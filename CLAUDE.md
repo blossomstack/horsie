@@ -47,6 +47,17 @@ my-crate/
 
 Unit-level assertions that need access to private internals are the only exception — those stay colocated under `#[cfg(test)] mod tests` in the source file.
 
+## Protocol models (fluorite)
+
+Use [fluorite](https://github.com/zhxiaogg/fluorite) to generate all protocol message types — any data transported between modules, or between server and clients (API request/response types, inter-crate message envelopes, wire formats).
+
+- Define schemas as `.fl` files under `fluorite/` at the workspace root.
+- The `models` crate runs `fluorite_codegen` in `build.rs` and exposes generated types via `models::models::*`.
+- Generated types automatically derive `Debug`, `Clone`, `PartialEq`, `Serialize`, `Deserialize`, `JsonSchema`.
+- Add hand-written convenience methods in `models/src/lib.rs` (not in the schema).
+
+**Never use fluorite for persisted data structures** (database rows, migration types, on-disk formats). Those are owned by the storage layer and must evolve independently of the wire protocol.
+
 ## Lint / fmt
 
 Apply workspace lints in `Cargo.toml`:

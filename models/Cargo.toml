@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+fluorite  = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+schemars  = { workspace = true }
+
+[build-dependencies]
+fluorite_codegen = { workspace = true }
 
 [lints]
 workspace = true
