@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "agentcore",
+    "server",
+    "executor",
+    "runtime",
+    "models",
+]
+resolver = "2"
+
+# Production code bans panic-prone constructs; test code opts out per-file via
+# #![cfg_attr(test, allow(clippy::unwrap_used, ...))]
+[workspace.lints.clippy]
+unwrap_used             = "deny"
+expect_used             = "deny"
+panic                   = "deny"
+wildcard_enum_match_arm = "deny"
