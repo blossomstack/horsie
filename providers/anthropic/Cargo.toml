@@ -1,0 +1,22 @@
+[package]
+name = "anthropic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+agentcore        = { path = "../../agentcore" }
+models           = { path = "../../models" }
+async-anthropic  = { workspace = true }
+async-trait      = { workspace = true }
+tokio            = { workspace = true, features = ["time"] }
+tokio-stream     = { workspace = true }
+serde_json       = { workspace = true }
+tracing          = { workspace = true }
+reqwest          = { workspace = true }
+
+[dev-dependencies]
+mock-llm = { path = "../mock-llm" }
+tokio    = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true

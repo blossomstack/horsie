@@ -1,0 +1,16 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2024"
+
+[dev-dependencies]
+agentcore   = { path = "../agentcore" }
+anthropic   = { path = "../providers/anthropic" }
+mock-llm    = { path = "../providers/mock-llm" }
+tokio       = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-util  = { workspace = true }
+async-trait = { workspace = true }
+serde_json  = { workspace = true }
+
+[lints]
+workspace = true
