@@ -1,0 +1,67 @@
+/// Protocol types for executor ↔ server communication
+package executor;
+
+/// Runtime configuration (extensible, empty for now)
+struct RuntimeConfig {}
+
+/// Current lifecycle state of a runtime
+enum RuntimeState {
+    Creating,
+    Running,
+    Stopping,
+    Stopped,
+    Failed,
+}
+
+/// Runtime summary returned by QueryRuntimes
+struct RuntimeInfo {
+    runtime_id: String,
+    state: RuntimeState,
+    restart_count: u32,
+}
+
+// --- Commands (server → executor) ---
+
+struct CreateRuntimeCmd { runtime_id: String, config: RuntimeConfig }
+struct DestroyRuntimeCmd { runtime_id: String }
+struct RestartRuntimeCmd { runtime_id: String }
+struct QueryRuntimesCmd {}
+
+/// All commands the server can send to an executor
+#[type_tag = "type"]
+union ExecutorCommand {
+    CreateRuntime(CreateRuntimeCmd),
+    DestroyRuntime(DestroyRuntimeCmd),
+    RestartRuntime(RestartRuntimeCmd),
+    QueryRuntimes(QueryRuntimesCmd),
+}
+
+/// Envelope for server → executor messages
+struct ExecutorInboundMessage {
+    request_id: String,
+    command: ExecutorCommand,
+}
+
+// --- Events (executor → server) ---
+
+struct RegisteredEvent { executor_id: String }
+struct RuntimeStateChangedEvent { runtime_id: String, state: RuntimeState }
+struct RuntimesListedEvent { runtimes: Vec<RuntimeInfo> }
+struct CommandFailedEvent { message: String }
+
+/// All events the executor can send to the server
+#[type_tag = "type"]
+union ExecutorEvent {
+    Registered(RegisteredEvent),
+    RuntimeStateChanged(RuntimeStateChangedEvent),
+    RuntimesListed(RuntimesListedEvent),
+    CommandFailed(CommandFailedEvent),
+}
+
+/// Envelope for executor → server messages.
+/// request_id echoes the command's request_id for responses;
+/// a fresh UUID is used for unsolicited events (e.g. health-check state changes).
+struct ExecutorOutboundMessage {
+    request_id: String,
+    event: ExecutorEvent,
+}

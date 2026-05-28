@@ -20,15 +20,17 @@ schemars         = "1.0"
 derive-new       = "0.5"
 async-trait      = "0.1"
 thiserror        = "1.0"
-tokio            = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
-tokio-util       = { version = "0.7" }
-tokio-stream     = { version = "0.1", features = ["sync"] }
-uuid             = { version = "1", features = ["v4"] }
-async-anthropic  = { git = "https://github.com/zhxiaogg/async-anthropic.git", rev = "64754b2" }
-axum             = { version = "0.7", features = ["macros"] }
-parking_lot      = "0.12"
-tracing          = "0.1"
-reqwest          = { version = "0.12", features = ["json"] }
+tokio             = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time"] }
+tokio-util        = { version = "0.7" }
+tokio-stream      = { version = "0.1", features = ["sync"] }
+tokio-tungstenite = "0.26"
+futures-util      = "0.3"
+uuid              = { version = "1", features = ["v4"] }
+async-anthropic   = { git = "https://github.com/zhxiaogg/async-anthropic.git", rev = "64754b2" }
+axum              = { version = "0.7", features = ["macros"] }
+parking_lot       = "0.12"
+tracing           = "0.1"
+reqwest           = { version = "0.12", features = ["json"] }
 
 # Production code bans panic-prone constructs; test code opts out per-file via
 # #![cfg_attr(test, allow(clippy::unwrap_used, ...))]
