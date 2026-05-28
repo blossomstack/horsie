@@ -1,35 +1,18 @@
 # october
 
-## Coding style
+## Design philosophy
 
-### Compile-time enforcement
+**Semantic types over convenient types.** Types should encode domain intent, not just data shape. If reusing an existing type would allow a caller to pass something semantically wrong, define a new type. The name of a type is part of its contract.
 
-Prefer catching mistakes at compile time over runtime checks. Mechanisms:
+**Make illegal states unrepresentable.** Use sum types (enums / tagged unions) to eliminate invalid combinations at the type level. Prefer exhaustive `match` over runtime guards — the compiler should enforce completeness, not tests.
 
-- **Clippy lints** — workspace-wide via `[workspace.lints.clippy]`; production code bans panic-prone constructs:
-  ```rust
-  // Cargo.toml [workspace.lints.clippy]
-  unwrap_used             = "deny"
-  expect_used             = "deny"
-  panic                   = "deny"
-  wildcard_enum_match_arm = "deny"
-  ```
-  Test code opts out per-file:
-  ```rust
-  #![cfg_attr(
-      test,
-      allow(
-          clippy::unwrap_used,
-          clippy::expect_used,
-          clippy::panic,
-          clippy::wildcard_enum_match_arm
-      )
-  )]
-  ```
+**Deep modules.** Narrow public interface, deep implementation. A trait with two methods that hides a complex subsystem is better than a leaky abstraction that exposes internals. Every abstraction boundary should ask: what mistakes does this prevent, and what complexity does this hide?
 
-- **Abstract data types** — use sum types (enums) to make illegal states unrepresentable. Prefer tagged enums over stringly-typed discriminators. Use the typestate/builder pattern for multi-phase initialization.
+**Compile-time over runtime enforcement.** Validate invariants at construction (builder `build()` → `Result`), not at call sites. Lints, type constraints, and the type system catch mistakes before they reach production.
 
-- **Functional style** — prefer immutable data structures, avoid shared mutable state, use combinator chains (`map`, `and_then`, `?`) over early returns and mutation.
+**Functional / immutable by default.** Prefer append-only data, pure functions on slices, and combinator chains over mutation and shared state. Mutation should be local and obvious, never implicit.
+
+**Protocol types are not storage types.** Wire formats and inter-module message types evolve at the speed of the interface contract. Persisted structures evolve at the speed of data migrations. Never conflate them.
 
 ## Tests
 
@@ -57,22 +40,7 @@ Use [fluorite](https://github.com/zhxiaogg/fluorite) to generate all protocol me
 
 ## Lint / fmt
 
-Apply workspace lints in `Cargo.toml`:
-
-```toml
-[workspace.lints.clippy]
-unwrap_used             = "deny"
-expect_used             = "deny"
-panic                   = "deny"
-wildcard_enum_match_arm = "deny"
-```
-
-Each crate inherits via:
-
-```toml
-[lints]
-workspace = true
-```
+Workspace lints are configured in `Cargo.toml`; each crate inherits via `[lints] workspace = true`. Production code denies `unwrap_used`, `expect_used`, `panic`, and `wildcard_enum_match_arm`. Test code opts out with `#![cfg_attr(test, allow(...))]`.
 
 Pre-PR checks:
 
