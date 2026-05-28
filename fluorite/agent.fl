@@ -1,0 +1,99 @@
+/// Protocol types for agent messages
+package agent;
+
+/// Role of the message sender
+enum Role {
+    User,
+    Assistant,
+    Tool,
+}
+
+/// Plain text content
+struct TextPart {
+    text: String,
+}
+
+/// A tool call requested by the model
+struct ToolCallPart {
+    id: String,
+    name: String,
+    input: Any,
+}
+
+/// The result of executing a tool call
+struct ToolResultPart {
+    tool_call_id: String,
+    output: String,
+    is_error: bool,
+}
+
+/// Extended thinking content
+struct ThinkingPart {
+    text: String,
+}
+
+/// Content variant within a message
+#[type_tag = "type"]
+union ContentPart {
+    Text(TextPart),
+    ToolCall(ToolCallPart),
+    ToolResult(ToolResultPart),
+    Thinking(ThinkingPart),
+}
+
+/// A single message in the conversation
+struct Message {
+    id: String,
+    role: Role,
+    parts: Vec<ContentPart>,
+}
+
+/// Token usage for a model turn
+struct Usage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+/// New user message — starts a new turn
+struct UserMessageInput {
+    id: String,
+    text: String,
+}
+
+/// Tool result input — resumes the agent after a handoff
+struct ToolResultInput {
+    tool_call_id: String,
+    output: String,
+    is_error: bool,
+}
+
+/// The only valid inputs to Agent::run
+#[type_tag = "type"]
+union AgentInput {
+    UserMessage(UserMessageInput),
+    ToolResult(ToolResultInput),
+}
+
+/// Agent completed with a final text response
+struct CompletedOutput {
+    text: String,
+}
+
+/// Agent handed off control with structured data
+struct HandoffOutput {
+    tool_name: String,
+    data: Any,
+}
+
+/// The outcome of an agent run
+#[type_tag = "type"]
+union AgentResult {
+    Completed(CompletedOutput),
+    Handoff(HandoffOutput),
+}
+
+/// The full output of Agent::run
+struct AgentOutput {
+    result: AgentResult,
+    usage: Usage,
+}

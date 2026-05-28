@@ -1,0 +1,52 @@
+/// Agent event types
+package events;
+
+use agent.AgentInput;
+use agent.Message;
+use agent.Usage;
+use agent.Role;
+
+/// Input received by the agent — one per run() invocation
+struct InputMessageEvent    { message_id: String, input: AgentInput }
+
+/// Assistant message lifecycle
+struct MessageStartEvent    { message_id: String, role: Role }
+struct MessageStopEvent     { message_id: String }
+struct MessageCompleteEvent { message_id: String, message: Message }
+
+/// Streaming content blocks — emitted by the provider; index = content block position
+struct TextChunkEvent          { message_id: String, index: u32, text: String }
+struct ThinkingChunkEvent      { message_id: String, index: u32, text: String }
+struct ToolCallStartEvent      { message_id: String, index: u32, tool_call_id: String, name: String }
+struct ToolCallInputDeltaEvent { message_id: String, index: u32, tool_call_id: String, delta: String }
+struct ToolCallInputDoneEvent  { message_id: String, index: u32, tool_call_id: String }
+
+/// Tool execution — message_id is the tool-result message id ("result:<tool_call_id>")
+struct ToolExecutingEvent { message_id: String, tool_call_id: String }
+struct ToolCompleteEvent  { message_id: String, tool_call_id: String, output: String, is_error: bool }
+
+/// Run lifecycle — message_id is a UUID for this run invocation
+struct RunCompleteEvent { message_id: String, usage: Usage, iterations: u32 }
+
+/// All events emitted during agent execution.
+///
+/// Flow per assistant turn:
+///   InputMessage (once, at the start of run)
+///   MessageStart → (TextChunk | ThinkingChunk | ToolCallStart→Delta*→Done)* → MessageStop → MessageComplete
+///   ToolExecuting → ToolComplete  (one pair per tool call)
+///   RunComplete
+#[type_tag = "type"]
+union AgentEvent {
+    InputMessage(InputMessageEvent),
+    MessageStart(MessageStartEvent),
+    MessageStop(MessageStopEvent),
+    MessageComplete(MessageCompleteEvent),
+    TextChunk(TextChunkEvent),
+    ThinkingChunk(ThinkingChunkEvent),
+    ToolCallStart(ToolCallStartEvent),
+    ToolCallInputDelta(ToolCallInputDeltaEvent),
+    ToolCallInputDone(ToolCallInputDoneEvent),
+    ToolExecuting(ToolExecutingEvent),
+    ToolComplete(ToolCompleteEvent),
+    RunComplete(RunCompleteEvent),
+}

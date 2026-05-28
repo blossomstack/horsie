@@ -33,19 +33,16 @@ Prefer catching mistakes at compile time over runtime checks. Mechanisms:
 
 ## Tests
 
-Tests must live in a separate `tests/` directory at the crate root, not inline in source files. This keeps source files focused and makes the test surface easy for LLMs/agents to read without noise.
+Unit tests live alongside source files under `#[cfg(test)] mod tests` in the same `.rs` file. E2e / integration tests that spin up the full stack go in `tests/` at the crate root.
 
 ```
 my-crate/
   src/
-    lib.rs
-    ...
+    lib.rs        # #[cfg(test)] mod tests { ... } here
+    agent.rs      # #[cfg(test)] mod tests { ... } here
   tests/
-    integration_test.rs
-    common.rs   # shared helpers
+    e2e_test.rs   # full-stack integration tests only
 ```
-
-Unit-level assertions that need access to private internals are the only exception — those stay colocated under `#[cfg(test)] mod tests` in the source file.
 
 ## Protocol models (fluorite)
 
