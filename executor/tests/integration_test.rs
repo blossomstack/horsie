@@ -101,7 +101,13 @@ async fn test_executor_connects_and_creates_runtime() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     server
-        .create_runtime("ex-1", "rt-1", RuntimeConfig {})
+        .create_runtime(
+            "ex-1",
+            "rt-1",
+            RuntimeConfig {
+                working_dir: "/tmp".to_string(),
+            },
+        )
         .await
         .unwrap();
 
@@ -134,7 +140,13 @@ async fn test_query_runtimes_returns_created_runtime() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     server
-        .create_runtime("ex-2", "rt-a", RuntimeConfig {})
+        .create_runtime(
+            "ex-2",
+            "rt-a",
+            RuntimeConfig {
+                working_dir: "/tmp".to_string(),
+            },
+        )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -169,7 +181,13 @@ async fn test_destroy_runtime_transitions_to_stopped() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     server
-        .create_runtime("ex-3", "rt-b", RuntimeConfig {})
+        .create_runtime(
+            "ex-3",
+            "rt-b",
+            RuntimeConfig {
+                working_dir: "/tmp".to_string(),
+            },
+        )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -197,7 +215,13 @@ async fn test_destroy_runtime_transitions_to_stopped() {
 async fn test_command_to_unknown_executor_fails() {
     let (server, _handler) = start_server().await;
     let result = server
-        .create_runtime("nobody", "rt-x", RuntimeConfig {})
+        .create_runtime(
+            "nobody",
+            "rt-x",
+            RuntimeConfig {
+                working_dir: "/tmp".to_string(),
+            },
+        )
         .await;
     assert!(result.is_err());
 }

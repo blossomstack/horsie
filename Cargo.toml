@@ -7,6 +7,7 @@ members = [
     "models",
     "providers/anthropic",
     "providers/mock-llm",
+    "runtime-client",
     "tests",
 ]
 resolver = "2"
@@ -31,6 +32,7 @@ axum              = { version = "0.7", features = ["macros"] }
 parking_lot       = "0.12"
 tracing           = "0.1"
 reqwest           = { version = "0.12", features = ["json"] }
+tempfile          = "3"
 
 # Production code bans panic-prone constructs; test code opts out per-file via
 # #![cfg_attr(test, allow(clippy::unwrap_used, ...))]

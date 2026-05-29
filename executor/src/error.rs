@@ -20,4 +20,8 @@ pub enum ExecutorError {
     SendFailed(String),
     #[error("serialization error: {0}")]
     Serialization(String),
+    #[error("bind failed: {0}")]
+    BindFailed(String),
+    #[error("spawn failed: {0}")]
+    SpawnFailed(String),
 }

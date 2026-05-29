@@ -3,7 +3,22 @@ name = "runtime"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "october-runtime"
+path = "src/main.rs"
+
 [dependencies]
+models        = { path = "../models" }
+tokio         = { workspace = true, features = ["process"] }
+tokio-tungstenite = { workspace = true }
+futures-util  = { workspace = true }
+serde_json    = { workspace = true }
+clap          = { version = "4", features = ["derive"] }
+regex         = "1"
+glob          = "0.3"
+
+[dev-dependencies]
+tempfile      = "3"
 
 [lints]
 workspace = true

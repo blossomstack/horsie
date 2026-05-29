@@ -8,7 +8,7 @@ pub use agent::{Agent, AgentBuilder, AgentConfig};
 pub use error::{AgentBuildError, AgentError, LlmError, ToolCallError};
 pub use events::EventSink;
 pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, StopReason, ToolChoice};
-pub use tool::{EmptyToolbox, ToolSpec, Toolbox};
+pub use tool::{EmptyToolbox, Tool, ToolSpec, Toolbox, ToolboxImpl};
 
 pub use models::agent::{
     AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, HandoffOutput, Message,

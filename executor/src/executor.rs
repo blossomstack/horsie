@@ -1,13 +1,19 @@
 use crate::{
+    connected_registry::{ConnectedRuntimeRegistry, RuntimeSink},
     error::{ExecutorError, RuntimeError},
     provider::{HealthStatus, RuntimeProvider},
     registry::RuntimeRegistry,
+    runtime_listener::RuntimeListenerServer,
 };
 use futures_util::{SinkExt, StreamExt};
 use models::executor::{
-    CommandFailedEvent, CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand, ExecutorEvent,
-    ExecutorInboundMessage, ExecutorOutboundMessage, RegisteredEvent, RestartRuntimeCmd,
-    RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent,
+    CancelToolCallCmd, CommandFailedEvent, CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand,
+    ExecutorEvent, ExecutorInboundMessage, ExecutorOutboundMessage, RegisteredEvent,
+    RestartRuntimeCmd, RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent, ToolCallCmd,
+    ToolResultEvent,
+};
+use models::runtime::{
+    CancelCallRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ToolCallRequest,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +61,8 @@ pub struct Executor {
     provider: Box<dyn RuntimeProvider>,
     health_check_interval: Duration,
     max_restarts: u32,
+    runtime_listener: Option<RuntimeListenerServer>,
+    connected_registry: Option<Arc<ConnectedRuntimeRegistry>>,
 }
 
 impl Executor {
@@ -69,6 +77,8 @@ impl Executor {
             provider,
             health_check_interval: Duration::from_secs(30),
             max_restarts: 3,
+            runtime_listener: None,
+            connected_registry: None,
         }
     }
 
@@ -79,6 +89,16 @@ impl Executor {
 
     pub fn with_max_restarts(mut self, max: u32) -> Self {
         self.max_restarts = max;
+        self
+    }
+
+    pub fn with_runtime_listener(
+        mut self,
+        listener: RuntimeListenerServer,
+        registry: Arc<ConnectedRuntimeRegistry>,
+    ) -> Self {
+        self.runtime_listener = Some(listener);
+        self.connected_registry = Some(registry);
         self
     }
 
@@ -103,6 +123,32 @@ impl Executor {
         let registry = Arc::new(RuntimeRegistry::new());
         let provider: Arc<dyn RuntimeProvider> = Arc::from(self.provider);
         let max_restarts = self.max_restarts;
+        let connected_registry = self.connected_registry;
+
+        // Start runtime listener if configured
+        if let (Some(listener), Some(conn_reg)) =
+            (self.runtime_listener, connected_registry.clone())
+        {
+            let listener_sink = sink.clone();
+            let listener_cancel = cancel.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = listener_cancel.cancelled() => break,
+                        result = listener.accept() => {
+                            match result {
+                                Ok(ws) => {
+                                    let reg = conn_reg.clone();
+                                    let srv_sink = listener_sink.clone();
+                                    tokio::spawn(handle_runtime_connection(ws, reg, srv_sink));
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         let hc_sink = sink.clone();
         let hc_reg = registry.clone();
@@ -129,7 +175,7 @@ impl Executor {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(inbound) = serde_json::from_str::<ExecutorInboundMessage>(&text) {
-                                dispatch(&inbound, &registry, &provider, &sink).await;
+                                dispatch(&inbound, &registry, &provider, &sink, connected_registry.as_ref()).await;
                             }
                         }
                         Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
@@ -152,6 +198,7 @@ async fn dispatch(
     registry: &Arc<RuntimeRegistry>,
     provider: &Arc<dyn RuntimeProvider>,
     sink: &WsSink,
+    connected_registry: Option<&Arc<ConnectedRuntimeRegistry>>,
 ) {
     let req = &msg.request_id;
     let result = match &msg.command {
@@ -172,6 +219,8 @@ async fn dispatch(
             .await;
             Ok(())
         }
+        ExecutorCommand::ToolCall(cmd) => do_tool_call(cmd, connected_registry, sink, req).await,
+        ExecutorCommand::CancelToolCall(cmd) => do_cancel_tool_call(cmd, connected_registry).await,
     };
     if let Err(e) = result {
         let _ = send_outbound(
@@ -185,6 +234,87 @@ async fn dispatch(
         )
         .await;
     }
+}
+
+async fn do_tool_call(
+    cmd: &ToolCallCmd,
+    connected_registry: Option<&Arc<ConnectedRuntimeRegistry>>,
+    _sink: &WsSink,
+    _req: &str,
+) -> Result<(), RuntimeError> {
+    let reg = connected_registry
+        .ok_or_else(|| RuntimeError::Provider("no runtime listener configured".to_string()))?;
+    let msg = RuntimeInboundMessage::ToolCall(ToolCallRequest {
+        call_id: cmd.call.call_id.clone(),
+        call: cmd.call.call.clone(),
+    });
+    let json = serde_json::to_string(&msg).map_err(|e| RuntimeError::Provider(e.to_string()))?;
+    reg.send_to(&cmd.runtime_id, json)
+        .await
+        .map_err(|e| RuntimeError::Provider(e.to_string()))
+}
+
+async fn do_cancel_tool_call(
+    cmd: &CancelToolCallCmd,
+    connected_registry: Option<&Arc<ConnectedRuntimeRegistry>>,
+) -> Result<(), RuntimeError> {
+    let reg = connected_registry
+        .ok_or_else(|| RuntimeError::Provider("no runtime listener configured".to_string()))?;
+    let msg = RuntimeInboundMessage::CancelCall(CancelCallRequest {
+        call_id: cmd.call_id.clone(),
+    });
+    let json = serde_json::to_string(&msg).map_err(|e| RuntimeError::Provider(e.to_string()))?;
+    // Best-effort
+    let _ = reg.send_to(&cmd.runtime_id, json).await;
+    Ok(())
+}
+
+async fn handle_runtime_connection(
+    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    registry: Arc<ConnectedRuntimeRegistry>,
+    server_sink: WsSink,
+) {
+    let (ws_sink, mut ws_stream) = ws.split();
+    let ws_sink: RuntimeSink = Arc::new(Mutex::new(ws_sink));
+
+    // First message must be RuntimeReady
+    let runtime_id = loop {
+        match ws_stream.next().await {
+            Some(Ok(Message::Text(text))) => {
+                if let Ok(RuntimeOutboundMessage::Ready(ev)) =
+                    serde_json::from_str::<RuntimeOutboundMessage>(&text)
+                {
+                    break ev.runtime_id;
+                }
+            }
+            _ => return,
+        }
+    };
+
+    registry.register(runtime_id.clone(), ws_sink).await;
+
+    // Process ToolCallResponse messages
+    while let Some(msg) = ws_stream.next().await {
+        if let Ok(Message::Text(text)) = msg {
+            if let Ok(RuntimeOutboundMessage::ToolCallResponse(resp)) =
+                serde_json::from_str::<RuntimeOutboundMessage>(&text)
+            {
+                let event = ExecutorOutboundMessage {
+                    request_id: resp.call_id.clone(),
+                    event: ExecutorEvent::ToolResult(ToolResultEvent {
+                        runtime_id: runtime_id.clone(),
+                        call_id: resp.call_id,
+                        result: resp.result,
+                    }),
+                };
+                let _ = send_outbound(&server_sink, event).await;
+            }
+        } else {
+            break;
+        }
+    }
+
+    registry.remove(&runtime_id).await;
 }
 
 async fn do_create(

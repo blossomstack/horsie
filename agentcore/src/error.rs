@@ -45,6 +45,9 @@ pub enum ToolCallError {
 
     #[error("execution error: {0}")]
     Execution(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("execution failed: {0}")]
+    ExecutionFailed(String),
 }
 
 #[cfg(test)]

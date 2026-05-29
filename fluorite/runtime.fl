@@ -1,0 +1,67 @@
+/// Protocol types for executor ↔ runtime communication
+package runtime;
+
+// --- Tool inputs ---
+
+struct BashInput { command: String }
+struct ReadFileInput { path: String, start_line: Option<u64>, end_line: Option<u64> }
+struct WriteFileInput { path: String, content: String }
+struct EditFileInput { path: String, old_text: String, new_text: String }
+
+struct RegexMode { pattern: String }
+struct LinesMode { start_line: u64, end_line: u64 }
+
+#[type_tag = "kind"]
+union ReplaceMode {
+    Regex(RegexMode),
+    Lines(LinesMode),
+}
+
+struct ReplaceInFileInput { path: String, replacement: String, mode: ReplaceMode }
+struct ListFilesInput { path: String }
+struct GlobInput { pattern: String, path: Option<String>, max_results: Option<u64> }
+struct GrepInput { pattern: String, path: Option<String>, file_pattern: Option<String>, max_results: Option<u64> }
+
+/// One variant per tool. The tag doubles as the tool name seen by the LLM.
+#[type_tag = "tool"]
+union ToolCall {
+    Bash(BashInput),
+    ReadFile(ReadFileInput),
+    WriteFile(WriteFileInput),
+    EditFile(EditFileInput),
+    ReplaceInFile(ReplaceInFileInput),
+    ListFiles(ListFilesInput),
+    Glob(GlobInput),
+    Grep(GrepInput),
+}
+
+// --- Inbound (executor → runtime) ---
+
+struct ToolCallRequest  { call_id: String, call: ToolCall }
+struct CancelCallRequest { call_id: String }
+
+#[type_tag = "type"]
+union RuntimeInboundMessage {
+    ToolCall(ToolCallRequest),
+    CancelCall(CancelCallRequest),
+}
+
+// --- Outbound (runtime → executor) ---
+
+struct ToolOutput { stdout: String, stderr: String, exit_code: i32 }
+struct ToolError  { reason: String }
+
+#[type_tag = "status"]
+union ToolResult { Ok(ToolOutput), Err(ToolError) }
+
+struct ToolCallResponse { call_id: String, result: ToolResult }
+
+/// First message the runtime sends after connecting.
+struct RuntimeReady { runtime_id: String }
+
+/// All messages the runtime sends to the executor.
+#[type_tag = "type"]
+union RuntimeOutboundMessage {
+    Ready(RuntimeReady),
+    ToolCallResponse(ToolCallResponse),
+}

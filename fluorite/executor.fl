@@ -1,8 +1,11 @@
 /// Protocol types for executor ↔ server communication
 package executor;
 
-/// Runtime configuration (extensible, empty for now)
-struct RuntimeConfig {}
+use runtime.ToolCallRequest;
+use runtime.ToolResult;
+
+/// Runtime configuration
+struct RuntimeConfig { working_dir: String }
 
 /// Current lifecycle state of a runtime
 enum RuntimeState {
@@ -20,6 +23,10 @@ struct RuntimeInfo {
     restart_count: u32,
 }
 
+struct ToolCallCmd { runtime_id: String, call: ToolCallRequest }
+struct CancelToolCallCmd { runtime_id: String, call_id: String }
+struct ToolResultEvent { runtime_id: String, call_id: String, result: ToolResult }
+
 // --- Commands (server → executor) ---
 
 struct CreateRuntimeCmd { runtime_id: String, config: RuntimeConfig }
@@ -34,6 +41,8 @@ union ExecutorCommand {
     DestroyRuntime(DestroyRuntimeCmd),
     RestartRuntime(RestartRuntimeCmd),
     QueryRuntimes(QueryRuntimesCmd),
+    ToolCall(ToolCallCmd),
+    CancelToolCall(CancelToolCallCmd),
 }
 
 /// Envelope for server → executor messages
@@ -56,6 +65,7 @@ union ExecutorEvent {
     RuntimeStateChanged(RuntimeStateChangedEvent),
     RuntimesListed(RuntimesListedEvent),
     CommandFailed(CommandFailedEvent),
+    ToolResult(ToolResultEvent),
 }
 
 /// Envelope for executor → server messages.
