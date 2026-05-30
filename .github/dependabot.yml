@@ -9,9 +9,21 @@ updates:
       timezone: "America/Vancouver"
     open-pull-requests-limit: 10
     groups:
-      all-cargo:
-        patterns:
-          - "*"
+      cargo-routine:
+        # Group routine minor/patch updates into a single daily PR.
+        update-types:
+          - minor
+          - patch
+        # Breaking-prone libraries are excluded so they arrive as individual,
+        # reviewable PRs. These are 0.x crates whose "minor" bumps are de-facto
+        # breaking, so update-type filtering alone won't isolate them.
+        exclude-patterns:
+          - "axum"
+          - "reqwest"
+          - "tokio-tungstenite"
+          - "jsonschema"
+    # Semver-major updates are not covered by the group above, so they open as
+    # individual PRs automatically.
 
   # Keeps the SHA-pinned GitHub Actions current (bumps both the pin and the
   # trailing # vX.Y.Z version comment).
