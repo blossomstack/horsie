@@ -1,0 +1,37 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "october"
+path = "src/main.rs"
+
+[dependencies]
+actor           = { path = "../actor", features = ["file-journal"] }
+agentcore       = { path = "../agentcore" }
+anthropic       = { path = "../providers/anthropic" }
+executor        = { path = "../executor" }
+executor-client = { path = "../executor-client", default-features = false }
+runtime-client  = { path = "../runtime-client" }
+workflow        = { path = "../workflow" }
+models          = { path = "../models" }
+clap            = { version = "4", features = ["derive"] }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+tokio           = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "net", "time"] }
+tokio-util      = { workspace = true }
+uuid            = { workspace = true }
+thiserror       = { workspace = true }
+async-trait     = { workspace = true }
+tracing         = { workspace = true }
+eval            = { workspace = true }
+
+[dev-dependencies]
+mock-llm = { path = "../providers/mock-llm" }
+tempfile = "3"
+
+[lints]
+workspace = true

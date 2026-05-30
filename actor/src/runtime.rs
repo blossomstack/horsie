@@ -1,6 +1,7 @@
 use crate::actor::{CommandEffect, EventSourcedActor};
 use crate::error::{JournalError, TellError};
 use crate::journal::Journal;
+use crate::persistence_id::PersistenceId;
 use futures_util::StreamExt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -88,10 +89,10 @@ fn spawn_inner<A: EventSourcedActor>(actor: A, inner: Arc<RuntimeInner>) -> Acto
 /// Rebuild an actor's state from its latest snapshot plus subsequent events.
 /// Returns the recovered state and the sequence number of the last applied event.
 async fn recover<A: EventSourcedActor>(
-    id: &str,
+    pid: &PersistenceId,
     journal: &Arc<dyn Journal>,
 ) -> Result<(A::State, u64), JournalError> {
-    let (mut state, mut seq_nr) = match journal.latest_snapshot(id).await? {
+    let (mut state, mut seq_nr) = match journal.latest_snapshot(pid).await? {
         Some((bytes, seq)) => {
             let state = serde_json::from_slice::<A::State>(&bytes)
                 .map_err(|e| JournalError::Serialization(e.to_string()))?;
@@ -100,7 +101,7 @@ async fn recover<A: EventSourcedActor>(
         None => (A::initial_state(), 0),
     };
 
-    let mut stream = journal.replay(id, seq_nr).await;
+    let mut stream = journal.replay(pid, seq_nr).await;
     while let Some(item) = stream.next().await {
         let bytes = item?;
         let event = serde_json::from_slice::<A::Event>(&bytes)
@@ -115,7 +116,7 @@ async fn recover<A: EventSourcedActor>(
 /// On failure the events are neither applied nor counted, keeping state
 /// consistent with what was durably written.
 async fn persist_events<A: EventSourcedActor>(
-    id: &str,
+    pid: &PersistenceId,
     journal: &Arc<dyn Journal>,
     events: Vec<A::Event>,
     mut state: A::State,
@@ -126,13 +127,13 @@ async fn persist_events<A: EventSourcedActor>(
         match serde_json::to_vec(event) {
             Ok(bytes) => encoded.push(bytes),
             Err(e) => {
-                tracing::error!(id, error = %e, "failed to serialize event; skipping persist");
+                tracing::error!(%pid, error = %e, "failed to serialize event; skipping persist");
                 return state;
             }
         }
     }
-    if let Err(e) = journal.persist(id, &encoded).await {
-        tracing::error!(id, error = %e, "failed to persist events; state left unchanged");
+    if let Err(e) = journal.persist(pid, &encoded).await {
+        tracing::error!(%pid, error = %e, "failed to persist events; state left unchanged");
         return state;
     }
     for event in events {
@@ -144,7 +145,7 @@ async fn persist_events<A: EventSourcedActor>(
 
 /// Snapshot `state` at `seq_nr` and compact the now-redundant event log.
 async fn snapshot_state<A: EventSourcedActor>(
-    id: &str,
+    pid: &PersistenceId,
     journal: &Arc<dyn Journal>,
     state: &A::State,
     seq_nr: u64,
@@ -152,16 +153,16 @@ async fn snapshot_state<A: EventSourcedActor>(
     let bytes = match serde_json::to_vec(state) {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!(id, error = %e, "failed to serialize snapshot; skipping");
+            tracing::error!(%pid, error = %e, "failed to serialize snapshot; skipping");
             return;
         }
     };
-    if let Err(e) = journal.save_snapshot(id, bytes, seq_nr).await {
-        tracing::error!(id, error = %e, "failed to save snapshot");
+    if let Err(e) = journal.save_snapshot(pid, bytes, seq_nr).await {
+        tracing::error!(%pid, error = %e, "failed to save snapshot");
         return;
     }
-    if let Err(e) = journal.delete_events_before(id, seq_nr).await {
-        tracing::error!(id, error = %e, "failed to compact event log after snapshot");
+    if let Err(e) = journal.delete_events_before(pid, seq_nr).await {
+        tracing::error!(%pid, error = %e, "failed to compact event log after snapshot");
     }
 }
 
@@ -172,13 +173,13 @@ async fn run_actor<A: EventSourcedActor>(
     mut rx: mpsc::Receiver<A::Command>,
     mut ctx: ActorContext<A>,
 ) {
-    let id = actor.persistence_id();
+    let pid = actor.persistence_id();
     let journal = ctx.inner.journal.clone();
 
-    let (mut state, mut seq_nr) = match recover::<A>(&id, &journal).await {
+    let (mut state, mut seq_nr) = match recover::<A>(&pid, &journal).await {
         Ok(recovered) => recovered,
         Err(e) => {
-            tracing::error!(id, error = %e, "actor recovery failed; shutting down");
+            tracing::error!(%pid, error = %e, "actor recovery failed; shutting down");
             return;
         }
     };
@@ -189,19 +190,19 @@ async fn run_actor<A: EventSourcedActor>(
         match actor.handle_command(&state, cmd, &mut ctx).await {
             CommandEffect::None => {}
             CommandEffect::Persist(events) => {
-                state = persist_events::<A>(&id, &journal, events, state, &mut seq_nr).await;
+                state = persist_events::<A>(&pid, &journal, events, state, &mut seq_nr).await;
             }
             CommandEffect::PersistAndSnapshot(events) => {
-                state = persist_events::<A>(&id, &journal, events, state, &mut seq_nr).await;
-                snapshot_state::<A>(&id, &journal, &state, seq_nr).await;
+                state = persist_events::<A>(&pid, &journal, events, state, &mut seq_nr).await;
+                snapshot_state::<A>(&pid, &journal, &state, seq_nr).await;
             }
             CommandEffect::Snapshot => {
-                snapshot_state::<A>(&id, &journal, &state, seq_nr).await;
+                snapshot_state::<A>(&pid, &journal, &state, seq_nr).await;
             }
             CommandEffect::Stop => break,
             CommandEffect::PersistAndStop(events) => {
                 // State is discarded immediately after; we only need the durable write.
-                let _ = persist_events::<A>(&id, &journal, events, state, &mut seq_nr).await;
+                let _ = persist_events::<A>(&pid, &journal, events, state, &mut seq_nr).await;
                 break;
             }
         }
@@ -253,8 +254,8 @@ mod tests {
         type Event = CounterEvent;
         type State = CounterState;
 
-        fn persistence_id(&self) -> String {
-            self.id.clone()
+        fn persistence_id(&self) -> PersistenceId {
+            PersistenceId::new("counter", self.id.clone())
         }
 
         fn initial_state() -> CounterState {
@@ -368,7 +369,9 @@ mod tests {
 
         // Confirm the snapshot compacted the pre-snapshot events.
         let count = {
-            let mut remaining = journal.replay("c3", 0).await;
+            let mut remaining = journal
+                .replay(&PersistenceId::new("counter", "c3"), 0)
+                .await;
             let mut count = 0;
             while let Some(item) = remaining.next().await {
                 item.unwrap();
@@ -409,8 +412,8 @@ mod tests {
             type Command = ParentCmd;
             type Event = ();
             type State = Empty;
-            fn persistence_id(&self) -> String {
-                "parent".into()
+            fn persistence_id(&self) -> PersistenceId {
+                PersistenceId::new("parent", "parent")
             }
             fn initial_state() -> Empty {
                 Empty::default()

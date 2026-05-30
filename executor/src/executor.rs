@@ -1,22 +1,22 @@
 use crate::{
-    connected_registry::{ConnectedRuntimeRegistry, RuntimeSink},
+    connected_registry::ConnectedRuntimeRegistry,
     error::{ExecutorError, RuntimeError},
     provider::{HealthStatus, RuntimeProvider},
     registry::RuntimeRegistry,
-    runtime_listener::RuntimeListenerServer,
+    runtime_listener::{AcceptedConn, RuntimeListenerServer},
+    socket_transport::SocketRuntimeTransport,
 };
 use futures_util::{SinkExt, StreamExt};
 use models::executor::{
     CancelToolCallCmd, CommandFailedEvent, CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand,
     ExecutorEvent, ExecutorInboundMessage, ExecutorOutboundMessage, RegisteredEvent,
-    RestartRuntimeCmd, RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent, ToolCallCmd,
-    ToolResultEvent,
+    RestartRuntimeCmd, RuntimeConfig, RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent,
+    ToolCallCmd, ToolResultEvent,
 };
-use models::runtime::{
-    CancelCallRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ToolCallRequest,
-};
+use models::runtime::{RuntimeOutboundMessage, ToolError, ToolResult};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{MaybeTlsStream, connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
@@ -53,6 +53,55 @@ async fn emit_state(sink: &WsSink, request_id: &str, runtime_id: &str, state: Ru
         },
     )
     .await;
+}
+
+/// Core runtime-creation transition, shared by the server WS path ([`do_create`])
+/// and the in-process [`InMemExecutorTransport`](crate::InMemExecutorTransport).
+/// Spawns the runtime (via the provider) and records it Running, or marks it Failed.
+pub(crate) async fn create_core(
+    registry: &Arc<RuntimeRegistry>,
+    provider: &Arc<dyn RuntimeProvider>,
+    id: &str,
+    config: RuntimeConfig,
+) -> Result<(), RuntimeError> {
+    registry.begin_create(id, config.clone()).await?;
+    match provider.create(id, &config).await {
+        Ok(handle) => {
+            registry.complete_create(id, handle).await?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = registry.mark_failed(id).await;
+            Err(e)
+        }
+    }
+}
+
+/// Accept runtime connections on `listener` and register each as a direct transport,
+/// until `cancel` fires. Used by CLI mode (which drives lifecycle via
+/// [`InMemExecutorTransport`](crate::InMemExecutorTransport)) to run the listener loop.
+pub fn serve_runtime_connections(
+    listener: RuntimeListenerServer,
+    registry: Arc<ConnectedRuntimeRegistry>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                result = listener.accept() => match result {
+                    Ok(AcceptedConn::Tcp(ws)) => {
+                        tokio::spawn(handle_runtime_connection(ws, registry.clone()));
+                    }
+                    Ok(AcceptedConn::Unix(ws)) => {
+                        tokio::spawn(handle_runtime_connection(ws, registry.clone()));
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        // Dropping `listener` here unlinks the unix socket (its Drop impl).
+    });
 }
 
 pub struct Executor {
@@ -125,29 +174,12 @@ impl Executor {
         let max_restarts = self.max_restarts;
         let connected_registry = self.connected_registry;
 
-        // Start runtime listener if configured
+        // Start the runtime listener if configured. The handler registers a direct
+        // transport per connection; tool calls then flow through that transport.
         if let (Some(listener), Some(conn_reg)) =
             (self.runtime_listener, connected_registry.clone())
         {
-            let listener_sink = sink.clone();
-            let listener_cancel = cancel.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = listener_cancel.cancelled() => break,
-                        result = listener.accept() => {
-                            match result {
-                                Ok(ws) => {
-                                    let reg = conn_reg.clone();
-                                    let srv_sink = listener_sink.clone();
-                                    tokio::spawn(handle_runtime_connection(ws, reg, srv_sink));
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                }
-            });
+            serve_runtime_connections(listener, conn_reg, cancel.clone());
         }
 
         let hc_sink = sink.clone();
@@ -193,6 +225,49 @@ impl Executor {
     }
 }
 
+/// Handshake on an accepted runtime link, then register it as a direct transport.
+/// Generic over the socket type so TCP and unix share one accept/handshake/frame path.
+async fn handle_runtime_connection<S>(
+    ws: tokio_tungstenite::WebSocketStream<S>,
+    registry: Arc<ConnectedRuntimeRegistry>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (sink, mut stream) = ws.split();
+
+    // First message must be RuntimeReady, within a bounded handshake window so a
+    // peer that connects but never announces itself can't leak this task forever.
+    let handshake = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match stream.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(RuntimeOutboundMessage::Ready(ev)) =
+                        serde_json::from_str::<RuntimeOutboundMessage>(&text)
+                    {
+                        return Some(ev.runtime_id);
+                    }
+                }
+                _ => return None,
+            }
+        }
+    })
+    .await;
+    let runtime_id = match handshake {
+        Ok(Some(id)) => id,
+        // Timed out, stream closed, or non-Text/garbage before Ready — drop the link.
+        Ok(None) | Err(_) => return,
+    };
+
+    let (transport, closed) = SocketRuntimeTransport::from_split(sink, stream);
+    registry
+        .register_transport(runtime_id.clone(), Arc::new(transport))
+        .await;
+    // Deregister when the link drops so health checks observe the loss and a stale
+    // transport never lingers (explicit destroy also removes it; double-remove is safe).
+    let _ = closed.await;
+    registry.remove(&runtime_id).await;
+}
+
 async fn dispatch(
     msg: &ExecutorInboundMessage,
     registry: &Arc<RuntimeRegistry>,
@@ -219,7 +294,7 @@ async fn dispatch(
             .await;
             Ok(())
         }
-        ExecutorCommand::ToolCall(cmd) => do_tool_call(cmd, connected_registry, sink, req).await,
+        ExecutorCommand::ToolCall(cmd) => do_tool_call(cmd, connected_registry, sink).await,
         ExecutorCommand::CancelToolCall(cmd) => do_cancel_tool_call(cmd, connected_registry).await,
     };
     if let Err(e) = result {
@@ -236,85 +311,59 @@ async fn dispatch(
     }
 }
 
+/// Server-mode tool relay: look up the runtime's direct transport, invoke the tool
+/// on a spawned task (so the dispatch loop is not blocked), and forward the result
+/// back to the server over the executor WS.
 async fn do_tool_call(
     cmd: &ToolCallCmd,
     connected_registry: Option<&Arc<ConnectedRuntimeRegistry>>,
-    _sink: &WsSink,
-    _req: &str,
+    sink: &WsSink,
 ) -> Result<(), RuntimeError> {
     let reg = connected_registry
         .ok_or_else(|| RuntimeError::Provider("no runtime listener configured".to_string()))?;
-    let msg = RuntimeInboundMessage::ToolCall(ToolCallRequest {
-        call_id: cmd.call.call_id.clone(),
-        call: cmd.call.call.clone(),
-    });
-    let json = serde_json::to_string(&msg).map_err(|e| RuntimeError::Provider(e.to_string()))?;
-    reg.send_to(&cmd.runtime_id, json)
+    let transport = reg
+        .runtime_transport(&cmd.runtime_id)
         .await
-        .map_err(|e| RuntimeError::Provider(e.to_string()))
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("runtime '{}' not connected", cmd.runtime_id))
+        })?;
+    let call_id = cmd.call.call_id.clone();
+    let call = cmd.call.call.clone();
+    let runtime_id = cmd.runtime_id.clone();
+    let sink = sink.clone();
+    tokio::spawn(async move {
+        let result = match transport.invoke(&call_id, call).await {
+            Ok(r) => r,
+            Err(e) => ToolResult::Err(ToolError {
+                reason: e.to_string(),
+            }),
+        };
+        let _ = send_outbound(
+            &sink,
+            ExecutorOutboundMessage {
+                request_id: call_id.clone(),
+                event: ExecutorEvent::ToolResult(ToolResultEvent {
+                    runtime_id,
+                    call_id,
+                    result,
+                }),
+            },
+        )
+        .await;
+    });
+    Ok(())
 }
 
 async fn do_cancel_tool_call(
     cmd: &CancelToolCallCmd,
     connected_registry: Option<&Arc<ConnectedRuntimeRegistry>>,
 ) -> Result<(), RuntimeError> {
-    let reg = connected_registry
-        .ok_or_else(|| RuntimeError::Provider("no runtime listener configured".to_string()))?;
-    let msg = RuntimeInboundMessage::CancelCall(CancelCallRequest {
-        call_id: cmd.call_id.clone(),
-    });
-    let json = serde_json::to_string(&msg).map_err(|e| RuntimeError::Provider(e.to_string()))?;
-    // Best-effort
-    let _ = reg.send_to(&cmd.runtime_id, json).await;
-    Ok(())
-}
-
-async fn handle_runtime_connection(
-    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-    registry: Arc<ConnectedRuntimeRegistry>,
-    server_sink: WsSink,
-) {
-    let (ws_sink, mut ws_stream) = ws.split();
-    let ws_sink: RuntimeSink = Arc::new(Mutex::new(ws_sink));
-
-    // First message must be RuntimeReady
-    let runtime_id = loop {
-        match ws_stream.next().await {
-            Some(Ok(Message::Text(text))) => {
-                if let Ok(RuntimeOutboundMessage::Ready(ev)) =
-                    serde_json::from_str::<RuntimeOutboundMessage>(&text)
-                {
-                    break ev.runtime_id;
-                }
-            }
-            _ => return,
-        }
-    };
-
-    registry.register(runtime_id.clone(), ws_sink).await;
-
-    // Process ToolCallResponse messages
-    while let Some(msg) = ws_stream.next().await {
-        if let Ok(Message::Text(text)) = msg {
-            if let Ok(RuntimeOutboundMessage::ToolCallResponse(resp)) =
-                serde_json::from_str::<RuntimeOutboundMessage>(&text)
-            {
-                let event = ExecutorOutboundMessage {
-                    request_id: resp.call_id.clone(),
-                    event: ExecutorEvent::ToolResult(ToolResultEvent {
-                        runtime_id: runtime_id.clone(),
-                        call_id: resp.call_id,
-                        result: resp.result,
-                    }),
-                };
-                let _ = send_outbound(&server_sink, event).await;
-            }
-        } else {
-            break;
-        }
+    if let Some(reg) = connected_registry
+        && let Some(transport) = reg.runtime_transport(&cmd.runtime_id).await
+    {
+        let _ = transport.cancel(&cmd.call_id).await;
     }
-
-    registry.remove(&runtime_id).await;
+    Ok(())
 }
 
 async fn do_create(
@@ -324,18 +373,13 @@ async fn do_create(
     sink: &WsSink,
     req: &str,
 ) -> Result<(), RuntimeError> {
-    registry
-        .begin_create(&cmd.runtime_id, cmd.config.clone())
-        .await?;
     emit_state(sink, req, &cmd.runtime_id, RuntimeState::Creating).await;
-    match provider.create(&cmd.runtime_id, &cmd.config).await {
-        Ok(handle) => {
-            registry.complete_create(&cmd.runtime_id, handle).await?;
+    match create_core(registry, provider, &cmd.runtime_id, cmd.config.clone()).await {
+        Ok(()) => {
             emit_state(sink, req, &cmd.runtime_id, RuntimeState::Running).await;
             Ok(())
         }
         Err(e) => {
-            let _ = registry.mark_failed(&cmd.runtime_id).await;
             emit_state(sink, req, &cmd.runtime_id, RuntimeState::Failed).await;
             Err(e)
         }

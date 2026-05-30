@@ -1,20 +1,16 @@
-use futures_util::SinkExt;
+use runtime_client::RuntimeTransport;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, oneshot};
-use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::Message;
-
-pub type RuntimeSink =
-    Arc<Mutex<futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>>>;
 
 struct Inner {
-    sinks: HashMap<String, RuntimeSink>,
+    transports: HashMap<String, Arc<dyn RuntimeTransport>>,
     pending: HashMap<String, oneshot::Sender<()>>,
 }
 
-/// Tracks live WebSocket connections from runtime binaries.
+/// Tracks the tool-call transport of each live runtime connection. The unit of
+/// storage is `Arc<dyn RuntimeTransport>` so a future provider can register a
+/// different transport impl (unix, tcp, in-container, …) without changing callers.
 pub struct ConnectedRuntimeRegistry {
     inner: Mutex<Inner>,
 }
@@ -29,23 +25,29 @@ impl ConnectedRuntimeRegistry {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(Inner {
-                sinks: HashMap::new(),
+                transports: HashMap::new(),
                 pending: HashMap::new(),
             }),
         }
     }
 
-    /// Register a runtime's WS sink. Resolves any pending `notify_when_ready` waiter.
-    pub async fn register(&self, runtime_id: String, sink: RuntimeSink) {
+    /// Register a runtime's tool transport. Resolves any pending `notify_when_ready`
+    /// waiter — callers register the transport *before* signaling ready, so
+    /// `runtime_transport` is never `None` once the waiter fires.
+    pub async fn register_transport(
+        &self,
+        runtime_id: String,
+        transport: Arc<dyn RuntimeTransport>,
+    ) {
         let mut inner = self.inner.lock().await;
-        inner.sinks.insert(runtime_id.clone(), sink);
+        inner.transports.insert(runtime_id.clone(), transport);
         if let Some(tx) = inner.pending.remove(&runtime_id) {
             let _ = tx.send(());
         }
     }
 
-    /// Returns a receiver that resolves when `register` is called for `runtime_id`.
-    /// Must be called BEFORE the process is spawned.
+    /// Returns a receiver that resolves when `register_transport` is called for
+    /// `runtime_id`. Must be called BEFORE the process is spawned.
     pub async fn notify_when_ready(&self, runtime_id: &str) -> oneshot::Receiver<()> {
         let (tx, rx) = oneshot::channel();
         self.inner
@@ -56,33 +58,14 @@ impl ConnectedRuntimeRegistry {
         rx
     }
 
-    /// Look up a connected runtime's sink.
-    pub async fn get_sink(&self, runtime_id: &str) -> Option<RuntimeSink> {
-        self.inner.lock().await.sinks.get(runtime_id).cloned()
+    /// Look up a connected runtime's tool transport.
+    pub async fn runtime_transport(&self, runtime_id: &str) -> Option<Arc<dyn RuntimeTransport>> {
+        self.inner.lock().await.transports.get(runtime_id).cloned()
     }
 
-    /// Remove a runtime (called when its WS connection drops).
+    /// Remove a runtime (called when its connection drops or it is destroyed).
     pub async fn remove(&self, runtime_id: &str) {
-        self.inner.lock().await.sinks.remove(runtime_id);
-    }
-
-    /// Send a serialized message to a connected runtime.
-    pub async fn send_to(
-        &self,
-        runtime_id: &str,
-        json: String,
-    ) -> Result<(), crate::error::ExecutorError> {
-        match self.get_sink(runtime_id).await {
-            Some(sink) => sink
-                .lock()
-                .await
-                .send(Message::Text(json.into()))
-                .await
-                .map_err(|e| crate::error::ExecutorError::SendFailed(e.to_string())),
-            None => Err(crate::error::ExecutorError::SendFailed(format!(
-                "runtime '{runtime_id}' not connected"
-            ))),
-        }
+        self.inner.lock().await.transports.remove(runtime_id);
     }
 }
 
@@ -95,25 +78,33 @@ impl ConnectedRuntimeRegistry {
 )]
 mod tests {
     use super::*;
+    use runtime_client::MockTransport;
 
     #[tokio::test]
-    async fn notify_resolves_when_registered() {
+    async fn register_resolves_pending_waiter_and_stores_transport() {
         let reg = ConnectedRuntimeRegistry::new();
         let rx = reg.notify_when_ready("rt-1").await;
-        let has_pending = reg.inner.lock().await.pending.contains_key("rt-1");
-        assert!(has_pending);
-        drop(rx);
+        assert!(reg.runtime_transport("rt-1").await.is_none());
+        reg.register_transport("rt-1".into(), Arc::new(MockTransport::ok("")))
+            .await;
+        // The readiness waiter fired ...
+        rx.await.unwrap();
+        // ... and the transport is retrievable.
+        assert!(reg.runtime_transport("rt-1").await.is_some());
     }
 
     #[tokio::test]
-    async fn get_sink_returns_none_for_unknown() {
+    async fn runtime_transport_none_for_unknown() {
         let reg = ConnectedRuntimeRegistry::new();
-        assert!(reg.get_sink("ghost").await.is_none());
+        assert!(reg.runtime_transport("ghost").await.is_none());
     }
 
     #[tokio::test]
-    async fn remove_does_not_panic_on_missing() {
+    async fn remove_clears_transport() {
         let reg = ConnectedRuntimeRegistry::new();
-        reg.remove("ghost").await;
+        reg.register_transport("rt-1".into(), Arc::new(MockTransport::ok("")))
+            .await;
+        reg.remove("rt-1").await;
+        assert!(reg.runtime_transport("rt-1").await.is_none());
     }
 }

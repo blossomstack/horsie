@@ -33,6 +33,13 @@ impl RuntimeClient {
         }
     }
 
+    /// Build a client from an already-type-erased transport — e.g. the one handed
+    /// back by `ExecutorClient::runtime_transport`, which cannot be re-boxed by
+    /// [`RuntimeClient::new`]'s `impl RuntimeTransport` bound.
+    pub fn from_arc(transport: Arc<dyn RuntimeTransport>) -> Self {
+        Self { inner: transport }
+    }
+
     pub async fn invoke(&self, call: ToolCall) -> Result<ToolOutput, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         match self.inner.invoke(&call_id, call).await {

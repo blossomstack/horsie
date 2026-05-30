@@ -1,3 +1,4 @@
+use crate::persistence_id::PersistenceId;
 use crate::runtime::ActorContext;
 use async_trait::async_trait;
 use serde::Serialize;
@@ -41,8 +42,9 @@ pub trait EventSourcedActor: Send + Sized + 'static {
     /// lends `&State` to `handle_command` across await points.
     type State: Send + Sync + Serialize + DeserializeOwned + 'static;
 
-    /// Stable key under which this actor's events and snapshots are stored.
-    fn persistence_id(&self) -> String;
+    /// Identity under which this actor's events and snapshots are stored — its kind
+    /// (actor type) plus a per-instance id. See [`PersistenceId`].
+    fn persistence_id(&self) -> PersistenceId;
 
     /// The state of an actor with no persisted history.
     fn initial_state() -> Self::State;

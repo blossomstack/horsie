@@ -6,7 +6,9 @@ publish = false # internal application crate, never published to crates.io
 
 [dependencies]
 models            = { path = "../models" }
-tokio             = { workspace = true, features = ["process"] }
+runtime-client    = { path = "../runtime-client" }
+executor-client   = { path = "../executor-client", default-features = false }
+tokio             = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util      = { workspace = true }
 serde_json        = { workspace = true }
@@ -16,7 +18,8 @@ async-trait       = { workspace = true }
 tokio-util        = { workspace = true }
 
 [dev-dependencies]
-server = { path = "../server" }
+server   = { path = "../server" }
+tempfile = "3"
 
 [lints]
 workspace = true

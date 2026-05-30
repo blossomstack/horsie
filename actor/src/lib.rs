@@ -10,10 +10,16 @@
 
 mod actor;
 mod error;
+#[cfg(feature = "file-journal")]
+mod file_journal;
 mod journal;
+mod persistence_id;
 mod runtime;
 
 pub use actor::{CommandEffect, EventSourcedActor};
 pub use error::{JournalError, TellError};
+#[cfg(feature = "file-journal")]
+pub use file_journal::FileJournal;
 pub use journal::{InMemoryJournal, Journal, JournalResult};
+pub use persistence_id::PersistenceId;
 pub use runtime::{ActorContext, ActorRef, spawn_root};

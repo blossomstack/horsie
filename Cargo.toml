@@ -5,11 +5,13 @@ members = [
     "workflow",
     "server",
     "executor",
+    "executor-client",
     "runtime",
     "models",
     "providers/anthropic",
     "providers/mock-llm",
     "runtime-client",
+    "cli",
     "tests",
 ]
 resolver = "2"

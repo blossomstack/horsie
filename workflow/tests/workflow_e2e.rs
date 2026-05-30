@@ -14,7 +14,7 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use actor::{EventSourcedActor, InMemoryJournal, Journal, spawn_root};
+use actor::{EventSourcedActor, InMemoryJournal, Journal, PersistenceId, spawn_root};
 use agentcore::{AgentEvent, ContentPart, EventSink, ToolCallError, ToolSpec, Toolbox};
 use anthropic::AnthropicProvider;
 use async_trait::async_trait;
@@ -28,8 +28,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use workflow::{
     AgentActor, AgentDomainEvent, CONCLUDE_TOOL, DefaultToolboxFactory, ToolboxFactory,
-    WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowRuntimeContext, WorkflowState,
-    WorkflowStatus, conclude_tool_spec,
+    WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowNotification,
+    WorkflowRuntimeContext, WorkflowState, WorkflowStatus, conclude_tool_spec,
 };
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -69,23 +69,32 @@ fn agent(name: &str) -> WorkflowAgentDef {
 fn runtime_context(
     provider: Arc<dyn agentcore::LlmProvider>,
     factory: Arc<dyn ToolboxFactory>,
-) -> WorkflowRuntimeContext {
+) -> (
+    WorkflowRuntimeContext,
+    tokio::sync::mpsc::Receiver<WorkflowNotification>,
+) {
     let mut registry: HashMap<String, Arc<dyn agentcore::LlmProvider>> = HashMap::new();
     registry.insert("mock".into(), provider);
-    WorkflowRuntimeContext {
-        provider_registry: registry,
-        toolbox_factory: factory,
-        runtime_client: RuntimeClient::new(MockTransport::ok("")),
-        event_sink: Arc::new(NoopSink),
-    }
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    (
+        WorkflowRuntimeContext {
+            provider_registry: registry,
+            toolbox_factory: factory,
+            runtime_client: RuntimeClient::new(MockTransport::ok("")),
+            event_sink: Arc::new(NoopSink),
+            workflow_events: tx,
+        },
+        rx,
+    )
 }
 
 async fn load_state(journal: &Arc<InMemoryJournal>, id: &str) -> WorkflowState {
-    let (mut state, seq) = match journal.latest_snapshot(id).await.unwrap() {
+    let pid = PersistenceId::new("workflow", id);
+    let (mut state, seq) = match journal.latest_snapshot(&pid).await.unwrap() {
         Some((bytes, seq)) => (serde_json::from_slice(&bytes).unwrap(), seq),
         None => (WorkflowActor::initial_state(), 0),
     };
-    let mut events = journal.replay(id, seq).await;
+    let mut events = journal.replay(&pid, seq).await;
     while let Some(item) = events.next().await {
         let ev: WorkflowDomainEvent = serde_json::from_slice(&item.unwrap()).unwrap();
         state = WorkflowActor::apply_event(state, ev);
@@ -120,12 +129,21 @@ async fn wait_for_status(
     }
 }
 
+async fn recv_notification(
+    rx: &mut tokio::sync::mpsc::Receiver<WorkflowNotification>,
+) -> WorkflowNotification {
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for notification")
+        .expect("notification channel closed")
+}
+
 async fn post_snapshot_events(
     journal: &Arc<InMemoryJournal>,
     id: &str,
 ) -> Vec<WorkflowDomainEvent> {
     let mut out = Vec::new();
-    let mut events = journal.replay(id, 0).await;
+    let mut events = journal.replay(&PersistenceId::new("workflow", id), 0).await;
     while let Some(item) = events.next().await {
         out.push(serde_json::from_slice(&item.unwrap()).unwrap());
     }
@@ -161,7 +179,8 @@ async fn two_agent_workflow_routes_on_condition_and_finishes() {
     };
 
     let journal = Arc::new(InMemoryJournal::new());
-    let rt = runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
+    let (rt, mut events) =
+        runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
     let wf = spawn_root(WorkflowActor::new("wf-seq", def, rt), journal.clone());
 
     wf.tell(WorkflowCommand::Start {
@@ -172,6 +191,13 @@ async fn two_agent_workflow_routes_on_condition_and_finishes() {
 
     let state = wait_for_status(&journal, "wf-seq", WorkflowStatus::Finished).await;
     assert_eq!(state.current_agent.as_deref(), Some("writer"));
+
+    // The push channel delivered a terminal Finished notification carrying the output.
+    let n = recv_notification(&mut events).await;
+    assert!(
+        matches!(n, WorkflowNotification::Finished { output } if output["report"] == "all done"),
+        "expected Finished notification with the writer output"
+    );
 
     let events = post_snapshot_events(&journal, "wf-seq").await;
     assert!(events.iter().any(|e| matches!(
@@ -211,7 +237,8 @@ async fn ask_user_pauses_then_resume_injects_reply() {
     };
 
     let journal = Arc::new(InMemoryJournal::new());
-    let rt = runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
+    let (rt, mut events) =
+        runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
     let wf = spawn_root(WorkflowActor::new("wf-ask", def, rt), journal.clone());
 
     wf.tell(WorkflowCommand::Start {
@@ -222,6 +249,13 @@ async fn ask_user_pauses_then_resume_injects_reply() {
 
     wait_for_status(&journal, "wf-ask", WorkflowStatus::AwaitingUserInput).await;
 
+    // The await transition pushed the question text on the channel.
+    let n = recv_notification(&mut events).await;
+    assert!(
+        matches!(n, WorkflowNotification::AwaitingUserInput { question } if question == "what colour?"),
+        "expected AwaitingUserInput carrying the question"
+    );
+
     wf.tell(WorkflowCommand::Resume {
         message: "blue".into(),
     })
@@ -230,6 +264,8 @@ async fn ask_user_pauses_then_resume_injects_reply() {
 
     let state = wait_for_status(&journal, "wf-ask", WorkflowStatus::Finished).await;
     assert_eq!(state.status, WorkflowStatus::Finished);
+    let n = recv_notification(&mut events).await;
+    assert!(matches!(n, WorkflowNotification::Finished { .. }));
 }
 
 // ── cancel / resume ──────────────────────────────────────────────────────────
@@ -308,7 +344,7 @@ async fn cancel_suspends_then_resume_continues() {
     });
 
     let journal = Arc::new(InMemoryJournal::new());
-    let rt = runtime_context(provider_at(&mock.url()), factory);
+    let (rt, _events) = runtime_context(provider_at(&mock.url()), factory);
     let wf = spawn_root(WorkflowActor::new("wf-cancel", def, rt), journal.clone());
 
     wf.tell(WorkflowCommand::Start {
@@ -356,7 +392,7 @@ async fn agent_session_history_reconstructs_from_journal() {
     };
 
     let journal = Arc::new(InMemoryJournal::new());
-    let rt = runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
+    let (rt, _events) = runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
     let wf = spawn_root(WorkflowActor::new("wf-recover", def, rt), journal.clone());
 
     wf.tell(WorkflowCommand::Start {
@@ -377,6 +413,7 @@ async fn agent_session_history_reconstructs_from_journal() {
     )));
 
     // Fold the agent session's journal the way recovery would.
+    // The agent journals under a run-scoped id: `<run_id>/sessions/<session_id>`.
     let history = reconstruct_agent_history(&journal, &session_id.to_string()).await;
     assert!(history.len() >= 2, "expected user + assistant messages");
     assert_eq!(history.first().unwrap().role, agentcore::Role::User);
@@ -393,11 +430,12 @@ async fn reconstruct_agent_history(
     journal: &Arc<InMemoryJournal>,
     session_id: &str,
 ) -> Vec<agentcore::Message> {
-    let (mut state, seq) = match journal.latest_snapshot(session_id).await.unwrap() {
+    let pid = PersistenceId::new("agent", session_id);
+    let (mut state, seq) = match journal.latest_snapshot(&pid).await.unwrap() {
         Some((bytes, seq)) => (serde_json::from_slice(&bytes).unwrap(), seq),
         None => (AgentActor::initial_state(), 0),
     };
-    let mut events = journal.replay(session_id, seq).await;
+    let mut events = journal.replay(&pid, seq).await;
     while let Some(item) = events.next().await {
         let ev: AgentDomainEvent = serde_json::from_slice(&item.unwrap()).unwrap();
         state = AgentActor::apply_event(state, ev);

@@ -2,10 +2,11 @@ use crate::{
     connected_registry::ConnectedRuntimeRegistry,
     error::RuntimeError,
     provider::{HealthStatus, RuntimeHandle},
+    runtime_listener::RuntimeEndpoint,
 };
 use async_trait::async_trait;
 use models::executor::RuntimeConfig;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{process::Child, sync::Mutex};
 
 pub struct ProcessRuntimeHandle {
@@ -28,7 +29,7 @@ impl RuntimeHandle for ProcessRuntimeHandle {
     async fn health_check(&self) -> Result<HealthStatus, RuntimeError> {
         let connected = self
             .connected_registry
-            .get_sink(&self.runtime_id)
+            .runtime_transport(&self.runtime_id)
             .await
             .is_some();
         if connected {
@@ -41,30 +42,48 @@ impl RuntimeHandle for ProcessRuntimeHandle {
     }
 }
 
-/// RuntimeProvider that spawns `october-runtime` as a child process.
+/// Sandbox policy passed to a spawned runtime child. Its presence means
+/// "sandbox-on"; absence means "no nono" (today's server / test behavior).
+#[derive(Debug, Clone, Default)]
+pub struct SandboxPolicy {
+    /// Extra read-only paths granted inside the sandbox (`--sandbox-read`).
+    pub extra_read_paths: Vec<PathBuf>,
+}
+
+/// RuntimeProvider that spawns `october-runtime` as a child process. Transport- and
+/// sandbox-agnostic: it spawns the binary with whatever endpoint + sandbox policy it
+/// was constructed with.
 pub struct ProcessRuntimeProvider {
     binary_path: PathBuf,
-    listener_addr: SocketAddr,
+    endpoint: RuntimeEndpoint,
     connected_registry: Arc<ConnectedRuntimeRegistry>,
     connect_timeout: Duration,
+    sandbox: Option<SandboxPolicy>,
 }
 
 impl ProcessRuntimeProvider {
     pub fn new(
         binary_path: PathBuf,
-        listener_addr: SocketAddr,
+        endpoint: RuntimeEndpoint,
         connected_registry: Arc<ConnectedRuntimeRegistry>,
     ) -> Self {
         Self {
             binary_path,
-            listener_addr,
+            endpoint,
             connected_registry,
             connect_timeout: Duration::from_secs(30),
+            sandbox: None,
         }
     }
 
     pub fn with_connect_timeout(mut self, d: Duration) -> Self {
         self.connect_timeout = d;
+        self
+    }
+
+    /// Spawn the child confined by nono (env-scrubbed + `--sandbox`).
+    pub fn with_sandbox(mut self, policy: SandboxPolicy) -> Self {
+        self.sandbox = Some(policy);
         self
     }
 }
@@ -76,17 +95,36 @@ impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
         id: &str,
         config: &RuntimeConfig,
     ) -> Result<Arc<dyn RuntimeHandle>, RuntimeError> {
-        // Register a watcher BEFORE spawning to avoid a race.
+        // Register a watcher BEFORE spawning to avoid losing the ready signal.
         let ready_rx = self.connected_registry.notify_when_ready(id).await;
 
-        let child = tokio::process::Command::new(&self.binary_path)
-            .arg("--executor-url")
-            .arg(format!("ws://{}", self.listener_addr))
+        let endpoint_arg = match &self.endpoint {
+            RuntimeEndpoint::Tcp(addr) => format!("ws://{addr}"),
+            RuntimeEndpoint::Unix(path) => format!("unix:{}", path.display()),
+        };
+
+        let mut cmd = tokio::process::Command::new(&self.binary_path);
+        cmd.arg("--endpoint")
+            .arg(&endpoint_arg)
             .arg("--runtime-id")
             .arg(id)
             .arg("--working-dir")
-            .arg(&config.working_dir)
-            .kill_on_drop(true)
+            .arg(&config.working_dir);
+
+        if let Some(policy) = &self.sandbox {
+            cmd.arg("--sandbox");
+            for p in &policy.extra_read_paths {
+                cmd.arg("--sandbox-read").arg(p);
+            }
+            // Scrub the environment: the child must not inherit orchestrator secrets.
+            cmd.env_clear();
+            for (k, v) in crate::env_scrub::scrubbed_env() {
+                cmd.env(k, v);
+            }
+        }
+
+        cmd.kill_on_drop(true);
+        let child = cmd
             .spawn()
             .map_err(|e| RuntimeError::Provider(e.to_string()))?;
 

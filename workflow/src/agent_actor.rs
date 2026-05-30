@@ -1,6 +1,6 @@
 use crate::context::{AgentRuntimeContext, CONCLUDE_TOOL};
 use crate::workflow_actor::WorkflowCommand;
-use actor::{ActorContext, CommandEffect, EventSourcedActor};
+use actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId};
 use agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
     LlmProvider, Message, Toolbox, Usage,
@@ -129,6 +129,12 @@ impl AgentActor {
             params,
             running: None,
         }
+    }
+
+    /// The journal identity of an agent session: kind `"agent"`, id = the session
+    /// UUID. Centralizes the kind so the workflow (e.g. fork) and the actor agree.
+    pub fn persistence_id_for(session_id: uuid::Uuid) -> PersistenceId {
+        PersistenceId::new("agent", session_id.to_string())
     }
 
     fn start_run(&mut self, input: AgentInput, ctx: &ActorContext<Self>, history: Vec<Message>) {
@@ -271,8 +277,8 @@ impl EventSourcedActor for AgentActor {
     type Event = AgentDomainEvent;
     type State = AgentState;
 
-    fn persistence_id(&self) -> String {
-        self.ctx.session_id.to_string()
+    fn persistence_id(&self) -> PersistenceId {
+        Self::persistence_id_for(self.ctx.session_id)
     }
 
     fn initial_state() -> AgentState {

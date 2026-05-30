@@ -17,5 +17,6 @@ pub use context::{
     WorkflowRuntimeContext, conclude_tool_spec,
 };
 pub use workflow_actor::{
-    WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowState, WorkflowStatus,
+    WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowNotification, WorkflowState,
+    WorkflowStatus,
 };

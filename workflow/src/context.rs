@@ -1,4 +1,4 @@
-use crate::workflow_actor::WorkflowCommand;
+use crate::workflow_actor::{WorkflowCommand, WorkflowNotification};
 use actor::ActorRef;
 use agentcore::{EventSink, LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
 use async_trait::async_trait;
@@ -28,6 +28,8 @@ pub struct WorkflowRuntimeContext {
     pub runtime_client: RuntimeClient,
     /// Sink for streaming observation events (never journaled).
     pub event_sink: Arc<dyn EventSink>,
+    /// Live push channel for workflow status transitions (never journaled).
+    pub workflow_events: tokio::sync::mpsc::Sender<WorkflowNotification>,
 }
 
 impl WorkflowRuntimeContext {
