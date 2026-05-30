@@ -36,6 +36,10 @@ enum Command {
         input: String,
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        /// Capability file fully replacing the runtime's built-in sandbox default.
+        /// Overrides `sandbox.capabilities_file` in the config.
+        #[arg(long)]
+        capabilities: Option<PathBuf>,
     },
     /// Resume a suspended run, injecting a reply.
     Resume {
@@ -103,6 +107,7 @@ async fn main() {
             workdir,
             input,
             state_dir,
+            capabilities,
         } => match run(RunParams {
             workflow_path: workflow,
             config_path: config,
@@ -110,6 +115,7 @@ async fn main() {
             input,
             state_dir,
             runtime_bin: runtime_binary_path(),
+            capabilities_path: capabilities,
         })
         .await
         {

@@ -13,8 +13,10 @@
     clippy::wildcard_enum_match_arm
 )]
 
+use cli::capabilities::builtin_default;
 use cli::run::{EXIT_AWAIT, ResumeParams, RunParams, resume, run};
 use mock_llm::MockLlmServer;
+use models::capabilities::{Access, DirGrant, Grant};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -46,17 +48,25 @@ fn locate_runtime_bin() -> Option<PathBuf> {
 
 /// Probe sandbox support by applying the sandbox in a throwaway runtime process
 /// pointed at an unreachable `ws://` endpoint: exit 3 = apply failed (unsupported
-/// kernel or `sandbox` feature off); anything else = apply succeeded.
+/// kernel or `sandbox` feature off); anything else = apply succeeded. Sandboxing is
+/// now driven by `--sandbox-caps`, so the probe writes the built-in default spec and
+/// points the runtime at it.
 fn sandbox_supported(bin: &Path) -> bool {
-    let tmp = std::env::temp_dir();
+    let Ok(spec) = builtin_default() else {
+        return false; // no built-in default for this platform → unsupported
+    };
+    let tmp = TempDir::new().unwrap();
+    let caps = tmp.path().join("caps.json");
+    std::fs::write(&caps, serde_json::to_vec(&spec).unwrap()).unwrap();
     match std::process::Command::new(bin)
         .arg("--endpoint")
         .arg("ws://127.0.0.1:1")
         .arg("--runtime-id")
         .arg("probe")
         .arg("--working-dir")
-        .arg(&tmp)
-        .arg("--sandbox")
+        .arg(tmp.path())
+        .arg("--sandbox-caps")
+        .arg(&caps)
         .output()
     {
         Ok(o) => o.status.code() != Some(3),
@@ -84,7 +94,6 @@ fn write_config(dir: &Path, mock_url: &str) -> PathBuf {
         // No api_key_env → a no-auth Anthropic client pointed at the mock server.
         "providers": { "local": { "type": "anthropic", "base_url": mock_url } },
         "models": { "m": { "provider": "local", "model_id": "test-model" } },
-        "sandbox": { "extra_read_paths": [] },
         "storage": { "root_dir": dir.join("state") }
     });
     let path = dir.join("october.json");
@@ -157,6 +166,7 @@ async fn run_orchestration_finishes() {
         input: "go".into(),
         state_dir: Some(state_dir(dir.path())),
         runtime_bin: bin,
+        capabilities_path: None,
     })
     .await
     .expect("run failed");
@@ -193,6 +203,7 @@ async fn suspend_then_resume_roundtrips() {
         input: "pick a colour".into(),
         state_dir: Some(state.clone()),
         runtime_bin: bin.clone(),
+        capabilities_path: None,
     })
     .await
     .expect("run failed");
@@ -242,6 +253,7 @@ async fn failing_workflow_exits_without_hanging() {
             input: "go".into(),
             state_dir: Some(state_dir(dir.path())),
             runtime_bin: bin,
+            capabilities_path: None,
         }),
     )
     .await
@@ -277,6 +289,7 @@ async fn bash_writes_inside_workdir() {
         input: "write a file".into(),
         state_dir: Some(state_dir(dir.path())),
         runtime_bin: bin,
+        capabilities_path: None,
     })
     .await
     .expect("run failed");
@@ -317,6 +330,7 @@ async fn bash_cannot_write_outside_workdir() {
         input: "try to escape".into(),
         state_dir: Some(state_dir(dir.path())),
         runtime_bin: bin,
+        capabilities_path: None,
     })
     .await
     .expect("run failed");
@@ -327,4 +341,56 @@ async fn bash_cannot_write_outside_workdir() {
         "sandbox must deny writes outside the workdir, but {} was created",
         outside.display()
     );
+}
+
+#[tokio::test]
+async fn capability_file_grants_write_outside_workdir() {
+    // The inverse of `bash_cannot_write_outside_workdir`: a custom capability file
+    // that adds a read-write grant for an otherwise-denied directory lets the tool
+    // write there — proving the file is a full, effective override of the default.
+    let Some(bin) = runtime_or_skip("capability_file_grants_write_outside_workdir") else {
+        return;
+    };
+    let outside_dir = TempDir::new().unwrap();
+    let outside = outside_dir.path().join("granted.txt");
+    let command = format!("echo ok > {}", outside.display());
+
+    let mock = MockLlmServer::builder()
+        .tool_call("bash", json!({ "command": command }))
+        .tool_call(CONCLUDE, json!({ "answer": "wrote" }))
+        .build()
+        .await;
+    let dir = TempDir::new().unwrap();
+    let config = write_config(dir.path(), &mock.url());
+    let workflow = write_workflow(dir.path(), &["bash"], false);
+    let workdir = TempDir::new().unwrap();
+
+    // Full-override spec = built-in default + a read-write grant for the outside dir.
+    let mut spec = builtin_default().expect("builtin default");
+    spec.grants.push(Grant::Dir(DirGrant {
+        path: outside_dir.path().to_string_lossy().into_owned(),
+        access: Access::ReadWrite,
+    }));
+    let caps = dir.path().join("caps.json");
+    std::fs::write(&caps, serde_json::to_vec_pretty(&spec).unwrap()).unwrap();
+
+    let code = run(RunParams {
+        workflow_path: workflow,
+        config_path: config,
+        workdir: workdir.path().to_path_buf(),
+        input: "write outside".into(),
+        state_dir: Some(state_dir(dir.path())),
+        runtime_bin: bin,
+        capabilities_path: Some(caps),
+    })
+    .await
+    .expect("run failed");
+    assert_eq!(code, 0);
+
+    assert!(
+        outside.exists(),
+        "the capability file granted read-write to {}, so the tool should have written it",
+        outside.display()
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap().trim(), "ok");
 }

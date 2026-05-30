@@ -8,6 +8,7 @@ use executor::{
     RuntimeListenerServer, SandboxPolicy, serve_runtime_connections,
 };
 use executor_client::ExecutorClient;
+use models::capabilities::CapabilitySpec;
 use models::executor::RuntimeConfig;
 use models::workflow::WorkflowDefinition;
 use runtime_client::RuntimeClient;
@@ -39,6 +40,8 @@ pub struct RunParams {
     pub input: String,
     pub state_dir: Option<PathBuf>,
     pub runtime_bin: PathBuf,
+    /// `--capabilities`: overrides `sandbox.capabilities_file` from the config.
+    pub capabilities_path: Option<PathBuf>,
 }
 
 pub struct ResumeParams {
@@ -80,6 +83,13 @@ fn socket_path() -> Result<PathBuf, CliError> {
     Ok(path)
 }
 
+/// How to launch the sandboxed runtime child for one `drive` call: which binary, and
+/// an optional `--capabilities` override of the configured/default capability spec.
+struct RuntimeLaunch {
+    binary: PathBuf,
+    capabilities_override: Option<PathBuf>,
+}
+
 /// Assemble the in-process sandboxed executor, spawn the workflow actor, and drive
 /// the two-plane control loop until a terminal/await transition.
 async fn drive(
@@ -88,7 +98,7 @@ async fn drive(
     workdir: PathBuf,
     run_id: String,
     root_dir: PathBuf,
-    runtime_bin: PathBuf,
+    launch: RuntimeLaunch,
     kickoff: WorkflowCommand,
 ) -> Result<i32, CliError> {
     let registry = build_registry(&cfg)?;
@@ -103,12 +113,37 @@ async fn drive(
     let cancel = CancellationToken::new();
     serve_runtime_connections(listener, connected.clone(), cancel.clone());
 
+    // Resolve the effective capability spec — `--capabilities` flag wins over
+    // `sandbox.capabilities_file`, and absent both we use the runtime's platform
+    // built-in default. Persist the concrete spec into the run dir so the runtime
+    // loads a single source of truth and `runs/<id>/capabilities.json` records
+    // exactly what was applied. Resolution happens here (not in the runtime) so the
+    // runtime carries no hidden fallback.
+    let caps_source = launch
+        .capabilities_override
+        .or_else(|| cfg.sandbox.capabilities_file.clone());
+    let spec = match &caps_source {
+        Some(path) => CapabilitySpec::load(path).map_err(CliError::Config)?,
+        None => crate::capabilities::builtin_default()?,
+    };
+    let rdir = run_dir(&root_dir, &run_id);
+    std::fs::create_dir_all(&rdir).map_err(|e| CliError::Io(e.to_string()))?;
+    let caps_path = rdir.join("capabilities.json");
+    std::fs::write(
+        &caps_path,
+        serde_json::to_vec_pretty(&spec).map_err(|e| CliError::Io(e.to_string()))?,
+    )
+    .map_err(|e| CliError::Io(e.to_string()))?;
+
     // Lifecycle: in-process executor + sandboxed runtime provider.
-    let provider =
-        ProcessRuntimeProvider::new(runtime_bin, RuntimeEndpoint::Unix(sock), connected.clone())
-            .with_sandbox(SandboxPolicy {
-                extra_read_paths: cfg.sandbox.extra_read_paths.clone(),
-            });
+    let provider = ProcessRuntimeProvider::new(
+        launch.binary,
+        RuntimeEndpoint::Unix(sock),
+        connected.clone(),
+    )
+    .with_sandbox(SandboxPolicy {
+        capabilities_file: caps_path,
+    });
     let client = ExecutorClient::new(InMemExecutorTransport::new(Arc::new(provider), connected));
 
     client
@@ -126,9 +161,8 @@ async fn drive(
         .map_err(|e| CliError::Executor(e.to_string()))?;
     let runtime_client = RuntimeClient::from_arc(rt_transport);
 
-    // Persist the manifest (no secrets) so `resume` can rebuild.
-    let rdir = run_dir(&root_dir, &run_id);
-    std::fs::create_dir_all(&rdir).map_err(|e| CliError::Io(e.to_string()))?;
+    // Persist the manifest (no secrets) so `resume` can rebuild. `rdir` was created
+    // above when writing the capability spec.
     let manifest = Manifest {
         workflow: def.clone(),
         workdir: workdir.clone(),
@@ -203,7 +237,10 @@ pub async fn run(p: RunParams) -> Result<i32, CliError> {
         p.workdir,
         run_id,
         root_dir,
-        p.runtime_bin,
+        RuntimeLaunch {
+            binary: p.runtime_bin,
+            capabilities_override: p.capabilities_path,
+        },
         WorkflowCommand::Start { input: p.input },
     )
     .await
@@ -223,7 +260,11 @@ pub async fn resume(p: ResumeParams) -> Result<i32, CliError> {
         manifest.workdir,
         p.run_id,
         root_dir,
-        p.runtime_bin,
+        RuntimeLaunch {
+            binary: p.runtime_bin,
+            // Resume reuses the config's capabilities_file; there is no resume-time flag.
+            capabilities_override: None,
+        },
         WorkflowCommand::Resume { message: p.message },
     )
     .await

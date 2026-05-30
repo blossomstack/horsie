@@ -4,6 +4,11 @@ pub mod agent {
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod capabilities {
+    include!(concat!(env!("OUT_DIR"), "/capabilities/mod.rs"));
+}
+
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod events {
     include!(concat!(env!("OUT_DIR"), "/events/mod.rs"));
 }
@@ -21,6 +26,18 @@ pub mod runtime {
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod workflow {
     include!(concat!(env!("OUT_DIR"), "/workflow/mod.rs"));
+}
+
+impl capabilities::CapabilitySpec {
+    /// Load and parse a capability file (the runtime's `--sandbox-caps` path, or a
+    /// user-authored file the CLI resolves). Shared by the runtime and the CLI; the
+    /// built-in *default* spec is owned by the CLI, not here.
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("read capability file {}: {e}", path.display()))?;
+        serde_json::from_str(&text)
+            .map_err(|e| format!("parse capability file {}: {e}", path.display()))
+    }
 }
 
 impl agent::Message {
@@ -98,5 +115,41 @@ impl agent::AgentInput {
                 })],
             },
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::capabilities::{Access, CapabilitySpec, Grant, NetworkPolicy};
+
+    #[test]
+    fn capability_spec_load_parses_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caps.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "network": "Allow",
+                "grants": [
+                    { "type": "Dir", "value": { "path": "/usr", "access": "Read" } },
+                    { "type": "WorkingDir", "value": { "access": "ReadWrite" } }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let spec = CapabilitySpec::load(&path).expect("valid file parses");
+        assert_eq!(spec.network, NetworkPolicy::Allow);
+        assert!(matches!(
+            spec.grants.first(),
+            Some(Grant::Dir(d)) if d.path == "/usr" && d.access == Access::Read
+        ));
+    }
+
+    #[test]
+    fn capability_spec_load_rejects_missing_file() {
+        let err = CapabilitySpec::load(std::path::Path::new("/nonexistent/october-caps.json"))
+            .expect_err("missing file must error");
+        assert!(err.contains("read capability file"));
     }
 }

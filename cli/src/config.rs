@@ -45,8 +45,10 @@ pub struct ModelConfig {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SandboxConfig {
+    /// Capability file that fully defines the sandbox, replacing the built-in default.
+    /// A `--capabilities` CLI flag overrides this. Absent → built-in default.
     #[serde(default)]
-    pub extra_read_paths: Vec<PathBuf>,
+    pub capabilities_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,7 +148,7 @@ mod tests {
         let json = r#"{
             "providers": { "anthropic": { "type": "anthropic", "api_key_env": "ANTHROPIC_API_KEY", "base_url": "https://api.anthropic.com" } },
             "models": { "sonnet": { "provider": "anthropic", "model_id": "claude-sonnet-4-6", "max_tokens": 8192 } },
-            "sandbox": { "extra_read_paths": [] },
+            "sandbox": { "capabilities_file": null },
             "storage": { "root_dir": "./.october" }
         }"#;
         let cfg: OctoberConfig = serde_json::from_str(json).unwrap();
@@ -182,6 +184,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_sandbox_capabilities_file() {
+        let cfg: OctoberConfig = serde_json::from_str(
+            r#"{
+                "providers": { "p": { "type": "anthropic", "base_url": "http://localhost:1" } },
+                "models": { "m": { "provider": "p", "model_id": "id" } },
+                "sandbox": { "capabilities_file": "/etc/october/caps.json" }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.sandbox.capabilities_file,
+            Some(PathBuf::from("/etc/october/caps.json"))
+        );
+    }
+
+    #[test]
+    fn capabilities_file_defaults_to_none() {
+        let cfg: OctoberConfig = serde_json::from_str(
+            r#"{
+                "providers": { "p": { "type": "anthropic", "base_url": "http://localhost:1" } },
+                "models": { "m": { "provider": "p", "model_id": "id" } }
+            }"#,
+        )
+        .unwrap();
+        assert!(cfg.sandbox.capabilities_file.is_none());
+    }
+
+    #[test]
     fn storage_and_sandbox_default_when_absent() {
         let json = r#"{
             "providers": { "m": { "type": "anthropic", "base_url": "http://localhost:1" } },
@@ -189,7 +219,7 @@ mod tests {
         }"#;
         let cfg: OctoberConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.storage.root_dir, PathBuf::from("./.october"));
-        assert!(cfg.sandbox.extra_read_paths.is_empty());
+        assert!(cfg.sandbox.capabilities_file.is_none());
         assert!(cfg.models["x"].max_tokens.is_none());
     }
 }

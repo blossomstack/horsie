@@ -43,11 +43,13 @@ impl RuntimeHandle for ProcessRuntimeHandle {
 }
 
 /// Sandbox policy passed to a spawned runtime child. Its presence means
-/// "sandbox-on"; absence means "no nono" (today's server / test behavior).
-#[derive(Debug, Clone, Default)]
+/// "sandbox-on"; absence means "no nono" (today's server / test behavior). The
+/// `capabilities_file` fully defines the allowed capabilities — the caller resolves
+/// custom-or-default and writes a concrete file before spawning.
+#[derive(Debug, Clone)]
 pub struct SandboxPolicy {
-    /// Extra read-only paths granted inside the sandbox (`--sandbox-read`).
-    pub extra_read_paths: Vec<PathBuf>,
+    /// Capability file passed to the runtime as `--sandbox-caps`.
+    pub capabilities_file: PathBuf,
 }
 
 /// RuntimeProvider that spawns `october-runtime` as a child process. Transport- and
@@ -81,7 +83,7 @@ impl ProcessRuntimeProvider {
         self
     }
 
-    /// Spawn the child confined by nono (env-scrubbed + `--sandbox`).
+    /// Spawn the child confined by nono (env-scrubbed + `--sandbox-caps`).
     pub fn with_sandbox(mut self, policy: SandboxPolicy) -> Self {
         self.sandbox = Some(policy);
         self
@@ -112,10 +114,7 @@ impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
             .arg(&config.working_dir);
 
         if let Some(policy) = &self.sandbox {
-            cmd.arg("--sandbox");
-            for p in &policy.extra_read_paths {
-                cmd.arg("--sandbox-read").arg(p);
-            }
+            cmd.arg("--sandbox-caps").arg(&policy.capabilities_file);
             // Scrub the environment: the child must not inherit orchestrator secrets.
             cmd.env_clear();
             for (k, v) in crate::env_scrub::scrubbed_env() {

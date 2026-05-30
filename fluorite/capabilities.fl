@@ -1,0 +1,41 @@
+/// Sandbox capability spec — the policy the runtime applies via nono. Part of the
+/// CLI → runtime contract: the CLI resolves and persists a spec, the runtime loads
+/// and enforces it. Hand-written `load`/`builtin_default` live in models/src/lib.rs.
+package capabilities;
+
+/// Access granted to a path.
+enum Access {
+    Read,
+    ReadWrite,
+}
+
+/// Whether the sandbox blocks network access. `Block` is the safe default.
+enum NetworkPolicy {
+    Block,
+    Allow,
+}
+
+/// A directory-subtree grant (`nono::allow_path`).
+struct DirGrant { path: String, access: Access }
+
+/// A single-file grant, e.g. a device node (`nono::allow_file`).
+struct FileGrant { path: String, access: Access }
+
+/// The runtime working directory, resolved to `--working-dir` at apply time.
+struct WorkingDirGrant { access: Access }
+
+/// A single capability grant. The kind is explicit so directory-vs-file intent is
+/// unambiguous; `nono`'s `allow_path` is directory-only and `allow_file` single-file.
+#[type_tag = "type"]
+union Grant {
+    Dir(DirGrant),
+    File(FileGrant),
+    WorkingDir(WorkingDirGrant),
+}
+
+/// A full sandbox capability specification. Either authored as a capability file or
+/// taken from the platform built-in default; fully defines what the sandbox allows.
+struct CapabilitySpec {
+    network: NetworkPolicy,
+    grants: Vec<Grant>,
+}

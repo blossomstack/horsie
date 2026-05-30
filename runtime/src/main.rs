@@ -30,12 +30,11 @@ struct Cli {
     runtime_id: String,
     #[arg(long)]
     working_dir: PathBuf,
-    /// Confine tool execution with the nono sandbox before connecting (fail-closed).
-    #[arg(long)]
-    sandbox: bool,
-    /// Extra read-only paths granted inside the sandbox.
-    #[arg(long = "sandbox-read")]
-    sandbox_read: Vec<PathBuf>,
+    /// Capability file confining tool execution with the nono sandbox before
+    /// connecting (fail-closed). Its presence enables the sandbox; absent → no
+    /// sandbox. The file fully defines the allowed capabilities.
+    #[arg(long = "sandbox-caps")]
+    sandbox_caps: Option<PathBuf>,
 }
 
 enum Endpoint {
@@ -65,22 +64,23 @@ async fn main() {
         }
     };
 
-    if cli.sandbox {
+    if let Some(caps_file) = &cli.sandbox_caps {
         #[cfg(feature = "sandbox")]
         {
             let socket = match &endpoint {
                 Endpoint::Unix(p) => Some(p.as_path()),
                 Endpoint::Ws(_) => None,
             };
-            if let Err(e) = runtime::sandbox::apply(&cli.working_dir, socket, &cli.sandbox_read) {
+            if let Err(e) = runtime::sandbox::apply(&cli.working_dir, socket, caps_file) {
                 eprintln!("sandbox apply failed: {e}");
                 std::process::exit(3);
             }
         }
         #[cfg(not(feature = "sandbox"))]
         {
+            let _ = caps_file;
             eprintln!(
-                "--sandbox requested but this binary was built without the `sandbox` feature"
+                "--sandbox-caps given but this binary was built without the `sandbox` feature"
             );
             std::process::exit(3);
         }
