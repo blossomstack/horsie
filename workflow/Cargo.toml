@@ -1,0 +1,28 @@
+[package]
+name = "workflow"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actor          = { path = "../actor" }
+agentcore      = { path = "../agentcore" }
+runtime-client = { path = "../runtime-client" }
+models         = { path = "../models" }
+async-trait    = { workspace = true }
+thiserror      = { workspace = true }
+tokio          = { workspace = true }
+tokio-util     = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+tracing        = { workspace = true }
+uuid           = { workspace = true }
+eval           = { workspace = true }
+
+[dev-dependencies]
+mock-llm     = { path = "../providers/mock-llm" }
+anthropic    = { path = "../providers/anthropic" }
+futures-util = { workspace = true }
+async-trait  = { workspace = true }
+
+[lints]
+workspace = true

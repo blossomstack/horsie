@@ -1,6 +1,8 @@
 [workspace]
 members = [
+    "actor",
     "agentcore",
+    "workflow",
     "server",
     "executor",
     "runtime",
@@ -26,13 +28,15 @@ tokio-util        = { version = "0.7" }
 tokio-stream      = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = "0.26"
 futures-util      = "0.3"
-uuid              = { version = "1", features = ["v4"] }
+uuid              = { version = "1", features = ["v4", "serde"] }
 async-anthropic   = { git = "https://github.com/zhxiaogg/async-anthropic.git", rev = "64754b2" }
 axum              = { version = "0.7", features = ["macros"] }
 parking_lot       = "0.12"
 tracing           = "0.1"
 reqwest           = { version = "0.12", features = ["json"] }
 tempfile          = "3"
+jsonschema        = "0.20"
+eval              = "0.4"
 
 # Production code bans panic-prone constructs; test code opts out per-file via
 # #![cfg_attr(test, allow(clippy::unwrap_used, ...))]

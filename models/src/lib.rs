@@ -18,6 +18,11 @@ pub mod runtime {
     include!(concat!(env!("OUT_DIR"), "/runtime/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod workflow {
+    include!(concat!(env!("OUT_DIR"), "/workflow/mod.rs"));
+}
+
 impl agent::Message {
     pub fn user(id: impl Into<String>, text: impl Into<String>) -> Self {
         Self {

@@ -24,6 +24,10 @@ pub struct AgentConfig {
     pub stuck_threshold: usize,
     pub nudge_threshold: usize,
     pub max_tokens: Option<u32>,
+    /// How many times the model may be nudged to re-issue a malformed handoff call
+    /// (called alongside other tools, or with input that fails schema validation)
+    /// before the run fails.
+    pub handoff_max_retries: u32,
 }
 
 impl Default for AgentConfig {
@@ -33,6 +37,7 @@ impl Default for AgentConfig {
             stuck_threshold: 5,
             nudge_threshold: 3,
             max_tokens: None,
+            handoff_max_retries: 2,
         }
     }
 }
@@ -41,7 +46,13 @@ pub struct Agent {
     pub(crate) provider: Arc<dyn LlmProvider>,
     pub(crate) system_prompt: String,
     pub(crate) toolbox: Arc<dyn Toolbox>,
+    /// The tool whose invocation ends the run and returns control to the caller as
+    /// a `Handoff`, rather than being executed. Validated to exist in the toolbox
+    /// at build time.
     pub(crate) handoff_tool: Option<String>,
+    /// Validator for the handoff tool's input, compiled from its declared
+    /// `input_schema`. `None` when there is no handoff tool.
+    pub(crate) handoff_validator: Option<Arc<jsonschema::Validator>>,
     pub(crate) config: AgentConfig,
     pub(crate) history: Vec<Message>,
 }
@@ -72,6 +83,8 @@ impl AgentBuilder {
         self
     }
 
+    /// Register the tool that ends the run as a `Handoff`. The tool must be present
+    /// in the toolbox (checked by [`build`](Self::build)).
     pub fn with_handoff_tool(mut self, n: impl Into<String>) -> Self {
         self.handoff_tool = Some(n.into());
         self
@@ -94,11 +107,36 @@ impl AgentBuilder {
                 stuck: self.config.stuck_threshold,
             });
         }
+
+        // A handoff tool must be advertised in the toolbox — otherwise the model is
+        // never told it exists and could never call it.
+        let handoff_validator = match &self.handoff_tool {
+            None => None,
+            Some(name) => {
+                let spec = self
+                    .toolbox
+                    .specs()
+                    .into_iter()
+                    .find(|s| &s.name == name)
+                    .ok_or_else(|| AgentBuildError::HandoffToolNotRegistered {
+                        tool: name.clone(),
+                    })?;
+                let validator = jsonschema::validator_for(&spec.input_schema).map_err(|e| {
+                    AgentBuildError::InvalidHandoffSchema {
+                        tool: name.clone(),
+                        reason: e.to_string(),
+                    }
+                })?;
+                Some(Arc::new(validator))
+            }
+        };
+
         Ok(Agent {
             provider: self.provider,
             system_prompt: self.system_prompt,
             toolbox: self.toolbox,
             handoff_tool: self.handoff_tool,
+            handoff_validator,
             config: self.config,
             history: self.history,
         })
@@ -141,6 +179,33 @@ impl Agent {
         AgentBuilder::new(provider, toolbox)
     }
 
+    /// Returns `Some(reason)` when a handoff call must be rejected: either it was
+    /// issued alongside other tool calls, or its input fails the tool's schema.
+    fn validate_handoff(
+        &self,
+        handoff_name: &str,
+        tool_calls: &[(String, String, Value)],
+        data: &Value,
+    ) -> Option<String> {
+        if tool_calls.len() > 1 {
+            return Some(format!(
+                "The '{handoff_name}' tool must be called on its own, with no other tool calls in the same turn."
+            ));
+        }
+        if let Some(validator) = &self.handoff_validator
+            && !validator.is_valid(data)
+        {
+            let detail = validator
+                .validate(data)
+                .err()
+                .and_then(|mut errs| errs.next())
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "input does not match the tool's schema".to_string());
+            return Some(format!("Invalid '{handoff_name}' input: {detail}"));
+        }
+        None
+    }
+
     pub async fn run(
         &mut self,
         input: AgentInput,
@@ -162,6 +227,16 @@ impl Agent {
         };
         let mut iteration: u32 = 0;
         let mut recent_fingerprints: VecDeque<String> = VecDeque::new();
+        let mut handoff_retries: u32 = 0;
+        let mut handoff_missing_retries: u32 = 0;
+        // With a handoff tool, force a tool call every turn (`Any`) so the model can
+        // never end with bare text — it must keep working or call the handoff tool to
+        // finish. Without one, the model may end its turn with text (`Auto`).
+        let tool_choice = if self.handoff_tool.is_some() {
+            ToolChoice::Any
+        } else {
+            ToolChoice::Auto
+        };
 
         loop {
             if cancel.is_cancelled() {
@@ -184,7 +259,7 @@ impl Agent {
                     Some(self.system_prompt.clone())
                 },
                 tools,
-                tool_choice: ToolChoice::Auto,
+                tool_choice: tool_choice.clone(),
                 max_tokens: self.config.max_tokens,
             };
 
@@ -221,6 +296,31 @@ impl Agent {
             let tool_calls = extract_tool_calls(&response.parts);
 
             if tool_calls.is_empty() {
+                // A handoff agent must finish by *calling* its handoff tool, never by
+                // ending its turn with plain text. `tool_choice: any` already pushes the
+                // model toward a tool call; this is the safety net if a provider returns
+                // text anyway — nudge and retry, then fail rather than silently accept it.
+                if let Some(handoff_name) = self.handoff_tool.clone() {
+                    if handoff_missing_retries >= self.config.handoff_max_retries {
+                        return Err(AgentError::HandoffValidationFailed {
+                            tool: handoff_name,
+                            reason:
+                                "model ended its turn with text instead of calling the handoff tool"
+                                    .to_string(),
+                        });
+                    }
+                    handoff_missing_retries += 1;
+                    self.history.push(Message::user(
+                        format!("nudge-handoff-missing:{iteration}"),
+                        format!(
+                            "You ended your turn without finishing. Call the '{handoff_name}' tool to \
+                             deliver your output or ask the user; if there is more work to do, call a \
+                             tool to do it."
+                        ),
+                    ));
+                    continue;
+                }
+
                 events.emit(AgentEvent::RunComplete(RunCompleteEvent {
                     message_id: run_id.clone(),
                     usage: total_usage.clone(),
@@ -234,21 +334,59 @@ impl Agent {
                 });
             }
 
-            if let Some(ref handoff_name) = self.handoff_tool
-                && let Some((_, name, data)) = tool_calls.iter().find(|(_, n, _)| n == handoff_name)
+            // Handoff handling: a call to the handoff tool ends the run, but only
+            // once it is the sole tool call and its input passes schema validation.
+            // Otherwise the model is nudged (via tool-result errors) to re-issue it,
+            // bounded by `handoff_max_retries`.
+            if let Some(handoff_name) = self.handoff_tool.clone()
+                && let Some((_, _, data)) = tool_calls
+                    .iter()
+                    .find(|(_, n, _)| n == &handoff_name)
+                    .cloned()
             {
-                events.emit(AgentEvent::RunComplete(RunCompleteEvent {
-                    message_id: run_id.clone(),
-                    usage: total_usage.clone(),
-                    iterations: iteration,
-                }));
-                return Ok(AgentOutput {
-                    result: AgentResult::Handoff(HandoffOutput {
-                        tool_name: name.clone(),
-                        data: data.clone(),
-                    }),
-                    usage: total_usage,
-                });
+                let rejection = self.validate_handoff(&handoff_name, &tool_calls, &data);
+                match rejection {
+                    None => {
+                        events.emit(AgentEvent::RunComplete(RunCompleteEvent {
+                            message_id: run_id.clone(),
+                            usage: total_usage.clone(),
+                            iterations: iteration,
+                        }));
+                        return Ok(AgentOutput {
+                            result: AgentResult::Handoff(HandoffOutput {
+                                tool_name: handoff_name,
+                                data,
+                            }),
+                            usage: total_usage,
+                        });
+                    }
+                    Some(reason) => {
+                        if handoff_retries >= self.config.handoff_max_retries {
+                            return Err(AgentError::HandoffValidationFailed {
+                                tool: handoff_name,
+                                reason,
+                            });
+                        }
+                        handoff_retries += 1;
+                        // Every tool_use in this turn needs a tool_result for the
+                        // conversation to stay valid; tell the model what to fix.
+                        for (tool_call_id, n, _) in &tool_calls {
+                            let content = if n == &handoff_name {
+                                reason.clone()
+                            } else {
+                                format!(
+                                    "Ignored: call '{handoff_name}' on its own to finish, with no other tools."
+                                )
+                            };
+                            self.history.push(Message::tool_result(
+                                tool_call_id.clone(),
+                                content,
+                                true,
+                            ));
+                        }
+                        continue;
+                    }
+                }
             }
 
             let fingerprint = tool_fingerprint(&tool_calls);
@@ -335,7 +473,7 @@ mod tests {
     use crate::{
         error::ToolCallError,
         events::EventSink,
-        provider::{CompletionResponse, StopReason},
+        provider::{CompletionResponse, StopReason, ToolChoice},
         tool::{EmptyToolbox, ToolSpec, Toolbox},
     };
     use async_trait::async_trait;
@@ -660,7 +798,8 @@ mod tests {
                 output_tokens: 5,
             },
         }]);
-        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+        // The handoff tool must be advertised in the toolbox.
+        let mut agent = Agent::builder(provider, MockToolbox::echo("handoff"))
             .with_handoff_tool("handoff")
             .build()
             .unwrap();
@@ -682,6 +821,131 @@ mod tests {
             }
             other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
         }
+    }
+
+    #[tokio::test]
+    async fn test_build_fails_when_handoff_tool_missing() {
+        let agent = Agent::builder(MockProvider::text("x"), Arc::new(EmptyToolbox))
+            .with_handoff_tool("nope")
+            .build();
+        assert!(matches!(
+            agent,
+            Err(AgentBuildError::HandoffToolNotRegistered { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_handoff_schema_validation_retries_then_succeeds() {
+        // First call: invalid handoff input (missing required field). Second: valid.
+        let toolbox = {
+            let spec = ToolSpec {
+                name: "finish".to_string(),
+                description: "finish".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["answer"],
+                    "properties": { "answer": { "type": "number" } }
+                }),
+            };
+            Arc::new(MockToolbox {
+                specs: vec![spec],
+                handler: Arc::new(|_, input| Ok(input)),
+            })
+        };
+        let provider = MockProvider::new(vec![
+            CompletionResponse {
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "h1".into(),
+                    name: "finish".into(),
+                    input: json!({"wrong": true}),
+                })],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            },
+            CompletionResponse {
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "h2".into(),
+                    name: "finish".into(),
+                    input: json!({"answer": 7}),
+                })],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            },
+        ]);
+        let mut agent = Agent::builder(provider, toolbox)
+            .with_handoff_tool("finish")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let output = agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        match output.result {
+            AgentResult::Handoff(HandoffOutput { data, .. }) => assert_eq!(data["answer"], 7),
+            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handoff_validation_fails_after_max_retries() {
+        let toolbox = {
+            let spec = ToolSpec {
+                name: "finish".to_string(),
+                description: "finish".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["answer"],
+                    "properties": { "answer": { "type": "number" } }
+                }),
+            };
+            Arc::new(MockToolbox {
+                specs: vec![spec],
+                handler: Arc::new(|_, input| Ok(input)),
+            })
+        };
+        // Always returns invalid input.
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: "h".into(),
+                name: "finish".into(),
+                input: json!({"wrong": true}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        }]);
+        let config = AgentConfig {
+            handoff_max_retries: 1,
+            ..AgentConfig::default()
+        };
+        let mut agent = Agent::builder(provider, toolbox)
+            .with_handoff_tool("finish")
+            .with_config(config)
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let err = agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentError::HandoffValidationFailed { .. }));
     }
 
     #[tokio::test]
@@ -754,6 +1018,7 @@ mod tests {
             stuck_threshold: 10,
             nudge_threshold: 8,
             max_tokens: None,
+            ..AgentConfig::default()
         };
         let mut agent = Agent::builder(provider, toolbox)
             .with_config(config)
@@ -792,6 +1057,7 @@ mod tests {
             stuck_threshold: 3,
             nudge_threshold: 2,
             max_tokens: None,
+            ..AgentConfig::default()
         };
         let mut agent = Agent::builder(provider, toolbox)
             .with_config(config)
@@ -835,5 +1101,124 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AgentError::Cancelled));
+    }
+
+    /// Records the `tool_choice` of the first provider call.
+    struct RecordingProvider {
+        seen: Mutex<Option<ToolChoice>>,
+        response: CompletionResponse,
+    }
+
+    #[async_trait]
+    impl crate::provider::LlmProvider for RecordingProvider {
+        fn model_id(&self) -> &str {
+            "recording"
+        }
+
+        async fn complete(
+            &self,
+            request: crate::provider::CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn EventSink,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            *self.seen.lock().unwrap() = Some(request.tool_choice.clone());
+            Ok(self.response.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handoff_agent_forces_tool_choice_any() {
+        // A handoff agent concludes immediately; assert the call used tool_choice=Any.
+        let provider = Arc::new(RecordingProvider {
+            seen: Mutex::new(None),
+            response: CompletionResponse {
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "h1".into(),
+                    name: "finish".into(),
+                    input: json!({}),
+                })],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            },
+        });
+        let mut agent = Agent::builder(provider.clone(), MockToolbox::echo("finish"))
+            .with_handoff_tool("finish")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            provider.seen.lock().unwrap().clone(),
+            Some(ToolChoice::Any)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_handoff_agent_errors_on_plain_text_completion() {
+        // Provider ignores tool_choice and keeps returning plain text. A handoff
+        // agent must not silently complete — it nudges then fails.
+        let provider = MockProvider::text("just chatting, no tool");
+        let config = AgentConfig {
+            handoff_max_retries: 1,
+            ..AgentConfig::default()
+        };
+        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"))
+            .with_handoff_tool("finish")
+            .with_config(config)
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let err = agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentError::HandoffValidationFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_non_handoff_agent_uses_tool_choice_auto() {
+        let provider = Arc::new(RecordingProvider {
+            seen: Mutex::new(None),
+            response: CompletionResponse {
+                parts: vec![ContentPart::Text(TextPart {
+                    text: "done".into(),
+                })],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            },
+        });
+        let mut agent = Agent::builder(provider.clone(), Arc::new(EmptyToolbox))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            provider.seen.lock().unwrap().clone(),
+            Some(ToolChoice::Auto)
+        ));
     }
 }

@@ -1,0 +1,39 @@
+/// Protocol/config types describing a multi-agent workflow.
+package workflow;
+
+/// A directed edge to the next agent, optionally gated by a condition.
+///
+/// `condition` is an expression evaluated against the producing agent's
+/// structured output (bound to `output`); it must evaluate to a boolean. A
+/// `None` condition is an unconditional catch-all. Transitions are tried in
+/// order and the first match wins.
+struct WorkflowTransition {
+    to: String,
+    condition: Option<String>,
+}
+
+/// One agent in a workflow graph.
+struct WorkflowAgentDef {
+    name: String,
+    system_prompt: Option<String>,
+    /// Key into the runtime provider registry.
+    model: String,
+    /// JSON Schema for the agent's structured output. When present, the agent
+    /// finishes by calling the builtin terminal tool with output conforming to it.
+    output_schema: Option<Any>,
+    /// Whether the agent may pause to ask the user a question.
+    allow_ask_user: bool,
+    /// Outgoing transitions evaluated against this agent's output.
+    transitions: Option<Vec<WorkflowTransition>>,
+    max_iterations: Option<u32>,
+    /// Retry budget for transient provider errors before the run is treated as failed.
+    max_retries: Option<u32>,
+    /// Tool allowlist; `None` means all tools are available.
+    allowed_tools: Option<Vec<String>>,
+}
+
+/// A complete workflow graph.
+struct WorkflowDefinition {
+    start: String,
+    agents: Vec<WorkflowAgentDef>,
+}

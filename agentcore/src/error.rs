@@ -4,6 +4,12 @@ use thiserror::Error;
 pub enum AgentBuildError {
     #[error("nudge_threshold ({nudge}) must be less than stuck_threshold ({stuck})")]
     InvalidConfig { nudge: usize, stuck: usize },
+
+    #[error("handoff tool '{tool}' is not present in the toolbox")]
+    HandoffToolNotRegistered { tool: String },
+
+    #[error("handoff tool '{tool}' has an invalid input schema: {reason}")]
+    InvalidHandoffSchema { tool: String, reason: String },
 }
 
 #[derive(Debug, Error)]
@@ -16,6 +22,9 @@ pub enum AgentError {
 
     #[error("provider error: {0}")]
     Provider(#[from] LlmError),
+
+    #[error("handoff tool '{tool}' validation failed after retries: {reason}")]
+    HandoffValidationFailed { tool: String, reason: String },
 
     #[error("cancelled")]
     Cancelled,

@@ -470,7 +470,9 @@ async fn test_agent_handoff() {
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(agentcore::EmptyToolbox))
+    // The handoff tool must be advertised in the toolbox.
+    let toolbox = FixedToolbox::new("delegate", serde_json::json!(null));
+    let mut agent = Agent::builder(provider, toolbox)
         .with_handoff_tool("delegate")
         .build()
         .unwrap();
