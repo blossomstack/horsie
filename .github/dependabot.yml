@@ -4,18 +4,25 @@ updates:
   - package-ecosystem: cargo
     directory: "/"
     schedule:
-      interval: weekly
+      interval: daily
+      time: "18:00"
+      timezone: "America/Vancouver"
     open-pull-requests-limit: 10
     groups:
-      cargo-minor-patch:
-        update-types:
-          - minor
-          - patch
+      all-cargo:
+        patterns:
+          - "*"
 
   # Keeps the SHA-pinned GitHub Actions current (bumps both the pin and the
   # trailing # vX.Y.Z version comment).
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
+      interval: daily
+      time: "18:00"
+      timezone: "America/Vancouver"
     open-pull-requests-limit: 5
+    groups:
+      all-actions:
+        patterns:
+          - "*"
