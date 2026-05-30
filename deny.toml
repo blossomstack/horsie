@@ -1,0 +1,54 @@
+# cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/
+# Run locally with: cargo deny check
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisory database. Vulnerable or yanked crates fail the build.
+version = 2
+# Only flag *unmaintained* advisories for crates the workspace depends on
+# directly. Deep transitive unmaintained crates (e.g. backoff/instant via
+# async-anthropic) have no safe upgrade and aren't ours to fix.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Permissive licenses only. Anything not listed here fails the build; add an
+# entry deliberately when a new transitive license shows up.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "OpenSSL",
+]
+
+# Our own workspace crates are unpublished (publish = false) and carry no
+# license field; skip the license check for them.
+[licenses.private]
+ignore = true
+
+[bans]
+# Duplicate versions are common in transitive trees; warn rather than fail.
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal workspace crates reference each other by path with "*" versions.
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io and explicitly allowed git sources are permitted.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/zhxiaogg/async-anthropic.git",
+]

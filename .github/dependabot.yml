@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Rust crate dependencies across the workspace.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Keeps the SHA-pinned GitHub Actions current (bumps both the pin and the
+  # trailing # vX.Y.Z version comment).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

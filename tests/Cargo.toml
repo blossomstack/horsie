@@ -2,6 +2,7 @@
 name = "integration-tests"
 version = "0.1.0"
 edition = "2024"
+publish = false # internal application crate, never published to crates.io
 
 [dev-dependencies]
 agentcore   = { path = "../agentcore" }
