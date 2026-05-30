@@ -21,15 +21,19 @@ enum Command {
     Validate {
         #[arg(long)]
         workflow: PathBuf,
+        /// Config path. Omit to use `$XDG_CONFIG_HOME/october/config.json`
+        /// (else `~/.config/october/config.json`), or an empty config if absent.
         #[arg(long)]
-        config: PathBuf,
+        config: Option<PathBuf>,
     },
     /// Run a workflow against a working directory.
     Run {
         #[arg(long)]
         workflow: PathBuf,
+        /// Config path. Omit to use `$XDG_CONFIG_HOME/october/config.json`
+        /// (else `~/.config/october/config.json`), or an empty config if absent.
         #[arg(long)]
-        config: PathBuf,
+        config: Option<PathBuf>,
         #[arg(long)]
         workdir: PathBuf,
         #[arg(long)]
@@ -45,8 +49,10 @@ enum Command {
     Resume {
         #[arg(long = "run")]
         run_id: String,
+        /// Config path. Omit to use `$XDG_CONFIG_HOME/october/config.json`
+        /// (else `~/.config/october/config.json`), or an empty config if absent.
         #[arg(long)]
-        config: PathBuf,
+        config: Option<PathBuf>,
         #[arg(long)]
         message: String,
         #[arg(long)]
@@ -62,8 +68,8 @@ fn runtime_binary_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("october-runtime"))
 }
 
-fn do_validate(workflow: PathBuf, config: PathBuf) -> i32 {
-    let cfg = match OctoberConfig::load(&config) {
+fn do_validate(workflow: PathBuf, config: Option<PathBuf>) -> i32 {
+    let cfg = match OctoberConfig::resolve(config.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");

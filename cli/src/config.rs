@@ -8,9 +8,16 @@ use std::sync::Arc;
 
 /// CLI-owned policy (hand-written serde — NOT a fluorite protocol type). The
 /// workflow file stays a pure `WorkflowDefinition`, reusable across server/CLI.
-#[derive(Debug, Deserialize)]
+///
+/// All fields default, so `OctoberConfig::default()` is a valid empty config
+/// (no providers, no models, default storage/sandbox). An empty config is a
+/// legal state — `validate` is what rejects workflows that reference models
+/// the config doesn't define.
+#[derive(Debug, Default, Deserialize)]
 pub struct OctoberConfig {
+    #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
+    #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
     #[serde(default)]
     pub sandbox: SandboxConfig,
@@ -69,6 +76,50 @@ impl OctoberConfig {
         let text = std::fs::read_to_string(path).map_err(|e| CliError::Io(e.to_string()))?;
         serde_json::from_str(&text).map_err(|e| CliError::Config(e.to_string()))
     }
+
+    /// Resolve the config per CLI policy:
+    /// - `explicit` path given (the `--config` flag) → load it; a missing or
+    ///   malformed file is an error, since the user asked for it by name.
+    /// - no flag → load the user config at [`user_config_path`] if it exists;
+    ///   otherwise fall back to an empty [`OctoberConfig::default`].
+    pub fn resolve(explicit: Option<&Path>) -> Result<Self, CliError> {
+        Self::resolve_with(explicit, user_config_path())
+    }
+
+    /// Inner policy with the user-config path injected, so the precedence rules
+    /// are testable without touching process env or the real home directory.
+    fn resolve_with(explicit: Option<&Path>, user_path: Option<PathBuf>) -> Result<Self, CliError> {
+        match explicit {
+            Some(p) => Self::load(p),
+            None => match user_path {
+                Some(p) if p.exists() => Self::load(&p),
+                _ => Ok(Self::default()),
+            },
+        }
+    }
+}
+
+/// The default user config path, `<config-dir>/october/config.json`, where
+/// `<config-dir>` is `$XDG_CONFIG_HOME` if set, else `$HOME/.config`. Same path
+/// on macOS and Linux. Returns `None` when neither env var is available.
+fn user_config_path() -> Option<PathBuf> {
+    user_config_path_from(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// Pure core of [`user_config_path`]: prefer a non-empty `$XDG_CONFIG_HOME`,
+/// else `$HOME/.config`. Returns `None` if neither yields a base directory.
+fn user_config_path_from(
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let config_dir = match xdg_config_home {
+        Some(x) if !x.is_empty() => PathBuf::from(x),
+        _ => PathBuf::from(home?).join(".config"),
+    };
+    Some(config_dir.join("october").join("config.json"))
 }
 
 /// Build the provider registry keyed by **model key** (matches `WorkflowAgentDef.model`).
@@ -209,6 +260,93 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.sandbox.capabilities_file.is_none());
+    }
+
+    #[test]
+    fn default_config_is_empty_but_valid() {
+        let cfg = OctoberConfig::default();
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.models.is_empty());
+        assert_eq!(cfg.storage.root_dir, PathBuf::from("./.october"));
+        assert!(cfg.sandbox.capabilities_file.is_none());
+    }
+
+    #[test]
+    fn parses_config_with_no_providers_or_models() {
+        // A file present but missing providers/models parses to empty maps.
+        let cfg: OctoberConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn user_config_path_prefers_xdg() {
+        let p = user_config_path_from(Some("/xdg".into()), Some("/home/u".into()));
+        assert_eq!(p, Some(PathBuf::from("/xdg/october/config.json")));
+    }
+
+    #[test]
+    fn user_config_path_falls_back_to_home_dot_config() {
+        // Unset and empty XDG both fall through to $HOME/.config.
+        for xdg in [None, Some("".into())] {
+            let p = user_config_path_from(xdg, Some("/home/u".into()));
+            assert_eq!(
+                p,
+                Some(PathBuf::from("/home/u/.config/october/config.json"))
+            );
+        }
+    }
+
+    #[test]
+    fn user_config_path_none_without_env() {
+        assert_eq!(user_config_path_from(None, None), None);
+        assert_eq!(user_config_path_from(Some("".into()), None), None);
+    }
+
+    #[test]
+    fn resolve_loads_explicit_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cfg.json");
+        std::fs::write(
+            &path,
+            r#"{ "providers": {}, "models": { "m": { "provider": "p", "model_id": "id" } } }"#,
+        )
+        .unwrap();
+        let cfg = OctoberConfig::resolve(Some(&path)).unwrap();
+        assert!(cfg.models.contains_key("m"));
+    }
+
+    #[test]
+    fn resolve_errors_on_missing_explicit_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.json");
+        assert!(OctoberConfig::resolve(Some(&missing)).is_err());
+    }
+
+    #[test]
+    fn resolve_with_loads_existing_user_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("user.json");
+        std::fs::write(
+            &path,
+            r#"{ "models": { "u": { "provider": "p", "model_id": "id" } } }"#,
+        )
+        .unwrap();
+        let cfg = OctoberConfig::resolve_with(None, Some(path)).unwrap();
+        assert!(cfg.models.contains_key("u"));
+    }
+
+    #[test]
+    fn resolve_with_defaults_when_user_config_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.json");
+        // No flag and the user config does not exist → empty default config.
+        let cfg = OctoberConfig::resolve_with(None, Some(missing)).unwrap();
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.models.is_empty());
+
+        let cfg = OctoberConfig::resolve_with(None, None).unwrap();
+        assert!(cfg.models.is_empty());
     }
 
     #[test]

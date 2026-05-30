@@ -35,7 +35,9 @@ struct Manifest {
 
 pub struct RunParams {
     pub workflow_path: PathBuf,
-    pub config_path: PathBuf,
+    /// `--config`: explicit config path. `None` → user config else empty (see
+    /// [`OctoberConfig::resolve`]).
+    pub config_path: Option<PathBuf>,
     pub workdir: PathBuf,
     pub input: String,
     pub state_dir: Option<PathBuf>,
@@ -46,7 +48,8 @@ pub struct RunParams {
 
 pub struct ResumeParams {
     pub run_id: String,
-    pub config_path: PathBuf,
+    /// `--config`: see [`RunParams::config_path`].
+    pub config_path: Option<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub message: String,
     pub runtime_bin: PathBuf,
@@ -222,7 +225,7 @@ async fn drive(
 }
 
 pub async fn run(p: RunParams) -> Result<i32, CliError> {
-    let cfg = OctoberConfig::load(&p.config_path)?;
+    let cfg = OctoberConfig::resolve(p.config_path.as_deref())?;
     let def = load_workflow(&p.workflow_path)?;
     let errs = validate(&def, &cfg);
     if !errs.is_empty() {
@@ -247,7 +250,7 @@ pub async fn run(p: RunParams) -> Result<i32, CliError> {
 }
 
 pub async fn resume(p: ResumeParams) -> Result<i32, CliError> {
-    let cfg = OctoberConfig::load(&p.config_path)?;
+    let cfg = OctoberConfig::resolve(p.config_path.as_deref())?;
     let root_dir = p.state_dir.unwrap_or_else(|| cfg.storage.root_dir.clone());
     let manifest_path = run_dir(&root_dir, &p.run_id).join("manifest.json");
     let manifest: Manifest = serde_json::from_slice(

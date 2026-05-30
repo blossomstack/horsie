@@ -46,14 +46,39 @@ fn locate_runtime_bin() -> Option<PathBuf> {
     cand.exists().then_some(cand)
 }
 
+/// Result of probing the runtime binary for sandbox support.
+#[derive(Debug, PartialEq)]
+enum SandboxProbe {
+    /// Sandbox applied cleanly — the platform can be exercised.
+    Supported,
+    /// Sandbox apply failed: unsupported kernel or the `sandbox` feature is off.
+    Unsupported,
+    /// The binary rejected the current CLI contract (clap exit 2) — almost always a
+    /// stale build that predates a flag change. Loud failure beats a silent skip,
+    /// because the dev needs to rebuild, not shrug it off as a kernel limitation.
+    Incompatible,
+}
+
+/// Interpret the runtime's exit code from the probe invocation. With a current
+/// binary against an unreachable `ws://` endpoint the sandbox applies, then the
+/// connect fails (exit 1) — so "got past apply" is the common Supported case.
+/// Exit 3 is the runtime's explicit "apply failed" signal; exit 2 is clap's
+/// argument-parse error, i.e. the binary doesn't speak our flags.
+fn classify_probe(exit_code: Option<i32>) -> SandboxProbe {
+    match exit_code {
+        Some(3) => SandboxProbe::Unsupported,
+        Some(2) => SandboxProbe::Incompatible,
+        _ => SandboxProbe::Supported,
+    }
+}
+
 /// Probe sandbox support by applying the sandbox in a throwaway runtime process
-/// pointed at an unreachable `ws://` endpoint: exit 3 = apply failed (unsupported
-/// kernel or `sandbox` feature off); anything else = apply succeeded. Sandboxing is
-/// now driven by `--sandbox-caps`, so the probe writes the built-in default spec and
-/// points the runtime at it.
-fn sandbox_supported(bin: &Path) -> bool {
+/// pointed at an unreachable `ws://` endpoint. Sandboxing is driven by
+/// `--sandbox-caps`, so the probe writes the built-in default spec and points the
+/// runtime at it.
+fn probe_sandbox(bin: &Path) -> SandboxProbe {
     let Ok(spec) = builtin_default() else {
-        return false; // no built-in default for this platform → unsupported
+        return SandboxProbe::Unsupported; // no built-in default for this platform
     };
     let tmp = TempDir::new().unwrap();
     let caps = tmp.path().join("caps.json");
@@ -69,23 +94,31 @@ fn sandbox_supported(bin: &Path) -> bool {
         .arg(&caps)
         .output()
     {
-        Ok(o) => o.status.code() != Some(3),
-        Err(_) => false,
+        Ok(o) => classify_probe(o.status.code()),
+        Err(_) => SandboxProbe::Unsupported, // can't even spawn it
     }
 }
 
-/// `Some(bin)` if the sandbox can be exercised here, else `None` (skip).
+/// `Some(bin)` if the sandbox can be exercised here, else `None` (skip). Panics
+/// with a rebuild hint if the binary is stale — a confusing 30s connection
+/// timeout otherwise, since a stale runtime never connects back.
 fn runtime_or_skip(test: &str) -> Option<PathBuf> {
-    match locate_runtime_bin() {
-        Some(bin) if sandbox_supported(&bin) => Some(bin),
-        Some(_) => {
+    let Some(bin) = locate_runtime_bin() else {
+        eprintln!("skipping {test}: october-runtime binary not found");
+        return None;
+    };
+    match probe_sandbox(&bin) {
+        SandboxProbe::Supported => Some(bin),
+        SandboxProbe::Unsupported => {
             eprintln!("skipping {test}: nono sandbox unsupported on this platform");
             None
         }
-        None => {
-            eprintln!("skipping {test}: october-runtime binary not found");
-            None
-        }
+        SandboxProbe::Incompatible => panic!(
+            "october-runtime at {} does not understand the current CLI flags — \
+             it is a stale build. Rebuild it with `cargo build -p runtime` (or run \
+             the suite via `cargo test --workspace`, which rebuilds it for you).",
+            bin.display()
+        ),
     }
 }
 
@@ -143,6 +176,20 @@ fn workflow_run_id(state: &Path) -> String {
     panic!("no run dir with a manifest under {}", runs.display());
 }
 
+// ── harness unit tests ─────────────────────────────────────────────────────
+
+#[test]
+fn classify_probe_maps_runtime_exit_codes() {
+    // Exit 3: runtime's explicit "sandbox apply failed" → skip as unsupported.
+    assert_eq!(classify_probe(Some(3)), SandboxProbe::Unsupported);
+    // Exit 2: clap argument-parse error → a stale binary that lacks our flags.
+    assert_eq!(classify_probe(Some(2)), SandboxProbe::Incompatible);
+    // Exit 1 (connect failed after a clean apply) and anything else → supported.
+    assert_eq!(classify_probe(Some(1)), SandboxProbe::Supported);
+    assert_eq!(classify_probe(Some(0)), SandboxProbe::Supported);
+    assert_eq!(classify_probe(None), SandboxProbe::Supported);
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -161,7 +208,7 @@ async fn run_orchestration_finishes() {
 
     let code = run(RunParams {
         workflow_path: workflow,
-        config_path: config,
+        config_path: Some(config),
         workdir: workdir.path().to_path_buf(),
         input: "go".into(),
         state_dir: Some(state_dir(dir.path())),
@@ -198,7 +245,7 @@ async fn suspend_then_resume_roundtrips() {
 
     let code = run(RunParams {
         workflow_path: workflow,
-        config_path: config.clone(),
+        config_path: Some(config.clone()),
         workdir: workdir.path().to_path_buf(),
         input: "pick a colour".into(),
         state_dir: Some(state.clone()),
@@ -219,7 +266,7 @@ async fn suspend_then_resume_roundtrips() {
 
     let code = resume(ResumeParams {
         run_id,
-        config_path: config,
+        config_path: Some(config),
         state_dir: Some(state),
         message: "blue".into(),
         runtime_bin: bin,
@@ -248,7 +295,7 @@ async fn failing_workflow_exits_without_hanging() {
         std::time::Duration::from_secs(60),
         run(RunParams {
             workflow_path: workflow,
-            config_path: config,
+            config_path: Some(config),
             workdir: workdir.path().to_path_buf(),
             input: "go".into(),
             state_dir: Some(state_dir(dir.path())),
@@ -284,7 +331,7 @@ async fn bash_writes_inside_workdir() {
 
     let code = run(RunParams {
         workflow_path: workflow,
-        config_path: config,
+        config_path: Some(config),
         workdir: workdir.path().to_path_buf(),
         input: "write a file".into(),
         state_dir: Some(state_dir(dir.path())),
@@ -325,7 +372,7 @@ async fn bash_cannot_write_outside_workdir() {
 
     let code = run(RunParams {
         workflow_path: workflow,
-        config_path: config,
+        config_path: Some(config),
         workdir: workdir.path().to_path_buf(),
         input: "try to escape".into(),
         state_dir: Some(state_dir(dir.path())),
@@ -376,7 +423,7 @@ async fn capability_file_grants_write_outside_workdir() {
 
     let code = run(RunParams {
         workflow_path: workflow,
-        config_path: config,
+        config_path: Some(config),
         workdir: workdir.path().to_path_buf(),
         input: "write outside".into(),
         state_dir: Some(state_dir(dir.path())),

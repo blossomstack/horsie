@@ -12,8 +12,13 @@ else
   TARGET_DIR := target/debug
 endif
 
+# Install location (override with PREFIX=/usr/local, BINDIR=..., or DESTDIR for
+# staged installs). Defaults to the XDG user-local bin — no sudo required.
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
+
 .DEFAULT_GOAL := build-cli
-.PHONY: build-cli build test fmt fmt-check clippy deny check clean help
+.PHONY: build-cli build test fmt fmt-check clippy deny check install-cli uninstall-cli clean help
 
 ## build-cli: build the october CLI + its sandboxed runtime child ($(PROFILE))
 build-cli:
@@ -46,6 +51,19 @@ deny:
 
 ## check: the full pre-PR gate (fmt + clippy + tests)
 check: fmt-check clippy test
+
+## install-cli: build + install october and october-runtime into $(BINDIR)
+install-cli: build-cli
+	@mkdir -p "$(DESTDIR)$(BINDIR)"
+	install -m 0755 "$(TARGET_DIR)/october" "$(DESTDIR)$(BINDIR)/october"
+	install -m 0755 "$(TARGET_DIR)/october-runtime" "$(DESTDIR)$(BINDIR)/october-runtime"
+	@echo "installed: $(DESTDIR)$(BINDIR)/october  $(DESTDIR)$(BINDIR)/october-runtime"
+	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "note: $(BINDIR) is not on your PATH — add it to run \`october\` directly";; esac
+
+## uninstall-cli: remove october and october-runtime from $(BINDIR)
+uninstall-cli:
+	rm -f "$(DESTDIR)$(BINDIR)/october" "$(DESTDIR)$(BINDIR)/october-runtime"
+	@echo "removed october + october-runtime from $(DESTDIR)$(BINDIR)"
 
 ## clean: remove build artifacts
 clean:
