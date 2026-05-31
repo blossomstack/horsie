@@ -40,6 +40,30 @@ fn sanitize_pod_name(runtime_id: &str) -> String {
     format!("{PREFIX}{id_part}")
 }
 
+/// Narrow seam over the Kubernetes pod API so the provider/handle are unit-testable
+/// without a cluster. Returns [`RuntimeError`] directly — kube error classification
+/// stays inside [`KubePodApi`] where `kube::Error` is in scope.
+#[async_trait]
+pub trait PodApi: Send + Sync {
+    async fn create(&self, pod: &Pod) -> Result<(), RuntimeError>;
+    /// Idempotent: deleting an already-absent pod is `Ok`.
+    async fn delete(&self, name: &str) -> Result<(), RuntimeError>;
+}
+
+/// HTTP 409 (Conflict) on create means the named pod already exists.
+fn classify_create_conflict(code: u16, name: &str) -> Option<RuntimeError> {
+    if code == 409 {
+        Some(RuntimeError::AlreadyExists(name.to_string()))
+    } else {
+        None
+    }
+}
+
+/// HTTP 404 on delete means the pod is already gone — treat as success.
+fn is_not_found(code: u16) -> bool {
+    code == 404
+}
+
 /// Build the Pod manifest for one runtime. Pure (no I/O): the heavily-tested core.
 /// `restartPolicy: Never` so the executor — not k8s — owns restarts; container `args`
 /// mirror the process-mode child argv exactly.
@@ -97,6 +121,46 @@ fn build_pod_spec(
 )]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakePodApi {
+        created: Mutex<Vec<Pod>>,
+        deleted: Mutex<Vec<String>>,
+        create_err: Mutex<Option<RuntimeError>>,
+    }
+
+    impl FakePodApi {
+        fn fail_next_create(&self, e: RuntimeError) {
+            *self.create_err.lock().unwrap() = Some(e);
+        }
+        fn created_names(&self) -> Vec<String> {
+            self.created
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p.metadata.name.clone())
+                .collect()
+        }
+        fn deleted_names(&self) -> Vec<String> {
+            self.deleted.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl PodApi for FakePodApi {
+        async fn create(&self, pod: &Pod) -> Result<(), RuntimeError> {
+            if let Some(e) = self.create_err.lock().unwrap().take() {
+                return Err(e);
+            }
+            self.created.lock().unwrap().push(pod.clone());
+            Ok(())
+        }
+        async fn delete(&self, name: &str) -> Result<(), RuntimeError> {
+            self.deleted.lock().unwrap().push(name.to_string());
+            Ok(())
+        }
+    }
 
     fn is_dns1123_label(s: &str) -> bool {
         !s.is_empty()
@@ -206,5 +270,22 @@ mod tests {
             pod.spec.unwrap().containers[0].image.as_deref(),
             Some("img:tag")
         );
+    }
+
+    #[test]
+    fn classify_create_conflict_maps_409_only() {
+        assert!(matches!(
+            classify_create_conflict(409, "p"),
+            Some(RuntimeError::AlreadyExists(_))
+        ));
+        assert!(classify_create_conflict(404, "p").is_none());
+        assert!(classify_create_conflict(500, "p").is_none());
+    }
+
+    #[test]
+    fn is_not_found_only_404() {
+        assert!(is_not_found(404));
+        assert!(!is_not_found(409));
+        assert!(!is_not_found(500));
     }
 }
