@@ -124,7 +124,7 @@ impl JobRuntime for ProcessJobRuntime {
 
         // Persist the resolved capability spec into the job dir so the runtime loads
         // a single source of truth (`jobs/<id>/capabilities.json`).
-        let jdir = self.deps.root_dir.join("jobs").join(&job_id);
+        let jdir = self.deps.state_dir.join("jobs").join(&job_id);
         std::fs::create_dir_all(&jdir).map_err(|e| e.to_string())?;
         let caps_path = jdir.join("capabilities.json");
         std::fs::write(

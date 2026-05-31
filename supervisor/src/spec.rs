@@ -35,8 +35,9 @@ pub struct SupervisorDeps {
     pub provider_registry: HashMap<String, Arc<dyn LlmProvider>>,
     /// Path to the sibling `october-runtime` binary.
     pub runtime_bin: PathBuf,
-    /// State root (the `.october` dir); job capability files are written under it.
-    pub root_dir: PathBuf,
+    /// State dir for ephemeral per-job runtime files; job capability files are
+    /// written under `<state_dir>/jobs/<id>/`.
+    pub state_dir: PathBuf,
     /// The shared journal; the same `Arc` backs the supervisor, jobs, workflows,
     /// and agents so every actor recovers from one event store.
     pub journal: Arc<dyn Journal>,

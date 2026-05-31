@@ -42,8 +42,6 @@ enum Command {
         workdir: PathBuf,
         #[arg(long)]
         input: String,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
         /// Capability file fully replacing the runtime's built-in sandbox default.
         /// Overrides `sandbox.capabilities_file` in the config.
         #[arg(long)]
@@ -71,8 +69,6 @@ enum DaemonAction {
     Start {
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
         /// Run detached in the background instead of the foreground.
         #[arg(long)]
         background: bool,
@@ -82,8 +78,6 @@ enum DaemonAction {
     Stop {
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
         /// Wait for running jobs to finish before the daemon exits.
         #[arg(long)]
         drain: bool,
@@ -92,8 +86,6 @@ enum DaemonAction {
     Status {
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
     },
 }
 
@@ -103,8 +95,6 @@ enum JobAction {
     List {
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
     },
     /// Stream a job's live output.
     Logs {
@@ -113,16 +103,12 @@ enum JobAction {
         follow: bool,
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
     },
     /// Cancel a running job (it becomes resumable).
     Stop {
         job_id: String,
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
     },
     /// Resume a suspended or awaiting-input job with a message.
     Resume {
@@ -131,33 +117,20 @@ enum JobAction {
         message: String,
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
     },
     /// Remove a finished or failed job from the registry.
     Remove {
         job_id: String,
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
     },
 }
 
-/// Locate the sibling `october-runtime` binary next to this executable.
-fn runtime_binary_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("october-runtime")))
-        .unwrap_or_else(|| PathBuf::from("october-runtime"))
-}
-
-/// Resolve the state root: `--state-dir` if given, else config `storage.root_dir`.
-fn resolve_root(state_dir: Option<PathBuf>, config: Option<&Path>) -> Result<PathBuf, CliError> {
-    match state_dir {
-        Some(dir) => Ok(dir),
-        None => Ok(OctoberConfig::resolve(config)?.storage.root_dir),
-    }
+/// Resolve the state dir (where the daemon control socket lives) from config:
+/// `storage.state_dir`, defaulting to `$XDG_STATE_HOME/october`. Every client
+/// command connects to the socket under this dir.
+fn resolve_state_dir(config: Option<&Path>) -> Result<PathBuf, CliError> {
+    Ok(OctoberConfig::resolve(config)?.storage.state_dir)
 }
 
 fn load_workflow(path: &Path) -> Result<WorkflowDefinition, CliError> {
@@ -240,11 +213,10 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             config,
             workdir,
             input,
-            state_dir,
             capabilities,
             detach,
         } => {
-            let root = resolve_root(state_dir, config.as_deref())?;
+            let root = resolve_state_dir(config.as_deref())?;
             let req = build_submit(workflow, config, workdir, input, capabilities)?;
             if detach {
                 let job_id = client::submit(&root, req).await?;
@@ -255,40 +227,29 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             }
         }
         Command::Daemon { action } => match action {
-            DaemonAction::Start {
-                config,
-                state_dir,
-                background,
-            } => {
+            DaemonAction::Start { config, background } => {
                 let cfg = OctoberConfig::resolve(config.as_deref())?;
-                let root = match state_dir {
-                    Some(dir) => dir,
-                    None => cfg.storage.root_dir.clone(),
-                };
                 if background {
-                    spawn_background_daemon(&root, config.as_deref())?;
+                    let state_dir = cfg.storage.state_dir.clone();
+                    spawn_background_daemon(&state_dir, config.as_deref())?;
                     println!(
                         "daemon started in background ({}/daemon.log)",
-                        root.display()
+                        state_dir.display()
                     );
                     Ok(0)
                 } else {
-                    daemon::serve(cfg, root, runtime_binary_path()).await?;
+                    daemon::serve(cfg).await?;
                     Ok(0)
                 }
             }
-            DaemonAction::Stop {
-                config,
-                state_dir,
-                drain,
-            } => {
-                let root = resolve_root(state_dir, config.as_deref())?;
+            DaemonAction::Stop { config, drain } => {
+                let root = resolve_state_dir(config.as_deref())?;
                 client::shutdown(&root, drain).await?;
                 println!("daemon stopped");
                 Ok(0)
             }
-            DaemonAction::Status { config, state_dir } => {
-                let root = resolve_root(state_dir, config.as_deref())?;
+            DaemonAction::Status { config } => {
+                let root = resolve_state_dir(config.as_deref())?;
                 let s = client::status(&root).await?;
                 println!(
                     "pid {} · up {}s · running {} · suspended {} · finished {} · failed {}",
@@ -298,8 +259,8 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             }
         },
         Command::Job { action } => match action {
-            JobAction::List { config, state_dir } => {
-                let root = resolve_root(state_dir, config.as_deref())?;
+            JobAction::List { config } => {
+                let root = resolve_state_dir(config.as_deref())?;
                 let jobs = client::list(&root).await?;
                 if jobs.is_empty() {
                     println!("no jobs");
@@ -321,18 +282,13 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 job_id,
                 follow,
                 config,
-                state_dir,
             } => {
-                let root = resolve_root(state_dir, config.as_deref())?;
+                let root = resolve_state_dir(config.as_deref())?;
                 client::logs(&root, job_id, follow).await?;
                 Ok(0)
             }
-            JobAction::Stop {
-                job_id,
-                config,
-                state_dir,
-            } => {
-                let root = resolve_root(state_dir, config.as_deref())?;
+            JobAction::Stop { job_id, config } => {
+                let root = resolve_state_dir(config.as_deref())?;
                 client::stop(&root, job_id).await?;
                 println!("stopped");
                 Ok(0)
@@ -341,19 +297,14 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 job_id,
                 message,
                 config,
-                state_dir,
             } => {
-                let root = resolve_root(state_dir, config.as_deref())?;
+                let root = resolve_state_dir(config.as_deref())?;
                 client::resume(&root, job_id, message).await?;
                 println!("resumed");
                 Ok(0)
             }
-            JobAction::Remove {
-                job_id,
-                config,
-                state_dir,
-            } => {
-                let root = resolve_root(state_dir, config.as_deref())?;
+            JobAction::Remove { job_id, config } => {
+                let root = resolve_state_dir(config.as_deref())?;
                 client::remove(&root, job_id).await?;
                 println!("removed");
                 Ok(0)
@@ -363,21 +314,22 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
 }
 
 /// Re-exec this binary as `october daemon start` (foreground) detached from the
-/// terminal, with stdout/stderr redirected to `<root>/daemon.log`, so the parent
-/// returns immediately. Errors if a daemon is already running (the child's
-/// liveness guard would fail, but we check here too for a clean message).
-fn spawn_background_daemon(root: &Path, config: Option<&Path>) -> Result<(), CliError> {
+/// terminal, with stdout/stderr redirected to `<state_dir>/daemon.log`, so the
+/// parent returns immediately. The child re-resolves its state/data dirs from
+/// `--config` (or the XDG defaults), deterministically landing on the same
+/// `state_dir` the parent computed for the log path.
+fn spawn_background_daemon(state_dir: &Path, config: Option<&Path>) -> Result<(), CliError> {
     use std::process::{Command, Stdio};
-    std::fs::create_dir_all(root).map_err(|e| CliError::Io(e.to_string()))?;
+    std::fs::create_dir_all(state_dir).map_err(|e| CliError::Io(e.to_string()))?;
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(root.join("daemon.log"))
+        .open(state_dir.join("daemon.log"))
         .map_err(|e| CliError::Io(e.to_string()))?;
     let err_log = log.try_clone().map_err(|e| CliError::Io(e.to_string()))?;
     let exe = std::env::current_exe().map_err(|e| CliError::Io(e.to_string()))?;
     let mut cmd = Command::new(exe);
-    cmd.arg("daemon").arg("start").arg("--state-dir").arg(root);
+    cmd.arg("daemon").arg("start");
     if let Some(c) = config {
         cmd.arg("--config").arg(c);
     }

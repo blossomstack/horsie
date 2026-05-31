@@ -26,6 +26,15 @@ pub fn socket_path(root: &Path) -> PathBuf {
     root.join("daemon.sock")
 }
 
+/// Locate the sibling `october-runtime` binary next to this executable — the
+/// default when the config sets no explicit `runtime.bin`.
+fn default_runtime_bin() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("october-runtime")))
+        .unwrap_or_else(|| PathBuf::from("october-runtime"))
+}
+
 fn pid_path(root: &Path) -> PathBuf {
     root.join("daemon.pid")
 }
@@ -56,29 +65,33 @@ struct Daemon {
 /// Run the daemon in the foreground until a `Shutdown` request arrives. Builds the
 /// shared dependencies, spawns the [`SupervisorActor`] (whose `on_recovery_complete`
 /// auto-resumes interrupted jobs), binds the socket, and serves connections.
-pub async fn serve(
-    cfg: OctoberConfig,
-    root_dir: PathBuf,
-    runtime_bin: PathBuf,
-) -> Result<(), CliError> {
-    std::fs::create_dir_all(&root_dir).map_err(|e| CliError::Io(e.to_string()))?;
+pub async fn serve(cfg: OctoberConfig) -> Result<(), CliError> {
+    // Two distinct roots: ephemeral runtime state (socket, pidfile, log, per-job
+    // capability files) lives under `state_dir`; the durable journal under `data_dir`.
+    let state_dir = cfg.storage.state_dir.clone();
+    let data_dir = cfg.storage.data_dir.clone();
+    // The runtime binary: an explicit `runtime.bin` from config, else the sibling
+    // `october-runtime` next to this executable.
+    let runtime_bin = cfg.runtime.bin.clone().unwrap_or_else(default_runtime_bin);
+    std::fs::create_dir_all(&state_dir).map_err(|e| CliError::Io(e.to_string()))?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| CliError::Io(e.to_string()))?;
 
     // Refuse to start if a daemon is already listening on the socket (a successful
     // connect means a live accept loop). Only a stale socket file — connect refused
     // or absent — is safe to unlink and rebind, which the bind path does below.
-    if daemon_alive(&socket_path(&root_dir)).await {
+    if daemon_alive(&socket_path(&state_dir)).await {
         return Err(CliError::Executor(format!(
             "a daemon is already running for {}",
-            root_dir.display()
+            state_dir.display()
         )));
     }
 
     let registry = build_registry(&cfg)?;
-    let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(root_dir.clone()));
+    let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(data_dir.clone()));
     let deps = SupervisorDeps {
         provider_registry: registry,
         runtime_bin,
-        root_dir: root_dir.clone(),
+        state_dir: state_dir.clone(),
         journal: journal.clone(),
     };
     let runtime = Arc::new(ProcessJobRuntime::new(deps));
@@ -93,11 +106,11 @@ pub async fn serve(
     };
     let default_caps = capabilities::resolve_user_paths(default_caps);
 
-    let sock = socket_path(&root_dir);
+    let sock = socket_path(&state_dir);
     // Remove a stale socket so bind() succeeds after an unclean shutdown.
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock).map_err(|e| CliError::Executor(e.to_string()))?;
-    std::fs::write(pid_path(&root_dir), std::process::id().to_string())
+    std::fs::write(pid_path(&state_dir), std::process::id().to_string())
         .map_err(|e| CliError::Io(e.to_string()))?;
     println!("october daemon listening on {}", sock.display());
 
@@ -127,7 +140,7 @@ pub async fn serve(
     }
 
     let _ = std::fs::remove_file(&sock);
-    let _ = std::fs::remove_file(pid_path(&root_dir));
+    let _ = std::fs::remove_file(pid_path(&state_dir));
     Ok(())
 }
 

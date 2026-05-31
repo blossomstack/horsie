@@ -114,7 +114,7 @@ fn config_with_mock(root: &Path, mock_url: &str) -> OctoberConfig {
     let cfg = json!({
         "providers": { "local": { "type": "anthropic", "base_url": mock_url } },
         "models": { "m": { "provider": "local", "model_id": "test-model" } },
-        "storage": { "root_dir": root.join("state") }
+        "storage": { "state_dir": root.join("state"), "data_dir": root.join("data") }
     });
     serde_json::from_value(cfg).unwrap()
 }
@@ -145,7 +145,7 @@ fn boot(root: &Path, cfg: &OctoberConfig, bin: PathBuf) -> ActorRef<SupervisorCo
     let deps = SupervisorDeps {
         provider_registry: build_registry(cfg).unwrap(),
         runtime_bin: bin,
-        root_dir: root.join("state"),
+        state_dir: root.join("state"),
         journal: journal.clone(),
     };
     spawn_root(

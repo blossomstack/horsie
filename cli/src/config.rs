@@ -10,8 +10,8 @@ use std::sync::Arc;
 /// workflow file stays a pure `WorkflowDefinition`, reusable across server/CLI.
 ///
 /// All fields default, so `OctoberConfig::default()` is a valid empty config
-/// (no providers, no models, default storage/sandbox). An empty config is a
-/// legal state — `validate` is what rejects workflows that reference models
+/// (no providers, no models, default storage/sandbox/runtime). An empty config
+/// is a legal state — `validate` is what rejects workflows that reference models
 /// the config doesn't define.
 #[derive(Debug, Default, Deserialize)]
 pub struct OctoberConfig {
@@ -23,6 +23,8 @@ pub struct OctoberConfig {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,15 +62,33 @@ pub struct SandboxConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {
-    pub root_dir: PathBuf,
+    /// Ephemeral runtime state: the daemon control socket, pidfile, log, and
+    /// per-job capability files. Defaults to `$XDG_STATE_HOME/october`, else
+    /// `$HOME/.local/state/october` (same path on macOS and Linux).
+    #[serde(default = "default_state_dir")]
+    pub state_dir: PathBuf,
+    /// Durable job history: the event-sourcing journal replayed to resume
+    /// interrupted jobs. Defaults to `$XDG_DATA_HOME/october`, else
+    /// `$HOME/.local/share/october` (same path on macOS and Linux).
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            root_dir: PathBuf::from("./.october"),
+            state_dir: default_state_dir(),
+            data_dir: default_data_dir(),
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RuntimeConfig {
+    /// Path to the `october-runtime` binary the daemon spawns per job. Absent →
+    /// the sibling `october-runtime` next to the running CLI executable.
+    #[serde(default)]
+    pub bin: Option<PathBuf>,
 }
 
 impl OctoberConfig {
@@ -120,6 +140,48 @@ fn user_config_path_from(
         _ => PathBuf::from(home?).join(".config"),
     };
     Some(config_dir.join("october").join("config.json"))
+}
+
+/// Default state dir for ephemeral runtime files (control socket, pidfile, log,
+/// per-job capability files): `$XDG_STATE_HOME/october` if set, else
+/// `$HOME/.local/state/october`. Same path on macOS and Linux.
+fn default_state_dir() -> PathBuf {
+    storage_dir_from(
+        std::env::var_os("XDG_STATE_HOME"),
+        std::env::var_os("HOME"),
+        ".local/state",
+        "state",
+    )
+}
+
+/// Default data dir for the durable job journal: `$XDG_DATA_HOME/october` if set,
+/// else `$HOME/.local/share/october`. Same path on macOS and Linux.
+fn default_data_dir() -> PathBuf {
+    storage_dir_from(
+        std::env::var_os("XDG_DATA_HOME"),
+        std::env::var_os("HOME"),
+        ".local/share",
+        "data",
+    )
+}
+
+/// Pure core of the storage-dir defaults: prefer a non-empty XDG base var joined
+/// with `october`; else `$HOME/<home_subdir>/october`; else, when neither env var
+/// is available (rare), a relative `./.october/<fallback_leaf>` so state and data
+/// stay distinct without a home directory.
+fn storage_dir_from(
+    xdg_base: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    home_subdir: &str,
+    fallback_leaf: &str,
+) -> PathBuf {
+    match xdg_base {
+        Some(x) if !x.is_empty() => PathBuf::from(x).join("october"),
+        _ => match home {
+            Some(h) if !h.is_empty() => PathBuf::from(h).join(home_subdir).join("october"),
+            _ => PathBuf::from("./.october").join(fallback_leaf),
+        },
+    }
 }
 
 /// Build the provider registry keyed by **model key** (matches `WorkflowAgentDef.model`).
@@ -200,12 +262,13 @@ mod tests {
             "providers": { "anthropic": { "type": "anthropic", "api_key_env": "ANTHROPIC_API_KEY", "base_url": "https://api.anthropic.com" } },
             "models": { "sonnet": { "provider": "anthropic", "model_id": "claude-sonnet-4-6", "max_tokens": 8192 } },
             "sandbox": { "capabilities_file": null },
-            "storage": { "root_dir": "./.october" }
+            "storage": { "state_dir": "/var/state", "data_dir": "/var/data" }
         }"#;
         let cfg: OctoberConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.providers.contains_key("anthropic"));
         assert_eq!(cfg.models["sonnet"].model_id, "claude-sonnet-4-6");
-        assert_eq!(cfg.storage.root_dir, PathBuf::from("./.october"));
+        assert_eq!(cfg.storage.state_dir, PathBuf::from("/var/state"));
+        assert_eq!(cfg.storage.data_dir, PathBuf::from("/var/data"));
     }
 
     #[test]
@@ -263,11 +326,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_runtime_bin() {
+        let cfg: OctoberConfig =
+            serde_json::from_str(r#"{ "runtime": { "bin": "/opt/october/october-runtime" } }"#)
+                .unwrap();
+        assert_eq!(
+            cfg.runtime.bin,
+            Some(PathBuf::from("/opt/october/october-runtime"))
+        );
+    }
+
+    #[test]
+    fn runtime_bin_defaults_to_none() {
+        let cfg: OctoberConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.runtime.bin.is_none());
+    }
+
+    #[test]
     fn default_config_is_empty_but_valid() {
         let cfg = OctoberConfig::default();
         assert!(cfg.providers.is_empty());
         assert!(cfg.models.is_empty());
-        assert_eq!(cfg.storage.root_dir, PathBuf::from("./.october"));
+        // State and data resolve to distinct dirs (different XDG bases / leaves).
+        assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
         assert!(cfg.sandbox.capabilities_file.is_none());
     }
 
@@ -356,8 +437,47 @@ mod tests {
             "models": { "x": { "provider": "m", "model_id": "id" } }
         }"#;
         let cfg: OctoberConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.storage.root_dir, PathBuf::from("./.october"));
+        assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
         assert!(cfg.sandbox.capabilities_file.is_none());
         assert!(cfg.models["x"].max_tokens.is_none());
+    }
+
+    #[test]
+    fn storage_dir_prefers_xdg() {
+        let state = storage_dir_from(
+            Some("/xdg/state".into()),
+            Some("/home/u".into()),
+            ".local/state",
+            "state",
+        );
+        assert_eq!(state, PathBuf::from("/xdg/state/october"));
+        let data = storage_dir_from(
+            Some("/xdg/data".into()),
+            Some("/home/u".into()),
+            ".local/share",
+            "data",
+        );
+        assert_eq!(data, PathBuf::from("/xdg/data/october"));
+    }
+
+    #[test]
+    fn storage_dir_falls_back_to_home() {
+        // Unset and empty XDG both fall through to the $HOME subdir.
+        for xdg in [None, Some("".into())] {
+            let p = storage_dir_from(xdg, Some("/home/u".into()), ".local/state", "state");
+            assert_eq!(p, PathBuf::from("/home/u/.local/state/october"));
+        }
+        let p = storage_dir_from(None, Some("/home/u".into()), ".local/share", "data");
+        assert_eq!(p, PathBuf::from("/home/u/.local/share/october"));
+    }
+
+    #[test]
+    fn storage_dir_falls_back_to_relative_without_env() {
+        // Neither XDG nor HOME → distinct relative leaves, never colliding.
+        let state = storage_dir_from(None, None, ".local/state", "state");
+        let data = storage_dir_from(Some("".into()), Some("".into()), ".local/share", "data");
+        assert_eq!(state, PathBuf::from("./.october/state"));
+        assert_eq!(data, PathBuf::from("./.october/data"));
+        assert_ne!(state, data);
     }
 }
