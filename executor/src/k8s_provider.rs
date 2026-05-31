@@ -98,11 +98,11 @@ impl PodApi for KubePodApi {
             Err(e) => {
                 // `if let` (not `match`) on the non-exhaustive kube::Error keeps the
                 // production lints happy without a wildcard arm.
-                if let kube::Error::Api(resp) = &e {
-                    let name = pod.metadata.name.clone().unwrap_or_default();
-                    if let Some(mapped) = classify_create_conflict(resp.code, &name) {
-                        return Err(mapped);
-                    }
+                let name = pod.metadata.name.clone().unwrap_or_default();
+                if let kube::Error::Api(resp) = &e
+                    && let Some(mapped) = classify_create_conflict(resp.code, &name)
+                {
+                    return Err(mapped);
                 }
                 Err(RuntimeError::Provider(e.to_string()))
             }

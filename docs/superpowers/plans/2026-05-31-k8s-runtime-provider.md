@@ -71,7 +71,7 @@ Expected: PASS (downloads kube/k8s-openapi). If `kube = "3"` fails to resolve or
 
 - [ ] **Step 3: Confirm no openssl and license-clean supply chain**
 
-Run: `grep -c openssl-sys Cargo.lock` → Expected: `0`
+Run: `cargo tree -p executor --all-features -i openssl-sys` → Expected: no match (executor's tree is rustls-only). Note: `openssl-sys` already exists in `Cargo.lock` on `main` (pre-existing via other crates' `native-tls`); the check is that kube adds none to the executor tree, not that the lockfile is globally openssl-free.
 Run: `cargo deny check licenses bans sources --all-features 2>&1 | tail -20`
 Expected: no license errors. If a new SPDX surfaces from a kube-only transitive, add it to `deny.toml`'s `[licenses] allow` list in this PR and re-run.
 
