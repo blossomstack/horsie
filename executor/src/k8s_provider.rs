@@ -112,6 +112,95 @@ fn build_pod_spec(
     }
 }
 
+/// [`RuntimeProvider`] that launches each runtime as a Kubernetes Pod. Mirrors
+/// [`ProcessRuntimeProvider`](crate::ProcessRuntimeProvider): register a readiness
+/// waiter, create the pod, await the dial-back, return a handle. Because a Pod has no
+/// `Drop`, `create` explicitly deletes the pod on every failure path.
+pub struct KubernetesRuntimeProvider {
+    image: String,
+    namespace: String,
+    /// `ws://` URL the pod dials back to — must be reachable from inside the cluster
+    /// (Service DNS / NodePort), not the listener's bind address.
+    callback_url: String,
+    connected_registry: Arc<ConnectedRuntimeRegistry>,
+    connect_timeout: Duration,
+    pod_api: Arc<dyn PodApi>,
+}
+
+impl KubernetesRuntimeProvider {
+    pub fn new(
+        image: String,
+        namespace: String,
+        callback_url: String,
+        connected_registry: Arc<ConnectedRuntimeRegistry>,
+        pod_api: Arc<dyn PodApi>,
+    ) -> Self {
+        Self {
+            image,
+            namespace,
+            callback_url,
+            connected_registry,
+            connect_timeout: Duration::from_secs(30),
+            pod_api,
+        }
+    }
+
+    pub fn with_connect_timeout(mut self, d: Duration) -> Self {
+        self.connect_timeout = d;
+        self
+    }
+}
+
+#[async_trait]
+impl RuntimeProvider for KubernetesRuntimeProvider {
+    async fn create(
+        &self,
+        id: &str,
+        config: &RuntimeConfig,
+    ) -> Result<Arc<dyn RuntimeHandle>, RuntimeError> {
+        // Register the readiness waiter BEFORE creating the pod, so the dial-back
+        // signal cannot be lost (parity with ProcessRuntimeProvider).
+        let ready_rx = self.connected_registry.notify_when_ready(id).await;
+
+        let pod_name = sanitize_pod_name(id);
+        let pod = build_pod_spec(
+            &self.image,
+            &self.namespace,
+            &pod_name,
+            id,
+            &config.working_dir,
+            &self.callback_url,
+        );
+        // A create failure (e.g. 409) means no pod was placed by us → propagate
+        // without deleting.
+        self.pod_api.create(&pod).await?;
+
+        match tokio::time::timeout(self.connect_timeout, ready_rx).await {
+            Ok(Ok(())) => Ok(Arc::new(KubernetesRuntimeHandle {
+                pod_name,
+                runtime_id: id.to_string(),
+                pod_api: Arc::clone(&self.pod_api),
+                connected_registry: Arc::clone(&self.connected_registry),
+            })),
+            Ok(Err(_)) => {
+                // Readiness channel dropped before the runtime connected — clean up.
+                let _ = self.pod_api.delete(&pod_name).await;
+                Err(RuntimeError::Provider(
+                    "connection channel dropped".to_string(),
+                ))
+            }
+            Err(_) => {
+                // No Drop on a Pod: explicitly delete so a never-connecting runtime
+                // does not leak a pod the executor's retry loop would multiply.
+                let _ = self.pod_api.delete(&pod_name).await;
+                Err(RuntimeError::Provider(
+                    "runtime connection timed out".to_string(),
+                ))
+            }
+        }
+    }
+}
+
 /// Lifecycle handle for one runtime Pod. `stop` deletes the pod and deregisters the
 /// transport; `health_check` is byte-identical to `ProcessRuntimeHandle` — it reports
 /// `Healthy` while the runtime's dial-back transport is registered.
@@ -369,5 +458,70 @@ mod tests {
             .register_transport("rt-1".into(), Arc::new(MockTransport::ok("")))
             .await;
         assert_eq!(handle.health_check().await.unwrap(), HealthStatus::Healthy);
+    }
+
+    fn provider_with(
+        registry: Arc<ConnectedRuntimeRegistry>,
+        pod_api: Arc<dyn PodApi>,
+    ) -> KubernetesRuntimeProvider {
+        KubernetesRuntimeProvider::new(
+            "img:tag".to_string(),
+            "october".to_string(),
+            "ws://cb:9000".to_string(),
+            registry,
+            pod_api,
+        )
+    }
+
+    fn cfg() -> RuntimeConfig {
+        RuntimeConfig {
+            working_dir: "/work".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_succeeds_when_runtime_dials_back() {
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let fake = Arc::new(FakePodApi::default());
+        let provider = provider_with(registry.clone(), fake.clone());
+
+        let task = tokio::spawn(async move { provider.create("rt-1", &cfg()).await });
+        // Let create() install the readiness waiter and create the pod, then simulate
+        // the runtime container dialing back by registering its transport.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        registry
+            .register_transport("rt-1".into(), Arc::new(MockTransport::ok("")))
+            .await;
+
+        let handle = task.await.unwrap().unwrap();
+        assert_eq!(handle.health_check().await.unwrap(), HealthStatus::Healthy);
+        assert_eq!(fake.created_names(), vec!["october-runtime-rt-1"]);
+    }
+
+    #[tokio::test]
+    async fn create_deletes_pod_on_timeout() {
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let fake = Arc::new(FakePodApi::default());
+        let provider = provider_with(registry.clone(), fake.clone())
+            .with_connect_timeout(Duration::from_millis(50));
+
+        // Never register a transport → create() must time out AND clean up the pod.
+        // (`matches!` rather than `unwrap_err()`: dyn RuntimeHandle isn't Debug.)
+        let res = provider.create("rt-1", &cfg()).await;
+        assert!(matches!(res, Err(RuntimeError::Provider(_))));
+        assert_eq!(fake.deleted_names(), vec!["october-runtime-rt-1"]);
+    }
+
+    #[tokio::test]
+    async fn create_propagates_conflict() {
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let fake = Arc::new(FakePodApi::default());
+        fake.fail_next_create(RuntimeError::AlreadyExists("october-runtime-rt-1".into()));
+        let provider = provider_with(registry.clone(), fake.clone());
+
+        let res = provider.create("rt-1", &cfg()).await;
+        assert!(matches!(res, Err(RuntimeError::AlreadyExists(_))));
+        // A create that never placed a pod must not issue a delete.
+        assert!(fake.deleted_names().is_empty());
     }
 }
