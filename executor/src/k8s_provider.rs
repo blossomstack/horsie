@@ -40,6 +40,54 @@ fn sanitize_pod_name(runtime_id: &str) -> String {
     format!("{PREFIX}{id_part}")
 }
 
+/// Build the Pod manifest for one runtime. Pure (no I/O): the heavily-tested core.
+/// `restartPolicy: Never` so the executor — not k8s — owns restarts; container `args`
+/// mirror the process-mode child argv exactly.
+fn build_pod_spec(
+    image: &str,
+    namespace: &str,
+    pod_name: &str,
+    runtime_id: &str,
+    working_dir: &str,
+    callback_url: &str,
+) -> Pod {
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        "app.kubernetes.io/managed-by".to_string(),
+        "october-executor".to_string(),
+    );
+    labels.insert("october.dev/runtime-id".to_string(), runtime_id.to_string());
+
+    Pod {
+        metadata: ObjectMeta {
+            name: Some(pod_name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: Some(PodSpec {
+            restart_policy: Some("Never".to_string()),
+            automount_service_account_token: Some(false),
+            containers: vec![Container {
+                name: "runtime".to_string(),
+                image: Some(image.to_string()),
+                image_pull_policy: Some("IfNotPresent".to_string()),
+                args: Some(vec![
+                    "--endpoint".to_string(),
+                    callback_url.to_string(),
+                    "--runtime-id".to_string(),
+                    runtime_id.to_string(),
+                    "--working-dir".to_string(),
+                    working_dir.to_string(),
+                ]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -83,5 +131,80 @@ mod tests {
     fn sanitize_trims_dashes_and_handles_empty() {
         assert_eq!(sanitize_pod_name("--x--"), "october-runtime-x");
         assert_eq!(sanitize_pod_name("***"), "october-runtime-rt");
+    }
+
+    fn sample_pod() -> Pod {
+        build_pod_spec(
+            "img:tag",
+            "october",
+            "october-runtime-rt-1",
+            "rt-1",
+            "/work",
+            "ws://cb:9000",
+        )
+    }
+
+    #[test]
+    fn pod_uses_restart_policy_never() {
+        let pod = sample_pod();
+        assert_eq!(pod.spec.unwrap().restart_policy.as_deref(), Some("Never"));
+    }
+
+    #[test]
+    fn pod_args_match_process_argv_exactly() {
+        let pod = sample_pod();
+        let c = &pod.spec.unwrap().containers[0];
+        assert_eq!(
+            c.args.clone().unwrap(),
+            vec![
+                "--endpoint",
+                "ws://cb:9000",
+                "--runtime-id",
+                "rt-1",
+                "--working-dir",
+                "/work",
+            ]
+        );
+    }
+
+    #[test]
+    fn pod_has_no_sandbox_caps_arg() {
+        let pod = sample_pod();
+        let c = &pod.spec.unwrap().containers[0];
+        assert!(!c.args.clone().unwrap().iter().any(|a| a == "--sandbox-caps"));
+    }
+
+    #[test]
+    fn pod_carries_management_labels() {
+        let pod = sample_pod();
+        let labels = pod.metadata.labels.unwrap();
+        assert_eq!(
+            labels.get("app.kubernetes.io/managed-by").map(String::as_str),
+            Some("october-executor")
+        );
+        assert_eq!(
+            labels.get("october.dev/runtime-id").map(String::as_str),
+            Some("rt-1")
+        );
+    }
+
+    #[test]
+    fn pod_disables_service_account_automount() {
+        let pod = sample_pod();
+        assert_eq!(
+            pod.spec.unwrap().automount_service_account_token,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn pod_sets_name_namespace_image() {
+        let pod = sample_pod();
+        assert_eq!(pod.metadata.name.as_deref(), Some("october-runtime-rt-1"));
+        assert_eq!(pod.metadata.namespace.as_deref(), Some("october"));
+        assert_eq!(
+            pod.spec.unwrap().containers[0].image.as_deref(),
+            Some("img:tag")
+        );
     }
 }
