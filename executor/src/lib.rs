@@ -3,6 +3,8 @@ mod env_scrub;
 mod error;
 mod executor;
 mod inmem_transport;
+#[cfg(feature = "kubernetes")]
+mod k8s_provider;
 mod process_provider;
 mod provider;
 mod registry;
