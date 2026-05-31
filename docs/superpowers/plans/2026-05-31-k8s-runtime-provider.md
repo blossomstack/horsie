@@ -52,7 +52,7 @@ Under `[dependencies]` add:
 # Kubernetes runtime provider (optional; enabled by the `kubernetes` feature).
 # rustls-tls reuses the existing rustls/ring stack — do NOT enable openssl-tls.
 kube        = { version = "3", default-features = false, features = ["client", "rustls-tls"], optional = true }
-k8s-openapi = { version = "0.27", default-features = false, features = ["v1_30"], optional = true }
+k8s-openapi = { version = "0.27", default-features = false, features = ["v1_31"], optional = true }
 ```
 
 Add a new section after `[dependencies]`:
@@ -67,7 +67,7 @@ kubernetes = ["dep:kube", "dep:k8s-openapi"]
 - [ ] **Step 2: Verify it resolves and builds on the pinned toolchain**
 
 Run: `cargo +1.96.0 build -p executor --all-features`
-Expected: PASS (downloads kube/k8s-openapi). If `kube = "3"` fails to resolve or bumps MSRV above 1.96.0, fall back to `kube = "0.99"` + `k8s-openapi = "0.24"` (same `v1_30`, `rustls-tls`, `default-features=false`) and re-run.
+Expected: PASS (downloads kube/k8s-openapi). If `kube = "3"` fails to resolve or bumps MSRV above 1.96.0, fall back to `kube = "0.99"` + `k8s-openapi = "0.24"` (same `v1_31`, `rustls-tls`, `default-features=false`) and re-run.
 
 - [ ] **Step 3: Confirm no openssl and license-clean supply chain**
 

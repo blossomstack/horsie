@@ -16,6 +16,15 @@ uuid              = { workspace = true }
 thiserror         = { workspace = true }
 async-trait       = { workspace = true }
 tokio-util        = { workspace = true }
+# Kubernetes runtime provider (optional; enabled by the `kubernetes` feature).
+# rustls-tls reuses the existing rustls/ring stack — do NOT enable openssl-tls.
+kube              = { version = "3", default-features = false, features = ["client", "rustls-tls"], optional = true }
+k8s-openapi       = { version = "0.27", default-features = false, features = ["v1_31"], optional = true }
+
+[features]
+# Compile the KubernetesRuntimeProvider. Off by default so non-k8s builds stay lean;
+# CI runs --all-features so it is always compiled, tested, and license-checked.
+kubernetes = ["dep:kube", "dep:k8s-openapi"]
 
 [dev-dependencies]
 server   = { path = "../server" }
