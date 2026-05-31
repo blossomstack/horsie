@@ -31,6 +31,9 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "OpenSSL",
+    # webpki-roots (Mozilla CA bundle, via nono's rustls stack) ships under the
+    # Community Data License Agreement – Permissive 2.0. Permissive; data, not code.
+    "CDLA-Permissive-2.0",
 ]
 
 # Our own workspace crates are unpublished (publish = false) and carry no
@@ -51,4 +54,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
     "https://github.com/zhxiaogg/async-anthropic.git",
+    # Fork of nono carrying the macOS SecurityServer / Secure-Transport TLS fix so
+    # cargo's libgit2 can complete its TLS handshake under the sandbox (see runtime).
+    "https://github.com/zhxiaogg/nono",
 ]

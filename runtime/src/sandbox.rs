@@ -76,6 +76,14 @@ pub fn apply(
         NetworkPolicy::Allow => {}
     }
 
+    // Diagnostics: when `OCTOBER_SANDBOX_DEBUG_DENY` is set, emit `(debug deny)` so the
+    // kernel logs every sandbox denial (visible via `log show --predicate 'eventMessage
+    // CONTAINS "deny("'`). Off by default — it is noisy and only needed when hunting a
+    // confinement failure. Read here (before sandbox apply) in the runtime's own env.
+    if std::env::var_os("OCTOBER_SANDBOX_DEBUG_DENY").is_some() {
+        caps.set_seatbelt_debug_deny(true);
+    }
+
     // `apply` returns `Result<SeccompNetFallback>` on Linux and `Result<()>` on
     // macOS. Bind the Linux payload (it is `#[must_use]`); on other platforms the
     // unit result is discarded as a statement (binding it would trip `let_unit_value`).

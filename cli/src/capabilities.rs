@@ -8,7 +8,58 @@
 //! per-OS JSON so they are reviewable and fully replaceable via `--capabilities`.
 
 use crate::error::CliError;
-use models::capabilities::CapabilitySpec;
+use models::capabilities::{CapabilitySpec, DirGrant, FileGrant, Grant};
+
+/// Expand a leading `~/` or an embedded `$HOME` / `${HOME}` in a capability path
+/// against `$HOME`, so a checked-in capability file is portable across users and
+/// machines (`~/.ssh` resolves to whoever runs october). A bare `~` maps to the home
+/// directory itself. When `$HOME` is unavailable, or the path references neither form,
+/// it is returned unchanged.
+fn expand_home(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home else {
+        return path.to_string();
+    };
+    let home = home.trim_end_matches('/');
+    if path == "~" {
+        return home.to_string();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return format!("{home}/{rest}");
+    }
+    path.replace("${HOME}", home).replace("$HOME", home)
+}
+
+/// Resolve home-relative paths in every `Dir`/`File` grant against `$HOME`. The CLI
+/// applies this to the loaded spec before persisting it into the run dir, so the
+/// runtime — a pure executor — only ever sees concrete absolute paths and carries no
+/// path-resolution logic of its own. `WorkingDir` grants hold no path and pass through.
+pub fn resolve_user_paths(spec: CapabilitySpec) -> CapabilitySpec {
+    resolve_user_paths_with(spec, std::env::var("HOME").ok().as_deref())
+}
+
+/// Pure core of [`resolve_user_paths`] with `$HOME` injected, so the expansion is
+/// testable without touching process env.
+fn resolve_user_paths_with(spec: CapabilitySpec, home: Option<&str>) -> CapabilitySpec {
+    let grants = spec
+        .grants
+        .into_iter()
+        .map(|g| match g {
+            Grant::Dir(d) => Grant::Dir(DirGrant {
+                path: expand_home(&d.path, home),
+                access: d.access,
+            }),
+            Grant::File(f) => Grant::File(FileGrant {
+                path: expand_home(&f.path, home),
+                access: f.access,
+            }),
+            Grant::WorkingDir(w) => Grant::WorkingDir(w),
+        })
+        .collect();
+    CapabilitySpec {
+        network: spec.network,
+        grants,
+    }
+}
 
 /// The shipped default capability file for the current platform, embedded at compile
 /// time. `None` on platforms with no default (the sandbox is unsupported there).
@@ -129,5 +180,74 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         let reparsed: CapabilitySpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, reparsed);
+    }
+
+    #[test]
+    fn expand_home_resolves_tilde_and_home_var() {
+        let home = Some("/home/u");
+        assert_eq!(expand_home("~/.ssh", home), "/home/u/.ssh");
+        assert_eq!(expand_home("~", home), "/home/u");
+        assert_eq!(expand_home("$HOME/.cargo", home), "/home/u/.cargo");
+        assert_eq!(expand_home("${HOME}/.rustup", home), "/home/u/.rustup");
+    }
+
+    #[test]
+    fn expand_home_leaves_absolute_and_unmatched_paths_alone() {
+        let home = Some("/home/u");
+        assert_eq!(expand_home("/usr/bin", home), "/usr/bin");
+        // A tilde that is not the home shorthand (no `/`) is left untouched.
+        assert_eq!(expand_home("~backup/data", home), "~backup/data");
+    }
+
+    #[test]
+    fn expand_home_is_a_noop_without_home() {
+        // Fail-soft: with no `$HOME` the path is unchanged (the grant then simply
+        // fails to match a real dir and is skipped, exactly as before).
+        assert_eq!(expand_home("~/.ssh", None), "~/.ssh");
+    }
+
+    #[test]
+    fn expand_home_trims_trailing_slash_on_home() {
+        assert_eq!(expand_home("~/.ssh", Some("/home/u/")), "/home/u/.ssh");
+    }
+
+    #[test]
+    fn resolve_user_paths_expands_dir_and_file_grants_and_preserves_working_dir() {
+        let spec = CapabilitySpec {
+            network: NetworkPolicy::Allow,
+            grants: vec![
+                Grant::Dir(DirGrant {
+                    path: "~/.ssh".into(),
+                    access: Access::Read,
+                }),
+                Grant::File(FileGrant {
+                    path: "$HOME/.gitconfig".into(),
+                    access: Access::Read,
+                }),
+                Grant::WorkingDir(WorkingDirGrant {
+                    access: Access::ReadWrite,
+                }),
+            ],
+        };
+        let resolved = resolve_user_paths_with(spec, Some("/home/u"));
+        assert_eq!(
+            resolved,
+            CapabilitySpec {
+                network: NetworkPolicy::Allow,
+                grants: vec![
+                    Grant::Dir(DirGrant {
+                        path: "/home/u/.ssh".into(),
+                        access: Access::Read
+                    }),
+                    Grant::File(FileGrant {
+                        path: "/home/u/.gitconfig".into(),
+                        access: Access::Read
+                    }),
+                    Grant::WorkingDir(WorkingDirGrant {
+                        access: Access::ReadWrite
+                    }),
+                ],
+            }
+        );
     }
 }

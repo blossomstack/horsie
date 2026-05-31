@@ -21,10 +21,10 @@ serde_json    = { workspace = true }
 clap          = { version = "4", features = ["derive"] }
 regex         = "1"
 glob          = "0.3"
-# Pinned to the 0.53.x line: it carries the same Sandbox/CapabilitySet API as 0.59
-# but keeps MSRV 1.74 (0.54+ require rustc 1.95). default-features=false drops the
-# optional system-keyring dependency.
-nono          = { version = "0.53", default-features = false, optional = true }
+# Forked nono carrying the macOS SecurityServer / Secure-Transport TLS fix
+# (zhxiaogg/nono) so cargo's libgit2 can complete its TLS handshake under the sandbox.
+# default-features=false drops the optional system-keyring dependency.
+nono          = { git = "https://github.com/zhxiaogg/nono", rev = "1273578", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile      = "3"

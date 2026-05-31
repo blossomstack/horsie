@@ -129,6 +129,10 @@ async fn drive(
         Some(path) => CapabilitySpec::load(path).map_err(CliError::Config)?,
         None => crate::capabilities::builtin_default()?,
     };
+    // Resolve `~`/`$HOME` in grant paths here, before the spec is persisted, so a
+    // checked-in capability file is portable across users and the runtime only ever
+    // loads concrete absolute paths.
+    let spec = crate::capabilities::resolve_user_paths(spec);
     let rdir = run_dir(&root_dir, &run_id);
     std::fs::create_dir_all(&rdir).map_err(|e| CliError::Io(e.to_string()))?;
     let caps_path = rdir.join("capabilities.json");
