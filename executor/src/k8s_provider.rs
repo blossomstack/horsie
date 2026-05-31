@@ -12,8 +12,8 @@ use crate::{
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{Container, Pod, PodSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, DeleteParams, PostParams};
 use kube::Client;
+use kube::api::{Api, DeleteParams, PostParams};
 use models::executor::RuntimeConfig;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -113,10 +113,10 @@ impl PodApi for KubePodApi {
         match self.api.delete(name, &DeleteParams::default()).await {
             Ok(_) => Ok(()),
             Err(e) => {
-                if let kube::Error::Api(resp) = &e {
-                    if is_not_found(resp.code) {
-                        return Ok(());
-                    }
+                if let kube::Error::Api(resp) = &e
+                    && is_not_found(resp.code)
+                {
+                    return Ok(());
                 }
                 Err(RuntimeError::Provider(e.to_string()))
             }
@@ -420,7 +420,13 @@ mod tests {
     fn pod_has_no_sandbox_caps_arg() {
         let pod = sample_pod();
         let c = &pod.spec.unwrap().containers[0];
-        assert!(!c.args.clone().unwrap().iter().any(|a| a == "--sandbox-caps"));
+        assert!(
+            !c.args
+                .clone()
+                .unwrap()
+                .iter()
+                .any(|a| a == "--sandbox-caps")
+        );
     }
 
     #[test]
@@ -428,7 +434,9 @@ mod tests {
         let pod = sample_pod();
         let labels = pod.metadata.labels.unwrap();
         assert_eq!(
-            labels.get("app.kubernetes.io/managed-by").map(String::as_str),
+            labels
+                .get("app.kubernetes.io/managed-by")
+                .map(String::as_str),
             Some("october-executor")
         );
         assert_eq!(
