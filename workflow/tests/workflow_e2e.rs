@@ -426,6 +426,48 @@ async fn agent_session_history_reconstructs_from_journal() {
     assert!(concluded, "expected a conclude tool call in the history");
 }
 
+// ── a failed agent run still journals its captured history ───────────────────
+
+#[tokio::test]
+async fn failed_agent_run_journals_its_history() {
+    // A provider error fails the run. The agent's captured history must still be
+    // persisted, so the failed session is inspectable / forkable — rather than being
+    // silently discarded on the failure path.
+    let mock = MockLlmServer::builder()
+        .error(529, "overloaded")
+        .build()
+        .await;
+
+    let mut solo = agent("solo");
+    solo.max_retries = Some(0); // fail on the first provider error, no retries
+
+    let def = WorkflowDefinition {
+        start: "solo".into(),
+        agents: vec![solo],
+    };
+
+    let journal = Arc::new(InMemoryJournal::new());
+    let (rt, _events) = runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
+    let wf = spawn_root(WorkflowActor::new("wf-fail", def, rt), journal.clone());
+
+    wf.tell(WorkflowCommand::Start {
+        input: "hello".into(),
+    })
+    .await
+    .unwrap();
+
+    let state = wait_for_status(&journal, "wf-fail", WorkflowStatus::Failed).await;
+    let session_id = state.current_session_id.expect("a current agent session");
+
+    // The failed session journaled nothing before the fix; now its captured history
+    // (at least the input user message) is durable.
+    let history = reconstruct_agent_history(&journal, &session_id.to_string()).await;
+    assert!(
+        !history.is_empty(),
+        "a failed agent run must still journal its captured history"
+    );
+}
+
 async fn reconstruct_agent_history(
     journal: &Arc<InMemoryJournal>,
     session_id: &str,

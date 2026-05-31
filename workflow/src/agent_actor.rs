@@ -223,7 +223,10 @@ impl AgentActor {
                         recoverable,
                     })
                     .await;
-                CommandEffect::Stop
+                // Persist the failed run's captured history (like the success paths) so the
+                // session is inspectable, and a recoverable failure can `resume`/`fork` from
+                // where it stopped instead of losing the partial conversation.
+                CommandEffect::PersistAndStop(report.events)
             }
         }
     }
@@ -499,7 +502,8 @@ async fn run_with_retries(
             }
             Err(AgentError::Provider(e)) => {
                 return RunReport {
-                    events: Vec::new(),
+                    // Keep the captured history so the failed session is journaled.
+                    events: coarse_events(&captured),
                     outcome: RunOutcome::Failed {
                         error: e.to_string(),
                         recoverable: true,
@@ -508,7 +512,8 @@ async fn run_with_retries(
             }
             Err(e) => {
                 return RunReport {
-                    events: Vec::new(),
+                    // Keep the captured history so the failed session is journaled.
+                    events: coarse_events(&captured),
                     outcome: RunOutcome::Failed {
                         error: e.to_string(),
                         recoverable: false,
