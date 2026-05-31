@@ -558,6 +558,7 @@ dependencies = [
  "runtime-client",
  "serde",
  "serde_json",
+ "supervisor",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -3379,6 +3380,31 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "supervisor"
+version = "0.1.0"
+dependencies = [
+ "actor",
+ "agentcore",
+ "anthropic",
+ "async-trait",
+ "executor",
+ "executor-client",
+ "futures-util",
+ "mock-llm",
+ "models",
+ "runtime-client",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "workflow",
+]
 
 [[package]]
 name = "syn"

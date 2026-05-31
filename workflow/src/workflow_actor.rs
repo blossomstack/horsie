@@ -149,6 +149,13 @@ impl WorkflowActor {
         }
     }
 
+    /// The journal identity of a workflow run: kind `"workflow"`, id = the run/job
+    /// id. Lets the supervisor replay a job's workflow event log for `logs` history
+    /// without hardcoding the kind string.
+    pub fn persistence_id_for(run_id: &str) -> PersistenceId {
+        PersistenceId::new("workflow", run_id.to_string())
+    }
+
     fn agent_def(&self, name: &str) -> Option<&WorkflowAgentDef> {
         self.def.agents.iter().find(|a| a.name == name)
     }
@@ -304,7 +311,12 @@ impl WorkflowActor {
                             })
                             .await;
                         self.current_child = Some(child);
-                        CommandEffect::PersistAndSnapshot(vec![
+                        // Persist (not snapshot): the workflow event log is tiny (a
+                        // handful of events per run) and retaining it in full lets
+                        // `october job logs` replay the per-job history — every
+                        // AgentStarted/AgentTransitioned — after compaction would
+                        // otherwise have discarded it.
+                        CommandEffect::Persist(vec![
                             WorkflowDomainEvent::AgentTransitioned {
                                 from: from_agent,
                                 to: to.clone(),
@@ -472,7 +484,9 @@ impl WorkflowActor {
                     })
                     .await;
                 self.current_child = Some(child);
-                CommandEffect::PersistAndSnapshot(vec![WorkflowDomainEvent::AgentStarted {
+                // Persist (not snapshot) so the full workflow event log survives for
+                // `october job logs` history replay (see the transition path).
+                CommandEffect::Persist(vec![WorkflowDomainEvent::AgentStarted {
                     agent_name,
                     session_id: new_session,
                     input: message,
@@ -622,6 +636,28 @@ impl EventSourcedActor for WorkflowActor {
                     tool_call_id,
                 }])
             }
+        }
+    }
+
+    /// After recovery, re-spawn the current agent when the workflow was `Running`
+    /// so the agent's own recovery re-drives the interrupted turn. No command is
+    /// sent: the spawned [`AgentActor`] recovers its history and self-continues via
+    /// its `on_recovery_complete`. Suspended / AwaitingUserInput stay dormant until
+    /// an explicit `Resume`.
+    async fn on_recovery_complete(&mut self, state: &WorkflowState, ctx: &mut ActorContext<Self>) {
+        if state.status != WorkflowStatus::Running {
+            return;
+        }
+        let (Some(agent_name), Some(session_id)) =
+            (state.current_agent.clone(), state.current_session_id)
+        else {
+            return;
+        };
+        let Some(agent_def) = self.agent_def(&agent_name).cloned() else {
+            return;
+        };
+        if let Ok(child) = self.spawn_agent(ctx, &agent_def, session_id) {
+            self.current_child = Some(child);
         }
     }
 }

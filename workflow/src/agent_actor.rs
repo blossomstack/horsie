@@ -3,7 +3,7 @@ use crate::workflow_actor::WorkflowCommand;
 use actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId};
 use agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
-    LlmProvider, Message, Toolbox, Usage,
+    LlmProvider, Message, Role, Toolbox, Usage,
 };
 use async_trait::async_trait;
 use models::workflow::WorkflowAgentDef;
@@ -58,6 +58,9 @@ pub enum AgentCommand {
     },
     /// Cancel an in-flight run.
     Cancel,
+    /// Internal: coarse events captured mid-run, streamed for incremental
+    /// persistence so a crash loses at most the in-flight message.
+    PersistProgress(Vec<AgentDomainEvent>),
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
 }
@@ -91,8 +94,9 @@ pub struct AgentState {
 }
 
 /// Result of a background run, sent back to the actor as [`AgentCommand::RunFinished`].
+/// Coarse events are streamed separately and incrementally via
+/// [`AgentCommand::PersistProgress`]; this carries only the terminal outcome.
 pub struct RunReport {
-    events: Vec<AgentDomainEvent>,
     outcome: RunOutcome,
 }
 
@@ -114,8 +118,8 @@ enum RunOutcome {
 }
 
 /// An agent run, modelled as an event-sourced actor. Each `Run`/`InjectToolResult`
-/// drives a background `agentcore::Agent` loop; the coarse outcome is journaled so
-/// a crashed session recovers its conversation and continues.
+/// drives a background `agentcore::Agent` loop; coarse events are journaled
+/// incrementally so a crashed session recovers its conversation and continues.
 pub struct AgentActor {
     ctx: AgentRuntimeContext,
     params: AgentParams,
@@ -143,15 +147,37 @@ impl AgentActor {
 
         let provider = self.ctx.provider.clone();
         let toolbox = self.ctx.toolbox.clone();
-        let sink = self.ctx.event_sink.clone();
+        let inner_sink = self.ctx.event_sink.clone();
         let system_prompt = self.params.system_prompt.clone().unwrap_or_default();
         let handoff_tool = self.params.handoff_tool();
         let max_iterations = self.params.max_iterations;
         let max_retries = self.params.max_retries;
         let self_ref = ctx.self_ref();
 
+        // Stream coarse events out of the (sync) sink and persist them through the
+        // actor — never from the sink directly. The forwarder drains the channel and
+        // `tell`s `PersistProgress`, so persistence stays ordered through the one
+        // mailbox. Unbounded so the sync `emit` never blocks.
+        let (coarse_tx, mut coarse_rx) = tokio::sync::mpsc::unbounded_channel();
+        let persist_ref = self_ref.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(ev) = coarse_rx.recv().await {
+                if persist_ref
+                    .tell(AgentCommand::PersistProgress(vec![ev]))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
         tokio::spawn(async move {
-            let report = run_with_retries(
+            let sink: Arc<dyn EventSink> = Arc::new(StreamingSink {
+                inner: inner_sink,
+                coarse_tx,
+            });
+            let outcome = run_with_retries(
                 provider,
                 toolbox,
                 sink,
@@ -164,14 +190,21 @@ impl AgentActor {
                 cancel,
             )
             .await;
+            // `run_with_retries` consumes its `sink` arg; once it returns the last
+            // `StreamingSink` is dropped, closing `coarse_tx` and ending the
+            // forwarder. Await it so every `PersistProgress` is enqueued before
+            // `RunFinished` (mailbox order == persistence order).
+            let _ = forwarder.await;
             let _ = self_ref
-                .tell(AgentCommand::RunFinished(Box::new(report)))
+                .tell(AgentCommand::RunFinished(Box::new(RunReport { outcome })))
                 .await;
         });
     }
 
     /// Interpret a `conclude` payload (or plain-text completion) and notify the
-    /// parent workflow accordingly.
+    /// parent workflow accordingly. The conversation events were already persisted
+    /// incrementally via [`AgentCommand::PersistProgress`], so this only records the
+    /// terminal transition and decides the actor's lifecycle.
     async fn handle_finished(&mut self, report: RunReport) -> CommandEffect<AgentDomainEvent> {
         self.running = None;
         let session_id = self.ctx.session_id;
@@ -186,7 +219,7 @@ impl AgentActor {
                         output: Value::String(text),
                     })
                     .await;
-                CommandEffect::PersistAndStop(report.events)
+                CommandEffect::Stop
             }
             RunOutcome::Concluded { data, tool_call_id } => {
                 match self.interpret(data, tool_call_id) {
@@ -194,7 +227,7 @@ impl AgentActor {
                         let _ = parent
                             .tell(WorkflowCommand::AgentConcluded { session_id, output })
                             .await;
-                        CommandEffect::PersistAndStop(report.events)
+                        CommandEffect::Stop
                     }
                     Conclusion::Ask {
                         tool_call_id,
@@ -208,7 +241,8 @@ impl AgentActor {
                             })
                             .await;
                         // Stay alive — InjectToolResult resumes this same session.
-                        CommandEffect::PersistAndSnapshot(report.events)
+                        // Snapshot to compact the incrementally-persisted log.
+                        CommandEffect::Snapshot
                     }
                 }
             }
@@ -223,10 +257,10 @@ impl AgentActor {
                         recoverable,
                     })
                     .await;
-                // Persist the failed run's captured history (like the success paths) so the
-                // session is inspectable, and a recoverable failure can `resume`/`fork` from
-                // where it stopped instead of losing the partial conversation.
-                CommandEffect::PersistAndStop(report.events)
+                // The partial conversation was already journaled incrementally, so the
+                // failed session stays inspectable and a recoverable failure can
+                // `resume`/`fork` from where it stopped.
+                CommandEffect::Stop
             }
         }
     }
@@ -312,24 +346,28 @@ impl EventSourcedActor for AgentActor {
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
             AgentCommand::Run { input } => {
-                self.start_run(
-                    AgentInput::user_message(new_message_id(), input),
-                    ctx,
-                    state.messages.clone(),
-                );
-                CommandEffect::None
+                let agent_input = AgentInput::user_message(new_message_id(), input);
+                // Persist the input message here (not via the streaming sink), so a
+                // turn-restarting provider retry that re-emits it can never
+                // double-persist it into two consecutive user messages.
+                let input_event = AgentDomainEvent::InputMessage {
+                    message: agent_input.to_message(),
+                };
+                self.start_run(agent_input, ctx, state.messages.clone());
+                CommandEffect::Persist(vec![input_event])
             }
             AgentCommand::InjectToolResult {
                 tool_call_id,
                 content,
             } => {
-                self.start_run(
-                    AgentInput::tool_result(tool_call_id, content, false),
-                    ctx,
-                    state.messages.clone(),
-                );
-                CommandEffect::None
+                let agent_input = AgentInput::tool_result(tool_call_id, content, false);
+                let input_event = AgentDomainEvent::InputMessage {
+                    message: agent_input.to_message(),
+                };
+                self.start_run(agent_input, ctx, state.messages.clone());
+                CommandEffect::Persist(vec![input_event])
             }
+            AgentCommand::PersistProgress(events) => CommandEffect::Persist(events),
             AgentCommand::Cancel => {
                 if let Some(token) = &self.running {
                     token.cancel();
@@ -339,6 +377,24 @@ impl EventSourcedActor for AgentActor {
             AgentCommand::RunFinished(report) => self.handle_finished(*report).await,
         }
     }
+
+    /// After recovery, re-drive an interrupted session. An empty history means
+    /// nothing ran yet (the workflow will send `Run`); otherwise the process died
+    /// mid-turn, so sanitize any dangling tool calls and re-enter the loop with a
+    /// synthetic continuation message. The synthetic input is intentionally not
+    /// persisted as a new turn boundary: if we crash again before progress,
+    /// recovery simply re-synthesizes it.
+    async fn on_recovery_complete(&mut self, state: &AgentState, ctx: &mut ActorContext<Self>) {
+        if state.messages.is_empty() {
+            return;
+        }
+        let history = sanitize_for_resume(state.messages.clone());
+        self.start_run(
+            AgentInput::user_message(new_message_id(), "continue the interrupted task"),
+            ctx,
+            history,
+        );
+    }
 }
 
 fn new_message_id() -> String {
@@ -346,6 +402,8 @@ fn new_message_id() -> String {
 }
 
 /// Captures coarse agent events while forwarding every event to the real sink.
+/// Used only inside [`run_with_retries`] to locate the handoff tool-call id;
+/// coarse events for persistence are streamed live by [`StreamingSink`].
 struct CapturingSink {
     inner: Arc<dyn EventSink>,
     captured: Mutex<Vec<AgentEvent>>,
@@ -373,35 +431,95 @@ impl EventSink for CapturingSink {
     }
 }
 
-fn coarse_events(events: &[AgentEvent]) -> Vec<AgentDomainEvent> {
-    events
+/// Forwards observation events to the real sink and streams coarse domain events
+/// out for the actor to persist incrementally. Never touches the journal directly
+/// (persistence is the actor's job, via [`AgentCommand::PersistProgress`]).
+///
+/// `InputMessage` is intentionally NOT streamed: the actor persists the input
+/// itself when handling `Run`/`InjectToolResult`, so a turn-restarting retry that
+/// re-emits the input can never double-persist it into two consecutive user
+/// messages.
+struct StreamingSink {
+    inner: Arc<dyn EventSink>,
+    coarse_tx: tokio::sync::mpsc::UnboundedSender<AgentDomainEvent>,
+}
+
+impl EventSink for StreamingSink {
+    fn emit(&self, event: AgentEvent) {
+        if let Some(coarse) = coarse_event(&event) {
+            // Unbounded: never blocks the sync emit; drained by the forwarder task.
+            let _ = self.coarse_tx.send(coarse);
+        }
+        self.inner.emit(event);
+    }
+}
+
+/// Map a single streaming event to the coarse domain event that should be
+/// persisted, or `None` for streaming noise and for `InputMessage` (see
+/// [`StreamingSink`]).
+fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
+    match e {
+        AgentEvent::MessageComplete(ev) => Some(AgentDomainEvent::MessageComplete {
+            message: ev.message.clone(),
+        }),
+        AgentEvent::ToolComplete(ev) => Some(AgentDomainEvent::ToolComplete {
+            tool_call_id: ev.tool_call_id.clone(),
+            output: ev.output.clone(),
+            is_error: ev.is_error,
+        }),
+        AgentEvent::RunComplete(ev) => Some(AgentDomainEvent::RunComplete {
+            usage: ev.usage.clone(),
+            iterations: ev.iterations,
+        }),
+        AgentEvent::InputMessage(_)
+        | AgentEvent::MessageStart(_)
+        | AgentEvent::MessageStop(_)
+        | AgentEvent::TextChunk(_)
+        | AgentEvent::ThinkingChunk(_)
+        | AgentEvent::ToolCallStart(_)
+        | AgentEvent::ToolCallInputDelta(_)
+        | AgentEvent::ToolCallInputDone(_)
+        | AgentEvent::ToolExecuting(_) => None,
+    }
+}
+
+/// Make a recovered history well-formed for the provider: every `tool_use` in the
+/// last assistant message must have a matching `tool_result`. Any missing one (an
+/// interrupted tool call) gets a synthetic error result so the model can retry.
+fn sanitize_for_resume(mut messages: Vec<Message>) -> Vec<Message> {
+    let answered: std::collections::HashSet<String> = messages
         .iter()
-        .filter_map(|e| match e {
-            AgentEvent::InputMessage(ev) => Some(AgentDomainEvent::InputMessage {
-                message: ev.input.to_message(),
-            }),
-            AgentEvent::MessageComplete(ev) => Some(AgentDomainEvent::MessageComplete {
-                message: ev.message.clone(),
-            }),
-            AgentEvent::ToolComplete(ev) => Some(AgentDomainEvent::ToolComplete {
-                tool_call_id: ev.tool_call_id.clone(),
-                output: ev.output.clone(),
-                is_error: ev.is_error,
-            }),
-            AgentEvent::RunComplete(ev) => Some(AgentDomainEvent::RunComplete {
-                usage: ev.usage.clone(),
-                iterations: ev.iterations,
-            }),
-            AgentEvent::MessageStart(_)
-            | AgentEvent::MessageStop(_)
-            | AgentEvent::TextChunk(_)
-            | AgentEvent::ThinkingChunk(_)
-            | AgentEvent::ToolCallStart(_)
-            | AgentEvent::ToolCallInputDelta(_)
-            | AgentEvent::ToolCallInputDone(_)
-            | AgentEvent::ToolExecuting(_) => None,
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
+            ContentPart::ToolResult(r) => Some(r.tool_call_id.clone()),
+            ContentPart::Text(_) | ContentPart::ToolCall(_) | ContentPart::Thinking(_) => None,
         })
-        .collect()
+        .collect();
+    let dangling: Vec<String> = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant)
+        .map(|m| {
+            m.parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::ToolCall(tc) if !answered.contains(&tc.id) => Some(tc.id.clone()),
+                    ContentPart::ToolCall(_)
+                    | ContentPart::Text(_)
+                    | ContentPart::ToolResult(_)
+                    | ContentPart::Thinking(_) => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in dangling {
+        messages.push(Message::tool_result(
+            id,
+            "interrupted by shutdown, not completed",
+            true,
+        ));
+    }
+    messages
 }
 
 /// Find the tool-call id of the handoff tool by scanning captured assistant messages.
@@ -440,9 +558,11 @@ async fn run_with_retries(
     history: Vec<Message>,
     input: AgentInput,
     cancel: CancellationToken,
-) -> RunReport {
+) -> RunOutcome {
     let mut attempt: u32 = 0;
     loop {
+        // CapturingSink wraps the StreamingSink: it records events only to locate
+        // the handoff tool-call id; persistence happens live via the StreamingSink.
         let capture = CapturingSink::new(sink.clone());
         let config = AgentConfig {
             max_iterations: max_iterations.unwrap_or_else(|| AgentConfig::default().max_iterations),
@@ -459,12 +579,9 @@ async fn run_with_retries(
         let mut agent = match builder.build() {
             Ok(a) => a,
             Err(e) => {
-                return RunReport {
-                    events: Vec::new(),
-                    outcome: RunOutcome::Failed {
-                        error: e.to_string(),
-                        recoverable: false,
-                    },
+                return RunOutcome::Failed {
+                    error: e.to_string(),
+                    recoverable: false,
                 };
             }
         };
@@ -474,8 +591,7 @@ async fn run_with_retries(
 
         match result {
             Ok(output) => {
-                let events = coarse_events(&captured);
-                let outcome = match output.result {
+                return match output.result {
                     AgentResult::Completed(c) => RunOutcome::Completed { text: c.text },
                     AgentResult::Handoff(h) => {
                         let tool_call_id = find_tool_call_id(&captured, &h.tool_name);
@@ -485,14 +601,8 @@ async fn run_with_retries(
                         }
                     }
                 };
-                return RunReport { events, outcome };
             }
-            Err(AgentError::Cancelled) => {
-                return RunReport {
-                    events: Vec::new(),
-                    outcome: RunOutcome::Cancelled,
-                };
-            }
+            Err(AgentError::Cancelled) => return RunOutcome::Cancelled,
             Err(AgentError::Provider(e)) if attempt < max_retries => {
                 attempt += 1;
                 let backoff = Duration::from_millis(50u64 * (1u64 << attempt.min(6)));
@@ -501,23 +611,15 @@ async fn run_with_retries(
                 continue;
             }
             Err(AgentError::Provider(e)) => {
-                return RunReport {
-                    // Keep the captured history so the failed session is journaled.
-                    events: coarse_events(&captured),
-                    outcome: RunOutcome::Failed {
-                        error: e.to_string(),
-                        recoverable: true,
-                    },
+                return RunOutcome::Failed {
+                    error: e.to_string(),
+                    recoverable: true,
                 };
             }
             Err(e) => {
-                return RunReport {
-                    // Keep the captured history so the failed session is journaled.
-                    events: coarse_events(&captured),
-                    outcome: RunOutcome::Failed {
-                        error: e.to_string(),
-                        recoverable: false,
-                    },
+                return RunOutcome::Failed {
+                    error: e.to_string(),
+                    recoverable: false,
                 };
             }
         }
@@ -533,7 +635,7 @@ async fn run_with_retries(
 )]
 mod tests {
     use super::*;
-    use models::agent::{Role, TextPart, ToolCallPart, ToolResultPart};
+    use models::agent::{TextPart, ToolCallPart, ToolResultPart};
 
     fn user_msg(text: &str) -> Message {
         Message {
@@ -617,21 +719,79 @@ mod tests {
     }
 
     #[test]
-    fn coarse_events_filter_streaming_noise() {
+    fn sanitize_appends_error_results_for_dangling_tool_calls() {
+        let history = vec![
+            user_msg("do it"),
+            Message {
+                id: "a".into(),
+                role: Role::Assistant,
+                parts: vec![
+                    ContentPart::ToolCall(ToolCallPart {
+                        id: "tc1".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({}),
+                    }),
+                    ContentPart::ToolCall(ToolCallPart {
+                        id: "tc2".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({}),
+                    }),
+                ],
+            },
+            Message::tool_result("tc1", "ok", false),
+        ];
+        let fixed = sanitize_for_resume(history);
+        // tc2 was dangling → an error tool_result is appended at the end.
+        let last = fixed.last().unwrap();
+        match &last.parts[0] {
+            ContentPart::ToolResult(r) => {
+                assert_eq!(r.tool_call_id, "tc2");
+                assert!(r.is_error);
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_leaves_well_formed_history_untouched() {
+        let history = vec![
+            user_msg("do it"),
+            Message {
+                id: "a".into(),
+                role: Role::Assistant,
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "tc1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({}),
+                })],
+            },
+            Message::tool_result("tc1", "ok", false),
+        ];
+        let before = history.len();
+        let fixed = sanitize_for_resume(history);
+        assert_eq!(fixed.len(), before);
+    }
+
+    #[test]
+    fn coarse_event_filters_streaming_noise_and_input() {
         use models::events::{InputMessageEvent, TextChunkEvent};
-        let events = vec![
-            AgentEvent::InputMessage(InputMessageEvent {
-                message_id: "m".into(),
-                input: AgentInput::user_message("m", "hi"),
-            }),
-            AgentEvent::TextChunk(TextChunkEvent {
+        // Streaming noise → None.
+        assert!(
+            coarse_event(&AgentEvent::TextChunk(TextChunkEvent {
                 message_id: "m".into(),
                 index: 0,
                 text: "noise".into(),
-            }),
-        ];
-        let coarse = coarse_events(&events);
-        assert_eq!(coarse.len(), 1);
-        assert!(matches!(coarse[0], AgentDomainEvent::InputMessage { .. }));
+            }))
+            .is_none()
+        );
+        // InputMessage is suppressed from the persistence stream (persisted by the
+        // actor instead).
+        assert!(
+            coarse_event(&AgentEvent::InputMessage(InputMessageEvent {
+                message_id: "m".into(),
+                input: AgentInput::user_message("m", "hi"),
+            }))
+            .is_none()
+        );
     }
 }

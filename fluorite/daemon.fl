@@ -1,0 +1,89 @@
+/// Wire protocol for the local October daemon ↔ CLI client (unix socket).
+/// These are PROTOCOL types only; the persisted JobSpec is a storage type owned
+/// by the supervisor crate and is intentionally not defined here.
+package daemon;
+
+use workflow.WorkflowDefinition;
+use capabilities.CapabilitySpec;
+
+/// Lifecycle status of a job, surfaced by `october job list`.
+enum JobStatus {
+    Running,
+    Suspended,
+    AwaitingUserInput,
+    Finished,
+    Failed,
+}
+
+/// One row in `october job list`.
+struct JobSummary {
+    job_id: String,
+    workflow_name: String,
+    status: JobStatus,
+    submitted_at: u64,
+    workdir: String,
+}
+
+/// Submit a new job. `capabilities` is the already-resolved spec (the client
+/// resolves config/flags before sending) or null to use the daemon default.
+struct SubmitRequest {
+    workflow: WorkflowDefinition,
+    workdir: String,
+    input: String,
+    capabilities: Option<CapabilitySpec>,
+    workflow_name: String,
+}
+
+struct ListRequest {}
+struct LogsRequest { job_id: String, follow: bool }
+struct StopRequest { job_id: String }
+struct ResumeRequest { job_id: String, message: String }
+struct RemoveRequest { job_id: String }
+struct StatusRequest {}
+/// `drain` waits for all running jobs to finish before the daemon exits.
+struct ShutdownRequest { drain: bool }
+
+/// All requests the client can send to the daemon.
+#[type_tag = "type"]
+union DaemonRequest {
+    Submit(SubmitRequest),
+    List(ListRequest),
+    Logs(LogsRequest),
+    Stop(StopRequest),
+    Resume(ResumeRequest),
+    Remove(RemoveRequest),
+    Status(StatusRequest),
+    Shutdown(ShutdownRequest),
+}
+
+/// Daemon process status.
+struct StatusInfo {
+    pid: u32,
+    uptime_secs: u64,
+    running: u32,
+    suspended: u32,
+    finished: u32,
+    failed: u32,
+}
+
+/// A streamed log line for `Logs`. `text` is already-rendered for the terminal.
+struct JobEventFrame { job_id: String, text: String }
+
+struct SubmittedResponse { job_id: String }
+struct JobListResponse { jobs: Vec<JobSummary> }
+struct AckResponse {}
+struct ErrorResponse { message: String }
+struct EndResponse {}
+
+/// All responses the daemon can send to the client. `Error` carries a failure
+/// message; `End` marks the end of a streaming (Logs) response.
+#[type_tag = "type"]
+union DaemonResponse {
+    Submitted(SubmittedResponse),
+    JobList(JobListResponse),
+    Ack(AckResponse),
+    Status(StatusInfo),
+    LogFrame(JobEventFrame),
+    Error(ErrorResponse),
+    End(EndResponse),
+}

@@ -1,0 +1,32 @@
+[package]
+name = "supervisor"
+version = "0.1.0"
+edition = "2024"
+publish = false # internal application crate, never published to crates.io
+
+[dependencies]
+actor           = { path = "../actor", features = ["file-journal"] }
+agentcore       = { path = "../agentcore" }
+workflow        = { path = "../workflow" }
+executor        = { path = "../executor" }
+executor-client = { path = "../executor-client", default-features = false }
+runtime-client  = { path = "../runtime-client" }
+models          = { path = "../models" }
+async-trait     = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+tokio           = { workspace = true }
+tokio-util      = { workspace = true }
+tracing         = { workspace = true }
+uuid            = { workspace = true }
+futures-util    = { workspace = true }
+
+[dev-dependencies]
+mock-llm     = { path = "../providers/mock-llm" }
+anthropic    = { path = "../providers/anthropic" }
+tempfile     = "3"
+futures-util = { workspace = true }
+
+[lints]
+workspace = true

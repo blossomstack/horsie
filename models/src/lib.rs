@@ -28,6 +28,11 @@ pub mod workflow {
     include!(concat!(env!("OUT_DIR"), "/workflow/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod daemon {
+    include!(concat!(env!("OUT_DIR"), "/daemon/mod.rs"));
+}
+
 impl capabilities::CapabilitySpec {
     /// Load and parse a capability file (the runtime's `--sandbox-caps` path, or a
     /// user-authored file the CLI resolves). Shared by the runtime and the CLI; the

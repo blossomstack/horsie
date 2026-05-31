@@ -17,6 +17,7 @@ executor        = { path = "../executor" }
 executor-client = { path = "../executor-client", default-features = false }
 runtime-client  = { path = "../runtime-client" }
 workflow        = { path = "../workflow" }
+supervisor      = { path = "../supervisor" }
 models          = { path = "../models" }
 clap            = { version = "4", features = ["derive"] }
 serde           = { workspace = true }

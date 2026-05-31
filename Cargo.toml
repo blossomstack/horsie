@@ -11,6 +11,7 @@ members = [
     "providers/anthropic",
     "providers/mock-llm",
     "runtime-client",
+    "supervisor",
     "cli",
     "tests",
 ]
