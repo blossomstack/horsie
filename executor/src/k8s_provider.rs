@@ -12,6 +12,8 @@ use crate::{
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{Container, Pod, PodSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::api::{Api, DeleteParams, PostParams};
+use kube::Client;
 use models::executor::RuntimeConfig;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -62,6 +64,64 @@ fn classify_create_conflict(code: u16, name: &str) -> Option<RuntimeError> {
 /// HTTP 404 on delete means the pod is already gone — treat as success.
 fn is_not_found(code: u16) -> bool {
     code == 404
+}
+
+/// Production [`PodApi`] backed by `kube::Api<Pod>`. Built from the ambient cluster
+/// config (in-cluster ServiceAccount or local kubeconfig). The error mapping lives
+/// here, the one place `kube::Error` is in scope.
+pub struct KubePodApi {
+    api: Api<Pod>,
+}
+
+impl KubePodApi {
+    /// Connect using the ambient kube config and scope to `namespace`.
+    pub async fn namespaced(namespace: &str) -> Result<Self, RuntimeError> {
+        let client = Client::try_default()
+            .await
+            .map_err(|e| RuntimeError::Provider(e.to_string()))?;
+        Ok(Self {
+            api: Api::namespaced(client, namespace),
+        })
+    }
+
+    /// Build from an existing `kube::Api<Pod>` (e.g. a custom client/config).
+    pub fn from_api(api: Api<Pod>) -> Self {
+        Self { api }
+    }
+}
+
+#[async_trait]
+impl PodApi for KubePodApi {
+    async fn create(&self, pod: &Pod) -> Result<(), RuntimeError> {
+        match self.api.create(&PostParams::default(), pod).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // `if let` (not `match`) on the non-exhaustive kube::Error keeps the
+                // production lints happy without a wildcard arm.
+                if let kube::Error::Api(resp) = &e {
+                    let name = pod.metadata.name.clone().unwrap_or_default();
+                    if let Some(mapped) = classify_create_conflict(resp.code, &name) {
+                        return Err(mapped);
+                    }
+                }
+                Err(RuntimeError::Provider(e.to_string()))
+            }
+        }
+    }
+
+    async fn delete(&self, name: &str) -> Result<(), RuntimeError> {
+        match self.api.delete(name, &DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let kube::Error::Api(resp) = &e {
+                    if is_not_found(resp.code) {
+                        return Ok(());
+                    }
+                }
+                Err(RuntimeError::Provider(e.to_string()))
+            }
+        }
+    }
 }
 
 /// Build the Pod manifest for one runtime. Pure (no I/O): the heavily-tested core.
