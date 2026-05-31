@@ -112,6 +112,42 @@ fn build_pod_spec(
     }
 }
 
+/// Lifecycle handle for one runtime Pod. `stop` deletes the pod and deregisters the
+/// transport; `health_check` is byte-identical to `ProcessRuntimeHandle` — it reports
+/// `Healthy` while the runtime's dial-back transport is registered.
+pub struct KubernetesRuntimeHandle {
+    pod_name: String,
+    runtime_id: String,
+    pod_api: Arc<dyn PodApi>,
+    connected_registry: Arc<ConnectedRuntimeRegistry>,
+}
+
+#[async_trait]
+impl RuntimeHandle for KubernetesRuntimeHandle {
+    async fn stop(&self) -> Result<(), RuntimeError> {
+        // Always deregister, even if the delete call errors, so a failed API call
+        // can't leave a stale transport that health checks would read as Healthy.
+        let deleted = self.pod_api.delete(&self.pod_name).await;
+        self.connected_registry.remove(&self.runtime_id).await;
+        deleted
+    }
+
+    async fn health_check(&self) -> Result<HealthStatus, RuntimeError> {
+        let connected = self
+            .connected_registry
+            .runtime_transport(&self.runtime_id)
+            .await
+            .is_some();
+        if connected {
+            Ok(HealthStatus::Healthy)
+        } else {
+            Ok(HealthStatus::Unhealthy {
+                reason: "runtime disconnected".to_string(),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -287,5 +323,51 @@ mod tests {
         assert!(is_not_found(404));
         assert!(!is_not_found(409));
         assert!(!is_not_found(500));
+    }
+
+    use crate::connected_registry::ConnectedRuntimeRegistry;
+    use runtime_client::MockTransport;
+
+    fn handle_with(
+        registry: Arc<ConnectedRuntimeRegistry>,
+        pod_api: Arc<dyn PodApi>,
+    ) -> KubernetesRuntimeHandle {
+        KubernetesRuntimeHandle {
+            pod_name: "october-runtime-rt-1".to_string(),
+            runtime_id: "rt-1".to_string(),
+            pod_api,
+            connected_registry: registry,
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_deletes_pod_and_deregisters() {
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        registry
+            .register_transport("rt-1".into(), Arc::new(MockTransport::ok("")))
+            .await;
+        let fake = Arc::new(FakePodApi::default());
+        let handle = handle_with(registry.clone(), fake.clone());
+
+        handle.stop().await.unwrap();
+
+        assert_eq!(fake.deleted_names(), vec!["october-runtime-rt-1"]);
+        assert!(registry.runtime_transport("rt-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn health_check_reflects_transport_presence() {
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let fake = Arc::new(FakePodApi::default());
+        let handle = handle_with(registry.clone(), fake);
+
+        assert!(matches!(
+            handle.health_check().await.unwrap(),
+            HealthStatus::Unhealthy { .. }
+        ));
+        registry
+            .register_transport("rt-1".into(), Arc::new(MockTransport::ok("")))
+            .await;
+        assert_eq!(handle.health_check().await.unwrap(), HealthStatus::Healthy);
     }
 }
