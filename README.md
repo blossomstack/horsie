@@ -1,14 +1,12 @@
 # horsie
 
-Run multi-agent workflows in a sandboxed runtime, supervised by a local daemon.
+**Sandboxed orchestration for LLM agent graphs.**
 
-`horsie` orchestrates LLM agent workflows — arbitrary graphs of agents collaborating
-on a task — with each agent executing inside a [nono](https://github.com/always-further/nono)-sandboxed
-`horsie-runtime` child process under an explicit, per-job capability grant. Agents that
-plan, write, and review code are one workflow you can run, not the limit: any multi-step
-agent process can be expressed and driven the same way. A background daemon supervises
-jobs running in parallel, persists their progress to a durable journal, and auto-resumes
-anything left in flight after a restart.
+horsie orchestrates LLM agents as arbitrary graphs that collaborate on a task.
+Each agent runs in its own [nono](https://github.com/always-further/nono)-sandboxed
+`horsie-runtime` child process under an explicit, per-job capability grant. A
+background daemon runs jobs in parallel, journals their progress durably, and
+auto-resumes anything still in flight after a restart.
 
 ## How it works
 
