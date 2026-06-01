@@ -6,7 +6,7 @@ mod tool;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig};
 pub use error::{AgentBuildError, AgentError, LlmError, ToolCallError};
-pub use events::EventSink;
+pub use events::{EventSink, EventSinkError};
 pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, StopReason, ToolChoice};
 pub use tool::{EmptyToolbox, Tool, ToolSpec, Toolbox, ToolboxImpl};
 

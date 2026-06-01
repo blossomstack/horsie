@@ -215,10 +215,12 @@ impl Agent {
         let run_id = Uuid::new_v4().to_string();
 
         let input_msg = input.to_message();
-        events.emit(AgentEvent::InputMessage(InputMessageEvent {
-            message_id: input.message_id(),
-            input,
-        }));
+        events
+            .emit(AgentEvent::InputMessage(InputMessageEvent {
+                message_id: input.message_id(),
+                input,
+            }))
+            .await?;
         self.history.push(input_msg);
 
         let mut total_usage = Usage {
@@ -264,10 +266,12 @@ impl Agent {
             };
 
             let msg_id = Uuid::new_v4().to_string();
-            events.emit(AgentEvent::MessageStart(MessageStartEvent {
-                message_id: msg_id.clone(),
-                role: Role::Assistant,
-            }));
+            events
+                .emit(AgentEvent::MessageStart(MessageStartEvent {
+                    message_id: msg_id.clone(),
+                    role: Role::Assistant,
+                }))
+                .await?;
 
             let response = self
                 .provider
@@ -275,9 +279,11 @@ impl Agent {
                 .await
                 .map_err(AgentError::Provider)?;
 
-            events.emit(AgentEvent::MessageStop(MessageStopEvent {
-                message_id: msg_id.clone(),
-            }));
+            events
+                .emit(AgentEvent::MessageStop(MessageStopEvent {
+                    message_id: msg_id.clone(),
+                }))
+                .await?;
 
             total_usage.input_tokens += response.usage.input_tokens;
             total_usage.output_tokens += response.usage.output_tokens;
@@ -287,10 +293,12 @@ impl Agent {
                 role: Role::Assistant,
                 parts: response.parts.clone(),
             };
-            events.emit(AgentEvent::MessageComplete(MessageCompleteEvent {
-                message_id: msg_id,
-                message: assistant_msg.clone(),
-            }));
+            events
+                .emit(AgentEvent::MessageComplete(MessageCompleteEvent {
+                    message_id: msg_id,
+                    message: assistant_msg.clone(),
+                }))
+                .await?;
             self.history.push(assistant_msg);
 
             let tool_calls = extract_tool_calls(&response.parts);
@@ -321,11 +329,13 @@ impl Agent {
                     continue;
                 }
 
-                events.emit(AgentEvent::RunComplete(RunCompleteEvent {
-                    message_id: run_id.clone(),
-                    usage: total_usage.clone(),
-                    iterations: iteration,
-                }));
+                events
+                    .emit(AgentEvent::RunComplete(RunCompleteEvent {
+                        message_id: run_id.clone(),
+                        usage: total_usage.clone(),
+                        iterations: iteration,
+                    }))
+                    .await?;
                 return Ok(AgentOutput {
                     result: AgentResult::Completed(CompletedOutput {
                         text: extract_text(&response.parts),
@@ -347,11 +357,13 @@ impl Agent {
                 let rejection = self.validate_handoff(&handoff_name, &tool_calls, &data);
                 match rejection {
                     None => {
-                        events.emit(AgentEvent::RunComplete(RunCompleteEvent {
-                            message_id: run_id.clone(),
-                            usage: total_usage.clone(),
-                            iterations: iteration,
-                        }));
+                        events
+                            .emit(AgentEvent::RunComplete(RunCompleteEvent {
+                                message_id: run_id.clone(),
+                                usage: total_usage.clone(),
+                                iterations: iteration,
+                            }))
+                            .await?;
                         return Ok(AgentOutput {
                             result: AgentResult::Handoff(HandoffOutput {
                                 tool_name: handoff_name,
@@ -430,22 +442,26 @@ impl Agent {
             for (tool_call_id, name, input) in &tool_calls {
                 let result_msg_id = format!("result:{tool_call_id}");
 
-                events.emit(AgentEvent::ToolExecuting(ToolExecutingEvent {
-                    message_id: result_msg_id.clone(),
-                    tool_call_id: tool_call_id.clone(),
-                }));
+                events
+                    .emit(AgentEvent::ToolExecuting(ToolExecutingEvent {
+                        message_id: result_msg_id.clone(),
+                        tool_call_id: tool_call_id.clone(),
+                    }))
+                    .await?;
 
                 let (output, is_error) = match self.toolbox.execute(name, input.clone()).await {
                     Ok(v) => (v.to_string(), false),
                     Err(e) => (e.to_string(), true),
                 };
 
-                events.emit(AgentEvent::ToolComplete(ToolCompleteEvent {
-                    message_id: result_msg_id.clone(),
-                    tool_call_id: tool_call_id.clone(),
-                    output: output.clone(),
-                    is_error,
-                }));
+                events
+                    .emit(AgentEvent::ToolComplete(ToolCompleteEvent {
+                        message_id: result_msg_id.clone(),
+                        tool_call_id: tool_call_id.clone(),
+                        output: output.clone(),
+                        is_error,
+                    }))
+                    .await?;
 
                 self.history.push(Message {
                     id: result_msg_id,
@@ -616,9 +632,12 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    #[async_trait]
     impl EventSink for CollectingEventSink {
-        fn emit(&self, event: AgentEvent) {
+        async fn emit(&self, event: AgentEvent) -> Result<(), crate::events::EventSinkError> {
             self.events.lock().unwrap().push(event);
+            Ok(())
         }
     }
 

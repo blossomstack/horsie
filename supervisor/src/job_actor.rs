@@ -1,7 +1,7 @@
 use crate::spec::{JobId, JobSpec, SupervisorDeps};
 use crate::supervisor_actor::SupervisorCommand;
 use actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, spawn_root};
-use agentcore::{AgentEvent, EventSink};
+use agentcore::{AgentEvent, EventSink, EventSinkError};
 use async_trait::async_trait;
 use executor::{
     ConnectedRuntimeRegistry, InMemExecutorTransport, ProcessRuntimeProvider, RuntimeEndpoint,
@@ -228,14 +228,18 @@ struct BroadcastSink {
     tx: broadcast::Sender<JobEventFrame>,
 }
 
+#[async_trait]
 impl EventSink for BroadcastSink {
-    fn emit(&self, event: AgentEvent) {
+    async fn emit(&self, event: AgentEvent) -> Result<(), EventSinkError> {
         if let Some(text) = render_event(&event) {
             let _ = self.tx.send(JobEventFrame {
                 job_id: self.job_id.clone(),
                 text,
             });
         }
+        // Best-effort observer: a dropped broadcast (no live subscriber) is fine and
+        // must never abort the run.
+        Ok(())
     }
 }
 
@@ -397,22 +401,22 @@ impl JobActor {
             WorkflowNotification::Finished { output } => {
                 self.teardown().await;
                 self.report(JobStatus::Finished).await;
-                CommandEffect::PersistAndStop(vec![JobDomainEvent::JobConcluded { output }])
+                CommandEffect::persist_and_stop(vec![JobDomainEvent::JobConcluded { output }])
             }
             WorkflowNotification::Failed { error } => {
                 self.teardown().await;
                 self.report(JobStatus::Failed).await;
-                CommandEffect::PersistAndStop(vec![JobDomainEvent::JobFailed { error }])
+                CommandEffect::persist_and_stop(vec![JobDomainEvent::JobFailed { error }])
             }
             // Suspended / awaiting keep the workflow + runtime alive so a live
             // `resume` re-drives the existing actor (no duplicate spawn).
             WorkflowNotification::Suspended => {
                 self.report(JobStatus::Suspended).await;
-                CommandEffect::Persist(vec![JobDomainEvent::JobSuspended])
+                CommandEffect::persist(vec![JobDomainEvent::JobSuspended])
             }
             WorkflowNotification::AwaitingUserInput { .. } => {
                 self.report(JobStatus::AwaitingUserInput).await;
-                CommandEffect::Persist(vec![JobDomainEvent::JobAwaitingInput])
+                CommandEffect::persist(vec![JobDomainEvent::JobAwaitingInput])
             }
         }
     }
@@ -452,24 +456,26 @@ impl EventSourcedActor for JobActor {
         match cmd {
             JobCommand::Start => match self.launch_workflow(Kickoff::Start, ctx).await {
                 // Submit already recorded Running at the supervisor, so don't re-report.
-                Ok(()) => CommandEffect::Persist(vec![JobDomainEvent::JobStarted]),
+                Ok(()) => CommandEffect::persist(vec![JobDomainEvent::JobStarted]),
                 Err(error) => {
                     self.report(JobStatus::Failed).await;
-                    CommandEffect::PersistAndStop(vec![JobDomainEvent::JobFailed { error }])
+                    CommandEffect::persist_and_stop(vec![JobDomainEvent::JobFailed { error }])
                 }
             },
             JobCommand::Resume { message } => {
                 if let Some(wf) = &self.workflow {
                     let _ = wf.tell(WorkflowCommand::Resume { message }).await;
-                    CommandEffect::None
+                    CommandEffect::none()
                 } else {
                     // Post-restart: no live workflow, so launch one fresh; it recovers
                     // its journal then handles the resume.
                     match self.launch_workflow(Kickoff::Resume(message), ctx).await {
-                        Ok(()) => CommandEffect::None,
+                        Ok(()) => CommandEffect::none(),
                         Err(error) => {
                             self.report(JobStatus::Failed).await;
-                            CommandEffect::PersistAndStop(vec![JobDomainEvent::JobFailed { error }])
+                            CommandEffect::persist_and_stop(vec![JobDomainEvent::JobFailed {
+                                error,
+                            }])
                         }
                     }
                 }
@@ -479,16 +485,16 @@ impl EventSourcedActor for JobActor {
                     let _ = wf.tell(WorkflowCommand::Cancel).await;
                 }
                 // The workflow's Suspended notification persists JobSuspended.
-                CommandEffect::None
+                CommandEffect::none()
             }
             JobCommand::Subscribe { reply } => {
                 let _ = reply.send(self.logs.subscribe());
-                CommandEffect::None
+                CommandEffect::none()
             }
             JobCommand::Shutdown { reply } => {
                 self.teardown().await;
                 let _ = reply.send(());
-                CommandEffect::Stop
+                CommandEffect::stop()
             }
             JobCommand::WorkflowEvent(n) => self.on_workflow_event(n).await,
         }

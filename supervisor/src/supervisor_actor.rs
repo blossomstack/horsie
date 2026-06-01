@@ -176,7 +176,7 @@ impl EventSourcedActor for SupervisorActor {
                     let _ = child.tell(JobCommand::Start).await;
                 }
                 let _ = reply.send(id.clone());
-                CommandEffect::Persist(vec![SupervisorEvent::JobSubmitted {
+                CommandEffect::persist(vec![SupervisorEvent::JobSubmitted {
                     id,
                     spec,
                     submitted_at,
@@ -189,38 +189,38 @@ impl EventSourcedActor for SupervisorActor {
                     .map(|(id, rec)| summary(id, rec))
                     .collect();
                 let _ = reply.send(jobs);
-                CommandEffect::None
+                CommandEffect::none()
             }
             SupervisorCommand::Stop { job_id } => {
                 if let Some(child) = self.children.get(&job_id) {
                     let _ = child.tell(JobCommand::Stop).await;
                 }
-                CommandEffect::None
+                CommandEffect::none()
             }
             SupervisorCommand::Resume { job_id, message } => {
                 if let Some(child) = self.children.get(&job_id) {
                     let _ = child.tell(JobCommand::Resume { message }).await;
                 }
-                CommandEffect::None
+                CommandEffect::none()
             }
             SupervisorCommand::Remove { job_id, reply } => match state.jobs.get(&job_id) {
                 None => {
                     let _ = reply.send(Err(format!("no such job: {job_id}")));
-                    CommandEffect::None
+                    CommandEffect::none()
                 }
                 Some(rec) if !is_terminal(&rec.status) => {
                     let _ = reply.send(Err(format!(
                         "job {job_id} is {:?}; stop it before removing",
                         rec.status
                     )));
-                    CommandEffect::None
+                    CommandEffect::none()
                 }
                 Some(_) => {
                     // Terminal jobs have no live child (PersistAndStop), but drop any
                     // stale ref defensively.
                     self.children.remove(&job_id);
                     let _ = reply.send(Ok(()));
-                    CommandEffect::Persist(vec![SupervisorEvent::JobRemoved { id: job_id }])
+                    CommandEffect::persist(vec![SupervisorEvent::JobRemoved { id: job_id }])
                 }
             },
             SupervisorCommand::Shutdown { reply } => {
@@ -238,7 +238,7 @@ impl EventSourcedActor for SupervisorActor {
                     let _ = ack.await;
                 }
                 let _ = reply.send(());
-                CommandEffect::None
+                CommandEffect::none()
             }
             SupervisorCommand::Subscribe { job_id, reply } => {
                 match self.children.get(&job_id) {
@@ -254,10 +254,10 @@ impl EventSourcedActor for SupervisorActor {
                         let _ = reply.send(None);
                     }
                 }
-                CommandEffect::None
+                CommandEffect::none()
             }
             SupervisorCommand::JobStatusChanged { job_id, status } => {
-                CommandEffect::Persist(vec![SupervisorEvent::JobStatusChanged {
+                CommandEffect::persist(vec![SupervisorEvent::JobStatusChanged {
                     id: job_id,
                     status,
                 }])

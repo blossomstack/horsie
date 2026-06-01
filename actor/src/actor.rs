@@ -1,3 +1,4 @@
+use crate::error::JournalError;
 use crate::persistence_id::PersistenceId;
 use crate::runtime::ActorContext;
 use async_trait::async_trait;
@@ -11,20 +12,87 @@ use serde::de::DeserializeOwned;
 /// only ever changes by folding persisted events through
 /// [`EventSourcedActor::apply_event`], guaranteeing that live operation and
 /// crash recovery follow the exact same path.
-pub enum CommandEffect<E> {
-    /// Persist these events and fold them into the current state.
-    Persist(Vec<E>),
-    /// Persist and fold these events, then snapshot the resulting state and
-    /// compact the now-redundant event log.
-    PersistAndSnapshot(Vec<E>),
-    /// Snapshot the current state and compact the event log; persist no new events.
-    Snapshot,
+///
+/// An effect is one persist step (possibly empty) followed by an ordered set of
+/// post-persist actions — snapshot, ack, stop — that the runtime runs only after
+/// the durable write. Modelled as composable fields rather than one variant per
+/// combination (à la Akka's `Effect.persist(e).thenRun(..).thenReply(..).thenStop()`),
+/// so e.g. "persist + snapshot + ack" needs no new variant. Build with the
+/// constructors ([`none`](Self::none), [`persist`](Self::persist),
+/// [`snapshot`](Self::snapshot), [`stop`](Self::stop)) and chain post-actions with
+/// [`and_snapshot`](Self::and_snapshot), [`and_ack`](Self::and_ack),
+/// [`and_stop`](Self::and_stop).
+pub struct CommandEffect<E> {
+    /// Events to persist and fold (empty = persist nothing).
+    pub(crate) events: Vec<E>,
+    /// After the durable write, snapshot the state and compact the event log.
+    pub(crate) snapshot: bool,
+    /// After the durable write, report its outcome on this channel — `Ok(())` once
+    /// the events are durably written, or `Err(JournalError)` if the write failed —
+    /// so an [`ActorRef::ask`] caller gets true post-persist backpressure and can
+    /// abort on failure. Events are neither folded nor counted on a failed write.
+    pub(crate) ack: Option<tokio::sync::oneshot::Sender<Result<(), JournalError>>>,
+    /// After the durable write, stop the actor.
+    pub(crate) stop: bool,
+}
+
+impl<E> CommandEffect<E> {
     /// Do nothing.
-    None,
-    /// Stop the actor.
-    Stop,
-    /// Persist and fold these events, then stop the actor.
-    PersistAndStop(Vec<E>),
+    pub fn none() -> Self {
+        Self {
+            events: Vec::new(),
+            snapshot: false,
+            ack: None,
+            stop: false,
+        }
+    }
+
+    /// Persist and fold `events` into the current state.
+    pub fn persist(events: Vec<E>) -> Self {
+        Self {
+            events,
+            snapshot: false,
+            ack: None,
+            stop: false,
+        }
+    }
+
+    /// Snapshot the current state and compact the event log; persist no new events.
+    pub fn snapshot() -> Self {
+        Self::none().and_snapshot()
+    }
+
+    /// Stop the actor; persist no new events.
+    pub fn stop() -> Self {
+        Self::none().and_stop()
+    }
+
+    /// Persist and fold `events`, then stop the actor.
+    pub fn persist_and_stop(events: Vec<E>) -> Self {
+        Self::persist(events).and_stop()
+    }
+
+    /// After the persist, snapshot the resulting state and compact the event log.
+    #[must_use]
+    pub fn and_snapshot(mut self) -> Self {
+        self.snapshot = true;
+        self
+    }
+
+    /// After the persist, report the durable-write outcome on `ack` (post-persist
+    /// backpressure for an [`ActorRef::ask`] caller).
+    #[must_use]
+    pub fn and_ack(mut self, ack: tokio::sync::oneshot::Sender<Result<(), JournalError>>) -> Self {
+        self.ack = Some(ack);
+        self
+    }
+
+    /// After the persist, stop the actor.
+    #[must_use]
+    pub fn and_stop(mut self) -> Self {
+        self.stop = true;
+        self
+    }
 }
 
 /// An actor whose state is rebuilt by replaying persisted events.

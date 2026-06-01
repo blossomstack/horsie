@@ -15,7 +15,9 @@
 )]
 
 use actor::{EventSourcedActor, InMemoryJournal, Journal, PersistenceId, spawn_root};
-use agentcore::{AgentEvent, ContentPart, EventSink, ToolCallError, ToolSpec, Toolbox};
+use agentcore::{
+    AgentEvent, ContentPart, EventSink, EventSinkError, ToolCallError, ToolSpec, Toolbox,
+};
 use anthropic::AnthropicProvider;
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -35,8 +37,11 @@ use workflow::{
 // ── helpers ────────────────────────────────────────────────────────────────
 
 struct NoopSink;
+#[async_trait]
 impl EventSink for NoopSink {
-    fn emit(&self, _event: AgentEvent) {}
+    async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
+        Ok(())
+    }
 }
 
 fn provider_at(url: &str) -> Arc<dyn agentcore::LlmProvider> {

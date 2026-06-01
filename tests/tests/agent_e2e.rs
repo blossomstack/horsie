@@ -13,7 +13,7 @@
 
 use agentcore::{
     Agent, AgentError, AgentEvent, AgentInput, AgentResult, CompletedOutput, ContentPart,
-    EventSink, HandoffOutput, ToolCallError, ToolSpec, Toolbox,
+    EventSink, EventSinkError, HandoffOutput, ToolCallError, ToolSpec, Toolbox,
 };
 use anthropic::AnthropicProvider;
 use async_trait::async_trait;
@@ -34,9 +34,11 @@ impl CollectSink {
     }
 }
 
+#[async_trait]
 impl EventSink for CollectSink {
-    fn emit(&self, event: AgentEvent) {
+    async fn emit(&self, event: AgentEvent) -> Result<(), EventSinkError> {
         self.0.lock().unwrap().push(event);
+        Ok(())
     }
 }
 

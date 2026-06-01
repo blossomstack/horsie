@@ -389,12 +389,14 @@ impl LlmProvider for AnthropicProvider {
                             text_blocks.insert(index, String::new());
                         }
                         MessageContent::ToolUse(tu) => {
-                            events.emit(AgentEvent::ToolCallStart(ToolCallStartEvent {
-                                message_id: message_id.to_string(),
-                                index: index as u32,
-                                tool_call_id: tu.id.clone(),
-                                name: tu.name.clone(),
-                            }));
+                            events
+                                .emit(AgentEvent::ToolCallStart(ToolCallStartEvent {
+                                    message_id: message_id.to_string(),
+                                    index: index as u32,
+                                    tool_call_id: tu.id.clone(),
+                                    name: tu.name.clone(),
+                                }))
+                                .await?;
                             tool_blocks.insert(index, (tu.id, tu.name, String::new()));
                         }
                         MessageContent::Thinking(_) => {
@@ -407,34 +409,38 @@ impl LlmProvider for AnthropicProvider {
                             if let Some(acc) = text_blocks.get_mut(&index) {
                                 acc.push_str(&text);
                             }
-                            events.emit(AgentEvent::TextChunk(TextChunkEvent {
-                                message_id: message_id.to_string(),
-                                index: index as u32,
-                                text,
-                            }));
+                            events
+                                .emit(AgentEvent::TextChunk(TextChunkEvent {
+                                    message_id: message_id.to_string(),
+                                    index: index as u32,
+                                    text,
+                                }))
+                                .await?;
                         }
                         ContentBlockDelta::InputJsonDelta { partial_json } => {
                             if let Some((id, _, acc)) = tool_blocks.get_mut(&index) {
                                 acc.push_str(&partial_json);
-                                events.emit(AgentEvent::ToolCallInputDelta(
-                                    ToolCallInputDeltaEvent {
+                                events
+                                    .emit(AgentEvent::ToolCallInputDelta(ToolCallInputDeltaEvent {
                                         message_id: message_id.to_string(),
                                         index: index as u32,
                                         tool_call_id: id.clone(),
                                         delta: partial_json,
-                                    },
-                                ));
+                                    }))
+                                    .await?;
                             }
                         }
                         ContentBlockDelta::ThinkingDelta { thinking } => {
                             if let Some((acc, _)) = thinking_blocks.get_mut(&index) {
                                 acc.push_str(&thinking);
                             }
-                            events.emit(AgentEvent::ThinkingChunk(ThinkingChunkEvent {
-                                message_id: message_id.to_string(),
-                                index: index as u32,
-                                text: thinking,
-                            }));
+                            events
+                                .emit(AgentEvent::ThinkingChunk(ThinkingChunkEvent {
+                                    message_id: message_id.to_string(),
+                                    index: index as u32,
+                                    text: thinking,
+                                }))
+                                .await?;
                         }
                         ContentBlockDelta::SignatureDelta { signature } => {
                             if let Some((_, acc_sig)) = thinking_blocks.get_mut(&index) {
@@ -444,11 +450,13 @@ impl LlmProvider for AnthropicProvider {
                     },
                     MessagesStreamEvent::ContentBlockStop { index } => {
                         if let Some((id, _, _)) = tool_blocks.get(&index) {
-                            events.emit(AgentEvent::ToolCallInputDone(ToolCallInputDoneEvent {
-                                message_id: message_id.to_string(),
-                                index: index as u32,
-                                tool_call_id: id.clone(),
-                            }));
+                            events
+                                .emit(AgentEvent::ToolCallInputDone(ToolCallInputDoneEvent {
+                                    message_id: message_id.to_string(),
+                                    index: index as u32,
+                                    tool_call_id: id.clone(),
+                                }))
+                                .await?;
                         }
                     }
                     MessagesStreamEvent::MessageDelta { delta, usage } => {

@@ -13,7 +13,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use actor::{ActorRef, FileJournal, Journal, spawn_root};
-use agentcore::{AgentEvent, EventSink, LlmProvider};
+use agentcore::{AgentEvent, EventSink, EventSinkError, LlmProvider};
 use anthropic::AnthropicProvider;
 use async_trait::async_trait;
 use mock_llm::MockLlmServer;
@@ -58,8 +58,11 @@ impl JobShutdown for NoopShutdown {
 
 struct NoopSink;
 
+#[async_trait]
 impl EventSink for NoopSink {
-    fn emit(&self, _event: AgentEvent) {}
+    async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
+        Ok(())
+    }
 }
 
 /// A [`JobRuntime`] that spawns the real `WorkflowActor` with a mock-backed

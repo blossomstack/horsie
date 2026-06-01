@@ -6,19 +6,22 @@
 )]
 
 use agentcore::{
-    AgentEvent, CompletionRequest, ContentPart, EventSink, LlmProvider, StopReason, ToolChoice,
-    ToolSpec,
+    AgentEvent, CompletionRequest, ContentPart, EventSink, EventSinkError, LlmProvider, StopReason,
+    ToolChoice, ToolSpec,
 };
 use anthropic::AnthropicProvider;
+use async_trait::async_trait;
 use mock_llm::MockLlmServer;
 use models::agent::{Message, Role, TextPart};
 use std::sync::{Arc, Mutex};
 
 struct CollectSink(Arc<Mutex<Vec<AgentEvent>>>);
 
+#[async_trait]
 impl EventSink for CollectSink {
-    fn emit(&self, event: AgentEvent) {
+    async fn emit(&self, event: AgentEvent) -> Result<(), EventSinkError> {
         self.0.lock().unwrap().push(event);
+        Ok(())
     }
 }
 

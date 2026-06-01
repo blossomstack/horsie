@@ -1,9 +1,9 @@
 use crate::context::{AgentRuntimeContext, CONCLUDE_TOOL};
 use crate::workflow_actor::WorkflowCommand;
-use actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId};
+use actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
-    LlmProvider, Message, Role, Toolbox, Usage,
+    EventSinkError, LlmProvider, Message, Role, Toolbox, Usage,
 };
 use async_trait::async_trait;
 use models::workflow::WorkflowAgentDef;
@@ -58,9 +58,15 @@ pub enum AgentCommand {
     },
     /// Cancel an in-flight run.
     Cancel,
-    /// Internal: coarse events captured mid-run, streamed for incremental
-    /// persistence so a crash loses at most the in-flight message.
-    PersistProgress(Vec<AgentDomainEvent>),
+    /// Internal: coarse events captured mid-run. `ack` lets the emitting loop await
+    /// the durable write before continuing, so persistence applies backpressure on
+    /// the agent loop, and reports the write outcome so a journal failure aborts the
+    /// run instead of proceeding on an unrecorded history. Persistence still flows
+    /// through this one mailbox.
+    PersistProgress {
+        events: Vec<AgentDomainEvent>,
+        ack: tokio::sync::oneshot::Sender<Result<(), actor::JournalError>>,
+    },
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
 }
@@ -154,28 +160,15 @@ impl AgentActor {
         let max_retries = self.params.max_retries;
         let self_ref = ctx.self_ref();
 
-        // Stream coarse events out of the (sync) sink and persist them through the
-        // actor — never from the sink directly. The forwarder drains the channel and
-        // `tell`s `PersistProgress`, so persistence stays ordered through the one
-        // mailbox. Unbounded so the sync `emit` never blocks.
-        let (coarse_tx, mut coarse_rx) = tokio::sync::mpsc::unbounded_channel();
-        let persist_ref = self_ref.clone();
-        let forwarder = tokio::spawn(async move {
-            while let Some(ev) = coarse_rx.recv().await {
-                if persist_ref
-                    .tell(AgentCommand::PersistProgress(vec![ev]))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-
         tokio::spawn(async move {
-            let sink: Arc<dyn EventSink> = Arc::new(StreamingSink {
+            // The sink persists each coarse event by `ask`ing this actor and awaiting
+            // the durable write, so the LLM loop has end-to-end backpressure:
+            // `emit().await` does not return until the event is journaled. Persistence
+            // still flows through the actor's single mailbox (`PersistProgress`),
+            // never the journal directly.
+            let sink: Arc<dyn EventSink> = Arc::new(PersistSink {
                 inner: inner_sink,
-                coarse_tx,
+                actor: self_ref.clone(),
             });
             let outcome = run_with_retries(
                 provider,
@@ -190,11 +183,8 @@ impl AgentActor {
                 cancel,
             )
             .await;
-            // `run_with_retries` consumes its `sink` arg; once it returns the last
-            // `StreamingSink` is dropped, closing `coarse_tx` and ending the
-            // forwarder. Await it so every `PersistProgress` is enqueued before
-            // `RunFinished` (mailbox order == persistence order).
-            let _ = forwarder.await;
+            // All coarse events were already persisted (each `emit` awaited its ack),
+            // so `RunFinished` lands after them in mailbox order.
             let _ = self_ref
                 .tell(AgentCommand::RunFinished(Box::new(RunReport { outcome })))
                 .await;
@@ -219,7 +209,7 @@ impl AgentActor {
                         output: Value::String(text),
                     })
                     .await;
-                CommandEffect::Stop
+                CommandEffect::stop()
             }
             RunOutcome::Concluded { data, tool_call_id } => {
                 match self.interpret(data, tool_call_id) {
@@ -227,7 +217,7 @@ impl AgentActor {
                         let _ = parent
                             .tell(WorkflowCommand::AgentConcluded { session_id, output })
                             .await;
-                        CommandEffect::Stop
+                        CommandEffect::stop()
                     }
                     Conclusion::Ask {
                         tool_call_id,
@@ -242,12 +232,13 @@ impl AgentActor {
                             .await;
                         // Stay alive — InjectToolResult resumes this same session.
                         // Snapshot to compact the incrementally-persisted log.
-                        CommandEffect::Snapshot
+                        CommandEffect::snapshot()
                     }
                 }
             }
             RunOutcome::Cancelled => {
-                CommandEffect::PersistAndSnapshot(vec![AgentDomainEvent::RunCancelled])
+                // Snapshot to compact the incrementally-persisted log on cancel.
+                CommandEffect::persist(vec![AgentDomainEvent::RunCancelled]).and_snapshot()
             }
             RunOutcome::Failed { error, recoverable } => {
                 let _ = parent
@@ -260,7 +251,7 @@ impl AgentActor {
                 // The partial conversation was already journaled incrementally, so the
                 // failed session stays inspectable and a recoverable failure can
                 // `resume`/`fork` from where it stopped.
-                CommandEffect::Stop
+                CommandEffect::stop()
             }
         }
     }
@@ -354,7 +345,7 @@ impl EventSourcedActor for AgentActor {
                     message: agent_input.to_message(),
                 };
                 self.start_run(agent_input, ctx, state.messages.clone());
-                CommandEffect::Persist(vec![input_event])
+                CommandEffect::persist(vec![input_event])
             }
             AgentCommand::InjectToolResult {
                 tool_call_id,
@@ -365,14 +356,16 @@ impl EventSourcedActor for AgentActor {
                     message: agent_input.to_message(),
                 };
                 self.start_run(agent_input, ctx, state.messages.clone());
-                CommandEffect::Persist(vec![input_event])
+                CommandEffect::persist(vec![input_event])
             }
-            AgentCommand::PersistProgress(events) => CommandEffect::Persist(events),
+            AgentCommand::PersistProgress { events, ack } => {
+                CommandEffect::persist(events).and_ack(ack)
+            }
             AgentCommand::Cancel => {
                 if let Some(token) = &self.running {
                     token.cancel();
                 }
-                CommandEffect::None
+                CommandEffect::none()
             }
             AgentCommand::RunFinished(report) => self.handle_finished(*report).await,
         }
@@ -401,9 +394,9 @@ fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Captures coarse agent events while forwarding every event to the real sink.
+/// Captures coarse agent events while forwarding every event to the inner sink.
 /// Used only inside [`run_with_retries`] to locate the handoff tool-call id;
-/// coarse events for persistence are streamed live by [`StreamingSink`].
+/// persistence (with backpressure) happens in the inner [`PersistSink`].
 struct CapturingSink {
     inner: Arc<dyn EventSink>,
     captured: Mutex<Vec<AgentEvent>>,
@@ -422,41 +415,64 @@ impl CapturingSink {
     }
 }
 
+#[async_trait]
 impl EventSink for CapturingSink {
-    fn emit(&self, event: AgentEvent) {
+    async fn emit(&self, event: AgentEvent) -> Result<(), EventSinkError> {
         if let Ok(mut guard) = self.captured.lock() {
             guard.push(event.clone());
         }
-        self.inner.emit(event);
+        // Propagate the inner sink's outcome so a durability failure aborts the run.
+        self.inner.emit(event).await
     }
 }
 
-/// Forwards observation events to the real sink and streams coarse domain events
-/// out for the actor to persist incrementally. Never touches the journal directly
-/// (persistence is the actor's job, via [`AgentCommand::PersistProgress`]).
+/// Persists each coarse domain event by `ask`ing the agent actor and awaiting the
+/// durable write before returning — this is what gives the agent loop end-to-end
+/// backpressure. Persistence flows through the actor's mailbox
+/// ([`AgentCommand::PersistProgress`]), never the journal directly. Every event is
+/// also forwarded to the inner observation sink.
 ///
-/// `InputMessage` is intentionally NOT streamed: the actor persists the input
+/// `InputMessage` is intentionally NOT persisted here: the actor persists the input
 /// itself when handling `Run`/`InjectToolResult`, so a turn-restarting retry that
 /// re-emits the input can never double-persist it into two consecutive user
 /// messages.
-struct StreamingSink {
+struct PersistSink {
     inner: Arc<dyn EventSink>,
-    coarse_tx: tokio::sync::mpsc::UnboundedSender<AgentDomainEvent>,
+    actor: ActorRef<AgentCommand>,
 }
 
-impl EventSink for StreamingSink {
-    fn emit(&self, event: AgentEvent) {
+#[async_trait]
+impl EventSink for PersistSink {
+    async fn emit(&self, event: AgentEvent) -> Result<(), EventSinkError> {
         if let Some(coarse) = coarse_event(&event) {
-            // Unbounded: never blocks the sync emit; drained by the forwarder task.
-            let _ = self.coarse_tx.send(coarse);
+            // Await the durable write and act on its outcome:
+            // - Ok(Ok(()))  → journaled; proceed.
+            // - Ok(Err(je)) → the journal write FAILED. Abort the run rather than
+            //   continue on a history that was never recorded.
+            // - Err(_)      → the actor has stopped (the run is being torn down), so
+            //   there is nothing to persist to and nothing to wait for; drop quietly.
+            match self
+                .actor
+                .ask(|ack| AgentCommand::PersistProgress {
+                    events: vec![coarse],
+                    ack,
+                })
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(je)) => {
+                    return Err(EventSinkError(format!("journal write failed: {je}")));
+                }
+                Err(_actor_gone) => {}
+            }
         }
-        self.inner.emit(event);
+        self.inner.emit(event).await
     }
 }
 
 /// Map a single streaming event to the coarse domain event that should be
 /// persisted, or `None` for streaming noise and for `InputMessage` (see
-/// [`StreamingSink`]).
+/// [`PersistSink`]).
 fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
     match e {
         AgentEvent::MessageComplete(ev) => Some(AgentDomainEvent::MessageComplete {
@@ -561,8 +577,8 @@ async fn run_with_retries(
 ) -> RunOutcome {
     let mut attempt: u32 = 0;
     loop {
-        // CapturingSink wraps the StreamingSink: it records events only to locate
-        // the handoff tool-call id; persistence happens live via the StreamingSink.
+        // CapturingSink wraps the PersistSink: it records events only to locate the
+        // handoff tool-call id; persistence (with backpressure) happens in PersistSink.
         let capture = CapturingSink::new(sink.clone());
         let config = AgentConfig {
             max_iterations: max_iterations.unwrap_or_else(|| AgentConfig::default().max_iterations),

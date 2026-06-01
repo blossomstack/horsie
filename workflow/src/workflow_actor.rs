@@ -221,7 +221,7 @@ impl WorkflowActor {
             self.notify(WorkflowNotification::Failed {
                 error: error.clone(),
             });
-            return CommandEffect::PersistAndStop(vec![WorkflowDomainEvent::WorkflowFailed {
+            return CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                 error,
                 recoverable: false,
             }]);
@@ -235,7 +235,7 @@ impl WorkflowActor {
                     })
                     .await;
                 self.current_child = Some(child);
-                CommandEffect::Persist(vec![
+                CommandEffect::persist(vec![
                     WorkflowDomainEvent::WorkflowStarted,
                     WorkflowDomainEvent::AgentStarted {
                         agent_name: start_name,
@@ -248,7 +248,7 @@ impl WorkflowActor {
                 self.notify(WorkflowNotification::Failed {
                     error: error.clone(),
                 });
-                CommandEffect::PersistAndStop(vec![WorkflowDomainEvent::WorkflowFailed {
+                CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                     error,
                     recoverable: false,
                 }])
@@ -264,13 +264,13 @@ impl WorkflowActor {
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<WorkflowDomainEvent> {
         if !self.is_current(state, session_id) {
-            return CommandEffect::None;
+            return CommandEffect::none();
         }
         let Some(from_agent) = state.current_agent.clone() else {
             self.notify(WorkflowNotification::Finished {
                 output: output.clone(),
             });
-            return CommandEffect::PersistAndStop(vec![WorkflowDomainEvent::WorkflowFinished {
+            return CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFinished {
                 output,
             }]);
         };
@@ -284,7 +284,7 @@ impl WorkflowActor {
                 self.notify(WorkflowNotification::Finished {
                     output: output.clone(),
                 });
-                CommandEffect::PersistAndStop(vec![WorkflowDomainEvent::WorkflowFinished {
+                CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFinished {
                     output,
                 }])
             }
@@ -294,7 +294,7 @@ impl WorkflowActor {
                     self.notify(WorkflowNotification::Failed {
                         error: error.clone(),
                     });
-                    return CommandEffect::PersistAndStop(vec![
+                    return CommandEffect::persist_and_stop(vec![
                         WorkflowDomainEvent::WorkflowFailed {
                             error,
                             recoverable: false,
@@ -316,7 +316,7 @@ impl WorkflowActor {
                         // `october job logs` replay the per-job history — every
                         // AgentStarted/AgentTransitioned — after compaction would
                         // otherwise have discarded it.
-                        CommandEffect::Persist(vec![
+                        CommandEffect::persist(vec![
                             WorkflowDomainEvent::AgentTransitioned {
                                 from: from_agent,
                                 to: to.clone(),
@@ -335,7 +335,7 @@ impl WorkflowActor {
                         self.notify(WorkflowNotification::Failed {
                             error: error.clone(),
                         });
-                        CommandEffect::PersistAndStop(vec![WorkflowDomainEvent::WorkflowFailed {
+                        CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                             error,
                             recoverable: false,
                         }])
@@ -356,13 +356,13 @@ impl WorkflowActor {
                 // Read the awaiting tool-call id from persisted state so resume works
                 // after recovery in a fresh process (in-memory fields are gone then).
                 let Some(tool_call_id) = state.pending_tool_call.clone() else {
-                    return CommandEffect::None;
+                    return CommandEffect::none();
                 };
                 let Some(session_id) = state.current_session_id else {
-                    return CommandEffect::None;
+                    return CommandEffect::none();
                 };
                 let Some(agent_name) = state.current_agent.clone() else {
-                    return CommandEffect::None;
+                    return CommandEffect::none();
                 };
                 // Re-spawn the agent (recovering its conversation from the session
                 // journal) when we no longer hold a live child handle.
@@ -370,7 +370,7 @@ impl WorkflowActor {
                     Some(child) => child,
                     None => {
                         let Some(agent_def) = self.agent_def(&agent_name).cloned() else {
-                            return CommandEffect::None;
+                            return CommandEffect::none();
                         };
                         match self.spawn_agent(ctx, &agent_def, session_id) {
                             Ok(child) => {
@@ -381,7 +381,7 @@ impl WorkflowActor {
                                 self.notify(WorkflowNotification::Failed {
                                     error: error.clone(),
                                 });
-                                return CommandEffect::PersistAndStop(vec![
+                                return CommandEffect::persist_and_stop(vec![
                                     WorkflowDomainEvent::WorkflowFailed {
                                         error,
                                         recoverable: false,
@@ -402,20 +402,20 @@ impl WorkflowActor {
                 // reply and wedge the run. Stay `AwaitingUserInput` (pending_tool_call
                 // intact) so resume is idempotent; the agent's own conclude/ask/fail
                 // persists the real next state.
-                CommandEffect::None
+                CommandEffect::none()
             }
             WorkflowStatus::Suspended => {
                 let Some(session_id) = state.current_session_id else {
-                    return CommandEffect::None;
+                    return CommandEffect::none();
                 };
                 let Some(agent_name) = state.current_agent.clone() else {
-                    return CommandEffect::None;
+                    return CommandEffect::none();
                 };
                 let child = match self.current_child.clone() {
                     Some(child) => child,
                     None => {
                         let Some(agent_def) = self.agent_def(&agent_name).cloned() else {
-                            return CommandEffect::None;
+                            return CommandEffect::none();
                         };
                         match self.spawn_agent(ctx, &agent_def, session_id) {
                             Ok(child) => {
@@ -423,7 +423,7 @@ impl WorkflowActor {
                                 child
                             }
                             Err(error) => {
-                                return CommandEffect::PersistAndStop(vec![
+                                return CommandEffect::persist_and_stop(vec![
                                     WorkflowDomainEvent::WorkflowFailed {
                                         error,
                                         recoverable: false,
@@ -437,12 +437,12 @@ impl WorkflowActor {
                 // Same as the await branch: don't persist `Resumed` optimistically.
                 // Stay `Suspended` until the agent's own outcome persists the next
                 // state, so a crash mid-resume leaves the run resumable.
-                CommandEffect::None
+                CommandEffect::none()
             }
             WorkflowStatus::Pending
             | WorkflowStatus::Running
             | WorkflowStatus::Finished
-            | WorkflowStatus::Failed => CommandEffect::None,
+            | WorkflowStatus::Failed => CommandEffect::none(),
         }
     }
 
@@ -454,13 +454,13 @@ impl WorkflowActor {
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<WorkflowDomainEvent> {
         if state.status != WorkflowStatus::Suspended {
-            return CommandEffect::None;
+            return CommandEffect::none();
         }
         let Some(agent_name) = state.current_agent.clone() else {
-            return CommandEffect::None;
+            return CommandEffect::none();
         };
         let Some(agent_def) = self.agent_def(&agent_name).cloned() else {
-            return CommandEffect::None;
+            return CommandEffect::none();
         };
         let new_session = Uuid::new_v4();
         if let Err(e) = ctx
@@ -471,7 +471,7 @@ impl WorkflowActor {
             )
             .await
         {
-            return CommandEffect::PersistAndStop(vec![WorkflowDomainEvent::WorkflowFailed {
+            return CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                 error: format!("fork failed: {e}"),
                 recoverable: false,
             }]);
@@ -486,14 +486,14 @@ impl WorkflowActor {
                 self.current_child = Some(child);
                 // Persist (not snapshot) so the full workflow event log survives for
                 // `october job logs` history replay (see the transition path).
-                CommandEffect::Persist(vec![WorkflowDomainEvent::AgentStarted {
+                CommandEffect::persist(vec![WorkflowDomainEvent::AgentStarted {
                     agent_name,
                     session_id: new_session,
                     input: message,
                 }])
             }
             Err(error) => {
-                CommandEffect::PersistAndStop(vec![WorkflowDomainEvent::WorkflowFailed {
+                CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                     error,
                     recoverable: false,
                 }])
@@ -591,7 +591,7 @@ impl EventSourcedActor for WorkflowActor {
                     let _ = child.tell(AgentCommand::Cancel).await;
                 }
                 self.notify(WorkflowNotification::Suspended);
-                CommandEffect::Persist(vec![WorkflowDomainEvent::WorkflowSuspended])
+                CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowSuspended])
             }
             WorkflowCommand::Resume { message } => self.on_resume(state, message, ctx).await,
             WorkflowCommand::Fork {
@@ -607,16 +607,16 @@ impl EventSourcedActor for WorkflowActor {
                 recoverable,
             } => {
                 if !self.is_current(state, session_id) {
-                    return CommandEffect::None;
+                    return CommandEffect::none();
                 }
                 if recoverable {
                     self.notify(WorkflowNotification::Suspended);
-                    CommandEffect::Persist(vec![WorkflowDomainEvent::WorkflowSuspended])
+                    CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowSuspended])
                 } else {
                     self.notify(WorkflowNotification::Failed {
                         error: error.clone(),
                     });
-                    CommandEffect::PersistAndStop(vec![WorkflowDomainEvent::WorkflowFailed {
+                    CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                         error,
                         recoverable,
                     }])
@@ -628,10 +628,10 @@ impl EventSourcedActor for WorkflowActor {
                 question,
             } => {
                 if !self.is_current(state, session_id) {
-                    return CommandEffect::None;
+                    return CommandEffect::none();
                 }
                 self.notify(WorkflowNotification::AwaitingUserInput { question });
-                CommandEffect::Persist(vec![WorkflowDomainEvent::WorkflowPaused {
+                CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowPaused {
                     session_id,
                     tool_call_id,
                 }])

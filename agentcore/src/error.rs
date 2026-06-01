@@ -1,3 +1,4 @@
+use crate::events::EventSinkError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -26,6 +27,12 @@ pub enum AgentError {
     #[error("handoff tool '{tool}' validation failed after retries: {reason}")]
     HandoffValidationFailed { tool: String, reason: String },
 
+    /// An event sink failed to handle an event durably (e.g. a journal write
+    /// failed), so the run is aborted rather than proceeding on an unrecorded
+    /// history.
+    #[error("event sink error: {0}")]
+    EventSink(#[from] EventSinkError),
+
     #[error("cancelled")]
     Cancelled,
 }
@@ -45,6 +52,13 @@ pub enum LlmError {
 
     #[error("network error: {0}")]
     Network(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// An event sink failed while the provider was emitting a streaming event. The
+    /// provider does not decide whether that is fatal — it propagates the sink's
+    /// verdict, so a sink that returns `Err` aborts the completion (and thus the
+    /// run); a best-effort sink returns `Ok(())` and is never seen here.
+    #[error("event sink error: {0}")]
+    EventSink(#[from] EventSinkError),
 }
 
 #[derive(Debug, Error)]
