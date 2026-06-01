@@ -89,8 +89,13 @@ impl ToolboxFactory for DefaultToolboxFactory {
                 list.iter().cloned().collect(),
             )),
         };
-        let conclude =
-            conclude_tool_spec(agent_def.output_schema.as_ref(), agent_def.allow_ask_user);
+        // The timer tools themselves are layered on at run time by the AgentActor;
+        // here we only widen the `conclude` schema to offer `park`.
+        let conclude = conclude_tool_spec(
+            agent_def.output_schema.as_ref(),
+            agent_def.allow_ask_user,
+            agent_def.allow_timers.unwrap_or(false),
+        );
         Arc::new(AgentToolbox {
             base,
             conclude,
@@ -99,25 +104,64 @@ impl ToolboxFactory for DefaultToolboxFactory {
     }
 }
 
-/// Synthesize the `conclude` tool's input schema for an agent, or `None` when the
-/// agent neither produces structured output nor may ask the user (in which case
-/// the agent simply ends its turn with a plain message).
-pub fn conclude_tool_spec(output_schema: Option<&Value>, allow_ask: bool) -> Option<ToolSpec> {
-    let input_schema = match (output_schema, allow_ask) {
-        (None, false) => return None,
-        // Output only: the tool input *is* the output schema.
-        (Some(out), false) => out.clone(),
-        // Ask only: the tool input is a question (+ optional choices).
-        (None, true) => ask_schema(),
-        // Both: a `kind`-tagged union of submit-output and ask.
-        (Some(out), true) => both_schema(out),
+/// Synthesize the `conclude` tool's input schema for an agent. Returns `None` when
+/// the agent neither produces structured output, may ask, nor uses timers (it then
+/// ends its turn with a plain message).
+///
+/// With `allow_timers` the tool is always a `kind`-tagged union including `park`
+/// (suspend awaiting timers) and `submit` (deliver output), plus `ask` when
+/// permitted. Without timers, behavior is exactly as before.
+pub fn conclude_tool_spec(
+    output_schema: Option<&Value>,
+    allow_ask: bool,
+    allow_timers: bool,
+) -> Option<ToolSpec> {
+    let input_schema = if allow_timers {
+        timers_kind_schema(output_schema, allow_ask)
+    } else {
+        match (output_schema, allow_ask) {
+            (None, false) => return None,
+            // Output only: the tool input *is* the output schema.
+            (Some(out), false) => out.clone(),
+            // Ask only: the tool input is a question (+ optional choices).
+            (None, true) => ask_schema(),
+            // Both: a `kind`-tagged union of submit-output and ask.
+            (Some(out), true) => both_schema(out),
+        }
     };
     Some(ToolSpec {
         name: CONCLUDE_TOOL.to_string(),
         description:
-            "Finish your turn: deliver your final structured output, or ask the user a question."
+            "Finish your turn: deliver final output, ask the user, or park to await your timers."
                 .to_string(),
         input_schema,
+    })
+}
+
+/// Kind-tagged conclude schema for timer-capable agents. Always offers `submit`
+/// and `park`; adds `ask` when permitted.
+fn timers_kind_schema(output_schema: Option<&Value>, allow_ask: bool) -> Value {
+    let mut kinds = vec![json!("submit"), json!("park")];
+    if allow_ask {
+        kinds.push(json!("ask"));
+    }
+    json!({
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": kinds,
+                "description": "submit: deliver final output. park: suspend until a timer fires. ask: pause for user input."
+            },
+            "output": output_schema.cloned().unwrap_or_else(|| json!({})),
+            "question": { "type": "string", "description": "Required when kind=ask." },
+            "choices": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional when kind=ask."
+            }
+        }
     })
 }
 
@@ -277,6 +321,7 @@ mod tests {
             model: "m".into(),
             output_schema: output,
             allow_ask_user: ask,
+            allow_timers: None,
             transitions: None,
             max_iterations: None,
             max_retries: None,
@@ -297,27 +342,64 @@ mod tests {
 
     #[test]
     fn conclude_not_registered_without_output_or_ask() {
-        assert!(conclude_tool_spec(None, false).is_none());
+        assert!(conclude_tool_spec(None, false, false).is_none());
     }
 
     #[test]
     fn conclude_output_only_uses_output_schema_as_input() {
         let out = json!({"type": "object", "properties": {"answer": {"type": "number"}}});
-        let spec = conclude_tool_spec(Some(&out), false).unwrap();
+        let spec = conclude_tool_spec(Some(&out), false, false).unwrap();
         assert_eq!(spec.input_schema, out);
     }
 
     #[test]
     fn conclude_ask_only_requires_question() {
-        let spec = conclude_tool_spec(None, true).unwrap();
+        let spec = conclude_tool_spec(None, true, false).unwrap();
         assert_eq!(spec.input_schema["required"][0], "question");
     }
 
     #[test]
     fn conclude_both_is_kind_tagged() {
         let out = json!({"type": "object"});
-        let spec = conclude_tool_spec(Some(&out), true).unwrap();
+        let spec = conclude_tool_spec(Some(&out), true, false).unwrap();
         assert_eq!(spec.input_schema["properties"]["kind"]["enum"][0], "submit");
+    }
+
+    #[test]
+    fn conclude_without_timers_is_unchanged() {
+        // Backward-compat: the no-timers signature still returns None when neither
+        // output nor ask is set.
+        assert!(conclude_tool_spec(None, false, false).is_none());
+    }
+
+    #[test]
+    fn conclude_with_timers_offers_park_and_submit() {
+        let out = json!({"type": "object"});
+        let spec = conclude_tool_spec(Some(&out), false, true).unwrap();
+        let kinds: Vec<&str> = spec.input_schema["properties"]["kind"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(kinds.contains(&"submit"));
+        assert!(kinds.contains(&"park"));
+        assert!(!kinds.contains(&"ask"));
+    }
+
+    #[test]
+    fn conclude_with_timers_and_ask_offers_all_three() {
+        let out = json!({"type": "object"});
+        let spec = conclude_tool_spec(Some(&out), true, true).unwrap();
+        let kinds: Vec<&str> = spec.input_schema["properties"]["kind"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for k in ["submit", "ask", "park"] {
+            assert!(kinds.contains(&k), "missing kind {k}");
+        }
     }
 
     #[test]

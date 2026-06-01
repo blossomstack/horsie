@@ -44,6 +44,9 @@ pub async fn render_history(journal: &Arc<dyn Journal>, job_id: &str) -> Vec<Job
             }
             WorkflowDomainEvent::WorkflowResumed => lines.push("▶ resumed\n".to_string()),
             WorkflowDomainEvent::WorkflowSuspended => lines.push("⏸ suspended\n".to_string()),
+            WorkflowDomainEvent::WorkflowParked { .. } => {
+                lines.push("⏲ parked (awaiting timers)\n".to_string());
+            }
             WorkflowDomainEvent::WorkflowFinished { output } => {
                 lines.push(format!("\n✓ finished: {}\n", compact(&output)));
             }

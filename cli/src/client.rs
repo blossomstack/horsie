@@ -165,6 +165,7 @@ pub async fn run_attached(root: &Path, req: SubmitRequest) -> Result<i32, CliErr
     Ok(match status {
         Some(JobStatus::Failed) => 1,
         Some(JobStatus::Running)
+        | Some(JobStatus::Parked)
         | Some(JobStatus::Suspended)
         | Some(JobStatus::AwaitingUserInput)
         | Some(JobStatus::Finished)

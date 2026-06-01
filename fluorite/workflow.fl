@@ -23,6 +23,9 @@ struct WorkflowAgentDef {
     output_schema: Option<Any>,
     /// Whether the agent may pause to ask the user a question.
     allow_ask_user: bool,
+    /// Whether the agent may arm timers (set_timer/list_timers/cancel_timer) and
+    /// park itself to await them. Optional for back-compat; absent means false.
+    allow_timers: Option<bool>,
     /// Outgoing transitions evaluated against this agent's output.
     transitions: Option<Vec<WorkflowTransition>>,
     max_iterations: Option<u32>,

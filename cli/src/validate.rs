@@ -83,6 +83,7 @@ mod tests {
             model: model.into(),
             output_schema: Some(json!({"type": "object"})),
             allow_ask_user: false,
+            allow_timers: None,
             transitions: None,
             max_iterations: None,
             max_retries: None,

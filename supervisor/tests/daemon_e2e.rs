@@ -159,6 +159,7 @@ fn agent(
         model: "m".into(),
         output_schema,
         allow_ask_user,
+        allow_timers: None,
         transitions: None,
         max_iterations: None,
         max_retries: None,
@@ -439,4 +440,61 @@ async fn render_history_replays_finished_job_from_journal() {
         text.contains("finished"),
         "history should include the finish marker; got: {text}"
     );
+}
+
+/// Single-agent workflow that may arm timers and park (kind-tagged conclude).
+fn timer_workflow() -> WorkflowDefinition {
+    let mut a = agent("solo", Some(serde_json::json!({"type": "object"})), false);
+    a.allow_timers = Some(true);
+    a.allowed_tools = None; // permit the timer control tools
+    WorkflowDefinition {
+        start: "solo".into(),
+        agents: vec![a],
+    }
+}
+
+#[tokio::test]
+async fn parked_job_recovers_after_restart() {
+    // Turn 1 arms a long recurring timer (so it never fires during the test); turn 2
+    // parks. After a restart the job is recovered as Parked (its agent re-arms its
+    // timers) and an explicit resume drives it to completion.
+    let mock = MockLlmServer::builder()
+        .tool_call(
+            "set_timer",
+            serde_json::json!({"kind": "recurring", "after_secs": 3600, "label": "pr"}),
+        )
+        .tool_call("conclude", serde_json::json!({"kind": "park"}))
+        .tool_call(
+            "conclude",
+            serde_json::json!({"kind": "submit", "output": {"answer": "done"}}),
+        )
+        .build()
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let job_id = {
+        let (_journal, sup) = boot(dir.path(), &mock.url());
+        let id = submit(&sup, spec(timer_workflow())).await;
+        wait_for(&sup, &id, |s| matches!(s, JobStatus::Parked)).await;
+        id
+    };
+
+    // Restart: the parked job is recovered and auto-relaunched (its workflow + agent
+    // come back live, re-arming the timer), staying Parked.
+    let (_journal2, sup2) = boot(dir.path(), &mock.url());
+    let recovered = list(&sup2)
+        .await
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job present after restart");
+    assert!(matches!(recovered.status, JobStatus::Parked));
+
+    // An explicit resume nudges the recovered agent, which finishes.
+    sup2.tell(SupervisorCommand::Resume {
+        job_id: job_id.clone(),
+        message: "wake up".into(),
+    })
+    .await
+    .unwrap();
+    wait_for(&sup2, &job_id, is_finished).await;
 }

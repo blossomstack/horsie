@@ -64,11 +64,19 @@ fn agent(name: &str) -> WorkflowAgentDef {
         model: "mock".into(),
         output_schema: Some(object_schema()),
         allow_ask_user: false,
+        allow_timers: None,
         transitions: None,
         max_iterations: None,
         max_retries: None,
         allowed_tools: Some(vec![]),
     }
+}
+
+fn timer_agent(name: &str) -> WorkflowAgentDef {
+    let mut a = agent(name);
+    a.allow_timers = Some(true);
+    a.allowed_tools = None; // allow the timer tools (allowlist None = all)
+    a
 }
 
 fn runtime_context(
@@ -315,7 +323,7 @@ struct BlockingFactory {
 
 impl ToolboxFactory for BlockingFactory {
     fn for_agent(&self, def: &WorkflowAgentDef, _client: RuntimeClient) -> Arc<dyn Toolbox> {
-        let conclude = conclude_tool_spec(def.output_schema.as_ref(), def.allow_ask_user)
+        let conclude = conclude_tool_spec(def.output_schema.as_ref(), def.allow_ask_user, false)
             .expect("worker has an output schema");
         Arc::new(BlockingToolbox {
             conclude,
@@ -488,4 +496,123 @@ async fn reconstruct_agent_history(
         state = AgentActor::apply_event(state, ev);
     }
     state.messages
+}
+
+// ── timers: park / fire / resume ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn timer_parks_then_fires_and_resumes() {
+    // Turn 1: arm a 1s one-shot, then park. Turn 2 (after it fires): submit + finish.
+    let mock = MockLlmServer::builder()
+        .tool_call(
+            "set_timer",
+            json!({"kind": "one_shot", "after_secs": 1, "label": "pr"}),
+        )
+        .tool_call(CONCLUDE_TOOL, json!({"kind": "park"}))
+        .tool_call(
+            CONCLUDE_TOOL,
+            json!({"kind": "submit", "output": {"done": true}}),
+        )
+        .build()
+        .await;
+
+    let def = WorkflowDefinition {
+        start: "watcher".into(),
+        agents: vec![timer_agent("watcher")],
+    };
+
+    let journal = Arc::new(InMemoryJournal::new());
+    let (rt, mut events) =
+        runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
+    let wf = spawn_root(WorkflowActor::new("wf-timer", def, rt), journal.clone());
+
+    wf.tell(WorkflowCommand::Start {
+        input: "watch the PR".into(),
+    })
+    .await
+    .unwrap();
+
+    // It parks first…
+    wait_for_status(&journal, "wf-timer", WorkflowStatus::Parked).await;
+    let n = recv_notification(&mut events).await;
+    assert!(matches!(n, WorkflowNotification::Parked));
+
+    // …then the 1s timer fires, the agent resumes and finishes.
+    let state = wait_for_status(&journal, "wf-timer", WorkflowStatus::Finished).await;
+    assert_eq!(state.current_agent.as_deref(), Some("watcher"));
+}
+
+#[tokio::test]
+async fn park_without_timers_fails_the_run() {
+    let mock = MockLlmServer::builder()
+        .tool_call(CONCLUDE_TOOL, json!({"kind": "park"}))
+        .build()
+        .await;
+    let def = WorkflowDefinition {
+        start: "watcher".into(),
+        agents: vec![timer_agent("watcher")],
+    };
+    let journal = Arc::new(InMemoryJournal::new());
+    let (rt, _events) = runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
+    let wf = spawn_root(WorkflowActor::new("wf-nopark", def, rt), journal.clone());
+    wf.tell(WorkflowCommand::Start { input: "go".into() })
+        .await
+        .unwrap();
+    let state = wait_for_status(&journal, "wf-nopark", WorkflowStatus::Failed).await;
+    assert_eq!(state.status, WorkflowStatus::Failed);
+}
+
+#[tokio::test]
+async fn recurring_timer_fires_then_can_be_cancelled() {
+    let mock = MockLlmServer::builder()
+        .tool_call(
+            "set_timer",
+            json!({"kind": "recurring", "after_secs": 1, "label": "ci"}),
+        )
+        .tool_call(CONCLUDE_TOOL, json!({"kind": "park"}))
+        // wake #1: confirm it is still listed, then cancel + finish.
+        .tool_call("list_timers", json!({}))
+        .tool_call("cancel_timer", json!({"all": true}))
+        .tool_call(
+            CONCLUDE_TOOL,
+            json!({"kind": "submit", "output": {"done": true}}),
+        )
+        .build()
+        .await;
+
+    let def = WorkflowDefinition {
+        start: "watcher".into(),
+        agents: vec![timer_agent("watcher")],
+    };
+    let journal = Arc::new(InMemoryJournal::new());
+    let (rt, _events) = runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
+    let wf = spawn_root(WorkflowActor::new("wf-recur", def, rt), journal.clone());
+    wf.tell(WorkflowCommand::Start {
+        input: "watch".into(),
+    })
+    .await
+    .unwrap();
+
+    wait_for_status(&journal, "wf-recur", WorkflowStatus::Parked).await;
+    let state = wait_for_status(&journal, "wf-recur", WorkflowStatus::Finished).await;
+    assert_eq!(state.status, WorkflowStatus::Finished);
+
+    // The recurring timer fired at least once. (TimerArmed is journaled before the
+    // park snapshot, which compacts pre-snapshot events; TimerFired lands after the
+    // snapshot, so it remains in the replayable log.)
+    let session_id = state.current_session_id.unwrap();
+    let pid = PersistenceId::new("agent", session_id.to_string());
+    let mut fired = 0;
+    let mut ev = journal.replay(&pid, 0).await;
+    while let Some(item) = ev.next().await {
+        if let AgentDomainEvent::TimerFired { .. } =
+            serde_json::from_slice::<AgentDomainEvent>(&item.unwrap()).unwrap()
+        {
+            fired += 1;
+        }
+    }
+    assert!(
+        fired >= 1,
+        "expected the recurring timer to fire at least once"
+    );
 }

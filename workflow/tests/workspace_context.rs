@@ -22,6 +22,7 @@ fn agent_def() -> WorkflowAgentDef {
         model: "m".into(),
         output_schema: None,
         allow_ask_user: false,
+        allow_timers: None,
         transitions: None,
         max_iterations: None,
         max_retries: None,

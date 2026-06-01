@@ -301,6 +301,7 @@ pub enum JobDomainEvent {
     JobConcluded { output: Value },
     JobSuspended,
     JobAwaitingInput,
+    JobParked,
     JobFailed { error: String },
 }
 
@@ -421,6 +422,12 @@ impl JobActor {
                 self.report(JobStatus::AwaitingUserInput).await;
                 CommandEffect::persist(vec![JobDomainEvent::JobAwaitingInput])
             }
+            // A parked job keeps its workflow + runtime alive so the agent can wake
+            // itself when a timer fires.
+            WorkflowNotification::Parked => {
+                self.report(JobStatus::Parked).await;
+                CommandEffect::persist(vec![JobDomainEvent::JobParked])
+            }
         }
     }
 }
@@ -445,6 +452,7 @@ impl EventSourcedActor for JobActor {
             JobDomainEvent::JobConcluded { .. } => JobStatus::Finished,
             JobDomainEvent::JobSuspended => JobStatus::Suspended,
             JobDomainEvent::JobAwaitingInput => JobStatus::AwaitingUserInput,
+            JobDomainEvent::JobParked => JobStatus::Parked,
             JobDomainEvent::JobFailed { .. } => JobStatus::Failed,
         });
         state
@@ -509,7 +517,9 @@ impl EventSourcedActor for JobActor {
     /// stay dormant (no sandbox child) until an explicit `Resume`.
     async fn on_recovery_complete(&mut self, state: &JobState, ctx: &mut ActorContext<Self>) {
         match state.status {
-            Some(JobStatus::Running) => {
+            // A parked job auto-resumes too: relaunching re-spawns the agent, which
+            // re-arms its timers from the journal and keeps firing.
+            Some(JobStatus::Running) | Some(JobStatus::Parked) => {
                 if let Err(e) = self.launch_workflow(Kickoff::Recover, ctx).await {
                     tracing::error!(job_id = %self.job_id, error = %e, "failed to recover job");
                 }
@@ -546,6 +556,12 @@ mod tests {
             },
         );
         assert_eq!(s.status, Some(JobStatus::Finished));
+    }
+
+    #[test]
+    fn parked_event_sets_parked_status() {
+        let s = JobActor::apply_event(JobState::default(), JobDomainEvent::JobParked);
+        assert_eq!(s.status, Some(JobStatus::Parked));
     }
 
     #[test]

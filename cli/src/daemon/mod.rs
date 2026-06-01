@@ -200,15 +200,17 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
                 uptime_secs: daemon.started.elapsed().as_secs(),
                 running: 0,
                 suspended: 0,
+                parked: 0,
                 finished: 0,
                 failed: 0,
             };
             for j in &jobs {
                 use models::daemon::JobStatus::{
-                    AwaitingUserInput, Failed, Finished, Running, Suspended,
+                    AwaitingUserInput, Failed, Finished, Parked, Running, Suspended,
                 };
                 match j.status {
                     Running => info.running += 1,
+                    Parked => info.parked += 1,
                     Suspended | AwaitingUserInput => info.suspended += 1,
                     Finished => info.finished += 1,
                     Failed => info.failed += 1,

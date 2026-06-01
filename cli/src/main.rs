@@ -253,8 +253,8 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 let root = resolve_state_dir(config.as_deref())?;
                 let s = client::status(&root).await?;
                 println!(
-                    "pid {} · up {}s · running {} · suspended {} · finished {} · failed {}",
-                    s.pid, s.uptime_secs, s.running, s.suspended, s.finished, s.failed
+                    "pid {} · up {}s · running {} · parked {} · suspended {} · finished {} · failed {}",
+                    s.pid, s.uptime_secs, s.running, s.parked, s.suspended, s.finished, s.failed
                 );
                 Ok(0)
             }

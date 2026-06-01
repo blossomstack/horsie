@@ -21,6 +21,8 @@ pub struct AgentParams {
     pub has_output_schema: bool,
     /// Whether the agent may pause to ask the user.
     pub allow_ask_user: bool,
+    /// Whether the agent may arm timers and park itself to await them.
+    pub allow_timers: bool,
     pub max_iterations: Option<u32>,
     pub max_retries: u32,
 }
@@ -31,15 +33,16 @@ impl AgentParams {
             system_prompt: def.system_prompt.clone(),
             has_output_schema: def.output_schema.is_some(),
             allow_ask_user: def.allow_ask_user,
+            allow_timers: def.allow_timers.unwrap_or(false),
             max_iterations: def.max_iterations,
             max_retries: def.max_retries.unwrap_or(0),
         }
     }
 
     /// The agent's handoff tool — the synthesized `conclude` tool when it has an
-    /// output schema and/or may ask, else `None` (the agent ends with plain text).
+    /// output schema, may ask, or may park on timers, else `None` (plain text end).
     fn handoff_tool(&self) -> Option<String> {
-        if self.has_output_schema || self.allow_ask_user {
+        if self.has_output_schema || self.allow_ask_user || self.allow_timers {
             Some(CONCLUDE_TOOL.to_string())
         } else {
             None
@@ -69,6 +72,24 @@ pub enum AgentCommand {
     },
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
+    /// Arm a timer; replies with the new timer id once recorded.
+    ArmTimer {
+        label: String,
+        kind: crate::timers::TimerKind,
+        after_secs: u64,
+        reply: tokio::sync::oneshot::Sender<crate::timers::TimerId>,
+    },
+    /// List active timers.
+    ListTimers {
+        reply: tokio::sync::oneshot::Sender<Vec<crate::timers::TimerView>>,
+    },
+    /// Cancel one or all timers; replies with the ids actually removed.
+    CancelTimer {
+        selector: crate::timers::CancelSelector,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::timers::TimerId>>,
+    },
+    /// Internal: a timer's sleep elapsed.
+    TimerFired { id: crate::timers::TimerId },
 }
 
 /// Coarse events that alter persisted agent state. Streaming observation events
@@ -91,12 +112,35 @@ pub enum AgentDomainEvent {
         iterations: u32,
     },
     RunCancelled,
+    /// A timer was armed.
+    TimerArmed {
+        record: crate::timers::TimerRecord,
+    },
+    /// One or more timers were cancelled.
+    TimerCancelled {
+        ids: Vec<crate::timers::TimerId>,
+    },
+    /// A timer fired. `next_fire_at_unix_ms` carries the re-armed fire time for a
+    /// recurring timer (so the fold stays pure); `None` removes a one-shot.
+    TimerFired {
+        id: crate::timers::TimerId,
+        next_fire_at_unix_ms: Option<u64>,
+    },
+    /// The agent parked itself awaiting its timers.
+    Parked,
 }
 
-/// The conversation history reconstructed by folding [`AgentDomainEvent`]s.
+/// The conversation history reconstructed by folding [`AgentDomainEvent`]s, plus
+/// any timers the agent has armed and whether it is currently parked.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentState {
     pub messages: Vec<Message>,
+    /// Active timers — durable so they re-arm on recovery and back `list`/`cancel`.
+    #[serde(default)]
+    pub timers: Vec<crate::timers::TimerRecord>,
+    /// True while the agent has parked itself awaiting a timer (no run in flight).
+    #[serde(default)]
+    pub parked: bool,
 }
 
 /// Result of a background run, sent back to the actor as [`AgentCommand::RunFinished`].
@@ -130,6 +174,8 @@ pub struct AgentActor {
     ctx: AgentRuntimeContext,
     params: AgentParams,
     running: Option<CancellationToken>,
+    /// A timer fired while a run was in flight; consume it when the run parks.
+    pending_wake: bool,
 }
 
 impl AgentActor {
@@ -138,6 +184,7 @@ impl AgentActor {
             ctx,
             params,
             running: None,
+            pending_wake: false,
         }
     }
 
@@ -151,14 +198,23 @@ impl AgentActor {
         let cancel = CancellationToken::new();
         self.running = Some(cancel.clone());
 
+        let self_ref = ctx.self_ref();
         let provider = self.ctx.provider.clone();
-        let toolbox = self.ctx.toolbox.clone();
+        // Timer-capable agents run with the timer control tools layered on; these
+        // execute by `ask`ing this actor and are never sent to the sandboxed runtime.
+        let toolbox: Arc<dyn Toolbox> = if self.params.allow_timers {
+            Arc::new(TimerToolbox {
+                inner: self.ctx.toolbox.clone(),
+                actor: self_ref.clone(),
+            })
+        } else {
+            self.ctx.toolbox.clone()
+        };
         let inner_sink = self.ctx.event_sink.clone();
         let system_prompt = self.params.system_prompt.clone().unwrap_or_default();
         let handoff_tool = self.params.handoff_tool();
         let max_iterations = self.params.max_iterations;
         let max_retries = self.params.max_retries;
-        let self_ref = ctx.self_ref();
 
         tokio::spawn(async move {
             // The sink persists each coarse event by `ask`ing this actor and awaiting
@@ -195,7 +251,12 @@ impl AgentActor {
     /// parent workflow accordingly. The conversation events were already persisted
     /// incrementally via [`AgentCommand::PersistProgress`], so this only records the
     /// terminal transition and decides the actor's lifecycle.
-    async fn handle_finished(&mut self, report: RunReport) -> CommandEffect<AgentDomainEvent> {
+    async fn handle_finished(
+        &mut self,
+        report: RunReport,
+        state: &AgentState,
+        ctx: &ActorContext<Self>,
+    ) -> CommandEffect<AgentDomainEvent> {
         self.running = None;
         let session_id = self.ctx.session_id;
         let parent = self.ctx.parent_ref.clone();
@@ -234,6 +295,7 @@ impl AgentActor {
                         // Snapshot to compact the incrementally-persisted log.
                         CommandEffect::snapshot()
                     }
+                    Conclusion::Park => self.park_or_resume(state, ctx, session_id, parent).await,
                 }
             }
             RunOutcome::Cancelled => {
@@ -256,47 +318,168 @@ impl AgentActor {
         }
     }
 
-    /// Decide whether a `conclude` payload is a final output or an ask, based on
-    /// the agent's configured variant.
+    /// Decide whether a `conclude` payload is a final output, an ask, or a park,
+    /// based on the agent's configured variant.
     fn interpret(&self, data: Value, tool_call_id: Option<String>) -> Conclusion {
-        let extract_question = |d: &Value| {
-            d.get("question")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
-        match (self.params.has_output_schema, self.params.allow_ask_user) {
-            // Kind-tagged union.
-            (true, true) => {
-                let kind = data.get("kind").and_then(Value::as_str).unwrap_or("submit");
-                if kind == "ask" {
-                    Conclusion::Ask {
-                        tool_call_id,
-                        question: extract_question(&data),
-                    }
-                } else {
-                    Conclusion::Output(data.get("output").cloned().unwrap_or(Value::Null))
-                }
-            }
-            // Output only: the payload is the output.
-            (true, false) => Conclusion::Output(data),
-            // Ask only: the payload is a question.
-            (false, true) => Conclusion::Ask {
-                tool_call_id,
-                question: extract_question(&data),
-            },
-            // No conclude tool registered — shouldn't be reached via a handoff.
-            (false, false) => Conclusion::Output(data),
+        classify_conclusion(
+            self.params.has_output_schema,
+            self.params.allow_ask_user,
+            self.params.allow_timers,
+            data,
+            tool_call_id,
+        )
+    }
+
+    /// Decide what a `park` conclusion means: an illegal park (no timers fails the
+    /// run), an immediate resume (a timer fired during the run), or a real park
+    /// (stay alive, status → Parked).
+    async fn park_or_resume(
+        &mut self,
+        state: &AgentState,
+        ctx: &ActorContext<Self>,
+        session_id: uuid::Uuid,
+        parent: ActorRef<WorkflowCommand>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        if state.timers.is_empty() {
+            let _ = parent
+                .tell(WorkflowCommand::AgentFailed {
+                    session_id,
+                    error: "agent parked with no active timers — nothing would ever wake it"
+                        .to_string(),
+                    recoverable: false,
+                })
+                .await;
+            return CommandEffect::stop();
         }
+        if self.pending_wake {
+            // A timer fired mid-run; go straight back to work instead of parking.
+            self.pending_wake = false;
+            let wake = AgentInput::user_message(
+                new_message_id(),
+                "A timer fired while you were busy — re-check now.".to_string(),
+            );
+            let input_event = AgentDomainEvent::InputMessage {
+                message: wake.to_message(),
+            };
+            self.start_run(wake, ctx, state.messages.clone());
+            return CommandEffect::persist(vec![input_event]);
+        }
+        let _ = parent
+            .tell(WorkflowCommand::AgentParked { session_id })
+            .await;
+        CommandEffect::persist(vec![AgentDomainEvent::Parked]).and_snapshot()
+    }
+
+    /// A timer's sleep elapsed. Re-arm a recurring timer, then resume the agent with
+    /// a wake message — unless a run is already in flight, in which case coalesce the
+    /// wake and let the run consume it when it parks.
+    async fn handle_timer_fired(
+        &mut self,
+        id: crate::timers::TimerId,
+        state: &AgentState,
+        ctx: &ActorContext<Self>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let Some(record) = state.timers.iter().find(|t| t.id == id).cloned() else {
+            // Cancelled or already removed — a stale sleep. Ignore.
+            return CommandEffect::none();
+        };
+        let display_count = record.fire_count + 1;
+        let now = crate::timers::now_unix_ms();
+        // Re-arm recurring; remove one-shot.
+        let next_fire_at_unix_ms = match record.kind {
+            crate::timers::TimerKind::Recurring => {
+                let next = now.saturating_add(record.interval_secs.saturating_mul(1000));
+                spawn_timer_sleep(
+                    ctx.self_ref(),
+                    id.clone(),
+                    std::time::Duration::from_secs(record.interval_secs),
+                );
+                Some(next)
+            }
+            crate::timers::TimerKind::OneShot => None,
+        };
+        let fired = AgentDomainEvent::TimerFired {
+            id,
+            next_fire_at_unix_ms,
+        };
+
+        if self.running.is_some() {
+            // A run is in flight: record the fire (re-arm) and remember to wake when
+            // the run parks. Multiple fires coalesce into one wake.
+            self.pending_wake = true;
+            return CommandEffect::persist(vec![fired]);
+        }
+
+        // Idle/parked: start a fresh run with the wake message.
+        let wake = AgentInput::user_message(new_message_id(), record.wake_message(display_count));
+        let input_event = AgentDomainEvent::InputMessage {
+            message: wake.to_message(),
+        };
+        self.start_run(wake, ctx, state.messages.clone());
+        CommandEffect::persist(vec![fired, input_event])
     }
 }
 
+/// Classify a `conclude` payload into the agent's terminal intent. With timers the
+/// payload is always `kind`-tagged (`submit`/`park`/`ask`); without, it follows the
+/// legacy (has_output, allow_ask) shape.
+fn classify_conclusion(
+    has_output_schema: bool,
+    allow_ask_user: bool,
+    allow_timers: bool,
+    data: Value,
+    tool_call_id: Option<String>,
+) -> Conclusion {
+    let extract_question = |d: &Value| {
+        d.get("question")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    if allow_timers {
+        let kind = data.get("kind").and_then(Value::as_str).unwrap_or("submit");
+        return match kind {
+            "park" => Conclusion::Park,
+            "ask" => Conclusion::Ask {
+                tool_call_id,
+                question: extract_question(&data),
+            },
+            _ => Conclusion::Output(data.get("output").cloned().unwrap_or(Value::Null)),
+        };
+    }
+    match (has_output_schema, allow_ask_user) {
+        // Kind-tagged union.
+        (true, true) => {
+            let kind = data.get("kind").and_then(Value::as_str).unwrap_or("submit");
+            if kind == "ask" {
+                Conclusion::Ask {
+                    tool_call_id,
+                    question: extract_question(&data),
+                }
+            } else {
+                Conclusion::Output(data.get("output").cloned().unwrap_or(Value::Null))
+            }
+        }
+        // Output only: the payload is the output.
+        (true, false) => Conclusion::Output(data),
+        // Ask only: the payload is a question.
+        (false, true) => Conclusion::Ask {
+            tool_call_id,
+            question: extract_question(&data),
+        },
+        // No conclude tool registered — shouldn't be reached via a handoff.
+        (false, false) => Conclusion::Output(data),
+    }
+}
+
+#[derive(Debug)]
 enum Conclusion {
     Output(Value),
     Ask {
         tool_call_id: Option<String>,
         question: String,
     },
+    Park,
 }
 
 #[async_trait]
@@ -315,8 +498,12 @@ impl EventSourcedActor for AgentActor {
 
     fn apply_event(mut state: AgentState, event: AgentDomainEvent) -> AgentState {
         match event {
-            AgentDomainEvent::InputMessage { message }
-            | AgentDomainEvent::MessageComplete { message } => state.messages.push(message),
+            AgentDomainEvent::InputMessage { message } => {
+                // A new turn began — the agent is no longer parked.
+                state.parked = false;
+                state.messages.push(message);
+            }
+            AgentDomainEvent::MessageComplete { message } => state.messages.push(message),
             AgentDomainEvent::ToolComplete {
                 tool_call_id,
                 output,
@@ -324,6 +511,23 @@ impl EventSourcedActor for AgentActor {
             } => state
                 .messages
                 .push(Message::tool_result(tool_call_id, output, is_error)),
+            AgentDomainEvent::TimerArmed { record } => state.timers.push(record),
+            AgentDomainEvent::TimerCancelled { ids } => {
+                state.timers.retain(|t| !ids.contains(&t.id));
+            }
+            AgentDomainEvent::TimerFired {
+                id,
+                next_fire_at_unix_ms,
+            } => match next_fire_at_unix_ms {
+                Some(next) => {
+                    if let Some(t) = state.timers.iter_mut().find(|t| t.id == id) {
+                        t.fire_at_unix_ms = next;
+                        t.fire_count += 1;
+                    }
+                }
+                None => state.timers.retain(|t| t.id != id),
+            },
+            AgentDomainEvent::Parked => state.parked = true,
             AgentDomainEvent::RunComplete { .. } | AgentDomainEvent::RunCancelled => {}
         }
         state
@@ -367,7 +571,56 @@ impl EventSourcedActor for AgentActor {
                 }
                 CommandEffect::none()
             }
-            AgentCommand::RunFinished(report) => self.handle_finished(*report).await,
+            AgentCommand::ArmTimer {
+                label,
+                kind,
+                after_secs,
+                reply,
+            } => {
+                let now = crate::timers::now_unix_ms();
+                let record = crate::timers::TimerRecord::arm(
+                    label,
+                    kind,
+                    std::time::Duration::from_secs(after_secs),
+                    now,
+                );
+                let id = record.id.clone();
+                spawn_timer_sleep(
+                    ctx.self_ref(),
+                    id.clone(),
+                    std::time::Duration::from_secs(after_secs),
+                );
+                let _ = reply.send(id);
+                CommandEffect::persist(vec![AgentDomainEvent::TimerArmed { record }])
+            }
+            AgentCommand::ListTimers { reply } => {
+                let now = crate::timers::now_unix_ms();
+                let views = state.timers.iter().map(|t| t.view(now)).collect();
+                let _ = reply.send(views);
+                CommandEffect::none()
+            }
+            AgentCommand::CancelTimer { selector, reply } => {
+                let ids: Vec<crate::timers::TimerId> = match selector {
+                    crate::timers::CancelSelector::All => {
+                        state.timers.iter().map(|t| t.id.clone()).collect()
+                    }
+                    crate::timers::CancelSelector::One(id) => {
+                        if state.timers.iter().any(|t| t.id == id) {
+                            vec![id]
+                        } else {
+                            vec![]
+                        }
+                    }
+                };
+                let _ = reply.send(ids.clone());
+                if ids.is_empty() {
+                    CommandEffect::none()
+                } else {
+                    CommandEffect::persist(vec![AgentDomainEvent::TimerCancelled { ids }])
+                }
+            }
+            AgentCommand::TimerFired { id } => self.handle_timer_fired(id, state, ctx).await,
+            AgentCommand::RunFinished(report) => self.handle_finished(*report, state, ctx).await,
         }
     }
 
@@ -378,6 +631,16 @@ impl EventSourcedActor for AgentActor {
     /// persisted as a new turn boundary: if we crash again before progress,
     /// recovery simply re-synthesizes it.
     async fn on_recovery_complete(&mut self, state: &AgentState, ctx: &mut ActorContext<Self>) {
+        // Re-arm every surviving timer with its remaining delay (fires immediately if
+        // already due). Do this whether parked or mid-run, so timers keep firing.
+        let now = crate::timers::now_unix_ms();
+        for t in &state.timers {
+            spawn_timer_sleep(ctx.self_ref(), t.id.clone(), t.remaining(now));
+        }
+        // A parked agent waits for a timer — do not re-drive a turn.
+        if state.parked {
+            return;
+        }
         if state.messages.is_empty() {
             return;
         }
@@ -392,6 +655,107 @@ impl EventSourcedActor for AgentActor {
 
 fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Spawn a one-shot sleep that tells the actor `TimerFired` after `delay`. The
+/// firing is journaled/handled in the actor; a stale fire (timer since cancelled)
+/// is ignored there, so an un-cancellable sleep task is harmless.
+fn spawn_timer_sleep(
+    self_ref: ActorRef<AgentCommand>,
+    id: crate::timers::TimerId,
+    delay: std::time::Duration,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let _ = self_ref.tell(AgentCommand::TimerFired { id }).await;
+    });
+}
+
+/// Wraps an agent's toolbox, adding the three timer control tools. They execute by
+/// `ask`ing the owning [`AgentActor`] (never forwarded to the sandboxed runtime).
+struct TimerToolbox {
+    inner: Arc<dyn Toolbox>,
+    actor: ActorRef<AgentCommand>,
+}
+
+#[async_trait]
+impl Toolbox for TimerToolbox {
+    fn specs(&self) -> Vec<agentcore::ToolSpec> {
+        let mut specs = self.inner.specs();
+        specs.extend(crate::timers::timer_tool_specs());
+        specs
+    }
+
+    async fn execute(&self, name: &str, input: Value) -> Result<Value, agentcore::ToolCallError> {
+        use crate::timers::{CancelSelector, TimerId, TimerKind};
+        use agentcore::ToolCallError;
+        match name {
+            "set_timer" => {
+                let kind = match input.get("kind").and_then(Value::as_str) {
+                    Some("one_shot") => TimerKind::OneShot,
+                    Some("recurring") => TimerKind::Recurring,
+                    _ => {
+                        return Err(ToolCallError::InvalidInput(
+                            "set_timer.kind must be 'one_shot' or 'recurring'".to_string(),
+                        ));
+                    }
+                };
+                let Some(after_secs) = input
+                    .get("after_secs")
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n >= 1)
+                else {
+                    return Err(ToolCallError::InvalidInput(
+                        "set_timer.after_secs must be an integer >= 1".to_string(),
+                    ));
+                };
+                let label = input
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let id = self
+                    .actor
+                    .ask(|reply| AgentCommand::ArmTimer {
+                        label,
+                        kind,
+                        after_secs,
+                        reply,
+                    })
+                    .await
+                    .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
+                Ok(serde_json::json!({ "timer_id": id.0 }))
+            }
+            "list_timers" => {
+                let views = self
+                    .actor
+                    .ask(|reply| AgentCommand::ListTimers { reply })
+                    .await
+                    .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
+                serde_json::to_value(views)
+                    .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
+            }
+            "cancel_timer" => {
+                let selector = if input.get("all").and_then(Value::as_bool) == Some(true) {
+                    CancelSelector::All
+                } else if let Some(id) = input.get("id").and_then(Value::as_str) {
+                    CancelSelector::One(TimerId(id.to_string()))
+                } else {
+                    return Err(ToolCallError::InvalidInput(
+                        "cancel_timer requires 'id' or 'all': true".to_string(),
+                    ));
+                };
+                let ids = self
+                    .actor
+                    .ask(|reply| AgentCommand::CancelTimer { selector, reply })
+                    .await
+                    .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
+                let ids: Vec<String> = ids.into_iter().map(|i| i.0).collect();
+                Ok(serde_json::json!({ "cancelled": ids }))
+            }
+            _ => self.inner.execute(name, input).await,
+        }
+    }
 }
 
 /// Captures coarse agent events while forwarding every event to the inner sink.
@@ -792,6 +1156,95 @@ mod tests {
         let before = history.len();
         let fixed = sanitize_for_resume(history);
         assert_eq!(fixed.len(), before);
+    }
+
+    #[test]
+    fn classify_park_kind_when_timers_enabled() {
+        use serde_json::json;
+        // timers on: a kind=park payload classifies as Park.
+        let c = classify_conclusion(true, true, true, json!({"kind": "park"}), None);
+        assert!(matches!(c, Conclusion::Park));
+        // kind=submit classifies as Output(output field).
+        let c = classify_conclusion(
+            true,
+            true,
+            true,
+            json!({"kind": "submit", "output": {"x": 1}}),
+            None,
+        );
+        match c {
+            Conclusion::Output(v) => assert_eq!(v["x"], 1),
+            other => panic!("expected Output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timer_events_fold_into_state() {
+        use crate::timers::{TimerKind, TimerRecord};
+        use std::time::Duration;
+
+        let rec = TimerRecord::arm(
+            "pr".into(),
+            TimerKind::Recurring,
+            Duration::from_secs(60),
+            0,
+        );
+        let id = rec.id.clone();
+        let mut state = AgentActor::initial_state();
+
+        state = AgentActor::apply_event(state, AgentDomainEvent::TimerArmed { record: rec });
+        assert_eq!(state.timers.len(), 1);
+
+        // Recurring fire re-arms in place with a carried next fire time and bumped count.
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerFired {
+                id: id.clone(),
+                next_fire_at_unix_ms: Some(120_000),
+            },
+        );
+        assert_eq!(state.timers.len(), 1);
+        assert_eq!(state.timers[0].fire_count, 1);
+        assert_eq!(state.timers[0].fire_at_unix_ms, 120_000);
+
+        // One-shot fire (None) removes it.
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerFired {
+                id,
+                next_fire_at_unix_ms: None,
+            },
+        );
+        assert!(state.timers.is_empty());
+    }
+
+    #[test]
+    fn park_sets_parked_and_input_clears_it() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(state, AgentDomainEvent::Parked);
+        assert!(state.parked);
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("wake"),
+            },
+        );
+        assert!(!state.parked);
+    }
+
+    #[test]
+    fn cancel_event_removes_selected_timers() {
+        use crate::timers::{TimerKind, TimerRecord};
+        use std::time::Duration;
+        let a = TimerRecord::arm("a".into(), TimerKind::OneShot, Duration::from_secs(1), 0);
+        let b = TimerRecord::arm("b".into(), TimerKind::OneShot, Duration::from_secs(1), 0);
+        let (ia, ib) = (a.id.clone(), b.id.clone());
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(state, AgentDomainEvent::TimerArmed { record: a });
+        state = AgentActor::apply_event(state, AgentDomainEvent::TimerArmed { record: b });
+        state = AgentActor::apply_event(state, AgentDomainEvent::TimerCancelled { ids: vec![ia] });
+        assert_eq!(state.timers.len(), 1);
+        assert_eq!(state.timers[0].id, ib);
     }
 
     #[test]

@@ -33,6 +33,9 @@ pub enum WorkflowCommand {
         tool_call_id: Option<String>,
         question: String,
     },
+    /// An agent parked itself awaiting its timers; the workflow goes idle but stays
+    /// alive so the agent can wake itself when a timer fires.
+    AgentParked { session_id: Uuid },
     /// An agent run failed.
     AgentFailed {
         session_id: Uuid,
@@ -71,6 +74,10 @@ pub enum WorkflowDomainEvent {
         tool_call_id: Option<String>,
     },
     WorkflowResumed,
+    /// The current agent parked itself awaiting its timers.
+    WorkflowParked {
+        session_id: Uuid,
+    },
 }
 
 /// Lifecycle status of a workflow.
@@ -80,6 +87,8 @@ pub enum WorkflowStatus {
     Running,
     Suspended,
     AwaitingUserInput,
+    /// The agent parked itself awaiting timers; it wakes itself on a timer fire.
+    Parked,
     Finished,
     Failed,
 }
@@ -95,6 +104,8 @@ pub enum WorkflowNotification {
     AwaitingUserInput { question: String },
     /// The workflow was suspended (cancel, or a recoverable agent failure).
     Suspended,
+    /// The current agent parked itself awaiting its timers.
+    Parked,
     /// The workflow finished with this output.
     Finished { output: Value },
     /// The workflow failed terminally.
@@ -409,7 +420,7 @@ impl WorkflowActor {
                 // persists the real next state.
                 CommandEffect::none()
             }
-            WorkflowStatus::Suspended => {
+            WorkflowStatus::Suspended | WorkflowStatus::Parked => {
                 let Some(session_id) = state.current_session_id else {
                     return CommandEffect::none();
                 };
@@ -579,6 +590,7 @@ impl EventSourcedActor for WorkflowActor {
                 state.status = WorkflowStatus::Running;
                 state.pending_tool_call = None;
             }
+            WorkflowDomainEvent::WorkflowParked { .. } => state.status = WorkflowStatus::Parked,
         }
         state
     }
@@ -641,6 +653,13 @@ impl EventSourcedActor for WorkflowActor {
                     tool_call_id,
                 }])
             }
+            WorkflowCommand::AgentParked { session_id } => {
+                if !self.is_current(state, session_id) {
+                    return CommandEffect::none();
+                }
+                self.notify(WorkflowNotification::Parked);
+                CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowParked { session_id }])
+            }
         }
     }
 
@@ -650,7 +669,13 @@ impl EventSourcedActor for WorkflowActor {
     /// its `on_recovery_complete`. Suspended / AwaitingUserInput stay dormant until
     /// an explicit `Resume`.
     async fn on_recovery_complete(&mut self, state: &WorkflowState, ctx: &mut ActorContext<Self>) {
-        if state.status != WorkflowStatus::Running {
+        // Re-spawn the current agent when Running (re-drive the interrupted turn) or
+        // Parked (the agent re-arms its timers and keeps firing). Suspended /
+        // AwaitingUserInput stay dormant until an explicit Resume.
+        if !matches!(
+            state.status,
+            WorkflowStatus::Running | WorkflowStatus::Parked
+        ) {
             return;
         }
         let (Some(agent_name), Some(session_id)) =
@@ -751,6 +776,15 @@ mod tests {
         assert_eq!(s.status, WorkflowStatus::AwaitingUserInput);
         s = WorkflowActor::apply_event(s, WorkflowDomainEvent::WorkflowResumed);
         assert_eq!(s.status, WorkflowStatus::Running);
+    }
+
+    #[test]
+    fn parked_event_sets_parked_status() {
+        let s = WorkflowActor::apply_event(
+            WorkflowActor::initial_state(),
+            WorkflowDomainEvent::WorkflowParked { session_id: sess() },
+        );
+        assert_eq!(s.status, WorkflowStatus::Parked);
     }
 
     #[test]

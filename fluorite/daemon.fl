@@ -11,6 +11,7 @@ enum JobStatus {
     Running,
     Suspended,
     AwaitingUserInput,
+    Parked,
     Finished,
     Failed,
 }
@@ -62,6 +63,7 @@ struct StatusInfo {
     uptime_secs: u64,
     running: u32,
     suspended: u32,
+    parked: u32,
     finished: u32,
     failed: u32,
 }
