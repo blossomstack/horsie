@@ -14,12 +14,19 @@ struct MessageStartEvent    { message_id: String, role: Role }
 struct MessageStopEvent     { message_id: String }
 struct MessageCompleteEvent { message_id: String, message: Message }
 
-/// Streaming content blocks — emitted by the provider; index = content block position
-struct TextChunkEvent          { message_id: String, index: u32, text: String }
-struct ThinkingChunkEvent      { message_id: String, index: u32, text: String }
-struct ToolCallStartEvent      { message_id: String, index: u32, tool_call_id: String, name: String }
-struct ToolCallInputDeltaEvent { message_id: String, index: u32, tool_call_id: String, delta: String }
-struct ToolCallInputDoneEvent  { message_id: String, index: u32, tool_call_id: String }
+/// Streaming content blocks — emitted by the provider; index = content block
+/// position. Every block follows the same lifecycle, keyed by index:
+///   Start → Delta* → ContentBlockStop
+/// Only the tool start carries identity (id+name); text/thinking starts are pure
+/// boundary markers. ContentBlockStop is the one generic terminator for all kinds.
+struct TextBlockStartEvent         { message_id: String, index: u32 }
+struct TextChunkEvent              { message_id: String, index: u32, text: String }
+struct ThinkingBlockStartEvent     { message_id: String, index: u32 }
+struct ThinkingChunkEvent          { message_id: String, index: u32, text: String }
+struct ThinkingSignatureChunkEvent { message_id: String, index: u32, signature: String }
+struct ToolCallStartEvent          { message_id: String, index: u32, tool_call_id: String, name: String }
+struct ToolCallInputDeltaEvent     { message_id: String, index: u32, tool_call_id: String, delta: String }
+struct ContentBlockStopEvent       { message_id: String, index: u32 }
 
 /// Tool execution — message_id is the tool-result message id ("result:<tool_call_id>")
 struct ToolExecutingEvent { message_id: String, tool_call_id: String }
@@ -32,7 +39,11 @@ struct RunCompleteEvent { message_id: String, usage: Usage, iterations: u32 }
 ///
 /// Flow per assistant turn:
 ///   InputMessage (once, at the start of run)
-///   MessageStart → (TextChunk | ThinkingChunk | ToolCallStart→Delta*→Done)* → MessageStop → MessageComplete
+///   MessageStart → ( block )* → MessageStop → MessageComplete
+///     where each block is one of:
+///       TextBlockStart     → TextChunk*                              → ContentBlockStop
+///       ThinkingBlockStart → (ThinkingChunk | ThinkingSignatureChunk)* → ContentBlockStop
+///       ToolCallStart      → ToolCallInputDelta*                     → ContentBlockStop
 ///   ToolExecuting → ToolComplete  (one pair per tool call)
 ///   RunComplete
 #[type_tag = "type"]
@@ -41,11 +52,14 @@ union AgentEvent {
     MessageStart(MessageStartEvent),
     MessageStop(MessageStopEvent),
     MessageComplete(MessageCompleteEvent),
+    TextBlockStart(TextBlockStartEvent),
     TextChunk(TextChunkEvent),
+    ThinkingBlockStart(ThinkingBlockStartEvent),
     ThinkingChunk(ThinkingChunkEvent),
+    ThinkingSignatureChunk(ThinkingSignatureChunkEvent),
     ToolCallStart(ToolCallStartEvent),
     ToolCallInputDelta(ToolCallInputDeltaEvent),
-    ToolCallInputDone(ToolCallInputDoneEvent),
+    ContentBlockStop(ContentBlockStopEvent),
     ToolExecuting(ToolExecutingEvent),
     ToolComplete(ToolCompleteEvent),
     RunComplete(RunCompleteEvent),

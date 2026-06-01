@@ -62,11 +62,14 @@ fn event_kinds(events: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::MessageStart(_) => "MessageStart",
             AgentEvent::MessageStop(_) => "MessageStop",
             AgentEvent::MessageComplete(_) => "MessageComplete",
+            AgentEvent::TextBlockStart(_) => "TextBlockStart",
             AgentEvent::TextChunk(_) => "TextChunk",
+            AgentEvent::ThinkingBlockStart(_) => "ThinkingBlockStart",
             AgentEvent::ThinkingChunk(_) => "ThinkingChunk",
+            AgentEvent::ThinkingSignatureChunk(_) => "ThinkingSignatureChunk",
             AgentEvent::ToolCallStart(_) => "ToolCallStart",
             AgentEvent::ToolCallInputDelta(_) => "ToolCallInputDelta",
-            AgentEvent::ToolCallInputDone(_) => "ToolCallInputDone",
+            AgentEvent::ContentBlockStop(_) => "ContentBlockStop",
             AgentEvent::ToolExecuting(_) => "ToolExecuting",
             AgentEvent::ToolComplete(_) => "ToolComplete",
             AgentEvent::RunComplete(_) => "RunComplete",
@@ -257,9 +260,9 @@ async fn test_tool_call_cycle() {
 
 /// Full event sequence for a tool-call turn:
 /// InputMessage
-/// MessageStart → ToolCallStart → ToolCallInputDelta(s) → ToolCallInputDone → MessageStop → MessageComplete
+/// MessageStart → ToolCallStart → ToolCallInputDelta(s) → ContentBlockStop → MessageStop → MessageComplete
 /// ToolExecuting → ToolComplete
-/// MessageStart → TextChunk(s) → MessageStop → MessageComplete
+/// MessageStart → TextBlockStart → TextChunk(s) → ContentBlockStop → MessageStop → MessageComplete
 /// RunComplete
 #[tokio::test]
 async fn test_tool_turn_event_sequence() {
@@ -292,10 +295,11 @@ async fn test_tool_turn_event_sequence() {
     assert_eq!(kinds[0], "InputMessage");
     assert_eq!(*kinds.last().unwrap(), "RunComplete");
 
-    // Turn 1 (tool call): ToolCallStart before ToolCallInputDone before first MessageStop
+    // Turn 1 (tool call): ToolCallStart before the block's ContentBlockStop before
+    // the first MessageStop (the first content-block stop is the tool block's).
     let first_stop = pos("MessageStop");
-    assert!(pos("ToolCallStart") < pos("ToolCallInputDone"));
-    assert!(pos("ToolCallInputDone") < first_stop);
+    assert!(pos("ToolCallStart") < pos("ContentBlockStop"));
+    assert!(pos("ContentBlockStop") < first_stop);
 
     // Tool execution comes after the first MessageComplete
     let first_complete = pos("MessageComplete");
@@ -310,7 +314,7 @@ async fn test_tool_turn_event_sequence() {
     assert!(last_complete < pos("RunComplete"));
 }
 
-/// Tool call IDs are consistent: ToolCallStart, ToolCallInputDone, ToolExecuting, ToolComplete
+/// Tool call IDs are consistent: ToolCallStart, ToolExecuting, ToolComplete
 /// all carry the same tool_call_id.
 #[tokio::test]
 async fn test_tool_call_id_consistency() {
@@ -342,17 +346,6 @@ async fn test_tool_call_id_consistency() {
         })
         .expect("ToolCallStart");
 
-    let done = events
-        .iter()
-        .find_map(|e| {
-            if let AgentEvent::ToolCallInputDone(d) = e {
-                Some(d.clone())
-            } else {
-                None
-            }
-        })
-        .expect("ToolCallInputDone");
-
     let executing = events
         .iter()
         .find_map(|e| {
@@ -375,7 +368,6 @@ async fn test_tool_call_id_consistency() {
         })
         .expect("ToolComplete");
 
-    assert_eq!(done.tool_call_id, start.tool_call_id);
     assert_eq!(executing.tool_call_id, start.tool_call_id);
     assert_eq!(complete.tool_call_id, start.tool_call_id);
     assert_eq!(complete.output, "7");

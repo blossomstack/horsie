@@ -16,7 +16,8 @@ pub use models::agent::{
     UserMessageInput,
 };
 pub use models::events::{
-    AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
-    RunCompleteEvent, TextChunkEvent, ThinkingChunkEvent, ToolCallInputDeltaEvent,
-    ToolCallInputDoneEvent, ToolCallStartEvent, ToolCompleteEvent, ToolExecutingEvent,
+    AgentEvent, ContentBlockStopEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent,
+    MessageStopEvent, RunCompleteEvent, TextBlockStartEvent, TextChunkEvent,
+    ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingSignatureChunkEvent,
+    ToolCallInputDeltaEvent, ToolCallStartEvent, ToolCompleteEvent, ToolExecutingEvent,
 };

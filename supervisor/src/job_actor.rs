@@ -262,9 +262,12 @@ pub fn render_event(event: &AgentEvent) -> Option<String> {
         | AgentEvent::MessageStart(_)
         | AgentEvent::MessageStop(_)
         | AgentEvent::MessageComplete(_)
+        | AgentEvent::TextBlockStart(_)
+        | AgentEvent::ThinkingBlockStart(_)
         | AgentEvent::ThinkingChunk(_)
+        | AgentEvent::ThinkingSignatureChunk(_)
         | AgentEvent::ToolCallInputDelta(_)
-        | AgentEvent::ToolCallInputDone(_)
+        | AgentEvent::ContentBlockStop(_)
         | AgentEvent::ToolExecuting(_) => None,
     }
 }

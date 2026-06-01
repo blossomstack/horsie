@@ -1,8 +1,8 @@
 use agentcore::{
-    AgentEvent, CompletionRequest, CompletionResponse, ContentPart, EventSink, LlmError,
-    LlmProvider, StopReason, TextChunkEvent, TextPart, ThinkingChunkEvent, ThinkingPart,
-    ToolCallInputDeltaEvent, ToolCallInputDoneEvent, ToolCallPart, ToolCallStartEvent, ToolChoice,
-    Usage,
+    AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
+    EventSink, LlmError, LlmProvider, StopReason, TextBlockStartEvent, TextChunkEvent, TextPart,
+    ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingPart, ThinkingSignatureChunkEvent,
+    ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
 };
 use async_anthropic::{
     Client,
@@ -375,11 +375,17 @@ impl LlmProvider for AnthropicProvider {
                     }
                 };
 
-                match event {
+                // Map each raw stream event to at most one AgentEvent while folding
+                // it into the per-block accumulators used to rebuild the final
+                // Message below. Emission happens once, after the match, so the
+                // backpressure `?` lives in a single chokepoint.
+                let mid = message_id.to_string();
+                let to_emit: Option<AgentEvent> = match event {
                     MessagesStreamEvent::MessageStart { message, usage: _ } => {
                         if let Some(u) = &message.usage {
                             input_tokens = u.input_tokens.unwrap_or(0);
                         }
+                        None
                     }
                     MessagesStreamEvent::ContentBlockStart {
                         index,
@@ -387,77 +393,83 @@ impl LlmProvider for AnthropicProvider {
                     } => match content_block {
                         MessageContent::Text(_) => {
                             text_blocks.insert(index, String::new());
+                            Some(AgentEvent::TextBlockStart(TextBlockStartEvent {
+                                message_id: mid,
+                                index: index as u32,
+                            }))
                         }
                         MessageContent::ToolUse(tu) => {
-                            events
-                                .emit(AgentEvent::ToolCallStart(ToolCallStartEvent {
-                                    message_id: message_id.to_string(),
-                                    index: index as u32,
-                                    tool_call_id: tu.id.clone(),
-                                    name: tu.name.clone(),
-                                }))
-                                .await?;
+                            let ev = AgentEvent::ToolCallStart(ToolCallStartEvent {
+                                message_id: mid,
+                                index: index as u32,
+                                tool_call_id: tu.id.clone(),
+                                name: tu.name.clone(),
+                            });
                             tool_blocks.insert(index, (tu.id, tu.name, String::new()));
+                            Some(ev)
                         }
                         MessageContent::Thinking(_) => {
                             thinking_blocks.insert(index, (String::new(), String::new()));
+                            Some(AgentEvent::ThinkingBlockStart(ThinkingBlockStartEvent {
+                                message_id: mid,
+                                index: index as u32,
+                            }))
                         }
-                        MessageContent::ToolResult(_) => {}
+                        MessageContent::ToolResult(_) => None,
                     },
                     MessagesStreamEvent::ContentBlockDelta { index, delta } => match delta {
                         ContentBlockDelta::TextDelta { text } => {
                             if let Some(acc) = text_blocks.get_mut(&index) {
                                 acc.push_str(&text);
                             }
-                            events
-                                .emit(AgentEvent::TextChunk(TextChunkEvent {
-                                    message_id: message_id.to_string(),
-                                    index: index as u32,
-                                    text,
-                                }))
-                                .await?;
+                            Some(AgentEvent::TextChunk(TextChunkEvent {
+                                message_id: mid,
+                                index: index as u32,
+                                text,
+                            }))
                         }
                         ContentBlockDelta::InputJsonDelta { partial_json } => {
-                            if let Some((id, _, acc)) = tool_blocks.get_mut(&index) {
-                                acc.push_str(&partial_json);
-                                events
-                                    .emit(AgentEvent::ToolCallInputDelta(ToolCallInputDeltaEvent {
-                                        message_id: message_id.to_string(),
+                            match tool_blocks.get_mut(&index) {
+                                Some((id, _, acc)) => {
+                                    acc.push_str(&partial_json);
+                                    Some(AgentEvent::ToolCallInputDelta(ToolCallInputDeltaEvent {
+                                        message_id: mid,
                                         index: index as u32,
                                         tool_call_id: id.clone(),
                                         delta: partial_json,
                                     }))
-                                    .await?;
+                                }
+                                None => None,
                             }
                         }
                         ContentBlockDelta::ThinkingDelta { thinking } => {
                             if let Some((acc, _)) = thinking_blocks.get_mut(&index) {
                                 acc.push_str(&thinking);
                             }
-                            events
-                                .emit(AgentEvent::ThinkingChunk(ThinkingChunkEvent {
-                                    message_id: message_id.to_string(),
-                                    index: index as u32,
-                                    text: thinking,
-                                }))
-                                .await?;
+                            Some(AgentEvent::ThinkingChunk(ThinkingChunkEvent {
+                                message_id: mid,
+                                index: index as u32,
+                                text: thinking,
+                            }))
                         }
                         ContentBlockDelta::SignatureDelta { signature } => {
                             if let Some((_, acc_sig)) = thinking_blocks.get_mut(&index) {
                                 acc_sig.push_str(&signature);
                             }
+                            Some(AgentEvent::ThinkingSignatureChunk(
+                                ThinkingSignatureChunkEvent {
+                                    message_id: mid,
+                                    index: index as u32,
+                                    signature,
+                                },
+                            ))
                         }
                     },
                     MessagesStreamEvent::ContentBlockStop { index } => {
-                        if let Some((id, _, _)) = tool_blocks.get(&index) {
-                            events
-                                .emit(AgentEvent::ToolCallInputDone(ToolCallInputDoneEvent {
-                                    message_id: message_id.to_string(),
-                                    index: index as u32,
-                                    tool_call_id: id.clone(),
-                                }))
-                                .await?;
-                        }
+                        Some(AgentEvent::ContentBlockStop(ContentBlockStopEvent {
+                            message_id: mid,
+                            index: index as u32,
+                        }))
                     }
                     MessagesStreamEvent::MessageDelta { delta, usage } => {
                         stop_reason = match delta.stop_reason.as_deref() {
@@ -468,8 +480,13 @@ impl LlmProvider for AnthropicProvider {
                         if let Some(u) = usage {
                             output_tokens = u.output_tokens.unwrap_or(output_tokens);
                         }
+                        None
                     }
-                    MessagesStreamEvent::MessageStop => {}
+                    MessagesStreamEvent::MessageStop => None,
+                };
+
+                if let Some(ev) = to_emit {
+                    events.emit(ev).await?;
                 }
             }
 

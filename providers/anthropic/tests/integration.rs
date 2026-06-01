@@ -124,7 +124,7 @@ async fn test_tool_call_response() {
     );
     assert!(
         evts.iter()
-            .any(|e| matches!(e, AgentEvent::ToolCallInputDone(_)))
+            .any(|e| matches!(e, AgentEvent::ContentBlockStop(_)))
     );
 }
 

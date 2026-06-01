@@ -490,11 +490,14 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
         AgentEvent::InputMessage(_)
         | AgentEvent::MessageStart(_)
         | AgentEvent::MessageStop(_)
+        | AgentEvent::TextBlockStart(_)
         | AgentEvent::TextChunk(_)
+        | AgentEvent::ThinkingBlockStart(_)
         | AgentEvent::ThinkingChunk(_)
+        | AgentEvent::ThinkingSignatureChunk(_)
         | AgentEvent::ToolCallStart(_)
         | AgentEvent::ToolCallInputDelta(_)
-        | AgentEvent::ToolCallInputDone(_)
+        | AgentEvent::ContentBlockStop(_)
         | AgentEvent::ToolExecuting(_) => None,
     }
 }
@@ -551,11 +554,14 @@ fn find_tool_call_id(events: &[AgentEvent], tool_name: &str) -> Option<String> {
         AgentEvent::InputMessage(_)
         | AgentEvent::MessageStart(_)
         | AgentEvent::MessageStop(_)
+        | AgentEvent::TextBlockStart(_)
         | AgentEvent::TextChunk(_)
+        | AgentEvent::ThinkingBlockStart(_)
         | AgentEvent::ThinkingChunk(_)
+        | AgentEvent::ThinkingSignatureChunk(_)
         | AgentEvent::ToolCallStart(_)
         | AgentEvent::ToolCallInputDelta(_)
-        | AgentEvent::ToolCallInputDone(_)
+        | AgentEvent::ContentBlockStop(_)
         | AgentEvent::ToolExecuting(_)
         | AgentEvent::ToolComplete(_)
         | AgentEvent::RunComplete(_) => None,
