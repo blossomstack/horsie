@@ -38,4 +38,9 @@ union Grant {
 struct CapabilitySpec {
     network: NetworkPolicy,
     grants: Vec<Grant>,
+    /// Raw platform sandbox rules (macOS Seatbelt S-expressions; ignored on Linux),
+    /// applied verbatim after the structured grants. The CLI prepends platform defaults
+    /// (see `with_default_seatbelt_rules`). `unsafe_` because they bypass the structured
+    /// grant model.
+    unsafe_seatbelt_rules: Option<Vec<String>>,
 }

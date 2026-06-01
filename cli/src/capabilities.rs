@@ -58,7 +58,36 @@ fn resolve_user_paths_with(spec: CapabilitySpec, home: Option<&str>) -> Capabili
     CapabilitySpec {
         network: spec.network,
         grants,
+        unsafe_seatbelt_rules: spec.unsafe_seatbelt_rules,
     }
+}
+
+/// Platform default raw Seatbelt rules prepended by [`with_default_seatbelt_rules`].
+/// macOS Secure Transport needs `com.apple.SecurityServer` to validate a TLS cert;
+/// without it cargo's libgit2 git fetches fail with `errSSLBadCert (-9808)` in the
+/// sandbox. The keychain daemons stay denied, so secrets are unaffected. Empty off macOS.
+fn default_seatbelt_rules() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        vec![r#"(allow mach-lookup (global-name "com.apple.SecurityServer"))"#.to_string()]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Prepend [`default_seatbelt_rules`] to the spec's authored rules.
+///
+/// Applied to the effective spec before it is persisted to `capabilities.json`, so the
+/// default applies even to author-supplied files (which replace the built-in default).
+/// Prepended, not appended: an author's trailing `(deny ...)` then wins under Seatbelt's
+/// last-rule-wins, opting the run back out.
+pub fn with_default_seatbelt_rules(mut spec: CapabilitySpec) -> CapabilitySpec {
+    let mut rules = default_seatbelt_rules();
+    rules.extend(spec.unsafe_seatbelt_rules.take().unwrap_or_default());
+    spec.unsafe_seatbelt_rules = if rules.is_empty() { None } else { Some(rules) };
+    spec
 }
 
 /// The shipped default capability file for the current platform, embedded at compile
@@ -228,6 +257,7 @@ mod tests {
                     access: Access::ReadWrite,
                 }),
             ],
+            unsafe_seatbelt_rules: None,
         };
         let resolved = resolve_user_paths_with(spec, Some("/home/u"));
         assert_eq!(
@@ -247,7 +277,73 @@ mod tests {
                         access: Access::ReadWrite
                     }),
                 ],
+                unsafe_seatbelt_rules: None,
             }
         );
+    }
+
+    // The macOS-only platform default; tests assert relative to it so they pass on Linux
+    // (where the default is `[]`) too.
+    const SECURITY_SERVER_ALLOW: &str =
+        r#"(allow mach-lookup (global-name "com.apple.SecurityServer"))"#;
+
+    fn spec_with_rules(rules: Option<Vec<String>>) -> CapabilitySpec {
+        CapabilitySpec {
+            network: NetworkPolicy::Block,
+            grants: vec![],
+            unsafe_seatbelt_rules: rules,
+        }
+    }
+
+    #[test]
+    fn default_seatbelt_rules_allow_security_server_on_macos_only() {
+        let rules = default_seatbelt_rules();
+        if cfg!(target_os = "macos") {
+            assert_eq!(rules, vec![SECURITY_SERVER_ALLOW.to_string()]);
+        } else {
+            assert!(rules.is_empty());
+        }
+    }
+
+    #[test]
+    fn with_default_seatbelt_rules_injects_default_when_author_supplied_none() {
+        let merged = with_default_seatbelt_rules(spec_with_rules(None));
+        assert_eq!(merged.unsafe_seatbelt_rules, default_into_option());
+    }
+
+    #[test]
+    fn with_default_seatbelt_rules_merges_author_rules_after_defaults() {
+        let authored = "(allow iokit-get-properties)".to_string();
+        let merged = with_default_seatbelt_rules(spec_with_rules(Some(vec![authored.clone()])));
+        let mut expected = default_seatbelt_rules();
+        expected.push(authored);
+        // Defaults come first so an authored deny would win under last-rule-wins.
+        assert_eq!(merged.unsafe_seatbelt_rules, Some(expected));
+    }
+
+    #[test]
+    fn with_default_seatbelt_rules_lets_author_deny_override_the_default() {
+        // An authored deny lands last, so Seatbelt honours it over the prepended allow.
+        let deny = r#"(deny mach-lookup (global-name "com.apple.SecurityServer"))"#.to_string();
+        let merged = with_default_seatbelt_rules(spec_with_rules(Some(vec![deny.clone()])));
+        let rules = merged.unsafe_seatbelt_rules.unwrap_or_default();
+        assert_eq!(
+            rules.last(),
+            Some(&deny),
+            "author's deny must be the last rule"
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                rules.first().map(String::as_str),
+                Some(SECURITY_SERVER_ALLOW)
+            );
+        }
+    }
+
+    /// The platform default in the `Option` shape `with_default_seatbelt_rules` yields
+    /// from an empty input (`None` off macOS).
+    fn default_into_option() -> Option<Vec<String>> {
+        let d = default_seatbelt_rules();
+        if d.is_empty() { None } else { Some(d) }
     }
 }

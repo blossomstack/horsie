@@ -196,6 +196,7 @@ fn spec(def: WorkflowDefinition) -> JobSpec {
         capabilities: CapabilitySpec {
             network: NetworkPolicy::Block,
             grants: vec![],
+            unsafe_seatbelt_rules: None,
         },
     }
 }

@@ -76,6 +76,12 @@ pub fn apply(
         NetworkPolicy::Allow => {}
     }
 
+    // Raw platform rules verbatim (macOS Seatbelt; ignored on Linux). nono validates
+    // each and emits them after the structured grants, so a trailing `(deny ...)` wins.
+    for rule in spec.unsafe_seatbelt_rules.iter().flatten() {
+        caps = caps.platform_rule(rule).map_err(|e| e.to_string())?;
+    }
+
     // Diagnostics: when `HORSIE_SANDBOX_DEBUG_DENY` is set, emit `(debug deny)` so the
     // kernel logs every sandbox denial (visible via `log show --predicate 'eventMessage
     // CONTAINS "deny("'`). Off by default — it is noisy and only needed when hunting a

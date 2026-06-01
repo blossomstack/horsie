@@ -157,10 +157,12 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
 
     let result = match req {
         DaemonRequest::Submit(s) => {
-            let caps = capabilities::resolve_user_paths(
+            // Resolve the effective spec, then prepend the platform default Seatbelt
+            // rules (see `with_default_seatbelt_rules`).
+            let caps = capabilities::with_default_seatbelt_rules(capabilities::resolve_user_paths(
                 s.capabilities
                     .unwrap_or_else(|| daemon.default_caps.clone()),
-            );
+            ));
             let spec = JobSpec {
                 workflow: s.workflow,
                 workflow_name: s.workflow_name,
