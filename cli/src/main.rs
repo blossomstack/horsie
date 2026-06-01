@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 #[derive(Parser)]
 #[command(
     name = "october",
+    version,
     about = "Run agent workflows in a nono-sandboxed runtime, supervised by a local daemon"
 )]
 struct Cli {

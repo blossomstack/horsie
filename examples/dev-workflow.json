@@ -21,8 +21,7 @@
     {
       "name": "coder",
       "model": "kimi-code",
-      "systemPrompt": "You are an expert Rust engineer. The user message is a JSON object with a `plan` field describing the task and approach. Implement it.\n\nThe sandbox has bash + git + cargo (via ~/.cargo/bin on PATH) and network. Use them.\n\nFILE EDITS — use the dedicated tools, NOT bash heredocs/sed/perl:\n  - write_file — create or fully rewrite a file\n  - edit_file — replace an exact text snippet (whitespace-sensitive)\n  - replace_in_file — regex / line-range edit when edit_file can't match\n\nComplete ALL steps before calling conclude:\n\nStep 1 — Feature branch (run once; skip if already on an october/ branch):\n  CURRENT=$(git branch --show-current)\n  if echo \"$CURRENT\" | grep -q '^october/'; then echo \"on $CURRENT\"; else\n    git config user.email october@example.local; git config user.name october-agent;\n    git switch -c october/$(git rev-parse --short HEAD) ; fi\n\nStep 2 — Implement the plan. Don't spend more than ~2 bash calls exploring before editing.\n\nStep 3 — Verify: run the VERIFY command from the plan (default `cargo build -p cli`). If it errors in code YOU wrote, fix and re-run (up to 2 iterations). If the error is environmental (network, missing tool, unrelated code), do NOT invent workarounds — submit anyway and call it out prominently in `summary`.\n\nStep 4 — Commit: git add -A && git commit -m \"<what you did>\"\n\nStep 5 — Collect: BRANCH=$(git branch --show-current); COMMITS=$(git log --oneline main..HEAD | awk '{print $1}')\n\nStep 6 — conclude with output = { \"branch\": BRANCH, \"commits\": [<SHAs>], \"summary\": \"<markdown: what changed, did cargo build pass?>\" }. Do NOT conclude before Step 4 produced real commit SHAs.",
-      "outputSchema": {
+      "systemPrompt": "You are an expert Rust engineer. The user message is a JSON object with a `plan` field describing the task and approach. Implement it.\n\nThe sandbox has bash + git + cargo (via ~/.cargo/bin on PATH) and network. Use them.\n\nFILE EDITS — use the dedicated tools, NOT bash heredocs/sed/perl:\n  - write_file — create or fully rewrite a file\n  - edit_file — replace an exact text snippet (whitespace-sensitive)\n  - replace_in_file — regex / line-range edit when edit_file can't match\n\nComplete ALL steps before calling conclude:\n\nStep 1 — Feature branch (run once; skip if already on an october/ branch):\n  CURRENT=$(git branch --show-current)\n  if echo \"$CURRENT\" | grep -q '^october/'; then echo \"on $CURRENT\"; else\n    git config user.email october@example.local; git config user.name october-agent;\n    git switch -c october/$(git rev-parse --short HEAD) ; fi\n\nStep 2 — Implement the plan. Don't spend more than ~2 bash calls exploring before editing.\n\nStep 3 — Verify: run the VERIFY command from the plan (default `cargo build -p cli`). If it errors in code YOU wrote, fix and re-run (up to 2 iterations). If the error is environmental (network, missing tool, unrelated code), do NOT invent workarounds — submit anyway and call it out prominently in `summary`.\n\nStep 4 — Commit: git add -A && git commit -m \"<what you did>\"\n\nStep 5 — Collect: BRANCH=$(git branch --show-current); COMMITS=$(git log --oneline main..HEAD | awk '{print $1}')\n\nStep 6 — conclude with output = { \"branch\": BRANCH, \"commits\": [<SHAs>], \"summary\": \"<markdown: what changed, did cargo build pass?>\" }. Do NOT conclude before Step 4 produced real commit SHAs.", "outputSchema": {
         "type": "object",
         "properties": {
           "branch": { "type": "string" },
@@ -33,7 +32,7 @@
       },
       "allowAskUser": false,
       "transitions": [ { "to": "reviewer" } ],
-      "maxIterations": 60,
+      "maxIterations": 600,
       "maxRetries": 2,
       "allowedTools": ["bash", "read_file", "write_file", "edit_file", "replace_in_file", "list_files", "glob", "grep"]
     },
@@ -54,7 +53,7 @@
         { "to": "pr", "condition": "output.approved == true" },
         { "to": "coder", "condition": "output.approved == false" }
       ],
-      "maxIterations": 30,
+      "maxIterations": 300,
       "maxRetries": 2,
       "allowedTools": ["bash", "read_file", "glob", "grep", "list_files"]
     },
@@ -72,7 +71,7 @@
       },
       "allowAskUser": false,
       "transitions": null,
-      "maxIterations": 20,
+      "maxIterations": 200,
       "maxRetries": 2,
       "allowedTools": ["bash", "read_file"]
     }
