@@ -1,6 +1,6 @@
 # Examples
 
-A worked example of driving october end to end: a multi-agent **dev workflow**
+A worked example of driving horsie end to end: a multi-agent **dev workflow**
 that plans, codes, reviews, and opens a pull request, plus the **capability file**
 that lets those agents build and push.
 
@@ -13,14 +13,14 @@ that lets those agents build and push.
 - **`dev-workflow-capabilities.json`** — a `CapabilitySpec` that grants the sandbox
   what the agents need to be useful: network, the Rust toolchain (`~/.cargo`,
   `~/.rustup`), and the credentials for pushing + opening a PR (`~/.ssh`, `~/.config/gh`).
-  Home-relative paths (`~/…`) are resolved per-user when october loads the file, so
+  Home-relative paths (`~/…`) are resolved per-user when horsie loads the file, so
   this file is portable across machines. System directories for both macOS and Linux
   are listed; paths absent on a given host are skipped.
 
 ## Prerequisites
 
-1. **A model** named `kimi-code` in your october config
-   (`~/.config/october/config.json`) — or edit the `model` fields in the workflow to
+1. **A model** named `kimi-code` in your horsie config
+   (`~/.config/horsie/config.json`) — or edit the `model` fields in the workflow to
    match a model you have configured. For example:
 
    ```json
@@ -41,7 +41,7 @@ that lets those agents build and push.
 ## Run
 
 ```bash
-october run \
+horsie run \
   --workflow examples/dev-workflow.json \
   --capabilities examples/dev-workflow-capabilities.json \
   --workdir /path/to/a/checkout \
@@ -49,7 +49,7 @@ october run \
 ```
 
 `--workdir` should be a git checkout whose `origin` is the SSH remote you want the PR
-opened against. The agents work on a fresh `october/<sha>` branch; only the final
+opened against. The agents work on a fresh `horsie/<sha>` branch; only the final
 `pr` agent pushes and opens the PR.
 
 ## Security note

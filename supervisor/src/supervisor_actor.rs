@@ -225,7 +225,7 @@ impl EventSourcedActor for SupervisorActor {
             },
             SupervisorCommand::Shutdown { reply } => {
                 // Ask every live job to release its runtime child, then await all acks
-                // so no october-runtime process is orphaned when the daemon exits.
+                // so no horsie-runtime process is orphaned when the daemon exits.
                 let mut acks = Vec::new();
                 for child in self.children.values() {
                     let (tx, rx) = oneshot::channel();

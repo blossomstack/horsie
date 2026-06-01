@@ -1,5 +1,5 @@
 //! Real-sandbox end-to-end test: drive the production `ProcessJobRuntime` through
-//! the `SupervisorActor`, spawning a genuine nono-sandboxed `october-runtime`
+//! the `SupervisorActor`, spawning a genuine nono-sandboxed `horsie-runtime`
 //! child, with `mock-llm` behind the provider. This is the coverage that the old
 //! `cli::run`-based `cli_e2e.rs` provided before the daemon refactor — it proves
 //! the executor/runtime/capability assembly actually works, which the supervisor's
@@ -13,7 +13,7 @@
 
 use actor::{ActorRef, FileJournal, Journal, spawn_root};
 use cli::capabilities::{builtin_default, resolve_user_paths};
-use cli::config::{OctoberConfig, build_registry};
+use cli::config::{HorsieConfig, build_registry};
 use mock_llm::MockLlmServer;
 use models::daemon::{JobStatus, JobSummary};
 use models::workflow::{WorkflowAgentDef, WorkflowDefinition};
@@ -30,7 +30,7 @@ const CONCLUDE: &str = workflow::CONCLUDE_TOOL;
 // ── sandbox probe harness (ported from the former cli_e2e.rs) ────────────────
 
 fn locate_runtime_bin() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("OCTOBER_RUNTIME_BIN") {
+    if let Some(p) = std::env::var_os("HORSIE_RUNTIME_BIN") {
         let p = PathBuf::from(p);
         if p.exists() {
             return Some(p);
@@ -39,12 +39,12 @@ fn locate_runtime_bin() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?; // .../target/<profile>/deps
     if let Some(profile) = dir.parent() {
-        let cand = profile.join("october-runtime");
+        let cand = profile.join("horsie-runtime");
         if cand.exists() {
             return Some(cand);
         }
     }
-    let cand = dir.join("october-runtime");
+    let cand = dir.join("horsie-runtime");
     cand.exists().then_some(cand)
 }
 
@@ -90,7 +90,7 @@ fn probe_sandbox(bin: &Path) -> SandboxProbe {
 /// with a rebuild hint if the binary is stale.
 fn runtime_or_skip(test: &str) -> Option<PathBuf> {
     let Some(bin) = locate_runtime_bin() else {
-        eprintln!("skipping {test}: october-runtime binary not found");
+        eprintln!("skipping {test}: horsie-runtime binary not found");
         return None;
     };
     match probe_sandbox(&bin) {
@@ -100,7 +100,7 @@ fn runtime_or_skip(test: &str) -> Option<PathBuf> {
             None
         }
         SandboxProbe::Incompatible => panic!(
-            "october-runtime at {} does not understand the current CLI flags — it is a \
+            "horsie-runtime at {} does not understand the current CLI flags — it is a \
              stale build. Rebuild it with `cargo build -p runtime` (or run the suite via \
              `cargo test --workspace`, which rebuilds it).",
             bin.display()
@@ -110,7 +110,7 @@ fn runtime_or_skip(test: &str) -> Option<PathBuf> {
 
 // ── supervisor harness ───────────────────────────────────────────────────────
 
-fn config_with_mock(root: &Path, mock_url: &str) -> OctoberConfig {
+fn config_with_mock(root: &Path, mock_url: &str) -> HorsieConfig {
     let cfg = json!({
         "providers": { "local": { "type": "anthropic", "base_url": mock_url } },
         "models": { "m": { "provider": "local", "model_id": "test-model" } },
@@ -140,7 +140,7 @@ fn bash_workflow(tools: &[&str]) -> WorkflowDefinition {
     }
 }
 
-fn boot(root: &Path, cfg: &OctoberConfig, bin: PathBuf) -> ActorRef<SupervisorCommand> {
+fn boot(root: &Path, cfg: &HorsieConfig, bin: PathBuf) -> ActorRef<SupervisorCommand> {
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(root.join("state")));
     let deps = SupervisorDeps {
         provider_registry: build_registry(cfg).unwrap(),

@@ -9,12 +9,12 @@ use std::sync::Arc;
 /// CLI-owned policy (hand-written serde — NOT a fluorite protocol type). The
 /// workflow file stays a pure `WorkflowDefinition`, reusable across server/CLI.
 ///
-/// All fields default, so `OctoberConfig::default()` is a valid empty config
+/// All fields default, so `HorsieConfig::default()` is a valid empty config
 /// (no providers, no models, default storage/sandbox/runtime). An empty config
 /// is a legal state — `validate` is what rejects workflows that reference models
 /// the config doesn't define.
 #[derive(Debug, Default, Deserialize)]
-pub struct OctoberConfig {
+pub struct HorsieConfig {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
@@ -63,13 +63,13 @@ pub struct SandboxConfig {
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {
     /// Ephemeral runtime state: the daemon control socket, pidfile, log, and
-    /// per-job capability files. Defaults to `$XDG_STATE_HOME/october`, else
-    /// `$HOME/.local/state/october` (same path on macOS and Linux).
+    /// per-job capability files. Defaults to `$XDG_STATE_HOME/horsie`, else
+    /// `$HOME/.local/state/horsie` (same path on macOS and Linux).
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
     /// Durable job history: the event-sourcing journal replayed to resume
-    /// interrupted jobs. Defaults to `$XDG_DATA_HOME/october`, else
-    /// `$HOME/.local/share/october` (same path on macOS and Linux).
+    /// interrupted jobs. Defaults to `$XDG_DATA_HOME/horsie`, else
+    /// `$HOME/.local/share/horsie` (same path on macOS and Linux).
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 }
@@ -85,13 +85,13 @@ impl Default for StorageConfig {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct RuntimeConfig {
-    /// Path to the `october-runtime` binary the daemon spawns per job. Absent →
-    /// the sibling `october-runtime` next to the running CLI executable.
+    /// Path to the `horsie-runtime` binary the daemon spawns per job. Absent →
+    /// the sibling `horsie-runtime` next to the running CLI executable.
     #[serde(default)]
     pub bin: Option<PathBuf>,
 }
 
-impl OctoberConfig {
+impl HorsieConfig {
     pub fn load(path: &Path) -> Result<Self, CliError> {
         let text = std::fs::read_to_string(path).map_err(|e| CliError::Io(e.to_string()))?;
         serde_json::from_str(&text).map_err(|e| CliError::Config(e.to_string()))
@@ -101,7 +101,7 @@ impl OctoberConfig {
     /// - `explicit` path given (the `--config` flag) → load it; a missing or
     ///   malformed file is an error, since the user asked for it by name.
     /// - no flag → load the user config at [`user_config_path`] if it exists;
-    ///   otherwise fall back to an empty [`OctoberConfig::default`].
+    ///   otherwise fall back to an empty [`HorsieConfig::default`].
     pub fn resolve(explicit: Option<&Path>) -> Result<Self, CliError> {
         Self::resolve_with(explicit, user_config_path())
     }
@@ -119,7 +119,7 @@ impl OctoberConfig {
     }
 }
 
-/// The default user config path, `<config-dir>/october/config.json`, where
+/// The default user config path, `<config-dir>/horsie/config.json`, where
 /// `<config-dir>` is `$XDG_CONFIG_HOME` if set, else `$HOME/.config`. Same path
 /// on macOS and Linux. Returns `None` when neither env var is available.
 fn user_config_path() -> Option<PathBuf> {
@@ -139,12 +139,12 @@ fn user_config_path_from(
         Some(x) if !x.is_empty() => PathBuf::from(x),
         _ => PathBuf::from(home?).join(".config"),
     };
-    Some(config_dir.join("october").join("config.json"))
+    Some(config_dir.join("horsie").join("config.json"))
 }
 
 /// Default state dir for ephemeral runtime files (control socket, pidfile, log,
-/// per-job capability files): `$XDG_STATE_HOME/october` if set, else
-/// `$HOME/.local/state/october`. Same path on macOS and Linux.
+/// per-job capability files): `$XDG_STATE_HOME/horsie` if set, else
+/// `$HOME/.local/state/horsie`. Same path on macOS and Linux.
 fn default_state_dir() -> PathBuf {
     storage_dir_from(
         std::env::var_os("XDG_STATE_HOME"),
@@ -154,8 +154,8 @@ fn default_state_dir() -> PathBuf {
     )
 }
 
-/// Default data dir for the durable job journal: `$XDG_DATA_HOME/october` if set,
-/// else `$HOME/.local/share/october`. Same path on macOS and Linux.
+/// Default data dir for the durable job journal: `$XDG_DATA_HOME/horsie` if set,
+/// else `$HOME/.local/share/horsie`. Same path on macOS and Linux.
 fn default_data_dir() -> PathBuf {
     storage_dir_from(
         std::env::var_os("XDG_DATA_HOME"),
@@ -166,8 +166,8 @@ fn default_data_dir() -> PathBuf {
 }
 
 /// Pure core of the storage-dir defaults: prefer a non-empty XDG base var joined
-/// with `october`; else `$HOME/<home_subdir>/october`; else, when neither env var
-/// is available (rare), a relative `./.october/<fallback_leaf>` so state and data
+/// with `horsie`; else `$HOME/<home_subdir>/horsie`; else, when neither env var
+/// is available (rare), a relative `./.horsie/<fallback_leaf>` so state and data
 /// stay distinct without a home directory.
 fn storage_dir_from(
     xdg_base: Option<std::ffi::OsString>,
@@ -176,10 +176,10 @@ fn storage_dir_from(
     fallback_leaf: &str,
 ) -> PathBuf {
     match xdg_base {
-        Some(x) if !x.is_empty() => PathBuf::from(x).join("october"),
+        Some(x) if !x.is_empty() => PathBuf::from(x).join("horsie"),
         _ => match home {
-            Some(h) if !h.is_empty() => PathBuf::from(h).join(home_subdir).join("october"),
-            _ => PathBuf::from("./.october").join(fallback_leaf),
+            Some(h) if !h.is_empty() => PathBuf::from(h).join(home_subdir).join("horsie"),
+            _ => PathBuf::from("./.horsie").join(fallback_leaf),
         },
     }
 }
@@ -188,7 +188,7 @@ fn storage_dir_from(
 /// The key is resolved inline-then-env-then-none; a configured-but-missing/empty key
 /// fails here, before any runtime is spawned.
 pub fn build_registry(
-    cfg: &OctoberConfig,
+    cfg: &HorsieConfig,
 ) -> Result<HashMap<String, Arc<dyn LlmProvider>>, CliError> {
     let mut reg: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
     for (model_key, mc) in &cfg.models {
@@ -264,7 +264,7 @@ mod tests {
             "sandbox": { "capabilities_file": null },
             "storage": { "state_dir": "/var/state", "data_dir": "/var/data" }
         }"#;
-        let cfg: OctoberConfig = serde_json::from_str(json).unwrap();
+        let cfg: HorsieConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.providers.contains_key("anthropic"));
         assert_eq!(cfg.models["sonnet"].model_id, "claude-sonnet-4-6");
         assert_eq!(cfg.storage.state_dir, PathBuf::from("/var/state"));
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn inline_api_key_builds_registry_without_env() {
         // Inline key path needs no env var and no network — just constructs providers.
-        let cfg: OctoberConfig = serde_json::from_str(
+        let cfg: HorsieConfig = serde_json::from_str(
             r#"{
                 "providers": { "p": { "type": "anthropic", "api_key": "sk-inline", "base_url": "http://localhost:1" } },
                 "models": { "m": { "provider": "p", "model_id": "id" } }
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn empty_inline_api_key_is_rejected() {
-        let cfg: OctoberConfig = serde_json::from_str(
+        let cfg: HorsieConfig = serde_json::from_str(
             r#"{
                 "providers": { "p": { "type": "anthropic", "api_key": "" } },
                 "models": { "m": { "provider": "p", "model_id": "id" } }
@@ -299,23 +299,23 @@ mod tests {
 
     #[test]
     fn parses_sandbox_capabilities_file() {
-        let cfg: OctoberConfig = serde_json::from_str(
+        let cfg: HorsieConfig = serde_json::from_str(
             r#"{
                 "providers": { "p": { "type": "anthropic", "base_url": "http://localhost:1" } },
                 "models": { "m": { "provider": "p", "model_id": "id" } },
-                "sandbox": { "capabilities_file": "/etc/october/caps.json" }
+                "sandbox": { "capabilities_file": "/etc/horsie/caps.json" }
             }"#,
         )
         .unwrap();
         assert_eq!(
             cfg.sandbox.capabilities_file,
-            Some(PathBuf::from("/etc/october/caps.json"))
+            Some(PathBuf::from("/etc/horsie/caps.json"))
         );
     }
 
     #[test]
     fn capabilities_file_defaults_to_none() {
-        let cfg: OctoberConfig = serde_json::from_str(
+        let cfg: HorsieConfig = serde_json::from_str(
             r#"{
                 "providers": { "p": { "type": "anthropic", "base_url": "http://localhost:1" } },
                 "models": { "m": { "provider": "p", "model_id": "id" } }
@@ -327,24 +327,24 @@ mod tests {
 
     #[test]
     fn parses_runtime_bin() {
-        let cfg: OctoberConfig =
-            serde_json::from_str(r#"{ "runtime": { "bin": "/opt/october/october-runtime" } }"#)
+        let cfg: HorsieConfig =
+            serde_json::from_str(r#"{ "runtime": { "bin": "/opt/horsie/horsie-runtime" } }"#)
                 .unwrap();
         assert_eq!(
             cfg.runtime.bin,
-            Some(PathBuf::from("/opt/october/october-runtime"))
+            Some(PathBuf::from("/opt/horsie/horsie-runtime"))
         );
     }
 
     #[test]
     fn runtime_bin_defaults_to_none() {
-        let cfg: OctoberConfig = serde_json::from_str("{}").unwrap();
+        let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.runtime.bin.is_none());
     }
 
     #[test]
     fn default_config_is_empty_but_valid() {
-        let cfg = OctoberConfig::default();
+        let cfg = HorsieConfig::default();
         assert!(cfg.providers.is_empty());
         assert!(cfg.models.is_empty());
         // State and data resolve to distinct dirs (different XDG bases / leaves).
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn parses_config_with_no_providers_or_models() {
         // A file present but missing providers/models parses to empty maps.
-        let cfg: OctoberConfig = serde_json::from_str("{}").unwrap();
+        let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.providers.is_empty());
         assert!(cfg.models.is_empty());
     }
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn user_config_path_prefers_xdg() {
         let p = user_config_path_from(Some("/xdg".into()), Some("/home/u".into()));
-        assert_eq!(p, Some(PathBuf::from("/xdg/october/config.json")));
+        assert_eq!(p, Some(PathBuf::from("/xdg/horsie/config.json")));
     }
 
     #[test]
@@ -371,10 +371,7 @@ mod tests {
         // Unset and empty XDG both fall through to $HOME/.config.
         for xdg in [None, Some("".into())] {
             let p = user_config_path_from(xdg, Some("/home/u".into()));
-            assert_eq!(
-                p,
-                Some(PathBuf::from("/home/u/.config/october/config.json"))
-            );
+            assert_eq!(p, Some(PathBuf::from("/home/u/.config/horsie/config.json")));
         }
     }
 
@@ -393,7 +390,7 @@ mod tests {
             r#"{ "providers": {}, "models": { "m": { "provider": "p", "model_id": "id" } } }"#,
         )
         .unwrap();
-        let cfg = OctoberConfig::resolve(Some(&path)).unwrap();
+        let cfg = HorsieConfig::resolve(Some(&path)).unwrap();
         assert!(cfg.models.contains_key("m"));
     }
 
@@ -401,7 +398,7 @@ mod tests {
     fn resolve_errors_on_missing_explicit_path() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.json");
-        assert!(OctoberConfig::resolve(Some(&missing)).is_err());
+        assert!(HorsieConfig::resolve(Some(&missing)).is_err());
     }
 
     #[test]
@@ -413,7 +410,7 @@ mod tests {
             r#"{ "models": { "u": { "provider": "p", "model_id": "id" } } }"#,
         )
         .unwrap();
-        let cfg = OctoberConfig::resolve_with(None, Some(path)).unwrap();
+        let cfg = HorsieConfig::resolve_with(None, Some(path)).unwrap();
         assert!(cfg.models.contains_key("u"));
     }
 
@@ -422,11 +419,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.json");
         // No flag and the user config does not exist → empty default config.
-        let cfg = OctoberConfig::resolve_with(None, Some(missing)).unwrap();
+        let cfg = HorsieConfig::resolve_with(None, Some(missing)).unwrap();
         assert!(cfg.providers.is_empty());
         assert!(cfg.models.is_empty());
 
-        let cfg = OctoberConfig::resolve_with(None, None).unwrap();
+        let cfg = HorsieConfig::resolve_with(None, None).unwrap();
         assert!(cfg.models.is_empty());
     }
 
@@ -436,7 +433,7 @@ mod tests {
             "providers": { "m": { "type": "anthropic", "base_url": "http://localhost:1" } },
             "models": { "x": { "provider": "m", "model_id": "id" } }
         }"#;
-        let cfg: OctoberConfig = serde_json::from_str(json).unwrap();
+        let cfg: HorsieConfig = serde_json::from_str(json).unwrap();
         assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
         assert!(cfg.sandbox.capabilities_file.is_none());
         assert!(cfg.models["x"].max_tokens.is_none());
@@ -450,14 +447,14 @@ mod tests {
             ".local/state",
             "state",
         );
-        assert_eq!(state, PathBuf::from("/xdg/state/october"));
+        assert_eq!(state, PathBuf::from("/xdg/state/horsie"));
         let data = storage_dir_from(
             Some("/xdg/data".into()),
             Some("/home/u".into()),
             ".local/share",
             "data",
         );
-        assert_eq!(data, PathBuf::from("/xdg/data/october"));
+        assert_eq!(data, PathBuf::from("/xdg/data/horsie"));
     }
 
     #[test]
@@ -465,10 +462,10 @@ mod tests {
         // Unset and empty XDG both fall through to the $HOME subdir.
         for xdg in [None, Some("".into())] {
             let p = storage_dir_from(xdg, Some("/home/u".into()), ".local/state", "state");
-            assert_eq!(p, PathBuf::from("/home/u/.local/state/october"));
+            assert_eq!(p, PathBuf::from("/home/u/.local/state/horsie"));
         }
         let p = storage_dir_from(None, Some("/home/u".into()), ".local/share", "data");
-        assert_eq!(p, PathBuf::from("/home/u/.local/share/october"));
+        assert_eq!(p, PathBuf::from("/home/u/.local/share/horsie"));
     }
 
     #[test]
@@ -476,8 +473,8 @@ mod tests {
         // Neither XDG nor HOME → distinct relative leaves, never colliding.
         let state = storage_dir_from(None, None, ".local/state", "state");
         let data = storage_dir_from(Some("".into()), Some("".into()), ".local/share", "data");
-        assert_eq!(state, PathBuf::from("./.october/state"));
-        assert_eq!(data, PathBuf::from("./.october/data"));
+        assert_eq!(state, PathBuf::from("./.horsie/state"));
+        assert_eq!(data, PathBuf::from("./.horsie/data"));
         assert_ne!(state, data);
     }
 }

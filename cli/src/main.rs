@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use cli::client;
-use cli::config::OctoberConfig;
+use cli::config::HorsieConfig;
 use cli::daemon;
 use cli::error::CliError;
 use cli::validate::validate;
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
-    name = "october",
+    name = "horsie",
     version,
     about = "Run agent workflows in a nono-sandboxed runtime, supervised by a local daemon"
 )]
@@ -26,8 +26,8 @@ enum Command {
     Validate {
         #[arg(long)]
         workflow: PathBuf,
-        /// Config path. Omit to use `$XDG_CONFIG_HOME/october/config.json`
-        /// (else `~/.config/october/config.json`), or an empty config if absent.
+        /// Config path. Omit to use `$XDG_CONFIG_HOME/horsie/config.json`
+        /// (else `~/.config/horsie/config.json`), or an empty config if absent.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -35,8 +35,8 @@ enum Command {
     Run {
         #[arg(long)]
         workflow: PathBuf,
-        /// Config path. Omit to use `$XDG_CONFIG_HOME/october/config.json`
-        /// (else `~/.config/october/config.json`), or an empty config if absent.
+        /// Config path. Omit to use `$XDG_CONFIG_HOME/horsie/config.json`
+        /// (else `~/.config/horsie/config.json`), or an empty config if absent.
         #[arg(long)]
         config: Option<PathBuf>,
         #[arg(long)]
@@ -128,10 +128,10 @@ enum JobAction {
 }
 
 /// Resolve the state dir (where the daemon control socket lives) from config:
-/// `storage.state_dir`, defaulting to `$XDG_STATE_HOME/october`. Every client
+/// `storage.state_dir`, defaulting to `$XDG_STATE_HOME/horsie`. Every client
 /// command connects to the socket under this dir.
 fn resolve_state_dir(config: Option<&Path>) -> Result<PathBuf, CliError> {
-    Ok(OctoberConfig::resolve(config)?.storage.state_dir)
+    Ok(HorsieConfig::resolve(config)?.storage.state_dir)
 }
 
 fn load_workflow(path: &Path) -> Result<WorkflowDefinition, CliError> {
@@ -140,7 +140,7 @@ fn load_workflow(path: &Path) -> Result<WorkflowDefinition, CliError> {
 }
 
 fn do_validate(workflow: PathBuf, config: Option<PathBuf>) -> i32 {
-    let cfg = match OctoberConfig::resolve(config.as_deref()) {
+    let cfg = match HorsieConfig::resolve(config.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
@@ -183,7 +183,7 @@ fn build_submit(
     input: String,
     capabilities: Option<PathBuf>,
 ) -> Result<SubmitRequest, CliError> {
-    let cfg = OctoberConfig::resolve(config.as_deref())?;
+    let cfg = HorsieConfig::resolve(config.as_deref())?;
     let def = load_workflow(&workflow)?;
     let errs = validate(&def, &cfg);
     if !errs.is_empty() {
@@ -229,7 +229,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
         }
         Command::Daemon { action } => match action {
             DaemonAction::Start { config, background } => {
-                let cfg = OctoberConfig::resolve(config.as_deref())?;
+                let cfg = HorsieConfig::resolve(config.as_deref())?;
                 if background {
                     let state_dir = cfg.storage.state_dir.clone();
                     spawn_background_daemon(&state_dir, config.as_deref())?;
@@ -314,7 +314,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
     }
 }
 
-/// Re-exec this binary as `october daemon start` (foreground) detached from the
+/// Re-exec this binary as `horsie daemon start` (foreground) detached from the
 /// terminal, with stdout/stderr redirected to `<state_dir>/daemon.log`, so the
 /// parent returns immediately. The child re-resolves its state/data dirs from
 /// `--config` (or the XDG defaults), deterministically landing on the same

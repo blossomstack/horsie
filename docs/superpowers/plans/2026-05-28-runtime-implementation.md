@@ -706,7 +706,7 @@ impl RuntimeHandle for ProcessRuntimeHandle {
     }
 }
 
-/// RuntimeProvider that spawns `october-runtime` as a child process.
+/// RuntimeProvider that spawns `horsie-runtime` as a child process.
 /// Used for testing and for environments where the runtime runs locally.
 pub struct ProcessRuntimeProvider {
     binary_path: PathBuf,
@@ -1284,7 +1284,7 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "october-runtime"
+name = "horsie-runtime"
 path = "src/main.rs"
 
 [dependencies]
@@ -1928,13 +1928,13 @@ async fn main() {
 cargo build -p runtime
 ```
 
-Expected: `target/debug/october-runtime` is produced.
+Expected: `target/debug/horsie-runtime` is produced.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add runtime/src/main.rs runtime/src/lib.rs runtime/Cargo.toml
-git commit -m "feat: october-runtime binary"
+git commit -m "feat: horsie-runtime binary"
 ```
 
 ---

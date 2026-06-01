@@ -7,7 +7,7 @@
 
 ## Goal
 
-When october runs a workflow against a workdir, agents should pick up that
+When horsie runs a workflow against a workdir, agents should pick up that
 workspace's project instructions and skills — the same way Claude Code reads
 `CLAUDE.md` and `.claude/skills/`. Concretely:
 

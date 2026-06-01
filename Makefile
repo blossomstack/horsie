@@ -1,6 +1,6 @@
-# october — common developer tasks.
-# The CLI is two binaries: `october` (cli crate) spawns the sibling
-# `october-runtime` (runtime crate), so build-cli builds both.
+# horsie — common developer tasks.
+# The CLI is two binaries: `horsie` (cli crate) spawns the sibling
+# `horsie-runtime` (runtime crate), so build-cli builds both.
 
 CARGO ?= cargo
 PROFILE ?= release
@@ -20,10 +20,10 @@ BINDIR ?= $(PREFIX)/bin
 .DEFAULT_GOAL := build-cli
 .PHONY: build-cli build test fmt fmt-check clippy deny check install-cli uninstall-cli clean help
 
-## build-cli: build the october CLI + its sandboxed runtime child ($(PROFILE))
+## build-cli: build the horsie CLI + its sandboxed runtime child ($(PROFILE))
 build-cli:
 	$(CARGO) build $(PROFILE_FLAG) -p cli -p runtime
-	@echo "built: $(TARGET_DIR)/october  $(TARGET_DIR)/october-runtime"
+	@echo "built: $(TARGET_DIR)/horsie  $(TARGET_DIR)/horsie-runtime"
 
 ## build: build the whole workspace
 build:
@@ -52,18 +52,18 @@ deny:
 ## check: the full pre-PR gate (fmt + clippy + tests)
 check: fmt-check clippy test
 
-## install-cli: build + install october and october-runtime into $(BINDIR)
+## install-cli: build + install horsie and horsie-runtime into $(BINDIR)
 install-cli: build-cli
 	@mkdir -p "$(DESTDIR)$(BINDIR)"
-	install -m 0755 "$(TARGET_DIR)/october" "$(DESTDIR)$(BINDIR)/october"
-	install -m 0755 "$(TARGET_DIR)/october-runtime" "$(DESTDIR)$(BINDIR)/october-runtime"
-	@echo "installed: $(DESTDIR)$(BINDIR)/october  $(DESTDIR)$(BINDIR)/october-runtime"
-	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "note: $(BINDIR) is not on your PATH — add it to run \`october\` directly";; esac
+	install -m 0755 "$(TARGET_DIR)/horsie" "$(DESTDIR)$(BINDIR)/horsie"
+	install -m 0755 "$(TARGET_DIR)/horsie-runtime" "$(DESTDIR)$(BINDIR)/horsie-runtime"
+	@echo "installed: $(DESTDIR)$(BINDIR)/horsie  $(DESTDIR)$(BINDIR)/horsie-runtime"
+	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "note: $(BINDIR) is not on your PATH — add it to run \`horsie\` directly";; esac
 
-## uninstall-cli: remove october and october-runtime from $(BINDIR)
+## uninstall-cli: remove horsie and horsie-runtime from $(BINDIR)
 uninstall-cli:
-	rm -f "$(DESTDIR)$(BINDIR)/october" "$(DESTDIR)$(BINDIR)/october-runtime"
-	@echo "removed october + october-runtime from $(DESTDIR)$(BINDIR)"
+	rm -f "$(DESTDIR)$(BINDIR)/horsie" "$(DESTDIR)$(BINDIR)/horsie-runtime"
+	@echo "removed horsie + horsie-runtime from $(DESTDIR)$(BINDIR)"
 
 ## clean: remove build artifacts
 clean:

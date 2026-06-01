@@ -1,4 +1,4 @@
-//! Render a job's "history so far" for `october job logs` by replaying its durable
+//! Render a job's "history so far" for `horsie job logs` by replaying its durable
 //! journals. Token-by-token streaming deltas are never journaled, so this reflects
 //! coarse messages, tool calls/results, and workflow lifecycle transitions — not
 //! the live character stream. Works on any job, including finished ones whose live

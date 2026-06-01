@@ -1,11 +1,11 @@
-//! The October daemon: a long-lived process that supervises parallel jobs and
+//! The Horsie daemon: a long-lived process that supervises parallel jobs and
 //! serves a unix control socket. The CLI's `run`/`job` subcommands are thin
 //! clients (see [`crate::client`]).
 
 pub mod protocol;
 
 use crate::capabilities;
-use crate::config::{OctoberConfig, build_registry};
+use crate::config::{HorsieConfig, build_registry};
 use crate::error::CliError;
 use actor::{ActorRef, FileJournal, Journal, spawn_root};
 use models::capabilities::CapabilitySpec;
@@ -26,13 +26,13 @@ pub fn socket_path(root: &Path) -> PathBuf {
     root.join("daemon.sock")
 }
 
-/// Locate the sibling `october-runtime` binary next to this executable — the
+/// Locate the sibling `horsie-runtime` binary next to this executable — the
 /// default when the config sets no explicit `runtime.bin`.
 fn default_runtime_bin() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("october-runtime")))
-        .unwrap_or_else(|| PathBuf::from("october-runtime"))
+        .and_then(|p| p.parent().map(|d| d.join("horsie-runtime")))
+        .unwrap_or_else(|| PathBuf::from("horsie-runtime"))
 }
 
 fn pid_path(root: &Path) -> PathBuf {
@@ -65,13 +65,13 @@ struct Daemon {
 /// Run the daemon in the foreground until a `Shutdown` request arrives. Builds the
 /// shared dependencies, spawns the [`SupervisorActor`] (whose `on_recovery_complete`
 /// auto-resumes interrupted jobs), binds the socket, and serves connections.
-pub async fn serve(cfg: OctoberConfig) -> Result<(), CliError> {
+pub async fn serve(cfg: HorsieConfig) -> Result<(), CliError> {
     // Two distinct roots: ephemeral runtime state (socket, pidfile, log, per-job
     // capability files) lives under `state_dir`; the durable journal under `data_dir`.
     let state_dir = cfg.storage.state_dir.clone();
     let data_dir = cfg.storage.data_dir.clone();
     // The runtime binary: an explicit `runtime.bin` from config, else the sibling
-    // `october-runtime` next to this executable.
+    // `horsie-runtime` next to this executable.
     let runtime_bin = cfg.runtime.bin.clone().unwrap_or_else(default_runtime_bin);
     std::fs::create_dir_all(&state_dir).map_err(|e| CliError::Io(e.to_string()))?;
     std::fs::create_dir_all(&data_dir).map_err(|e| CliError::Io(e.to_string()))?;
@@ -112,7 +112,7 @@ pub async fn serve(cfg: OctoberConfig) -> Result<(), CliError> {
     let listener = UnixListener::bind(&sock).map_err(|e| CliError::Executor(e.to_string()))?;
     std::fs::write(pid_path(&state_dir), std::process::id().to_string())
         .map_err(|e| CliError::Io(e.to_string()))?;
-    println!("october daemon listening on {}", sock.display());
+    println!("horsie daemon listening on {}", sock.display());
 
     let daemon = Arc::new(Daemon {
         supervisor,
@@ -256,7 +256,7 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
                 drain_running(&daemon).await;
             }
             // Tear down every live job's runtime child before exiting so no
-            // october-runtime process is orphaned. Jobs keep their persisted status
+            // horsie-runtime process is orphaned. Jobs keep their persisted status
             // and auto-resume on the next start.
             let (tx, rx) = oneshot::channel();
             let _ = daemon

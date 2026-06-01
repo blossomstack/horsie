@@ -1,4 +1,4 @@
-/// Wire protocol for the local October daemon ↔ CLI client (unix socket).
+/// Wire protocol for the local Horsie daemon ↔ CLI client (unix socket).
 /// These are PROTOCOL types only; the persisted JobSpec is a storage type owned
 /// by the supervisor crate and is intentionally not defined here.
 package daemon;
@@ -6,7 +6,7 @@ package daemon;
 use workflow.WorkflowDefinition;
 use capabilities.CapabilitySpec;
 
-/// Lifecycle status of a job, surfaced by `october job list`.
+/// Lifecycle status of a job, surfaced by `horsie job list`.
 enum JobStatus {
     Running,
     Suspended,
@@ -15,7 +15,7 @@ enum JobStatus {
     Failed,
 }
 
-/// One row in `october job list`.
+/// One row in `horsie job list`.
 struct JobSummary {
     job_id: String,
     workflow_name: String,

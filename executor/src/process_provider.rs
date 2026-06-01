@@ -52,7 +52,7 @@ pub struct SandboxPolicy {
     pub capabilities_file: PathBuf,
 }
 
-/// RuntimeProvider that spawns `october-runtime` as a child process. Transport- and
+/// RuntimeProvider that spawns `horsie-runtime` as a child process. Transport- and
 /// sandbox-agnostic: it spawns the binary with whatever endpoint + sandbox policy it
 /// was constructed with.
 pub struct ProcessRuntimeProvider {

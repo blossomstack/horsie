@@ -1,10 +1,10 @@
-# october CLI (run mode) with nono sandbox — Implementation Plan
+# horsie CLI (run mode) with nono sandbox — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** Add a single-process `october` CLI (`validate`/`run`/`resume`) that loads a workflow + JSON config, runs it against a workdir, confines all tool execution in the nono sandbox over a unix socket, and supports suspend/resume.
+**Goal:** Add a single-process `horsie` CLI (`validate`/`run`/`resume`) that loads a workflow + JSON config, runs it against a workdir, confines all tool execution in the nono sandbox over a unix socket, and supports suspend/resume.
 
-**Architecture:** Orchestrator (unsanboxed, holds API key) talks to an in-process executor over in-memory channels (`InMemExecutorTransport`, lifecycle only) and to the sandboxed `october-runtime` child directly over a unix socket (`SocketRuntimeTransport`, tool calls). The TCP/WebSocket relay path stays for distributed mode via the same generic-over-socket connection layer. A push `WorkflowNotification` channel drives the CLI control loop; a `FileJournal` is the durable source of truth for resume.
+**Architecture:** Orchestrator (unsanboxed, holds API key) talks to an in-process executor over in-memory channels (`InMemExecutorTransport`, lifecycle only) and to the sandboxed `horsie-runtime` child directly over a unix socket (`SocketRuntimeTransport`, tool calls). The TCP/WebSocket relay path stays for distributed mode via the same generic-over-socket connection layer. A push `WorkflowNotification` channel drives the CLI control loop; a `FileJournal` is the durable source of truth for resume.
 
 **Tech Stack:** Rust 2024, tokio, tokio-tungstenite (WS over TcpStream + UnixStream), clap, serde/serde_json, `nono = "0.59"` (Landlock/Seatbelt), `base64`, `eval`, fluorite-generated `models`.
 
@@ -68,19 +68,19 @@ workflow/tests/workflow_e2e.rs  MOD  construct workflow_events channel in runtim
 server/src/lib.rs               MOD  drop executor_client mod + re-exports
 server/src/executor_client.rs   DELETE
 
-cli/                            NEW CRATE  bin `october`
+cli/                            NEW CRATE  bin `horsie`
   Cargo.toml                          deps as below; enables actor/file-journal
   src/main.rs                         clap subcommands → lib; runtime_binary_path(); process::exit
   src/lib.rs                          pub mod config, validate, run, terminal_sink, error
   src/error.rs                        CliError
-  src/config.rs                       OctoberConfig serde + build_registry + load helpers
+  src/config.rs                       HorsieConfig serde + build_registry + load helpers
   src/validate.rs                     validate(def, cfg) -> Vec<String>
   src/terminal_sink.rs                TerminalSink: EventSink
   src/run.rs                          assembly + two-plane control loop (run + resume) + manifest
   tests/cli_e2e.rs                    orchestration + suspend/resume + (support-gated) sandbox/bash
 
 Cargo.toml (workspace)          MOD  members += "executor-client", "cli"
-fluorite/october.json (example) NEW  sample config (docs only, optional)
+fluorite/horsie.json (example) NEW  sample config (docs only, optional)
 ```
 
 Dependency direction (acyclic): `executor-client → runtime-client, models`;
@@ -1491,7 +1491,7 @@ WorkflowRuntimeContext {
 
 ---
 
-## Phase 7 — `cli` crate (`october`)
+## Phase 7 — `cli` crate (`horsie`)
 
 **Files:** Create crate `cli`; root `Cargo.toml` `members += "cli"`.
 
@@ -1505,7 +1505,7 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "october"
+name = "horsie"
 path = "src/main.rs"
 
 [dependencies]
@@ -1564,7 +1564,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
-pub struct OctoberConfig {
+pub struct HorsieConfig {
     pub providers: HashMap<String, ProviderConfig>,
     pub models: HashMap<String, ModelConfig>,
     #[serde(default)]
@@ -1599,10 +1599,10 @@ pub struct StorageConfig {
     pub root_dir: PathBuf,
 }
 impl Default for StorageConfig {
-    fn default() -> Self { Self { root_dir: PathBuf::from("./.october") } }
+    fn default() -> Self { Self { root_dir: PathBuf::from("./.horsie") } }
 }
 
-impl OctoberConfig {
+impl HorsieConfig {
     pub fn load(path: &std::path::Path) -> Result<Self, CliError> {
         let text = std::fs::read_to_string(path).map_err(|e| CliError::Io(e.to_string()))?;
         serde_json::from_str(&text).map_err(|e| CliError::Config(e.to_string()))
@@ -1610,7 +1610,7 @@ impl OctoberConfig {
 }
 
 /// Build the provider registry keyed by **model key** (matches `WorkflowAgentDef.model`).
-pub fn build_registry(cfg: &OctoberConfig) -> Result<HashMap<String, Arc<dyn LlmProvider>>, CliError> {
+pub fn build_registry(cfg: &HorsieConfig) -> Result<HashMap<String, Arc<dyn LlmProvider>>, CliError> {
     let mut reg: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
     for (model_key, mc) in &cfg.models {
         let pc = cfg.providers.get(&mc.provider).ok_or_else(|| {
@@ -1648,12 +1648,12 @@ pub fn build_registry(cfg: &OctoberConfig) -> Result<HashMap<String, Arc<dyn Llm
 
 - [ ] **Step 1:** `cli/src/validate.rs`:
 ```rust
-use crate::config::OctoberConfig;
+use crate::config::HorsieConfig;
 use models::workflow::WorkflowDefinition;
 use std::collections::HashSet;
 
 /// Structural + semantic checks; returns ALL errors (empty = valid).
-pub fn validate(def: &WorkflowDefinition, cfg: &OctoberConfig) -> Vec<String> {
+pub fn validate(def: &WorkflowDefinition, cfg: &HorsieConfig) -> Vec<String> {
     let mut errs = Vec::new();
     let names: HashSet<&str> = def.agents.iter().map(|a| a.name.as_str()).collect();
     if !names.contains(def.start.as_str()) {
@@ -1723,7 +1723,7 @@ impl EventSink for TerminalSink {
 
 - [ ] **Step 1:** `cli/src/run.rs` (full assembly + two-plane loop). Key pieces:
 ```rust
-use crate::config::{OctoberConfig, build_registry};
+use crate::config::{HorsieConfig, build_registry};
 use crate::error::CliError;
 use crate::terminal_sink::TerminalSink;
 use crate::validate::validate;
@@ -1775,7 +1775,7 @@ fn run_dir(root: &Path, run_id: &str) -> PathBuf { root.join("runs").join(run_id
 /// Shared driver: assemble runtime, spawn the workflow actor, drive the control loop.
 async fn drive(
     def: WorkflowDefinition,
-    cfg: OctoberConfig,
+    cfg: HorsieConfig,
     workdir: PathBuf,
     run_id: String,
     root_dir: PathBuf,
@@ -1848,7 +1848,7 @@ async fn drive(
 }
 
 pub async fn run(p: RunParams) -> Result<i32, CliError> {
-    let cfg = OctoberConfig::load(&p.config_path)?;
+    let cfg = HorsieConfig::load(&p.config_path)?;
     let def = load_workflow(&p.workflow_path)?;
     let errs = validate(&def, &cfg);
     if !errs.is_empty() { return Err(CliError::Validation(errs.join("\n"))); }
@@ -1859,7 +1859,7 @@ pub async fn run(p: RunParams) -> Result<i32, CliError> {
 }
 
 pub async fn resume(p: ResumeParams) -> Result<i32, CliError> {
-    let cfg = OctoberConfig::load(&p.config_path)?;
+    let cfg = HorsieConfig::load(&p.config_path)?;
     let root_dir = p.state_dir.unwrap_or_else(|| cfg.storage.root_dir.clone());
     let manifest_path = run_dir(&root_dir, &p.run_id).join("manifest.json");
     let manifest: Manifest = serde_json::from_slice(
@@ -1880,13 +1880,13 @@ pub mod validate;
 - [ ] **Step 3:** `cli/src/main.rs`:
 ```rust
 use clap::{Parser, Subcommand};
-use cli::config::OctoberConfig;
+use cli::config::HorsieConfig;
 use cli::run::{ResumeParams, RunParams, resume, run};
 use cli::validate::validate;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "october")]
+#[command(name = "horsie")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -1910,12 +1910,12 @@ enum Command {
     },
 }
 
-/// Locate the sibling `october-runtime` binary next to this executable.
+/// Locate the sibling `horsie-runtime` binary next to this executable.
 fn runtime_binary_path() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("october-runtime")))
-        .unwrap_or_else(|| PathBuf::from("october-runtime"))
+        .and_then(|p| p.parent().map(|d| d.join("horsie-runtime")))
+        .unwrap_or_else(|| PathBuf::from("horsie-runtime"))
 }
 
 #[tokio::main]
@@ -1923,7 +1923,7 @@ async fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
         Command::Validate { workflow, config } => {
-            match (OctoberConfig::load(&config), std::fs::read_to_string(&workflow)) {
+            match (HorsieConfig::load(&config), std::fs::read_to_string(&workflow)) {
                 (Ok(cfg), Ok(text)) => match serde_json::from_str(&text) {
                     Ok(def) => {
                         let errs = validate(&def, &cfg);
@@ -1955,7 +1955,7 @@ async fn main() {
   *(Simplify the `Validate` arm during impl — the `e_check` placeholder above is illustrative; final form
   loads config then workflow, printing whichever error occurs. Keep it lint-clean.)*
 - [ ] **Step 4:** root `Cargo.toml` `members += "cli"`. Run `cargo build -p cli` → PASS.
-- [ ] **Step 5:** Commit `feat(cli): october validate/run/resume with in-process sandboxed executor`.
+- [ ] **Step 5:** Commit `feat(cli): horsie validate/run/resume with in-process sandboxed executor`.
 
 ---
 
@@ -1963,14 +1963,14 @@ async fn main() {
 
 **Files:** `cli/tests/cli_e2e.rs`.
 
-- [ ] **Step 1:** Helper to locate the built `october-runtime` (walks up from the test exe):
+- [ ] **Step 1:** Helper to locate the built `horsie-runtime` (walks up from the test exe):
 ```rust
 fn locate_runtime_bin() -> std::path::PathBuf {
     let exe = std::env::current_exe().unwrap();
-    // .../target/<profile>/deps/<test> → up to target/<profile>/october-runtime
+    // .../target/<profile>/deps/<test> → up to target/<profile>/horsie-runtime
     let mut dir = exe.parent().unwrap().to_path_buf();
     if dir.ends_with("deps") { dir.pop(); }
-    dir.join("october-runtime")
+    dir.join("horsie-runtime")
 }
 
 fn sandbox_supported(runtime_bin: &std::path::Path) -> bool {
@@ -2024,7 +2024,7 @@ cargo test --workspace
    all-or-nothing-per-batch invariant). `replay(after_seq)` decodes batches in order, counts events, yields
    those with event-index > after_seq. Empty/undecodable complete line → stop (corruption boundary).
 3. **Sandbox::apply** → `let _ = Sandbox::apply(&caps).map_err(|e| e.to_string())?;` (discard SeccompNetFallback).
-4. **Unix socket path length** → socket at `std::env::temp_dir().join(format!("october-{short}")).join("rt.sock")`
+4. **Unix socket path length** → socket at `std::env::temp_dir().join(format!("horsie-{short}")).join("rt.sock")`
    (`short` = first 12 hex of run_id), parent 0700; guard returns error if path > 107 bytes. Socket is ephemeral
    (rebuilt each run/resume), outside workdir — satisfies the security argument.
 5. **Env-scrub child test** → in `env_scrub.rs`: build a `tokio::process::Command`, `.env("ANTHROPIC_API_KEY","leak")`,
@@ -2036,7 +2036,7 @@ cargo test --workspace
 9. **Notification channel** → capacity 256; `notify()` = `try_send` + `tracing::warn!` on full; CLI loop
    `None => break 1` (actor death → clean exit, never hangs).
 10. **e2e** → write config JSON (with `mock.url()`) to a temp file before calling `run`/`resume`; robust
-    `locate_runtime_bin` (env `OCTOBER_RUNTIME_BIN` override → sibling → deps-parent fallbacks); broaden
+    `locate_runtime_bin` (env `HORSIE_RUNTIME_BIN` override → sibling → deps-parent fallbacks); broaden
     support-gate match terms; assert manifest.json round-trips and contains no secrets.
 11. **InMemExecutorTransport / TerminalSink** → enumerate enum variants explicitly (OR-patterns), never `_`,
     to satisfy `deny(wildcard_enum_match_arm)`. (Tungstenite `Message` matches keep the existing committed

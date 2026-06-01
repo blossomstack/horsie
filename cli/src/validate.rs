@@ -1,4 +1,4 @@
-use crate::config::OctoberConfig;
+use crate::config::HorsieConfig;
 use models::workflow::WorkflowDefinition;
 use std::collections::HashSet;
 
@@ -10,7 +10,7 @@ use std::collections::HashSet;
 ///   surface parse failures here);
 /// - every `agent.model` is in config `models`;
 /// - every referenced `model.provider` is in config `providers`.
-pub fn validate(def: &WorkflowDefinition, cfg: &OctoberConfig) -> Vec<String> {
+pub fn validate(def: &WorkflowDefinition, cfg: &HorsieConfig) -> Vec<String> {
     let mut errs = Vec::new();
     let names: HashSet<&str> = def.agents.iter().map(|a| a.name.as_str()).collect();
 
@@ -66,7 +66,7 @@ mod tests {
     use models::workflow::{WorkflowAgentDef, WorkflowTransition};
     use serde_json::json;
 
-    fn cfg() -> OctoberConfig {
+    fn cfg() -> HorsieConfig {
         serde_json::from_str(
             r#"{
                 "providers": { "local": { "type": "anthropic", "base_url": "http://localhost:1" } },
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn unknown_provider_is_reported() {
-        let bad: OctoberConfig = serde_json::from_str(
+        let bad: HorsieConfig = serde_json::from_str(
             r#"{
                 "providers": {},
                 "models": { "m": { "provider": "ghost", "model_id": "id" } }

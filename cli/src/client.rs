@@ -1,4 +1,4 @@
-//! Thin unix-socket client for the October daemon. Each call opens a fresh
+//! Thin unix-socket client for the Horsie daemon. Each call opens a fresh
 //! connection, sends one [`DaemonRequest`], and reads the response(s).
 
 use crate::daemon::protocol::{read_frame, write_frame};
@@ -14,7 +14,7 @@ use tokio::net::UnixStream;
 
 async fn connect(root: &Path) -> Result<UnixStream, CliError> {
     UnixStream::connect(socket_path(root)).await.map_err(|_| {
-        CliError::Executor("no daemon running; start it with `october daemon start`".to_string())
+        CliError::Executor("no daemon running; start it with `horsie daemon start`".to_string())
     })
 }
 

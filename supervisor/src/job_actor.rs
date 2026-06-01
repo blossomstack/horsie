@@ -71,7 +71,7 @@ pub trait JobRuntime: Send + Sync + 'static {
 // ── Production runtime: the executor + sandboxed child assembly ──────────────
 
 /// The production [`JobRuntime`] — assembles the in-process executor and a
-/// sandboxed `october-runtime` child per job (the logic that used to live in
+/// sandboxed `horsie-runtime` child per job (the logic that used to live in
 /// `cli::run::drive`).
 pub struct ProcessJobRuntime {
     deps: SupervisorDeps,
@@ -88,7 +88,7 @@ impl ProcessJobRuntime {
 fn socket_path() -> Result<PathBuf, String> {
     let token = uuid::Uuid::new_v4().simple().to_string();
     let path = std::env::temp_dir()
-        .join(format!("october-{}", &token[..12]))
+        .join(format!("horsie-{}", &token[..12]))
         .join("rt.sock");
     let max = if cfg!(target_os = "macos") { 103 } else { 107 };
     if path.as_os_str().len() > max {
@@ -221,7 +221,7 @@ impl JobShutdown for ProcessShutdown {
 }
 
 /// Publishes render-friendly log frames to the job's broadcast channel. A live
-/// `october job logs --follow` subscriber tails these; the journal stays the
+/// `horsie job logs --follow` subscriber tails these; the journal stays the
 /// durable record.
 struct BroadcastSink {
     job_id: String,
@@ -282,7 +282,7 @@ pub enum JobCommand {
     Resume { message: String },
     /// Cancel the in-flight run (→ Suspended).
     Stop,
-    /// Hand back a live log subscriber for `october job logs`.
+    /// Hand back a live log subscriber for `horsie job logs`.
     Subscribe {
         reply: oneshot::Sender<broadcast::Receiver<JobEventFrame>>,
     },

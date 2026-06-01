@@ -35,7 +35,7 @@ The `agentcore` crate provides the agent execution loop and the minimal abstract
 ## Crate layout
 
 ```
-october/
+horsie/
   fluorite/
     agent.fl        ← Message, ContentPart, Role, Usage
     events.fl       ← AgentEvent

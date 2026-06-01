@@ -1,14 +1,14 @@
-# October Daemon & Parallel Jobs Implementation Plan
+# Horsie Daemon & Parallel Jobs Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Run October as a local daemon that supervises multiple workflow jobs in parallel, auto-resumes interrupted jobs from their journals on restart, and exposes job management (list/logs/stop/resume) via a thin CLI client over a unix socket.
+**Goal:** Run Horsie as a local daemon that supervises multiple workflow jobs in parallel, auto-resumes interrupted jobs from their journals on restart, and exposes job management (list/logs/stop/resume) via a thin CLI client over a unix socket.
 
 **Architecture:** A new transport-agnostic `supervisor` crate hosts an event-sourced `SupervisorActor` (job registry) and a per-job `JobActor` (resource lifecycle), layered over the existing `WorkflowActor`/`AgentActor`. The CLI gains a daemon host + unix-socket client. Recovery uses actor-aligned incremental persistence (a sink conduit that streams `PersistProgress` commands back to the agent actor; agentcore untouched) plus a synthetic-continue resume that synthesizes error `tool_result`s for dangling tool calls.
 
 **Tech Stack:** Rust 2024 (toolchain 1.96.0), tokio, the in-house `actor` event-sourcing runtime, `fluorite` schema codegen, clap, serde_json, unix domain sockets, `tokio::sync::broadcast`.
 
-**Design spec:** `docs/superpowers/specs/2026-05-31-october-daemon-parallel-jobs-design.md`
+**Design spec:** `docs/superpowers/specs/2026-05-31-horsie-daemon-parallel-jobs-design.md`
 
 **CI gate (must stay green):** `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings` (production code denies `unwrap_used`/`expect_used`/`panic`/`wildcard_enum_match_arm`), `cargo test --locked --workspace --all-features`, `cargo deny check`. New crates MUST set `publish = false` (cargo-deny `licenses.private.ignore = true` exempts them from the license check).
 
@@ -51,7 +51,7 @@
 - [ ] **Step 1: Write `fluorite/daemon.fl`**
 
 ```fl
-/// Wire protocol for the local October daemon ↔ CLI client (unix socket).
+/// Wire protocol for the local Horsie daemon ↔ CLI client (unix socket).
 /// These are PROTOCOL types only; the persisted JobSpec is a storage type owned
 /// by the supervisor crate and is intentionally not defined here.
 package daemon;
@@ -59,7 +59,7 @@ package daemon;
 use workflow.WorkflowDefinition;
 use capabilities.CapabilitySpec;
 
-/// Lifecycle status of a job, surfaced by `october job list`.
+/// Lifecycle status of a job, surfaced by `horsie job list`.
 enum JobStatus {
     Running,
     Suspended,
@@ -68,7 +68,7 @@ enum JobStatus {
     Failed,
 }
 
-/// One row in `october job list`.
+/// One row in `horsie job list`.
 struct JobSummary {
     job_id: String,
     workflow_name: String,
@@ -577,7 +577,7 @@ pub struct JobSpec {
 pub struct SupervisorDeps {
     pub provider_registry: HashMap<String, Arc<dyn LlmProvider>>,
     pub runtime_bin: PathBuf,
-    /// State root (the `.october` dir); the FileJournal is rooted here too.
+    /// State root (the `.horsie` dir); the FileJournal is rooted here too.
     pub root_dir: PathBuf,
 }
 ```
@@ -907,7 +907,7 @@ git commit -m "feat(cli): length-prefixed daemon frame codec"
 
 - [ ] **Step 1: `serve` entry point**
 
-`pub async fn serve(cfg: OctoberConfig, root_dir, runtime_bin) -> Result<(), CliError>`:
+`pub async fn serve(cfg: HorsieConfig, root_dir, runtime_bin) -> Result<(), CliError>`:
 build `SupervisorDeps` (registry via `build_registry`, runtime_bin, root_dir),
 `spawn_root(SupervisorActor::new(deps), Arc::new(FileJournal::new(root_dir)))`
 (auto-resume fires), bind `UnixListener` at `<root>/daemon.sock` (unlink stale
@@ -941,7 +941,7 @@ git commit -m "feat(cli): daemon host serving the control socket"
 
 - [ ] **Step 1: `render.rs`** — `pub fn render_event(&AgentEvent) -> Option<String>` extracted from the existing `TerminalSink::emit` match (text → stdout-style string; tool/run notes → annotated lines). `TerminalSink` calls it. `supervisor`'s `BroadcastSink` uses the same logic (duplicate a minimal copy in supervisor to avoid a cli→supervisor dep cycle, or move the renderer into a shared low-level crate; simplest: small copy in supervisor).
 
-- [ ] **Step 2: `client.rs`** — `connect(root_dir) -> UnixStream` (errors with "no daemon running; start it with `october daemon start`"). Helpers: `submit(stream, SubmitRequest) -> JobId`, `list`, `stop`, `resume`, `logs(follow)` (loops reading `LogFrame` until `End`/`Error`), `status`.
+- [ ] **Step 2: `client.rs`** — `connect(root_dir) -> UnixStream` (errors with "no daemon running; start it with `horsie daemon start`"). Helpers: `submit(stream, SubmitRequest) -> JobId`, `list`, `stop`, `resume`, `logs(follow)` (loops reading `LogFrame` until `End`/`Error`), `status`.
 
 - [ ] **Step 3: clippy + commit**
 
@@ -994,7 +994,7 @@ enum JobAction {
 }
 ```
 
-- [ ] **Step 2: Dispatch** — `Run` builds a `SubmitRequest` (load workflow, resolve capabilities to a `CapabilitySpec`), connects via client, submits, then streams logs unless `--detach`. `Daemon::Start` calls `daemon::serve` (foreground) or re-execs detached when `--background`. `Job::*` call the matching client helpers. Resolve `state_dir` → root via `OctoberConfig::resolve(config).storage.root_dir` when not given.
+- [ ] **Step 2: Dispatch** — `Run` builds a `SubmitRequest` (load workflow, resolve capabilities to a `CapabilitySpec`), connects via client, submits, then streams logs unless `--detach`. `Daemon::Start` calls `daemon::serve` (foreground) or re-execs detached when `--background`. `Job::*` call the matching client helpers. Resolve `state_dir` → root via `HorsieConfig::resolve(config).storage.root_dir` when not given.
 
 - [ ] **Step 3: Gut `cli/src/run.rs`** — remove `drive()`/`Manifest` (moved to supervisor). Keep nothing that duplicates the supervisor. If `run.rs` ends empty, delete it and drop its `mod` line.
 
@@ -1024,7 +1024,7 @@ git add cli/ && git commit -m "feat(cli): daemon + job subcommands; run submits 
 Drive the `SupervisorActor` directly (no socket) with a `FileJournal` in a
 `tempfile::TempDir` and two mock-llm-backed jobs. Submit both, assert `List`
 returns two `Running`, await completion (poll `List` until both `Finished`).
-Use a runtime binary built by the harness (`env!("CARGO_BIN_EXE_october-runtime")`
+Use a runtime binary built by the harness (`env!("CARGO_BIN_EXE_horsie-runtime")`
 is unavailable cross-crate; instead pass a fake runtime or test at the
 supervisor layer with a workflow whose single agent concludes via mock-llm and
 needs no runtime tools). Prefer driving through `SupervisorActor` with a

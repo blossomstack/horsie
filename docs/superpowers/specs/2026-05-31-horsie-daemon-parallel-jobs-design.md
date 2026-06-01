@@ -1,11 +1,11 @@
-# October daemon & parallel jobs — design
+# Horsie daemon & parallel jobs — design
 
 **Date:** 2026-05-31
 **Status:** Approved design, pre-implementation
 
 ## Goal
 
-Run the October CLI as a long-lived local daemon that supervises multiple
+Run the Horsie CLI as a long-lived local daemon that supervises multiple
 workflow executions ("jobs") in parallel, survives restarts by resuming
 interrupted jobs from their journals, and exposes job management (list, logs,
 stop, resume) through a thin CLI client.
@@ -18,15 +18,15 @@ stop, resume) through a thin CLI client.
   their journals.
 - **Client commands:** `list`, `logs`/tail, `stop`/cancel, `resume`/send-message.
 - **Concurrency:** unbounded — every submitted job starts immediately, no queue.
-- **Submission:** `october run` submits a job to the daemon and attaches
+- **Submission:** `horsie run` submits a job to the daemon and attaches
   (streams) by default; `--detach` returns the job id immediately.
-- **Daemon lifecycle:** explicit start only (`october daemon start|stop|status`);
+- **Daemon lifecycle:** explicit start only (`horsie daemon start|stop|status`);
   client commands error if no daemon is running.
 - **Architecture:** a new crate (Approach B), shared by the CLI daemon and a
   future server mode. The crate hosts an event-sourced supervisor actor plus a
   per-job actor that manages the resources of one execution.
 - **Terminology:** full rename of `run → job` throughout (`job_id`,
-  `.october/jobs/…` semantics, `JobParams`, `october job …`, etc.).
+  `.horsie/jobs/…` semantics, `JobParams`, `horsie job …`, etc.).
 - **Recovery mechanics:** incremental (per-message) persistence + synthetic
   "continue" kick on resume; agentcore's run loop is **not** modified.
 - **Dangling tool calls on resume:** synthesize error `tool_result`s for any
@@ -193,21 +193,21 @@ window detectable so we can warn rather than silently re-run.
 
 ## Daemon process & lifecycle
 
-- `october daemon start [--background]` — loads config, builds `SupervisorDeps`
+- `horsie daemon start [--background]` — loads config, builds `SupervisorDeps`
   (provider registry, runtime-bin path, default capability spec),
   `spawn_root(SupervisorActor::new(deps), FileJournal)` (auto-resume fires via
   `on_recovery_complete`), binds the control socket, writes `daemon.pid` +
   `daemon.log`, serves until shutdown. `--background` re-execs detached with logs
   to `daemon.log`.
-- `october daemon stop [--drain]` — sends `Shutdown`; the daemon stops accepting
+- `horsie daemon stop [--drain]` — sends `Shutdown`; the daemon stops accepting
   work, kills runtime children, and exits **leaving `Running` jobs in `Running`**
   so the next `start` auto-resumes them. `--drain` waits for jobs to finish
   first.
-- `october daemon status` — daemon pid, uptime, job counts by status.
+- `horsie daemon status` — daemon pid, uptime, job counts by status.
 
 ## Transport & protocol (fluorite)
 
-- Unix socket at `.october/daemon.sock`, length-prefixed framed messages.
+- Unix socket at `.horsie/daemon.sock`, length-prefixed framed messages.
 - New `.fl` schema (wire protocol):
   - `DaemonRequest`: `Submit`, `List`, `Logs { follow }`, `Stop`, `Resume`,
     `Status`, `Shutdown`.
@@ -227,23 +227,23 @@ window detectable so we can warn rather than silently re-run.
   history-so-far, then — if `--follow` and the job is live — subscribes to the
   broadcast channel for the tail; ends when the job is terminal or the client
   disconnects.
-- `october run` (attached) = `Submit` then `Logs { follow: true }`.
+- `horsie run` (attached) = `Submit` then `Logs { follow: true }`.
 - Slow consumers may observe broadcast `lagged` drops; acceptable for logs
   (noted to the user).
 
 ## CLI surface (full `run → job` rename)
 
-- `october daemon start|stop|status`
-- `october run --workflow … --workdir … --input … [--detach] [--config] [--capabilities]`
+- `horsie daemon start|stop|status`
+- `horsie run --workflow … --workdir … --input … [--detach] [--config] [--capabilities]`
   → submits + attaches; `--detach` prints the job id and returns. Errors if no
   daemon.
-- `october job list` — table: `job_id`, workflow, status, submitted_at.
-- `october job logs <id> [--follow]`
-- `october job stop <id>` (cancel → `Suspended`)
-- `october job resume <id> [-m "message"]`
-- `october validate` unchanged.
-- Old `october resume --run <id>` → `october job resume <id>`.
-- On-disk `.october/runs/<id>/` (manifest + capabilities sidecars) removed; the
+- `horsie job list` — table: `job_id`, workflow, status, submitted_at.
+- `horsie job logs <id> [--follow]`
+- `horsie job stop <id>` (cancel → `Suspended`)
+- `horsie job resume <id> [-m "message"]`
+- `horsie validate` unchanged.
+- Old `horsie resume --run <id>` → `horsie job resume <id>`.
+- On-disk `.horsie/runs/<id>/` (manifest + capabilities sidecars) removed; the
   spec now lives in the supervisor journal.
 
 ## Job status model
@@ -255,9 +255,9 @@ supervisor mirrors it in `JobSummary` via `JobStatusChanged`.
 `stop` cancels the in-flight run and suspends the job (`→ Suspended`,
 resumable), matching the existing `WorkflowActor` `Cancel → WorkflowSuspended`
 semantics — there is no terminal "cancelled" state. Permanently abandoning a job
-is `JobRemoved` at the supervisor level (future `october job remove`).
+is `JobRemoved` at the supervisor level (future `horsie job remove`).
 
-## Persistence layout (under `.october/`)
+## Persistence layout (under `.horsie/`)
 
 ```
 actors/supervisor/main/journal.jsonl

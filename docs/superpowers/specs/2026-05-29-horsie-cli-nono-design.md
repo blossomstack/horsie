@@ -1,4 +1,4 @@
-# october CLI (run mode) with nono sandbox — design
+# horsie CLI (run mode) with nono sandbox — design
 
 **Date:** 2026-05-29
 **Status:** Approved design, ready for implementation plan
@@ -10,7 +10,7 @@ rather than frozen (generic-over-socket handler, lifecycle-only `ExecutorClient`
 
 ## Goal
 
-Add a single-process **CLI mode** to october (alongside the existing distributed
+Add a single-process **CLI mode** to horsie (alongside the existing distributed
 server mode) that:
 
 - loads a workflow definition and a JSON config from files,
@@ -33,9 +33,9 @@ Today only `workflow/tests/workflow_e2e.rs` wires a `WorkflowActor`, and it uses
 ## Threat model
 
 The sandbox confines **untrusted, LLM-driven tool actions** (`bash`, file writes,
-etc.), not a compromised october binary. The orchestrator process is *not*
+etc.), not a compromised horsie binary. The orchestrator process is *not*
 sandboxed: it holds the API key and the LLM network connection by design. Only
-the `october-runtime` child — which runs the tools — is sandboxed.
+the `horsie-runtime` child — which runs the tools — is sandboxed.
 
 Crucially, the runtime child **must not inherit the orchestrator's secrets**. nono
 blocks the child's network, but a tool's stdout flows back over the socket to the
@@ -49,7 +49,7 @@ of the model, not an afterthought — see *Security notes*.
 ## Architecture
 
 ```
-october process  (orchestrator — UNSANDBOXED: holds API key + LLM network)
+horsie process  (orchestrator — UNSANDBOXED: holds API key + LLM network)
  ├─ WorkflowActor / AgentActors  +  provider_registry (anthropic / mock)
  │     ├─ ExecutorClient(InMemExecutorTransport)     — runtime lifecycle only
  │     ├─ RuntimeClient(UnixSocketRuntimeTransport)  — tool calls (direct)
@@ -57,7 +57,7 @@ october process  (orchestrator — UNSANDBOXED: holds API key + LLM network)
  │     └─ workflow_events ──▶ CLI control loop       — status transitions (await/finish/fail)
  │
  ├─ Executor  (ProcessRuntimeProvider + RuntimeListenerServer + ConnectedRuntimeRegistry)
- │     └─ spawns october-runtime child ──[UNIX SOCKET]──▶ [NONO SANDBOX]
+ │     └─ spawns horsie-runtime child ──[UNIX SOCKET]──▶ [NONO SANDBOX]
  │            (env scrubbed: no API key)                   workdir RW + connect(socket) only
  └─ FileJournal  (NEW; the durable source of truth for resume)
 ```
@@ -341,7 +341,7 @@ dependency, for unit tests and unsupported-platform development. The `nono`
 dependency is taken with `default-features = false` (the sandbox/capability APIs
 are not feature-gated; this skips the unneeded `system-keyring`/`keyring` dep).
 
-### New crate: `cli` (binary `october`)
+### New crate: `cli` (binary `horsie`)
 
 - Arg parsing (`clap`), JSON config loading, provider registry construction,
   in-process executor assembly, the three subcommands.
@@ -381,12 +381,12 @@ Notes:
   is **no run-time bypass flag** — when `--sandbox` is requested, an unsupported
   platform or failed apply is a hard failure.
 - The `cli` crate enables `actor/file-journal` and builds/locates the
-  `october-runtime` binary with `sandbox` on. It can disable `executor-client/ws`
+  `horsie-runtime` binary with `sandbox` on. It can disable `executor-client/ws`
   for a pure-local build.
 
 ## Config (JSON)
 
-`october.json`:
+`horsie.json`:
 
 ```json
 {
@@ -408,7 +408,7 @@ Notes:
     "extra_read_paths": []
   },
   "storage": {
-    "root_dir": "./.october"
+    "root_dir": "./.horsie"
   }
 }
 ```
@@ -441,7 +441,7 @@ Notes:
 
 ## Subcommands
 
-### `october validate --workflow x.json --config october.json`
+### `horsie validate --workflow x.json --config horsie.json`
 
 Structural + semantic checks; reports **all** errors; non-zero exit on any:
 
@@ -455,7 +455,7 @@ Structural + semantic checks; reports **all** errors; non-zero exit on any:
 - every `agent.model` ∈ config `models`.
 - every referenced `model.provider` ∈ config `providers`.
 
-### `october run --workflow x.json --config october.json --workdir DIR --input STR [--state-dir DIR]`
+### `horsie run --workflow x.json --config horsie.json --workdir DIR --input STR [--state-dir DIR]`
 
 1. Run `validate`; abort on error.
 2. Build `provider_registry`.
@@ -489,7 +489,7 @@ Structural + semantic checks; reports **all** errors; non-zero exit on any:
 8. Per-run state at `<root_dir>/runs/<run_id>/{journal.jsonl, manifest.json}`.
    `manifest.json` = resolved workflow def + workdir (**no secrets**).
 
-### `october resume --run <run_id> --config october.json [--state-dir DIR] [--message STR]`
+### `horsie resume --run <run_id> --config horsie.json [--state-dir DIR] [--message STR]`
 
 1. Load `manifest.json` (def + workdir) + `FileJournal` for `run_id`.
 2. Re-create a fresh sandboxed runtime for the workdir (lifecycle wiring is not
@@ -544,7 +544,7 @@ Structural + semantic checks; reports **all** errors; non-zero exit on any:
 ## Crate / file layout
 
 ```
-cli/                         NEW   binary `october`; subcommands, config, TerminalSink,
+cli/                         NEW   binary `horsie`; subcommands, config, TerminalSink,
                                    WorkflowNotification control loop; enables actor/file-journal
 executor-client/             NEW   ExecutorTransport trait (+ runtime_transport), lifecycle-only
                                    ExecutorClient, ClientError, WsExecutorTransport [feat ws]

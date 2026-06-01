@@ -126,7 +126,7 @@ pub struct WorkflowRuntimeContext {
     pub provider_registry: HashMap<String, Arc<dyn LlmProvider>>,
     pub toolbox_factory:   Arc<dyn ToolboxFactory>,
     pub runtime_client:    Arc<dyn RuntimeClient>,
-    // RuntimeClient: abstraction over october's executor/runtime infrastructure;
+    // RuntimeClient: abstraction over horsie's executor/runtime infrastructure;
     // passed into ToolboxFactory so tools can execute shell/file operations inside
     // a managed runtime. Concrete impl wraps the executor WebSocket protocol.
     pub event_sink:        Arc<dyn EventSink>,

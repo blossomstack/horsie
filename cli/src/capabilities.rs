@@ -12,7 +12,7 @@ use models::capabilities::{CapabilitySpec, DirGrant, FileGrant, Grant};
 
 /// Expand a leading `~/` or an embedded `$HOME` / `${HOME}` in a capability path
 /// against `$HOME`, so a checked-in capability file is portable across users and
-/// machines (`~/.ssh` resolves to whoever runs october). A bare `~` maps to the home
+/// machines (`~/.ssh` resolves to whoever runs horsie). A bare `~` maps to the home
 /// directory itself. When `$HOME` is unavailable, or the path references neither form,
 /// it is returned unchanged.
 fn expand_home(path: &str, home: Option<&str>) -> String {

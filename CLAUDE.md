@@ -1,4 +1,4 @@
-# october
+# horsie
 
 ## Design philosophy
 

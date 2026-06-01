@@ -1,5 +1,6 @@
 [package]
 name = "actor"
+license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2024"
 publish = false # internal application crate, never published to crates.io

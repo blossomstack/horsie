@@ -318,7 +318,7 @@ impl WorkflowActor {
                         self.current_child = Some(child);
                         // Persist (not snapshot): the workflow event log is tiny (a
                         // handful of events per run) and retaining it in full lets
-                        // `october job logs` replay the per-job history — every
+                        // `horsie job logs` replay the per-job history — every
                         // AgentStarted/AgentTransitioned — after compaction would
                         // otherwise have discarded it.
                         CommandEffect::persist(vec![
@@ -490,7 +490,7 @@ impl WorkflowActor {
                     .await;
                 self.current_child = Some(child);
                 // Persist (not snapshot) so the full workflow event log survives for
-                // `october job logs` history replay (see the transition path).
+                // `horsie job logs` history replay (see the transition path).
                 CommandEffect::persist(vec![WorkflowDomainEvent::AgentStarted {
                     agent_name,
                     session_id: new_session,

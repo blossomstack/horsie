@@ -103,7 +103,7 @@ The executor gains a second responsibility: hosting a WS listener that runtimes 
 2. Connects outbound to the server as before
 3. When creating a runtime, spawns the binary:
    ```
-   october-runtime --executor-url ws://<runtime_listener_addr> \
+   horsie-runtime --executor-url ws://<runtime_listener_addr> \
                    --runtime-id <id> \
                    --working-dir <path>
    ```
@@ -125,7 +125,7 @@ The executor gains a second responsibility: hosting a WS listener that runtimes 
 
 **CLI:**
 ```
-october-runtime --executor-url <ws://...> --runtime-id <id> --working-dir <path>
+horsie-runtime --executor-url <ws://...> --runtime-id <id> --working-dir <path>
 ```
 
 **Startup:**
@@ -300,6 +300,6 @@ executor        ← Executor, ProcessRuntimeProvider, ConnectedRuntimeRegistry
                   (does raw WS message routing to runtimes — no runtime-client dependency)
 server          ← Server, ExecutorClient, ExecutorTransport, WsExecutorTransport
                   depends on: models, runtime-client
-runtime (bin)   ← october-runtime binary, tool fns
+runtime (bin)   ← horsie-runtime binary, tool fns
                   depends on: models
 ```

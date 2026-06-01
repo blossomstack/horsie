@@ -1,6 +1,6 @@
 //! End-to-end tests for the supervisor stack: SupervisorActor → JobActor →
 //! WorkflowActor → AgentActor, driven by a mock LLM. A test [`JobRuntime`] stands
-//! in for the production sandboxed assembly so no `october-runtime` child or nono
+//! in for the production sandboxed assembly so no `horsie-runtime` child or nono
 //! sandbox is needed; everything else (event sourcing, journaling, the registry,
 //! parallelism, resume) is the real code path.
 //!

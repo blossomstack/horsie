@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn capability_spec_load_rejects_missing_file() {
-        let err = CapabilitySpec::load(std::path::Path::new("/nonexistent/october-caps.json"))
+        let err = CapabilitySpec::load(std::path::Path::new("/nonexistent/horsie-caps.json"))
             .expect_err("missing file must error");
         assert!(err.contains("read capability file"));
     }

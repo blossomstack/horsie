@@ -76,11 +76,11 @@ pub fn apply(
         NetworkPolicy::Allow => {}
     }
 
-    // Diagnostics: when `OCTOBER_SANDBOX_DEBUG_DENY` is set, emit `(debug deny)` so the
+    // Diagnostics: when `HORSIE_SANDBOX_DEBUG_DENY` is set, emit `(debug deny)` so the
     // kernel logs every sandbox denial (visible via `log show --predicate 'eventMessage
     // CONTAINS "deny("'`). Off by default — it is noisy and only needed when hunting a
     // confinement failure. Read here (before sandbox apply) in the runtime's own env.
-    if std::env::var_os("OCTOBER_SANDBOX_DEBUG_DENY").is_some() {
+    if std::env::var_os("HORSIE_SANDBOX_DEBUG_DENY").is_some() {
         caps.set_seatbelt_debug_deny(true);
     }
 

@@ -33,7 +33,7 @@ pub struct JobSpec {
 pub struct SupervisorDeps {
     /// LLM providers keyed by the `model` field of a workflow agent.
     pub provider_registry: HashMap<String, Arc<dyn LlmProvider>>,
-    /// Path to the sibling `october-runtime` binary.
+    /// Path to the sibling `horsie-runtime` binary.
     pub runtime_bin: PathBuf,
     /// State dir for ephemeral per-job runtime files; job capability files are
     /// written under `<state_dir>/jobs/<id>/`.
