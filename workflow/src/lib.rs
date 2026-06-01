@@ -10,13 +10,17 @@
 mod agent_actor;
 mod context;
 mod workflow_actor;
+mod workspace;
 
 pub use agent_actor::{AgentActor, AgentCommand, AgentDomainEvent, AgentParams, AgentState};
 pub use context::{
-    AgentRuntimeContext, CONCLUDE_TOOL, DefaultToolboxFactory, ToolboxFactory,
-    WorkflowRuntimeContext, conclude_tool_spec,
+    AgentRuntimeContext, CONCLUDE_TOOL, DefaultToolboxFactory, LIST_SKILLS_TOOL, SKILL_TOOL,
+    ToolboxFactory, WorkflowRuntimeContext, conclude_tool_spec,
 };
 pub use workflow_actor::{
     WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowNotification, WorkflowState,
     WorkflowStatus,
+};
+pub use workspace::{
+    Skill, SkillSet, WorkspaceContext, compose_system_prompt, scan as scan_workspace,
 };

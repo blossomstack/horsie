@@ -11,8 +11,8 @@
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use models::runtime::{
-    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ToolCallResponse, ToolError,
-    ToolResult,
+    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse, ToolCallResponse,
+    ToolError, ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -173,6 +173,33 @@ where
                             .lock()
                             .await
                             .insert(req.call_id, handle.abort_handle());
+                    }
+                    RuntimeInboundMessage::ScanWorkspace(req) => {
+                        let call_id = req.call_id.clone();
+                        let map_id = req.call_id.clone();
+                        let working_dir = working_dir.clone();
+                        let sink_clone = sink.clone();
+                        let in_flight_clone = in_flight.clone();
+
+                        let handle = tokio::spawn(async move {
+                            let scan = runtime::scan::exec(&working_dir, req);
+                            let response = serde_json::to_string(
+                                &RuntimeOutboundMessage::ScanResult(ScanResponse {
+                                    call_id: call_id.clone(),
+                                    scan,
+                                }),
+                            );
+                            if let Ok(json) = response {
+                                let _ = sink_clone
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(json.into()))
+                                    .await;
+                            }
+                            in_flight_clone.lock().await.remove(&call_id);
+                        });
+
+                        in_flight.lock().await.insert(map_id, handle.abort_handle());
                     }
                     RuntimeInboundMessage::CancelCall(req) => {
                         if let Some(handle) = in_flight.lock().await.remove(&req.call_id) {

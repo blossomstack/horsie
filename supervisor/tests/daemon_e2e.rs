@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use mock_llm::MockLlmServer;
 use models::capabilities::{CapabilitySpec, NetworkPolicy};
 use models::daemon::JobStatus;
-use models::runtime::{ToolCall, ToolResult};
+use models::runtime::{ToolCall, ToolResult, WorkspaceScan};
 use models::workflow::{WorkflowAgentDef, WorkflowDefinition};
 use runtime_client::{RuntimeClient, RuntimeTransport, TransportError};
 use std::collections::HashMap;
@@ -45,6 +45,17 @@ impl RuntimeTransport for NoopTransport {
     }
     async fn cancel(&self, _call_id: &str) -> Result<(), TransportError> {
         Ok(())
+    }
+    async fn scan_workspace(
+        &self,
+        _call_id: &str,
+        _instruction_candidates: Vec<String>,
+        _skills_glob: String,
+    ) -> Result<WorkspaceScan, TransportError> {
+        Ok(WorkspaceScan {
+            instructions: None,
+            skills: Vec::new(),
+        })
     }
 }
 

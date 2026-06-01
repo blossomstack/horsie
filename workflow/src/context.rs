@@ -13,6 +13,14 @@ use uuid::Uuid;
 /// delivering its structured output or asking the user a question.
 pub const CONCLUDE_TOOL: &str = "conclude";
 
+/// Name of the builtin tool an agent calls to load a skill's full instructions on
+/// demand (progressive disclosure). Always advertised; re-scans the workspace live.
+pub const SKILL_TOOL: &str = "skill";
+
+/// Name of the builtin tool that re-scans the workspace and returns the current
+/// skill catalog (name + description). Always advertised, like `skill`.
+pub const LIST_SKILLS_TOOL: &str = "list_skills";
+
 /// Resources injected into a [`WorkflowActor`](crate::WorkflowActor) at construction.
 ///
 /// These are runtime wiring, not persisted state — they are recreated on every
@@ -72,6 +80,7 @@ impl ToolboxFactory for DefaultToolboxFactory {
         agent_def: &WorkflowAgentDef,
         runtime_client: RuntimeClient,
     ) -> Arc<dyn Toolbox> {
+        let client = runtime_client.clone();
         let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client);
         let base: Arc<dyn Toolbox> = match &agent_def.allowed_tools {
             None => Arc::new(runtime),
@@ -82,7 +91,11 @@ impl ToolboxFactory for DefaultToolboxFactory {
         };
         let conclude =
             conclude_tool_spec(agent_def.output_schema.as_ref(), agent_def.allow_ask_user);
-        Arc::new(AgentToolbox { base, conclude })
+        Arc::new(AgentToolbox {
+            base,
+            conclude,
+            runtime_client: client,
+        })
     }
 }
 
@@ -144,11 +157,14 @@ fn both_schema(output_schema: &Value) -> Value {
     })
 }
 
-/// A toolbox = a base (permitted runtime tools) plus the optional `conclude` tool,
-/// which is advertised but never executed (the agent loop intercepts it).
+/// A toolbox = a base (permitted runtime tools), the optional `conclude` terminal
+/// tool, and the always-present `skill` / `list_skills` tools. The latter two re-scan
+/// the workspace live on each call (no cached skill set), so a skill added mid-run is
+/// immediately loadable. `conclude`, `skill`, and `list_skills` bypass the allowlist.
 struct AgentToolbox {
     base: Arc<dyn Toolbox>,
     conclude: Option<ToolSpec>,
+    runtime_client: RuntimeClient,
 }
 
 #[async_trait]
@@ -158,6 +174,24 @@ impl Toolbox for AgentToolbox {
         if let Some(c) = &self.conclude {
             specs.push(c.clone());
         }
+        specs.push(ToolSpec {
+            name: SKILL_TOOL.to_string(),
+            description:
+                "Load the full instructions for a named skill (see 'Available skills' or list_skills)."
+                    .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": { "name": { "type": "string", "description": "The skill name." } }
+            }),
+        });
+        specs.push(ToolSpec {
+            name: LIST_SKILLS_TOOL.to_string(),
+            description:
+                "Re-scan the workspace and list the skills currently available (name + description)."
+                    .to_string(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        });
         specs
     }
 
@@ -168,6 +202,26 @@ impl Toolbox for AgentToolbox {
             return Err(ToolCallError::ExecutionFailed(
                 "the conclude tool is terminal and is not executed".to_string(),
             ));
+        }
+        if name == SKILL_TOOL {
+            let requested = input
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let ws = crate::workspace::scan(&self.runtime_client).await;
+            return match ws.skills.get(requested) {
+                Some(skill) => Ok(Value::String(skill.body.clone())),
+                None => Err(ToolCallError::InvalidInput(format!(
+                    "unknown skill '{requested}'; available: {}",
+                    ws.skills.names().join(", ")
+                ))),
+            };
+        }
+        if name == LIST_SKILLS_TOOL {
+            let ws = crate::workspace::scan(&self.runtime_client).await;
+            return Ok(Value::String(crate::workspace::list_skills_result(
+                &ws.skills,
+            )));
         }
         self.base.execute(name, input).await
     }
@@ -230,6 +284,17 @@ mod tests {
         }
     }
 
+    fn scan_with_skill() -> models::runtime::WorkspaceScan {
+        let content = "---\nname: git-bisect\ndescription: find bad commit\n---\nStep 1...";
+        models::runtime::WorkspaceScan {
+            instructions: None,
+            skills: vec![models::runtime::ScannedFile {
+                path: ".claude/skills/git-bisect/SKILL.md".into(),
+                content: content.into(),
+            }],
+        }
+    }
+
     #[test]
     fn conclude_not_registered_without_output_or_ask() {
         assert!(conclude_tool_spec(None, false).is_none());
@@ -274,5 +339,38 @@ mod tests {
         let tb = DefaultToolboxFactory.for_agent(&def(None, Some(out), false), client);
         let err = tb.execute(CONCLUDE_TOOL, json!({})).await.unwrap_err();
         assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn skill_and_list_skills_always_present() {
+        let client = RuntimeClient::new(MockTransport::ok("")); // empty scan
+        let tb = DefaultToolboxFactory.for_agent(&def(None, None, false), client);
+        let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
+        assert!(names.contains(&SKILL_TOOL.to_string()));
+        assert!(names.contains(&LIST_SKILLS_TOOL.to_string()));
+    }
+
+    #[tokio::test]
+    async fn skill_fetches_live_and_list_skills_reports() {
+        let client = RuntimeClient::new(MockTransport::ok("").with_scan(scan_with_skill()));
+        let tb = DefaultToolboxFactory.for_agent(&def(None, None, false), client);
+
+        let body = tb
+            .execute(SKILL_TOOL, json!({ "name": "git-bisect" }))
+            .await
+            .unwrap();
+        assert_eq!(body, json!("Step 1..."));
+
+        let err = tb
+            .execute(SKILL_TOOL, json!({ "name": "nope" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+
+        let listed = tb.execute(LIST_SKILLS_TOOL, json!({})).await.unwrap();
+        assert_eq!(
+            listed,
+            json!("1 skills available:\n- git-bisect: find bad commit")
+        );
     }
 }

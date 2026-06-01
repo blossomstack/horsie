@@ -157,4 +157,40 @@ mod tests {
             .expect_err("missing file must error");
         assert!(err.contains("read capability file"));
     }
+
+    #[test]
+    fn scan_workspace_inbound_round_trips() {
+        use crate::runtime::{RuntimeInboundMessage, ScanRequest};
+        let msg = RuntimeInboundMessage::ScanWorkspace(ScanRequest {
+            call_id: "c1".into(),
+            instruction_candidates: vec!["AGENTS.md".into()],
+            skills_glob: ".claude/skills/*/SKILL.md".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"ScanWorkspace\""));
+        let back: RuntimeInboundMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, RuntimeInboundMessage::ScanWorkspace(r) if r.call_id == "c1"));
+    }
+
+    #[test]
+    fn scan_result_outbound_round_trips() {
+        use crate::runtime::{RuntimeOutboundMessage, ScanResponse, ScannedFile, WorkspaceScan};
+        let msg = RuntimeOutboundMessage::ScanResult(ScanResponse {
+            call_id: "c1".into(),
+            scan: WorkspaceScan {
+                instructions: Some(ScannedFile {
+                    path: "AGENTS.md".into(),
+                    content: "hi".into(),
+                }),
+                skills: vec![ScannedFile {
+                    path: ".claude/skills/x/SKILL.md".into(),
+                    content: "b".into(),
+                }],
+            },
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"ScanResult\""));
+        let back: RuntimeOutboundMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, RuntimeOutboundMessage::ScanResult(r) if r.scan.skills.len() == 1));
+    }
 }

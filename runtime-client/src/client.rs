@@ -1,5 +1,5 @@
 use crate::transport::{RuntimeTransport, TransportError};
-use models::runtime::{ToolCall, ToolError, ToolOutput, ToolResult};
+use models::runtime::{ToolCall, ToolError, ToolOutput, ToolResult, WorkspaceScan};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -52,6 +52,21 @@ impl RuntimeClient {
     pub async fn cancel(&self, call_id: &str) {
         let _ = self.inner.cancel(call_id).await;
     }
+
+    /// Scan the workspace over the runtime. `instruction_candidates` are tried in
+    /// order (first existing wins); `skills_glob` locates skill files. Raw contents
+    /// come back for the caller to interpret.
+    pub async fn scan_workspace(
+        &self,
+        instruction_candidates: Vec<String>,
+        skills_glob: String,
+    ) -> Result<WorkspaceScan, RuntimeCallError> {
+        let call_id = Uuid::new_v4().to_string();
+        self.inner
+            .scan_workspace(&call_id, instruction_candidates, skills_glob)
+            .await
+            .map_err(RuntimeCallError::Transport)
+    }
 }
 
 #[cfg(test)]
@@ -88,5 +103,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RuntimeCallError::ToolFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn client_scan_returns_mock_scan() {
+        use models::runtime::{ScannedFile, WorkspaceScan};
+        let scan = WorkspaceScan {
+            instructions: Some(ScannedFile {
+                path: "AGENTS.md".into(),
+                content: "hi".into(),
+            }),
+            skills: vec![],
+        };
+        let client = RuntimeClient::new(MockTransport::ok("").with_scan(scan));
+        let out = client
+            .scan_workspace(vec!["AGENTS.md".into()], ".claude/skills/*/SKILL.md".into())
+            .await
+            .unwrap();
+        assert_eq!(out.instructions.unwrap().content, "hi");
     }
 }

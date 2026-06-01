@@ -6,7 +6,7 @@ use models::executor::{
     CancelToolCallCmd, ExecutorCommand, ExecutorEvent, ExecutorInboundMessage,
     ExecutorOutboundMessage, ToolCallCmd,
 };
-use models::runtime::{ToolCall, ToolCallRequest, ToolResult};
+use models::runtime::{ToolCall, ToolCallRequest, ToolResult, WorkspaceScan};
 use runtime_client::{RuntimeTransport, TransportError};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -151,5 +151,21 @@ impl RuntimeTransport for RelayRuntimeTransport {
         .await
         .map_err(|e| TransportError::SendFailed(e.to_string()))?;
         Ok(())
+    }
+
+    async fn scan_workspace(
+        &self,
+        _call_id: &str,
+        _instruction_candidates: Vec<String>,
+        _skills_glob: String,
+    ) -> Result<WorkspaceScan, TransportError> {
+        // The executor relay protocol (ExecutorCommand/ExecutorEvent) has no scan
+        // command yet, so workspace context is not available in distributed/server
+        // mode. The error is caught by `workflow::workspace::scan`, which degrades to
+        // an empty context — agents still run, just without AGENTS.md/skills. Wiring
+        // a ScanWorkspace command through the executor protocol is a follow-up.
+        Err(TransportError::SendFailed(
+            "workspace scan is not supported over the executor relay transport".to_string(),
+        ))
     }
 }

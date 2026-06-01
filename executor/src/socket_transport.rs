@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use models::runtime::{
-    CancelCallRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ToolCall, ToolCallRequest,
-    ToolResult,
+    CancelCallRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ToolCall,
+    ToolCallRequest, ToolResult, WorkspaceScan,
 };
 use runtime_client::{RuntimeTransport, TransportError};
 use std::collections::HashMap;
@@ -14,14 +14,18 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 type Reply = Result<ToolResult, TransportError>;
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Reply>>>>;
+type ScanReply = Result<WorkspaceScan, TransportError>;
+type PendingScan = Arc<Mutex<HashMap<String, oneshot::Sender<ScanReply>>>>;
 
 /// Direct tool-call transport over a single accepted runtime link
 /// (`WebSocketStream<S>`, where `S` = `TcpStream` or `UnixStream`). Owns the sink
-/// and a `call_id → oneshot` pending map; a spawned reader fills it and, on
-/// disconnect, resolves every outstanding call with [`TransportError::Disconnected`].
+/// and `call_id → oneshot` pending maps (one for tool calls, one for scans); a
+/// spawned reader fills them and, on disconnect, resolves every outstanding call
+/// with [`TransportError::Disconnected`].
 pub struct SocketRuntimeTransport<S> {
     sink: Arc<Mutex<SplitSink<WebSocketStream<S>, Message>>>,
     pending: Pending,
+    pending_scan: PendingScan,
 }
 
 /// The unix instantiation used by CLI mode.
@@ -44,32 +48,45 @@ where
         mut stream: SplitStream<WebSocketStream<S>>,
     ) -> (Self, oneshot::Receiver<()>) {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending_scan: PendingScan = Arc::new(Mutex::new(HashMap::new()));
         let reader_pending = pending.clone();
+        let reader_pending_scan = pending_scan.clone();
         let (closed_tx, closed_rx) = oneshot::channel();
         tokio::spawn(async move {
             while let Some(Ok(Message::Text(text))) = stream.next().await {
-                if let Ok(RuntimeOutboundMessage::ToolCallResponse(resp)) =
-                    serde_json::from_str::<RuntimeOutboundMessage>(&text)
-                {
-                    let waiter = reader_pending.lock().await.remove(&resp.call_id);
-                    if let Some(tx) = waiter {
-                        let _ = tx.send(Ok(resp.result));
+                match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
+                    Ok(RuntimeOutboundMessage::ToolCallResponse(resp)) => {
+                        if let Some(tx) = reader_pending.lock().await.remove(&resp.call_id) {
+                            let _ = tx.send(Ok(resp.result));
+                        }
                     }
+                    Ok(RuntimeOutboundMessage::ScanResult(resp)) => {
+                        if let Some(tx) = reader_pending_scan.lock().await.remove(&resp.call_id) {
+                            let _ = tx.send(Ok(resp.scan));
+                        }
+                    }
+                    Ok(RuntimeOutboundMessage::Ready(_)) | Err(_) => {}
                 }
             }
-            // Disconnected: fail every outstanding call so no invoke() hangs forever,
-            // then signal the link is closed.
+            // Disconnected: fail every outstanding call so no invoke()/scan() hangs
+            // forever, then signal the link is closed.
             let mut map = reader_pending.lock().await;
             for (_, tx) in map.drain() {
                 let _ = tx.send(Err(TransportError::Disconnected));
             }
             drop(map);
+            let mut scan_map = reader_pending_scan.lock().await;
+            for (_, tx) in scan_map.drain() {
+                let _ = tx.send(Err(TransportError::Disconnected));
+            }
+            drop(scan_map);
             let _ = closed_tx.send(());
         });
         (
             Self {
                 sink: Arc::new(Mutex::new(sink)),
                 pending,
+                pending_scan,
             },
             closed_rx,
         )
@@ -122,6 +139,41 @@ where
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))
     }
+
+    async fn scan_workspace(
+        &self,
+        call_id: &str,
+        instruction_candidates: Vec<String>,
+        skills_glob: String,
+    ) -> Result<WorkspaceScan, TransportError> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_scan
+            .lock()
+            .await
+            .insert(call_id.to_string(), tx);
+
+        let msg = RuntimeInboundMessage::ScanWorkspace(ScanRequest {
+            call_id: call_id.to_string(),
+            instruction_candidates,
+            skills_glob,
+        });
+        let json = serde_json::to_string(&msg)
+            .map_err(|e| TransportError::Serialization(e.to_string()))?;
+        if let Err(e) = self
+            .sink
+            .lock()
+            .await
+            .send(Message::Text(json.into()))
+            .await
+        {
+            self.pending_scan.lock().await.remove(call_id);
+            return Err(TransportError::SendFailed(e.to_string()));
+        }
+        match rx.await {
+            Ok(reply) => reply,
+            Err(_) => Err(TransportError::Disconnected),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -147,20 +199,37 @@ mod tests {
             let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             let (mut sink, mut stream) = ws.split();
             while let Some(Ok(Message::Text(t))) = stream.next().await {
-                if let Ok(RuntimeInboundMessage::ToolCall(req)) =
-                    serde_json::from_str::<RuntimeInboundMessage>(&t)
-                {
-                    let resp = RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
-                        call_id: req.call_id,
-                        result: ToolResult::Ok(ToolOutput {
-                            stdout: "ok".into(),
-                            stderr: String::new(),
-                            exit_code: 0,
-                        }),
-                    });
-                    let _ = sink
-                        .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
-                        .await;
+                match serde_json::from_str::<RuntimeInboundMessage>(&t) {
+                    Ok(RuntimeInboundMessage::ToolCall(req)) => {
+                        let resp = RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
+                            call_id: req.call_id,
+                            result: ToolResult::Ok(ToolOutput {
+                                stdout: "ok".into(),
+                                stderr: String::new(),
+                                exit_code: 0,
+                            }),
+                        });
+                        let _ = sink
+                            .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
+                            .await;
+                    }
+                    Ok(RuntimeInboundMessage::ScanWorkspace(req)) => {
+                        let resp =
+                            RuntimeOutboundMessage::ScanResult(models::runtime::ScanResponse {
+                                call_id: req.call_id,
+                                scan: models::runtime::WorkspaceScan {
+                                    instructions: Some(models::runtime::ScannedFile {
+                                        path: "AGENTS.md".into(),
+                                        content: "ctx".into(),
+                                    }),
+                                    skills: vec![],
+                                },
+                            });
+                        let _ = sink
+                            .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
+                            .await;
+                    }
+                    _ => {}
                 }
             }
         });
@@ -183,6 +252,20 @@ mod tests {
         let (t, _dir) = paired().await;
         let r = t.invoke("c1", bash()).await.unwrap();
         assert!(matches!(r, ToolResult::Ok(o) if o.stdout == "ok"));
+    }
+
+    #[tokio::test]
+    async fn scan_correlates_response() {
+        let (t, _dir) = paired().await;
+        let scan = t
+            .scan_workspace(
+                "s1",
+                vec!["AGENTS.md".into()],
+                ".claude/skills/*/SKILL.md".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scan.instructions.unwrap().content, "ctx");
     }
 
     #[tokio::test]

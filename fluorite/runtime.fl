@@ -35,6 +35,21 @@ union ToolCall {
     Grep(GrepInput),
 }
 
+// --- Workspace scan ---
+
+// Parameterized so the runtime stays convention-agnostic: the client supplies the
+// instruction filenames to try (in order) and the skills glob. Raw contents come
+// back; the client parses frontmatter.
+struct ScanRequest {
+    call_id: String,
+    instruction_candidates: Vec<String>,
+    skills_glob: String,
+}
+
+struct ScannedFile { path: String, content: String }
+struct WorkspaceScan { instructions: Option<ScannedFile>, skills: Vec<ScannedFile> }
+struct ScanResponse { call_id: String, scan: WorkspaceScan }
+
 // --- Inbound (executor → runtime) ---
 
 struct ToolCallRequest  { call_id: String, call: ToolCall }
@@ -44,6 +59,7 @@ struct CancelCallRequest { call_id: String }
 union RuntimeInboundMessage {
     ToolCall(ToolCallRequest),
     CancelCall(CancelCallRequest),
+    ScanWorkspace(ScanRequest),
 }
 
 // --- Outbound (runtime → executor) ---
@@ -64,4 +80,5 @@ struct RuntimeReady { runtime_id: String }
 union RuntimeOutboundMessage {
     Ready(RuntimeReady),
     ToolCallResponse(ToolCallResponse),
+    ScanResult(ScanResponse),
 }
