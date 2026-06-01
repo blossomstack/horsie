@@ -75,6 +75,7 @@ pub enum AgentCommand {
     /// Arm a timer; replies with the new timer id once recorded.
     ArmTimer {
         label: String,
+        message: String,
         kind: crate::timers::TimerKind,
         after_secs: u64,
         reply: tokio::sync::oneshot::Sender<crate::timers::TimerId>,
@@ -573,6 +574,7 @@ impl EventSourcedActor for AgentActor {
             }
             AgentCommand::ArmTimer {
                 label,
+                message,
                 kind,
                 after_secs,
                 reply,
@@ -580,6 +582,7 @@ impl EventSourcedActor for AgentActor {
                 let now = crate::timers::now_unix_ms();
                 let record = crate::timers::TimerRecord::arm(
                     label,
+                    message,
                     kind,
                     std::time::Duration::from_secs(after_secs),
                     now,
@@ -714,10 +717,21 @@ impl Toolbox for TimerToolbox {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                let Some(message) = input
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                else {
+                    return Err(ToolCallError::InvalidInput(
+                        "set_timer.message must be a non-empty string".to_string(),
+                    ));
+                };
                 let id = self
                     .actor
                     .ask(|reply| AgentCommand::ArmTimer {
                         label,
+                        message,
                         kind,
                         after_secs,
                         reply,
@@ -1185,6 +1199,7 @@ mod tests {
 
         let rec = TimerRecord::arm(
             "pr".into(),
+            String::new(),
             TimerKind::Recurring,
             Duration::from_secs(60),
             0,
@@ -1236,8 +1251,20 @@ mod tests {
     fn cancel_event_removes_selected_timers() {
         use crate::timers::{TimerKind, TimerRecord};
         use std::time::Duration;
-        let a = TimerRecord::arm("a".into(), TimerKind::OneShot, Duration::from_secs(1), 0);
-        let b = TimerRecord::arm("b".into(), TimerKind::OneShot, Duration::from_secs(1), 0);
+        let a = TimerRecord::arm(
+            "a".into(),
+            String::new(),
+            TimerKind::OneShot,
+            Duration::from_secs(1),
+            0,
+        );
+        let b = TimerRecord::arm(
+            "b".into(),
+            String::new(),
+            TimerKind::OneShot,
+            Duration::from_secs(1),
+            0,
+        );
         let (ia, ib) = (a.id.clone(), b.id.clone());
         let mut state = AgentActor::initial_state();
         state = AgentActor::apply_event(state, AgentDomainEvent::TimerArmed { record: a });

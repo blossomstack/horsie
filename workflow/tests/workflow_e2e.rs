@@ -506,7 +506,12 @@ async fn timer_parks_then_fires_and_resumes() {
     let mock = MockLlmServer::builder()
         .tool_call(
             "set_timer",
-            json!({"kind": "one_shot", "after_secs": 1, "label": "pr"}),
+            json!({
+                "kind": "one_shot",
+                "after_secs": 1,
+                "label": "pr",
+                "message": "recheck the PR's CI status"
+            }),
         )
         .tool_call(CONCLUDE_TOOL, json!({"kind": "park"}))
         .tool_call(
@@ -540,6 +545,15 @@ async fn timer_parks_then_fires_and_resumes() {
     // …then the 1s timer fires, the agent resumes and finishes.
     let state = wait_for_status(&journal, "wf-timer", WorkflowStatus::Finished).await;
     assert_eq!(state.current_agent.as_deref(), Some("watcher"));
+
+    // The wake message delivered the agent's own note back to it verbatim.
+    let session_id = state.current_session_id.expect("a current agent session");
+    let history = reconstruct_agent_history(&journal, &session_id.to_string()).await;
+    let dump = serde_json::to_string(&history).unwrap();
+    assert!(
+        dump.contains("recheck the PR's CI status"),
+        "the timer's message must be delivered in the wake prompt"
+    );
 }
 
 #[tokio::test]
@@ -567,7 +581,7 @@ async fn recurring_timer_fires_then_can_be_cancelled() {
     let mock = MockLlmServer::builder()
         .tool_call(
             "set_timer",
-            json!({"kind": "recurring", "after_secs": 1, "label": "ci"}),
+            json!({"kind": "recurring", "after_secs": 1, "label": "ci", "message": "check CI"}),
         )
         .tool_call(CONCLUDE_TOOL, json!({"kind": "park"}))
         // wake #1: confirm it is still listed, then cancel + finish.

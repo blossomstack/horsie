@@ -461,7 +461,7 @@ async fn parked_job_recovers_after_restart() {
     let mock = MockLlmServer::builder()
         .tool_call(
             "set_timer",
-            serde_json::json!({"kind": "recurring", "after_secs": 3600, "label": "pr"}),
+            serde_json::json!({"kind": "recurring", "after_secs": 3600, "label": "pr", "message": "check the PR"}),
         )
         .tool_call("conclude", serde_json::json!({"kind": "park"}))
         .tool_call(
