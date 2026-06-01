@@ -141,7 +141,11 @@ fn bash_workflow(tools: &[&str]) -> WorkflowDefinition {
     }
 }
 
-fn boot(root: &Path, cfg: &HorsieConfig, bin: PathBuf) -> ActorRef<SupervisorCommand> {
+fn boot(
+    root: &Path,
+    cfg: &HorsieConfig,
+    bin: PathBuf,
+) -> (Arc<dyn Journal>, ActorRef<SupervisorCommand>) {
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(root.join("state")));
     let deps = SupervisorDeps {
         provider_registry: build_registry(cfg).unwrap(),
@@ -149,10 +153,11 @@ fn boot(root: &Path, cfg: &HorsieConfig, bin: PathBuf) -> ActorRef<SupervisorCom
         state_dir: root.join("state"),
         journal: journal.clone(),
     };
-    spawn_root(
+    let sup = spawn_root(
         SupervisorActor::new(Arc::new(ProcessJobRuntime::new(deps))),
-        journal,
-    )
+        journal.clone(),
+    );
+    (journal, sup)
 }
 
 fn job_spec(def: WorkflowDefinition, workdir: &Path) -> JobSpec {
@@ -216,7 +221,7 @@ async fn sandboxed_job_writes_inside_workdir() {
     let dir = TempDir::new().unwrap();
     let workdir = TempDir::new().unwrap();
     let cfg = config_with_mock(dir.path(), &mock.url());
-    let sup = boot(dir.path(), &cfg, bin);
+    let (_journal, sup) = boot(dir.path(), &cfg, bin);
 
     let id = submit(&sup, job_spec(bash_workflow(&["bash"]), workdir.path())).await;
     let status = wait_terminal(&sup, &id).await;
@@ -247,7 +252,7 @@ async fn sandboxed_job_cannot_write_outside_workdir() {
     let dir = TempDir::new().unwrap();
     let workdir = TempDir::new().unwrap();
     let cfg = config_with_mock(dir.path(), &mock.url());
-    let sup = boot(dir.path(), &cfg, bin);
+    let (_journal, sup) = boot(dir.path(), &cfg, bin);
 
     let id = submit(&sup, job_spec(bash_workflow(&["bash"]), workdir.path())).await;
     // The job finishes regardless (the failed write is the tool's problem, not the
@@ -257,5 +262,53 @@ async fn sandboxed_job_cannot_write_outside_workdir() {
         !outside.exists(),
         "sandbox must deny writes outside the workdir, but {} was created",
         outside.display()
+    );
+}
+
+#[tokio::test]
+async fn sandboxed_agent_loads_workspace_skill() {
+    // A skill file in the workspace must be discovered by the runtime's real scan and
+    // loadable by the agent: the sandboxed `horsie-runtime` child scans the workdir
+    // (`runtime::scan::exec`), the agent lists it (`list_skills`) and loads its body
+    // (`skill`) over the real transport — the whole scan→agent path, end to end.
+    let Some(bin) = runtime_or_skip("sandboxed_agent_loads_workspace_skill") else {
+        return;
+    };
+    let mock = MockLlmServer::builder()
+        .tool_call("list_skills", json!({}))
+        .tool_call("skill", json!({ "name": "doc-helper" }))
+        .tool_call(CONCLUDE, json!({ "answer": "done" }))
+        .build()
+        .await;
+    let dir = TempDir::new().unwrap();
+    let workdir = TempDir::new().unwrap();
+
+    // A real skill on disk for the runtime's glob (`.claude/skills/*/SKILL.md`) to find.
+    let skill_dir = workdir.path().join(".claude/skills/doc-helper");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: doc-helper\ndescription: Summarize project docs\n---\nStep 1: read the docs.",
+    )
+    .unwrap();
+
+    let cfg = config_with_mock(dir.path(), &mock.url());
+    let (journal, sup) = boot(dir.path(), &cfg, bin);
+
+    // `skill` / `list_skills` are always available regardless of the tool allowlist.
+    let id = submit(&sup, job_spec(bash_workflow(&[]), workdir.path())).await;
+    assert_eq!(wait_terminal(&sup, &id).await, JobStatus::Finished);
+
+    // Replay the durable journal: the tool results the agent saw must carry the
+    // scanned skill — its listing (name + description) and its loaded body.
+    let frames = supervisor::render_history(&journal, &id).await;
+    let text: String = frames.into_iter().map(|f| f.text).collect();
+    assert!(
+        text.contains("doc-helper") && text.contains("Summarize project docs"),
+        "list_skills should surface the scanned skill; history:\n{text}"
+    );
+    assert!(
+        text.contains("Step 1: read the docs."),
+        "skill(doc-helper) should load the body; history:\n{text}"
     );
 }
