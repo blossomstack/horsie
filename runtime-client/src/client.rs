@@ -87,6 +87,7 @@ mod tests {
         let output = client
             .invoke(ToolCall::Bash(BashInput {
                 command: "echo hello".into(),
+                timeout_secs: None,
             }))
             .await
             .unwrap();
@@ -99,6 +100,7 @@ mod tests {
         let err = client
             .invoke(ToolCall::Bash(BashInput {
                 command: "bad".into(),
+                timeout_secs: None,
             }))
             .await
             .unwrap_err();

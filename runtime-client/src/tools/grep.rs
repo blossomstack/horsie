@@ -47,7 +47,7 @@ impl Tool for GrepTool {
                 max_results,
             }))
             .await
-            .map(|o| Value::String(o.stdout))
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
+            .and_then(super::render_output)
     }
 }

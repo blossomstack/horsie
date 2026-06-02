@@ -3,21 +3,18 @@ package runtime;
 
 // --- Tool inputs ---
 
-struct BashInput { command: String }
+struct BashInput { command: String, timeout_secs: Option<u64> }
 struct ReadFileInput { path: String, start_line: Option<u64>, end_line: Option<u64> }
 struct WriteFileInput { path: String, content: String }
-struct EditFileInput { path: String, old_text: String, new_text: String }
 
-struct RegexMode { pattern: String }
-struct LinesMode { start_line: u64, end_line: u64 }
+// Content-based find/replace. `regex` (default false) switches `find` from a
+// literal string to a pattern; `replace_all` (default false) requires the match
+// to be unique and errors otherwise — set it true to change every occurrence.
+struct FindAndReplaceInput { path: String, find: String, replace: String, regex: Option<bool>, replace_all: Option<bool> }
 
-#[type_tag = "kind"]
-union ReplaceMode {
-    Regex(RegexMode),
-    Lines(LinesMode),
-}
+// Positional replacement: swap the 1-based, inclusive line range for `replacement`.
+struct ReplaceLinesInput { path: String, start_line: u64, end_line: u64, replacement: String }
 
-struct ReplaceInFileInput { path: String, replacement: String, mode: ReplaceMode }
 struct ListFilesInput { path: String }
 struct GlobInput { pattern: String, path: Option<String>, max_results: Option<u64> }
 struct GrepInput { pattern: String, path: Option<String>, file_pattern: Option<String>, max_results: Option<u64> }
@@ -28,8 +25,8 @@ union ToolCall {
     Bash(BashInput),
     ReadFile(ReadFileInput),
     WriteFile(WriteFileInput),
-    EditFile(EditFileInput),
-    ReplaceInFile(ReplaceInFileInput),
+    FindAndReplace(FindAndReplaceInput),
+    ReplaceLines(ReplaceLinesInput),
     ListFiles(ListFilesInput),
     Glob(GlobInput),
     Grep(GrepInput),

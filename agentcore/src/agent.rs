@@ -439,39 +439,60 @@ impl Agent {
                 return Err(AgentError::Cancelled);
             }
 
-            for (tool_call_id, name, input) in &tool_calls {
-                let result_msg_id = format!("result:{tool_call_id}");
+            // Execute every tool call in this turn concurrently. The model may
+            // request several at once (parallel tool use); running them in parallel
+            // cuts a turn's latency to its slowest call rather than the sum. Results
+            // are collected in request order so the history stays deterministic.
+            let toolbox = &self.toolbox;
+            let executions = tool_calls
+                .iter()
+                .map(|(tool_call_id, name, input)| async move {
+                    let result_msg_id = format!("result:{tool_call_id}");
 
-                events
-                    .emit(AgentEvent::ToolExecuting(ToolExecutingEvent {
-                        message_id: result_msg_id.clone(),
-                        tool_call_id: tool_call_id.clone(),
-                    }))
-                    .await?;
+                    events
+                        .emit(AgentEvent::ToolExecuting(ToolExecutingEvent {
+                            message_id: result_msg_id.clone(),
+                            tool_call_id: tool_call_id.clone(),
+                        }))
+                        .await?;
 
-                let (output, is_error) = match self.toolbox.execute(name, input.clone()).await {
-                    Ok(v) => (v.to_string(), false),
-                    Err(e) => (e.to_string(), true),
-                };
+                    let (output, is_error) = match toolbox.execute(name, input.clone()).await {
+                        // A string result is forwarded verbatim; re-encoding it as JSON
+                        // would wrap it in quotes and escape every newline, wasting
+                        // tokens and hurting readability. Non-string values are rendered
+                        // as compact JSON.
+                        Ok(v) => (
+                            v.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| v.to_string()),
+                            false,
+                        ),
+                        Err(e) => (e.to_string(), true),
+                    };
 
-                events
-                    .emit(AgentEvent::ToolComplete(ToolCompleteEvent {
-                        message_id: result_msg_id.clone(),
-                        tool_call_id: tool_call_id.clone(),
-                        output: output.clone(),
-                        is_error,
-                    }))
-                    .await?;
+                    events
+                        .emit(AgentEvent::ToolComplete(ToolCompleteEvent {
+                            message_id: result_msg_id.clone(),
+                            tool_call_id: tool_call_id.clone(),
+                            output: output.clone(),
+                            is_error,
+                        }))
+                        .await?;
 
-                self.history.push(Message {
-                    id: result_msg_id,
-                    role: Role::Tool,
-                    parts: vec![ContentPart::ToolResult(ToolResultPart {
-                        tool_call_id: tool_call_id.clone(),
-                        output,
-                        is_error,
-                    })],
+                    Ok::<Message, AgentError>(Message {
+                        id: result_msg_id,
+                        role: Role::Tool,
+                        parts: vec![ContentPart::ToolResult(ToolResultPart {
+                            tool_call_id: tool_call_id.clone(),
+                            output,
+                            is_error,
+                        })],
+                    })
                 });
+
+            let results = futures_util::future::join_all(executions).await;
+            for result in results {
+                self.history.push(result?);
             }
         }
     }
@@ -1239,5 +1260,131 @@ mod tests {
             provider.seen.lock().unwrap().clone(),
             Some(ToolChoice::Auto)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_string_tool_output_is_not_json_escaped() {
+        // A tool returning a JSON string should reach the conversation verbatim —
+        // no surrounding quotes, no `\n` escapes from a second JSON encoding.
+        let provider = MockProvider::tool_then_text("t1", "cat", json!({}), "done");
+        let toolbox = Arc::new(MockToolbox {
+            specs: vec![ToolSpec {
+                name: "cat".to_string(),
+                description: "cat".to_string(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            handler: Arc::new(|_, _| Ok(Value::String("line1\nline2".to_string()))),
+        });
+        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let tc = sink
+            .events()
+            .into_iter()
+            .find_map(|e| match e {
+                AgentEvent::ToolComplete(tc) => Some(tc),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(tc.output, "line1\nline2");
+        assert!(
+            !tc.output.contains("\\n"),
+            "output was JSON-escaped: {}",
+            tc.output
+        );
+    }
+
+    struct BarrierToolbox {
+        barrier: Arc<tokio::sync::Barrier>,
+        timed_out: Arc<std::sync::atomic::AtomicBool>,
+        spec: ToolSpec,
+    }
+
+    #[async_trait]
+    impl Toolbox for BarrierToolbox {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![self.spec.clone()]
+        }
+
+        async fn execute(&self, _name: &str, input: Value) -> Result<Value, ToolCallError> {
+            // Concurrent execution => both calls reach the barrier and proceed at
+            // once. Sequential execution => the first call blocks here until the
+            // timeout fires, flagging the regression.
+            if tokio::time::timeout(std::time::Duration::from_secs(2), self.barrier.wait())
+                .await
+                .is_err()
+            {
+                self.timed_out
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(input)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_calls_in_a_turn_run_concurrently() {
+        let provider = MockProvider::new(vec![
+            CompletionResponse {
+                parts: vec![
+                    ContentPart::ToolCall(ToolCallPart {
+                        id: "a".into(),
+                        name: "wait".into(),
+                        input: json!({}),
+                    }),
+                    ContentPart::ToolCall(ToolCallPart {
+                        id: "b".into(),
+                        name: "wait".into(),
+                        input: json!({}),
+                    }),
+                ],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            },
+            CompletionResponse {
+                parts: vec![ContentPart::Text(TextPart {
+                    text: "done".into(),
+                })],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            },
+        ]);
+        let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let toolbox = Arc::new(BarrierToolbox {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            timed_out: timed_out.clone(),
+            spec: ToolSpec {
+                name: "wait".to_string(),
+                description: "wait".to_string(),
+                input_schema: json!({ "type": "object" }),
+            },
+        });
+        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !timed_out.load(std::sync::atomic::Ordering::SeqCst),
+            "tool calls in a turn ran sequentially, not concurrently"
+        );
     }
 }

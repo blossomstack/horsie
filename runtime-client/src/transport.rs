@@ -46,6 +46,14 @@ impl MockTransport {
         }
     }
 
+    /// Return a specific [`ToolOutput`] (lets tests exercise stderr / exit codes).
+    pub fn output(output: ToolOutput) -> Self {
+        Self {
+            result: ToolResult::Ok(output),
+            scan: empty_scan(),
+        }
+    }
+
     pub fn err(reason: impl Into<String>) -> Self {
         Self {
             result: ToolResult::Err(models::runtime::ToolError {

@@ -244,6 +244,7 @@ mod tests {
     fn bash() -> ToolCall {
         ToolCall::Bash(BashInput {
             command: "x".into(),
+            timeout_secs: None,
         })
     }
 

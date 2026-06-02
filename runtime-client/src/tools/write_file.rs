@@ -41,7 +41,7 @@ impl Tool for WriteFileTool {
         self.client
             .invoke(ToolCall::WriteFile(WriteFileInput { path, content }))
             .await
-            .map(|o| Value::String(o.stdout))
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
+            .and_then(super::render_output)
     }
 }

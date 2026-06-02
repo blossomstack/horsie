@@ -23,6 +23,7 @@ name = "agentcore"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "jsonschema",
  "models",
  "serde_json",
