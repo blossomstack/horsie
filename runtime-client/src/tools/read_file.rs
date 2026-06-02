@@ -20,7 +20,7 @@ impl Tool for ReadFileTool {
             name: "read_file".to_string(),
             description: "Read file contents, optionally limited to a 1-based line range."
                 .to_string(),
-            input_schema: json!({
+            input_schema: crate::tools::with_workspace(json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
@@ -28,7 +28,7 @@ impl Tool for ReadFileTool {
                     "end_line": { "type": "integer" }
                 },
                 "required": ["path"]
-            }),
+            })),
         }
     }
     async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
@@ -38,11 +38,13 @@ impl Tool for ReadFileTool {
             .to_string();
         let start_line = input["start_line"].as_u64();
         let end_line = input["end_line"].as_u64();
+        let workspace = crate::tools::workspace_arg(&input);
         self.client
             .invoke(ToolCall::ReadFile(ReadFileInput {
                 path,
                 start_line,
                 end_line,
+                workspace,
             }))
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))

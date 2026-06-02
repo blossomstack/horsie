@@ -109,9 +109,11 @@ impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
         cmd.arg("--endpoint")
             .arg(&endpoint_arg)
             .arg("--runtime-id")
-            .arg(id)
-            .arg("--working-dir")
-            .arg(&config.working_dir);
+            .arg(id);
+        for ws in &config.workspaces {
+            cmd.arg("--workspace")
+                .arg(format!("{}={}", ws.name, ws.path));
+        }
 
         if let Some(policy) = &self.sandbox {
             cmd.arg("--sandbox-caps").arg(&policy.capabilities_file);

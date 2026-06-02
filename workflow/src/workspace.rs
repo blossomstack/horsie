@@ -8,12 +8,35 @@ const INSTRUCTION_CANDIDATES: &[&str] = &["AGENTS.md", "AGENT.md", "CLAUDE.md"];
 /// Glob (relative to the workdir) locating skill definition files.
 const SKILLS_GLOB: &str = ".claude/skills/*/SKILL.md";
 
-/// Workspace context surfaced to every agent: the project instruction file and the
-/// set of available skills, both as of the spawn-time scan.
+/// Workspace context surfaced to every agent: one entry per workspace root, each with
+/// its project instruction file and skill set, as of the spawn-time scan.
 #[derive(Clone, Default)]
 pub struct WorkspaceContext {
+    pub workspaces: Vec<WorkspaceInfo>,
+}
+
+/// One scanned workspace root.
+#[derive(Clone)]
+pub struct WorkspaceInfo {
+    pub name: String,
+    pub path: String,
+    pub is_git_repo: bool,
     pub instructions: Option<String>,
     pub skills: Arc<SkillSet>,
+}
+
+impl WorkspaceContext {
+    pub fn is_empty(&self) -> bool {
+        self.workspaces.is_empty()
+    }
+    /// Names of all scanned workspaces, in scan order.
+    pub fn names(&self) -> Vec<String> {
+        self.workspaces.iter().map(|w| w.name.clone()).collect()
+    }
+    /// The workspace with the given name, if scanned.
+    pub fn find(&self, name: &str) -> Option<&WorkspaceInfo> {
+        self.workspaces.iter().find(|w| w.name == name)
+    }
 }
 
 /// Skills keyed by name, kept sorted for a stable prompt ordering.
@@ -55,15 +78,16 @@ impl FromIterator<Skill> for SkillSet {
     }
 }
 
-/// Scan the workspace over the runtime and interpret it. On a transport error,
-/// warn and return an empty context — the feature is additive and must not sink a run.
-pub async fn scan(client: &RuntimeClient) -> WorkspaceContext {
+/// Scan workspaces over the runtime and interpret them. `workspace` filters which
+/// roots to scan (`None` = all, `Some(name)` = one). On a transport error, warn and
+/// return an empty context — the feature is additive and must not sink a run.
+pub async fn scan(client: &RuntimeClient, workspace: Option<String>) -> WorkspaceContext {
     let candidates = INSTRUCTION_CANDIDATES
         .iter()
         .map(|s| s.to_string())
         .collect();
     match client
-        .scan_workspace(candidates, SKILLS_GLOB.to_string())
+        .scan_workspace(workspace, candidates, SKILLS_GLOB.to_string())
         .await
     {
         Ok(raw) => interpret(raw),
@@ -74,14 +98,23 @@ pub async fn scan(client: &RuntimeClient) -> WorkspaceContext {
     }
 }
 
-fn interpret(raw: WorkspaceScan) -> WorkspaceContext {
+fn interpret(raw: Vec<WorkspaceScan>) -> WorkspaceContext {
+    WorkspaceContext {
+        workspaces: raw.into_iter().map(interpret_one).collect(),
+    }
+}
+
+/// Interpret one workspace's raw scan: instructions verbatim, skills parsed from
+/// frontmatter and deduped within this workspace (kept-first). Skills are never merged
+/// across workspaces — each `WorkspaceInfo` owns its own set.
+fn interpret_one(raw: WorkspaceScan) -> WorkspaceInfo {
     let instructions = raw.instructions.map(|f| f.content);
     let mut skills = BTreeMap::new();
     for file in raw.skills {
         match parse_skill(&file) {
             Some(skill) => {
                 if skills.contains_key(&skill.name) {
-                    tracing::warn!(name = %skill.name, "duplicate skill name; keeping first");
+                    tracing::warn!(workspace = %raw.name, name = %skill.name, "duplicate skill name; keeping first");
                 } else {
                     skills.insert(skill.name.clone(), skill);
                 }
@@ -89,7 +122,10 @@ fn interpret(raw: WorkspaceScan) -> WorkspaceContext {
             None => tracing::warn!(path = %file.path, "skipping skill with invalid frontmatter"),
         }
     }
-    WorkspaceContext {
+    WorkspaceInfo {
+        name: raw.name,
+        path: raw.path,
+        is_git_repo: raw.is_git_repo,
         instructions,
         skills: Arc::new(SkillSet { skills }),
     }
@@ -164,16 +200,31 @@ pub fn compose_system_prompt(agent_prompt: Option<&str>, ws: &WorkspaceContext) 
     {
         sections.push(p.trim().to_string());
     }
-    if let Some(instr) = &ws.instructions
-        && !instr.trim().is_empty()
-    {
-        sections.push(format!("# Workspace context\n{}", instr.trim()));
-    }
-    if !ws.skills.is_empty() {
-        sections.push(format!(
-            "# Available skills\nLoad a skill's full instructions with the `skill` tool before relying on it.\n{}",
-            skills_listing(&ws.skills)
-        ));
+    if !ws.workspaces.is_empty() {
+        let mut block = String::from(
+            "# Workspaces\nFilesystem, bash, and skill tools take a `workspace` argument naming one of these (omit it only when there is exactly one).",
+        );
+        for w in &ws.workspaces {
+            block.push_str(&format!(
+                "\n\n## {} — {}{}",
+                w.name,
+                w.path,
+                if w.is_git_repo { " (git)" } else { "" }
+            ));
+            if let Some(instr) = &w.instructions
+                && !instr.trim().is_empty()
+            {
+                block.push_str(&format!("\n{}", instr.trim()));
+            }
+            if !w.skills.is_empty() {
+                block.push_str(&format!(
+                    "\n### Skills (load with the skill tool, workspace=\"{}\")\n{}",
+                    w.name,
+                    skills_listing(&w.skills)
+                ));
+            }
+        }
+        sections.push(block);
     }
     if sections.is_empty() {
         None
@@ -192,17 +243,40 @@ fn skills_listing(skills: &SkillSet) -> String {
         .join("\n")
 }
 
-/// The `list_skills` tool result: a count + catalog, or an empty-state line.
-pub(crate) fn list_skills_result(skills: &SkillSet) -> String {
-    if skills.is_empty() {
-        "No skills found in the workspace.".to_string()
-    } else {
-        format!(
-            "{} skills available:\n{}",
-            skills.len(),
-            skills_listing(skills)
-        )
+/// The `inspect_workspace` tool result: the live catalog for the scanned workspaces —
+/// each with its path, git flag, instruction-file presence, and skills (name +
+/// description only, never bodies).
+pub(crate) fn inspect_result(ws: &WorkspaceContext) -> String {
+    if ws.workspaces.is_empty() {
+        return "No workspaces found.".to_string();
     }
+    let mut out = String::new();
+    for (i, w) in ws.workspaces.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!(
+            "## {} — {}{}\ninstructions: {}",
+            w.name,
+            w.path,
+            if w.is_git_repo { " (git)" } else { "" },
+            if w.instructions.is_some() {
+                "present"
+            } else {
+                "none"
+            },
+        ));
+        if w.skills.is_empty() {
+            out.push_str("\nskills: none");
+        } else {
+            out.push_str(&format!(
+                "\nskills ({}):\n{}",
+                w.skills.len(),
+                skills_listing(&w.skills)
+            ));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -261,11 +335,22 @@ mod tests {
         assert!(parse_skill(&file("p", "---\nname: n\n---\nbody")).is_none());
     }
 
+    fn ws_scan(name: &str, instructions: Option<&str>, skills: Vec<ScannedFile>) -> WorkspaceScan {
+        WorkspaceScan {
+            name: name.into(),
+            path: format!("/ws/{name}"),
+            is_git_repo: false,
+            instructions: instructions.map(|c| file("AGENTS.md", c)),
+            skills,
+        }
+    }
+
     #[test]
-    fn interpret_skips_bad_and_dedupes() {
-        let raw = WorkspaceScan {
-            instructions: Some(file("AGENTS.md", "proj")),
-            skills: vec![
+    fn interpret_skips_bad_and_dedupes_within_workspace() {
+        let raw = vec![ws_scan(
+            "w",
+            Some("proj"),
+            vec![
                 file(
                     "a/SKILL.md",
                     "---\nname: a\ndescription: first\n---\nbody-a",
@@ -276,55 +361,89 @@ mod tests {
                     "---\nname: a\ndescription: dup\n---\nbody-dup",
                 ),
             ],
-        };
+        )];
         let ctx = interpret(raw);
-        assert_eq!(ctx.instructions.as_deref(), Some("proj"));
-        assert_eq!(ctx.skills.names(), vec!["a".to_string()]);
-        assert_eq!(ctx.skills.get("a").unwrap().description, "first");
+        let w = ctx.find("w").unwrap();
+        assert_eq!(w.instructions.as_deref(), Some("proj"));
+        assert_eq!(w.skills.names(), vec!["a".to_string()]);
+        assert_eq!(w.skills.get("a").unwrap().description, "first");
     }
 
     #[test]
-    fn compose_is_role_first_and_omits_empty() {
-        let ctx = WorkspaceContext {
-            instructions: Some("project rules".into()),
-            skills: Arc::new(SkillSet::from_iter([Skill {
-                name: "git-bisect".into(),
-                description: "find bad commit".into(),
-                body: "b".into(),
-            }])),
+    fn interpret_keeps_same_skill_name_across_workspaces() {
+        let skill = |desc: &str| {
+            file(
+                "s/SKILL.md",
+                &format!("---\nname: dup\ndescription: {desc}\n---\nbody"),
+            )
         };
+        let ctx = interpret(vec![
+            ws_scan("alpha", None, vec![skill("from-alpha")]),
+            ws_scan("beta", None, vec![skill("from-beta")]),
+        ]);
+        assert_eq!(
+            ctx.find("alpha")
+                .unwrap()
+                .skills
+                .get("dup")
+                .unwrap()
+                .description,
+            "from-alpha"
+        );
+        assert_eq!(
+            ctx.find("beta")
+                .unwrap()
+                .skills
+                .get("dup")
+                .unwrap()
+                .description,
+            "from-beta"
+        );
+    }
+
+    #[test]
+    fn compose_is_role_first_with_one_block_per_workspace() {
+        let ctx = interpret(vec![
+            ws_scan(
+                "alpha",
+                Some("alpha rules"),
+                vec![file(
+                    "s/SKILL.md",
+                    "---\nname: a-skill\ndescription: do a\n---\nb",
+                )],
+            ),
+            ws_scan("beta", None, vec![]),
+        ]);
         let prompt = compose_system_prompt(Some("You are a coder."), &ctx).unwrap();
         let role = prompt.find("You are a coder.").unwrap();
-        let ctx_pos = prompt.find("# Workspace context").unwrap();
-        let skills_pos = prompt.find("# Available skills").unwrap();
-        assert!(role < ctx_pos && ctx_pos < skills_pos);
-        assert!(prompt.contains("- git-bisect: find bad commit"));
+        let header = prompt.find("# Workspaces").unwrap();
+        let alpha = prompt.find("## alpha").unwrap();
+        let beta = prompt.find("## beta").unwrap();
+        assert!(role < header && header < alpha && alpha < beta);
+        assert!(prompt.contains("alpha rules"));
+        assert!(prompt.contains("- a-skill: do a"));
+        assert!(prompt.contains("workspace=\"alpha\""));
     }
 
     #[test]
-    fn list_skills_result_lists_or_reports_empty() {
-        let empty = SkillSet::default();
+    fn inspect_lists_workspaces_or_reports_empty() {
         assert_eq!(
-            list_skills_result(&empty),
-            "No skills found in the workspace."
+            inspect_result(&WorkspaceContext::default()),
+            "No workspaces found."
         );
-
-        let set = SkillSet::from_iter([
-            Skill {
-                name: "a".into(),
-                description: "first".into(),
-                body: "x".into(),
-            },
-            Skill {
-                name: "b".into(),
-                description: "second".into(),
-                body: "y".into(),
-            },
-        ]);
-        let out = list_skills_result(&set);
-        assert!(out.starts_with("2 skills available:\n"));
+        let ctx = interpret(vec![ws_scan(
+            "alpha",
+            Some("rules"),
+            vec![file(
+                "s/SKILL.md",
+                "---\nname: a\ndescription: first\n---\nx",
+            )],
+        )]);
+        let out = inspect_result(&ctx);
+        assert!(out.contains("## alpha — /ws/alpha"));
+        assert!(out.contains("instructions: present"));
+        assert!(out.contains("skills (1):"));
         assert!(out.contains("- a: first"));
-        assert!(out.contains("- b: second"));
     }
 
     #[test]

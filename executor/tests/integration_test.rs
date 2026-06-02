@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use executor::{Executor, HealthStatus, RuntimeError, RuntimeHandle, RuntimeProvider};
-use models::executor::{ExecutorEvent, RuntimeConfig, RuntimeState};
+use models::executor::{ExecutorEvent, RuntimeConfig, RuntimeState, WorkspaceConfig};
 use server::{ExecutorEventHandler, Server};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -105,7 +105,10 @@ async fn test_executor_connects_and_creates_runtime() {
             "ex-1",
             "rt-1",
             RuntimeConfig {
-                working_dir: "/tmp".to_string(),
+                workspaces: vec![WorkspaceConfig {
+                    name: "tmp".to_string(),
+                    path: "/tmp".to_string(),
+                }],
             },
         )
         .await
@@ -144,7 +147,10 @@ async fn test_query_runtimes_returns_created_runtime() {
             "ex-2",
             "rt-a",
             RuntimeConfig {
-                working_dir: "/tmp".to_string(),
+                workspaces: vec![WorkspaceConfig {
+                    name: "tmp".to_string(),
+                    path: "/tmp".to_string(),
+                }],
             },
         )
         .await
@@ -185,7 +191,10 @@ async fn test_destroy_runtime_transitions_to_stopped() {
             "ex-3",
             "rt-b",
             RuntimeConfig {
-                working_dir: "/tmp".to_string(),
+                workspaces: vec![WorkspaceConfig {
+                    name: "tmp".to_string(),
+                    path: "/tmp".to_string(),
+                }],
             },
         )
         .await
@@ -219,7 +228,10 @@ async fn test_command_to_unknown_executor_fails() {
             "nobody",
             "rt-x",
             RuntimeConfig {
-                working_dir: "/tmp".to_string(),
+                workspaces: vec![WorkspaceConfig {
+                    name: "tmp".to_string(),
+                    path: "/tmp".to_string(),
+                }],
             },
         )
         .await;

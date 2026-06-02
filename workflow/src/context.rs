@@ -17,9 +17,10 @@ pub const CONCLUDE_TOOL: &str = "conclude";
 /// demand (progressive disclosure). Always advertised; re-scans the workspace live.
 pub const SKILL_TOOL: &str = "skill";
 
-/// Name of the builtin tool that re-scans the workspace and returns the current
-/// skill catalog (name + description). Always advertised, like `skill`.
-pub const LIST_SKILLS_TOOL: &str = "list_skills";
+/// Name of the builtin tool that re-scans the workspace(s) and returns the current
+/// catalog (path, git status, instruction presence, skills). Always advertised, like
+/// `skill`. Replaces the former `list_skills`.
+pub const INSPECT_WORKSPACE_TOOL: &str = "inspect_workspace";
 
 /// Resources injected into a [`WorkflowActor`](crate::WorkflowActor) at construction.
 ///
@@ -67,6 +68,7 @@ pub trait ToolboxFactory: Send + Sync + 'static {
         &self,
         agent_def: &WorkflowAgentDef,
         runtime_client: RuntimeClient,
+        workspace_names: Vec<String>,
     ) -> Arc<dyn Toolbox>;
 }
 
@@ -79,6 +81,7 @@ impl ToolboxFactory for DefaultToolboxFactory {
         &self,
         agent_def: &WorkflowAgentDef,
         runtime_client: RuntimeClient,
+        workspace_names: Vec<String>,
     ) -> Arc<dyn Toolbox> {
         let client = runtime_client.clone();
         let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client);
@@ -100,6 +103,7 @@ impl ToolboxFactory for DefaultToolboxFactory {
             base,
             conclude,
             runtime_client: client,
+            workspace_names,
         })
     }
 }
@@ -209,6 +213,36 @@ struct AgentToolbox {
     base: Arc<dyn Toolbox>,
     conclude: Option<ToolSpec>,
     runtime_client: RuntimeClient,
+    /// Names of the job's workspaces (stable for the job); used to apply the
+    /// "optional iff single" rule and to list valid names in errors. The runtime owns
+    /// the actual name→path resolution.
+    workspace_names: Vec<String>,
+}
+
+impl AgentToolbox {
+    /// Resolve the optional `workspace` argument of a skill-side tool to a concrete
+    /// name. `None` is allowed only when there is exactly one workspace.
+    fn resolve_workspace(&self, requested: Option<&str>) -> Result<String, ToolCallError> {
+        match requested {
+            Some(name) => {
+                if self.workspace_names.iter().any(|n| n == name) {
+                    Ok(name.to_string())
+                } else {
+                    Err(ToolCallError::InvalidInput(format!(
+                        "unknown workspace '{name}'; available: {}",
+                        self.workspace_names.join(", ")
+                    )))
+                }
+            }
+            None => match self.workspace_names.as_slice() {
+                [only] => Ok(only.clone()),
+                _ => Err(ToolCallError::InvalidInput(format!(
+                    "specify a workspace: {}",
+                    self.workspace_names.join(", ")
+                ))),
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -221,20 +255,28 @@ impl Toolbox for AgentToolbox {
         specs.push(ToolSpec {
             name: SKILL_TOOL.to_string(),
             description:
-                "Load the full instructions for a named skill (see 'Available skills' or list_skills)."
+                "Load the full instructions for a named skill in a workspace (see '# Workspaces' or inspect_workspace)."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["name"],
-                "properties": { "name": { "type": "string", "description": "The skill name." } }
+                "properties": {
+                    "name": { "type": "string", "description": "The skill name." },
+                    "workspace": { "type": "string", "description": "Which workspace the skill belongs to (see '# Workspaces'). Required when there is more than one workspace." }
+                }
             }),
         });
         specs.push(ToolSpec {
-            name: LIST_SKILLS_TOOL.to_string(),
+            name: INSPECT_WORKSPACE_TOOL.to_string(),
             description:
-                "Re-scan the workspace and list the skills currently available (name + description)."
+                "Re-scan and show the current state of the workspace(s): path, git status, instruction-file presence, and available skills (name + description)."
                     .to_string(),
-            input_schema: json!({ "type": "object", "properties": {} }),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": { "type": "string", "description": "Limit to one workspace (see '# Workspaces'). Omit to show all." }
+                }
+            }),
         });
         specs
     }
@@ -252,20 +294,28 @@ impl Toolbox for AgentToolbox {
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let ws = crate::workspace::scan(&self.runtime_client).await;
-            return match ws.skills.get(requested) {
+            let ws_name = self.resolve_workspace(input.get("workspace").and_then(Value::as_str))?;
+            let ws = crate::workspace::scan(&self.runtime_client, Some(ws_name.clone())).await;
+            let Some(info) = ws.find(&ws_name) else {
+                return Err(ToolCallError::InvalidInput(format!(
+                    "workspace '{ws_name}' is not available"
+                )));
+            };
+            return match info.skills.get(requested) {
                 Some(skill) => Ok(Value::String(skill.body.clone())),
                 None => Err(ToolCallError::InvalidInput(format!(
-                    "unknown skill '{requested}'; available: {}",
-                    ws.skills.names().join(", ")
+                    "unknown skill '{requested}' in workspace '{ws_name}'; available: {}",
+                    info.skills.names().join(", ")
                 ))),
             };
         }
-        if name == LIST_SKILLS_TOOL {
-            let ws = crate::workspace::scan(&self.runtime_client).await;
-            return Ok(Value::String(crate::workspace::list_skills_result(
-                &ws.skills,
-            )));
+        if name == INSPECT_WORKSPACE_TOOL {
+            let filter = input
+                .get("workspace")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let ws = crate::workspace::scan(&self.runtime_client, filter).await;
+            return Ok(Value::String(crate::workspace::inspect_result(&ws)));
         }
         self.base.execute(name, input).await
     }
@@ -329,9 +379,12 @@ mod tests {
         }
     }
 
-    fn scan_with_skill() -> models::runtime::WorkspaceScan {
+    fn scan_with_skill(name: &str) -> models::runtime::WorkspaceScan {
         let content = "---\nname: git-bisect\ndescription: find bad commit\n---\nStep 1...";
         models::runtime::WorkspaceScan {
+            name: name.into(),
+            path: format!("/ws/{name}"),
+            is_git_repo: false,
             instructions: None,
             skills: vec![models::runtime::ScannedFile {
                 path: ".claude/skills/git-bisect/SKILL.md".into(),
@@ -406,8 +459,11 @@ mod tests {
     fn toolbox_includes_conclude_and_filters_runtime_tools() {
         let client = RuntimeClient::new(MockTransport::ok(""));
         let out = json!({"type": "object"});
-        let tb = DefaultToolboxFactory
-            .for_agent(&def(Some(vec!["bash".into()]), Some(out), false), client);
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(Some(vec!["bash".into()]), Some(out), false),
+            client,
+            vec!["october".into()],
+        );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"bash".to_string()));
         assert!(names.contains(&CONCLUDE_TOOL.to_string()));
@@ -418,25 +474,39 @@ mod tests {
     async fn conclude_tool_is_not_executable() {
         let client = RuntimeClient::new(MockTransport::ok(""));
         let out = json!({"type": "object"});
-        let tb = DefaultToolboxFactory.for_agent(&def(None, Some(out), false), client);
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(None, Some(out), false),
+            client,
+            vec!["october".into()],
+        );
         let err = tb.execute(CONCLUDE_TOOL, json!({})).await.unwrap_err();
         assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
     }
 
     #[tokio::test]
-    async fn skill_and_list_skills_always_present() {
+    async fn skill_and_inspect_always_present() {
         let client = RuntimeClient::new(MockTransport::ok("")); // empty scan
-        let tb = DefaultToolboxFactory.for_agent(&def(None, None, false), client);
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(None, None, false),
+            client,
+            vec!["october".into()],
+        );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&SKILL_TOOL.to_string()));
-        assert!(names.contains(&LIST_SKILLS_TOOL.to_string()));
+        assert!(names.contains(&INSPECT_WORKSPACE_TOOL.to_string()));
     }
 
     #[tokio::test]
-    async fn skill_fetches_live_and_list_skills_reports() {
-        let client = RuntimeClient::new(MockTransport::ok("").with_scan(scan_with_skill()));
-        let tb = DefaultToolboxFactory.for_agent(&def(None, None, false), client);
+    async fn skill_fetches_live_for_single_workspace_default() {
+        let client =
+            RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan_with_skill("october")]));
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(None, None, false),
+            client,
+            vec!["october".into()],
+        );
 
+        // Single workspace → `workspace` may be omitted.
         let body = tb
             .execute(SKILL_TOOL, json!({ "name": "git-bisect" }))
             .await
@@ -449,10 +519,35 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
 
-        let listed = tb.execute(LIST_SKILLS_TOOL, json!({})).await.unwrap();
-        assert_eq!(
-            listed,
-            json!("1 skills available:\n- git-bisect: find bad commit")
+        let listed = tb.execute(INSPECT_WORKSPACE_TOOL, json!({})).await.unwrap();
+        let text = listed.as_str().unwrap();
+        assert!(text.contains("## october — /ws/october"));
+        assert!(text.contains("- git-bisect: find bad commit"));
+    }
+
+    #[tokio::test]
+    async fn skill_requires_workspace_when_multiple() {
+        let client =
+            RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan_with_skill("october")]));
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(None, None, false),
+            client,
+            vec!["alpha".into(), "beta".into()],
         );
+        // Omitting `workspace` with several workspaces is rejected before any scan.
+        let err = tb
+            .execute(SKILL_TOOL, json!({ "name": "git-bisect" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+        // An unknown workspace name is also rejected.
+        let err = tb
+            .execute(
+                SKILL_TOOL,
+                json!({ "name": "git-bisect", "workspace": "zzz" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
     }
 }

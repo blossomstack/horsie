@@ -7,8 +7,8 @@ pub mod read_file;
 pub mod replace_lines;
 pub mod write_file;
 
-use models::runtime::{ToolCall, ToolResult};
-use std::path::Path;
+use crate::workspace::WorkspaceRegistry;
+use models::runtime::{ToolCall, ToolError, ToolResult};
 
 /// Per-stream output budget. Tool output rides along in the agent's conversation
 /// history and is re-sent to the model on every turn, so an unbounded `cat`, build
@@ -17,16 +17,38 @@ use std::path::Path;
 /// holds regardless of which tool produced the output.
 const MAX_STREAM_BYTES: usize = 50_000;
 
-pub async fn dispatch(working_dir: &Path, call: ToolCall) -> ToolResult {
+/// The `workspace` field carried by every tool input (each variant has one).
+fn workspace_of(call: &ToolCall) -> &Option<String> {
+    match call {
+        ToolCall::Bash(i) => &i.workspace,
+        ToolCall::ReadFile(i) => &i.workspace,
+        ToolCall::WriteFile(i) => &i.workspace,
+        ToolCall::FindAndReplace(i) => &i.workspace,
+        ToolCall::ReplaceLines(i) => &i.workspace,
+        ToolCall::ListFiles(i) => &i.workspace,
+        ToolCall::Glob(i) => &i.workspace,
+        ToolCall::Grep(i) => &i.workspace,
+    }
+}
+
+/// Resolve the call's target workspace to a root directory (the single translation
+/// site), run the tool there, then clamp its output. An unresolvable `workspace`
+/// (missing with several workspaces, or an unknown name) is returned to the model as
+/// a `ToolError`.
+pub async fn dispatch(registry: &WorkspaceRegistry, call: ToolCall) -> ToolResult {
+    let dir = match registry.resolve(workspace_of(&call)) {
+        Ok(d) => d,
+        Err(reason) => return ToolResult::Err(ToolError { reason }),
+    };
     let result = match call {
-        ToolCall::Bash(input) => bash::exec(working_dir, input).await,
-        ToolCall::ReadFile(input) => read_file::exec(working_dir, input).await,
-        ToolCall::WriteFile(input) => write_file::exec(working_dir, input).await,
-        ToolCall::FindAndReplace(input) => find_and_replace::exec(working_dir, input).await,
-        ToolCall::ReplaceLines(input) => replace_lines::exec(working_dir, input).await,
-        ToolCall::ListFiles(input) => list_files::exec(working_dir, input).await,
-        ToolCall::Glob(input) => glob::exec(working_dir, input).await,
-        ToolCall::Grep(input) => grep::exec(working_dir, input).await,
+        ToolCall::Bash(input) => bash::exec(&dir, input).await,
+        ToolCall::ReadFile(input) => read_file::exec(&dir, input).await,
+        ToolCall::WriteFile(input) => write_file::exec(&dir, input).await,
+        ToolCall::FindAndReplace(input) => find_and_replace::exec(&dir, input).await,
+        ToolCall::ReplaceLines(input) => replace_lines::exec(&dir, input).await,
+        ToolCall::ListFiles(input) => list_files::exec(&dir, input).await,
+        ToolCall::Glob(input) => glob::exec(&dir, input).await,
+        ToolCall::Grep(input) => grep::exec(&dir, input).await,
     };
 
     match result {
@@ -74,6 +96,7 @@ fn truncate_stream(s: String) -> String {
 )]
 mod tests {
     use super::*;
+    use models::Workspace;
     use models::runtime::BashInput;
     use tempfile::TempDir;
 
@@ -96,12 +119,17 @@ mod tests {
     #[tokio::test]
     async fn dispatch_truncates_large_bash_output() {
         let dir = TempDir::new().unwrap();
+        let registry = WorkspaceRegistry::new(vec![Workspace {
+            name: "ws".into(),
+            path: dir.path().to_path_buf(),
+        }]);
         // 80 KB of 'a' on stdout, well over the cap.
         let result = dispatch(
-            dir.path(),
+            &registry,
             ToolCall::Bash(BashInput {
                 command: "head -c 80000 < /dev/zero | tr '\\0' a".to_string(),
                 timeout_secs: None,
+                workspace: None,
             }),
         )
         .await;
@@ -112,5 +140,30 @@ mod tests {
             }
             ToolResult::Err(e) => panic!("{}", e.reason),
         }
+    }
+
+    #[tokio::test]
+    async fn dispatch_errors_when_workspace_ambiguous() {
+        let registry = WorkspaceRegistry::new(vec![
+            Workspace {
+                name: "a".into(),
+                path: "/a".into(),
+            },
+            Workspace {
+                name: "b".into(),
+                path: "/b".into(),
+            },
+        ]);
+        // No `workspace` with several workspaces → a ToolError, never silent.
+        let result = dispatch(
+            &registry,
+            ToolCall::Bash(BashInput {
+                command: "echo hi".to_string(),
+                timeout_secs: None,
+                workspace: None,
+            }),
+        )
+        .await;
+        assert!(matches!(result, ToolResult::Err(_)));
     }
 }

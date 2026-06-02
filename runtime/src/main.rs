@@ -28,13 +28,18 @@ struct Cli {
     endpoint: String,
     #[arg(long)]
     runtime_id: String,
-    #[arg(long)]
-    working_dir: PathBuf,
+    /// Repeatable `name=path` workspace root. At least one is required.
+    #[arg(long = "workspace", required = true, value_parser = parse_workspace_arg)]
+    workspaces: Vec<models::Workspace>,
     /// Capability file confining tool execution with the nono sandbox before
     /// connecting (fail-closed). Its presence enables the sandbox; absent → no
     /// sandbox. The file fully defines the allowed capabilities.
     #[arg(long = "sandbox-caps")]
     sandbox_caps: Option<PathBuf>,
+}
+
+fn parse_workspace_arg(s: &str) -> Result<models::Workspace, String> {
+    runtime::workspace::WorkspaceRegistry::parse_arg(s)
 }
 
 enum Endpoint {
@@ -71,7 +76,8 @@ async fn main() {
                 Endpoint::Unix(p) => Some(p.as_path()),
                 Endpoint::Ws(_) => None,
             };
-            if let Err(e) = runtime::sandbox::apply(&cli.working_dir, socket, caps_file) {
+            let dirs: Vec<PathBuf> = cli.workspaces.iter().map(|w| w.path.clone()).collect();
+            if let Err(e) = runtime::sandbox::apply(&dirs, socket, caps_file) {
                 eprintln!("sandbox apply failed: {e}");
                 std::process::exit(3);
             }
@@ -86,9 +92,11 @@ async fn main() {
         }
     }
 
+    let registry = Arc::new(runtime::workspace::WorkspaceRegistry::new(cli.workspaces));
+
     match endpoint {
         Endpoint::Ws(url) => match connect_async(&url).await {
-            Ok((ws, _)) => run_loop(ws, cli.working_dir, cli.runtime_id).await,
+            Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id).await,
             Err(e) => {
                 eprintln!("failed to connect to {url}: {e}");
                 std::process::exit(1);
@@ -96,7 +104,7 @@ async fn main() {
         },
         Endpoint::Unix(path) => match tokio::net::UnixStream::connect(&path).await {
             Ok(stream) => match client_async("ws://localhost/", stream).await {
-                Ok((ws, _)) => run_loop(ws, cli.working_dir, cli.runtime_id).await,
+                Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id).await,
                 Err(e) => {
                     eprintln!("ws handshake failed on unix socket: {e}");
                     std::process::exit(1);
@@ -112,8 +120,11 @@ async fn main() {
 
 /// The runtime message loop, generic over the underlying socket so TCP and unix
 /// share one implementation. Announces `RuntimeReady`, then services tool calls.
-async fn run_loop<S>(ws: WebSocketStream<S>, working_dir: PathBuf, runtime_id: String)
-where
+async fn run_loop<S>(
+    ws: WebSocketStream<S>,
+    registry: Arc<runtime::workspace::WorkspaceRegistry>,
+    runtime_id: String,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (sink_raw, mut stream) = ws.split();
@@ -147,12 +158,12 @@ where
                 match inbound {
                     RuntimeInboundMessage::ToolCall(req) => {
                         let call_id = req.call_id.clone();
-                        let working_dir = working_dir.clone();
+                        let registry = registry.clone();
                         let sink_clone = sink.clone();
                         let in_flight_clone = in_flight.clone();
 
                         let handle = tokio::spawn(async move {
-                            let result = runtime::tools::dispatch(&working_dir, req.call).await;
+                            let result = runtime::tools::dispatch(&registry, req.call).await;
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
                                     call_id: call_id.clone(),
@@ -177,16 +188,16 @@ where
                     RuntimeInboundMessage::ScanWorkspace(req) => {
                         let call_id = req.call_id.clone();
                         let map_id = req.call_id.clone();
-                        let working_dir = working_dir.clone();
+                        let registry = registry.clone();
                         let sink_clone = sink.clone();
                         let in_flight_clone = in_flight.clone();
 
                         let handle = tokio::spawn(async move {
-                            let scan = runtime::scan::exec(&working_dir, req);
+                            let workspaces = runtime::scan::exec(&registry, req);
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ScanResult(ScanResponse {
                                     call_id: call_id.clone(),
-                                    scan,
+                                    workspaces,
                                 }),
                             );
                             if let Ok(json) = response {

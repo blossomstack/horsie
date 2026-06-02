@@ -123,6 +123,152 @@ impl agent::AgentInput {
     }
 }
 
+/// A named workspace root. Storage/in-memory pair (hand-written, deliberately NOT a
+/// fluorite type): `JobSpec` persists it and the runtime registry is built from it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Workspace {
+    pub name: String,
+    pub path: std::path::PathBuf,
+}
+
+/// Error from [`derive_workspaces`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum WorkspaceError {
+    /// Two inputs are the same path — a real mistake, not a naming problem.
+    DuplicatePath(String),
+    /// A path has no usable name component (e.g. `/` or empty).
+    Empty(String),
+}
+
+impl std::fmt::Display for WorkspaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicatePath(p) => write!(f, "two workspaces resolve to the same path: {p}"),
+            Self::Empty(p) => write!(f, "workspace path has no name component: {p}"),
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceError {}
+
+/// Derive a unique name per path: start from the basename, and while any two names
+/// collide, prepend the next parent segment to each colliding one (joined with `/`)
+/// until all are unique. Byte-identical paths are an error.
+pub fn derive_workspaces(paths: &[std::path::PathBuf]) -> Result<Vec<Workspace>, WorkspaceError> {
+    for i in 0..paths.len() {
+        for j in (i + 1)..paths.len() {
+            if paths[i] == paths[j] {
+                return Err(WorkspaceError::DuplicatePath(
+                    paths[i].display().to_string(),
+                ));
+            }
+        }
+    }
+    // Per path, its normal components (basename last) for progressive lengthening.
+    let comps: Vec<Vec<String>> = paths
+        .iter()
+        .map(|p| {
+            p.components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                    std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::CurDir
+                    | std::path::Component::ParentDir => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for (p, c) in paths.iter().zip(&comps) {
+        if c.is_empty() {
+            return Err(WorkspaceError::Empty(p.display().to_string()));
+        }
+    }
+    // depth[i] = number of trailing segments included in name i (>= 1).
+    let mut depth = vec![1usize; paths.len()];
+    loop {
+        let names: Vec<String> = comps
+            .iter()
+            .zip(&depth)
+            .map(|(c, &d)| {
+                let start = c.len().saturating_sub(d);
+                c[start..].join("/")
+            })
+            .collect();
+        let mut bumped = false;
+        for i in 0..names.len() {
+            let collides = names
+                .iter()
+                .enumerate()
+                .any(|(j, n)| j != i && *n == names[i]);
+            if collides && depth[i] < comps[i].len() {
+                depth[i] += 1;
+                bumped = true;
+            }
+        }
+        if !bumped {
+            return Ok(paths
+                .iter()
+                .zip(names)
+                .map(|(p, name)| Workspace {
+                    name,
+                    path: p.clone(),
+                })
+                .collect());
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod workspace_tests {
+    use super::{Workspace, derive_workspaces};
+    use std::path::PathBuf;
+
+    fn names(ws: &[Workspace]) -> Vec<&str> {
+        ws.iter().map(|w| w.name.as_str()).collect()
+    }
+
+    #[test]
+    fn basenames_when_unique() {
+        let ws = derive_workspaces(&[
+            PathBuf::from("./api"),
+            PathBuf::from("./web"),
+            PathBuf::from("../shared"),
+        ])
+        .unwrap();
+        assert_eq!(names(&ws), ["api", "web", "shared"]);
+    }
+
+    #[test]
+    fn lengthens_on_conflict() {
+        let ws = derive_workspaces(&[
+            PathBuf::from("./services/api"),
+            PathBuf::from("./tools/api"),
+        ])
+        .unwrap();
+        assert_eq!(names(&ws), ["services/api", "tools/api"]);
+    }
+
+    #[test]
+    fn lengthens_until_unique() {
+        let ws =
+            derive_workspaces(&[PathBuf::from("/a/x/api"), PathBuf::from("/b/x/api")]).unwrap();
+        assert_eq!(names(&ws), ["a/x/api", "b/x/api"]);
+    }
+
+    #[test]
+    fn identical_paths_error() {
+        assert!(derive_workspaces(&[PathBuf::from("./api"), PathBuf::from("./api")]).is_err());
+    }
+
+    #[test]
+    fn single_workspace_basename() {
+        let ws = derive_workspaces(&[PathBuf::from("/home/me/october")]).unwrap();
+        assert_eq!(names(&ws), ["october"]);
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -163,6 +309,7 @@ mod tests {
         use crate::runtime::{RuntimeInboundMessage, ScanRequest};
         let msg = RuntimeInboundMessage::ScanWorkspace(ScanRequest {
             call_id: "c1".into(),
+            workspace: None,
             instruction_candidates: vec!["AGENTS.md".into()],
             skills_glob: ".claude/skills/*/SKILL.md".into(),
         });
@@ -177,7 +324,10 @@ mod tests {
         use crate::runtime::{RuntimeOutboundMessage, ScanResponse, ScannedFile, WorkspaceScan};
         let msg = RuntimeOutboundMessage::ScanResult(ScanResponse {
             call_id: "c1".into(),
-            scan: WorkspaceScan {
+            workspaces: vec![WorkspaceScan {
+                name: "october".into(),
+                path: "/ws/october".into(),
+                is_git_repo: true,
                 instructions: Some(ScannedFile {
                     path: "AGENTS.md".into(),
                     content: "hi".into(),
@@ -186,11 +336,13 @@ mod tests {
                     path: ".claude/skills/x/SKILL.md".into(),
                     content: "b".into(),
                 }],
-            },
+            }],
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"ScanResult\""));
         let back: RuntimeOutboundMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, RuntimeOutboundMessage::ScanResult(r) if r.scan.skills.len() == 1));
+        assert!(
+            matches!(back, RuntimeOutboundMessage::ScanResult(r) if r.workspaces.len() == 1 && r.workspaces[0].skills.len() == 1)
+        );
     }
 }

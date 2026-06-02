@@ -42,6 +42,7 @@ mod tests {
             WriteFileInput {
                 path: "out.txt".into(),
                 content: "hello".into(),
+                workspace: None,
             },
         )
         .await;
@@ -59,6 +60,7 @@ mod tests {
             WriteFileInput {
                 path: "a/b/c.txt".into(),
                 content: "x".into(),
+                workspace: None,
             },
         )
         .await;

@@ -63,6 +63,7 @@ mod tests {
             BashInput {
                 command: "echo hello".to_string(),
                 timeout_secs: None,
+                workspace: None,
             },
         )
         .await;
@@ -80,6 +81,7 @@ mod tests {
             BashInput {
                 command: "exit 42".to_string(),
                 timeout_secs: None,
+                workspace: None,
             },
         )
         .await;
@@ -98,6 +100,7 @@ mod tests {
             BashInput {
                 command: "cat sentinel.txt".to_string(),
                 timeout_secs: None,
+                workspace: None,
             },
         )
         .await;
@@ -115,6 +118,7 @@ mod tests {
             BashInput {
                 command: "sleep 5".to_string(),
                 timeout_secs: Some(1),
+                workspace: None,
             },
         )
         .await;

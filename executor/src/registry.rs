@@ -191,7 +191,10 @@ mod tests {
 
     fn cfg() -> RuntimeConfig {
         RuntimeConfig {
-            working_dir: "/tmp".to_string(),
+            workspaces: vec![models::executor::WorkspaceConfig {
+                name: "tmp".to_string(),
+                path: "/tmp".to_string(),
+            }],
         }
     }
 

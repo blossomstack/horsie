@@ -75,8 +75,8 @@ fn probe_sandbox(bin: &Path) -> SandboxProbe {
         .arg("ws://127.0.0.1:1")
         .arg("--runtime-id")
         .arg("probe")
-        .arg("--working-dir")
-        .arg(tmp.path())
+        .arg("--workspace")
+        .arg(format!("probe={}", tmp.path().display()))
         .arg("--sandbox-caps")
         .arg(&caps)
         .output()
@@ -164,10 +164,30 @@ fn job_spec(def: WorkflowDefinition, workdir: &Path) -> JobSpec {
     JobSpec {
         workflow: def,
         workflow_name: "wf".into(),
-        workdir: workdir.to_path_buf(),
+        workspaces: vec![models::Workspace {
+            name: "ws".into(),
+            path: workdir.to_path_buf(),
+        }],
         input: "go".into(),
         // The resolved built-in default sandbox spec — workdir read-write, system
         // paths read-only — exactly what the daemon would apply.
+        capabilities: resolve_user_paths(builtin_default().unwrap()),
+    }
+}
+
+/// A job spanning several named workspace roots.
+fn job_spec_multi(def: WorkflowDefinition, workspaces: &[(&str, &Path)]) -> JobSpec {
+    JobSpec {
+        workflow: def,
+        workflow_name: "wf".into(),
+        workspaces: workspaces
+            .iter()
+            .map(|(n, p)| models::Workspace {
+                name: (*n).into(),
+                path: p.to_path_buf(),
+            })
+            .collect(),
+        input: "go".into(),
         capabilities: resolve_user_paths(builtin_default().unwrap()),
     }
 }
@@ -268,14 +288,14 @@ async fn sandboxed_job_cannot_write_outside_workdir() {
 #[tokio::test]
 async fn sandboxed_agent_loads_workspace_skill() {
     // A skill file in the workspace must be discovered by the runtime's real scan and
-    // loadable by the agent: the sandboxed `horsie-runtime` child scans the workdir
-    // (`runtime::scan::exec`), the agent lists it (`list_skills`) and loads its body
-    // (`skill`) over the real transport — the whole scan→agent path, end to end.
+    // loadable by the agent: the sandboxed `horsie-runtime` child scans the workspace
+    // (`runtime::scan::exec`), the agent lists it (`inspect_workspace`) and loads its
+    // body (`skill`) over the real transport — the whole scan→agent path, end to end.
     let Some(bin) = runtime_or_skip("sandboxed_agent_loads_workspace_skill") else {
         return;
     };
     let mock = MockLlmServer::builder()
-        .tool_call("list_skills", json!({}))
+        .tool_call("inspect_workspace", json!({}))
         .tool_call("skill", json!({ "name": "doc-helper" }))
         .tool_call(CONCLUDE, json!({ "answer": "done" }))
         .build()
@@ -295,7 +315,7 @@ async fn sandboxed_agent_loads_workspace_skill() {
     let cfg = config_with_mock(dir.path(), &mock.url());
     let (journal, sup) = boot(dir.path(), &cfg, bin);
 
-    // `skill` / `list_skills` are always available regardless of the tool allowlist.
+    // `skill` / `inspect_workspace` are always available regardless of the tool allowlist.
     let id = submit(&sup, job_spec(bash_workflow(&[]), workdir.path())).await;
     assert_eq!(wait_terminal(&sup, &id).await, JobStatus::Finished);
 
@@ -310,5 +330,88 @@ async fn sandboxed_agent_loads_workspace_skill() {
     assert!(
         text.contains("Step 1: read the docs."),
         "skill(doc-helper) should load the body; history:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn sandboxed_agent_across_two_workspaces() {
+    // End to end with TWO co-equal workspaces: the runtime scans both, the agent
+    // inspects them, loads a skill from a *named* workspace (getting that one's body,
+    // not the other's), and writes into a *named* workspace (the file lands there and
+    // nowhere else). Exercises registry-resolved scan + skill + write across roots.
+    let Some(bin) = runtime_or_skip("sandboxed_agent_across_two_workspaces") else {
+        return;
+    };
+    let mock = MockLlmServer::builder()
+        .tool_call("inspect_workspace", json!({}))
+        .tool_call(
+            "skill",
+            json!({ "workspace": "beta", "name": "beta-skill" }),
+        )
+        .tool_call(
+            "write_file",
+            json!({ "workspace": "alpha", "path": "out.txt", "content": "from-agent" }),
+        )
+        .tool_call(CONCLUDE, json!({ "answer": "done" }))
+        .build()
+        .await;
+    let dir = TempDir::new().unwrap();
+    let alpha = TempDir::new().unwrap();
+    let beta = TempDir::new().unwrap();
+
+    // A distinct skill in each workspace; same-shaped files, different names/bodies.
+    for (root, name, body) in [
+        (alpha.path(), "alpha-skill", "Alpha body."),
+        (beta.path(), "beta-skill", "Beta body."),
+    ] {
+        let skill_dir = root.join(format!(".claude/skills/{name}"));
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} helper\n---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    let cfg = config_with_mock(dir.path(), &mock.url());
+    let (journal, sup) = boot(dir.path(), &cfg, bin);
+
+    let spec = job_spec_multi(
+        bash_workflow(&["write_file"]),
+        &[("alpha", alpha.path()), ("beta", beta.path())],
+    );
+    let id = submit(&sup, spec).await;
+    assert_eq!(wait_terminal(&sup, &id).await, JobStatus::Finished);
+
+    // The write targeted `alpha` by name → it lands in alpha, never in beta.
+    assert_eq!(
+        std::fs::read_to_string(alpha.path().join("out.txt")).unwrap(),
+        "from-agent",
+        "write_file(workspace=alpha) must land in the alpha root"
+    );
+    assert!(
+        !beta.path().join("out.txt").exists(),
+        "the alpha-scoped write must not appear in beta"
+    );
+
+    // Journal: inspect surfaced both workspaces and their skills; the skill call loaded
+    // beta's body specifically (not alpha's).
+    let frames = supervisor::render_history(&journal, &id).await;
+    let text: String = frames.into_iter().map(|f| f.text).collect();
+    assert!(
+        text.contains("## alpha") && text.contains("## beta"),
+        "inspect_workspace should list both workspaces; history:\n{text}"
+    );
+    assert!(
+        text.contains("alpha-skill") && text.contains("beta-skill"),
+        "inspect_workspace should list each workspace's skills; history:\n{text}"
+    );
+    assert!(
+        text.contains("Beta body."),
+        "skill(workspace=beta) should load beta's body; history:\n{text}"
+    );
+    assert!(
+        !text.contains("Alpha body."),
+        "only beta's skill body was requested; alpha's must not appear; history:\n{text}"
     );
 }

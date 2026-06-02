@@ -32,6 +32,9 @@ fn agent_def() -> WorkflowAgentDef {
 
 fn scan_payload() -> WorkspaceScan {
     WorkspaceScan {
+        name: "october".into(),
+        path: "/ws/october".into(),
+        is_git_repo: true,
         instructions: Some(ScannedFile {
             path: "AGENTS.md".into(),
             content: "Project rules.".into(),
@@ -47,22 +50,25 @@ fn scan_payload() -> WorkspaceScan {
 
 #[tokio::test]
 async fn scan_composes_prompt_and_exposes_skill_tool() {
-    let client = RuntimeClient::new(MockTransport::ok("").with_scan(scan_payload()));
-    let ws = scan_workspace(&client).await;
+    let client = RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan_payload()]));
+    let ws = scan_workspace(&client, None).await;
 
-    // Prompt: role first, then workspace context, then the skill listing.
+    // Prompt: role first, then a `# Workspaces` block per root, then its skill listing.
     let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws).unwrap();
     assert!(prompt.contains("You are a coder."));
-    assert!(prompt.contains("# Workspace context\nProject rules."));
+    assert!(prompt.contains("# Workspaces"));
+    assert!(prompt.contains("## october — /ws/october (git)"));
+    assert!(prompt.contains("Project rules."));
     assert!(prompt.contains("- git-bisect: Find the bad commit"));
 
-    // Toolbox fetches skills live: skill + list_skills present (even with allowed_tools=["bash"]),
-    // and skill(name) serves the body from a fresh scan.
-    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client);
+    // Toolbox fetches skills live: skill + inspect_workspace present (even with
+    // allowed_tools=["bash"]); skill(name) serves the body from a fresh scan, and with
+    // a single workspace the `workspace` arg can be omitted.
+    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client, ws.names());
     let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
     assert!(names.contains(&"bash".to_string()));
     assert!(names.contains(&"skill".to_string()));
-    assert!(names.contains(&"list_skills".to_string()));
+    assert!(names.contains(&"inspect_workspace".to_string()));
     let body = tb
         .execute("skill", serde_json::json!({ "name": "git-bisect" }))
         .await
@@ -73,11 +79,11 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
 #[tokio::test]
 async fn empty_workspace_yields_plain_prompt_but_tools_present() {
     let client = RuntimeClient::new(MockTransport::ok("")); // default empty scan
-    let ws = scan_workspace(&client).await;
+    let ws = scan_workspace(&client, None).await;
     let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws);
     assert_eq!(prompt.as_deref(), Some("You are a coder."));
-    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client);
+    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client, ws.names());
     let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
     assert!(names.contains(&"skill".to_string()));
-    assert!(names.contains(&"list_skills".to_string()));
+    assert!(names.contains(&"inspect_workspace".to_string()));
 }

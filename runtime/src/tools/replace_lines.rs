@@ -56,6 +56,7 @@ mod tests {
                 start_line: 2,
                 end_line: 3,
                 replacement: "X\nY".into(),
+                workspace: None,
             },
         )
         .await;

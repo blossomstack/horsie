@@ -22,7 +22,7 @@ impl Tool for ReplaceLinesTool {
                 content. Use this for positional edits; use find_and_replace to edit by \
                 matching content."
                 .to_string(),
-            input_schema: json!({
+            input_schema: crate::tools::with_workspace(json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
@@ -31,7 +31,7 @@ impl Tool for ReplaceLinesTool {
                     "replacement": { "type": "string" }
                 },
                 "required": ["path", "start_line", "end_line", "replacement"]
-            }),
+            })),
         }
     }
     async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
@@ -49,12 +49,14 @@ impl Tool for ReplaceLinesTool {
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'replacement'".into()))?
             .to_string();
+        let workspace = crate::tools::workspace_arg(&input);
         self.client
             .invoke(ToolCall::ReplaceLines(ReplaceLinesInput {
                 path,
                 start_line,
                 end_line,
                 replacement,
+                workspace,
             }))
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))

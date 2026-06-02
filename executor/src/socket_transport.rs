@@ -14,7 +14,7 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 type Reply = Result<ToolResult, TransportError>;
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Reply>>>>;
-type ScanReply = Result<WorkspaceScan, TransportError>;
+type ScanReply = Result<Vec<WorkspaceScan>, TransportError>;
 type PendingScan = Arc<Mutex<HashMap<String, oneshot::Sender<ScanReply>>>>;
 
 /// Direct tool-call transport over a single accepted runtime link
@@ -62,7 +62,7 @@ where
                     }
                     Ok(RuntimeOutboundMessage::ScanResult(resp)) => {
                         if let Some(tx) = reader_pending_scan.lock().await.remove(&resp.call_id) {
-                            let _ = tx.send(Ok(resp.scan));
+                            let _ = tx.send(Ok(resp.workspaces));
                         }
                     }
                     Ok(RuntimeOutboundMessage::Ready(_)) | Err(_) => {}
@@ -143,9 +143,10 @@ where
     async fn scan_workspace(
         &self,
         call_id: &str,
+        workspace: Option<String>,
         instruction_candidates: Vec<String>,
         skills_glob: String,
-    ) -> Result<WorkspaceScan, TransportError> {
+    ) -> Result<Vec<WorkspaceScan>, TransportError> {
         let (tx, rx) = oneshot::channel();
         self.pending_scan
             .lock()
@@ -154,6 +155,7 @@ where
 
         let msg = RuntimeInboundMessage::ScanWorkspace(ScanRequest {
             call_id: call_id.to_string(),
+            workspace,
             instruction_candidates,
             skills_glob,
         });
@@ -217,13 +219,16 @@ mod tests {
                         let resp =
                             RuntimeOutboundMessage::ScanResult(models::runtime::ScanResponse {
                                 call_id: req.call_id,
-                                scan: models::runtime::WorkspaceScan {
+                                workspaces: vec![models::runtime::WorkspaceScan {
+                                    name: "october".into(),
+                                    path: "/ws/october".into(),
+                                    is_git_repo: false,
                                     instructions: Some(models::runtime::ScannedFile {
                                         path: "AGENTS.md".into(),
                                         content: "ctx".into(),
                                     }),
                                     skills: vec![],
-                                },
+                                }],
                             });
                         let _ = sink
                             .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
@@ -245,6 +250,7 @@ mod tests {
         ToolCall::Bash(BashInput {
             command: "x".into(),
             timeout_secs: None,
+            workspace: None,
         })
     }
 
@@ -261,12 +267,14 @@ mod tests {
         let scan = t
             .scan_workspace(
                 "s1",
+                None,
                 vec!["AGENTS.md".into()],
                 ".claude/skills/*/SKILL.md".into(),
             )
             .await
             .unwrap();
-        assert_eq!(scan.instructions.unwrap().content, "ctx");
+        assert_eq!(scan.len(), 1);
+        assert_eq!(scan[0].instructions.as_ref().unwrap().content, "ctx");
     }
 
     #[tokio::test]

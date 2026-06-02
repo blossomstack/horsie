@@ -53,17 +53,19 @@ impl RuntimeClient {
         let _ = self.inner.cancel(call_id).await;
     }
 
-    /// Scan the workspace over the runtime. `instruction_candidates` are tried in
-    /// order (first existing wins); `skills_glob` locates skill files. Raw contents
-    /// come back for the caller to interpret.
+    /// Scan workspaces over the runtime. `workspace` filters which roots to scan
+    /// (`None` = all, `Some(name)` = one). `instruction_candidates` are tried in order
+    /// (first existing wins); `skills_glob` locates skill files. Raw contents come back
+    /// for the caller to interpret.
     pub async fn scan_workspace(
         &self,
+        workspace: Option<String>,
         instruction_candidates: Vec<String>,
         skills_glob: String,
-    ) -> Result<WorkspaceScan, RuntimeCallError> {
+    ) -> Result<Vec<WorkspaceScan>, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.inner
-            .scan_workspace(&call_id, instruction_candidates, skills_glob)
+            .scan_workspace(&call_id, workspace, instruction_candidates, skills_glob)
             .await
             .map_err(RuntimeCallError::Transport)
     }
@@ -88,6 +90,7 @@ mod tests {
             .invoke(ToolCall::Bash(BashInput {
                 command: "echo hello".into(),
                 timeout_secs: None,
+                workspace: None,
             }))
             .await
             .unwrap();
@@ -101,6 +104,7 @@ mod tests {
             .invoke(ToolCall::Bash(BashInput {
                 command: "bad".into(),
                 timeout_secs: None,
+                workspace: None,
             }))
             .await
             .unwrap_err();
@@ -111,17 +115,25 @@ mod tests {
     async fn client_scan_returns_mock_scan() {
         use models::runtime::{ScannedFile, WorkspaceScan};
         let scan = WorkspaceScan {
+            name: "october".into(),
+            path: "/ws/october".into(),
+            is_git_repo: false,
             instructions: Some(ScannedFile {
                 path: "AGENTS.md".into(),
                 content: "hi".into(),
             }),
             skills: vec![],
         };
-        let client = RuntimeClient::new(MockTransport::ok("").with_scan(scan));
+        let client = RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan]));
         let out = client
-            .scan_workspace(vec!["AGENTS.md".into()], ".claude/skills/*/SKILL.md".into())
+            .scan_workspace(
+                None,
+                vec!["AGENTS.md".into()],
+                ".claude/skills/*/SKILL.md".into(),
+            )
             .await
             .unwrap();
-        assert_eq!(out.instructions.unwrap().content, "hi");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].instructions.as_ref().unwrap().content, "hi");
     }
 }

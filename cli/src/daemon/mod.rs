@@ -163,10 +163,19 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
                 s.capabilities
                     .unwrap_or_else(|| daemon.default_caps.clone()),
             ));
+            // Derive a unique name per workspace path (server-side, the single place).
+            let paths: Vec<PathBuf> = s.workdirs.iter().map(PathBuf::from).collect();
+            let workspaces = match models::derive_workspaces(&paths) {
+                Ok(ws) => ws,
+                Err(e) => {
+                    let _ = write_err(&mut wr, &format!("invalid workspaces: {e}")).await;
+                    return;
+                }
+            };
             let spec = JobSpec {
                 workflow: s.workflow,
                 workflow_name: s.workflow_name,
-                workdir: PathBuf::from(s.workdir),
+                workspaces,
                 input: s.input,
                 capabilities: caps,
             };

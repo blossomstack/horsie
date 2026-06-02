@@ -21,7 +21,8 @@ pub struct JobSpec {
     pub workflow: WorkflowDefinition,
     /// Display name for `job list` (usually the workflow file stem).
     pub workflow_name: String,
-    pub workdir: PathBuf,
+    /// The named workspace roots this job runs against (≥1). Names derived at submit.
+    pub workspaces: Vec<models::Workspace>,
     pub input: String,
     /// Already resolved (`~`/`$HOME` expanded) at submit time.
     pub capabilities: CapabilitySpec,

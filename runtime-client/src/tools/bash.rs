@@ -22,14 +22,14 @@ impl Tool for BashTool {
             description: "Execute a bash command in the runtime's working directory. \
                 Optionally set 'timeout_secs' to bound how long the command may run."
                 .to_string(),
-            input_schema: json!({
+            input_schema: crate::tools::with_workspace(json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
                     "timeout_secs": { "type": "integer" }
                 },
                 "required": ["command"]
-            }),
+            })),
         }
     }
 
@@ -39,10 +39,12 @@ impl Tool for BashTool {
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'command'".into()))?
             .to_string();
         let timeout_secs = input["timeout_secs"].as_u64();
+        let workspace = crate::tools::workspace_arg(&input);
         self.client
             .invoke(ToolCall::Bash(BashInput {
                 command,
                 timeout_secs,
+                workspace,
             }))
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))

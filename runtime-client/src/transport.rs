@@ -18,20 +18,23 @@ pub trait RuntimeTransport: Send + Sync {
 
     async fn cancel(&self, call_id: &str) -> Result<(), TransportError>;
 
-    /// Scan the workspace: read the first existing instruction candidate (in order)
-    /// and every file matching `skills_glob`, returning raw contents.
+    /// Scan the selected workspaces (`workspace`: `None` = all, `Some(name)` = one),
+    /// reading the first existing instruction candidate (in order) and every file
+    /// matching `skills_glob` per root, returning raw contents. Name→path resolution
+    /// happens runtime-side against its workspace registry.
     async fn scan_workspace(
         &self,
         call_id: &str,
+        workspace: Option<String>,
         instruction_candidates: Vec<String>,
         skills_glob: String,
-    ) -> Result<WorkspaceScan, TransportError>;
+    ) -> Result<Vec<WorkspaceScan>, TransportError>;
 }
 
 /// Mock transport for tests — returns a configurable canned result.
 pub struct MockTransport {
     result: ToolResult,
-    scan: WorkspaceScan,
+    scan: Vec<WorkspaceScan>,
 }
 
 impl MockTransport {
@@ -64,17 +67,14 @@ impl MockTransport {
     }
 
     /// Override the canned scan returned by `scan_workspace`.
-    pub fn with_scan(mut self, scan: WorkspaceScan) -> Self {
+    pub fn with_scan(mut self, scan: Vec<WorkspaceScan>) -> Self {
         self.scan = scan;
         self
     }
 }
 
-fn empty_scan() -> WorkspaceScan {
-    WorkspaceScan {
-        instructions: None,
-        skills: Vec::new(),
-    }
+fn empty_scan() -> Vec<WorkspaceScan> {
+    Vec::new()
 }
 
 #[async_trait]
@@ -90,9 +90,10 @@ impl RuntimeTransport for MockTransport {
     async fn scan_workspace(
         &self,
         _call_id: &str,
+        _workspace: Option<String>,
         _instruction_candidates: Vec<String>,
         _skills_glob: String,
-    ) -> Result<WorkspaceScan, TransportError> {
+    ) -> Result<Vec<WorkspaceScan>, TransportError> {
         Ok(self.scan.clone())
     }
 }

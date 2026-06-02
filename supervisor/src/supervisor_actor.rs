@@ -85,7 +85,13 @@ fn summary(id: &str, rec: &JobRecord) -> JobSummary {
         workflow_name: rec.spec.workflow_name.clone(),
         status: rec.status.clone(),
         submitted_at: rec.submitted_at,
-        workdir: rec.spec.workdir.to_string_lossy().into_owned(),
+        workdir: rec
+            .spec
+            .workspaces
+            .iter()
+            .map(|w| w.path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(","),
     }
 }
 
@@ -304,7 +310,10 @@ mod tests {
                 agents: vec![],
             },
             workflow_name: "wf".into(),
-            workdir: PathBuf::from("/tmp"),
+            workspaces: vec![models::Workspace {
+                name: "tmp".into(),
+                path: PathBuf::from("/tmp"),
+            }],
             input: "go".into(),
             capabilities: CapabilitySpec {
                 network: NetworkPolicy::Block,

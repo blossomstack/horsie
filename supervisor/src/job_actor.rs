@@ -147,7 +147,14 @@ impl JobRuntime for ProcessJobRuntime {
             .create_runtime(
                 &job_id,
                 RuntimeConfig {
-                    working_dir: spec.workdir.to_string_lossy().into_owned(),
+                    workspaces: spec
+                        .workspaces
+                        .iter()
+                        .map(|w| models::executor::WorkspaceConfig {
+                            name: w.name.clone(),
+                            path: w.path.to_string_lossy().into_owned(),
+                        })
+                        .collect(),
                 },
             )
             .await

@@ -23,7 +23,7 @@ impl Tool for FindAndReplaceTool {
                 groups in 'replace'). The match must be unique unless 'replace_all' is true, \
                 which changes every occurrence. Returns how many were replaced."
                 .to_string(),
-            input_schema: json!({
+            input_schema: crate::tools::with_workspace(json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
@@ -33,7 +33,7 @@ impl Tool for FindAndReplaceTool {
                     "replace_all": { "type": "boolean" }
                 },
                 "required": ["path", "find", "replace"]
-            }),
+            })),
         }
     }
     async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
@@ -51,6 +51,7 @@ impl Tool for FindAndReplaceTool {
             .to_string();
         let regex = input["regex"].as_bool();
         let replace_all = input["replace_all"].as_bool();
+        let workspace = crate::tools::workspace_arg(&input);
         self.client
             .invoke(ToolCall::FindAndReplace(FindAndReplaceInput {
                 path,
@@ -58,6 +59,7 @@ impl Tool for FindAndReplaceTool {
                 replace,
                 regex,
                 replace_all,
+                workspace,
             }))
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))

@@ -3,21 +3,21 @@ package runtime;
 
 // --- Tool inputs ---
 
-struct BashInput { command: String, timeout_secs: Option<u64> }
-struct ReadFileInput { path: String, start_line: Option<u64>, end_line: Option<u64> }
-struct WriteFileInput { path: String, content: String }
+struct BashInput { command: String, timeout_secs: Option<u64>, workspace: Option<String> }
+struct ReadFileInput { path: String, start_line: Option<u64>, end_line: Option<u64>, workspace: Option<String> }
+struct WriteFileInput { path: String, content: String, workspace: Option<String> }
 
 // Content-based find/replace. `regex` (default false) switches `find` from a
 // literal string to a pattern; `replace_all` (default false) requires the match
 // to be unique and errors otherwise — set it true to change every occurrence.
-struct FindAndReplaceInput { path: String, find: String, replace: String, regex: Option<bool>, replace_all: Option<bool> }
+struct FindAndReplaceInput { path: String, find: String, replace: String, regex: Option<bool>, replace_all: Option<bool>, workspace: Option<String> }
 
 // Positional replacement: swap the 1-based, inclusive line range for `replacement`.
-struct ReplaceLinesInput { path: String, start_line: u64, end_line: u64, replacement: String }
+struct ReplaceLinesInput { path: String, start_line: u64, end_line: u64, replacement: String, workspace: Option<String> }
 
-struct ListFilesInput { path: String }
-struct GlobInput { pattern: String, path: Option<String>, max_results: Option<u64> }
-struct GrepInput { pattern: String, path: Option<String>, file_pattern: Option<String>, max_results: Option<u64> }
+struct ListFilesInput { path: String, workspace: Option<String> }
+struct GlobInput { pattern: String, path: Option<String>, max_results: Option<u64>, workspace: Option<String> }
+struct GrepInput { pattern: String, path: Option<String>, file_pattern: Option<String>, max_results: Option<u64>, workspace: Option<String> }
 
 /// One variant per tool. The tag doubles as the tool name seen by the LLM.
 #[type_tag = "tool"]
@@ -39,13 +39,20 @@ union ToolCall {
 // back; the client parses frontmatter.
 struct ScanRequest {
     call_id: String,
+    workspace: Option<String>,
     instruction_candidates: Vec<String>,
     skills_glob: String,
 }
 
 struct ScannedFile { path: String, content: String }
-struct WorkspaceScan { instructions: Option<ScannedFile>, skills: Vec<ScannedFile> }
-struct ScanResponse { call_id: String, scan: WorkspaceScan }
+struct WorkspaceScan {
+    name: String,
+    path: String,
+    is_git_repo: bool,
+    instructions: Option<ScannedFile>,
+    skills: Vec<ScannedFile>,
+}
+struct ScanResponse { call_id: String, workspaces: Vec<WorkspaceScan> }
 
 // --- Inbound (executor → runtime) ---
 

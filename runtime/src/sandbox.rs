@@ -17,7 +17,7 @@ use std::path::Path;
 /// The executor `socket_path` grant is injected here — it is an operational
 /// requirement of the runtime↔executor IPC, not user-facing policy.
 pub fn apply(
-    working_dir: &Path,
+    working_dirs: &[std::path::PathBuf],
     socket_path: Option<&Path>,
     caps_file: &Path,
 ) -> Result<(), String> {
@@ -56,11 +56,13 @@ pub fn apply(
                         .map_err(|e| e.to_string())?;
                 }
             }
-            // Resolved to the actual runtime working directory.
+            // Resolved to every runtime workspace root — one grant covers them all.
             Grant::WorkingDir(g) => {
-                caps = caps
-                    .allow_path(working_dir, access_mode(&g.access))
-                    .map_err(|e| e.to_string())?;
+                for dir in working_dirs {
+                    caps = caps
+                        .allow_path(dir, access_mode(&g.access))
+                        .map_err(|e| e.to_string())?;
+                }
             }
         }
     }

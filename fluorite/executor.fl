@@ -4,8 +4,11 @@ package executor;
 use runtime.ToolCallRequest;
 use runtime.ToolResult;
 
+/// One named workspace root passed to a runtime.
+struct WorkspaceConfig { name: String, path: String }
+
 /// Runtime configuration
-struct RuntimeConfig { working_dir: String }
+struct RuntimeConfig { workspaces: Vec<WorkspaceConfig> }
 
 /// Current lifecycle state of a runtime
 enum RuntimeState {

@@ -29,7 +29,7 @@ struct JobSummary {
 /// resolves config/flags before sending) or null to use the daemon default.
 struct SubmitRequest {
     workflow: WorkflowDefinition,
-    workdir: String,
+    workdirs: Vec<String>,
     input: String,
     capabilities: Option<CapabilitySpec>,
     workflow_name: String,

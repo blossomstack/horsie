@@ -49,13 +49,11 @@ impl RuntimeTransport for NoopTransport {
     async fn scan_workspace(
         &self,
         _call_id: &str,
+        _workspace: Option<String>,
         _instruction_candidates: Vec<String>,
         _skills_glob: String,
-    ) -> Result<WorkspaceScan, TransportError> {
-        Ok(WorkspaceScan {
-            instructions: None,
-            skills: Vec::new(),
-        })
+    ) -> Result<Vec<WorkspaceScan>, TransportError> {
+        Ok(Vec::new())
     }
 }
 
@@ -191,7 +189,10 @@ fn spec(def: WorkflowDefinition) -> JobSpec {
     JobSpec {
         workflow: def,
         workflow_name: "wf".into(),
-        workdir: PathBuf::from("/tmp"),
+        workspaces: vec![models::Workspace {
+            name: "tmp".into(),
+            path: PathBuf::from("/tmp"),
+        }],
         input: "go".into(),
         capabilities: CapabilitySpec {
             network: NetworkPolicy::Block,

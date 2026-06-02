@@ -156,9 +156,10 @@ impl RuntimeTransport for RelayRuntimeTransport {
     async fn scan_workspace(
         &self,
         _call_id: &str,
+        _workspace: Option<String>,
         _instruction_candidates: Vec<String>,
         _skills_glob: String,
-    ) -> Result<WorkspaceScan, TransportError> {
+    ) -> Result<Vec<WorkspaceScan>, TransportError> {
         // The executor relay protocol (ExecutorCommand/ExecutorEvent) has no scan
         // command yet, so workspace context is not available in distributed/server
         // mode. The error is caught by `workflow::workspace::scan`, which degrades to

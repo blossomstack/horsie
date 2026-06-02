@@ -39,8 +39,10 @@ enum Command {
         /// (else `~/.config/horsie/config.json`), or an empty config if absent.
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long)]
-        workdir: PathBuf,
+        /// One or more workspace roots, comma-separated (e.g. `./api,./web,../shared`).
+        /// A single value is the common case. Paths cannot contain commas.
+        #[arg(long, value_delimiter = ',', required = true)]
+        workdir: Vec<PathBuf>,
         #[arg(long)]
         input: String,
         /// Capability file fully replacing the runtime's built-in sandbox default.
@@ -179,7 +181,7 @@ fn do_validate(workflow: PathBuf, config: Option<PathBuf>) -> i32 {
 fn build_submit(
     workflow: PathBuf,
     config: Option<PathBuf>,
-    workdir: PathBuf,
+    workdirs: Vec<PathBuf>,
     input: String,
     capabilities: Option<PathBuf>,
 ) -> Result<SubmitRequest, CliError> {
@@ -199,7 +201,10 @@ fn build_submit(
         .unwrap_or_else(|| "workflow".to_string());
     Ok(SubmitRequest {
         workflow: def,
-        workdir: workdir.to_string_lossy().into_owned(),
+        workdirs: workdirs
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
         input,
         capabilities: caps,
         workflow_name,

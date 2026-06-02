@@ -47,6 +47,29 @@ pub(crate) fn render_output(o: ToolOutput) -> Result<Value, ToolCallError> {
     Ok(Value::String(text))
 }
 
+/// Inject the standard optional `workspace` property into a tool's input schema. The
+/// runtime resolves the name → root (defaulting to the sole workspace when omitted).
+pub(crate) fn with_workspace(mut schema: Value) -> Value {
+    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        props.insert(
+            "workspace".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "description": "Which workspace to act in (see '# Workspaces'). Required when there is more than one workspace."
+            }),
+        );
+    }
+    schema
+}
+
+/// Extract the optional `workspace` argument from a tool-call input object.
+pub(crate) fn workspace_arg(input: &Value) -> Option<String> {
+    input
+        .get("workspace")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// Add all runtime-backed tools to an existing ToolboxImpl.
 pub fn add_runtime_tools(toolbox: ToolboxImpl, client: RuntimeClient) -> ToolboxImpl {
     toolbox

@@ -46,7 +46,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
-        let result = exec(dir.path(), ListFilesInput { path: ".".into() }).await;
+        let result = exec(
+            dir.path(),
+            ListFilesInput {
+                path: ".".into(),
+                workspace: None,
+            },
+        )
+        .await;
         match result {
             ToolResult::Ok(o) => {
                 assert!(o.stdout.contains("a.txt"));

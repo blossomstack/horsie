@@ -181,13 +181,16 @@ impl WorkflowActor {
             .rt
             .provider_for(&agent_def.model)
             .ok_or_else(|| format!("no provider registered for model '{}'", agent_def.model))?;
-        // Scan once to compose the `# Available skills` prompt block; the toolbox
-        // fetches skills live on its own (so mid-run additions are still loadable).
-        let ws = crate::workspace::scan(&self.rt.runtime_client).await;
-        let toolbox = self
-            .rt
-            .toolbox_factory
-            .for_agent(agent_def, self.rt.runtime_client.clone());
+        // Scan all workspaces once to compose the `# Workspaces` prompt block; the
+        // toolbox fetches skills live on its own (so mid-run additions are still
+        // loadable). The workspace names are handed to the toolbox for its skill/inspect
+        // tools — the runtime still owns name→path resolution.
+        let ws = crate::workspace::scan(&self.rt.runtime_client, None).await;
+        let toolbox = self.rt.toolbox_factory.for_agent(
+            agent_def,
+            self.rt.runtime_client.clone(),
+            ws.names(),
+        );
         let agent_ctx = AgentRuntimeContext {
             provider,
             toolbox,
