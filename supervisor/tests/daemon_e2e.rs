@@ -222,6 +222,17 @@ async fn list(sup: &ActorRef<SupervisorCommand>) -> Vec<models::daemon::JobSumma
     rx.await.unwrap()
 }
 
+async fn get_job(sup: &ActorRef<SupervisorCommand>, job_id: &str) -> Option<supervisor::JobRecord> {
+    let (tx, rx) = oneshot::channel();
+    sup.tell(SupervisorCommand::GetJob {
+        job_id: job_id.into(),
+        reply: tx,
+    })
+    .await
+    .unwrap();
+    rx.await.unwrap()
+}
+
 /// Poll `List` until `pred` holds for the named job, or panic after a timeout.
 async fn wait_for(
     sup: &ActorRef<SupervisorCommand>,
@@ -442,6 +453,40 @@ async fn render_history_replays_finished_job_from_journal() {
         text.contains("finished"),
         "history should include the finish marker; got: {text}"
     );
+}
+
+#[tokio::test]
+async fn get_job_then_fold_progress_reports_finished_agent() {
+    let mock = MockLlmServer::builder()
+        .response("the answer is 42")
+        .build()
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, sup) = boot(dir.path(), &mock.url());
+
+    let id = submit(&sup, spec(solo_workflow())).await;
+    wait_for(&sup, &id, is_finished).await;
+
+    // The daemon's `job status` path: fetch the record, replay the workflow
+    // journal, fold into progress.
+    let rec = get_job(&sup, &id).await.expect("job record present");
+    let events = supervisor::workflow_events(&journal, &id).await;
+    let progress =
+        supervisor::fold_progress(&events, &rec.spec.workflow, rec.status, rec.submitted_at);
+
+    assert_eq!(progress.agents.len(), 1, "one agent ran");
+    assert_eq!(progress.agents[0].name, "solo");
+    assert!(matches!(
+        progress.agents[0].phase,
+        models::daemon::AgentPhase::Done
+    ));
+    assert!(
+        progress.finished_at.is_some(),
+        "a finished job carries a terminal timestamp"
+    );
+
+    // An unknown job id yields no record.
+    assert!(get_job(&sup, "nope").await.is_none());
 }
 
 /// Single-agent workflow that may arm timers and park (kind-tagged conclude).

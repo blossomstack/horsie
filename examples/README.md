@@ -41,7 +41,7 @@ that lets those agents build and push.
 ## Run
 
 ```bash
-horsie run \
+horsie job run \
   --workflow examples/dev-workflow.json \
   --capabilities examples/dev-workflow-capabilities.json \
   --workdir /path/to/a/checkout \

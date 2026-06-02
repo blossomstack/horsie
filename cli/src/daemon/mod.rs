@@ -1,5 +1,5 @@
 //! The Horsie daemon: a long-lived process that supervises parallel jobs and
-//! serves a unix control socket. The CLI's `run`/`job` subcommands are thin
+//! serves a unix control socket. The CLI's `job` subcommands are thin
 //! clients (see [`crate::client`]).
 
 pub mod protocol;
@@ -230,6 +230,39 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
             write_frame(&mut wr, &DaemonResponse::Status(info))
                 .await
                 .is_ok()
+        }
+        DaemonRequest::JobStatus(s) => {
+            let (tx, rx) = oneshot::channel();
+            if daemon
+                .supervisor
+                .tell(SupervisorCommand::GetJob {
+                    job_id: s.job_id.clone(),
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                write_err(&mut wr, "supervisor unavailable").await
+            } else {
+                match rx.await {
+                    Ok(Some(rec)) => {
+                        let events = supervisor::workflow_events(&daemon.journal, &s.job_id).await;
+                        let mut progress = supervisor::fold_progress(
+                            &events,
+                            &rec.spec.workflow,
+                            rec.status.clone(),
+                            rec.submitted_at,
+                        );
+                        progress.job_id = s.job_id.clone();
+                        progress.workflow_name = rec.spec.workflow_name.clone();
+                        write_frame(&mut wr, &DaemonResponse::JobProgress(progress))
+                            .await
+                            .is_ok()
+                    }
+                    Ok(None) => write_err(&mut wr, &format!("no such job: {}", s.job_id)).await,
+                    Err(_) => write_err(&mut wr, "job status failed").await,
+                }
+            }
         }
         DaemonRequest::Stop(s) => {
             let _ = daemon

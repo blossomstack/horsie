@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Wall-clock epoch millis for stamping events on the command path. Saturates
+/// rather than panicking on a pre-epoch clock (prod lints deny panic/unwrap).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 /// Commands accepted by a [`WorkflowActor`].
 ///
 /// The first four are operator-facing; the rest are sent by child [`AgentActor`]s
@@ -45,13 +54,23 @@ pub enum WorkflowCommand {
 }
 
 /// Events that drive the workflow status machine. Persisted.
+///
+/// Every variant carries `at_ms`: the wall-clock epoch-millis when the event was
+/// emitted on the command path. It is the source of truth for `horsie job status`
+/// timing. `#[serde(default)]` keeps journals written before this field readable
+/// (they replay as `None`, rendered as `—`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowDomainEvent {
-    WorkflowStarted,
+    WorkflowStarted {
+        #[serde(default)]
+        at_ms: Option<u64>,
+    },
     AgentStarted {
         agent_name: String,
         session_id: Uuid,
         input: String,
+        #[serde(default)]
+        at_ms: Option<u64>,
     },
     AgentTransitioned {
         from: String,
@@ -60,23 +79,39 @@ pub enum WorkflowDomainEvent {
         to_session: Uuid,
         /// The transition condition that matched (`None` = unconditional).
         condition: Option<String>,
+        #[serde(default)]
+        at_ms: Option<u64>,
     },
     WorkflowFinished {
         output: Value,
+        #[serde(default)]
+        at_ms: Option<u64>,
     },
-    WorkflowSuspended,
+    WorkflowSuspended {
+        #[serde(default)]
+        at_ms: Option<u64>,
+    },
     WorkflowFailed {
         error: String,
         recoverable: bool,
+        #[serde(default)]
+        at_ms: Option<u64>,
     },
     WorkflowPaused {
         session_id: Uuid,
         tool_call_id: Option<String>,
+        #[serde(default)]
+        at_ms: Option<u64>,
     },
-    WorkflowResumed,
+    WorkflowResumed {
+        #[serde(default)]
+        at_ms: Option<u64>,
+    },
     /// The current agent parked itself awaiting its timers.
     WorkflowParked {
         session_id: Uuid,
+        #[serde(default)]
+        at_ms: Option<u64>,
     },
 }
 
@@ -243,6 +278,7 @@ impl WorkflowActor {
             return CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                 error,
                 recoverable: false,
+                at_ms: Some(now_ms()),
             }]);
         };
         let session_id = Uuid::new_v4();
@@ -255,11 +291,14 @@ impl WorkflowActor {
                     .await;
                 self.current_child = Some(child);
                 CommandEffect::persist(vec![
-                    WorkflowDomainEvent::WorkflowStarted,
+                    WorkflowDomainEvent::WorkflowStarted {
+                        at_ms: Some(now_ms()),
+                    },
                     WorkflowDomainEvent::AgentStarted {
                         agent_name: start_name,
                         session_id,
                         input,
+                        at_ms: Some(now_ms()),
                     },
                 ])
             }
@@ -270,6 +309,7 @@ impl WorkflowActor {
                 CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                     error,
                     recoverable: false,
+                    at_ms: Some(now_ms()),
                 }])
             }
         }
@@ -291,6 +331,7 @@ impl WorkflowActor {
             });
             return CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFinished {
                 output,
+                at_ms: Some(now_ms()),
             }]);
         };
         let transitions = self
@@ -305,6 +346,7 @@ impl WorkflowActor {
                 });
                 CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFinished {
                     output,
+                    at_ms: Some(now_ms()),
                 }])
             }
             Some((to, condition)) => {
@@ -317,6 +359,7 @@ impl WorkflowActor {
                         WorkflowDomainEvent::WorkflowFailed {
                             error,
                             recoverable: false,
+                            at_ms: Some(now_ms()),
                         },
                     ]);
                 };
@@ -342,11 +385,13 @@ impl WorkflowActor {
                                 from_session: session_id,
                                 to_session,
                                 condition,
+                                at_ms: Some(now_ms()),
                             },
                             WorkflowDomainEvent::AgentStarted {
                                 agent_name: to,
                                 session_id: to_session,
                                 input,
+                                at_ms: Some(now_ms()),
                             },
                         ])
                     }
@@ -357,6 +402,7 @@ impl WorkflowActor {
                         CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                             error,
                             recoverable: false,
+                            at_ms: Some(now_ms()),
                         }])
                     }
                 }
@@ -404,6 +450,7 @@ impl WorkflowActor {
                                     WorkflowDomainEvent::WorkflowFailed {
                                         error,
                                         recoverable: false,
+                                        at_ms: Some(now_ms()),
                                     },
                                 ]);
                             }
@@ -446,6 +493,7 @@ impl WorkflowActor {
                                     WorkflowDomainEvent::WorkflowFailed {
                                         error,
                                         recoverable: false,
+                                        at_ms: Some(now_ms()),
                                     },
                                 ]);
                             }
@@ -493,6 +541,7 @@ impl WorkflowActor {
             return CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                 error: format!("fork failed: {e}"),
                 recoverable: false,
+                at_ms: Some(now_ms()),
             }]);
         }
         match self.spawn_agent(ctx, &agent_def, new_session).await {
@@ -509,12 +558,14 @@ impl WorkflowActor {
                     agent_name,
                     session_id: new_session,
                     input: message,
+                    at_ms: Some(now_ms()),
                 }])
             }
             Err(error) => {
                 CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                     error,
                     recoverable: false,
+                    at_ms: Some(now_ms()),
                 }])
             }
         }
@@ -567,7 +618,7 @@ impl EventSourcedActor for WorkflowActor {
 
     fn apply_event(mut state: WorkflowState, event: WorkflowDomainEvent) -> WorkflowState {
         match event {
-            WorkflowDomainEvent::WorkflowStarted => state.status = WorkflowStatus::Running,
+            WorkflowDomainEvent::WorkflowStarted { .. } => state.status = WorkflowStatus::Running,
             WorkflowDomainEvent::AgentStarted {
                 agent_name,
                 session_id,
@@ -583,13 +634,15 @@ impl EventSourcedActor for WorkflowActor {
                 state.status = WorkflowStatus::Running;
             }
             WorkflowDomainEvent::WorkflowFinished { .. } => state.status = WorkflowStatus::Finished,
-            WorkflowDomainEvent::WorkflowSuspended => state.status = WorkflowStatus::Suspended,
+            WorkflowDomainEvent::WorkflowSuspended { .. } => {
+                state.status = WorkflowStatus::Suspended
+            }
             WorkflowDomainEvent::WorkflowFailed { .. } => state.status = WorkflowStatus::Failed,
             WorkflowDomainEvent::WorkflowPaused { tool_call_id, .. } => {
                 state.status = WorkflowStatus::AwaitingUserInput;
                 state.pending_tool_call = tool_call_id;
             }
-            WorkflowDomainEvent::WorkflowResumed => {
+            WorkflowDomainEvent::WorkflowResumed { .. } => {
                 state.status = WorkflowStatus::Running;
                 state.pending_tool_call = None;
             }
@@ -611,7 +664,9 @@ impl EventSourcedActor for WorkflowActor {
                     let _ = child.tell(AgentCommand::Cancel).await;
                 }
                 self.notify(WorkflowNotification::Suspended);
-                CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowSuspended])
+                CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowSuspended {
+                    at_ms: Some(now_ms()),
+                }])
             }
             WorkflowCommand::Resume { message } => self.on_resume(state, message, ctx).await,
             WorkflowCommand::Fork {
@@ -631,7 +686,9 @@ impl EventSourcedActor for WorkflowActor {
                 }
                 if recoverable {
                     self.notify(WorkflowNotification::Suspended);
-                    CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowSuspended])
+                    CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowSuspended {
+                        at_ms: Some(now_ms()),
+                    }])
                 } else {
                     self.notify(WorkflowNotification::Failed {
                         error: error.clone(),
@@ -639,6 +696,7 @@ impl EventSourcedActor for WorkflowActor {
                     CommandEffect::persist_and_stop(vec![WorkflowDomainEvent::WorkflowFailed {
                         error,
                         recoverable,
+                        at_ms: Some(now_ms()),
                     }])
                 }
             }
@@ -654,6 +712,7 @@ impl EventSourcedActor for WorkflowActor {
                 CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowPaused {
                     session_id,
                     tool_call_id,
+                    at_ms: Some(now_ms()),
                 }])
             }
             WorkflowCommand::AgentParked { session_id } => {
@@ -661,7 +720,10 @@ impl EventSourcedActor for WorkflowActor {
                     return CommandEffect::none();
                 }
                 self.notify(WorkflowNotification::Parked);
-                CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowParked { session_id }])
+                CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowParked {
+                    session_id,
+                    at_ms: Some(now_ms()),
+                }])
             }
         }
     }
@@ -714,7 +776,7 @@ mod tests {
     fn started_then_agent_started_sets_running() {
         let s = WorkflowActor::initial_state();
         assert_eq!(s.status, WorkflowStatus::Pending);
-        let s = WorkflowActor::apply_event(s, WorkflowDomainEvent::WorkflowStarted);
+        let s = WorkflowActor::apply_event(s, WorkflowDomainEvent::WorkflowStarted { at_ms: None });
         assert_eq!(s.status, WorkflowStatus::Running);
         let session = sess();
         let s = WorkflowActor::apply_event(
@@ -723,6 +785,7 @@ mod tests {
                 agent_name: "writer".into(),
                 session_id: session,
                 input: "go".into(),
+                at_ms: None,
             },
         );
         assert_eq!(s.current_agent.as_deref(), Some("writer"));
@@ -740,6 +803,7 @@ mod tests {
                 agent_name: "a".into(),
                 session_id: from,
                 input: "x".into(),
+                at_ms: None,
             },
         );
         let s = WorkflowActor::apply_event(
@@ -750,6 +814,7 @@ mod tests {
                 from_session: from,
                 to_session: to,
                 condition: Some("output.score > 80".into()),
+                at_ms: None,
             },
         );
         assert_eq!(s.current_agent.as_deref(), Some("b"));
@@ -767,6 +832,7 @@ mod tests {
                 agent_name: "a".into(),
                 session_id: session,
                 input: "x".into(),
+                at_ms: None,
             },
         );
         s = WorkflowActor::apply_event(
@@ -774,10 +840,11 @@ mod tests {
             WorkflowDomainEvent::WorkflowPaused {
                 session_id: session,
                 tool_call_id: Some("tc".into()),
+                at_ms: None,
             },
         );
         assert_eq!(s.status, WorkflowStatus::AwaitingUserInput);
-        s = WorkflowActor::apply_event(s, WorkflowDomainEvent::WorkflowResumed);
+        s = WorkflowActor::apply_event(s, WorkflowDomainEvent::WorkflowResumed { at_ms: None });
         assert_eq!(s.status, WorkflowStatus::Running);
     }
 
@@ -785,7 +852,10 @@ mod tests {
     fn parked_event_sets_parked_status() {
         let s = WorkflowActor::apply_event(
             WorkflowActor::initial_state(),
-            WorkflowDomainEvent::WorkflowParked { session_id: sess() },
+            WorkflowDomainEvent::WorkflowParked {
+                session_id: sess(),
+                at_ms: None,
+            },
         );
         assert_eq!(s.status, WorkflowStatus::Parked);
     }
@@ -796,6 +866,7 @@ mod tests {
             WorkflowActor::initial_state(),
             WorkflowDomainEvent::WorkflowFinished {
                 output: Value::String("ok".into()),
+                at_ms: None,
             },
         );
         assert_eq!(done.status, WorkflowStatus::Finished);
@@ -804,6 +875,7 @@ mod tests {
             WorkflowDomainEvent::WorkflowFailed {
                 error: "boom".into(),
                 recoverable: false,
+                at_ms: None,
             },
         );
         assert_eq!(failed.status, WorkflowStatus::Failed);

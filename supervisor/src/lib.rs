@@ -11,14 +11,16 @@
 
 mod history;
 mod job_actor;
+mod progress;
 mod spec;
 mod supervisor_actor;
 
-pub use history::render_history;
+pub use history::{render_history, workflow_events};
 pub use job_actor::{
     JobActor, JobCommand, JobDomainEvent, JobRuntime, JobShutdown, JobState, Kickoff, LaunchParams,
     LaunchedJob, ProcessJobRuntime, render_event,
 };
+pub use progress::fold_progress;
 pub use spec::{JobId, JobSpec, SupervisorDeps};
 pub use supervisor_actor::{
     JobRecord, SupervisorActor, SupervisorCommand, SupervisorEvent, SupervisorState,

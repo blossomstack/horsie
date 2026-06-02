@@ -5,8 +5,9 @@ use crate::daemon::protocol::{read_frame, write_frame};
 use crate::daemon::socket_path;
 use crate::error::CliError;
 use models::daemon::{
-    DaemonRequest, DaemonResponse, JobStatus, JobSummary, ListRequest, LogsRequest, RemoveRequest,
-    ResumeRequest, ShutdownRequest, StatusInfo, StatusRequest, StopRequest, SubmitRequest,
+    DaemonRequest, DaemonResponse, JobProgress, JobStatus, JobStatusRequest, JobSummary,
+    ListRequest, LogsRequest, RemoveRequest, ResumeRequest, ShutdownRequest, StatusInfo,
+    StatusRequest, StopRequest, SubmitRequest,
 };
 use std::io::Write;
 use std::path::Path;
@@ -39,6 +40,7 @@ fn unexpected(resp: DaemonResponse) -> CliError {
         DaemonResponse::JobList(_) => "job-list",
         DaemonResponse::Ack(_) => "ack",
         DaemonResponse::Status(_) => "status",
+        DaemonResponse::JobProgress(_) => "job-progress",
         DaemonResponse::LogFrame(_) => "log-frame",
         DaemonResponse::End(_) => "end",
     };
@@ -68,6 +70,16 @@ pub async fn status(root: &Path) -> Result<StatusInfo, CliError> {
     let resp = request(root, &DaemonRequest::Status(StatusRequest {})).await?;
     if let DaemonResponse::Status(s) = resp {
         Ok(s)
+    } else {
+        Err(unexpected(resp))
+    }
+}
+
+/// Fetch a single job's workflow execution progress.
+pub async fn job_status(root: &Path, job_id: String) -> Result<JobProgress, CliError> {
+    let resp = request(root, &DaemonRequest::JobStatus(JobStatusRequest { job_id })).await?;
+    if let DaemonResponse::JobProgress(p) = resp {
+        Ok(p)
     } else {
         Err(unexpected(resp))
     }
@@ -140,7 +152,8 @@ pub async fn logs(root: &Path, job_id: String, follow: bool) -> Result<(), CliEr
             DaemonResponse::Submitted(_)
             | DaemonResponse::JobList(_)
             | DaemonResponse::Ack(_)
-            | DaemonResponse::Status(_) => {
+            | DaemonResponse::Status(_)
+            | DaemonResponse::JobProgress(_) => {
                 return Err(CliError::Executor(
                     "unexpected frame in log stream".to_string(),
                 ));

@@ -21,7 +21,9 @@ pub async fn render_history(journal: &Arc<dyn Journal>, job_id: &str) -> Vec<Job
     let mut lines: Vec<String> = Vec::new();
     for ev in workflow_events(journal, job_id).await {
         match ev {
-            WorkflowDomainEvent::WorkflowStarted => lines.push("● workflow started\n".to_string()),
+            WorkflowDomainEvent::WorkflowStarted { .. } => {
+                lines.push("● workflow started\n".to_string())
+            }
             WorkflowDomainEvent::AgentStarted {
                 agent_name,
                 session_id,
@@ -42,12 +44,14 @@ pub async fn render_history(journal: &Arc<dyn Journal>, job_id: &str) -> Vec<Job
             WorkflowDomainEvent::WorkflowPaused { .. } => {
                 lines.push("⏸ awaiting user input\n".to_string());
             }
-            WorkflowDomainEvent::WorkflowResumed => lines.push("▶ resumed\n".to_string()),
-            WorkflowDomainEvent::WorkflowSuspended => lines.push("⏸ suspended\n".to_string()),
+            WorkflowDomainEvent::WorkflowResumed { .. } => lines.push("▶ resumed\n".to_string()),
+            WorkflowDomainEvent::WorkflowSuspended { .. } => {
+                lines.push("⏸ suspended\n".to_string())
+            }
             WorkflowDomainEvent::WorkflowParked { .. } => {
                 lines.push("⏲ parked (awaiting timers)\n".to_string());
             }
-            WorkflowDomainEvent::WorkflowFinished { output } => {
+            WorkflowDomainEvent::WorkflowFinished { output, .. } => {
                 lines.push(format!("\n✓ finished: {}\n", compact(&output)));
             }
             WorkflowDomainEvent::WorkflowFailed { error, .. } => {
@@ -67,7 +71,7 @@ pub async fn render_history(journal: &Arc<dyn Journal>, job_id: &str) -> Vec<Job
 /// All workflow events for a job, in order. The workflow actor does not snapshot
 /// (its event log is tiny and kept whole for exactly this), so replaying from the
 /// snapshot seq returns the complete history for any run created by this version.
-async fn workflow_events(journal: &Arc<dyn Journal>, job_id: &str) -> Vec<WorkflowDomainEvent> {
+pub async fn workflow_events(journal: &Arc<dyn Journal>, job_id: &str) -> Vec<WorkflowDomainEvent> {
     let pid = WorkflowActor::persistence_id_for(job_id);
     let seq = snapshot_seq(journal, &pid).await;
     let mut out = Vec::new();

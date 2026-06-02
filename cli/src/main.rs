@@ -31,34 +31,12 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Submit a workflow to the running daemon as a job and stream it.
-    Run {
-        #[arg(long)]
-        workflow: PathBuf,
-        /// Config path. Omit to use `$XDG_CONFIG_HOME/horsie/config.json`
-        /// (else `~/.config/horsie/config.json`), or an empty config if absent.
-        #[arg(long)]
-        config: Option<PathBuf>,
-        /// One or more workspace roots, comma-separated (e.g. `./api,./web,../shared`).
-        /// A single value is the common case. Paths cannot contain commas.
-        #[arg(long, value_delimiter = ',', required = true)]
-        workdir: Vec<PathBuf>,
-        #[arg(long)]
-        input: String,
-        /// Capability file fully replacing the runtime's built-in sandbox default.
-        /// Overrides `sandbox.capabilities_file` in the config.
-        #[arg(long)]
-        capabilities: Option<PathBuf>,
-        /// Submit and return the job id without streaming output.
-        #[arg(long)]
-        detach: bool,
-    },
     /// Manage the background daemon.
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
     },
-    /// Manage jobs on the running daemon.
+    /// Run and manage jobs on the running daemon.
     Job {
         #[command(subcommand)]
         action: JobAction,
@@ -94,8 +72,36 @@ enum DaemonAction {
 
 #[derive(Subcommand)]
 enum JobAction {
+    /// Submit a workflow to the running daemon as a job and stream it.
+    Run {
+        #[arg(long)]
+        workflow: PathBuf,
+        /// Config path. Omit to use `$XDG_CONFIG_HOME/horsie/config.json`
+        /// (else `~/.config/horsie/config.json`), or an empty config if absent.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// One or more workspace roots, comma-separated (e.g. `./api,./web,../shared`).
+        /// A single value is the common case. Paths cannot contain commas.
+        #[arg(long, value_delimiter = ',', required = true)]
+        workdir: Vec<PathBuf>,
+        #[arg(long)]
+        input: String,
+        /// Capability file fully replacing the runtime's built-in sandbox default.
+        /// Overrides `sandbox.capabilities_file` in the config.
+        #[arg(long)]
+        capabilities: Option<PathBuf>,
+        /// Submit and return the job id without streaming output.
+        #[arg(long)]
+        detach: bool,
+    },
     /// List all jobs known to the daemon.
     List {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Show a job's workflow execution progress (per-agent, with timing).
+    Status {
+        job_id: String,
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -175,7 +181,7 @@ fn do_validate(workflow: PathBuf, config: Option<PathBuf>) -> i32 {
     }
 }
 
-/// Build a `SubmitRequest` from `run`/submit arguments, validating the workflow
+/// Build a `SubmitRequest` from `job run` arguments, validating the workflow
 /// against the config and resolving an explicit `--capabilities` file (the daemon
 /// applies its default when `capabilities` is `None`).
 fn build_submit(
@@ -211,27 +217,69 @@ fn build_submit(
     })
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Compact duration: `45s`, `4m12s`, `1h03m`. Input is millis.
+fn humanize(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Label for the single `Active` agent row, derived from the overall job status.
+fn active_label(status: &models::daemon::JobStatus) -> &'static str {
+    use models::daemon::JobStatus;
+    match status {
+        JobStatus::Running => "working",
+        JobStatus::AwaitingUserInput => "awaiting input",
+        JobStatus::Parked => "parked",
+        JobStatus::Suspended => "suspended",
+        JobStatus::Finished => "finished",
+        JobStatus::Failed => "failed",
+    }
+}
+
+/// Render a job's workflow progress as a header line plus one line per agent.
+fn print_job_status(p: &models::daemon::JobProgress) {
+    use models::daemon::AgentPhase;
+    let now = now_ms();
+    let overall = p.finished_at.unwrap_or(now).saturating_sub(p.submitted_at);
+    println!(
+        "job {} · workflow \"{}\" · {:?} · {}",
+        p.job_id,
+        p.workflow_name,
+        p.status,
+        humanize(overall)
+    );
+    println!();
+    for a in &p.agents {
+        let (marker, label) = match a.phase {
+            AgentPhase::Done => ("✓", "finished"),
+            AgentPhase::Pending => ("·", "pending"),
+            AgentPhase::Active => ("▸", active_label(&p.status)),
+        };
+        let dur = match a.started_at {
+            Some(start) => humanize(a.ended_at.unwrap_or(now).saturating_sub(start)),
+            None => "—".to_string(),
+        };
+        println!("  {marker} {:<12} {:<16} {}", a.name, label, dur);
+    }
+}
+
 async fn dispatch(command: Command) -> Result<i32, CliError> {
     match command {
         Command::Validate { workflow, config } => Ok(do_validate(workflow, config)),
-        Command::Run {
-            workflow,
-            config,
-            workdir,
-            input,
-            capabilities,
-            detach,
-        } => {
-            let root = resolve_state_dir(config.as_deref())?;
-            let req = build_submit(workflow, config, workdir, input, capabilities)?;
-            if detach {
-                let job_id = client::submit(&root, req).await?;
-                println!("job {job_id}");
-                Ok(0)
-            } else {
-                client::run_attached(&root, req).await
-            }
-        }
         Command::Daemon { action } => match action {
             DaemonAction::Start { config, background } => {
                 let cfg = HorsieConfig::resolve(config.as_deref())?;
@@ -265,6 +313,30 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             }
         },
         Command::Job { action } => match action {
+            JobAction::Run {
+                workflow,
+                config,
+                workdir,
+                input,
+                capabilities,
+                detach,
+            } => {
+                let root = resolve_state_dir(config.as_deref())?;
+                let req = build_submit(workflow, config, workdir, input, capabilities)?;
+                if detach {
+                    let job_id = client::submit(&root, req).await?;
+                    println!("job {job_id}");
+                    Ok(0)
+                } else {
+                    client::run_attached(&root, req).await
+                }
+            }
+            JobAction::Status { job_id, config } => {
+                let root = resolve_state_dir(config.as_deref())?;
+                let p = client::job_status(&root, job_id).await?;
+                print_job_status(&p);
+                Ok(0)
+            }
             JobAction::List { config } => {
                 let root = resolve_state_dir(config.as_deref())?;
                 let jobs = client::list(&root).await?;

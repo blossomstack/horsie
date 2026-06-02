@@ -44,7 +44,7 @@ Start the daemon, then submit a workflow as a job:
 ```bash
 horsie daemon start --background
 
-horsie run \
+horsie job run \
   --workflow examples/dev-workflow.json \
   --capabilities examples/dev-workflow-capabilities.json \
   --workdir /path/to/a/checkout \
@@ -56,6 +56,7 @@ Inspect and manage work:
 ```bash
 horsie daemon status              # pid, uptime, job counts
 horsie job list                   # all known jobs
+horsie job status <id>            # per-agent workflow progress with timing
 horsie job logs <id> --follow     # tail a job's live output
 horsie job stop <id>              # cancel (job becomes resumable)
 horsie job resume <id> -m "..."   # answer a job awaiting input

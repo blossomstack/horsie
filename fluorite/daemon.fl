@@ -35,8 +35,35 @@ struct SubmitRequest {
     workflow_name: String,
 }
 
+/// Where an agent sits in a job's execution trace, for `horsie job status`.
+enum AgentPhase {
+    Pending,   // defined in the workflow but not yet visited
+    Active,    // the current agent; qualify with JobProgress.status
+    Done,      // ran and handed off (or the workflow moved past it)
+}
+
+/// One row of a job's workflow progress. Timestamps are the source of truth;
+/// the CLI derives durations from them. `started_at`/`ended_at` are epoch millis.
+struct AgentProgress {
+    name: String,
+    phase: AgentPhase,
+    started_at: Option<u64>,   // None = pending, or a job predating event timestamps
+    ended_at: Option<u64>,     // None while Active/Pending
+}
+
+/// A job's workflow execution progress, returned by `JobStatus`.
+struct JobProgress {
+    job_id: String,
+    workflow_name: String,
+    status: JobStatus,         // overall job status; qualifies the Active row
+    submitted_at: u64,         // epoch millis
+    finished_at: Option<u64>,  // terminal event's timestamp; None if not terminal / pre-timestamp
+    agents: Vec<AgentProgress>,
+}
+
 struct ListRequest {}
 struct LogsRequest { job_id: String, follow: bool }
+struct JobStatusRequest { job_id: String }
 struct StopRequest { job_id: String }
 struct ResumeRequest { job_id: String, message: String }
 struct RemoveRequest { job_id: String }
@@ -54,6 +81,7 @@ union DaemonRequest {
     Resume(ResumeRequest),
     Remove(RemoveRequest),
     Status(StatusRequest),
+    JobStatus(JobStatusRequest),
     Shutdown(ShutdownRequest),
 }
 
@@ -85,6 +113,7 @@ union DaemonResponse {
     JobList(JobListResponse),
     Ack(AckResponse),
     Status(StatusInfo),
+    JobProgress(JobProgress),
     LogFrame(JobEventFrame),
     Error(ErrorResponse),
     End(EndResponse),

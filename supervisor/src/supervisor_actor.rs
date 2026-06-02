@@ -21,6 +21,12 @@ pub enum SupervisorCommand {
     List {
         reply: oneshot::Sender<Vec<JobSummary>>,
     },
+    /// Fetch one job's full record (spec + status + submit time), or `None` if
+    /// unknown. Backs `horsie job status`.
+    GetJob {
+        job_id: JobId,
+        reply: oneshot::Sender<Option<JobRecord>>,
+    },
     /// Cancel a running job (→ Suspended).
     Stop { job_id: JobId },
     /// Resume a suspended/awaiting job with a message.
@@ -195,6 +201,10 @@ impl EventSourcedActor for SupervisorActor {
                     .map(|(id, rec)| summary(id, rec))
                     .collect();
                 let _ = reply.send(jobs);
+                CommandEffect::none()
+            }
+            SupervisorCommand::GetJob { job_id, reply } => {
+                let _ = reply.send(state.jobs.get(&job_id).cloned());
                 CommandEffect::none()
             }
             SupervisorCommand::Stop { job_id } => {

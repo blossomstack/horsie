@@ -215,7 +215,7 @@ async fn two_agent_workflow_routes_on_condition_and_finishes() {
     let events = post_snapshot_events(&journal, "wf-seq").await;
     assert!(events.iter().any(|e| matches!(
         e,
-        WorkflowDomainEvent::WorkflowFinished { output } if output["report"] == "all done"
+        WorkflowDomainEvent::WorkflowFinished { output, .. } if output["report"] == "all done"
     )));
 }
 
@@ -427,7 +427,7 @@ async fn agent_session_history_reconstructs_from_journal() {
     let events = post_snapshot_events(&journal, "wf-recover").await;
     assert!(events.iter().any(|e| matches!(
         e,
-        WorkflowDomainEvent::WorkflowFinished { output } if output["answer"] == "42"
+        WorkflowDomainEvent::WorkflowFinished { output, .. } if output["answer"] == "42"
     )));
 
     // Fold the agent session's journal the way recovery would.
