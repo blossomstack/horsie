@@ -8,7 +8,15 @@ use runtime.ToolResult;
 struct WorkspaceConfig { name: String, path: String }
 
 /// Runtime configuration
-struct RuntimeConfig { workspaces: Vec<WorkspaceConfig> }
+struct RuntimeConfig {
+    workspaces: Vec<WorkspaceConfig>,
+    /// Shared plugin library root, exposed to agents as the `horsie_shared`
+    /// workspace. `None` disables the shared library for this runtime.
+    plugins_dir: Option<String>,
+    /// Directories prepended to PATH when running plugin hooks (e.g. the node bin
+    /// dir), resolved by the CLI. Empty inherits the ambient PATH.
+    hook_path: Vec<String>,
+}
 
 /// Current lifecycle state of a runtime
 enum RuntimeState {

@@ -11,8 +11,8 @@
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use models::runtime::{
-    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse, ToolCallResponse,
-    ToolError, ToolResult,
+    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse,
+    SessionStartResponse, ToolCallResponse, ToolError, ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,6 +36,14 @@ struct Cli {
     /// sandbox. The file fully defines the allowed capabilities.
     #[arg(long = "sandbox-caps")]
     sandbox_caps: Option<PathBuf>,
+    /// Shared plugin library root, exposed to agents as the `horsie_shared`
+    /// workspace (read-only). Absent → no shared library.
+    #[arg(long = "plugins-dir")]
+    plugins_dir: Option<PathBuf>,
+    /// Directory prepended to PATH when running plugin hooks (repeatable), e.g. the
+    /// node bin dir.
+    #[arg(long = "hook-path")]
+    hook_path: Vec<PathBuf>,
 }
 
 fn parse_workspace_arg(s: &str) -> Result<models::Workspace, String> {
@@ -92,7 +100,10 @@ async fn main() {
         }
     }
 
-    let registry = Arc::new(runtime::workspace::WorkspaceRegistry::new(cli.workspaces));
+    let registry = Arc::new(
+        runtime::workspace::WorkspaceRegistry::new(cli.workspaces)
+            .with_plugins(cli.plugins_dir, cli.hook_path),
+    );
 
     match endpoint {
         Endpoint::Ws(url) => match connect_async(&url).await {
@@ -193,11 +204,15 @@ async fn run_loop<S>(
                         let in_flight_clone = in_flight.clone();
 
                         let handle = tokio::spawn(async move {
+                            let include_shared = req.include_shared;
                             let workspaces = runtime::scan::exec(&registry, req);
+                            let shared_skills =
+                                runtime::scan::shared_skills(&registry, include_shared);
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ScanResult(ScanResponse {
                                     call_id: call_id.clone(),
                                     workspaces,
+                                    shared_skills,
                                 }),
                             );
                             if let Ok(json) = response {
@@ -227,6 +242,39 @@ async fn run_loop<S>(
                         if let Ok(json) = response {
                             let _ = sink.lock().await.send(Message::Text(json.into())).await;
                         }
+                    }
+                    RuntimeInboundMessage::SessionStart(req) => {
+                        let call_id = req.call_id.clone();
+                        let map_id = req.call_id.clone();
+                        let registry = registry.clone();
+                        let sink_clone = sink.clone();
+                        let in_flight_clone = in_flight.clone();
+
+                        let handle = tokio::spawn(async move {
+                            let context = match registry.plugins_dir() {
+                                Some(dir) => {
+                                    runtime::plugins::run_session_start(dir, registry.hook_path())
+                                        .await
+                                }
+                                None => String::new(),
+                            };
+                            let response = serde_json::to_string(
+                                &RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
+                                    call_id: call_id.clone(),
+                                    context,
+                                }),
+                            );
+                            if let Ok(json) = response {
+                                let _ = sink_clone
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(json.into()))
+                                    .await;
+                            }
+                            in_flight_clone.lock().await.remove(&call_id);
+                        });
+
+                        in_flight.lock().await.insert(map_id, handle.abort_handle());
                     }
                 }
             }

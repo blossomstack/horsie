@@ -1,5 +1,5 @@
 use crate::transport::{RuntimeTransport, TransportError};
-use models::runtime::{ToolCall, ToolError, ToolOutput, ToolResult, WorkspaceScan};
+use models::runtime::{PluginSkill, ToolCall, ToolError, ToolOutput, ToolResult, WorkspaceScan};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -62,10 +62,27 @@ impl RuntimeClient {
         workspace: Option<String>,
         instruction_candidates: Vec<String>,
         skills_glob: String,
-    ) -> Result<Vec<WorkspaceScan>, RuntimeCallError> {
+        include_shared: bool,
+    ) -> Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.inner
-            .scan_workspace(&call_id, workspace, instruction_candidates, skills_glob)
+            .scan_workspace(
+                &call_id,
+                workspace,
+                instruction_candidates,
+                skills_glob,
+                include_shared,
+            )
+            .await
+            .map_err(RuntimeCallError::Transport)
+    }
+
+    /// Run the shared plugin library's `SessionStart` hooks and return the injected
+    /// context (empty when there are none, or on relay transports that lack support).
+    pub async fn run_session_start(&self) -> Result<String, RuntimeCallError> {
+        let call_id = Uuid::new_v4().to_string();
+        self.inner
+            .run_session_start(&call_id)
             .await
             .map_err(RuntimeCallError::Transport)
     }
@@ -125,15 +142,17 @@ mod tests {
             skills: vec![],
         };
         let client = RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan]));
-        let out = client
+        let (out, shared) = client
             .scan_workspace(
                 None,
                 vec!["AGENTS.md".into()],
                 ".claude/skills/*/SKILL.md".into(),
+                false,
             )
             .await
             .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].instructions.as_ref().unwrap().content, "hi");
+        assert!(shared.is_empty());
     }
 }

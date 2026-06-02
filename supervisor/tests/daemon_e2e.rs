@@ -52,8 +52,13 @@ impl RuntimeTransport for NoopTransport {
         _workspace: Option<String>,
         _instruction_candidates: Vec<String>,
         _skills_glob: String,
-    ) -> Result<Vec<WorkspaceScan>, TransportError> {
-        Ok(Vec::new())
+        _include_shared: bool,
+    ) -> Result<(Vec<WorkspaceScan>, Vec<models::runtime::PluginSkill>), TransportError> {
+        Ok((Vec::new(), Vec::new()))
+    }
+
+    async fn run_session_start(&self, _call_id: &str) -> Result<String, TransportError> {
+        Ok(String::new())
     }
 }
 
@@ -152,6 +157,7 @@ fn agent(
     allow_ask_user: bool,
 ) -> WorkflowAgentDef {
     WorkflowAgentDef {
+        use_plugins: None,
         name: name.into(),
         system_prompt: None,
         model: "m".into(),
@@ -168,6 +174,7 @@ fn agent(
 /// Single-agent, no-tool workflow that ends with the model's plain text.
 fn solo_workflow() -> WorkflowDefinition {
     WorkflowDefinition {
+        default_use_plugins: None,
         start: "solo".into(),
         agents: vec![agent("solo", None, false)],
     }
@@ -176,6 +183,7 @@ fn solo_workflow() -> WorkflowDefinition {
 /// Single-agent workflow that may ask the user (kind-tagged conclude).
 fn ask_workflow() -> WorkflowDefinition {
     WorkflowDefinition {
+        default_use_plugins: None,
         start: "solo".into(),
         agents: vec![agent(
             "solo",
@@ -187,6 +195,8 @@ fn ask_workflow() -> WorkflowDefinition {
 
 fn spec(def: WorkflowDefinition) -> JobSpec {
     JobSpec {
+        plugins_dir: None,
+        hook_path: Vec::new(),
         workflow: def,
         workflow_name: "wf".into(),
         workspaces: vec![models::Workspace {
@@ -495,6 +505,7 @@ fn timer_workflow() -> WorkflowDefinition {
     a.allow_timers = Some(true);
     a.allowed_tools = None; // permit the timer control tools
     WorkflowDefinition {
+        default_use_plugins: None,
         start: "solo".into(),
         agents: vec![a],
     }

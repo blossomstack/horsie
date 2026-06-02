@@ -42,6 +42,9 @@ struct ScanRequest {
     workspace: Option<String>,
     instruction_candidates: Vec<String>,
     skills_glob: String,
+    /// When true, also enumerate the shared plugin library and return its skills in
+    /// `ScanResponse.shared_skills`. The client sets this only for opted-in agents.
+    include_shared: bool,
 }
 
 struct ScannedFile { path: String, content: String }
@@ -52,7 +55,27 @@ struct WorkspaceScan {
     instructions: Option<ScannedFile>,
     skills: Vec<ScannedFile>,
 }
-struct ScanResponse { call_id: String, workspaces: Vec<WorkspaceScan> }
+
+/// A skill discovered in the shared plugin library. `rel_dir` is the skill's
+/// directory relative to the plugins root (the `horsie_shared` workspace), so the
+/// agent can read sibling resources with the filesystem tools.
+struct PluginSkill {
+    plugin: String,
+    rel_dir: String,
+    content: String,
+}
+struct ScanResponse {
+    call_id: String,
+    workspaces: Vec<WorkspaceScan>,
+    shared_skills: Vec<PluginSkill>,
+}
+
+// --- SessionStart hooks ---
+
+/// Run every installed plugin's SessionStart hook inside the sandbox and return
+/// the concatenated injected context (empty when there are no hooks / no plugins).
+struct SessionStartRequest { call_id: String }
+struct SessionStartResponse { call_id: String, context: String }
 
 // --- Inbound (executor → runtime) ---
 
@@ -64,6 +87,7 @@ union RuntimeInboundMessage {
     ToolCall(ToolCallRequest),
     CancelCall(CancelCallRequest),
     ScanWorkspace(ScanRequest),
+    SessionStart(SessionStartRequest),
 }
 
 // --- Outbound (runtime → executor) ---
@@ -85,4 +109,5 @@ union RuntimeOutboundMessage {
     Ready(RuntimeReady),
     ToolCallResponse(ToolCallResponse),
     ScanResult(ScanResponse),
+    SessionStartResult(SessionStartResponse),
 }

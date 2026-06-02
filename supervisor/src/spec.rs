@@ -26,6 +26,12 @@ pub struct JobSpec {
     pub input: String,
     /// Already resolved (`~`/`$HOME` expanded) at submit time.
     pub capabilities: CapabilitySpec,
+    /// Shared plugin library root (`horsie_shared`), if any plugins are installed.
+    #[serde(default)]
+    pub plugins_dir: Option<PathBuf>,
+    /// Directories prepended to PATH when running plugin hooks (resolved at submit).
+    #[serde(default)]
+    pub hook_path: Vec<PathBuf>,
 }
 
 /// Shared, process-wide dependencies the production [`crate::ProcessJobRuntime`]

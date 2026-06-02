@@ -17,6 +17,7 @@ use workflow::{DefaultToolboxFactory, ToolboxFactory, compose_system_prompt, sca
 
 fn agent_def() -> WorkflowAgentDef {
     WorkflowAgentDef {
+        use_plugins: None,
         name: "coder".into(),
         system_prompt: Some("You are a coder.".into()),
         model: "m".into(),
@@ -51,10 +52,10 @@ fn scan_payload() -> WorkspaceScan {
 #[tokio::test]
 async fn scan_composes_prompt_and_exposes_skill_tool() {
     let client = RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan_payload()]));
-    let ws = scan_workspace(&client, None).await;
+    let (ws, _shared) = scan_workspace(&client, None, false).await;
 
     // Prompt: role first, then a `# Workspaces` block per root, then its skill listing.
-    let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws).unwrap();
+    let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws, None).unwrap();
     assert!(prompt.contains("You are a coder."));
     assert!(prompt.contains("# Workspaces"));
     assert!(prompt.contains("## october — /ws/october (git)"));
@@ -64,7 +65,7 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
     // Toolbox fetches skills live: skill + inspect_workspace present (even with
     // allowed_tools=["bash"]); skill(name) serves the body from a fresh scan, and with
     // a single workspace the `workspace` arg can be omitted.
-    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client, ws.names());
+    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client, ws.names(), false);
     let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
     assert!(names.contains(&"bash".to_string()));
     assert!(names.contains(&"skill".to_string()));
@@ -79,10 +80,10 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
 #[tokio::test]
 async fn empty_workspace_yields_plain_prompt_but_tools_present() {
     let client = RuntimeClient::new(MockTransport::ok("")); // default empty scan
-    let ws = scan_workspace(&client, None).await;
-    let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws);
+    let (ws, _shared) = scan_workspace(&client, None, false).await;
+    let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws, None);
     assert_eq!(prompt.as_deref(), Some("You are a coder."));
-    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client, ws.names());
+    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client, ws.names(), false);
     let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
     assert!(names.contains(&"skill".to_string()));
     assert!(names.contains(&"inspect_workspace".to_string()));

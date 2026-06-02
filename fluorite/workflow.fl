@@ -33,10 +33,16 @@ struct WorkflowAgentDef {
     max_retries: Option<u32>,
     /// Tool allowlist; `None` means all tools are available.
     allowed_tools: Option<Vec<String>>,
+    /// Whether this agent sees the shared plugin library (skills + SessionStart
+    /// bootstrap). `None` inherits the workflow-level default.
+    use_plugins: Option<bool>,
 }
 
 /// A complete workflow graph.
 struct WorkflowDefinition {
     start: String,
     agents: Vec<WorkflowAgentDef>,
+    /// Default for agents that don't set `use_plugins`. `None` means on — installed
+    /// shared plugins are available to every agent unless it opts out.
+    default_use_plugins: Option<bool>,
 }

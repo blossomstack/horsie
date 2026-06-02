@@ -6,7 +6,7 @@ use models::executor::{
     CancelToolCallCmd, ExecutorCommand, ExecutorEvent, ExecutorInboundMessage,
     ExecutorOutboundMessage, ToolCallCmd,
 };
-use models::runtime::{ToolCall, ToolCallRequest, ToolResult, WorkspaceScan};
+use models::runtime::{PluginSkill, ToolCall, ToolCallRequest, ToolResult, WorkspaceScan};
 use runtime_client::{RuntimeTransport, TransportError};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -159,7 +159,8 @@ impl RuntimeTransport for RelayRuntimeTransport {
         _workspace: Option<String>,
         _instruction_candidates: Vec<String>,
         _skills_glob: String,
-    ) -> Result<Vec<WorkspaceScan>, TransportError> {
+        _include_shared: bool,
+    ) -> Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), TransportError> {
         // The executor relay protocol (ExecutorCommand/ExecutorEvent) has no scan
         // command yet, so workspace context is not available in distributed/server
         // mode. The error is caught by `workflow::workspace::scan`, which degrades to
@@ -167,6 +168,14 @@ impl RuntimeTransport for RelayRuntimeTransport {
         // a ScanWorkspace command through the executor protocol is a follow-up.
         Err(TransportError::SendFailed(
             "workspace scan is not supported over the executor relay transport".to_string(),
+        ))
+    }
+
+    async fn run_session_start(&self, _call_id: &str) -> Result<String, TransportError> {
+        // Same relay limitation as `scan_workspace`: no SessionStart command over the
+        // executor protocol yet. `workflow` treats an error as "no bootstrap context".
+        Err(TransportError::SendFailed(
+            "session-start hooks are not supported over the executor relay transport".to_string(),
         ))
     }
 }

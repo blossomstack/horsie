@@ -308,6 +308,7 @@ mod tests {
     fn scan_workspace_inbound_round_trips() {
         use crate::runtime::{RuntimeInboundMessage, ScanRequest};
         let msg = RuntimeInboundMessage::ScanWorkspace(ScanRequest {
+            include_shared: false,
             call_id: "c1".into(),
             workspace: None,
             instruction_candidates: vec!["AGENTS.md".into()],
@@ -323,6 +324,7 @@ mod tests {
     fn scan_result_outbound_round_trips() {
         use crate::runtime::{RuntimeOutboundMessage, ScanResponse, ScannedFile, WorkspaceScan};
         let msg = RuntimeOutboundMessage::ScanResult(ScanResponse {
+            shared_skills: vec![],
             call_id: "c1".into(),
             workspaces: vec![WorkspaceScan {
                 name: "october".into(),

@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use models::runtime::{
-    CancelCallRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ToolCall,
-    ToolCallRequest, ToolResult, WorkspaceScan,
+    CancelCallRequest, PluginSkill, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest,
+    SessionStartRequest, ToolCall, ToolCallRequest, ToolResult, WorkspaceScan,
 };
 use runtime_client::{RuntimeTransport, TransportError};
 use std::collections::HashMap;
@@ -14,8 +14,10 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 type Reply = Result<ToolResult, TransportError>;
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Reply>>>>;
-type ScanReply = Result<Vec<WorkspaceScan>, TransportError>;
+type ScanReply = Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), TransportError>;
 type PendingScan = Arc<Mutex<HashMap<String, oneshot::Sender<ScanReply>>>>;
+type SessionReply = Result<String, TransportError>;
+type PendingSession = Arc<Mutex<HashMap<String, oneshot::Sender<SessionReply>>>>;
 
 /// Direct tool-call transport over a single accepted runtime link
 /// (`WebSocketStream<S>`, where `S` = `TcpStream` or `UnixStream`). Owns the sink
@@ -26,6 +28,7 @@ pub struct SocketRuntimeTransport<S> {
     sink: Arc<Mutex<SplitSink<WebSocketStream<S>, Message>>>,
     pending: Pending,
     pending_scan: PendingScan,
+    pending_session: PendingSession,
 }
 
 /// The unix instantiation used by CLI mode.
@@ -49,8 +52,10 @@ where
     ) -> (Self, oneshot::Receiver<()>) {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let pending_scan: PendingScan = Arc::new(Mutex::new(HashMap::new()));
+        let pending_session: PendingSession = Arc::new(Mutex::new(HashMap::new()));
         let reader_pending = pending.clone();
         let reader_pending_scan = pending_scan.clone();
+        let reader_pending_session = pending_session.clone();
         let (closed_tx, closed_rx) = oneshot::channel();
         tokio::spawn(async move {
             while let Some(Ok(Message::Text(text))) = stream.next().await {
@@ -62,7 +67,13 @@ where
                     }
                     Ok(RuntimeOutboundMessage::ScanResult(resp)) => {
                         if let Some(tx) = reader_pending_scan.lock().await.remove(&resp.call_id) {
-                            let _ = tx.send(Ok(resp.workspaces));
+                            let _ = tx.send(Ok((resp.workspaces, resp.shared_skills)));
+                        }
+                    }
+                    Ok(RuntimeOutboundMessage::SessionStartResult(resp)) => {
+                        if let Some(tx) = reader_pending_session.lock().await.remove(&resp.call_id)
+                        {
+                            let _ = tx.send(Ok(resp.context));
                         }
                     }
                     Ok(RuntimeOutboundMessage::Ready(_)) | Err(_) => {}
@@ -80,6 +91,11 @@ where
                 let _ = tx.send(Err(TransportError::Disconnected));
             }
             drop(scan_map);
+            let mut session_map = reader_pending_session.lock().await;
+            for (_, tx) in session_map.drain() {
+                let _ = tx.send(Err(TransportError::Disconnected));
+            }
+            drop(session_map);
             let _ = closed_tx.send(());
         });
         (
@@ -87,6 +103,7 @@ where
                 sink: Arc::new(Mutex::new(sink)),
                 pending,
                 pending_scan,
+                pending_session,
             },
             closed_rx,
         )
@@ -146,7 +163,8 @@ where
         workspace: Option<String>,
         instruction_candidates: Vec<String>,
         skills_glob: String,
-    ) -> Result<Vec<WorkspaceScan>, TransportError> {
+        include_shared: bool,
+    ) -> Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), TransportError> {
         let (tx, rx) = oneshot::channel();
         self.pending_scan
             .lock()
@@ -158,6 +176,7 @@ where
             workspace,
             instruction_candidates,
             skills_glob,
+            include_shared,
         });
         let json = serde_json::to_string(&msg)
             .map_err(|e| TransportError::Serialization(e.to_string()))?;
@@ -169,6 +188,34 @@ where
             .await
         {
             self.pending_scan.lock().await.remove(call_id);
+            return Err(TransportError::SendFailed(e.to_string()));
+        }
+        match rx.await {
+            Ok(reply) => reply,
+            Err(_) => Err(TransportError::Disconnected),
+        }
+    }
+
+    async fn run_session_start(&self, call_id: &str) -> Result<String, TransportError> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_session
+            .lock()
+            .await
+            .insert(call_id.to_string(), tx);
+
+        let msg = RuntimeInboundMessage::SessionStart(SessionStartRequest {
+            call_id: call_id.to_string(),
+        });
+        let json = serde_json::to_string(&msg)
+            .map_err(|e| TransportError::Serialization(e.to_string()))?;
+        if let Err(e) = self
+            .sink
+            .lock()
+            .await
+            .send(Message::Text(json.into()))
+            .await
+        {
+            self.pending_session.lock().await.remove(call_id);
             return Err(TransportError::SendFailed(e.to_string()));
         }
         match rx.await {
@@ -218,6 +265,7 @@ mod tests {
                     Ok(RuntimeInboundMessage::ScanWorkspace(req)) => {
                         let resp =
                             RuntimeOutboundMessage::ScanResult(models::runtime::ScanResponse {
+                                shared_skills: vec![],
                                 call_id: req.call_id,
                                 workspaces: vec![models::runtime::WorkspaceScan {
                                     name: "october".into(),
@@ -264,12 +312,13 @@ mod tests {
     #[tokio::test]
     async fn scan_correlates_response() {
         let (t, _dir) = paired().await;
-        let scan = t
+        let (scan, _shared) = t
             .scan_workspace(
                 "s1",
                 None,
                 vec!["AGENTS.md".into()],
                 ".claude/skills/*/SKILL.md".into(),
+                false,
             )
             .await
             .unwrap();

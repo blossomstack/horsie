@@ -1,4 +1,4 @@
-use models::runtime::{ScannedFile, WorkspaceScan};
+use models::runtime::{PluginSkill, ScannedFile, WorkspaceScan};
 use runtime_client::RuntimeClient;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -7,6 +7,22 @@ use std::sync::Arc;
 const INSTRUCTION_CANDIDATES: &[&str] = &["AGENTS.md", "AGENT.md", "CLAUDE.md"];
 /// Glob (relative to the workdir) locating skill definition files.
 const SKILLS_GLOB: &str = ".claude/skills/*/SKILL.md";
+/// Reserved workspace name addressing the shared plugin library.
+pub const SHARED_WORKSPACE: &str = "horsie_shared";
+
+/// The shared plugin library surfaced to an opted-in agent: its skills plus the
+/// `SessionStart` bootstrap context, as of the spawn-time scan.
+#[derive(Clone, Default)]
+pub struct SharedContext {
+    pub skills: Arc<SkillSet>,
+    pub bootstrap: Option<String>,
+}
+
+impl SharedContext {
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty() && self.bootstrap.is_none()
+    }
+}
 
 /// Workspace context surfaced to every agent: one entry per workspace root, each with
 /// its project instruction file and skill set, as of the spawn-time scan.
@@ -50,6 +66,9 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub body: String,
+    /// For a shared (plugin) skill: its directory relative to the `horsie_shared`
+    /// root, so the agent can read sibling resources. `None` for workspace skills.
+    pub rel_dir: Option<String>,
 }
 
 impl SkillSet {
@@ -79,23 +98,59 @@ impl FromIterator<Skill> for SkillSet {
 }
 
 /// Scan workspaces over the runtime and interpret them. `workspace` filters which
-/// roots to scan (`None` = all, `Some(name)` = one). On a transport error, warn and
-/// return an empty context — the feature is additive and must not sink a run.
-pub async fn scan(client: &RuntimeClient, workspace: Option<String>) -> WorkspaceContext {
+/// roots to scan (`None` = all, `Some(name)` = one); `include_shared` also pulls the
+/// shared plugin library's skills. On a transport error, warn and return empty —
+/// the feature is additive and must not sink a run.
+pub async fn scan(
+    client: &RuntimeClient,
+    workspace: Option<String>,
+    include_shared: bool,
+) -> (WorkspaceContext, SkillSet) {
     let candidates = INSTRUCTION_CANDIDATES
         .iter()
         .map(|s| s.to_string())
         .collect();
     match client
-        .scan_workspace(workspace, candidates, SKILLS_GLOB.to_string())
+        .scan_workspace(
+            workspace,
+            candidates,
+            SKILLS_GLOB.to_string(),
+            include_shared,
+        )
         .await
     {
-        Ok(raw) => interpret(raw),
+        Ok((raw, shared)) => (interpret(raw), interpret_shared(shared)),
         Err(e) => {
             tracing::warn!(error = %e, "workspace scan failed; continuing without it");
-            WorkspaceContext::default()
+            (WorkspaceContext::default(), SkillSet::default())
         }
     }
+}
+
+/// Interpret the shared plugin library's skills: parse frontmatter, attach each
+/// skill's `rel_dir`, dedupe by name (kept-first across plugins, with a warning).
+fn interpret_shared(raw: Vec<PluginSkill>) -> SkillSet {
+    let mut skills = BTreeMap::new();
+    for ps in raw {
+        let scanned = ScannedFile {
+            path: ps.rel_dir.clone(),
+            content: ps.content,
+        };
+        match parse_skill(&scanned) {
+            Some(mut skill) => {
+                skill.rel_dir = Some(ps.rel_dir);
+                if skills.contains_key(&skill.name) {
+                    tracing::warn!(plugin = %ps.plugin, name = %skill.name, "duplicate shared skill name; keeping first");
+                } else {
+                    skills.insert(skill.name.clone(), skill);
+                }
+            }
+            None => {
+                tracing::warn!(plugin = %ps.plugin, "skipping shared skill with invalid frontmatter")
+            }
+        }
+    }
+    SkillSet { skills }
 }
 
 fn interpret(raw: Vec<WorkspaceScan>) -> WorkspaceContext {
@@ -155,6 +210,7 @@ fn parse_skill(file: &ScannedFile) -> Option<Skill> {
         name: name?,
         description: description?,
         body: body.trim().to_string(),
+        rel_dir: None,
     })
 }
 
@@ -190,11 +246,22 @@ fn unquote(s: &str) -> &str {
     }
 }
 
-/// Compose the agent's effective system prompt: its own prompt first (role), then
-/// the workspace instructions, then the available-skills listing. Sections are
-/// omitted when empty; returns `None` if nothing at all would be emitted.
-pub fn compose_system_prompt(agent_prompt: Option<&str>, ws: &WorkspaceContext) -> Option<String> {
+/// Compose the agent's effective system prompt: the `SessionStart` bootstrap (if any)
+/// first, then its own prompt (role), the workspace instructions/skills, and finally
+/// the shared-skills listing. Sections are omitted when empty; returns `None` if
+/// nothing at all would be emitted.
+pub fn compose_system_prompt(
+    agent_prompt: Option<&str>,
+    ws: &WorkspaceContext,
+    shared: Option<&SharedContext>,
+) -> Option<String> {
     let mut sections: Vec<String> = Vec::new();
+    if let Some(s) = shared
+        && let Some(boot) = &s.bootstrap
+        && !boot.trim().is_empty()
+    {
+        sections.push(format!("# Session bootstrap\n{}", boot.trim()));
+    }
     if let Some(p) = agent_prompt
         && !p.trim().is_empty()
     {
@@ -226,11 +293,34 @@ pub fn compose_system_prompt(agent_prompt: Option<&str>, ws: &WorkspaceContext) 
         }
         sections.push(block);
     }
+    if let Some(s) = shared
+        && !s.skills.is_empty()
+    {
+        sections.push(format!(
+            "# Shared skills (load with the skill tool, workspace=\"{}\")\n{}",
+            SHARED_WORKSPACE,
+            skills_listing(&s.skills)
+        ));
+    }
     if sections.is_empty() {
         None
     } else {
         Some(sections.join("\n\n"))
     }
+}
+
+/// The `inspect_workspace` view of the shared plugin library: its skills (name +
+/// description), or a note when empty.
+pub(crate) fn shared_inspect(skills: &SkillSet) -> String {
+    if skills.is_empty() {
+        return format!("## {SHARED_WORKSPACE}\nskills: none");
+    }
+    format!(
+        "## {}\nskills ({}):\n{}",
+        SHARED_WORKSPACE,
+        skills.len(),
+        skills_listing(skills)
+    )
 }
 
 /// Render skills as sorted `- name: description` lines. Shared by the prompt's
@@ -414,7 +504,7 @@ mod tests {
             ),
             ws_scan("beta", None, vec![]),
         ]);
-        let prompt = compose_system_prompt(Some("You are a coder."), &ctx).unwrap();
+        let prompt = compose_system_prompt(Some("You are a coder."), &ctx, None).unwrap();
         let role = prompt.find("You are a coder.").unwrap();
         let header = prompt.find("# Workspaces").unwrap();
         let alpha = prompt.find("## alpha").unwrap();
@@ -449,10 +539,61 @@ mod tests {
     #[test]
     fn compose_empty_context_is_none() {
         let ctx = WorkspaceContext::default();
-        assert!(compose_system_prompt(None, &ctx).is_none());
+        assert!(compose_system_prompt(None, &ctx, None).is_none());
         assert_eq!(
-            compose_system_prompt(Some("just role"), &ctx).as_deref(),
+            compose_system_prompt(Some("just role"), &ctx, None).as_deref(),
             Some("just role")
         );
+    }
+
+    fn plugin_skill(name: &str, rel_dir: &str, desc: &str) -> PluginSkill {
+        PluginSkill {
+            plugin: "sp".into(),
+            rel_dir: rel_dir.into(),
+            content: format!("---\nname: {name}\ndescription: {desc}\n---\nbody-{name}"),
+        }
+    }
+
+    #[test]
+    fn interpret_shared_sets_rel_dir_and_dedupes() {
+        let set = interpret_shared(vec![
+            plugin_skill("brainstorming", "sp/skills/brainstorming", "explore"),
+            plugin_skill("brainstorming", "other/skills/brainstorming", "dup"),
+        ]);
+        assert_eq!(set.names(), vec!["brainstorming".to_string()]);
+        let s = set.get("brainstorming").unwrap();
+        assert_eq!(s.description, "explore"); // kept-first
+        assert_eq!(s.rel_dir.as_deref(), Some("sp/skills/brainstorming"));
+    }
+
+    #[test]
+    fn compose_prepends_bootstrap_and_appends_shared_skills() {
+        let ctx = WorkspaceContext::default();
+        let skills = interpret_shared(vec![plugin_skill(
+            "tdd",
+            "sp/skills/tdd",
+            "write tests first",
+        )]);
+        let shared = SharedContext {
+            skills: Arc::new(skills),
+            bootstrap: Some("USE SKILLS".into()),
+        };
+        let prompt = compose_system_prompt(Some("You are a coder."), &ctx, Some(&shared)).unwrap();
+        let boot = prompt.find("# Session bootstrap").unwrap();
+        let role = prompt.find("You are a coder.").unwrap();
+        let shared_hdr = prompt.find("# Shared skills").unwrap();
+        assert!(boot < role && role < shared_hdr);
+        assert!(prompt.contains("USE SKILLS"));
+        assert!(prompt.contains("workspace=\"horsie_shared\""));
+        assert!(prompt.contains("- tdd: write tests first"));
+    }
+
+    #[test]
+    fn shared_inspect_lists_or_reports_empty() {
+        assert!(shared_inspect(&SkillSet::default()).contains("skills: none"));
+        let skills = interpret_shared(vec![plugin_skill("tdd", "sp/skills/tdd", "d")]);
+        let out = shared_inspect(&skills);
+        assert!(out.contains("## horsie_shared"));
+        assert!(out.contains("- tdd: d"));
     }
 }

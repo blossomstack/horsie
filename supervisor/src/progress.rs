@@ -106,10 +106,12 @@ mod tests {
 
     fn def(names: &[&str]) -> WorkflowDefinition {
         WorkflowDefinition {
+            default_use_plugins: None,
             start: names.first().copied().unwrap_or("").into(),
             agents: names
                 .iter()
                 .map(|n| WorkflowAgentDef {
+                    use_plugins: None,
                     name: (*n).into(),
                     system_prompt: None,
                     model: "mock".into(),

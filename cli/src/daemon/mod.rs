@@ -56,6 +56,10 @@ fn now_millis() -> u64 {
 struct Daemon {
     supervisor: ActorRef<SupervisorCommand>,
     default_caps: CapabilitySpec,
+    /// Shared plugin library root (`horsie_shared`), `None` when none is installed.
+    plugins_dir: Option<PathBuf>,
+    /// Hook interpreter dirs, resolved once at startup (config override else `node`).
+    hook_path: Vec<PathBuf>,
     /// Shared journal, used to replay a job's history for `logs`.
     journal: Arc<dyn Journal>,
     started: Instant,
@@ -106,6 +110,16 @@ pub async fn serve(cfg: HorsieConfig) -> Result<(), CliError> {
     };
     let default_caps = capabilities::resolve_user_paths(default_caps);
 
+    // Resolve the shared plugin library once: only when the dir holds ≥1 plugin. The
+    // hook interpreter dirs (config override else discovered `node`) are resolved only
+    // when there is a library to run hooks for.
+    let plugins_dir = crate::plugins::plugins_dir_if_populated(&cfg.storage.plugins_dir);
+    let hook_path = if plugins_dir.is_some() {
+        crate::plugins::resolve_hook_path(cfg.runtime.hook_path.clone())
+    } else {
+        Vec::new()
+    };
+
     let sock = socket_path(&state_dir);
     // Remove a stale socket so bind() succeeds after an unclean shutdown.
     let _ = std::fs::remove_file(&sock);
@@ -117,6 +131,8 @@ pub async fn serve(cfg: HorsieConfig) -> Result<(), CliError> {
     let daemon = Arc::new(Daemon {
         supervisor,
         default_caps,
+        plugins_dir,
+        hook_path,
         journal,
         started: Instant::now(),
         shutdown: Arc::new(Notify::new()),
@@ -159,9 +175,13 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
         DaemonRequest::Submit(s) => {
             // Resolve the effective spec, then prepend the platform default Seatbelt
             // rules (see `with_default_seatbelt_rules`).
-            let caps = capabilities::with_default_seatbelt_rules(capabilities::resolve_user_paths(
-                s.capabilities
-                    .unwrap_or_else(|| daemon.default_caps.clone()),
+            let caps = capabilities::with_default_seatbelt_rules(capabilities::with_plugin_grants(
+                capabilities::resolve_user_paths(
+                    s.capabilities
+                        .unwrap_or_else(|| daemon.default_caps.clone()),
+                ),
+                daemon.plugins_dir.as_deref(),
+                &daemon.hook_path,
             ));
             // Derive a unique name per workspace path (server-side, the single place).
             let paths: Vec<PathBuf> = s.workdirs.iter().map(PathBuf::from).collect();
@@ -178,6 +198,8 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
                 workspaces,
                 input: s.input,
                 capabilities: caps,
+                plugins_dir: daemon.plugins_dir.clone(),
+                hook_path: daemon.hook_path.clone(),
             };
             let (tx, rx) = oneshot::channel();
             let _ = daemon

@@ -51,6 +51,10 @@ pub enum SupervisorCommand {
 }
 
 /// Events recording the job registry. Persisted.
+// `JobSubmitted` inherently carries the full `JobSpec`; the size gap to the small
+// status/remove variants is by design for a persisted submit event, not worth boxing
+// (which would only obscure the journal payload).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SupervisorEvent {
     JobSubmitted {
@@ -315,7 +319,10 @@ mod tests {
 
     fn spec() -> JobSpec {
         JobSpec {
+            plugins_dir: None,
+            hook_path: Vec::new(),
             workflow: WorkflowDefinition {
+                default_use_plugins: None,
                 start: "a".into(),
                 agents: vec![],
             },

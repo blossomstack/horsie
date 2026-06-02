@@ -72,6 +72,11 @@ pub struct StorageConfig {
     /// `$HOME/.local/share/horsie` (same path on macOS and Linux).
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    /// Shared plugin library root (`horsie plugin install` clones here). Exposed to
+    /// opted-in agents as the `horsie_shared` workspace. Defaults to
+    /// `<data_dir>/plugins`.
+    #[serde(default = "default_plugins_dir")]
+    pub plugins_dir: PathBuf,
 }
 
 impl Default for StorageConfig {
@@ -79,6 +84,7 @@ impl Default for StorageConfig {
         Self {
             state_dir: default_state_dir(),
             data_dir: default_data_dir(),
+            plugins_dir: default_plugins_dir(),
         }
     }
 }
@@ -89,6 +95,11 @@ pub struct RuntimeConfig {
     /// the sibling `horsie-runtime` next to the running CLI executable.
     #[serde(default)]
     pub bin: Option<PathBuf>,
+    /// Directories prepended to PATH when running plugin hooks (e.g. the node bin
+    /// dir). Absent → auto-discover `node` from the daemon's environment. These dirs
+    /// are also granted read access in the sandbox.
+    #[serde(default)]
+    pub hook_path: Option<Vec<PathBuf>>,
 }
 
 impl HorsieConfig {
@@ -163,6 +174,11 @@ fn default_data_dir() -> PathBuf {
         ".local/share",
         "data",
     )
+}
+
+/// Default shared plugin library root: `<data_dir>/plugins`.
+fn default_plugins_dir() -> PathBuf {
+    default_data_dir().join("plugins")
 }
 
 /// Pure core of the storage-dir defaults: prefer a non-empty XDG base var joined

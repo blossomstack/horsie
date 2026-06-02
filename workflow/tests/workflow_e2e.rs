@@ -59,6 +59,7 @@ fn object_schema() -> Value {
 
 fn agent(name: &str) -> WorkflowAgentDef {
     WorkflowAgentDef {
+        use_plugins: None,
         name: name.into(),
         system_prompt: None,
         model: "mock".into(),
@@ -187,6 +188,7 @@ async fn two_agent_workflow_routes_on_condition_and_finishes() {
     let writer = agent("writer");
 
     let def = WorkflowDefinition {
+        default_use_plugins: None,
         start: "researcher".into(),
         agents: vec![researcher, writer],
     };
@@ -245,6 +247,7 @@ async fn ask_user_pauses_then_resume_injects_reply() {
     }));
 
     let def = WorkflowDefinition {
+        default_use_plugins: None,
         start: "asker".into(),
         agents: vec![asker],
     };
@@ -327,6 +330,7 @@ impl ToolboxFactory for BlockingFactory {
         def: &WorkflowAgentDef,
         _client: RuntimeClient,
         _workspace_names: Vec<String>,
+        _use_plugins: bool,
     ) -> Arc<dyn Toolbox> {
         let conclude = conclude_tool_spec(def.output_schema.as_ref(), def.allow_ask_user, false)
             .expect("worker has an output schema");
@@ -350,6 +354,7 @@ async fn cancel_suspends_then_resume_continues() {
     worker.allowed_tools = Some(vec!["wait".into()]);
 
     let def = WorkflowDefinition {
+        default_use_plugins: None,
         start: "worker".into(),
         agents: vec![worker],
     };
@@ -405,6 +410,7 @@ async fn agent_session_history_reconstructs_from_journal() {
     }));
 
     let def = WorkflowDefinition {
+        default_use_plugins: None,
         start: "solo".into(),
         agents: vec![solo],
     };
@@ -460,6 +466,7 @@ async fn failed_agent_run_journals_its_history() {
     solo.max_retries = Some(0); // fail on the first provider error, no retries
 
     let def = WorkflowDefinition {
+        default_use_plugins: None,
         start: "solo".into(),
         agents: vec![solo],
     };
@@ -527,6 +534,7 @@ async fn timer_parks_then_fires_and_resumes() {
         .await;
 
     let def = WorkflowDefinition {
+        default_use_plugins: None,
         start: "watcher".into(),
         agents: vec![timer_agent("watcher")],
     };
@@ -568,6 +576,7 @@ async fn park_without_timers_fails_the_run() {
         .build()
         .await;
     let def = WorkflowDefinition {
+        default_use_plugins: None,
         start: "watcher".into(),
         agents: vec![timer_agent("watcher")],
     };
@@ -600,6 +609,7 @@ async fn recurring_timer_fires_then_can_be_cancelled() {
         .await;
 
     let def = WorkflowDefinition {
+        default_use_plugins: None,
         start: "watcher".into(),
         agents: vec![timer_agent("watcher")],
     };

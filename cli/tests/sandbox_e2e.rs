@@ -122,8 +122,10 @@ fn config_with_mock(root: &Path, mock_url: &str) -> HorsieConfig {
 /// A single-agent workflow with the given tool allowlist.
 fn bash_workflow(tools: &[&str]) -> WorkflowDefinition {
     WorkflowDefinition {
+        default_use_plugins: None,
         start: "solo".into(),
         agents: vec![WorkflowAgentDef {
+            use_plugins: None,
             name: "solo".into(),
             system_prompt: None,
             model: "m".into(),
@@ -162,6 +164,8 @@ fn boot(
 
 fn job_spec(def: WorkflowDefinition, workdir: &Path) -> JobSpec {
     JobSpec {
+        plugins_dir: None,
+        hook_path: Vec::new(),
         workflow: def,
         workflow_name: "wf".into(),
         workspaces: vec![models::Workspace {
@@ -178,6 +182,8 @@ fn job_spec(def: WorkflowDefinition, workdir: &Path) -> JobSpec {
 /// A job spanning several named workspace roots.
 fn job_spec_multi(def: WorkflowDefinition, workspaces: &[(&str, &Path)]) -> JobSpec {
     JobSpec {
+        plugins_dir: None,
+        hook_path: Vec::new(),
         workflow: def,
         workflow_name: "wf".into(),
         workspaces: workspaces

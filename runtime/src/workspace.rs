@@ -1,17 +1,47 @@
 use models::Workspace;
 use std::path::{Path, PathBuf};
 
+/// Reserved workspace name for the shared plugin library. Read-only; resolves to the
+/// runtime's `plugins_dir`. Excluded from the "default when single" rule so it never
+/// becomes the implicit tool target.
+pub const SHARED_WORKSPACE: &str = "horsie_shared";
+
 /// Name → path registry the runtime resolves tool and scan `workspace` fields
 /// against. Order-preserving. This is the single name→path translation site for the
 /// runtime — both `tools::dispatch` and `scan::exec` go through it.
 #[derive(Clone, Debug)]
 pub struct WorkspaceRegistry {
     workspaces: Vec<Workspace>,
+    /// Shared plugin library root, resolvable as `horsie_shared` (read-only).
+    plugins_dir: Option<PathBuf>,
+    /// Directories prepended to PATH when running plugin hooks.
+    hook_path: Vec<PathBuf>,
 }
 
 impl WorkspaceRegistry {
     pub fn new(workspaces: Vec<Workspace>) -> Self {
-        Self { workspaces }
+        Self {
+            workspaces,
+            plugins_dir: None,
+            hook_path: Vec::new(),
+        }
+    }
+
+    /// Attach the shared plugin library (`horsie_shared`) and its hook PATH.
+    pub fn with_plugins(mut self, plugins_dir: Option<PathBuf>, hook_path: Vec<PathBuf>) -> Self {
+        self.plugins_dir = plugins_dir;
+        self.hook_path = hook_path;
+        self
+    }
+
+    /// The shared plugin library root, if configured.
+    pub fn plugins_dir(&self) -> Option<&Path> {
+        self.plugins_dir.as_deref()
+    }
+
+    /// Directories prepended to PATH when running plugin hooks.
+    pub fn hook_path(&self) -> &[PathBuf] {
+        &self.hook_path
     }
 
     /// Parse a `name=path` CLI argument into a [`Workspace`].
@@ -37,6 +67,9 @@ impl WorkspaceRegistry {
     /// unknown name errors with the available list.
     pub fn resolve(&self, workspace: &Option<String>) -> Result<PathBuf, String> {
         match workspace {
+            Some(name) if name == SHARED_WORKSPACE => self.plugins_dir.clone().ok_or_else(|| {
+                "shared plugin library 'horsie_shared' is not configured".to_string()
+            }),
             Some(name) => self
                 .workspaces
                 .iter()

@@ -155,6 +155,15 @@ impl JobRuntime for ProcessJobRuntime {
                             path: w.path.to_string_lossy().into_owned(),
                         })
                         .collect(),
+                    plugins_dir: spec
+                        .plugins_dir
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    hook_path: spec
+                        .hook_path
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
                 },
             )
             .await

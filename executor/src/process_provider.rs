@@ -114,6 +114,12 @@ impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
             cmd.arg("--workspace")
                 .arg(format!("{}={}", ws.name, ws.path));
         }
+        if let Some(dir) = &config.plugins_dir {
+            cmd.arg("--plugins-dir").arg(dir);
+        }
+        for hp in &config.hook_path {
+            cmd.arg("--hook-path").arg(hp);
+        }
 
         if let Some(policy) = &self.sandbox {
             cmd.arg("--sandbox-caps").arg(&policy.capabilities_file);

@@ -69,6 +69,7 @@ pub trait ToolboxFactory: Send + Sync + 'static {
         agent_def: &WorkflowAgentDef,
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
+        use_plugins: bool,
     ) -> Arc<dyn Toolbox>;
 }
 
@@ -82,6 +83,7 @@ impl ToolboxFactory for DefaultToolboxFactory {
         agent_def: &WorkflowAgentDef,
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
+        use_plugins: bool,
     ) -> Arc<dyn Toolbox> {
         let client = runtime_client.clone();
         let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client);
@@ -104,6 +106,7 @@ impl ToolboxFactory for DefaultToolboxFactory {
             conclude,
             runtime_client: client,
             workspace_names,
+            use_plugins,
         })
     }
 }
@@ -217,6 +220,8 @@ struct AgentToolbox {
     /// "optional iff single" rule and to list valid names in errors. The runtime owns
     /// the actual name→path resolution.
     workspace_names: Vec<String>,
+    /// Whether this agent may see the shared plugin library (`horsie_shared`).
+    use_plugins: bool,
 }
 
 impl AgentToolbox {
@@ -294,8 +299,28 @@ impl Toolbox for AgentToolbox {
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let ws_name = self.resolve_workspace(input.get("workspace").and_then(Value::as_str))?;
-            let ws = crate::workspace::scan(&self.runtime_client, Some(ws_name.clone())).await;
+            let requested_ws = input.get("workspace").and_then(Value::as_str);
+            // Shared plugin library: addressed by the reserved `horsie_shared` name,
+            // resolved against the shared skill set (not a job workspace).
+            if requested_ws == Some(crate::workspace::SHARED_WORKSPACE) {
+                if !self.use_plugins {
+                    return Err(ToolCallError::InvalidInput(
+                        "the shared plugin library 'horsie_shared' is not enabled for this agent"
+                            .to_string(),
+                    ));
+                }
+                let (_, shared) = crate::workspace::scan(&self.runtime_client, None, true).await;
+                return match shared.get(requested) {
+                    Some(skill) => Ok(Value::String(shared_skill_body(skill))),
+                    None => Err(ToolCallError::InvalidInput(format!(
+                        "unknown shared skill '{requested}'; available: {}",
+                        shared.names().join(", ")
+                    ))),
+                };
+            }
+            let ws_name = self.resolve_workspace(requested_ws)?;
+            let (ws, _) =
+                crate::workspace::scan(&self.runtime_client, Some(ws_name.clone()), false).await;
             let Some(info) = ws.find(&ws_name) else {
                 return Err(ToolCallError::InvalidInput(format!(
                     "workspace '{ws_name}' is not available"
@@ -314,10 +339,46 @@ impl Toolbox for AgentToolbox {
                 .get("workspace")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let ws = crate::workspace::scan(&self.runtime_client, filter).await;
-            return Ok(Value::String(crate::workspace::inspect_result(&ws)));
+            // Shared-only view.
+            if filter.as_deref() == Some(crate::workspace::SHARED_WORKSPACE) {
+                if !self.use_plugins {
+                    return Err(ToolCallError::InvalidInput(
+                        "the shared plugin library 'horsie_shared' is not enabled for this agent"
+                            .to_string(),
+                    ));
+                }
+                let (_, shared) = crate::workspace::scan(&self.runtime_client, None, true).await;
+                return Ok(Value::String(crate::workspace::shared_inspect(&shared)));
+            }
+            let (ws, shared) =
+                crate::workspace::scan(&self.runtime_client, filter.clone(), self.use_plugins)
+                    .await;
+            let mut out = crate::workspace::inspect_result(&ws);
+            // Append the shared library when listing everything for an opted-in agent.
+            if self.use_plugins && filter.is_none() {
+                out.push_str("\n\n");
+                out.push_str(&crate::workspace::shared_inspect(&shared));
+            }
+            return Ok(Value::String(out));
         }
         self.base.execute(name, input).await
+    }
+}
+
+/// A shared skill's body plus a hint pointing at its directory under `horsie_shared`
+/// so the agent can read sibling resources with the filesystem tools.
+fn shared_skill_body(skill: &crate::workspace::Skill) -> String {
+    match &skill.rel_dir {
+        Some(dir) => format!(
+            "{}\n\n[resources] This skill's files are under workspace \"{}\" at {}/. \
+             Read one with read_file(workspace=\"{}\", path=\"{}/<file>\").",
+            skill.body,
+            crate::workspace::SHARED_WORKSPACE,
+            dir,
+            crate::workspace::SHARED_WORKSPACE,
+            dir,
+        ),
+        None => skill.body.clone(),
     }
 }
 
@@ -366,6 +427,7 @@ mod tests {
 
     fn def(allowed: Option<Vec<String>>, output: Option<Value>, ask: bool) -> WorkflowAgentDef {
         WorkflowAgentDef {
+            use_plugins: None,
             name: "a".into(),
             system_prompt: None,
             model: "m".into(),
@@ -463,6 +525,7 @@ mod tests {
             &def(Some(vec!["bash".into()]), Some(out), false),
             client,
             vec!["october".into()],
+            false,
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"bash".to_string()));
@@ -478,6 +541,7 @@ mod tests {
             &def(None, Some(out), false),
             client,
             vec!["october".into()],
+            false,
         );
         let err = tb.execute(CONCLUDE_TOOL, json!({})).await.unwrap_err();
         assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
@@ -490,6 +554,7 @@ mod tests {
             &def(None, None, false),
             client,
             vec!["october".into()],
+            false,
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&SKILL_TOOL.to_string()));
@@ -504,6 +569,7 @@ mod tests {
             &def(None, None, false),
             client,
             vec!["october".into()],
+            false,
         );
 
         // Single workspace → `workspace` may be omitted.
@@ -533,6 +599,7 @@ mod tests {
             &def(None, None, false),
             client,
             vec!["alpha".into(), "beta".into()],
+            false,
         );
         // Omitting `workspace` with several workspaces is rejected before any scan.
         let err = tb
@@ -549,5 +616,85 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    fn shared_skill() -> models::runtime::PluginSkill {
+        models::runtime::PluginSkill {
+            plugin: "sp".into(),
+            rel_dir: "sp/skills/brainstorming".into(),
+            content: "---\nname: brainstorming\ndescription: explore first\n---\nDo it.".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_skill_loads_with_resource_hint_when_opted_in() {
+        let client =
+            RuntimeClient::new(MockTransport::ok("").with_shared_skills(vec![shared_skill()]));
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(None, None, false),
+            client,
+            vec!["october".into()],
+            true,
+        );
+        let body = tb
+            .execute(
+                SKILL_TOOL,
+                json!({ "name": "brainstorming", "workspace": "horsie_shared" }),
+            )
+            .await
+            .unwrap();
+        let text = body.as_str().unwrap();
+        assert!(text.contains("Do it."));
+        assert!(text.contains("workspace=\"horsie_shared\""));
+        assert!(text.contains("sp/skills/brainstorming"));
+    }
+
+    #[tokio::test]
+    async fn shared_skill_rejected_when_opted_out() {
+        let client =
+            RuntimeClient::new(MockTransport::ok("").with_shared_skills(vec![shared_skill()]));
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(None, None, false),
+            client,
+            vec!["october".into()],
+            false,
+        );
+        let err = tb
+            .execute(
+                SKILL_TOOL,
+                json!({ "name": "brainstorming", "workspace": "horsie_shared" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn inspect_includes_shared_section_only_when_opted_in() {
+        let client =
+            RuntimeClient::new(MockTransport::ok("").with_shared_skills(vec![shared_skill()]));
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(None, None, false),
+            client.clone(),
+            vec!["october".into()],
+            true,
+        );
+        let out = tb.execute(INSPECT_WORKSPACE_TOOL, json!({})).await.unwrap();
+        let text = out.as_str().unwrap();
+        assert!(text.contains("## horsie_shared"));
+        assert!(text.contains("- brainstorming: explore first"));
+
+        // Opted-out agent never sees the shared section.
+        let tb_off = DefaultToolboxFactory.for_agent(
+            &def(None, None, false),
+            client,
+            vec!["october".into()],
+            false,
+        );
+        let out = tb_off
+            .execute(INSPECT_WORKSPACE_TOOL, json!({}))
+            .await
+            .unwrap();
+        assert!(!out.as_str().unwrap().contains("horsie_shared"));
     }
 }

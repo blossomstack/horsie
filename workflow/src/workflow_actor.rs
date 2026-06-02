@@ -216,15 +216,39 @@ impl WorkflowActor {
             .rt
             .provider_for(&agent_def.model)
             .ok_or_else(|| format!("no provider registered for model '{}'", agent_def.model))?;
+        // Per-agent opt-in for the shared plugin library: the agent's own flag, else
+        // the workflow default, else on. When off, the agent behaves exactly as before
+        // (no shared skills, no bootstrap, `horsie_shared` rejected by its tools).
+        let use_plugins = agent_def
+            .use_plugins
+            .or(self.def.default_use_plugins)
+            .unwrap_or(true);
         // Scan all workspaces once to compose the `# Workspaces` prompt block; the
         // toolbox fetches skills live on its own (so mid-run additions are still
         // loadable). The workspace names are handed to the toolbox for its skill/inspect
-        // tools — the runtime still owns name→path resolution.
-        let ws = crate::workspace::scan(&self.rt.runtime_client, None).await;
+        // tools — the runtime still owns name→path resolution. `include_shared` also
+        // pulls the shared plugin library's skills when this agent is opted in.
+        let (ws, shared_skills) =
+            crate::workspace::scan(&self.rt.runtime_client, None, use_plugins).await;
+        // For an opted-in agent, run the plugins' SessionStart hooks once to obtain the
+        // bootstrap context (best-effort; an error or relay transport yields none).
+        let shared = if use_plugins {
+            let bootstrap = match self.rt.runtime_client.run_session_start().await {
+                Ok(ctx) if !ctx.trim().is_empty() => Some(ctx),
+                _ => None,
+            };
+            Some(crate::workspace::SharedContext {
+                skills: std::sync::Arc::new(shared_skills),
+                bootstrap,
+            })
+        } else {
+            None
+        };
         let toolbox = self.rt.toolbox_factory.for_agent(
             agent_def,
             self.rt.runtime_client.clone(),
             ws.names(),
+            use_plugins,
         );
         let agent_ctx = AgentRuntimeContext {
             provider,
@@ -234,8 +258,11 @@ impl WorkflowActor {
             session_id,
         };
         let mut params = AgentParams::from_def(agent_def);
-        params.system_prompt =
-            crate::workspace::compose_system_prompt(agent_def.system_prompt.as_deref(), &ws);
+        params.system_prompt = crate::workspace::compose_system_prompt(
+            agent_def.system_prompt.as_deref(),
+            &ws,
+            shared.as_ref(),
+        );
         Ok(ctx.spawn(AgentActor::new(agent_ctx, params)))
     }
 

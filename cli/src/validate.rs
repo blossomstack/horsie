@@ -78,6 +78,7 @@ mod tests {
 
     fn agent(name: &str, model: &str) -> WorkflowAgentDef {
         WorkflowAgentDef {
+            use_plugins: None,
             name: name.into(),
             system_prompt: None,
             model: model.into(),
@@ -94,6 +95,7 @@ mod tests {
     #[test]
     fn valid_workflow_has_no_errors() {
         let def = WorkflowDefinition {
+            default_use_plugins: None,
             start: "a".into(),
             agents: vec![agent("a", "m")],
         };
@@ -103,6 +105,7 @@ mod tests {
     #[test]
     fn unknown_start_is_reported() {
         let def = WorkflowDefinition {
+            default_use_plugins: None,
             start: "missing".into(),
             agents: vec![agent("a", "m")],
         };
@@ -118,6 +121,7 @@ mod tests {
             condition: None,
         }]);
         let def = WorkflowDefinition {
+            default_use_plugins: None,
             start: "a".into(),
             agents: vec![a],
         };
@@ -128,6 +132,7 @@ mod tests {
     #[test]
     fn unknown_model_is_reported() {
         let def = WorkflowDefinition {
+            default_use_plugins: None,
             start: "a".into(),
             agents: vec![agent("a", "nope")],
         };
@@ -145,6 +150,7 @@ mod tests {
         )
         .unwrap();
         let def = WorkflowDefinition {
+            default_use_plugins: None,
             start: "a".into(),
             agents: vec![agent("a", "m")],
         };
@@ -162,6 +168,7 @@ mod tests {
             condition: Some("output.score > 80".into()),
         }]);
         let def = WorkflowDefinition {
+            default_use_plugins: None,
             start: "a".into(),
             agents: vec![a, b],
         };
@@ -180,6 +187,7 @@ mod tests {
             condition: Some("output.score >>> ".into()),
         }]);
         let def = WorkflowDefinition {
+            default_use_plugins: None,
             start: "a".into(),
             agents: vec![a, b],
         };

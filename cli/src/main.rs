@@ -41,6 +41,53 @@ enum Command {
         #[command(subcommand)]
         action: JobAction,
     },
+    /// Manage the shared plugin library (skills + SessionStart hooks for all jobs).
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// Install a plugin by cloning its git repo into the shared library.
+    Install {
+        /// Git URL of the plugin repo (e.g. https://github.com/obra/superpowers).
+        url: String,
+        /// Install name (default: derived from the URL).
+        #[arg(long)]
+        name: Option<String>,
+        /// Git ref/branch to check out.
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+        /// Reinstall over an existing plugin of the same name.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// List installed plugins.
+    List {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Update an installed plugin (git pull).
+    Update {
+        name: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Remove an installed plugin.
+    Remove {
+        name: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+}
+
+/// Resolve the shared plugin library dir from config (`storage.plugins_dir`).
+fn resolve_plugins_dir(config: Option<&Path>) -> Result<PathBuf, CliError> {
+    Ok(HorsieConfig::resolve(config)?.storage.plugins_dir)
 }
 
 #[derive(Subcommand)]
@@ -385,6 +432,50 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 let root = resolve_state_dir(config.as_deref())?;
                 client::remove(&root, job_id).await?;
                 println!("removed");
+                Ok(0)
+            }
+        },
+        Command::Plugin { action } => match action {
+            PluginAction::Install {
+                url,
+                name,
+                git_ref,
+                force,
+                config,
+            } => {
+                let dir = resolve_plugins_dir(config.as_deref())?;
+                let installed = cli::plugins::install(&dir, &url, name, git_ref, force)?;
+                println!("installed plugin '{installed}' into {}", dir.display());
+                Ok(0)
+            }
+            PluginAction::List { config } => {
+                let dir = resolve_plugins_dir(config.as_deref())?;
+                let plugins = cli::plugins::list(&dir);
+                if plugins.is_empty() {
+                    println!("no plugins installed");
+                } else {
+                    println!("{:<24} {:<10} SOURCE", "NAME", "VERSION");
+                    for p in plugins {
+                        println!(
+                            "{:<24} {:<10} {}",
+                            p.name,
+                            p.version.as_deref().unwrap_or("-"),
+                            p.source
+                        );
+                    }
+                }
+                Ok(0)
+            }
+            PluginAction::Update { name, config } => {
+                let dir = resolve_plugins_dir(config.as_deref())?;
+                cli::plugins::update(&dir, &name)?;
+                println!("updated plugin '{name}'");
+                Ok(0)
+            }
+            PluginAction::Remove { name, config } => {
+                let dir = resolve_plugins_dir(config.as_deref())?;
+                cli::plugins::remove(&dir, &name)?;
+                println!("removed plugin '{name}'");
                 Ok(0)
             }
         },

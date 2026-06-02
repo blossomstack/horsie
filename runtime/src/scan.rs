@@ -1,5 +1,17 @@
 use crate::workspace::{WorkspaceRegistry, is_git_repo};
-use models::runtime::{ScanRequest, ScannedFile, WorkspaceScan};
+use models::runtime::{PluginSkill, ScanRequest, ScannedFile, WorkspaceScan};
+
+/// Discover the shared plugin library's skills when `include_shared` is set and a
+/// `plugins_dir` is configured. Best-effort and convention-aware (see [`crate::plugins`]).
+pub fn shared_skills(registry: &WorkspaceRegistry, include_shared: bool) -> Vec<PluginSkill> {
+    if !include_shared {
+        return Vec::new();
+    }
+    match registry.plugins_dir() {
+        Some(dir) => crate::plugins::discover_skills(dir),
+        None => Vec::new(),
+    }
+}
 
 /// Scan the selected workspaces. `req.workspace` filters which roots to scan (`None`
 /// → all; `Some(name)` → just that one, or none if unknown). For each root, gather the
@@ -71,6 +83,7 @@ mod tests {
 
     fn req(workspace: Option<String>) -> ScanRequest {
         ScanRequest {
+            include_shared: false,
             call_id: "c".into(),
             workspace,
             instruction_candidates: vec!["AGENTS.md".into(), "AGENT.md".into(), "CLAUDE.md".into()],
