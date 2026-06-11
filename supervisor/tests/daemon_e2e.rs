@@ -17,7 +17,7 @@ use agentcore::{AgentEvent, EventSink, EventSinkError, LlmProvider};
 use anthropic::AnthropicProvider;
 use async_trait::async_trait;
 use mock_llm::MockLlmServer;
-use models::capabilities::{CapabilitySpec, NetworkPolicy};
+use models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
 use models::daemon::JobStatus;
 use models::runtime::{ToolCall, ToolResult, WorkspaceScan};
 use models::workflow::{WorkflowAgentDef, WorkflowDefinition};
@@ -205,7 +205,7 @@ fn spec(def: WorkflowDefinition) -> JobSpec {
         }],
         input: "go".into(),
         capabilities: CapabilitySpec {
-            network: NetworkPolicy::Block,
+            network: NetworkPolicy::Block(BlockNetwork {}),
             grants: vec![],
             unsafe_seatbelt_rules: None,
         },

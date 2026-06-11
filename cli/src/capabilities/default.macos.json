@@ -1,5 +1,5 @@
 {
-  "network": "Block",
+  "network": { "type": "Block", "value": {} },
   "grants": [
     { "type": "Dir", "value": { "path": "/usr", "access": "Read" } },
     { "type": "Dir", "value": { "path": "/bin", "access": "Read" } },

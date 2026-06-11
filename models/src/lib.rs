@@ -272,7 +272,9 @@ mod workspace_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::capabilities::{Access, CapabilitySpec, Grant, NetworkPolicy};
+    use super::capabilities::{
+        Access, AllowNetwork, BlockNetwork, CapabilitySpec, Grant, NetworkPolicy, ProxyOnlyNetwork,
+    };
 
     #[test]
     fn capability_spec_load_parses_a_file() {
@@ -281,7 +283,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"{
-                "network": "Allow",
+                "network": { "type": "Allow", "value": {} },
                 "grants": [
                     { "type": "Dir", "value": { "path": "/usr", "access": "Read" } },
                     { "type": "WorkingDir", "value": { "access": "ReadWrite" } }
@@ -290,11 +292,37 @@ mod tests {
         )
         .unwrap();
         let spec = CapabilitySpec::load(&path).expect("valid file parses");
-        assert_eq!(spec.network, NetworkPolicy::Allow);
+        assert_eq!(spec.network, NetworkPolicy::Allow(AllowNetwork {}));
         assert!(matches!(
             spec.grants.first(),
             Some(Grant::Dir(d)) if d.path == "/usr" && d.access == Access::Read
         ));
+    }
+
+    #[test]
+    fn network_policy_json_round_trips_all_variants() {
+        // Pins the wire format of every variant: adjacently tagged with
+        // `type`/`value`, the unit-payload variants carrying an empty object.
+        let cases = [
+            (
+                NetworkPolicy::Block(BlockNetwork {}),
+                r#"{"type":"Block","value":{}}"#,
+            ),
+            (
+                NetworkPolicy::Allow(AllowNetwork {}),
+                r#"{"type":"Allow","value":{}}"#,
+            ),
+            (
+                NetworkPolicy::ProxyOnly(ProxyOnlyNetwork { port: 18080 }),
+                r#"{"type":"ProxyOnly","value":{"port":18080}}"#,
+            ),
+        ];
+        for (policy, expected_json) in cases {
+            let json = serde_json::to_string(&policy).unwrap();
+            assert_eq!(json, expected_json);
+            let back: NetworkPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, policy);
+        }
     }
 
     #[test]

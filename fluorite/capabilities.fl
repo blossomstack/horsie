@@ -9,10 +9,25 @@ enum Access {
     ReadWrite,
 }
 
-/// Whether the sandbox blocks network access. `Block` is the safe default.
-enum NetworkPolicy {
-    Block,
-    Allow,
+/// All network access kernel-blocked (the safe default).
+struct BlockNetwork {}
+
+/// Unrestricted network access.
+struct AllowNetwork {}
+
+/// Outbound TCP restricted to `localhost:<port>` only — all other egress is
+/// kernel-blocked. Confines an agent to a local policy proxy. Unix-socket grants
+/// (e.g. the runtime↔executor IPC socket) are a separate capability layer in nono
+/// and remain in effect. `port` is `u32` because the schema language has no `u16`;
+/// the runtime rejects values above 65535 at apply time.
+struct ProxyOnlyNetwork { port: u32 }
+
+/// What network egress the sandbox permits. `Block` is the safe default.
+#[type_tag = "type"]
+union NetworkPolicy {
+    Block(BlockNetwork),
+    Allow(AllowNetwork),
+    ProxyOnly(ProxyOnlyNetwork),
 }
 
 /// A directory-subtree grant (`nono::allow_path`).

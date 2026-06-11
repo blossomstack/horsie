@@ -146,7 +146,9 @@ pub fn builtin_default() -> Result<CapabilitySpec, CliError> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use models::capabilities::{Access, Grant, NetworkPolicy, WorkingDirGrant};
+    use models::capabilities::{
+        Access, AllowNetwork, BlockNetwork, Grant, NetworkPolicy, WorkingDirGrant,
+    };
 
     // The legacy hard-coded sets, kept here as the regression oracle for the shipped
     // default files. If a default drifts from the original sandbox behavior, the
@@ -193,7 +195,7 @@ mod tests {
     #[test]
     fn builtin_default_blocks_network_and_grants_working_dir_rw() {
         let spec = builtin_default().expect("builtin default for this platform");
-        assert_eq!(spec.network, NetworkPolicy::Block);
+        assert_eq!(spec.network, NetworkPolicy::Block(BlockNetwork {}));
         assert!(
             spec.grants.contains(&Grant::WorkingDir(WorkingDirGrant {
                 access: Access::ReadWrite,
@@ -268,7 +270,7 @@ mod tests {
     #[test]
     fn resolve_user_paths_expands_dir_and_file_grants_and_preserves_working_dir() {
         let spec = CapabilitySpec {
-            network: NetworkPolicy::Allow,
+            network: NetworkPolicy::Allow(AllowNetwork {}),
             grants: vec![
                 Grant::Dir(DirGrant {
                     path: "~/.ssh".into(),
@@ -288,7 +290,7 @@ mod tests {
         assert_eq!(
             resolved,
             CapabilitySpec {
-                network: NetworkPolicy::Allow,
+                network: NetworkPolicy::Allow(AllowNetwork {}),
                 grants: vec![
                     Grant::Dir(DirGrant {
                         path: "/home/u/.ssh".into(),
@@ -314,7 +316,7 @@ mod tests {
 
     fn spec_with_rules(rules: Option<Vec<String>>) -> CapabilitySpec {
         CapabilitySpec {
-            network: NetworkPolicy::Block,
+            network: NetworkPolicy::Block(BlockNetwork {}),
             grants: vec![],
             unsafe_seatbelt_rules: rules,
         }

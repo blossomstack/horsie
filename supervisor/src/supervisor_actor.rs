@@ -313,7 +313,7 @@ impl EventSourcedActor for SupervisorActor {
 )]
 mod tests {
     use super::*;
-    use models::capabilities::{CapabilitySpec, NetworkPolicy};
+    use models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use models::workflow::WorkflowDefinition;
     use std::path::PathBuf;
 
@@ -333,7 +333,7 @@ mod tests {
             }],
             input: "go".into(),
             capabilities: CapabilitySpec {
-                network: NetworkPolicy::Block,
+                network: NetworkPolicy::Block(BlockNetwork {}),
                 grants: vec![],
                 unsafe_seatbelt_rules: None,
             },
