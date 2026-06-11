@@ -107,6 +107,7 @@ async fn test_executor_connects_and_creates_runtime() {
             RuntimeConfig {
                 plugins_dir: None,
                 hook_path: vec![],
+                env: vec![],
                 workspaces: vec![WorkspaceConfig {
                     name: "tmp".to_string(),
                     path: "/tmp".to_string(),
@@ -151,6 +152,7 @@ async fn test_query_runtimes_returns_created_runtime() {
             RuntimeConfig {
                 plugins_dir: None,
                 hook_path: vec![],
+                env: vec![],
                 workspaces: vec![WorkspaceConfig {
                     name: "tmp".to_string(),
                     path: "/tmp".to_string(),
@@ -197,6 +199,7 @@ async fn test_destroy_runtime_transitions_to_stopped() {
             RuntimeConfig {
                 plugins_dir: None,
                 hook_path: vec![],
+                env: vec![],
                 workspaces: vec![WorkspaceConfig {
                     name: "tmp".to_string(),
                     path: "/tmp".to_string(),
@@ -236,6 +239,7 @@ async fn test_command_to_unknown_executor_fails() {
             RuntimeConfig {
                 plugins_dir: None,
                 hook_path: vec![],
+                env: vec![],
                 workspaces: vec![WorkspaceConfig {
                     name: "tmp".to_string(),
                     path: "/tmp".to_string(),

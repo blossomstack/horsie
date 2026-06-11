@@ -193,6 +193,7 @@ mod tests {
         RuntimeConfig {
             plugins_dir: None,
             hook_path: vec![],
+            env: vec![],
             workspaces: vec![models::executor::WorkspaceConfig {
                 name: "tmp".to_string(),
                 path: "/tmp".to_string(),

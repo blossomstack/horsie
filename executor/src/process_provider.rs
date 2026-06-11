@@ -5,7 +5,7 @@ use crate::{
     runtime_listener::RuntimeEndpoint,
 };
 use async_trait::async_trait;
-use models::executor::RuntimeConfig;
+use models::executor::{EnvVar, RuntimeConfig};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{process::Child, sync::Mutex};
 
@@ -90,6 +90,32 @@ impl ProcessRuntimeProvider {
     }
 }
 
+/// Apply the environment policy for a runtime child to `cmd`.
+///
+/// Sandboxed (`sandboxed == true`): `env_clear()` + the scrubbed ambient
+/// allowlist (see [`crate::env_scrub`]), then the explicitly `injected` vars on
+/// top. Injection wins over the ambient allowlist on conflict — e.g. an
+/// injected `HOME` overrides the host `HOME`. This is the deliberate per-job
+/// channel for job-scoped values like capability tokens and synthetic homes;
+/// every ambient var NOT explicitly injected stays scrubbed, so orchestrator
+/// secrets (e.g. `ANTHROPIC_API_KEY`) still never leak.
+///
+/// Unsandboxed: the child inherits the full ambient environment unchanged
+/// (today's behavior), and the `injected` vars are still applied on top —
+/// injection is explicit daemon intent, independent of sandboxing.
+fn apply_child_env(cmd: &mut tokio::process::Command, sandboxed: bool, injected: &[EnvVar]) {
+    if sandboxed {
+        // Scrub the environment: the child must not inherit orchestrator secrets.
+        cmd.env_clear();
+        for (k, v) in crate::env_scrub::scrubbed_env() {
+            cmd.env(k, v);
+        }
+    }
+    for var in injected {
+        cmd.env(&var.name, &var.value);
+    }
+}
+
 #[async_trait]
 impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
     async fn create(
@@ -123,12 +149,8 @@ impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
 
         if let Some(policy) = &self.sandbox {
             cmd.arg("--sandbox-caps").arg(&policy.capabilities_file);
-            // Scrub the environment: the child must not inherit orchestrator secrets.
-            cmd.env_clear();
-            for (k, v) in crate::env_scrub::scrubbed_env() {
-                cmd.env(k, v);
-            }
         }
+        apply_child_env(&mut cmd, self.sandbox.is_some(), &config.env);
 
         cmd.kill_on_drop(true);
         let child = cmd
@@ -145,5 +167,144 @@ impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
             runtime_id: id.to_string(),
             connected_registry: Arc::clone(&self.connected_registry),
         }))
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+
+    fn which_bash() -> Option<std::path::PathBuf> {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|p| p.join("bash"))
+                .find(|p| p.exists())
+        })
+    }
+
+    /// Spawn `bash -c <script>` with the given env policy and return its stdout.
+    async fn child_stdout(script: &str, sandboxed: bool, injected: &[EnvVar]) -> String {
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        apply_child_env(&mut cmd, sandboxed, injected);
+        let out = cmd.output().await.unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[tokio::test]
+    async fn sandboxed_child_receives_injected_vars() {
+        if which_bash().is_none() {
+            eprintln!("skipping: no bash on PATH");
+            return;
+        }
+        let injected = vec![EnvVar {
+            name: "HALTER_TOKEN".to_string(),
+            value: "tok-123".to_string(),
+        }];
+        let out = child_stdout("printf '%s' \"$HALTER_TOKEN\"", true, &injected).await;
+        assert_eq!(out, "tok-123");
+    }
+
+    /// Injection wins over the ambient allowlist on conflict: an injected HOME
+    /// (a synthetic per-job home) overrides the host HOME the scrub re-added.
+    #[tokio::test]
+    async fn injected_home_overrides_host_home() {
+        if which_bash().is_none() {
+            eprintln!("skipping: no bash on PATH");
+            return;
+        }
+        let host_home = std::env::var("HOME").unwrap_or_default();
+        let injected = vec![EnvVar {
+            name: "HOME".to_string(),
+            value: "/synthetic/home".to_string(),
+        }];
+        let out = child_stdout("printf '%s' \"$HOME\"", true, &injected).await;
+        assert_eq!(out, "/synthetic/home");
+        assert_ne!(out, host_home, "test requires a distinct synthetic HOME");
+    }
+
+    /// Injection does not weaken the scrub: ambient secrets not explicitly
+    /// injected are still wiped from the sandboxed child.
+    #[tokio::test]
+    async fn ambient_secret_still_scrubbed_when_other_vars_injected() {
+        if which_bash().is_none() {
+            eprintln!("skipping: no bash on PATH");
+            return;
+        }
+        let injected = vec![EnvVar {
+            name: "HALTER_TOKEN".to_string(),
+            value: "tok-123".to_string(),
+        }];
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg("printf '%s' \"$ANTHROPIC_API_KEY\"");
+        // Seed the secret before the scrub, simulating inheritance.
+        cmd.env("ANTHROPIC_API_KEY", "leak-me");
+        apply_child_env(&mut cmd, true, &injected);
+        let out = cmd.output().await.unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "",
+            "ANTHROPIC_API_KEY leaked despite not being injected"
+        );
+    }
+
+    /// An empty injection list is exactly today's behavior: the sandboxed child
+    /// sees only the scrubbed allowlist, nothing more.
+    #[tokio::test]
+    async fn empty_injection_matches_scrub_only_behavior() {
+        if which_bash().is_none() {
+            eprintln!("skipping: no bash on PATH");
+            return;
+        }
+        let out = child_stdout("env", true, &[]).await;
+        let expected: std::collections::BTreeMap<String, String> =
+            crate::env_scrub::scrubbed_env().into_iter().collect();
+        for line in out.lines() {
+            let Some((k, v)) = line.split_once('=') else {
+                continue; // multi-line value continuation
+            };
+            // bash sets a few of its own vars (PWD, SHLVL, _, ...); everything
+            // it *inherited* must come from the allowlist with ambient values.
+            if let Some(exp) = expected.get(k) {
+                assert_eq!(v, exp, "allowlisted {k} differs from ambient value");
+            } else {
+                assert!(
+                    !crate::env_scrub::SANDBOX_ENV_ALLOWLIST.contains(&k)
+                        && ["PWD", "OLDPWD", "SHLVL", "_"].contains(&k),
+                    "unexpected inherited var in scrubbed child: {k}"
+                );
+            }
+        }
+    }
+
+    /// Injection applies in the unsandboxed path too (explicit daemon intent),
+    /// while the ambient environment is still inherited unchanged.
+    #[tokio::test]
+    async fn unsandboxed_child_receives_injected_vars_and_inherits_ambient() {
+        if which_bash().is_none() {
+            eprintln!("skipping: no bash on PATH");
+            return;
+        }
+        let injected = vec![EnvVar {
+            name: "HALTER_TOKEN".to_string(),
+            value: "tok-456".to_string(),
+        }];
+        let out = child_stdout(
+            "printf '%s:%s' \"$HALTER_TOKEN\" \"$PATH\"",
+            false,
+            &injected,
+        )
+        .await;
+        let (tok, path) = out.split_once(':').unwrap();
+        assert_eq!(tok, "tok-456");
+        assert_eq!(path, std::env::var("PATH").unwrap_or_default());
     }
 }

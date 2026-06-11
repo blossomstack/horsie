@@ -7,6 +7,10 @@ use runtime.ToolResult;
 /// One named workspace root passed to a runtime.
 struct WorkspaceConfig { name: String, path: String }
 
+/// One environment variable explicitly injected into a spawned runtime child
+/// (e.g. a capability token or a synthetic `HOME`).
+struct EnvVar { name: String, value: String }
+
 /// Runtime configuration
 struct RuntimeConfig {
     workspaces: Vec<WorkspaceConfig>,
@@ -16,6 +20,11 @@ struct RuntimeConfig {
     /// Directories prepended to PATH when running plugin hooks (e.g. the node bin
     /// dir), resolved by the CLI. Empty inherits the ambient PATH.
     hook_path: Vec<String>,
+    /// Environment variables explicitly injected into the runtime child by the
+    /// daemon (job-scoped values like capability tokens or a synthetic `HOME`).
+    /// Applied after the sandbox env scrub, so injection wins over the ambient
+    /// allowlist on conflict. Empty injects nothing.
+    env: Vec<EnvVar>,
 }
 
 /// Current lifecycle state of a runtime

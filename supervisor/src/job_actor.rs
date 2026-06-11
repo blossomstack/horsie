@@ -164,6 +164,8 @@ impl JobRuntime for ProcessJobRuntime {
                         .iter()
                         .map(|p| p.to_string_lossy().into_owned())
                         .collect(),
+                    // Per-job env injection channel; nothing minted at spawn yet.
+                    env: Vec::new(),
                 },
             )
             .await
