@@ -205,10 +205,10 @@ mod tests {
             return;
         }
         let injected = vec![EnvVar {
-            name: "HALTER_TOKEN".to_string(),
+            name: "HACKAMORE_TOKEN".to_string(),
             value: "tok-123".to_string(),
         }];
-        let out = child_stdout("printf '%s' \"$HALTER_TOKEN\"", true, &injected).await;
+        let out = child_stdout("printf '%s' \"$HACKAMORE_TOKEN\"", true, &injected).await;
         assert_eq!(out, "tok-123");
     }
 
@@ -239,7 +239,7 @@ mod tests {
             return;
         }
         let injected = vec![EnvVar {
-            name: "HALTER_TOKEN".to_string(),
+            name: "HACKAMORE_TOKEN".to_string(),
             value: "tok-123".to_string(),
         }];
         let mut cmd = tokio::process::Command::new("bash");
@@ -294,11 +294,11 @@ mod tests {
             return;
         }
         let injected = vec![EnvVar {
-            name: "HALTER_TOKEN".to_string(),
+            name: "HACKAMORE_TOKEN".to_string(),
             value: "tok-456".to_string(),
         }];
         let out = child_stdout(
-            "printf '%s:%s' \"$HALTER_TOKEN\" \"$PATH\"",
+            "printf '%s:%s' \"$HACKAMORE_TOKEN\" \"$PATH\"",
             false,
             &injected,
         )

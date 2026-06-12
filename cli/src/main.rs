@@ -147,12 +147,12 @@ enum JobAction {
         /// Overrides `sandbox.capabilities_file` in the config.
         #[arg(long)]
         capabilities: Option<PathBuf>,
-        /// Per-run halter policy doc (JSON: `{ "policy": {...}, "params": {
+        /// Per-run hackamore policy doc (JSON: `{ "policy": {...}, "params": {
         /// "ttlSeconds": N } }`). When given, the daemon mints a policy-bound
-        /// proxy token for this job at spawn. Omit → the job runs with no halter
-        /// provisioning. Requires the daemon to have a `halter` server config.
-        #[arg(long = "halter-policy")]
-        halter_policy: Option<PathBuf>,
+        /// proxy token for this job at spawn. Omit → the job runs with no hackamore
+        /// provisioning. Requires the daemon to have a `hackamore` server config.
+        #[arg(long = "hackamore-policy")]
+        hackamore_policy: Option<PathBuf>,
         /// Submit and return the job id without streaming output.
         #[arg(long)]
         detach: bool,
@@ -246,16 +246,16 @@ fn do_validate(workflow: PathBuf, config: Option<PathBuf>) -> i32 {
 
 /// Build a `SubmitRequest` from `job run` arguments, validating the workflow
 /// against the config and resolving an explicit `--capabilities` file (the daemon
-/// applies its default when `capabilities` is `None`). A `--halter-policy` file,
+/// applies its default when `capabilities` is `None`). A `--hackamore-policy` file,
 /// when given, is read and parsed here so a malformed policy fails before submit;
-/// it ships as the strong `HalterRunPolicy` wire type the daemon uses directly.
+/// it ships as the strong `HackamoreRunPolicy` wire type the daemon uses directly.
 fn build_submit(
     workflow: PathBuf,
     config: Option<PathBuf>,
     workdirs: Vec<PathBuf>,
     input: String,
     capabilities: Option<PathBuf>,
-    halter_policy: Option<PathBuf>,
+    hackamore_policy: Option<PathBuf>,
 ) -> Result<SubmitRequest, CliError> {
     let cfg = HorsieConfig::resolve(config.as_deref())?;
     let def = load_workflow(&workflow)?;
@@ -267,7 +267,7 @@ fn build_submit(
         Some(path) => Some(CapabilitySpec::load(&path).map_err(CliError::Config)?),
         None => None,
     };
-    let halter_policy = load_halter_policy(halter_policy.as_deref())?;
+    let hackamore_policy = load_hackamore_policy(hackamore_policy.as_deref())?;
     let workflow_name = workflow
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -281,25 +281,25 @@ fn build_submit(
         input,
         capabilities: caps,
         workflow_name,
-        halter_policy,
+        hackamore_policy,
     })
 }
 
-/// Read and parse the `--halter-policy` file (the `{policy, params}` doc) into
-/// the strong [`models::daemon::HalterRunPolicy`] shipped in the submit message.
+/// Read and parse the `--hackamore-policy` file (the `{policy, params}` doc) into
+/// the strong [`models::daemon::HackamoreRunPolicy`] shipped in the submit message.
 /// Parsing here rejects a malformed doc at the CLI, before it reaches the daemon
 /// (and the same type rides the wire, so the daemon does no re-parse). `None` →
-/// no halter provisioning.
-fn load_halter_policy(
+/// no hackamore provisioning.
+fn load_hackamore_policy(
     path: Option<&Path>,
-) -> Result<Option<models::daemon::HalterRunPolicy>, CliError> {
+) -> Result<Option<models::daemon::HackamoreRunPolicy>, CliError> {
     let Some(path) = path else {
         return Ok(None);
     };
     let text = std::fs::read_to_string(path)
-        .map_err(|e| CliError::Io(format!("read halter policy {}: {e}", path.display())))?;
-    let policy: models::daemon::HalterRunPolicy = serde_json::from_str(&text)
-        .map_err(|e| CliError::Config(format!("invalid halter policy: {e}")))?;
+        .map_err(|e| CliError::Io(format!("read hackamore policy {}: {e}", path.display())))?;
+    let policy: models::daemon::HackamoreRunPolicy = serde_json::from_str(&text)
+        .map_err(|e| CliError::Config(format!("invalid hackamore policy: {e}")))?;
     Ok(Some(policy))
 }
 
@@ -405,7 +405,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 workdir,
                 input,
                 capabilities,
-                halter_policy,
+                hackamore_policy,
                 detach,
             } => {
                 let root = resolve_state_dir(config.as_deref())?;
@@ -415,7 +415,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                     workdir,
                     input,
                     capabilities,
-                    halter_policy,
+                    hackamore_policy,
                 )?;
                 if detach {
                     let job_id = client::submit(&root, req).await?;
@@ -574,14 +574,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_halter_policy_flag_ships_no_policy() {
-        // Omitting `--halter-policy` → the submit carries no policy, so the daemon
-        // runs the job with no halter provisioning (today's no-halter behavior).
-        assert_eq!(load_halter_policy(None).unwrap(), None);
+    fn no_hackamore_policy_flag_ships_no_policy() {
+        // Omitting `--hackamore-policy` → the submit carries no policy, so the daemon
+        // runs the job with no hackamore provisioning (today's no-hackamore behavior).
+        assert_eq!(load_hackamore_policy(None).unwrap(), None);
     }
 
     #[test]
-    fn halter_policy_flag_ships_the_strong_type() {
+    fn hackamore_policy_flag_ships_the_strong_type() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.json");
         std::fs::write(
@@ -589,10 +589,10 @@ mod tests {
             r#"{ "policy": { "targets": [{ "name": "github" }] }, "params": { "ttlSeconds": 900 } }"#,
         )
         .unwrap();
-        let policy = load_halter_policy(Some(&path))
+        let policy = load_hackamore_policy(Some(&path))
             .unwrap()
             .expect("policy shipped");
-        // The strong `HalterRunPolicy` is shipped: the opaque `policy` is preserved
+        // The strong `HackamoreRunPolicy` is shipped: the opaque `policy` is preserved
         // verbatim and `params.ttlSeconds` is parsed into the typed field.
         assert_eq!(
             policy.policy["targets"][0]["name"],
@@ -602,11 +602,11 @@ mod tests {
     }
 
     #[test]
-    fn malformed_halter_policy_is_rejected_at_the_cli() {
+    fn malformed_hackamore_policy_is_rejected_at_the_cli() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.json");
         // `policy` is required; a doc with only params cannot mint.
         std::fs::write(&path, r#"{ "params": { "ttlSeconds": 60 } }"#).unwrap();
-        assert!(load_halter_policy(Some(&path)).is_err());
+        assert!(load_hackamore_policy(Some(&path)).is_err());
     }
 }

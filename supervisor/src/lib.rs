@@ -9,14 +9,14 @@
 //!   be driven in tests without a real sandbox; [`ProcessJobRuntime`] is the
 //!   production implementation.
 
-mod halter;
+mod hackamore;
 mod history;
 mod job_actor;
 mod progress;
 mod spec;
 mod supervisor_actor;
 
-pub use halter::{ENV_HALTER_TOKEN, ENV_HALTER_URL, HalterMinter};
+pub use hackamore::{ENV_HACKAMORE_TOKEN, ENV_HACKAMORE_URL, HackamoreMinter};
 pub use history::{render_history, workflow_events};
 pub use job_actor::{
     JobActor, JobCommand, JobDomainEvent, JobRuntime, JobShutdown, JobState, Kickoff, LaunchParams,

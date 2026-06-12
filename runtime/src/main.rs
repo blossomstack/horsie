@@ -100,12 +100,12 @@ async fn main() {
         }
     }
 
-    // In-sandbox halter self-provisioning — after the sandbox is applied (so the
+    // In-sandbox hackamore self-provisioning — after the sandbox is applied (so the
     // provision fetch runs under the same confinement as the job) and before the
-    // message loop. Fail closed: a daemon that injected halter env expects a
+    // message loop. Fail closed: a daemon that injected hackamore env expects a
     // provisioned runtime, so any failure here must fail the job visibly.
     if let Err(e) = runtime::provision::provision_from_env().await {
-        eprintln!("halter provisioning failed: {e}");
+        eprintln!("hackamore provisioning failed: {e}");
         std::process::exit(4);
     }
 

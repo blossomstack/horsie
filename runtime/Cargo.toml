@@ -15,9 +15,9 @@ sandbox = ["dep:nono"]
 
 [dependencies]
 models        = { path = "../models" }
-# In-process halter provisioning (replaces shelling out to the halter-agent binary).
+# In-process hackamore provisioning (replaces shelling out to the hackamore-agent binary).
 # Pinned by rev so the provisioning ABI is reproducible.
-halter-agent  = { git = "https://github.com/zhxiaogg/halter", rev = "9e16f4101acf3c69084daedf11fa4566a2d6420b" }
+hackamore-agent  = { git = "https://github.com/zhxiaogg/hackamore", rev = "4b99c6272332132100dd92e92e1bf1471abe5f69" }
 tokio         = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util  = { workspace = true }

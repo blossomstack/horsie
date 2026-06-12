@@ -1,12 +1,12 @@
-//! In-sandbox halter self-provisioning. When the daemon minted a policy-bound
-//! token for this job, it injected `HALTER_TOKEN` and `HALTER_URL` (plus a
+//! In-sandbox hackamore self-provisioning. When the daemon minted a policy-bound
+//! token for this job, it injected `HACKAMORE_TOKEN` and `HACKAMORE_URL` (plus a
 //! synthetic `HOME`) into this process. Before the message loop starts we fetch
-//! the provision doc through the halter proxy and render it into native tool
+//! the provision doc through the hackamore proxy and render it into native tool
 //! config under the synthetic home, so the job's stock tools (`gh` etc.) reach
-//! upstreams through the halter proxy — the only network egress the sandbox
+//! upstreams through the hackamore proxy — the only network egress the sandbox
 //! permits.
 //!
-//! Provisioning runs IN-PROCESS via the `halter_agent` library: no `halter-agent`
+//! Provisioning runs IN-PROCESS via the `hackamore_agent` library: no `hackamore-agent`
 //! binary on `PATH`, no child process. The runtime therefore has no PATH
 //! dependency for provisioning.
 //!
@@ -16,25 +16,25 @@
 use std::path::PathBuf;
 
 /// Env var carrying the minted policy-bound token (daemon-injected).
-pub const ENV_HALTER_TOKEN: &str = "HALTER_TOKEN";
-/// Env var carrying the halter proxy-listener base URL (daemon-injected).
-pub const ENV_HALTER_URL: &str = "HALTER_URL";
+pub const ENV_HACKAMORE_TOKEN: &str = "HACKAMORE_TOKEN";
+/// Env var carrying the hackamore proxy-listener base URL (daemon-injected).
+pub const ENV_HACKAMORE_URL: &str = "HACKAMORE_URL";
 
-/// A fully-specified provisioning request: both halter vars are present along
-/// with the synthetic home halter writes native tool config into. Constructed
+/// A fully-specified provisioning request: both hackamore vars are present along
+/// with the synthetic home hackamore writes native tool config into. Constructed
 /// only by [`setup_from_env`], so a half-set environment can never reach
 /// [`run_setup`].
 #[derive(Debug, PartialEq)]
-pub struct HalterSetup {
-    pub halter_url: String,
+pub struct HackamoreSetup {
+    pub hackamore_url: String,
     pub token: String,
     pub home: PathBuf,
 }
 
 /// Decide the provisioning intent from this runtime's environment.
 ///
-/// - both `HALTER_TOKEN` and `HALTER_URL` set → `Ok(Some(_))` (provision);
-/// - neither set → `Ok(None)` (no halter, skip silently);
+/// - both `HACKAMORE_TOKEN` and `HACKAMORE_URL` set → `Ok(Some(_))` (provision);
+/// - neither set → `Ok(None)` (no hackamore, skip silently);
 /// - exactly one set, or set without a `HOME` → `Err` (illegal half-provisioned
 ///   state; the daemon injects all three together, so this is a wiring bug and
 ///   the job must fail visibly).
@@ -44,28 +44,28 @@ pub fn setup_from_env(
     token: Option<String>,
     url: Option<String>,
     home: Option<String>,
-) -> Result<Option<HalterSetup>, String> {
+) -> Result<Option<HackamoreSetup>, String> {
     match (non_empty(token), non_empty(url)) {
         (None, None) => Ok(None),
-        (Some(token), Some(halter_url)) => {
+        (Some(token), Some(hackamore_url)) => {
             let home = non_empty(home).ok_or_else(|| {
                 format!(
-                    "{ENV_HALTER_TOKEN} and {ENV_HALTER_URL} are set but HOME is not — \
+                    "{ENV_HACKAMORE_TOKEN} and {ENV_HACKAMORE_URL} are set but HOME is not — \
                      the daemon must inject a synthetic HOME alongside them"
                 )
             })?;
-            Ok(Some(HalterSetup {
-                halter_url,
+            Ok(Some(HackamoreSetup {
+                hackamore_url,
                 token,
                 home: PathBuf::from(home),
             }))
         }
         (Some(_), None) => Err(format!(
-            "{ENV_HALTER_TOKEN} is set but {ENV_HALTER_URL} is not — \
+            "{ENV_HACKAMORE_TOKEN} is set but {ENV_HACKAMORE_URL} is not — \
              refusing to start half-provisioned"
         )),
         (None, Some(_)) => Err(format!(
-            "{ENV_HALTER_URL} is set but {ENV_HALTER_TOKEN} is not — \
+            "{ENV_HACKAMORE_URL} is set but {ENV_HACKAMORE_TOKEN} is not — \
              refusing to start half-provisioned"
         )),
     }
@@ -76,14 +76,14 @@ fn non_empty(v: Option<String>) -> Option<String> {
     v.filter(|s| !s.is_empty())
 }
 
-/// Provision in-process via the `halter_agent` library: fetch the provision doc
+/// Provision in-process via the `hackamore_agent` library: fetch the provision doc
 /// through the proxy listener, then render native tool config under the
 /// synthetic home. Any fetch or write failure is a hard failure (fail closed).
-pub async fn run_setup(setup: &HalterSetup) -> Result<(), String> {
-    let doc = halter_agent::fetch_provision(&setup.halter_url, &setup.token).await?;
-    halter_agent::write_configs(&setup.home, &doc).map_err(|e| {
+pub async fn run_setup(setup: &HackamoreSetup) -> Result<(), String> {
+    let doc = hackamore_agent::fetch_provision(&setup.hackamore_url, &setup.token).await?;
+    hackamore_agent::write_configs(&setup.home, &doc).map_err(|e| {
         format!(
-            "halter: writing tool config under {}: {e}",
+            "hackamore: writing tool config under {}: {e}",
             setup.home.display()
         )
     })?;
@@ -91,12 +91,12 @@ pub async fn run_setup(setup: &HalterSetup) -> Result<(), String> {
 }
 
 /// Entry point for the runtime main: read the env, validate the intent, and —
-/// when the daemon provisioned this job for halter — fetch + write the provision
-/// doc. No halter env → `Ok(())` without side effects.
+/// when the daemon provisioned this job for hackamore — fetch + write the provision
+/// doc. No hackamore env → `Ok(())` without side effects.
 pub async fn provision_from_env() -> Result<(), String> {
     match setup_from_env(
-        env_var(ENV_HALTER_TOKEN),
-        env_var(ENV_HALTER_URL),
+        env_var(ENV_HACKAMORE_TOKEN),
+        env_var(ENV_HACKAMORE_URL),
         env_var("HOME"),
     )? {
         Some(setup) => run_setup(&setup).await,
@@ -131,8 +131,8 @@ mod tests {
             .expect("should provision");
         assert_eq!(
             setup,
-            HalterSetup {
-                halter_url: "http://proxy".into(),
+            HackamoreSetup {
+                hackamore_url: "http://proxy".into(),
                 token: "tok".into(),
                 home: PathBuf::from("/jobs/j1/home"),
             }
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_home_with_halter_env_is_an_error() {
+    fn missing_home_with_hackamore_env_is_an_error() {
         let err = setup_from_env(s("tok"), s("http://proxy"), None).unwrap_err();
         assert!(err.contains("HOME"), "error should name HOME: {err}");
         assert!(setup_from_env(s("tok"), s("http://proxy"), s("")).is_err());
@@ -158,8 +158,8 @@ mod tests {
     async fn run_setup_fails_closed_when_proxy_unreachable() {
         // Reserved port with no listener: the in-process fetch must surface a
         // spawn-aborting error rather than silently skipping provisioning.
-        let setup = HalterSetup {
-            halter_url: "http://127.0.0.1:1".into(),
+        let setup = HackamoreSetup {
+            hackamore_url: "http://127.0.0.1:1".into(),
             token: "t".into(),
             home: PathBuf::from("/h"),
         };

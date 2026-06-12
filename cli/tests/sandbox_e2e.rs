@@ -154,8 +154,8 @@ fn boot(
         runtime_bin: bin,
         state_dir: root.join("state"),
         journal: journal.clone(),
-        // No halter: these tests assert the halter-less spawn path stays unchanged.
-        halter: None,
+        // No hackamore: these tests assert the hackamore-less spawn path stays unchanged.
+        hackamore: None,
     };
     let sup = spawn_root(
         SupervisorActor::new(Arc::new(ProcessJobRuntime::new(deps))),
@@ -168,7 +168,7 @@ fn job_spec(def: WorkflowDefinition, workdir: &Path) -> JobSpec {
     JobSpec {
         plugins_dir: None,
         hook_path: Vec::new(),
-        halter_policy: None,
+        hackamore_policy: None,
         workflow: def,
         workflow_name: "wf".into(),
         workspaces: vec![models::Workspace {
@@ -187,7 +187,7 @@ fn job_spec_multi(def: WorkflowDefinition, workspaces: &[(&str, &Path)]) -> JobS
     JobSpec {
         plugins_dir: None,
         hook_path: Vec::new(),
-        halter_policy: None,
+        hackamore_policy: None,
         workflow: def,
         workflow_name: "wf".into(),
         workspaces: workspaces

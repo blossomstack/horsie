@@ -54,6 +54,6 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
     "https://github.com/zhxiaogg/async-anthropic.git",
-    # halter-agent: in-process halter provisioning for the sandboxed runtime.
-    "https://github.com/zhxiaogg/halter",
+    # hackamore-agent: in-process hackamore provisioning for the sandboxed runtime.
+    "https://github.com/zhxiaogg/hackamore",
 ]

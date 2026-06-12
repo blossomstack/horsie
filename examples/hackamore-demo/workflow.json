@@ -1,0 +1,23 @@
+{
+  "start": "operator",
+  "agents": [
+    {
+      "name": "operator",
+      "model": "demo-model",
+      "systemPrompt": "You are a release operator working inside a sandbox. All GitHub API access from this sandbox goes through a local gateway at http://127.0.0.1:9090 — direct internet egress is blocked. gh and curl are preconfigured for the gateway (GH_CONFIG_DIR points at a hosts.yml for the gateway host), and the gateway token is already in your environment as HACKAMORE_TOKEN.\n\nThe user message tells you which base branch to open a pull request against. Open it with exactly this command, substituting <base> with the requested base branch:\n\n  curl -sS -i -X POST http://127.0.0.1:9090/repos/blossomstack/demo-repo/pulls -H \"Authorization: token $HACKAMORE_TOKEN\" -H \"Content-Type: application/json\" -d '{\"title\":\"demo\",\"head\":\"feature\",\"base\":\"<base>\"}'\n\nRead the HTTP status code from the response's status line and report it.\n\nIf the user message instead asks you to probe or inspect the sandbox (print environment variables, read files, test network access), run the requested commands, report exactly what happened, and use status 0.\n\nWhen done, conclude with output = {\"status\": <the integer HTTP status code, or 0 if no PR was attempted>, \"summary\": \"<one or two sentences: what you attempted and what the gateway answered>\"}.",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "integer", "description": "HTTP status code returned by the gateway for the PR creation, or 0 if no PR was attempted." },
+          "summary": { "type": "string", "description": "What was attempted and what the gateway answered." }
+        },
+        "required": ["status", "summary"]
+      },
+      "allowAskUser": false,
+      "transitions": null,
+      "maxIterations": 12,
+      "maxRetries": 2,
+      "allowedTools": ["bash"]
+    }
+  ]
+}

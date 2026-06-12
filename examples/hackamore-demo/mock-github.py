@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Mock GitHub upstream for the halter demo (stdlib only, no deps).
+"""Mock GitHub upstream for the hackamore demo (stdlib only, no deps).
 
 Listens on 127.0.0.1:9999 and logs every request — method, path, and the
 Authorization header — to stdout. Its whole purpose is to PROVE credential
-injection: when halter allows a request, the Authorization line printed here
+injection: when hackamore allows a request, the Authorization line printed here
 must show the REAL upstream credential ("Bearer ghp_DEMO_REAL_TOKEN_do_not_use",
-injected by halter from its vault), and NEVER the opaque per-job halter token
-the sandboxed agent actually holds. If you ever see a halter token in this log,
+injected by hackamore from its vault), and NEVER the opaque per-job hackamore token
+the sandboxed agent actually holds. If you ever see a hackamore token in this log,
 the demo is broken.
 
 Responses:
   POST .../pulls  -> 201 {"number": 1, "html_url": "http://mock/pr/1"}
   anything else   -> 200 {}
 
-Usage: python3 examples/halter-demo/mock-github.py
+Usage: python3 examples/hackamore-demo/mock-github.py
 """
 
 import json

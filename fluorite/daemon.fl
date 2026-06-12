@@ -25,32 +25,32 @@ struct JobSummary {
     workdir: String,
 }
 
-/// Mint parameters horsie controls per run, carried in a per-run halter policy.
+/// Mint parameters horsie controls per run, carried in a per-run hackamore policy.
 /// `ttl_seconds` is optional in the file; absent → the daemon's default TTL.
-struct HalterPolicyParams {
+struct HackamorePolicyParams {
     ttl_seconds: Option<u64>,
 }
 
-/// A per-run halter policy: the opaque halter `policy` document (forwarded
-/// verbatim to halter's `/mint`, never parsed by horsie) plus the optional
+/// A per-run hackamore policy: the opaque hackamore `policy` document (forwarded
+/// verbatim to hackamore's `/mint`, never parsed by horsie) plus the optional
 /// mint `params` horsie owns.
-struct HalterRunPolicy {
+struct HackamoreRunPolicy {
     policy: Any,
-    params: Option<HalterPolicyParams>,
+    params: Option<HackamorePolicyParams>,
 }
 
 /// Submit a new job. `capabilities` is the already-resolved spec (the client
 /// resolves config/flags before sending) or null to use the daemon default.
-/// `halter_policy` is the per-run halter policy (`--halter-policy`, the
+/// `hackamore_policy` is the per-run hackamore policy (`--hackamore-policy`, the
 /// `{policy, params}` shape the daemon mints from at spawn) or null for a job
-/// that needs no halter provisioning.
+/// that needs no hackamore provisioning.
 struct SubmitRequest {
     workflow: WorkflowDefinition,
     workdirs: Vec<String>,
     input: String,
     capabilities: Option<CapabilitySpec>,
     workflow_name: String,
-    halter_policy: Option<HalterRunPolicy>,
+    hackamore_policy: Option<HackamoreRunPolicy>,
 }
 
 /// Where an agent sits in a job's execution trace, for `horsie job status`.
