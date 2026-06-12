@@ -18,6 +18,8 @@ use tokio_stream::StreamExt;
 
 pub const DEFAULT_MODEL: &str = "claude-3-5-sonnet-20241022";
 pub const DEFAULT_MAX_TOKENS: u32 = 16_384;
+/// The `anthropic-version` header value sent on every request. Required by the API.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 const MAX_STREAM_RETRIES: u32 = 6;
 const BACKOFF_BASE_SECS: u64 = 5;
 
@@ -99,6 +101,12 @@ impl AnthropicProvider {
 
         let mut builder = Client::builder();
         builder.http_client(http_client);
+        // The async-anthropic `Client` derives its builder with `version:
+        // #[builder(default)]`, which yields an empty string — NOT the
+        // `"2023-06-01"` from its `Default` impl. An empty `anthropic-version`
+        // header makes the streaming endpoint reject every request with
+        // `400 "anthropic-version: header is required"`, so set it explicitly.
+        builder.version(ANTHROPIC_VERSION);
         if let Some(url) = base_url {
             builder.base_url(url);
         }

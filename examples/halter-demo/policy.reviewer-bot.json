@@ -1,0 +1,29 @@
+{
+  "policy": {
+    "rules": [
+      {
+        "effect": "Allow",
+        "matches": {
+          "targets": [],
+          "verbs": [ { "type": "Crud", "value": { "kind": "Read" } } ],
+          "resources": ["repos/**"],
+          "conditions": []
+        }
+      },
+      {
+        "effect": "Allow",
+        "matches": {
+          "targets": [],
+          "verbs": [ { "type": "Crud", "value": { "kind": "Create" } } ],
+          "resources": ["repos/*/*/pulls"],
+          "conditions": [
+            { "type": "Equals", "value": { "field": "base", "value": "develop" } }
+          ]
+        }
+      }
+    ]
+  },
+  "params": {
+    "ttlSeconds": 900
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "proxy_addr": "127.0.0.1:9090",
+  "admin_addr": "127.0.0.1:9091",
+  "services": [
+    {
+      "name": "github",
+      "host": "*",
+      "upstream_base": "http://127.0.0.1:9999",
+      "flavor": "github",
+      "consumer_address": "http://127.0.0.1:9090",
+      "outbound": { "bearer": "github-bot" }
+    }
+  ],
+  "credentials": {
+    "github-bot": "ghp_DEMO_REAL_TOKEN_do_not_use"
+  },
+  "audit_log": "/tmp/halter-demo-audit.jsonl"
+}
