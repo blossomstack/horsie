@@ -32,6 +32,14 @@ pub struct JobSpec {
     /// Directories prepended to PATH when running plugin hooks (resolved at submit).
     #[serde(default)]
     pub hook_path: Vec<PathBuf>,
+    /// Per-run halter policy (the `--halter-policy` doc, parsed at submit). `Some`
+    /// → the daemon mints a policy-bound proxy token for this job at spawn (fail
+    /// closed); `None` → the job runs with no halter provisioning, exactly as a
+    /// job runs today. The generated `models::daemon` wire type is reused as the
+    /// stored shape (like [`CapabilitySpec`]); the inner halter `policy` stays an
+    /// opaque value horsie forwards verbatim.
+    #[serde(default)]
+    pub halter_policy: Option<models::daemon::HalterRunPolicy>,
 }
 
 /// Shared, process-wide dependencies the production [`crate::ProcessJobRuntime`]
@@ -48,4 +56,10 @@ pub struct SupervisorDeps {
     /// The shared journal; the same `Arc` backs the supervisor, jobs, workflows,
     /// and agents so every actor recovers from one event store.
     pub journal: Arc<dyn Journal>,
+    /// Halter server location (deployment-global): `Some` lets jobs that carry a
+    /// per-run `models::daemon::HalterRunPolicy` mint a policy-bound proxy token
+    /// at spawn (fail closed). `None`, or a job with no policy, spawns exactly as
+    /// before. The minter holds only the admin/proxy URLs — the policy and TTL
+    /// travel per-run on the [`JobSpec`].
+    pub halter: Option<crate::halter::HalterMinter>,
 }

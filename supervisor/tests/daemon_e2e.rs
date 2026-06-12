@@ -197,6 +197,7 @@ fn spec(def: WorkflowDefinition) -> JobSpec {
     JobSpec {
         plugins_dir: None,
         hook_path: Vec::new(),
+        halter_policy: None,
         workflow: def,
         workflow_name: "wf".into(),
         workspaces: vec![models::Workspace {

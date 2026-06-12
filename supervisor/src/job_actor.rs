@@ -122,14 +122,29 @@ impl JobRuntime for ProcessJobRuntime {
         let cancel = CancellationToken::new();
         serve_runtime_connections(listener, connected.clone(), cancel.clone());
 
-        // Persist the resolved capability spec into the job dir so the runtime loads
-        // a single source of truth (`jobs/<id>/capabilities.json`).
         let jdir = self.deps.state_dir.join("jobs").join(&job_id);
         std::fs::create_dir_all(&jdir).map_err(|e| e.to_string())?;
+
+        // Mint-at-spawn (fail closed): when the daemon is configured against halter
+        // AND this job carries a per-run policy, mint a fresh policy-bound token,
+        // materialize a synthetic home under the job dir, open it in the capability
+        // spec, and inject the env the runtime needs to self-provision. No halter
+        // config, or a job with no `--halter-policy`, → both stay untouched.
+        let provision = match (&self.deps.halter, &spec.halter_policy) {
+            (Some(minter), Some(policy)) => {
+                Some(crate::halter::provision_for_spawn(minter, policy, &jdir).await?)
+            }
+            _ => None,
+        };
+        let (capabilities, env) =
+            crate::halter::apply_provision(spec.capabilities.clone(), provision);
+
+        // Persist the resolved capability spec into the job dir so the runtime loads
+        // a single source of truth (`jobs/<id>/capabilities.json`).
         let caps_path = jdir.join("capabilities.json");
         std::fs::write(
             &caps_path,
-            serde_json::to_vec_pretty(&spec.capabilities).map_err(|e| e.to_string())?,
+            serde_json::to_vec_pretty(&capabilities).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
 
@@ -164,8 +179,9 @@ impl JobRuntime for ProcessJobRuntime {
                         .iter()
                         .map(|p| p.to_string_lossy().into_owned())
                         .collect(),
-                    // Per-job env injection channel; nothing minted at spawn yet.
-                    env: Vec::new(),
+                    // Per-job env injection: the halter token + synthetic home when
+                    // minting is configured, empty otherwise.
+                    env,
                 },
             )
             .await

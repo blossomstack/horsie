@@ -9,6 +9,10 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 
 /// Commands accepted by the [`SupervisorActor`].
+// `Submit` inherently carries the full `JobSpec` (workflow + caps + halter
+// policy); the size gap to the small control variants is by design for a
+// one-shot submit command, not worth boxing (which would only obscure the API).
+#[allow(clippy::large_enum_variant)]
 pub enum SupervisorCommand {
     /// Submit a new job; replies with its generated id.
     Submit {
@@ -321,6 +325,7 @@ mod tests {
         JobSpec {
             plugins_dir: None,
             hook_path: Vec::new(),
+            halter_policy: None,
             workflow: WorkflowDefinition {
                 default_use_plugins: None,
                 start: "a".into(),

@@ -92,11 +92,20 @@ pub async fn serve(cfg: HorsieConfig) -> Result<(), CliError> {
 
     let registry = build_registry(&cfg)?;
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(data_dir.clone()));
+    // Halter integration: the deployment-global server location. A job that
+    // carries a per-run `--halter-policy` then mints a policy-bound proxy token
+    // at spawn (fail closed). Absent, or a job with no policy → spawns behave
+    // exactly as before.
+    let halter = cfg
+        .halter
+        .as_ref()
+        .map(|h| supervisor::HalterMinter::new(h.admin_url.clone(), h.proxy_url.clone()));
     let deps = SupervisorDeps {
         provider_registry: registry,
         runtime_bin,
         state_dir: state_dir.clone(),
         journal: journal.clone(),
+        halter,
     };
     let runtime = Arc::new(ProcessJobRuntime::new(deps));
     let supervisor = spawn_root(SupervisorActor::new(runtime), journal.clone());
@@ -192,6 +201,10 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
                     return;
                 }
             };
+            // The per-run halter policy is a strong wire field on `SubmitRequest`
+            // (`Option<HalterRunPolicy>`), so a malformed policy already fails at
+            // wire deserialization of the request — uniformly with `capabilities` —
+            // and is carried into the spec verbatim here.
             let spec = JobSpec {
                 workflow: s.workflow,
                 workflow_name: s.workflow_name,
@@ -200,6 +213,7 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
                 capabilities: caps,
                 plugins_dir: daemon.plugins_dir.clone(),
                 hook_path: daemon.hook_path.clone(),
+                halter_policy: s.halter_policy,
             };
             let (tx, rx) = oneshot::channel();
             let _ = daemon

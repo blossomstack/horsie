@@ -25,14 +25,32 @@ struct JobSummary {
     workdir: String,
 }
 
+/// Mint parameters horsie controls per run, carried in a per-run halter policy.
+/// `ttl_seconds` is optional in the file; absent → the daemon's default TTL.
+struct HalterPolicyParams {
+    ttl_seconds: Option<u64>,
+}
+
+/// A per-run halter policy: the opaque halter `policy` document (forwarded
+/// verbatim to halter's `/mint`, never parsed by horsie) plus the optional
+/// mint `params` horsie owns.
+struct HalterRunPolicy {
+    policy: Any,
+    params: Option<HalterPolicyParams>,
+}
+
 /// Submit a new job. `capabilities` is the already-resolved spec (the client
 /// resolves config/flags before sending) or null to use the daemon default.
+/// `halter_policy` is the per-run halter policy (`--halter-policy`, the
+/// `{policy, params}` shape the daemon mints from at spawn) or null for a job
+/// that needs no halter provisioning.
 struct SubmitRequest {
     workflow: WorkflowDefinition,
     workdirs: Vec<String>,
     input: String,
     capabilities: Option<CapabilitySpec>,
     workflow_name: String,
+    halter_policy: Option<HalterRunPolicy>,
 }
 
 /// Where an agent sits in a job's execution trace, for `horsie job status`.

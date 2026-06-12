@@ -25,7 +25,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "jsonschema",
- "models",
+ "models 0.1.0",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
@@ -129,7 +129,7 @@ dependencies = [
  "async-anthropic",
  "async-trait",
  "mock-llm",
- "models",
+ "models 0.1.0",
  "reqwest 0.12.28",
  "serde_json",
  "tokio",
@@ -555,7 +555,7 @@ dependencies = [
  "executor",
  "executor-client",
  "mock-llm",
- "models",
+ "models 0.1.0",
  "runtime-client",
  "serde",
  "serde_json",
@@ -986,7 +986,7 @@ dependencies = [
  "async-trait",
  "executor-client",
  "futures-util",
- "models",
+ "models 0.1.0",
  "runtime-client",
  "serde_json",
  "server",
@@ -1004,7 +1004,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
- "models",
+ "models 0.1.0",
  "runtime-client",
  "serde_json",
  "thiserror 1.0.69",
@@ -1306,6 +1306,18 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "halter-agent"
+version = "0.1.0"
+source = "git+https://github.com/zhxiaogg/halter?rev=9e16f4101acf3c69084daedf11fa4566a2d6420b#9e16f4101acf3c69084daedf11fa4566a2d6420b"
+dependencies = [
+ "clap",
+ "models 0.1.0 (git+https://github.com/zhxiaogg/halter?rev=9e16f4101acf3c69084daedf11fa4566a2d6420b)",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1986,6 +1998,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "models"
+version = "0.1.0"
+source = "git+https://github.com/zhxiaogg/halter?rev=9e16f4101acf3c69084daedf11fa4566a2d6420b#9e16f4101acf3c69084daedf11fa4566a2d6420b"
+dependencies = [
+ "derive-new 0.5.9",
+ "fluorite",
+ "fluorite_codegen",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2723,7 +2748,8 @@ dependencies = [
  "clap",
  "futures-util",
  "glob",
- "models",
+ "halter-agent",
+ "models 0.1.0",
  "nono",
  "regex",
  "serde_json",
@@ -2740,7 +2766,7 @@ dependencies = [
  "agentcore",
  "async-trait",
  "futures-util",
- "models",
+ "models 0.1.0",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
@@ -3066,7 +3092,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
- "models",
+ "models 0.1.0",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
@@ -3392,11 +3418,13 @@ dependencies = [
  "agentcore",
  "anthropic",
  "async-trait",
+ "axum",
  "executor",
  "executor-client",
  "futures-util",
  "mock-llm",
- "models",
+ "models 0.1.0",
+ "reqwest 0.12.28",
  "runtime-client",
  "serde",
  "serde_json",
@@ -4511,7 +4539,7 @@ dependencies = [
  "eval",
  "futures-util",
  "mock-llm",
- "models",
+ "models 0.1.0",
  "runtime-client",
  "serde",
  "serde_json",

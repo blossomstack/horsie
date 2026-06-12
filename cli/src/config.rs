@@ -25,6 +25,12 @@ pub struct HorsieConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    /// Optional halter server location. Present → a job submitted with a per-run
+    /// `--halter-policy` mints a policy-bound proxy token at spawn (fail closed).
+    /// Absent, or a job with no policy → jobs run exactly as they do today, with
+    /// no halter env or grants.
+    #[serde(default)]
+    pub halter: Option<HalterConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +93,22 @@ impl Default for StorageConfig {
             plugins_dir: default_plugins_dir(),
         }
     }
+}
+
+/// Daemon-local halter *server location* (hand-written serde — NOT a fluorite
+/// protocol type; this never crosses a module boundary, the daemon consumes it
+/// in place). halter is a policy-governed credential-injecting reverse proxy.
+///
+/// Only the deployment-global addresses live here. The policy a token is bound
+/// to, and its TTL, are a per-run resource supplied by the `job run`
+/// `--halter-policy` flag — not global config.
+#[derive(Debug, Deserialize)]
+pub struct HalterConfig {
+    /// Base URL of halter's admin API (daemon-only; serves `POST /mint`).
+    pub admin_url: String,
+    /// Base URL of halter's proxy listener — the one address the sandboxed job
+    /// may reach; injected into the runtime child as `HALTER_URL`.
+    pub proxy_url: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -339,6 +361,40 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.sandbox.capabilities_file.is_none());
+    }
+
+    #[test]
+    fn parses_halter_section() {
+        // The global section is just the deployment server location now — the
+        // policy and TTL are per-run (`--halter-policy`).
+        let cfg: HorsieConfig = serde_json::from_str(
+            r#"{
+                "halter": {
+                    "admin_url": "http://127.0.0.1:9091",
+                    "proxy_url": "http://127.0.0.1:9090"
+                }
+            }"#,
+        )
+        .unwrap();
+        let h = cfg.halter.expect("halter section should parse");
+        assert_eq!(h.admin_url, "http://127.0.0.1:9091");
+        assert_eq!(h.proxy_url, "http://127.0.0.1:9090");
+    }
+
+    #[test]
+    fn halter_section_defaults_to_absent() {
+        let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.halter.is_none());
+        assert!(HorsieConfig::default().halter.is_none());
+    }
+
+    #[test]
+    fn halter_section_missing_required_field_is_rejected() {
+        // A halter section without an admin_url cannot mint — reject at parse
+        // time rather than failing every spawn.
+        let res =
+            serde_json::from_str::<HorsieConfig>(r#"{ "halter": { "proxy_url": "http://p" } }"#);
+        assert!(res.is_err());
     }
 
     #[test]
