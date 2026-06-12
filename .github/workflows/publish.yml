@@ -56,6 +56,12 @@ jobs:
         run: cargo publish --workspace --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+          # The runner hits spurious HTTP/2 broken-pipe errors against
+          # crates.io, which desync cargo's wait-for-publish loop ("no
+          # packages ready to publish but N remain in plan"). HTTP/1.1 and a
+          # longer confirmation window keep the chained publish alive.
+          CARGO_HTTP_MULTIPLEXING: "false"
+          CARGO_PUBLISH_TIMEOUT: "300"
 
   release-binaries:
     name: Release binaries (${{ matrix.target }})
