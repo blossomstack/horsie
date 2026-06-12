@@ -3,12 +3,12 @@ name = "horsie-anthropic"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "Anthropic LLM provider for horsie"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]
-horsie-agentcore = { version = "0.1.1", path = "../../agentcore" }
-horsie-models = { version = "0.1.1", path = "../../models" }
+horsie-agentcore = { version = "0.1.2", path = "../../agentcore" }
+horsie-models = { version = "0.1.2", path = "../../models" }
 async-llm        = { workspace = true }
 async-trait      = { workspace = true }
 tokio            = { workspace = true, features = ["time"] }

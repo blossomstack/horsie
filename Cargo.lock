@@ -1275,7 +1275,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "horsie"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "clap",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-actor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-agentcore"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-anthropic"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-llm",
  "async-trait",
@@ -1349,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-executor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-executor-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-mock-llm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "futures",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-models"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "derive-new 0.5.9",
  "fluorite",
@@ -1409,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "futures-util",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-runtime-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-supervisor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1483,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "horsie-workflow"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "eval",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "integration-tests"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "horsie-agentcore",
