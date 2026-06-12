@@ -3,12 +3,12 @@ name = "horsie-runtime-client"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "Client for the horsie runtime"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 
 [dependencies]
-horsie-models = { version = "0.1.2", path = "../models" }
-horsie-agentcore = { version = "0.1.2", path = "../agentcore" }
+horsie-models = { version = "0.1.3", path = "../models" }
+horsie-agentcore = { version = "0.1.3", path = "../agentcore" }
 async-trait = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }

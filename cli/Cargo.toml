@@ -1,6 +1,6 @@
 [package]
 name = "horsie"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
@@ -11,15 +11,15 @@ name = "horsie"
 path = "src/main.rs"
 
 [dependencies]
-horsie-actor = { version = "0.1.2", path = "../actor", features = ["file-journal"] }
-horsie-agentcore = { version = "0.1.2", path = "../agentcore" }
-horsie-anthropic = { version = "0.1.2", path = "../providers/anthropic" }
-horsie-executor = { version = "0.1.2", path = "../executor" }
-horsie-executor-client = { version = "0.1.2", path = "../executor-client", default-features = false }
-horsie-runtime-client = { version = "0.1.2", path = "../runtime-client" }
-horsie-workflow = { version = "0.1.2", path = "../workflow" }
-horsie-supervisor = { version = "0.1.2", path = "../supervisor" }
-horsie-models = { version = "0.1.2", path = "../models" }
+horsie-actor = { version = "0.1.3", path = "../actor", features = ["file-journal"] }
+horsie-agentcore = { version = "0.1.3", path = "../agentcore" }
+horsie-anthropic = { version = "0.1.3", path = "../providers/anthropic" }
+horsie-executor = { version = "0.1.3", path = "../executor" }
+horsie-executor-client = { version = "0.1.3", path = "../executor-client", default-features = false }
+horsie-runtime-client = { version = "0.1.3", path = "../runtime-client" }
+horsie-workflow = { version = "0.1.3", path = "../workflow" }
+horsie-supervisor = { version = "0.1.3", path = "../supervisor" }
+horsie-models = { version = "0.1.3", path = "../models" }
 clap            = { version = "4", features = ["derive"] }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
