@@ -49,11 +49,32 @@ jobs:
         # to the token secret below instead of failing the run.
         continue-on-error: true
 
-      # `--workspace` resolves the inter-crate publish order automatically and
-      # skips publish = false members (horsie-server, horsie-mock-llm,
-      # horsie-tests). `--locked` guards against lockfile drift.
+      # Publish each publishable member (derived from cargo metadata, so new
+      # crates are picked up automatically), skipping versions the registry
+      # already has. Multiple passes resolve dependency order: a crate whose
+      # deps aren't published yet fails its pass and succeeds in a later one.
+      # This sidesteps a cargo 1.96 `--workspace` publish bug where the
+      # index-confirmation loop desyncs mid-chain ("no packages ready to
+      # publish but N remain in plan"), and makes reruns resumable.
       - name: cargo publish
-        run: cargo publish --workspace --locked
+        run: |
+          mapfile -t pkgs < <(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish == null) | "\(.name) \(.version)"')
+          for pass in $(seq 1 ${#pkgs[@]}); do
+            progress=0 remaining=0
+            for pkg in "${pkgs[@]}"; do
+              name=${pkg% *} version=${pkg#* }
+              if curl -fsS -A "publish-workflow (github.com/${{ github.repository }})" \
+                  "https://crates.io/api/v1/crates/$name/$version" >/dev/null 2>&1; then
+                continue
+              fi
+              remaining=1
+              if cargo publish -p "$name" --locked; then progress=1; fi
+            done
+            [ "$remaining" = 0 ] && exit 0
+            [ "$progress" = 0 ] && { echo "no progress in pass $pass"; exit 1; }
+          done
+          echo "crates still unpublished after ${#pkgs[@]} passes"; exit 1
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
           # The runner hits spurious HTTP/2 broken-pipe errors against
