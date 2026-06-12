@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use models::runtime::{
+use horsie_models::runtime::{
     CancelCallRequest, PluginSkill, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest,
     SessionStartRequest, ToolCall, ToolCallRequest, ToolResult, WorkspaceScan,
 };
-use runtime_client::{RuntimeTransport, TransportError};
+use horsie_runtime_client::{RuntimeTransport, TransportError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -234,7 +234,7 @@ where
 )]
 mod tests {
     use super::*;
-    use models::runtime::{BashInput, ToolCallResponse, ToolOutput};
+    use horsie_models::runtime::{BashInput, ToolCallResponse, ToolOutput};
     use tokio::net::{UnixListener, UnixStream};
 
     /// A fake runtime on the server side of a paired unix socket that answers every
@@ -263,21 +263,22 @@ mod tests {
                             .await;
                     }
                     Ok(RuntimeInboundMessage::ScanWorkspace(req)) => {
-                        let resp =
-                            RuntimeOutboundMessage::ScanResult(models::runtime::ScanResponse {
+                        let resp = RuntimeOutboundMessage::ScanResult(
+                            horsie_models::runtime::ScanResponse {
                                 shared_skills: vec![],
                                 call_id: req.call_id,
-                                workspaces: vec![models::runtime::WorkspaceScan {
+                                workspaces: vec![horsie_models::runtime::WorkspaceScan {
                                     name: "october".into(),
                                     path: "/ws/october".into(),
                                     is_git_repo: false,
-                                    instructions: Some(models::runtime::ScannedFile {
+                                    instructions: Some(horsie_models::runtime::ScannedFile {
                                         path: "AGENTS.md".into(),
                                         content: "ctx".into(),
                                     }),
                                     skills: vec![],
                                 }],
-                            });
+                            },
+                        );
                         let _ = sink
                             .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
                             .await;

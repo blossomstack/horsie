@@ -1,9 +1,9 @@
 use crate::workflow_actor::{WorkflowCommand, WorkflowNotification};
-use actor::ActorRef;
-use agentcore::{EventSink, LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
 use async_trait::async_trait;
-use models::workflow::WorkflowAgentDef;
-use runtime_client::{RuntimeClient, add_runtime_tools};
+use horsie_actor::ActorRef;
+use horsie_agentcore::{EventSink, LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
+use horsie_models::workflow::WorkflowAgentDef;
+use horsie_runtime_client::{RuntimeClient, add_runtime_tools};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -423,7 +423,7 @@ impl Toolbox for FilteredToolbox {
 )]
 mod tests {
     use super::*;
-    use runtime_client::MockTransport;
+    use horsie_runtime_client::MockTransport;
 
     fn def(allowed: Option<Vec<String>>, output: Option<Value>, ask: bool) -> WorkflowAgentDef {
         WorkflowAgentDef {
@@ -441,14 +441,14 @@ mod tests {
         }
     }
 
-    fn scan_with_skill(name: &str) -> models::runtime::WorkspaceScan {
+    fn scan_with_skill(name: &str) -> horsie_models::runtime::WorkspaceScan {
         let content = "---\nname: git-bisect\ndescription: find bad commit\n---\nStep 1...";
-        models::runtime::WorkspaceScan {
+        horsie_models::runtime::WorkspaceScan {
             name: name.into(),
             path: format!("/ws/{name}"),
             is_git_repo: false,
             instructions: None,
-            skills: vec![models::runtime::ScannedFile {
+            skills: vec![horsie_models::runtime::ScannedFile {
                 path: ".claude/skills/git-bisect/SKILL.md".into(),
                 content: content.into(),
             }],
@@ -618,8 +618,8 @@ mod tests {
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
     }
 
-    fn shared_skill() -> models::runtime::PluginSkill {
-        models::runtime::PluginSkill {
+    fn shared_skill() -> horsie_models::runtime::PluginSkill {
+        horsie_models::runtime::PluginSkill {
             plugin: "sp".into(),
             rel_dir: "sp/skills/brainstorming".into(),
             content: "---\nname: brainstorming\ndescription: explore first\n---\nDo it.".into(),

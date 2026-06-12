@@ -1,5 +1,7 @@
 use crate::transport::{RuntimeTransport, TransportError};
-use models::runtime::{PluginSkill, ToolCall, ToolError, ToolOutput, ToolResult, WorkspaceScan};
+use horsie_models::runtime::{
+    PluginSkill, ToolCall, ToolError, ToolOutput, ToolResult, WorkspaceScan,
+};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -98,7 +100,7 @@ impl RuntimeClient {
 mod tests {
     use super::*;
     use crate::transport::MockTransport;
-    use models::runtime::BashInput;
+    use horsie_models::runtime::BashInput;
 
     #[tokio::test]
     async fn client_returns_ok_output() {
@@ -130,7 +132,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_scan_returns_mock_scan() {
-        use models::runtime::{ScannedFile, WorkspaceScan};
+        use horsie_models::runtime::{ScannedFile, WorkspaceScan};
         let scan = WorkspaceScan {
             name: "october".into(),
             path: "/ws/october".into(),

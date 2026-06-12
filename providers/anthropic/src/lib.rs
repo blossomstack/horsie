@@ -1,10 +1,4 @@
-use agentcore::{
-    AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
-    EventSink, LlmError, LlmProvider, StopReason, TextBlockStartEvent, TextChunkEvent, TextPart,
-    ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingPart, ThinkingSignatureChunkEvent,
-    ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
-};
-use async_anthropic::{
+use async_llm::{
     Client,
     types::{
         CacheControl, ContentBlockDelta, CreateMessagesRequestBuilder, MessageBuilder,
@@ -13,6 +7,12 @@ use async_anthropic::{
     },
 };
 use async_trait::async_trait;
+use horsie_agentcore::{
+    AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
+    EventSink, LlmError, LlmProvider, StopReason, TextBlockStartEvent, TextChunkEvent, TextPart,
+    ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingPart, ThinkingSignatureChunkEvent,
+    ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
+};
 use std::{collections::HashMap, env, time::Duration};
 use tokio_stream::StreamExt;
 
@@ -37,7 +37,7 @@ fn is_retryable(msg: &str) -> bool {
         || msg.contains("Too Many Requests")
 }
 
-fn to_llm_error(e: async_anthropic::errors::AnthropicError) -> LlmError {
+fn to_llm_error(e: async_llm::errors::AnthropicError) -> LlmError {
     let msg = e.to_string();
     if msg.contains("overloaded_error") || msg.contains("overloaded") || msg.contains("529") {
         return LlmError::Overloaded;
@@ -46,7 +46,7 @@ fn to_llm_error(e: async_anthropic::errors::AnthropicError) -> LlmError {
     {
         return LlmError::RateLimit { retry_after: None };
     }
-    use async_anthropic::errors::AnthropicError;
+    use async_llm::errors::AnthropicError;
     match e {
         AnthropicError::NetworkError(re) => LlmError::Network(Box::new(re)),
         AnthropicError::Unauthorized => LlmError::ApiError {
@@ -196,15 +196,17 @@ impl AnthropicProvider {
         }
     }
 
-    fn to_api_role(role: &models::agent::Role) -> MessageRole {
+    fn to_api_role(role: &horsie_models::agent::Role) -> MessageRole {
         match role {
-            models::agent::Role::Assistant => MessageRole::Assistant,
-            models::agent::Role::User | models::agent::Role::Tool => MessageRole::User,
+            horsie_models::agent::Role::Assistant => MessageRole::Assistant,
+            horsie_models::agent::Role::User | horsie_models::agent::Role::Tool => {
+                MessageRole::User
+            }
         }
     }
 
-    fn parts_to_api_content(parts: &[ContentPart]) -> async_anthropic::types::MessageContentList {
-        use async_anthropic::types::MessageContentList;
+    fn parts_to_api_content(parts: &[ContentPart]) -> async_llm::types::MessageContentList {
+        use async_llm::types::MessageContentList;
         let items: Vec<MessageContent> = parts
             .iter()
             .map(|p| match p {
@@ -234,7 +236,7 @@ impl AnthropicProvider {
         MessageContentList(items)
     }
 
-    fn mark_last_message_cacheable(messages: &mut [async_anthropic::types::Message]) {
+    fn mark_last_message_cacheable(messages: &mut [async_llm::types::Message]) {
         let Some(last) = messages.last_mut() else {
             return;
         };
@@ -273,7 +275,7 @@ impl LlmProvider for AnthropicProvider {
         events: &dyn EventSink,
     ) -> Result<CompletionResponse, LlmError> {
         // 1. Convert messages
-        let mut api_messages: Vec<async_anthropic::types::Message> = request
+        let mut api_messages: Vec<async_llm::types::Message> = request
             .messages
             .iter()
             .map(|m| {
@@ -320,10 +322,10 @@ impl LlmProvider for AnthropicProvider {
             match &request.tool_choice {
                 ToolChoice::Auto => {}
                 ToolChoice::Any => {
-                    builder.tool_choice(async_anthropic::types::ToolChoice::Any);
+                    builder.tool_choice(async_llm::types::ToolChoice::Any);
                 }
                 ToolChoice::Required(name) => {
-                    builder.tool_choice(async_anthropic::types::ToolChoice::Tool(name.clone()));
+                    builder.tool_choice(async_llm::types::ToolChoice::Tool(name.clone()));
                 }
             }
         }
@@ -580,7 +582,7 @@ mod tests {
     #[test]
     fn test_to_api_role_user() {
         assert!(matches!(
-            AnthropicProvider::to_api_role(&models::agent::Role::User),
+            AnthropicProvider::to_api_role(&horsie_models::agent::Role::User),
             MessageRole::User
         ));
     }
@@ -588,7 +590,7 @@ mod tests {
     #[test]
     fn test_to_api_role_assistant() {
         assert!(matches!(
-            AnthropicProvider::to_api_role(&models::agent::Role::Assistant),
+            AnthropicProvider::to_api_role(&horsie_models::agent::Role::Assistant),
             MessageRole::Assistant
         ));
     }
@@ -596,7 +598,7 @@ mod tests {
     #[test]
     fn test_to_api_role_tool_maps_to_user() {
         assert!(matches!(
-            AnthropicProvider::to_api_role(&models::agent::Role::Tool),
+            AnthropicProvider::to_api_role(&horsie_models::agent::Role::Tool),
             MessageRole::User
         ));
     }
@@ -613,11 +615,13 @@ mod tests {
 
     #[test]
     fn test_parts_to_api_content_tool_result() {
-        let parts = vec![ContentPart::ToolResult(models::agent::ToolResultPart {
-            tool_call_id: "tc1".into(),
-            output: "result".into(),
-            is_error: false,
-        })];
+        let parts = vec![ContentPart::ToolResult(
+            horsie_models::agent::ToolResultPart {
+                tool_call_id: "tc1".into(),
+                output: "result".into(),
+                is_error: false,
+            },
+        )];
         let list = AnthropicProvider::parts_to_api_content(&parts);
         assert_eq!(list.len(), 1);
         assert!(matches!(&list[0], MessageContent::ToolResult(tr) if tr.tool_use_id == "tc1"));

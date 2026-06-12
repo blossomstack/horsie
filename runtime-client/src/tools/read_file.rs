@@ -1,7 +1,7 @@
 use crate::client::{RuntimeCallError, RuntimeClient};
-use agentcore::{Tool, ToolCallError, ToolSpec};
 use async_trait::async_trait;
-use models::runtime::{ReadFileInput, ToolCall};
+use horsie_agentcore::{Tool, ToolCallError, ToolSpec};
+use horsie_models::runtime::{ReadFileInput, ToolCall};
 use serde_json::{Value, json};
 
 pub struct ReadFileTool {

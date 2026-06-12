@@ -1,14 +1,15 @@
 [package]
-name = "executor"
+name = "horsie-executor"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/blossomstack/horsie"
+description = "Job executor for horsie"
 version = "0.1.0"
 edition = "2024"
-publish = false # internal application crate, never published to crates.io
 
 [dependencies]
-models            = { path = "../models" }
-runtime-client    = { path = "../runtime-client" }
-executor-client   = { path = "../executor-client", default-features = false }
+horsie-models = { version = "0.1.0", path = "../models" }
+horsie-runtime-client = { version = "0.1.0", path = "../runtime-client" }
+horsie-executor-client = { version = "0.1.0", path = "../executor-client", default-features = false }
 tokio             = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util      = { workspace = true }
@@ -19,7 +20,7 @@ async-trait       = { workspace = true }
 tokio-util        = { workspace = true }
 
 [dev-dependencies]
-server   = { path = "../server" }
+horsie-server = { path = "../server" }
 tempfile = "3"
 
 [lints]

@@ -5,7 +5,7 @@
 //! are computed once in the actor's command handler and carried in events, never
 //! recomputed during the pure `apply_event` fold.
 
-use agentcore::ToolSpec;
+use horsie_agentcore::ToolSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

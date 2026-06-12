@@ -10,10 +10,12 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use models::runtime::{ScannedFile, WorkspaceScan};
-use models::workflow::WorkflowAgentDef;
-use runtime_client::{MockTransport, RuntimeClient};
-use workflow::{DefaultToolboxFactory, ToolboxFactory, compose_system_prompt, scan_workspace};
+use horsie_models::runtime::{ScannedFile, WorkspaceScan};
+use horsie_models::workflow::WorkflowAgentDef;
+use horsie_runtime_client::{MockTransport, RuntimeClient};
+use horsie_workflow::{
+    DefaultToolboxFactory, ToolboxFactory, compose_system_prompt, scan_workspace,
+};
 
 fn agent_def() -> WorkflowAgentDef {
     WorkflowAgentDef {

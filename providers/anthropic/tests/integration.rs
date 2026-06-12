@@ -5,14 +5,14 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use agentcore::{
+use async_trait::async_trait;
+use horsie_agentcore::{
     AgentEvent, CompletionRequest, ContentPart, EventSink, EventSinkError, LlmProvider, StopReason,
     ToolChoice, ToolSpec,
 };
-use anthropic::AnthropicProvider;
-use async_trait::async_trait;
-use mock_llm::MockLlmServer;
-use models::agent::{Message, Role, TextPart};
+use horsie_anthropic::AnthropicProvider;
+use horsie_mock_llm::MockLlmServer;
+use horsie_models::agent::{Message, Role, TextPart};
 use std::sync::{Arc, Mutex};
 
 struct CollectSink(Arc<Mutex<Vec<AgentEvent>>>);

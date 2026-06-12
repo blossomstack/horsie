@@ -1,7 +1,7 @@
 use crate::client::{RuntimeCallError, RuntimeClient};
-use agentcore::{Tool, ToolCallError, ToolSpec};
 use async_trait::async_trait;
-use models::runtime::{ToolCall, WriteFileInput};
+use horsie_agentcore::{Tool, ToolCallError, ToolSpec};
+use horsie_models::runtime::{ToolCall, WriteFileInput};
 use serde_json::{Value, json};
 
 pub struct WriteFileTool {

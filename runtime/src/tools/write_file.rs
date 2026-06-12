@@ -1,4 +1,4 @@
-use models::runtime::{ToolError, ToolOutput, ToolResult, WriteFileInput};
+use horsie_models::runtime::{ToolError, ToolOutput, ToolResult, WriteFileInput};
 use std::path::Path;
 
 pub async fn exec(working_dir: &Path, input: WriteFileInput) -> ToolResult {

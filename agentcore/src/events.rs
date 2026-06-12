@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use models::events::AgentEvent;
+use horsie_models::events::AgentEvent;
 use thiserror::Error;
 
 /// Error returned by [`EventSink::emit`] when handling an event fails in a way that

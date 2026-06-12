@@ -9,14 +9,14 @@
 )]
 
 use clap::{Parser, Subcommand};
-use cli::client;
-use cli::config::HorsieConfig;
-use cli::daemon;
-use cli::error::CliError;
-use cli::validate::validate;
-use models::capabilities::CapabilitySpec;
-use models::daemon::SubmitRequest;
-use models::workflow::WorkflowDefinition;
+use horsie::client;
+use horsie::config::HorsieConfig;
+use horsie::daemon;
+use horsie::error::CliError;
+use horsie::validate::validate;
+use horsie_models::capabilities::CapabilitySpec;
+use horsie_models::daemon::SubmitRequest;
+use horsie_models::workflow::WorkflowDefinition;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -286,19 +286,19 @@ fn build_submit(
 }
 
 /// Read and parse the `--hackamore-policy` file (the `{policy, params}` doc) into
-/// the strong [`models::daemon::HackamoreRunPolicy`] shipped in the submit message.
+/// the strong [`horsie_models::daemon::HackamoreRunPolicy`] shipped in the submit message.
 /// Parsing here rejects a malformed doc at the CLI, before it reaches the daemon
 /// (and the same type rides the wire, so the daemon does no re-parse). `None` →
 /// no hackamore provisioning.
 fn load_hackamore_policy(
     path: Option<&Path>,
-) -> Result<Option<models::daemon::HackamoreRunPolicy>, CliError> {
+) -> Result<Option<horsie_models::daemon::HackamoreRunPolicy>, CliError> {
     let Some(path) = path else {
         return Ok(None);
     };
     let text = std::fs::read_to_string(path)
         .map_err(|e| CliError::Io(format!("read hackamore policy {}: {e}", path.display())))?;
-    let policy: models::daemon::HackamoreRunPolicy = serde_json::from_str(&text)
+    let policy: horsie_models::daemon::HackamoreRunPolicy = serde_json::from_str(&text)
         .map_err(|e| CliError::Config(format!("invalid hackamore policy: {e}")))?;
     Ok(Some(policy))
 }
@@ -324,8 +324,8 @@ fn humanize(ms: u64) -> String {
 }
 
 /// Label for the single `Active` agent row, derived from the overall job status.
-fn active_label(status: &models::daemon::JobStatus) -> &'static str {
-    use models::daemon::JobStatus;
+fn active_label(status: &horsie_models::daemon::JobStatus) -> &'static str {
+    use horsie_models::daemon::JobStatus;
     match status {
         JobStatus::Running => "working",
         JobStatus::AwaitingUserInput => "awaiting input",
@@ -337,8 +337,8 @@ fn active_label(status: &models::daemon::JobStatus) -> &'static str {
 }
 
 /// Render a job's workflow progress as a header line plus one line per agent.
-fn print_job_status(p: &models::daemon::JobProgress) {
-    use models::daemon::AgentPhase;
+fn print_job_status(p: &horsie_models::daemon::JobProgress) {
+    use horsie_models::daemon::AgentPhase;
     let now = now_ms();
     let overall = p.finished_at.unwrap_or(now).saturating_sub(p.submitted_at);
     println!(
@@ -491,13 +491,13 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 config,
             } => {
                 let dir = resolve_plugins_dir(config.as_deref())?;
-                let installed = cli::plugins::install(&dir, &url, name, git_ref, force)?;
+                let installed = horsie::plugins::install(&dir, &url, name, git_ref, force)?;
                 println!("installed plugin '{installed}' into {}", dir.display());
                 Ok(0)
             }
             PluginAction::List { config } => {
                 let dir = resolve_plugins_dir(config.as_deref())?;
-                let plugins = cli::plugins::list(&dir);
+                let plugins = horsie::plugins::list(&dir);
                 if plugins.is_empty() {
                     println!("no plugins installed");
                 } else {
@@ -515,13 +515,13 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             }
             PluginAction::Update { name, config } => {
                 let dir = resolve_plugins_dir(config.as_deref())?;
-                cli::plugins::update(&dir, &name)?;
+                horsie::plugins::update(&dir, &name)?;
                 println!("updated plugin '{name}'");
                 Ok(0)
             }
             PluginAction::Remove { name, config } => {
                 let dir = resolve_plugins_dir(config.as_deref())?;
-                cli::plugins::remove(&dir, &name)?;
+                horsie::plugins::remove(&dir, &name)?;
                 println!("removed plugin '{name}'");
                 Ok(0)
             }

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use models::runtime::{PluginSkill, ToolCall, ToolOutput, ToolResult, WorkspaceScan};
+use horsie_models::runtime::{PluginSkill, ToolCall, ToolOutput, ToolResult, WorkspaceScan};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -71,7 +71,7 @@ impl MockTransport {
 
     pub fn err(reason: impl Into<String>) -> Self {
         Self {
-            result: ToolResult::Err(models::runtime::ToolError {
+            result: ToolResult::Err(horsie_models::runtime::ToolError {
                 reason: reason.into(),
             }),
             scan: empty_scan(),

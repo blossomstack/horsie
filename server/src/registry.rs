@@ -1,6 +1,6 @@
 use crate::error::ServerError;
 use async_trait::async_trait;
-use models::executor::{ExecutorCommand, ExecutorInboundMessage};
+use horsie_models::executor::{ExecutorCommand, ExecutorInboundMessage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -79,7 +79,7 @@ impl ExecutorRegistry {
 )]
 mod tests {
     use super::*;
-    use models::executor::QueryRuntimesCmd;
+    use horsie_models::executor::QueryRuntimesCmd;
     use tokio::sync::mpsc;
 
     struct MockSink {

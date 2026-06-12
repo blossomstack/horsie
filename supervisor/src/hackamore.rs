@@ -14,9 +14,9 @@
 //! the spawn — a job silently running without its credential proxy is the
 //! illegal state.
 
-use models::capabilities::{Access, CapabilitySpec, DirGrant, Grant};
-use models::daemon::HackamoreRunPolicy;
-use models::executor::EnvVar;
+use horsie_models::capabilities::{Access, CapabilitySpec, DirGrant, Grant};
+use horsie_models::daemon::HackamoreRunPolicy;
+use horsie_models::executor::EnvVar;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -27,7 +27,7 @@ pub const ENV_HACKAMORE_URL: &str = "HACKAMORE_URL";
 
 /// Default TTL for minted hackamore tokens when a policy omits `params.ttlSeconds`:
 /// one hour. The per-run `HackamoreRunPolicy`/`HackamorePolicyParams` are the generated
-/// `models::daemon` wire types; horsie applies this default when the optional
+/// `horsie_models::daemon` wire types; horsie applies this default when the optional
 /// `ttlSeconds` is absent.
 const DEFAULT_TTL_SECONDS: u64 = 3600;
 
@@ -191,8 +191,8 @@ mod tests {
     use axum::Json;
     use axum::extract::State;
     use axum::routing::post;
-    use models::capabilities::{BlockNetwork, NetworkPolicy};
-    use models::daemon::HackamorePolicyParams;
+    use horsie_models::capabilities::{BlockNetwork, NetworkPolicy};
+    use horsie_models::daemon::HackamorePolicyParams;
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
 

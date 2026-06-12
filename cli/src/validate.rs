@@ -1,5 +1,5 @@
 use crate::config::HorsieConfig;
-use models::workflow::WorkflowDefinition;
+use horsie_models::workflow::WorkflowDefinition;
 use std::collections::HashSet;
 
 /// Structural + semantic checks. Returns ALL errors (empty = valid):
@@ -63,7 +63,7 @@ pub fn validate(def: &WorkflowDefinition, cfg: &HorsieConfig) -> Vec<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use models::workflow::{WorkflowAgentDef, WorkflowTransition};
+    use horsie_models::workflow::{WorkflowAgentDef, WorkflowTransition};
     use serde_json::json;
 
     fn cfg() -> HorsieConfig {

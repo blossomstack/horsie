@@ -1,5 +1,5 @@
-use models::runtime::{PluginSkill, ScannedFile, WorkspaceScan};
-use runtime_client::RuntimeClient;
+use horsie_models::runtime::{PluginSkill, ScannedFile, WorkspaceScan};
+use horsie_runtime_client::RuntimeClient;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

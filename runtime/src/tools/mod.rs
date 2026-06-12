@@ -8,7 +8,7 @@ pub mod replace_lines;
 pub mod write_file;
 
 use crate::workspace::WorkspaceRegistry;
-use models::runtime::{ToolCall, ToolError, ToolResult};
+use horsie_models::runtime::{ToolCall, ToolError, ToolResult};
 
 /// Per-stream output budget. Tool output rides along in the agent's conversation
 /// history and is re-sent to the model on every turn, so an unbounded `cat`, build
@@ -96,8 +96,8 @@ fn truncate_stream(s: String) -> String {
 )]
 mod tests {
     use super::*;
-    use models::Workspace;
-    use models::runtime::BashInput;
+    use horsie_models::Workspace;
+    use horsie_models::runtime::BashInput;
     use tempfile::TempDir;
 
     #[test]

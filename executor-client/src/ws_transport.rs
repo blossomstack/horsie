@@ -2,12 +2,12 @@ use crate::client::ClientError;
 use crate::transport::ExecutorTransport;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use models::executor::{
+use horsie_models::executor::{
     CancelToolCallCmd, ExecutorCommand, ExecutorEvent, ExecutorInboundMessage,
     ExecutorOutboundMessage, ToolCallCmd,
 };
-use models::runtime::{PluginSkill, ToolCall, ToolCallRequest, ToolResult, WorkspaceScan};
-use runtime_client::{RuntimeTransport, TransportError};
+use horsie_models::runtime::{PluginSkill, ToolCall, ToolCallRequest, ToolResult, WorkspaceScan};
+use horsie_runtime_client::{RuntimeTransport, TransportError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -163,7 +163,7 @@ impl RuntimeTransport for RelayRuntimeTransport {
     ) -> Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), TransportError> {
         // The executor relay protocol (ExecutorCommand/ExecutorEvent) has no scan
         // command yet, so workspace context is not available in distributed/server
-        // mode. The error is caught by `workflow::workspace::scan`, which degrades to
+        // mode. The error is caught by `horsie_workflow::workspace::scan`, which degrades to
         // an empty context — agents still run, just without AGENTS.md/skills. Wiring
         // a ScanWorkspace command through the executor protocol is a follow-up.
         Err(TransportError::SendFailed(

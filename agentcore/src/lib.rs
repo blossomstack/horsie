@@ -10,12 +10,12 @@ pub use events::{EventSink, EventSinkError};
 pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, StopReason, ToolChoice};
 pub use tool::{EmptyToolbox, Tool, ToolSpec, Toolbox, ToolboxImpl};
 
-pub use models::agent::{
+pub use horsie_models::agent::{
     AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, HandoffOutput, Message,
     Role, TextPart, ThinkingPart, ToolCallPart, ToolResultInput, ToolResultPart, Usage,
     UserMessageInput,
 };
-pub use models::events::{
+pub use horsie_models::events::{
     AgentEvent, ContentBlockStopEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent,
     MessageStopEvent, RunCompleteEvent, TextBlockStartEvent, TextChunkEvent,
     ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingSignatureChunkEvent,

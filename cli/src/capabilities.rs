@@ -8,7 +8,7 @@
 //! per-OS JSON so they are reviewable and fully replaceable via `--capabilities`.
 
 use crate::error::CliError;
-use models::capabilities::{Access, CapabilitySpec, DirGrant, FileGrant, Grant};
+use horsie_models::capabilities::{Access, CapabilitySpec, DirGrant, FileGrant, Grant};
 use std::path::{Path, PathBuf};
 
 /// Append read-only `Dir` grants for the shared plugin library and the hook
@@ -146,7 +146,7 @@ pub fn builtin_default() -> Result<CapabilitySpec, CliError> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use models::capabilities::{
+    use horsie_models::capabilities::{
         Access, AllowNetwork, BlockNetwork, Grant, NetworkPolicy, WorkingDirGrant,
     };
 

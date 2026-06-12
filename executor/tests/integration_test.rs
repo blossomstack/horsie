@@ -9,9 +9,9 @@
 )]
 
 use async_trait::async_trait;
-use executor::{Executor, HealthStatus, RuntimeError, RuntimeHandle, RuntimeProvider};
-use models::executor::{ExecutorEvent, RuntimeConfig, RuntimeState, WorkspaceConfig};
-use server::{ExecutorEventHandler, Server};
+use horsie_executor::{Executor, HealthStatus, RuntimeError, RuntimeHandle, RuntimeProvider};
+use horsie_models::executor::{ExecutorEvent, RuntimeConfig, RuntimeState, WorkspaceConfig};
+use horsie_server::{ExecutorEventHandler, Server};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;

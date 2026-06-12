@@ -1,7 +1,7 @@
 //! Real-sandbox end-to-end test: drive the production `ProcessJobRuntime` through
 //! the `SupervisorActor`, spawning a genuine nono-sandboxed `horsie-runtime`
 //! child, with `mock-llm` behind the provider. This is the coverage that the old
-//! `cli::run`-based `cli_e2e.rs` provided before the daemon refactor — it proves
+//! `horsie::run`-based `cli_e2e.rs` provided before the daemon refactor — it proves
 //! the executor/runtime/capability assembly actually works, which the supervisor's
 //! `TestRuntime`-based tests deliberately bypass.
 //!
@@ -11,21 +11,23 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use actor::{ActorRef, FileJournal, Journal, spawn_root};
-use cli::capabilities::{builtin_default, resolve_user_paths};
-use cli::config::{HorsieConfig, build_registry};
-use mock_llm::MockLlmServer;
-use models::daemon::{JobStatus, JobSummary};
-use models::workflow::{WorkflowAgentDef, WorkflowDefinition};
+use horsie::capabilities::{builtin_default, resolve_user_paths};
+use horsie::config::{HorsieConfig, build_registry};
+use horsie_actor::{ActorRef, FileJournal, Journal, spawn_root};
+use horsie_mock_llm::MockLlmServer;
+use horsie_models::daemon::{JobStatus, JobSummary};
+use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition};
+use horsie_supervisor::{
+    JobSpec, ProcessJobRuntime, SupervisorActor, SupervisorCommand, SupervisorDeps,
+};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use supervisor::{JobSpec, ProcessJobRuntime, SupervisorActor, SupervisorCommand, SupervisorDeps};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
-const CONCLUDE: &str = workflow::CONCLUDE_TOOL;
+const CONCLUDE: &str = horsie_workflow::CONCLUDE_TOOL;
 
 // ── sandbox probe harness (ported from the former cli_e2e.rs) ────────────────
 
@@ -171,7 +173,7 @@ fn job_spec(def: WorkflowDefinition, workdir: &Path) -> JobSpec {
         hackamore_policy: None,
         workflow: def,
         workflow_name: "wf".into(),
-        workspaces: vec![models::Workspace {
+        workspaces: vec![horsie_models::Workspace {
             name: "ws".into(),
             path: workdir.to_path_buf(),
         }],
@@ -192,7 +194,7 @@ fn job_spec_multi(def: WorkflowDefinition, workspaces: &[(&str, &Path)]) -> JobS
         workflow_name: "wf".into(),
         workspaces: workspaces
             .iter()
-            .map(|(n, p)| models::Workspace {
+            .map(|(n, p)| horsie_models::Workspace {
                 name: (*n).into(),
                 path: p.to_path_buf(),
             })
@@ -331,7 +333,7 @@ async fn sandboxed_agent_loads_workspace_skill() {
 
     // Replay the durable journal: the tool results the agent saw must carry the
     // scanned skill — its listing (name + description) and its loaded body.
-    let frames = supervisor::render_history(&journal, &id).await;
+    let frames = horsie_supervisor::render_history(&journal, &id).await;
     let text: String = frames.into_iter().map(|f| f.text).collect();
     assert!(
         text.contains("doc-helper") && text.contains("Summarize project docs"),
@@ -406,7 +408,7 @@ async fn sandboxed_agent_across_two_workspaces() {
 
     // Journal: inspect surfaced both workspaces and their skills; the skill call loaded
     // beta's body specifically (not alpha's).
-    let frames = supervisor::render_history(&journal, &id).await;
+    let frames = horsie_supervisor::render_history(&journal, &id).await;
     let text: String = frames.into_iter().map(|f| f.text).collect();
     assert!(
         text.contains("## alpha") && text.contains("## beta"),

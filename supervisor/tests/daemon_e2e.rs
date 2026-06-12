@@ -12,26 +12,28 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use actor::{ActorRef, FileJournal, Journal, spawn_root};
-use agentcore::{AgentEvent, EventSink, EventSinkError, LlmProvider};
-use anthropic::AnthropicProvider;
 use async_trait::async_trait;
-use mock_llm::MockLlmServer;
-use models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
-use models::daemon::JobStatus;
-use models::runtime::{ToolCall, ToolResult, WorkspaceScan};
-use models::workflow::{WorkflowAgentDef, WorkflowDefinition};
-use runtime_client::{RuntimeClient, RuntimeTransport, TransportError};
+use horsie_actor::{ActorRef, FileJournal, Journal, spawn_root};
+use horsie_agentcore::{AgentEvent, EventSink, EventSinkError, LlmProvider};
+use horsie_anthropic::AnthropicProvider;
+use horsie_mock_llm::MockLlmServer;
+use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
+use horsie_models::daemon::JobStatus;
+use horsie_models::runtime::{ToolCall, ToolResult, WorkspaceScan};
+use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition};
+use horsie_runtime_client::{RuntimeClient, RuntimeTransport, TransportError};
+use horsie_supervisor::{
+    JobRuntime, JobShutdown, JobSpec, Kickoff, LaunchParams, LaunchedJob, SupervisorActor,
+    SupervisorCommand,
+};
+use horsie_workflow::{
+    DefaultToolboxFactory, WorkflowActor, WorkflowCommand, WorkflowRuntimeContext,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use supervisor::{
-    JobRuntime, JobShutdown, JobSpec, Kickoff, LaunchParams, LaunchedJob, SupervisorActor,
-    SupervisorCommand,
-};
 use tokio::sync::oneshot;
-use workflow::{DefaultToolboxFactory, WorkflowActor, WorkflowCommand, WorkflowRuntimeContext};
 
 // ── test doubles ────────────────────────────────────────────────────────────
 
@@ -53,7 +55,8 @@ impl RuntimeTransport for NoopTransport {
         _instruction_candidates: Vec<String>,
         _skills_glob: String,
         _include_shared: bool,
-    ) -> Result<(Vec<WorkspaceScan>, Vec<models::runtime::PluginSkill>), TransportError> {
+    ) -> Result<(Vec<WorkspaceScan>, Vec<horsie_models::runtime::PluginSkill>), TransportError>
+    {
         Ok((Vec::new(), Vec::new()))
     }
 
@@ -200,7 +203,7 @@ fn spec(def: WorkflowDefinition) -> JobSpec {
         hackamore_policy: None,
         workflow: def,
         workflow_name: "wf".into(),
-        workspaces: vec![models::Workspace {
+        workspaces: vec![horsie_models::Workspace {
             name: "tmp".into(),
             path: PathBuf::from("/tmp"),
         }],
@@ -225,7 +228,7 @@ async fn submit(sup: &ActorRef<SupervisorCommand>, job_spec: JobSpec) -> String 
     rx.await.unwrap()
 }
 
-async fn list(sup: &ActorRef<SupervisorCommand>) -> Vec<models::daemon::JobSummary> {
+async fn list(sup: &ActorRef<SupervisorCommand>) -> Vec<horsie_models::daemon::JobSummary> {
     let (tx, rx) = oneshot::channel();
     sup.tell(SupervisorCommand::List { reply: tx })
         .await
@@ -233,7 +236,10 @@ async fn list(sup: &ActorRef<SupervisorCommand>) -> Vec<models::daemon::JobSumma
     rx.await.unwrap()
 }
 
-async fn get_job(sup: &ActorRef<SupervisorCommand>, job_id: &str) -> Option<supervisor::JobRecord> {
+async fn get_job(
+    sup: &ActorRef<SupervisorCommand>,
+    job_id: &str,
+) -> Option<horsie_supervisor::JobRecord> {
     let (tx, rx) = oneshot::channel();
     sup.tell(SupervisorCommand::GetJob {
         job_id: job_id.into(),
@@ -454,7 +460,7 @@ async fn render_history_replays_finished_job_from_journal() {
 
     // History is replayed purely from durable journals — no live broadcaster — so
     // it works for a job whose actor has already stopped.
-    let frames = supervisor::render_history(&journal, &id).await;
+    let frames = horsie_supervisor::render_history(&journal, &id).await;
     let text: String = frames.into_iter().map(|f| f.text).collect();
     assert!(
         text.contains("workflow started"),
@@ -481,15 +487,15 @@ async fn get_job_then_fold_progress_reports_finished_agent() {
     // The daemon's `job status` path: fetch the record, replay the workflow
     // journal, fold into progress.
     let rec = get_job(&sup, &id).await.expect("job record present");
-    let events = supervisor::workflow_events(&journal, &id).await;
+    let events = horsie_supervisor::workflow_events(&journal, &id).await;
     let progress =
-        supervisor::fold_progress(&events, &rec.spec.workflow, rec.status, rec.submitted_at);
+        horsie_supervisor::fold_progress(&events, &rec.spec.workflow, rec.status, rec.submitted_at);
 
     assert_eq!(progress.agents.len(), 1, "one agent ran");
     assert_eq!(progress.agents[0].name, "solo");
     assert!(matches!(
         progress.agents[0].phase,
-        models::daemon::AgentPhase::Done
+        horsie_models::daemon::AgentPhase::Done
     ));
     assert!(
         progress.finished_at.is_some(),

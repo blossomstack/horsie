@@ -1,5 +1,5 @@
 use crate::{error::RuntimeError, provider::RuntimeHandle};
-use models::executor::{RuntimeConfig, RuntimeInfo, RuntimeState};
+use horsie_models::executor::{RuntimeConfig, RuntimeInfo, RuntimeState};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -194,7 +194,7 @@ mod tests {
             plugins_dir: None,
             hook_path: vec![],
             env: vec![],
-            workspaces: vec![models::executor::WorkspaceConfig {
+            workspaces: vec![horsie_models::executor::WorkspaceConfig {
                 name: "tmp".to_string(),
                 path: "/tmp".to_string(),
             }],

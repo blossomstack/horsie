@@ -1,4 +1,4 @@
-use models::Workspace;
+use horsie_models::Workspace;
 use std::path::{Path, PathBuf};
 
 /// Reserved workspace name for the shared plugin library. Read-only; resolves to the

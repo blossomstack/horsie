@@ -1,12 +1,12 @@
 [package]
-name = "server"
+name = "horsie-server"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2024"
 publish = false # internal application crate, never published to crates.io
 
 [dependencies]
-models            = { path = "../models" }
+horsie-models = { path = "../models" }
 tokio             = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util      = { workspace = true }

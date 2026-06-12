@@ -4,14 +4,16 @@
 //! the live character stream. Works on any job, including finished ones whose live
 //! broadcaster is gone.
 
-use actor::{EventSourcedActor, Journal, PersistenceId};
-use agentcore::{ContentPart, Message, Role};
 use futures_util::StreamExt;
-use models::daemon::JobEventFrame;
+use horsie_actor::{EventSourcedActor, Journal, PersistenceId};
+use horsie_agentcore::{ContentPart, Message, Role};
+use horsie_models::daemon::JobEventFrame;
+use horsie_workflow::{
+    AgentActor, AgentDomainEvent, AgentState, WorkflowActor, WorkflowDomainEvent,
+};
 use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
-use workflow::{AgentActor, AgentDomainEvent, AgentState, WorkflowActor, WorkflowDomainEvent};
 
 /// Cap on a rendered tool-result body so a huge output can't flood the log.
 const MAX_OUTPUT_CHARS: usize = 500;

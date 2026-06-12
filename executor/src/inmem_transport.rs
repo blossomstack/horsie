@@ -3,11 +3,11 @@ use crate::executor::create_core;
 use crate::provider::RuntimeProvider;
 use crate::registry::RuntimeRegistry;
 use async_trait::async_trait;
-use executor_client::{ClientError, ExecutorTransport};
-use models::executor::{
+use horsie_executor_client::{ClientError, ExecutorTransport};
+use horsie_models::executor::{
     CommandFailedEvent, ExecutorCommand, ExecutorEvent, RuntimeState, RuntimeStateChangedEvent,
 };
-use runtime_client::RuntimeTransport;
+use horsie_runtime_client::RuntimeTransport;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 

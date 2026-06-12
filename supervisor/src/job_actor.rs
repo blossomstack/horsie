@@ -1,26 +1,28 @@
 use crate::spec::{JobId, JobSpec, SupervisorDeps};
 use crate::supervisor_actor::SupervisorCommand;
-use actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, spawn_root};
-use agentcore::{AgentEvent, EventSink, EventSinkError};
 use async_trait::async_trait;
-use executor::{
+use horsie_actor::{
+    ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, spawn_root,
+};
+use horsie_agentcore::{AgentEvent, EventSink, EventSinkError};
+use horsie_executor::{
     ConnectedRuntimeRegistry, InMemExecutorTransport, ProcessRuntimeProvider, RuntimeEndpoint,
     RuntimeListenerServer, SandboxPolicy, serve_runtime_connections,
 };
-use executor_client::ExecutorClient;
-use models::daemon::{JobEventFrame, JobStatus};
-use models::executor::RuntimeConfig;
-use runtime_client::RuntimeClient;
+use horsie_executor_client::ExecutorClient;
+use horsie_models::daemon::{JobEventFrame, JobStatus};
+use horsie_models::executor::RuntimeConfig;
+use horsie_runtime_client::RuntimeClient;
+use horsie_workflow::{
+    DefaultToolboxFactory, WorkflowActor, WorkflowCommand, WorkflowNotification,
+    WorkflowRuntimeContext,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use workflow::{
-    DefaultToolboxFactory, WorkflowActor, WorkflowCommand, WorkflowNotification,
-    WorkflowRuntimeContext,
-};
 
 /// Capacity of a job's live log broadcast. Slow subscribers see `lagged` drops.
 const LOG_BROADCAST_CAPACITY: usize = 256;
@@ -165,7 +167,7 @@ impl JobRuntime for ProcessJobRuntime {
                     workspaces: spec
                         .workspaces
                         .iter()
-                        .map(|w| models::executor::WorkspaceConfig {
+                        .map(|w| horsie_models::executor::WorkspaceConfig {
                             name: w.name.clone(),
                             path: w.path.to_string_lossy().into_owned(),
                         })
@@ -616,11 +618,11 @@ mod tests {
 
     #[test]
     fn render_event_filters_non_log_events() {
-        use models::events::MessageStartEvent;
+        use horsie_models::events::MessageStartEvent;
         assert!(
             render_event(&AgentEvent::MessageStart(MessageStartEvent {
                 message_id: "m".into(),
-                role: models::agent::Role::Assistant,
+                role: horsie_models::agent::Role::Assistant,
             }))
             .is_none()
         );

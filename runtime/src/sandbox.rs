@@ -2,14 +2,14 @@
 //! macOS). Behind the crate's `sandbox` feature.
 //!
 //! The capability set is declarative: the runtime loads a [`CapabilitySpec`]
-//! (`models::capabilities`) from the `--sandbox-caps` file and translates it into a
+//! (`horsie_models::capabilities`) from the `--sandbox-caps` file and translates it into a
 //! `nono::CapabilitySet`. The spec is the single source of truth — the caller (the
 //! CLI) resolves custom-or-default and writes the concrete file, so the runtime
 //! carries no hidden fallback. This module owns only the spec → nono translation.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
-use models::capabilities::{Access, CapabilitySpec, Grant, NetworkPolicy};
+use horsie_models::capabilities::{Access, CapabilitySpec, Grant, NetworkPolicy};
 use nono::{CapabilitySet, UnixSocketMode};
 use std::path::Path;
 
@@ -138,7 +138,7 @@ fn access_mode(access: &Access) -> nono::AccessMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use models::capabilities::{AllowNetwork, BlockNetwork, ProxyOnlyNetwork};
+    use horsie_models::capabilities::{AllowNetwork, BlockNetwork, ProxyOnlyNetwork};
     use nono::NetworkMode;
 
     fn spec(network: NetworkPolicy) -> CapabilitySpec {

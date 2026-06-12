@@ -1,13 +1,14 @@
 [package]
-name = "executor-client"
+name = "horsie-executor-client"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-publish = false
+repository = "https://github.com/blossomstack/horsie"
+description = "Client for the horsie executor"
 
 [dependencies]
-models            = { path = "../models" }
-runtime-client    = { path = "../runtime-client" }
+horsie-models = { version = "0.1.0", path = "../models" }
+horsie-runtime-client = { version = "0.1.0", path = "../runtime-client" }
 async-trait       = { workspace = true }
 thiserror         = { workspace = true }
 tokio             = { workspace = true }

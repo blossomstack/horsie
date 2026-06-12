@@ -3,37 +3,6 @@
 version = 4
 
 [[package]]
-name = "actor"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "futures-util",
- "parking_lot",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "agentcore"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures-util",
- "jsonschema",
- "models",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,22 +91,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anthropic"
-version = "0.1.0"
-dependencies = [
- "agentcore",
- "async-anthropic",
- "async-trait",
- "mock-llm",
- "models",
- "reqwest 0.12.28",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
 name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,9 +160,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-anthropic"
-version = "0.6.0"
-source = "git+https://github.com/zhxiaogg/async-anthropic.git?rev=64754b2#64754b2e9c046ba08b15059ae2f5321983b1ed46"
+name = "async-llm"
+version = "0.7.0"
+source = "git+https://github.com/zhxiaogg/async-anthropic.git?rev=89217381f63dc66ff437415da3227032130e9714#89217381f63dc66ff437415da3227032130e9714"
 dependencies = [
  "backoff",
  "derive_builder",
@@ -541,33 +494,6 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
-name = "cli"
-version = "0.1.0"
-dependencies = [
- "actor",
- "agentcore",
- "anthropic",
- "async-trait",
- "clap",
- "eval",
- "executor",
- "executor-client",
- "mock-llm",
- "models",
- "runtime-client",
- "serde",
- "serde_json",
- "supervisor",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "workflow",
-]
 
 [[package]]
 name = "cmake"
@@ -980,40 +906,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "executor"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "executor-client",
- "futures-util",
- "models",
- "runtime-client",
- "serde_json",
- "server",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "executor-client"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures-util",
- "models",
- "runtime-client",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "uuid",
-]
-
-[[package]]
 name = "fancy-regex"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1382,6 +1274,236 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "horsie"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "eval",
+ "horsie-actor",
+ "horsie-agentcore",
+ "horsie-anthropic",
+ "horsie-executor",
+ "horsie-executor-client",
+ "horsie-mock-llm",
+ "horsie-models",
+ "horsie-runtime-client",
+ "horsie-supervisor",
+ "horsie-workflow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "horsie-actor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "futures-util",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "horsie-agentcore"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "horsie-models",
+ "jsonschema",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "horsie-anthropic"
+version = "0.1.0"
+dependencies = [
+ "async-llm",
+ "async-trait",
+ "horsie-agentcore",
+ "horsie-mock-llm",
+ "horsie-models",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "horsie-executor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "horsie-executor-client",
+ "horsie-models",
+ "horsie-runtime-client",
+ "horsie-server",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "horsie-executor-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "horsie-models",
+ "horsie-runtime-client",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "horsie-mock-llm"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "horsie-models"
+version = "0.1.0"
+dependencies = [
+ "derive-new 0.5.9",
+ "fluorite",
+ "fluorite_codegen",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "horsie-runtime"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "futures-util",
+ "glob",
+ "hackamore-agent",
+ "horsie-models",
+ "nono",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
+name = "horsie-runtime-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "horsie-agentcore",
+ "horsie-models",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "horsie-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "horsie-models",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "horsie-supervisor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures-util",
+ "horsie-actor",
+ "horsie-agentcore",
+ "horsie-anthropic",
+ "horsie-executor",
+ "horsie-executor-client",
+ "horsie-mock-llm",
+ "horsie-models",
+ "horsie-runtime-client",
+ "horsie-workflow",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "horsie-workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eval",
+ "futures-util",
+ "horsie-actor",
+ "horsie-agentcore",
+ "horsie-anthropic",
+ "horsie-mock-llm",
+ "horsie-models",
+ "horsie-runtime-client",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "http"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1704,10 +1826,10 @@ dependencies = [
 name = "integration-tests"
 version = "0.1.0"
 dependencies = [
- "agentcore",
- "anthropic",
  "async-trait",
- "mock-llm",
+ "horsie-agentcore",
+ "horsie-anthropic",
+ "horsie-mock-llm",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -1985,32 +2107,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mock-llm"
-version = "0.1.0"
-dependencies = [
- "axum",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "models"
-version = "0.1.0"
-dependencies = [
- "derive-new 0.5.9",
- "fluorite",
- "fluorite_codegen",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -2742,39 +2838,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtime"
-version = "0.1.0"
-dependencies = [
- "clap",
- "futures-util",
- "glob",
- "hackamore-agent",
- "models",
- "nono",
- "regex",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tracing",
-]
-
-[[package]]
-name = "runtime-client"
-version = "0.1.0"
-dependencies = [
- "agentcore",
- "async-trait",
- "futures-util",
- "models",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "uuid",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3087,20 +3150,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "server"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures-util",
- "models",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "uuid",
-]
-
-[[package]]
 name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3409,33 +3458,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "supervisor"
-version = "0.1.0"
-dependencies = [
- "actor",
- "agentcore",
- "anthropic",
- "async-trait",
- "axum",
- "executor",
- "executor-client",
- "futures-util",
- "mock-llm",
- "models",
- "reqwest 0.12.28",
- "runtime-client",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "workflow",
-]
 
 [[package]]
 name = "syn"
@@ -4526,28 +4548,6 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
-]
-
-[[package]]
-name = "workflow"
-version = "0.1.0"
-dependencies = [
- "actor",
- "agentcore",
- "anthropic",
- "async-trait",
- "eval",
- "futures-util",
- "mock-llm",
- "models",
- "runtime-client",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
 ]
 
 [[package]]

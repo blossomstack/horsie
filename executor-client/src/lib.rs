@@ -2,7 +2,7 @@
 //!
 //! Split out from `server` so callers (the CLI, the executor itself) can drive
 //! runtime lifecycle without depending on the WS `Server`. Tool calls do *not* go
-//! through this client — they use a [`RuntimeClient`](runtime_client::RuntimeClient)
+//! through this client — they use a [`RuntimeClient`](horsie_runtime_client::RuntimeClient)
 //! obtained from [`ExecutorClient::runtime_transport`].
 
 mod client;

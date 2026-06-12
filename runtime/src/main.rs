@@ -10,7 +10,7 @@
 
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
-use models::runtime::{
+use horsie_models::runtime::{
     RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse,
     SessionStartResponse, ToolCallResponse, ToolError, ToolResult,
 };
@@ -30,7 +30,7 @@ struct Cli {
     runtime_id: String,
     /// Repeatable `name=path` workspace root. At least one is required.
     #[arg(long = "workspace", required = true, value_parser = parse_workspace_arg)]
-    workspaces: Vec<models::Workspace>,
+    workspaces: Vec<horsie_models::Workspace>,
     /// Capability file confining tool execution with the nono sandbox before
     /// connecting (fail-closed). Its presence enables the sandbox; absent → no
     /// sandbox. The file fully defines the allowed capabilities.
@@ -46,8 +46,8 @@ struct Cli {
     hook_path: Vec<PathBuf>,
 }
 
-fn parse_workspace_arg(s: &str) -> Result<models::Workspace, String> {
-    runtime::workspace::WorkspaceRegistry::parse_arg(s)
+fn parse_workspace_arg(s: &str) -> Result<horsie_models::Workspace, String> {
+    horsie_runtime::workspace::WorkspaceRegistry::parse_arg(s)
 }
 
 enum Endpoint {
@@ -85,7 +85,7 @@ async fn main() {
                 Endpoint::Ws(_) => None,
             };
             let dirs: Vec<PathBuf> = cli.workspaces.iter().map(|w| w.path.clone()).collect();
-            if let Err(e) = runtime::sandbox::apply(&dirs, socket, caps_file) {
+            if let Err(e) = horsie_runtime::sandbox::apply(&dirs, socket, caps_file) {
                 eprintln!("sandbox apply failed: {e}");
                 std::process::exit(3);
             }
@@ -104,13 +104,13 @@ async fn main() {
     // provision fetch runs under the same confinement as the job) and before the
     // message loop. Fail closed: a daemon that injected hackamore env expects a
     // provisioned runtime, so any failure here must fail the job visibly.
-    if let Err(e) = runtime::provision::provision_from_env().await {
+    if let Err(e) = horsie_runtime::provision::provision_from_env().await {
         eprintln!("hackamore provisioning failed: {e}");
         std::process::exit(4);
     }
 
     let registry = Arc::new(
-        runtime::workspace::WorkspaceRegistry::new(cli.workspaces)
+        horsie_runtime::workspace::WorkspaceRegistry::new(cli.workspaces)
             .with_plugins(cli.plugins_dir, cli.hook_path),
     );
 
@@ -142,7 +142,7 @@ async fn main() {
 /// share one implementation. Announces `RuntimeReady`, then services tool calls.
 async fn run_loop<S>(
     ws: WebSocketStream<S>,
-    registry: Arc<runtime::workspace::WorkspaceRegistry>,
+    registry: Arc<horsie_runtime::workspace::WorkspaceRegistry>,
     runtime_id: String,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -183,7 +183,7 @@ async fn run_loop<S>(
                         let in_flight_clone = in_flight.clone();
 
                         let handle = tokio::spawn(async move {
-                            let result = runtime::tools::dispatch(&registry, req.call).await;
+                            let result = horsie_runtime::tools::dispatch(&registry, req.call).await;
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
                                     call_id: call_id.clone(),
@@ -214,9 +214,9 @@ async fn run_loop<S>(
 
                         let handle = tokio::spawn(async move {
                             let include_shared = req.include_shared;
-                            let workspaces = runtime::scan::exec(&registry, req);
+                            let workspaces = horsie_runtime::scan::exec(&registry, req);
                             let shared_skills =
-                                runtime::scan::shared_skills(&registry, include_shared);
+                                horsie_runtime::scan::shared_skills(&registry, include_shared);
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ScanResult(ScanResponse {
                                     call_id: call_id.clone(),
@@ -262,8 +262,11 @@ async fn run_loop<S>(
                         let handle = tokio::spawn(async move {
                             let context = match registry.plugins_dir() {
                                 Some(dir) => {
-                                    runtime::plugins::run_session_start(dir, registry.hook_path())
-                                        .await
+                                    horsie_runtime::plugins::run_session_start(
+                                        dir,
+                                        registry.hook_path(),
+                                    )
+                                    .await
                                 }
                                 None => String::new(),
                             };

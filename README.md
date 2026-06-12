@@ -12,9 +12,9 @@ auto-resumes anything still in flight after a restart.
 
 The CLI is two binaries:
 
-- **`horsie`** — the user-facing CLI and the daemon (the `cli` crate).
+- **`horsie`** — the user-facing CLI and the daemon (the `horsie` crate, in `cli/`).
 - **`horsie-runtime`** — the sandboxed child the daemon spawns once per job (the
-  `runtime` crate). It is the only process that talks to the model and touches the
+  `horsie-runtime` crate, in `runtime/`). It is the only process that talks to the model and touches the
   workdir, and it runs under a nono sandbox restricted to the capabilities you grant.
 
 A job carries a **workflow** (a graph of agents, e.g. `planner → coder → reviewer →
@@ -23,7 +23,7 @@ reach). The daemon streams agent events back over a unix socket, journals every 
 and lets you list, tail, cancel, resume, and remove jobs.
 
 Wire/protocol types are generated with [fluorite](https://github.com/zhxiaogg/fluorite)
-from the schemas under `fluorite/`; see `CLAUDE.md` for the design conventions.
+from the schemas under `models/fluorite/`; see `CLAUDE.md` for the design conventions.
 
 ## Build & install
 

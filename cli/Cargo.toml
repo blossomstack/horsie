@@ -1,24 +1,25 @@
 [package]
-name = "cli"
+name = "horsie"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-publish = false
+repository = "https://github.com/blossomstack/horsie"
+description = "Sandboxed orchestration for LLM agent graphs"
 
 [[bin]]
 name = "horsie"
 path = "src/main.rs"
 
 [dependencies]
-actor           = { path = "../actor", features = ["file-journal"] }
-agentcore       = { path = "../agentcore" }
-anthropic       = { path = "../providers/anthropic" }
-executor        = { path = "../executor" }
-executor-client = { path = "../executor-client", default-features = false }
-runtime-client  = { path = "../runtime-client" }
-workflow        = { path = "../workflow" }
-supervisor      = { path = "../supervisor" }
-models          = { path = "../models" }
+horsie-actor = { version = "0.1.0", path = "../actor", features = ["file-journal"] }
+horsie-agentcore = { version = "0.1.0", path = "../agentcore" }
+horsie-anthropic = { version = "0.1.0", path = "../providers/anthropic" }
+horsie-executor = { version = "0.1.0", path = "../executor" }
+horsie-executor-client = { version = "0.1.0", path = "../executor-client", default-features = false }
+horsie-runtime-client = { version = "0.1.0", path = "../runtime-client" }
+horsie-workflow = { version = "0.1.0", path = "../workflow" }
+horsie-supervisor = { version = "0.1.0", path = "../supervisor" }
+horsie-models = { version = "0.1.0", path = "../models" }
 clap            = { version = "4", features = ["derive"] }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
@@ -31,7 +32,7 @@ tracing         = { workspace = true }
 eval            = { workspace = true }
 
 [dev-dependencies]
-mock-llm = { path = "../providers/mock-llm" }
+horsie-mock-llm = { path = "../providers/mock-llm" }
 tempfile = "3"
 
 [lints]

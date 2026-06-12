@@ -1,7 +1,7 @@
-use actor::Journal;
-use agentcore::LlmProvider;
-use models::capabilities::CapabilitySpec;
-use models::workflow::WorkflowDefinition;
+use horsie_actor::Journal;
+use horsie_agentcore::LlmProvider;
+use horsie_models::capabilities::CapabilitySpec;
+use horsie_models::workflow::WorkflowDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ pub struct JobSpec {
     /// Display name for `job list` (usually the workflow file stem).
     pub workflow_name: String,
     /// The named workspace roots this job runs against (≥1). Names derived at submit.
-    pub workspaces: Vec<models::Workspace>,
+    pub workspaces: Vec<horsie_models::Workspace>,
     pub input: String,
     /// Already resolved (`~`/`$HOME` expanded) at submit time.
     pub capabilities: CapabilitySpec,
@@ -35,11 +35,11 @@ pub struct JobSpec {
     /// Per-run hackamore policy (the `--hackamore-policy` doc, parsed at submit). `Some`
     /// → the daemon mints a policy-bound proxy token for this job at spawn (fail
     /// closed); `None` → the job runs with no hackamore provisioning, exactly as a
-    /// job runs today. The generated `models::daemon` wire type is reused as the
+    /// job runs today. The generated `horsie_models::daemon` wire type is reused as the
     /// stored shape (like [`CapabilitySpec`]); the inner hackamore `policy` stays an
     /// opaque value horsie forwards verbatim.
     #[serde(default)]
-    pub hackamore_policy: Option<models::daemon::HackamoreRunPolicy>,
+    pub hackamore_policy: Option<horsie_models::daemon::HackamoreRunPolicy>,
 }
 
 /// Shared, process-wide dependencies the production [`crate::ProcessJobRuntime`]
@@ -57,7 +57,7 @@ pub struct SupervisorDeps {
     /// and agents so every actor recovers from one event store.
     pub journal: Arc<dyn Journal>,
     /// Hackamore server location (deployment-global): `Some` lets jobs that carry a
-    /// per-run `models::daemon::HackamoreRunPolicy` mint a policy-bound proxy token
+    /// per-run `horsie_models::daemon::HackamoreRunPolicy` mint a policy-bound proxy token
     /// at spawn (fail closed). `None`, or a job with no policy, spawns exactly as
     /// before. The minter holds only the admin/proxy URLs — the policy and TTL
     /// travel per-run on the [`JobSpec`].

@@ -11,13 +11,13 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use agentcore::{
+use async_trait::async_trait;
+use horsie_agentcore::{
     Agent, AgentError, AgentEvent, AgentInput, AgentResult, CompletedOutput, ContentPart,
     EventSink, EventSinkError, HandoffOutput, ToolCallError, ToolSpec, Toolbox,
 };
-use anthropic::AnthropicProvider;
-use async_trait::async_trait;
-use mock_llm::MockLlmServer;
+use horsie_anthropic::AnthropicProvider;
+use horsie_mock_llm::MockLlmServer;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -128,7 +128,7 @@ async fn test_simple_text_completion() {
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(agentcore::EmptyToolbox))
+    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
         .build()
         .unwrap();
     let sink = CollectSink::new();
@@ -149,7 +149,7 @@ async fn test_simple_text_completion() {
 async fn test_text_turn_event_sequence() {
     let mock = MockLlmServer::builder().response("done").build().await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(agentcore::EmptyToolbox))
+    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
         .build()
         .unwrap();
     let sink = CollectSink::new();
@@ -186,7 +186,7 @@ async fn test_text_chunks_message_id_and_content() {
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(agentcore::EmptyToolbox))
+    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
         .build()
         .unwrap();
     let sink = CollectSink::new();
@@ -382,7 +382,7 @@ async fn test_message_complete_contains_full_message() {
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(agentcore::EmptyToolbox))
+    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
         .build()
         .unwrap();
     let sink = CollectSink::new();
@@ -404,7 +404,7 @@ async fn test_message_complete_contains_full_message() {
         })
         .expect("MessageComplete");
 
-    assert_eq!(mc.message.role, agentcore::Role::Assistant);
+    assert_eq!(mc.message.role, horsie_agentcore::Role::Assistant);
     let text: String = mc
         .message
         .parts
@@ -503,7 +503,7 @@ async fn test_agent_handoff() {
 async fn test_exactly_one_run_complete() {
     let mock = MockLlmServer::builder().response("ok").build().await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(agentcore::EmptyToolbox))
+    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
         .build()
         .unwrap();
     let sink = CollectSink::new();
@@ -530,7 +530,7 @@ async fn test_agent_transparent_retry_on_overload() {
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(agentcore::EmptyToolbox))
+    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
         .build()
         .unwrap();
     let sink = CollectSink::new();

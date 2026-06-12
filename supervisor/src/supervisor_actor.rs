@@ -1,8 +1,8 @@
 use crate::job_actor::{JobActor, JobCommand, JobRuntime};
 use crate::spec::{JobId, JobSpec};
-use actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use async_trait::async_trait;
-use models::daemon::{JobEventFrame, JobStatus, JobSummary};
+use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
+use horsie_models::daemon::{JobEventFrame, JobStatus, JobSummary};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -317,8 +317,8 @@ impl EventSourcedActor for SupervisorActor {
 )]
 mod tests {
     use super::*;
-    use models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
-    use models::workflow::WorkflowDefinition;
+    use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
+    use horsie_models::workflow::WorkflowDefinition;
     use std::path::PathBuf;
 
     fn spec() -> JobSpec {
@@ -332,7 +332,7 @@ mod tests {
                 agents: vec![],
             },
             workflow_name: "wf".into(),
-            workspaces: vec![models::Workspace {
+            workspaces: vec![horsie_models::Workspace {
                 name: "tmp".into(),
                 path: PathBuf::from("/tmp"),
             }],

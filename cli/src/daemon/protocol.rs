@@ -45,7 +45,7 @@ where
 )]
 mod tests {
     use super::*;
-    use models::daemon::{DaemonResponse, SubmittedResponse};
+    use horsie_models::daemon::{DaemonResponse, SubmittedResponse};
 
     #[tokio::test]
     async fn frame_round_trips() {

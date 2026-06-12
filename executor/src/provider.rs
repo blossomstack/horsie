@@ -1,6 +1,6 @@
 use crate::error::RuntimeError;
 use async_trait::async_trait;
-use models::executor::RuntimeConfig;
+use horsie_models::executor::RuntimeConfig;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]

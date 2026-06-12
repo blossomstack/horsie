@@ -1,9 +1,9 @@
 use crate::transport::ExecutorTransport;
-use models::executor::{
+use horsie_models::executor::{
     CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand, ExecutorEvent, RuntimeConfig,
     RuntimeState,
 };
-use runtime_client::RuntimeTransport;
+use horsie_runtime_client::RuntimeTransport;
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;

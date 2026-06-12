@@ -1,5 +1,5 @@
 use crate::workspace::{WorkspaceRegistry, is_git_repo};
-use models::runtime::{PluginSkill, ScanRequest, ScannedFile, WorkspaceScan};
+use horsie_models::runtime::{PluginSkill, ScanRequest, ScannedFile, WorkspaceScan};
 
 /// Discover the shared plugin library's skills when `include_shared` is set and a
 /// `plugins_dir` is configured. Best-effort and convention-aware (see [`crate::plugins`]).
@@ -66,7 +66,7 @@ pub fn exec(registry: &WorkspaceRegistry, req: ScanRequest) -> Vec<WorkspaceScan
 )]
 mod tests {
     use super::*;
-    use models::Workspace;
+    use horsie_models::Workspace;
     use std::path::Path;
     use tempfile::TempDir;
 

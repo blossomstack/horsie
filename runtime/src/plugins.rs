@@ -6,7 +6,7 @@
 //! by default, or wherever its `.claude-plugin/plugin.json` `skills` field points
 //! (string or array of paths). Hooks are declared in `hooks/hooks.json`.
 
-use models::runtime::PluginSkill;
+use horsie_models::runtime::PluginSkill;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

@@ -1,7 +1,7 @@
 use crate::client::{RuntimeCallError, RuntimeClient};
-use agentcore::{Tool, ToolCallError, ToolSpec};
 use async_trait::async_trait;
-use models::runtime::{BashInput, ToolCall};
+use horsie_agentcore::{Tool, ToolCallError, ToolSpec};
+use horsie_models::runtime::{BashInput, ToolCall};
 use serde_json::{Value, json};
 
 pub struct BashTool {
@@ -62,7 +62,7 @@ impl Tool for BashTool {
 mod tests {
     use super::*;
     use crate::transport::MockTransport;
-    use models::runtime::ToolOutput;
+    use horsie_models::runtime::ToolOutput;
 
     #[tokio::test]
     async fn surfaces_stderr_on_success() {

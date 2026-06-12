@@ -1,4 +1,4 @@
-use runtime_client::RuntimeTransport;
+use horsie_runtime_client::RuntimeTransport;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, oneshot};
@@ -78,7 +78,7 @@ impl ConnectedRuntimeRegistry {
 )]
 mod tests {
     use super::*;
-    use runtime_client::MockTransport;
+    use horsie_runtime_client::MockTransport;
 
     #[tokio::test]
     async fn register_resolves_pending_waiter_and_stores_transport() {

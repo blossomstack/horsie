@@ -7,13 +7,13 @@ use crate::{
     socket_transport::SocketRuntimeTransport,
 };
 use futures_util::{SinkExt, StreamExt};
-use models::executor::{
+use horsie_models::executor::{
     CancelToolCallCmd, CommandFailedEvent, CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand,
     ExecutorEvent, ExecutorInboundMessage, ExecutorOutboundMessage, RegisteredEvent,
     RestartRuntimeCmd, RuntimeConfig, RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent,
     ToolCallCmd, ToolResultEvent,
 };
-use models::runtime::{RuntimeOutboundMessage, ToolError, ToolResult};
+use horsie_models::runtime::{RuntimeOutboundMessage, ToolError, ToolResult};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};

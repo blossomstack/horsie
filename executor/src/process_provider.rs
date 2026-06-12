@@ -5,7 +5,7 @@ use crate::{
     runtime_listener::RuntimeEndpoint,
 };
 use async_trait::async_trait;
-use models::executor::{EnvVar, RuntimeConfig};
+use horsie_models::executor::{EnvVar, RuntimeConfig};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{process::Child, sync::Mutex};
 

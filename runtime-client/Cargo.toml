@@ -1,13 +1,14 @@
 [package]
-name = "runtime-client"
+name = "horsie-runtime-client"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/blossomstack/horsie"
+description = "Client for the horsie runtime"
 version = "0.1.0"
 edition = "2024"
-publish = false # internal application crate, never published to crates.io
 
 [dependencies]
-models      = { path = "../models" }
-agentcore   = { path = "../agentcore" }
+horsie-models = { version = "0.1.0", path = "../models" }
+horsie-agentcore = { version = "0.1.0", path = "../agentcore" }
 async-trait = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }

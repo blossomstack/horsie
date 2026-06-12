@@ -6,9 +6,9 @@ edition = "2024"
 publish = false # internal application crate, never published to crates.io
 
 [dev-dependencies]
-agentcore   = { path = "../agentcore" }
-anthropic   = { path = "../providers/anthropic" }
-mock-llm    = { path = "../providers/mock-llm" }
+horsie-agentcore = { path = "../agentcore" }
+horsie-anthropic = { path = "../providers/anthropic" }
+horsie-mock-llm = { path = "../providers/mock-llm" }
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-util  = { workspace = true }
 async-trait = { workspace = true }

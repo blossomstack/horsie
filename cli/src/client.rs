@@ -4,7 +4,7 @@
 use crate::daemon::protocol::{read_frame, write_frame};
 use crate::daemon::socket_path;
 use crate::error::CliError;
-use models::daemon::{
+use horsie_models::daemon::{
     DaemonRequest, DaemonResponse, JobProgress, JobStatus, JobStatusRequest, JobSummary,
     ListRequest, LogsRequest, RemoveRequest, ResumeRequest, ShutdownRequest, StatusInfo,
     StatusRequest, StopRequest, SubmitRequest,

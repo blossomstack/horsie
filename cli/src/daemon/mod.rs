@@ -7,17 +7,19 @@ pub mod protocol;
 use crate::capabilities;
 use crate::config::{HorsieConfig, build_registry};
 use crate::error::CliError;
-use actor::{ActorRef, FileJournal, Journal, spawn_root};
-use models::capabilities::CapabilitySpec;
-use models::daemon::{
+use horsie_actor::{ActorRef, FileJournal, Journal, spawn_root};
+use horsie_models::capabilities::CapabilitySpec;
+use horsie_models::daemon::{
     AckResponse, DaemonRequest, DaemonResponse, EndResponse, ErrorResponse, JobListResponse,
     StatusInfo, SubmittedResponse,
+};
+use horsie_supervisor::{
+    JobSpec, ProcessJobRuntime, SupervisorActor, SupervisorCommand, SupervisorDeps,
 };
 use protocol::{read_frame, write_frame};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use supervisor::{JobSpec, ProcessJobRuntime, SupervisorActor, SupervisorCommand, SupervisorDeps};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, oneshot};
 
@@ -99,7 +101,7 @@ pub async fn serve(cfg: HorsieConfig) -> Result<(), CliError> {
     let hackamore = cfg
         .hackamore
         .as_ref()
-        .map(|h| supervisor::HackamoreMinter::new(h.admin_url.clone(), h.proxy_url.clone()));
+        .map(|h| horsie_supervisor::HackamoreMinter::new(h.admin_url.clone(), h.proxy_url.clone()));
     let deps = SupervisorDeps {
         provider_registry: registry,
         runtime_bin,
@@ -194,7 +196,7 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
             ));
             // Derive a unique name per workspace path (server-side, the single place).
             let paths: Vec<PathBuf> = s.workdirs.iter().map(PathBuf::from).collect();
-            let workspaces = match models::derive_workspaces(&paths) {
+            let workspaces = match horsie_models::derive_workspaces(&paths) {
                 Ok(ws) => ws,
                 Err(e) => {
                     let _ = write_err(&mut wr, &format!("invalid workspaces: {e}")).await;
@@ -252,7 +254,7 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
                 failed: 0,
             };
             for j in &jobs {
-                use models::daemon::JobStatus::{
+                use horsie_models::daemon::JobStatus::{
                     AwaitingUserInput, Failed, Finished, Parked, Running, Suspended,
                 };
                 match j.status {
@@ -282,8 +284,9 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
             } else {
                 match rx.await {
                     Ok(Some(rec)) => {
-                        let events = supervisor::workflow_events(&daemon.journal, &s.job_id).await;
-                        let mut progress = supervisor::fold_progress(
+                        let events =
+                            horsie_supervisor::workflow_events(&daemon.journal, &s.job_id).await;
+                        let mut progress = horsie_supervisor::fold_progress(
                             &events,
                             &rec.spec.workflow,
                             rec.status.clone(),
@@ -360,7 +363,7 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
 /// active compute and would otherwise wait on a human, so they don't delay a drain;
 /// they keep their status and auto-resume next start.
 async fn drain_running(daemon: &Daemon) {
-    use models::daemon::JobStatus;
+    use horsie_models::daemon::JobStatus;
     loop {
         let running = list_jobs(daemon)
             .await
@@ -374,7 +377,7 @@ async fn drain_running(daemon: &Daemon) {
     }
 }
 
-async fn list_jobs(daemon: &Daemon) -> Vec<models::daemon::JobSummary> {
+async fn list_jobs(daemon: &Daemon) -> Vec<horsie_models::daemon::JobSummary> {
     let (tx, rx) = oneshot::channel();
     if daemon
         .supervisor
@@ -395,7 +398,7 @@ async fn stream_logs<W>(wr: &mut W, daemon: &Daemon, job_id: String, follow: boo
 where
     W: tokio::io::AsyncWriteExt + Unpin,
 {
-    for frame in supervisor::render_history(&daemon.journal, &job_id).await {
+    for frame in horsie_supervisor::render_history(&daemon.journal, &job_id).await {
         if write_frame(wr, &DaemonResponse::LogFrame(frame))
             .await
             .is_err()

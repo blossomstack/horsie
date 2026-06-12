@@ -5,9 +5,9 @@
 //! agent revisited in a loop appears more than once — followed by any workflow
 //! definition agents that were never visited, as `Pending`.
 
-use models::daemon::{AgentPhase, AgentProgress, JobProgress, JobStatus};
-use models::workflow::WorkflowDefinition;
-use workflow::WorkflowDomainEvent;
+use horsie_models::daemon::{AgentPhase, AgentProgress, JobProgress, JobStatus};
+use horsie_models::workflow::WorkflowDefinition;
+use horsie_workflow::WorkflowDomainEvent;
 
 /// Close the open (last) trace row at `at`, marking it `Done`.
 fn close_last(rows: &mut [AgentProgress], at: Option<u64>) {
@@ -100,7 +100,7 @@ pub fn fold_progress(
 )]
 mod tests {
     use super::*;
-    use models::workflow::WorkflowAgentDef;
+    use horsie_models::workflow::WorkflowAgentDef;
     use serde_json::Value;
     use uuid::Uuid;
 

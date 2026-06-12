@@ -4,11 +4,11 @@ use crate::{
     provider::{CompletionRequest, LlmProvider, ToolChoice},
     tool::Toolbox,
 };
-use models::agent::{
+use horsie_models::agent::{
     AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, HandoffOutput, Message,
     Role, ToolResultPart, Usage,
 };
-use models::events::{
+use horsie_models::events::{
     AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
     RunCompleteEvent, ToolCompleteEvent, ToolExecutingEvent,
 };
@@ -514,8 +514,8 @@ mod tests {
         tool::{EmptyToolbox, ToolSpec, Toolbox},
     };
     use async_trait::async_trait;
-    use models::agent::{ContentPart, TextPart, ToolCallPart, Usage};
-    use models::events::AgentEvent;
+    use horsie_models::agent::{ContentPart, TextPart, ToolCallPart, Usage};
+    use horsie_models::events::AgentEvent;
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;

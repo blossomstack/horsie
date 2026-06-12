@@ -1,4 +1,4 @@
-use models::runtime::{ReplaceLinesInput, ToolError, ToolOutput, ToolResult};
+use horsie_models::runtime::{ReplaceLinesInput, ToolError, ToolOutput, ToolResult};
 use std::path::Path;
 
 pub async fn exec(working_dir: &Path, input: ReplaceLinesInput) -> ToolResult {

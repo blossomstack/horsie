@@ -1,7 +1,7 @@
 use crate::client::ClientError;
 use async_trait::async_trait;
-use models::executor::{ExecutorCommand, ExecutorEvent};
-use runtime_client::RuntimeTransport;
+use horsie_models::executor::{ExecutorCommand, ExecutorEvent};
+use horsie_runtime_client::RuntimeTransport;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 

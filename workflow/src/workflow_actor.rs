@@ -1,8 +1,8 @@
 use crate::agent_actor::{AgentActor, AgentCommand, AgentParams};
 use crate::context::{AgentRuntimeContext, WorkflowRuntimeContext};
-use actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use async_trait::async_trait;
-use models::workflow::{WorkflowAgentDef, WorkflowDefinition, WorkflowTransition};
+use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
+use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition, WorkflowTransition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;

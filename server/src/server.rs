@@ -5,7 +5,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use models::executor::{
+use horsie_models::executor::{
     CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand, ExecutorInboundMessage,
     ExecutorOutboundMessage, QueryRuntimesCmd, RestartRuntimeCmd, RuntimeConfig,
 };
@@ -155,7 +155,7 @@ async fn handle_connection(
         match stream.next().await {
             Some(Ok(Message::Text(text))) => {
                 if let Ok(msg) = serde_json::from_str::<ExecutorOutboundMessage>(&text)
-                    && let models::executor::ExecutorEvent::Registered(ref ev) = msg.event
+                    && let horsie_models::executor::ExecutorEvent::Registered(ref ev) = msg.event
                 {
                     break ev.executor_id.clone();
                 }

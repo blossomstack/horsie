@@ -1,6 +1,6 @@
 //! Multi-agent orchestration on top of the event-sourced `actor` runtime.
 //!
-//! A [`WorkflowActor`] drives a [`WorkflowDefinition`](models::workflow::WorkflowDefinition):
+//! A [`WorkflowActor`] drives a [`WorkflowDefinition`](horsie_models::workflow::WorkflowDefinition):
 //! it spawns one [`AgentActor`] per agent session, routes handoff tools to the
 //! next agent via the workflow's transitions, and owns the error and
 //! interruption model — cancel, resume, ask/reply, fork, and crash recovery.

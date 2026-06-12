@@ -1,14 +1,15 @@
 [package]
-name = "anthropic"
+name = "horsie-anthropic"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/blossomstack/horsie"
+description = "Anthropic LLM provider for horsie"
 version = "0.1.0"
 edition = "2024"
-publish = false # internal application crate, never published to crates.io
 
 [dependencies]
-agentcore        = { path = "../../agentcore" }
-models           = { path = "../../models" }
-async-anthropic  = { workspace = true }
+horsie-agentcore = { version = "0.1.0", path = "../../agentcore" }
+horsie-models = { version = "0.1.0", path = "../../models" }
+async-llm        = { workspace = true }
 async-trait      = { workspace = true }
 tokio            = { workspace = true, features = ["time"] }
 tokio-stream     = { workspace = true }
@@ -17,7 +18,7 @@ tracing          = { workspace = true }
 reqwest          = { workspace = true }
 
 [dev-dependencies]
-mock-llm = { path = "../mock-llm" }
+horsie-mock-llm = { path = "../mock-llm" }
 tokio    = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 [lints]

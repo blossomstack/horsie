@@ -1,6 +1,6 @@
 use crate::error::CliError;
-use agentcore::LlmProvider;
-use anthropic::AnthropicProvider;
+use horsie_agentcore::LlmProvider;
+use horsie_anthropic::AnthropicProvider;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

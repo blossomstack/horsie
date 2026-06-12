@@ -1,4 +1,4 @@
-use models::runtime::{BashInput, ToolError, ToolOutput, ToolResult};
+use horsie_models::runtime::{BashInput, ToolError, ToolOutput, ToolResult};
 use std::path::Path;
 use std::time::Duration;
 

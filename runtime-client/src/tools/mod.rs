@@ -17,8 +17,8 @@ pub use replace_lines::ReplaceLinesTool;
 pub use write_file::WriteFileTool;
 
 use crate::client::RuntimeClient;
-use agentcore::{ToolCallError, ToolboxImpl};
-use models::runtime::ToolOutput;
+use horsie_agentcore::{ToolCallError, ToolboxImpl};
+use horsie_models::runtime::ToolOutput;
 use serde_json::Value;
 
 /// Render a successful [`ToolOutput`] into the text the model sees.

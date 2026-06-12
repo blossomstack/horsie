@@ -1,9 +1,10 @@
 [package]
-name = "runtime"
+name = "horsie-runtime"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/blossomstack/horsie"
+description = "Sandboxed per-job runtime child for horsie"
 version = "0.1.0"
 edition = "2024"
-publish = false # internal application crate, never published to crates.io
 
 [[bin]]
 name = "horsie-runtime"
@@ -14,10 +15,10 @@ default = ["sandbox"]
 sandbox = ["dep:nono"]
 
 [dependencies]
-models        = { path = "../models" }
+horsie-models = { version = "0.1.0", path = "../models" }
 # In-process hackamore provisioning (replaces shelling out to the hackamore-agent binary).
 # Pinned by rev so the provisioning ABI is reproducible.
-hackamore-agent  = { git = "https://github.com/zhxiaogg/hackamore", rev = "4b99c6272332132100dd92e92e1bf1471abe5f69" }
+hackamore-agent  = { version = "0.1.0", git = "https://github.com/zhxiaogg/hackamore", rev = "4b99c6272332132100dd92e92e1bf1471abe5f69" }
 tokio         = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util  = { workspace = true }

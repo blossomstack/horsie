@@ -1,6 +1,6 @@
 use crate::{error::LlmError, events::EventSink, tool::ToolSpec};
 use async_trait::async_trait;
-use models::agent::{ContentPart, Message, Usage};
+use horsie_models::agent::{ContentPart, Message, Usage};
 
 pub struct CompletionRequest<'a> {
     pub messages: &'a [Message],

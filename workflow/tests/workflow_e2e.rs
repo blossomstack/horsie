@@ -14,25 +14,25 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use actor::{EventSourcedActor, InMemoryJournal, Journal, PersistenceId, spawn_root};
-use agentcore::{
-    AgentEvent, ContentPart, EventSink, EventSinkError, ToolCallError, ToolSpec, Toolbox,
-};
-use anthropic::AnthropicProvider;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use mock_llm::MockLlmServer;
-use models::workflow::{WorkflowAgentDef, WorkflowDefinition, WorkflowTransition};
-use runtime_client::{MockTransport, RuntimeClient};
-use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-use workflow::{
+use horsie_actor::{EventSourcedActor, InMemoryJournal, Journal, PersistenceId, spawn_root};
+use horsie_agentcore::{
+    AgentEvent, ContentPart, EventSink, EventSinkError, ToolCallError, ToolSpec, Toolbox,
+};
+use horsie_anthropic::AnthropicProvider;
+use horsie_mock_llm::MockLlmServer;
+use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition, WorkflowTransition};
+use horsie_runtime_client::{MockTransport, RuntimeClient};
+use horsie_workflow::{
     AgentActor, AgentDomainEvent, CONCLUDE_TOOL, DefaultToolboxFactory, ToolboxFactory,
     WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowNotification,
     WorkflowRuntimeContext, WorkflowState, WorkflowStatus, conclude_tool_spec,
 };
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ impl EventSink for NoopSink {
     }
 }
 
-fn provider_at(url: &str) -> Arc<dyn agentcore::LlmProvider> {
+fn provider_at(url: &str) -> Arc<dyn horsie_agentcore::LlmProvider> {
     Arc::new(
         AnthropicProvider::with_api_key("test-key")
             .unwrap()
@@ -81,13 +81,13 @@ fn timer_agent(name: &str) -> WorkflowAgentDef {
 }
 
 fn runtime_context(
-    provider: Arc<dyn agentcore::LlmProvider>,
+    provider: Arc<dyn horsie_agentcore::LlmProvider>,
     factory: Arc<dyn ToolboxFactory>,
 ) -> (
     WorkflowRuntimeContext,
     tokio::sync::mpsc::Receiver<WorkflowNotification>,
 ) {
-    let mut registry: HashMap<String, Arc<dyn agentcore::LlmProvider>> = HashMap::new();
+    let mut registry: HashMap<String, Arc<dyn horsie_agentcore::LlmProvider>> = HashMap::new();
     registry.insert("mock".into(), provider);
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     (
@@ -440,7 +440,7 @@ async fn agent_session_history_reconstructs_from_journal() {
     // The agent journals under a run-scoped id: `<run_id>/sessions/<session_id>`.
     let history = reconstruct_agent_history(&journal, &session_id.to_string()).await;
     assert!(history.len() >= 2, "expected user + assistant messages");
-    assert_eq!(history.first().unwrap().role, agentcore::Role::User);
+    assert_eq!(history.first().unwrap().role, horsie_agentcore::Role::User);
     // The assistant's terminal turn called the conclude tool.
     let concluded = history.iter().any(|m| {
         m.parts
@@ -496,7 +496,7 @@ async fn failed_agent_run_journals_its_history() {
 async fn reconstruct_agent_history(
     journal: &Arc<InMemoryJournal>,
     session_id: &str,
-) -> Vec<agentcore::Message> {
+) -> Vec<horsie_agentcore::Message> {
     let pid = PersistenceId::new("agent", session_id);
     let (mut state, seq) = match journal.latest_snapshot(&pid).await.unwrap() {
         Some((bytes, seq)) => (serde_json::from_slice(&bytes).unwrap(), seq),

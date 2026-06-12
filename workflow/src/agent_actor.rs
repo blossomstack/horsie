@@ -1,12 +1,12 @@
 use crate::context::{AgentRuntimeContext, CONCLUDE_TOOL};
 use crate::workflow_actor::WorkflowCommand;
-use actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
-use agentcore::{
+use async_trait::async_trait;
+use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
+use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
     EventSinkError, LlmProvider, Message, Role, Toolbox, Usage,
 };
-use async_trait::async_trait;
-use models::workflow::WorkflowAgentDef;
+use horsie_models::workflow::WorkflowAgentDef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -68,7 +68,7 @@ pub enum AgentCommand {
     /// through this one mailbox.
     PersistProgress {
         events: Vec<AgentDomainEvent>,
-        ack: tokio::sync::oneshot::Sender<Result<(), actor::JournalError>>,
+        ack: tokio::sync::oneshot::Sender<Result<(), horsie_actor::JournalError>>,
     },
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
@@ -169,7 +169,7 @@ enum RunOutcome {
 }
 
 /// An agent run, modelled as an event-sourced actor. Each `Run`/`InjectToolResult`
-/// drives a background `agentcore::Agent` loop; coarse events are journaled
+/// drives a background `horsie_agentcore::Agent` loop; coarse events are journaled
 /// incrementally so a crashed session recovers its conversation and continues.
 pub struct AgentActor {
     ctx: AgentRuntimeContext,
@@ -683,15 +683,19 @@ struct TimerToolbox {
 
 #[async_trait]
 impl Toolbox for TimerToolbox {
-    fn specs(&self) -> Vec<agentcore::ToolSpec> {
+    fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
         let mut specs = self.inner.specs();
         specs.extend(crate::timers::timer_tool_specs());
         specs
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, agentcore::ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+    ) -> Result<Value, horsie_agentcore::ToolCallError> {
         use crate::timers::{CancelSelector, TimerId, TimerKind};
-        use agentcore::ToolCallError;
+        use horsie_agentcore::ToolCallError;
         match name {
             "set_timer" => {
                 let kind = match input.get("kind").and_then(Value::as_str) {
@@ -1035,7 +1039,7 @@ async fn run_with_retries(
 )]
 mod tests {
     use super::*;
-    use models::agent::{TextPart, ToolCallPart, ToolResultPart};
+    use horsie_models::agent::{TextPart, ToolCallPart, ToolResultPart};
 
     fn user_msg(text: &str) -> Message {
         Message {
@@ -1276,7 +1280,7 @@ mod tests {
 
     #[test]
     fn coarse_event_filters_streaming_noise_and_input() {
-        use models::events::{InputMessageEvent, TextChunkEvent};
+        use horsie_models::events::{InputMessageEvent, TextChunkEvent};
         // Streaming noise → None.
         assert!(
             coarse_event(&AgentEvent::TextChunk(TextChunkEvent {

@@ -3,7 +3,7 @@
 use fluorite_codegen::code_gen::rust::RustOptions;
 
 fn main() {
-    println!("cargo:rerun-if-changed=../fluorite");
+    println!("cargo:rerun-if-changed=fluorite");
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -19,6 +19,6 @@ fn main() {
             "schemars::JsonSchema".to_string(),
         ]);
 
-    fluorite_codegen::compile_with_options(options, &["../fluorite"])
+    fluorite_codegen::compile_with_options(options, &["fluorite"])
         .expect("Failed to compile fluorite schemas");
 }

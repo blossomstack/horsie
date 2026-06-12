@@ -1,0 +1,103 @@
+name: Publish
+
+# Publishes every workspace crate to crates.io, in dependency order, via
+# Trusted Publishing (OIDC) — no long-lived token.
+#
+# One-time setup on crates.io (after each crate exists): crate Settings ->
+# Trusted Publishing -> GitHub, with repository blossomstack/horsie and
+# workflow publish.yml (each crate needs its own config).
+#
+# Bootstrap caveat: trusted publishing can only be configured for crates that
+# already exist on crates.io, so the very first publish falls back to the
+# CARGO_REGISTRY_TOKEN repo secret. Delete the secret once OIDC is configured.
+#
+# Cross-repo ordering for a fresh registry: async-llm and the hackamore-*
+# crates must be on crates.io before this workflow can verify, since the
+# published horsie crates depend on them by version.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Match ci.yml — single source of truth for the pinned toolchain.
+  RUST_TOOLCHAIN: "1.96.0"
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # mint the OIDC token exchanged for a temp crates.io token
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Authenticate with crates.io (OIDC)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1.0.4
+        # First-ever publish has no trusted-publishing config yet; fall through
+        # to the token secret below instead of failing the run.
+        continue-on-error: true
+
+      # `--workspace` resolves the inter-crate publish order automatically and
+      # skips publish = false members (horsie-server, horsie-mock-llm,
+      # horsie-tests). `--locked` guards against lockfile drift.
+      - name: cargo publish
+        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-binaries:
+    name: Release binaries (${{ matrix.target }})
+    # Only meaningful for version tags; manual dispatch reruns (e.g. after a
+    # crates.io rate limit) on a branch ref skip this job.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write # create the release and upload assets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: macos-latest # cross-compiled; Intel runners are being retired
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p horsie -p horsie-runtime --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          tar -czf "horsie-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" horsie horsie-runtime
+
+      - name: Upload to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # First matrix job to get here creates the release; the rest just upload.
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes 2>/dev/null || true
+          gh release upload "$GITHUB_REF_NAME" "horsie-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" --clobber
