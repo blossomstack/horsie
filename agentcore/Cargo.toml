@@ -3,11 +3,11 @@ name = "horsie-agentcore"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "Core agent abstractions for horsie"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
-horsie-models = { version = "0.1.0", path = "../models" }
+horsie-models = { version = "0.1.1", path = "../models" }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 thiserror   = { workspace = true }

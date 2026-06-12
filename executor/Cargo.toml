@@ -3,13 +3,13 @@ name = "horsie-executor"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "Job executor for horsie"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
-horsie-models = { version = "0.1.0", path = "../models" }
-horsie-runtime-client = { version = "0.1.0", path = "../runtime-client" }
-horsie-executor-client = { version = "0.1.0", path = "../executor-client", default-features = false }
+horsie-models = { version = "0.1.1", path = "../models" }
+horsie-runtime-client = { version = "0.1.1", path = "../runtime-client" }
+horsie-executor-client = { version = "0.1.1", path = "../executor-client", default-features = false }
 tokio             = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util      = { workspace = true }
