@@ -20,6 +20,10 @@ confidence-threshold = 0.9
 # entry deliberately when a new transitive license shows up.
 allow = [
     "MIT",
+    # MIT No Attribution — strictly more permissive than MIT (drops the
+    # attribution clause). Pulled in via borrow-or-share (fluent-uri ->
+    # referencing -> jsonschema).
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",

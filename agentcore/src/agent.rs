@@ -198,7 +198,6 @@ impl Agent {
             let detail = validator
                 .validate(data)
                 .err()
-                .and_then(|mut errs| errs.next())
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "input does not match the tool's schema".to_string());
             return Some(format!("Invalid '{handoff_name}' input: {detail}"));
