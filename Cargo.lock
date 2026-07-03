@@ -67,7 +67,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -78,7 +78,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -790,7 +790,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -867,7 +867,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1932,9 +1932,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.46.8"
+version = "0.46.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24fc8535da347b994f6d2fab0a84b74e3b31ad08ebe4204d95f3e755db7af49b"
+checksum = "1d865ca7ca04445fcaa1d751fda3dc43b0113ba2fcddc65d5a0fcb474a7c3bba"
 dependencies = [
  "ahash",
  "bytecount",
@@ -1945,18 +1945,27 @@ dependencies = [
  "getrandom 0.3.4",
  "idna",
  "itoa",
+ "jsonschema-regex",
  "num-cmp",
  "num-traits",
  "percent-encoding",
  "referencing",
  "regex",
- "regex-syntax",
  "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
  "unicode-general-category",
  "uuid-simd",
+]
+
+[[package]]
+name = "jsonschema-regex"
+version = "0.46.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b7fc96cd6677cc81b00607d43477327d719419937ef1c44b3556a40f517d54c"
+dependencies = [
+ "regex-syntax",
 ]
 
 [[package]]
@@ -2632,9 +2641,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.46.8"
+version = "0.46.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c8dceb372b46fecd006be48ca335468b49ad887a7f0150cabd6098fa4fc500f"
+checksum = "77954d81b2e1c5e8ab889f9f597a92f852ab073255de9e37ee3fb443efd57051"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -2830,7 +2839,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2888,7 +2897,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3420,7 +3429,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3449,7 +3458,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3537,7 +3546,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4160,7 +4169,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
