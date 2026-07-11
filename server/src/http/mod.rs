@@ -30,6 +30,8 @@ pub struct AppState {
     pub default_caps: CapabilitySpec,
     pub plugins_dir: Option<PathBuf>,
     pub hook_path: Vec<PathBuf>,
+    /// Vendor name a create request defaults to when it omits `vendor`.
+    pub default_vendor: String,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -98,6 +100,7 @@ mod tests {
             default_caps: block_caps(),
             plugins_dir: None,
             hook_path: vec![],
+            default_vendor: "mock".to_string(),
         }
     }
 

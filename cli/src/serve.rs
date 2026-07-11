@@ -13,9 +13,12 @@ use horsie_models::capabilities::CapabilitySpec;
 use horsie_server::http::{AppState, app};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::SessionSupervisor;
-use horsie_server::vendor::{LocalProcessVendor, RuntimeVendor};
+use horsie_server::velos::VelosClient;
+use horsie_server::vendor::{LocalProcessVendor, RuntimeVendor, VelosVendor, VelosVendorSettings};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub async fn serve(cfg: HorsieConfig, addr: String) -> Result<(), CliError> {
     let state_dir = cfg.storage.state_dir.join("server");
@@ -56,6 +59,27 @@ pub async fn serve(cfg: HorsieConfig, addr: String) -> Result<(), CliError> {
         Arc::new(LocalProcessVendor::new(runtime_bin)),
     );
 
+    // Optional velos remote runtime vendor. Present → sessions may target
+    // `"vendor": "velos"` to run in a remote container; absent → local only.
+    if let Some(vc) = &cfg.velos {
+        let vendor = build_velos_vendor(vc).await?;
+        println!(
+            "velos remote runtime vendor enabled (server {}, image {})",
+            vc.server_url, vc.image
+        );
+        vendors.insert("velos".into(), Arc::new(vendor));
+    }
+
+    // The vendor a create request defaults to when it omits `vendor`.
+    let default_vendor = cfg.default_vendor.clone().unwrap_or_else(|| "local".into());
+    if !vendors.contains_key(&default_vendor) {
+        return Err(CliError::Config(format!(
+            "default_vendor '{default_vendor}' is not a configured vendor \
+             (available: {})",
+            available_vendors(&vendors)
+        )));
+    }
+
     let deps = ServerDeps {
         provider_registry: registry,
         vendors,
@@ -75,6 +99,7 @@ pub async fn serve(cfg: HorsieConfig, addr: String) -> Result<(), CliError> {
         default_caps,
         plugins_dir,
         hook_path,
+        default_vendor,
     };
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -83,4 +108,38 @@ pub async fn serve(cfg: HorsieConfig, addr: String) -> Result<(), CliError> {
     axum::serve(listener, app(state))
         .await
         .map_err(|e| CliError::Executor(e.to_string()))
+}
+
+/// Build the velos vendor from config: resolve the bearer token, construct the
+/// REST client, and bind the shared reverse-dial listener.
+async fn build_velos_vendor(
+    vc: &crate::config::VelosVendorConfig,
+) -> Result<VelosVendor, CliError> {
+    let token = vc.resolve_token()?;
+    let client = VelosClient::new(&vc.server_url, token)
+        .map_err(|e| CliError::Config(format!("velos client: {e}")))?;
+    let listen: SocketAddr = vc
+        .listen
+        .parse()
+        .map_err(|e| CliError::Config(format!("invalid velos listen '{}': {e}", vc.listen)))?;
+    let settings = VelosVendorSettings {
+        image: vc.image.clone(),
+        runtime_bin: vc.runtime_bin.clone(),
+        workspace_root: vc.workspace_root.clone(),
+        advertise_host: vc.advertise_host.clone(),
+        listen,
+        cpu: vc.cpu,
+        memory_bytes: vc.memory_bytes(),
+        connect_timeout: Duration::from_secs(vc.connect_timeout_secs),
+    };
+    VelosVendor::bind(Arc::new(client), settings)
+        .await
+        .map_err(|e| CliError::Executor(format!("velos vendor: {e}")))
+}
+
+/// Comma-separated sorted vendor names, for error messages.
+fn available_vendors(vendors: &HashMap<String, Arc<dyn RuntimeVendor>>) -> String {
+    let mut names: Vec<&str> = vendors.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    names.join(", ")
 }

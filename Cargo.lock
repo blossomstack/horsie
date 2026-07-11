@@ -1454,6 +1454,7 @@ dependencies = [
  "horsie-models",
  "horsie-runtime-client",
  "horsie-workflow",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",

@@ -31,6 +31,16 @@ pub struct HorsieConfig {
     /// no hackamore env or grants.
     #[serde(default)]
     pub hackamore: Option<HackamoreConfig>,
+    /// Optional velos remote runtime vendor for the session server. Present → a
+    /// `"velos"` vendor is registered and sessions may set `"vendor": "velos"` to
+    /// run in a remote container. Absent → local-only, unchanged behaviour.
+    #[serde(default)]
+    pub velos: Option<VelosVendorConfig>,
+    /// Vendor a session-create request defaults to when it omits `vendor`.
+    /// Defaults to `"local"`; set to `"velos"` (with a `velos` section) to make
+    /// remote sandboxes the default.
+    #[serde(default)]
+    pub default_vendor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +132,98 @@ pub struct RuntimeConfig {
     /// are also granted read access in the sandbox.
     #[serde(default)]
     pub hook_path: Option<Vec<PathBuf>>,
+}
+
+/// Configuration for the velos-backed remote runtime vendor (hand-written serde
+/// — daemon-local policy, never a wire type). Only `server_url`, `image`, and
+/// `advertise_host` are required; the rest default.
+#[derive(Debug, Deserialize)]
+pub struct VelosVendorConfig {
+    /// velos server base URL, e.g. `http://velos.internal:8080`.
+    pub server_url: String,
+    /// Bearer token inline. Prefer `token_env` to keep the secret out of the file.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Env var to read the bearer token from.
+    #[serde(default)]
+    pub token_env: Option<String>,
+    /// OCI image bundling `horsie-runtime` (Linux, built without the sandbox
+    /// feature — the container is the isolation boundary).
+    pub image: String,
+    /// Path to `horsie-runtime` inside the image.
+    #[serde(default = "default_container_runtime_bin")]
+    pub runtime_bin: String,
+    /// In-container root under which each workspace directory is created.
+    #[serde(default = "default_workspace_root")]
+    pub workspace_root: String,
+    /// Host/IP the container dials back to. Must be routable from the velos
+    /// worker's container network to this server's reverse-dial listener.
+    pub advertise_host: String,
+    /// Address the reverse-dial listener binds. Port `0` (the default) picks an
+    /// ephemeral port, advertised as `ws://<advertise_host>:<port>`.
+    #[serde(default = "default_velos_listen")]
+    pub listen: String,
+    /// CPU cores requested per container.
+    #[serde(default = "default_velos_cpu")]
+    pub cpu: u32,
+    /// Memory requested per container, in MiB.
+    #[serde(default = "default_velos_memory_mib")]
+    pub memory_mib: u64,
+    /// How long to wait for a scheduled container's runtime to dial back.
+    #[serde(default = "default_velos_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+}
+
+fn default_container_runtime_bin() -> String {
+    "horsie-runtime".to_string()
+}
+fn default_workspace_root() -> String {
+    "/workspace".to_string()
+}
+fn default_velos_listen() -> String {
+    "0.0.0.0:0".to_string()
+}
+fn default_velos_cpu() -> u32 {
+    2
+}
+fn default_velos_memory_mib() -> u64 {
+    1024
+}
+fn default_velos_connect_timeout_secs() -> u64 {
+    60
+}
+
+impl VelosVendorConfig {
+    /// Resolve the bearer token: inline first, then env var, else none (an
+    /// unauthenticated velos server). A configured-but-empty value fails here,
+    /// before the vendor is built.
+    pub fn resolve_token(&self) -> Result<Option<String>, CliError> {
+        match (&self.token, &self.token_env) {
+            (Some(t), _) => {
+                if t.is_empty() {
+                    return Err(CliError::Config("velos inline token is empty".to_string()));
+                }
+                Ok(Some(t.clone()))
+            }
+            (None, Some(var)) => {
+                let key = std::env::var(var).map_err(|_| {
+                    CliError::Config(format!("velos token env var '{var}' is not set"))
+                })?;
+                if key.is_empty() {
+                    return Err(CliError::Config(format!(
+                        "velos token env var '{var}' is empty"
+                    )));
+                }
+                Ok(Some(key))
+            }
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// Memory request in bytes (from the MiB knob).
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory_mib.saturating_mul(1024 * 1024)
+    }
 }
 
 impl HorsieConfig {
@@ -412,6 +514,74 @@ mod tests {
     fn runtime_bin_defaults_to_none() {
         let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.runtime.bin.is_none());
+    }
+
+    #[test]
+    fn parses_velos_section_with_defaults() {
+        let cfg: HorsieConfig = serde_json::from_str(
+            r#"{
+                "velos": {
+                    "server_url": "http://velos:8080",
+                    "image": "ghcr.io/x/horsie-runtime:latest",
+                    "advertise_host": "10.0.0.5"
+                }
+            }"#,
+        )
+        .unwrap();
+        let v = cfg.velos.expect("velos section should parse");
+        assert_eq!(v.server_url, "http://velos:8080");
+        assert_eq!(v.image, "ghcr.io/x/horsie-runtime:latest");
+        assert_eq!(v.advertise_host, "10.0.0.5");
+        assert_eq!(v.runtime_bin, "horsie-runtime");
+        assert_eq!(v.workspace_root, "/workspace");
+        assert_eq!(v.listen, "0.0.0.0:0");
+        assert_eq!(v.cpu, 2);
+        assert_eq!(v.memory_mib, 1024);
+        assert_eq!(v.memory_bytes(), 1024 * 1024 * 1024);
+        assert_eq!(v.connect_timeout_secs, 60);
+    }
+
+    #[test]
+    fn velos_and_default_vendor_absent_by_default() {
+        let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.velos.is_none());
+        assert!(cfg.default_vendor.is_none());
+        assert!(HorsieConfig::default().velos.is_none());
+    }
+
+    #[test]
+    fn parses_default_vendor() {
+        let cfg: HorsieConfig = serde_json::from_str(r#"{ "default_vendor": "velos" }"#).unwrap();
+        assert_eq!(cfg.default_vendor.as_deref(), Some("velos"));
+    }
+
+    #[test]
+    fn velos_token_resolves_inline_env_and_none() {
+        let base = r#"{"velos":{"server_url":"http://v","image":"i","advertise_host":"h""#;
+        // Inline token.
+        let cfg: HorsieConfig =
+            serde_json::from_str(&format!(r#"{base},"token":"secret"}}}}"#)).unwrap();
+        assert_eq!(
+            cfg.velos.unwrap().resolve_token().unwrap().as_deref(),
+            Some("secret")
+        );
+        // Empty inline token is rejected.
+        let cfg: HorsieConfig = serde_json::from_str(&format!(r#"{base},"token":""}}}}"#)).unwrap();
+        assert!(cfg.velos.unwrap().resolve_token().is_err());
+        // No token → None (unauthenticated velos).
+        let cfg: HorsieConfig = serde_json::from_str(&format!(r#"{base}}}}}"#)).unwrap();
+        assert_eq!(cfg.velos.unwrap().resolve_token().unwrap(), None);
+    }
+
+    #[test]
+    fn velos_missing_required_field_is_rejected() {
+        // `image` omitted → parse error, before any vendor is built.
+        assert!(
+            serde_json::from_str::<HorsieConfig>(
+                r#"{"velos":{"server_url":"http://v","advertise_host":"h"}}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -12,8 +12,10 @@ mod local;
 /// crates that opt in via the `test-util` feature.
 #[cfg(any(test, feature = "test-util"))]
 pub mod mock;
+mod velos;
 
 pub use local::LocalProcessVendor;
+pub use velos::{VelosVendor, VelosVendorSettings};
 
 use async_trait::async_trait;
 use horsie_runtime_client::RuntimeClient;

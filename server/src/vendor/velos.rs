@@ -1,0 +1,753 @@
+//! Runtime vendor backed by a [velos](https://github.com/blossomstack)-scheduled
+//! remote container.
+//!
+//! Unlike [`crate::vendor::LocalProcessVendor`], which spawns a child process
+//! and lets it dial a per-session unix socket, this vendor binds **one shared
+//! TCP listener** and asks velos to run a container whose command is
+//! `horsie-runtime --endpoint ws://<advertise>:<port> …`. The runtime dials back
+//! over that outbound connection (velos exposes no inbound networking), and the
+//! shared [`ConnectedRuntimeRegistry`] demultiplexes connections by
+//! `runtime_id`. Everything downstream of the provider — the listener, registry,
+//! executor client, and socket transport — is reused unchanged from the local
+//! path; only the [`RuntimeProvider`] differs.
+//!
+//! velos containers are ephemeral (no volumes), so `stop` deletes the container
+//! and `attach` schedules a fresh one under the same `runtime_id`; the durable
+//! session state (the journal) lives server-side and recovers on attach.
+
+use crate::velos::{ContainerApi, ContainerLaunchSpec};
+use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle};
+use async_trait::async_trait;
+use horsie_executor::{
+    ConnectedRuntimeRegistry, HealthStatus, InMemExecutorTransport, RuntimeEndpoint, RuntimeError,
+    RuntimeHandle, RuntimeListenerServer, RuntimeProvider, serve_runtime_connections,
+};
+use horsie_executor_client::ExecutorClient;
+use horsie_models::executor::{RuntimeConfig, WorkspaceConfig};
+use horsie_runtime_client::RuntimeClient;
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::{CancellationToken, DropGuard};
+
+/// Deployment-global knobs for the velos vendor. Built from config.
+#[derive(Debug, Clone)]
+pub struct VelosVendorSettings {
+    /// OCI image bundling `horsie-runtime` (Linux, built without the sandbox
+    /// feature — the container is the isolation boundary).
+    pub image: String,
+    /// Path to `horsie-runtime` inside the image.
+    pub runtime_bin: String,
+    /// In-container root under which each workspace is created (`<root>/<name>`).
+    pub workspace_root: String,
+    /// Host/IP the container dials back to. Must be reachable from the velos
+    /// worker's container network.
+    pub advertise_host: String,
+    /// Address the shared reverse-dial listener binds. Port `0` picks an
+    /// ephemeral port, which is combined with `advertise_host` into the URL.
+    pub listen: SocketAddr,
+    pub cpu: u32,
+    pub memory_bytes: u64,
+    /// How long to wait for a scheduled container's runtime to dial back.
+    pub connect_timeout: Duration,
+}
+
+/// One workspace, resolved to the directory it lives at inside the container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceMount {
+    name: String,
+    container_path: String,
+}
+
+/// The velos object name for a runtime (its `metadata.name`).
+fn container_name(runtime_id: &str) -> String {
+    format!("horsie-{runtime_id}")
+}
+
+/// POSIX single-quote a value so it survives `sh -c` verbatim (embedded quotes
+/// become `'\''`). Workspace names derive from user paths, so quote defensively.
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Build the container command: create the workspace dirs, then `exec` the
+/// runtime so it becomes PID 1 and its exit is the container's exit. Returns an
+/// argv the image runs via `sh -c` (no `--sandbox-caps`/`--plugins-dir`/
+/// `--hook-path`: the container is the sandbox and remote plugins are out of MVP
+/// scope).
+fn build_container_command(
+    runtime_bin: &str,
+    endpoint_ws: &str,
+    runtime_id: &str,
+    mounts: &[WorkspaceMount],
+) -> Vec<String> {
+    let mut exec_line = format!(
+        "exec {} --endpoint {} --runtime-id {}",
+        shell_quote(runtime_bin),
+        shell_quote(endpoint_ws),
+        shell_quote(runtime_id),
+    );
+    for m in mounts {
+        exec_line.push_str(&format!(
+            " --workspace {}",
+            shell_quote(&format!("{}={}", m.name, m.container_path)),
+        ));
+    }
+    let script = if mounts.is_empty() {
+        exec_line
+    } else {
+        let dirs = mounts
+            .iter()
+            .map(|m| shell_quote(&m.container_path))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("mkdir -p {dirs} && {exec_line}")
+    };
+    vec!["/bin/sh".to_string(), "-c".to_string(), script]
+}
+
+/// A [`RuntimeProvider`] that provisions a velos container instead of a local
+/// child process. Constructed fresh per `create`/`attach` (like the local
+/// path), sharing the vendor's `ContainerApi` and connection registry.
+///
+/// The `id` passed to [`RuntimeProvider::create`] is the **incarnation** id (a
+/// per-attempt dial-back key on the shared registry), while `container_name` is
+/// the **deterministic** velos object name for the session — so a stale
+/// connection's cleanup can never unregister a fresh incarnation, yet the
+/// container is still reclaimable by name after a server restart.
+struct VelosRuntimeProvider {
+    api: Arc<dyn ContainerApi>,
+    connected: Arc<ConnectedRuntimeRegistry>,
+    container_name: String,
+    endpoint_ws: String,
+    image: String,
+    runtime_bin: String,
+    workspace_root: String,
+    cpu: u32,
+    memory_bytes: u64,
+    connect_timeout: Duration,
+}
+
+impl VelosRuntimeProvider {
+    fn mounts(&self, config: &RuntimeConfig) -> Vec<WorkspaceMount> {
+        let root = self.workspace_root.trim_end_matches('/');
+        config
+            .workspaces
+            .iter()
+            .map(|w| WorkspaceMount {
+                name: w.name.clone(),
+                container_path: format!("{root}/{}", w.name),
+            })
+            .collect()
+    }
+
+    /// Wait for the runtime to dial back, polling velos so a container that dies
+    /// before connecting fails fast instead of burning the whole timeout.
+    async fn await_ready(
+        &self,
+        runtime_id: &str,
+        name: &str,
+        ready_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<(), RuntimeError> {
+        tokio::pin!(ready_rx);
+        let deadline = tokio::time::sleep(self.connect_timeout);
+        tokio::pin!(deadline);
+        let poll_period = Duration::from_millis(750);
+        let mut poll =
+            tokio::time::interval_at(tokio::time::Instant::now() + poll_period, poll_period);
+        loop {
+            tokio::select! {
+                res = &mut ready_rx => {
+                    return res.map_err(|_| {
+                        RuntimeError::Provider("runtime readiness channel dropped".to_string())
+                    });
+                }
+                _ = &mut deadline => {
+                    return Err(RuntimeError::Provider(format!(
+                        "timed out waiting for runtime '{runtime_id}' to connect"
+                    )));
+                }
+                _ = poll.tick() => {
+                    if let Ok(Some(phase)) = self.api.container_phase(name).await
+                        && phase.is_dead()
+                    {
+                        return Err(RuntimeError::Provider(format!(
+                            "velos container '{name}' reached {phase:?} before connecting"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeProvider for VelosRuntimeProvider {
+    async fn create(
+        &self,
+        id: &str,
+        config: &RuntimeConfig,
+    ) -> Result<Arc<dyn RuntimeHandle>, RuntimeError> {
+        // Register the readiness waiter BEFORE scheduling, mirroring the process
+        // provider, so a fast dial-back can't race ahead of the waiter. `id` is
+        // the incarnation id — the dial-back key the container announces.
+        let ready_rx = self.connected.notify_when_ready(id).await;
+        let command = build_container_command(
+            &self.runtime_bin,
+            &self.endpoint_ws,
+            id,
+            &self.mounts(config),
+        );
+        let env: BTreeMap<String, String> = config
+            .env
+            .iter()
+            .map(|e| (e.name.clone(), e.value.clone()))
+            .collect();
+        let spec = ContainerLaunchSpec {
+            image: self.image.clone(),
+            command,
+            env,
+            cpu: self.cpu,
+            memory_bytes: self.memory_bytes,
+        };
+        self.api
+            .create_container(&self.container_name, &spec)
+            .await
+            .map_err(|e| RuntimeError::Provider(e.to_string()))?;
+
+        if let Err(e) = self.await_ready(id, &self.container_name, ready_rx).await {
+            // Reclaim the container we scheduled but never heard from.
+            let _ = self.api.delete_container(&self.container_name).await;
+            self.connected.remove(id).await;
+            return Err(e);
+        }
+
+        Ok(Arc::new(VelosRuntimeHandle {
+            api: self.api.clone(),
+            connected: self.connected.clone(),
+            name: self.container_name.clone(),
+            runtime_id: id.to_string(),
+        }))
+    }
+}
+
+/// Lifecycle handle for one scheduled container. `stop` deletes it (velos has no
+/// pause), and health follows the live dial-back connection.
+struct VelosRuntimeHandle {
+    api: Arc<dyn ContainerApi>,
+    connected: Arc<ConnectedRuntimeRegistry>,
+    name: String,
+    runtime_id: String,
+}
+
+#[async_trait]
+impl RuntimeHandle for VelosRuntimeHandle {
+    async fn stop(&self) -> Result<(), RuntimeError> {
+        let _ = self.api.delete_container(&self.name).await;
+        self.connected.remove(&self.runtime_id).await;
+        Ok(())
+    }
+
+    async fn health_check(&self) -> Result<HealthStatus, RuntimeError> {
+        let connected = self
+            .connected
+            .runtime_transport(&self.runtime_id)
+            .await
+            .is_some();
+        Ok(if connected {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Unhealthy {
+                reason: "runtime disconnected".to_string(),
+            }
+        })
+    }
+}
+
+/// The velos runtime vendor. Owns the shared reverse-dial listener + connection
+/// registry for its whole lifetime; drops the serve loop when the vendor drops.
+pub struct VelosVendor {
+    api: Arc<dyn ContainerApi>,
+    connected: Arc<ConnectedRuntimeRegistry>,
+    /// `ws://<advertise_host>:<bound_port>` — where scheduled runtimes dial back.
+    endpoint_ws: String,
+    image: String,
+    runtime_bin: String,
+    workspace_root: String,
+    cpu: u32,
+    memory_bytes: u64,
+    connect_timeout: Duration,
+    _serve_guard: DropGuard,
+}
+
+impl VelosVendor {
+    /// Bind the shared reverse-dial listener and start accepting runtime
+    /// connections. `api` is how containers are scheduled/reclaimed.
+    pub async fn bind(
+        api: Arc<dyn ContainerApi>,
+        settings: VelosVendorSettings,
+    ) -> Result<Self, VendorError> {
+        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Tcp(settings.listen))
+            .await
+            .map_err(|e| VendorError::Provision(format!("velos vendor listener: {e}")))?;
+        let port = listener
+            .tcp_addr()
+            .ok_or_else(|| VendorError::Provision("velos vendor requires a TCP listener".into()))?
+            .port();
+        let endpoint_ws = format!("ws://{}:{port}", settings.advertise_host);
+        let connected = Arc::new(ConnectedRuntimeRegistry::new());
+        let cancel = CancellationToken::new();
+        serve_runtime_connections(listener, connected.clone(), cancel.clone());
+        Ok(Self {
+            api,
+            connected,
+            endpoint_ws,
+            image: settings.image,
+            runtime_bin: settings.runtime_bin,
+            workspace_root: settings.workspace_root,
+            cpu: settings.cpu,
+            memory_bytes: settings.memory_bytes,
+            connect_timeout: settings.connect_timeout,
+            _serve_guard: cancel.drop_guard(),
+        })
+    }
+
+    async fn provision(
+        &self,
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+        attach: bool,
+    ) -> Result<VendorRuntime, VendorError> {
+        let wrap = |e: String| {
+            if attach {
+                VendorError::Attach(e)
+            } else {
+                VendorError::Provision(e)
+            }
+        };
+        // Deterministic container name (reclaimable by name after a restart) +
+        // a unique per-attempt incarnation id (the dial-back key on the shared
+        // registry, so a lingering old connection can't unregister this one).
+        let container = container_name(runtime_id);
+        let incarnation = format!("{runtime_id}-{}", uuid::Uuid::new_v4().simple());
+        let provider = Arc::new(VelosRuntimeProvider {
+            api: self.api.clone(),
+            connected: self.connected.clone(),
+            container_name: container,
+            endpoint_ws: self.endpoint_ws.clone(),
+            image: self.image.clone(),
+            runtime_bin: self.runtime_bin.clone(),
+            workspace_root: self.workspace_root.clone(),
+            cpu: self.cpu,
+            memory_bytes: self.memory_bytes,
+            connect_timeout: self.connect_timeout,
+        });
+        let client = ExecutorClient::new(InMemExecutorTransport::new(
+            provider,
+            self.connected.clone(),
+        ));
+        let config = runtime_config_from(spec);
+        let result = if attach {
+            client.attach_runtime(&incarnation, config).await
+        } else {
+            client.create_runtime(&incarnation, config).await
+        };
+        result.map_err(|e| wrap(e.to_string()))?;
+        let transport = client
+            .runtime_transport(&incarnation)
+            .await
+            .map_err(|e| wrap(e.to_string()))?;
+        Ok(VendorRuntime {
+            runtime_client: RuntimeClient::from_arc(transport),
+            handle: Arc::new(VelosHandle {
+                client,
+                runtime_id: incarnation,
+            }),
+        })
+    }
+}
+
+#[async_trait]
+impl RuntimeVendor for VelosVendor {
+    fn name(&self) -> &'static str {
+        "velos"
+    }
+
+    async fn create(
+        &self,
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+    ) -> Result<VendorRuntime, VendorError> {
+        self.provision(runtime_id, spec, false).await
+    }
+
+    async fn attach(
+        &self,
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+    ) -> Result<VendorRuntime, VendorError> {
+        self.provision(runtime_id, spec, true).await
+    }
+
+    async fn delete(&self, runtime_id: &str) {
+        // Callable with no live handle (e.g. after a server restart): reclaim the
+        // container by its deterministic name. Any live incarnation's transport
+        // was already removed by its handle's `stop` (the session halts before
+        // delete), so there is nothing to unregister here.
+        let _ = self.api.delete_container(&container_name(runtime_id)).await;
+    }
+}
+
+/// The vendor-facing lifecycle handle: stop routes through the executor client
+/// so the shared registry's bookkeeping stays consistent (which in turn deletes
+/// the container via [`VelosRuntimeHandle::stop`]).
+struct VelosHandle {
+    client: ExecutorClient,
+    runtime_id: String,
+}
+
+#[async_trait]
+impl VendorRuntimeHandle for VelosHandle {
+    async fn stop(&self) {
+        let _ = self.client.stop_runtime(&self.runtime_id).await;
+    }
+}
+
+/// Remote runtime config: workspace *names* carry over (the provider maps them to
+/// in-container paths), while local-only inputs (plugins/hooks/env) are dropped —
+/// the container is a fresh, self-contained sandbox.
+fn runtime_config_from(spec: &RuntimeSpec) -> RuntimeConfig {
+    RuntimeConfig {
+        workspaces: spec
+            .workspaces
+            .iter()
+            .map(|w| WorkspaceConfig {
+                name: w.name.clone(),
+                path: w.path.to_string_lossy().into_owned(),
+            })
+            .collect(),
+        plugins_dir: None,
+        hook_path: vec![],
+        env: vec![],
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::velos::{ContainerPhase, VelosError};
+    use futures_util::{SinkExt, StreamExt};
+    use horsie_models::runtime::{
+        BashInput, RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ToolCall,
+        ToolCallResponse, ToolOutput, ToolResult,
+    };
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    #[test]
+    fn command_creates_dirs_and_execs_runtime_without_sandbox_flags() {
+        let mounts = vec![
+            WorkspaceMount {
+                name: "main".into(),
+                container_path: "/workspace/main".into(),
+            },
+            WorkspaceMount {
+                name: "docs".into(),
+                container_path: "/workspace/docs".into(),
+            },
+        ];
+        let cmd = build_container_command("horsie-runtime", "ws://10.0.0.1:7070", "rt-1", &mounts);
+        assert_eq!(cmd[0], "/bin/sh");
+        assert_eq!(cmd[1], "-c");
+        let script = &cmd[2];
+        assert!(script.starts_with("mkdir -p '/workspace/main' '/workspace/docs' &&"));
+        assert!(script.contains("exec 'horsie-runtime'"));
+        assert!(script.contains("--endpoint 'ws://10.0.0.1:7070'"));
+        assert!(script.contains("--runtime-id 'rt-1'"));
+        assert!(script.contains("--workspace 'main=/workspace/main'"));
+        assert!(script.contains("--workspace 'docs=/workspace/docs'"));
+        // The container is the sandbox — no nono, no shared plugins.
+        assert!(!script.contains("--sandbox-caps"));
+        assert!(!script.contains("--plugins-dir"));
+        assert!(!script.contains("--hook-path"));
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote("plain"), "'plain'");
+    }
+
+    // --- Full reverse-dial over TCP with a fake velos + fake runtime ---------
+
+    /// A `ContainerApi` double: instead of a micro-VM, `create_container` spawns
+    /// an in-process WebSocket "runtime" that dials the vendor's listener and
+    /// answers tool calls, exactly as a real container's `horsie-runtime` would.
+    /// It learns *where* to dial and *what id* to announce by parsing the command
+    /// the vendor built — just as the real container's `sh -c` would.
+    struct FakeVelosApi {
+        creates: Mutex<Vec<String>>,
+        deletes: Mutex<Vec<String>>,
+        /// The `--runtime-id` (incarnation id) each container was told to announce.
+        incarnations: Mutex<Vec<String>>,
+        tasks: Mutex<HashMap<String, JoinHandle<()>>>,
+    }
+
+    impl FakeVelosApi {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                creates: Mutex::new(Vec::new()),
+                deletes: Mutex::new(Vec::new()),
+                incarnations: Mutex::new(Vec::new()),
+                tasks: Mutex::new(HashMap::new()),
+            })
+        }
+        fn creates(&self) -> Vec<String> {
+            self.creates.lock().unwrap().clone()
+        }
+        fn deletes(&self) -> Vec<String> {
+            self.deletes.lock().unwrap().clone()
+        }
+        fn incarnations(&self) -> Vec<String> {
+            self.incarnations.lock().unwrap().clone()
+        }
+    }
+
+    /// Pull the single-quoted value after `flag` out of the `sh -c` script.
+    fn arg_after(script: &str, flag: &str) -> Option<String> {
+        let marker = format!("{flag} '");
+        let rest = script.split(&marker).nth(1)?;
+        rest.split('\'').next().map(str::to_string)
+    }
+
+    async fn fake_runtime(endpoint: String, runtime_id: String) {
+        let (ws, _) = match connect_async(&endpoint).await {
+            Ok(x) => x,
+            Err(_) => return,
+        };
+        let (mut sink, mut stream) = ws.split();
+        let ready =
+            serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady { runtime_id }))
+                .unwrap();
+        if sink.send(Message::Text(ready.into())).await.is_err() {
+            return;
+        }
+        while let Some(Ok(msg)) = stream.next().await {
+            if let Message::Text(text) = msg
+                && let Ok(RuntimeInboundMessage::ToolCall(req)) =
+                    serde_json::from_str::<RuntimeInboundMessage>(&text)
+            {
+                let resp = RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
+                    call_id: req.call_id,
+                    result: ToolResult::Ok(ToolOutput {
+                        stdout: "remote-ok".to_string(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                    }),
+                });
+                if let Ok(json) = serde_json::to_string(&resp) {
+                    let _ = sink.send(Message::Text(json.into())).await;
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ContainerApi for FakeVelosApi {
+        async fn create_container(
+            &self,
+            name: &str,
+            spec: &ContainerLaunchSpec,
+        ) -> Result<(), VelosError> {
+            self.creates.lock().unwrap().push(name.to_string());
+            // Dial exactly where/how the vendor's command tells the container to.
+            let script = spec.command.get(2).cloned().unwrap_or_default();
+            let endpoint = arg_after(&script, "--endpoint").expect("endpoint in command");
+            let runtime_id = arg_after(&script, "--runtime-id").expect("runtime-id in command");
+            self.incarnations.lock().unwrap().push(runtime_id.clone());
+            let handle = tokio::spawn(fake_runtime(endpoint, runtime_id));
+            self.tasks.lock().unwrap().insert(name.to_string(), handle);
+            Ok(())
+        }
+
+        async fn delete_container(&self, name: &str) -> Result<(), VelosError> {
+            self.deletes.lock().unwrap().push(name.to_string());
+            if let Some(t) = self.tasks.lock().unwrap().remove(name) {
+                t.abort();
+            }
+            Ok(())
+        }
+
+        async fn container_phase(&self, name: &str) -> Result<Option<ContainerPhase>, VelosError> {
+            Ok(if self.tasks.lock().unwrap().contains_key(name) {
+                Some(ContainerPhase::Running)
+            } else {
+                None
+            })
+        }
+    }
+
+    fn test_settings() -> VelosVendorSettings {
+        VelosVendorSettings {
+            image: "test/image".into(),
+            runtime_bin: "horsie-runtime".into(),
+            workspace_root: "/workspace".into(),
+            advertise_host: "127.0.0.1".into(),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            cpu: 1,
+            memory_bytes: 536_870_912,
+            connect_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn test_spec() -> RuntimeSpec {
+        RuntimeSpec {
+            workspaces: vec![horsie_models::Workspace {
+                name: "main".into(),
+                path: std::path::PathBuf::from("/host/main"),
+            }],
+            capabilities_file: std::env::temp_dir().join("caps.json"),
+            plugins_dir: None,
+            hook_path: vec![],
+        }
+    }
+
+    async fn bind_vendor(api: Arc<FakeVelosApi>) -> VelosVendor {
+        VelosVendor::bind(api.clone(), test_settings())
+            .await
+            .expect("bind")
+    }
+
+    #[tokio::test]
+    async fn create_reverse_dials_and_tool_calls_round_trip() {
+        let api = FakeVelosApi::new();
+        let vendor = bind_vendor(api.clone()).await;
+
+        let rt = vendor.create("rt-1", &test_spec()).await.expect("create");
+        assert_eq!(api.creates(), vec!["horsie-rt-1"]);
+
+        // A tool call round-trips over the real socket transport to the fake runtime.
+        let out = rt
+            .runtime_client
+            .invoke(ToolCall::Bash(BashInput {
+                command: "echo hi".into(),
+                timeout_secs: None,
+                workspace: None,
+            }))
+            .await
+            .expect("tool call");
+        assert_eq!(out.stdout, "remote-ok");
+
+        // Stop deletes the container (velos has no pause).
+        rt.handle.stop().await;
+        assert_eq!(api.deletes(), vec!["horsie-rt-1"]);
+    }
+
+    #[tokio::test]
+    async fn attach_schedules_a_fresh_container_then_delete_reclaims() {
+        let api = FakeVelosApi::new();
+        let vendor = bind_vendor(api.clone()).await;
+
+        let rt = vendor.attach("rt-2", &test_spec()).await.expect("attach");
+        assert_eq!(api.creates(), vec!["horsie-rt-2"]);
+        rt.handle.stop().await;
+
+        // Delete with no live handle still reclaims by deterministic name.
+        vendor.delete("rt-2").await;
+        // stop deleted once, delete deleted again (idempotent on the velos side).
+        assert_eq!(api.deletes(), vec!["horsie-rt-2", "horsie-rt-2"]);
+    }
+
+    #[tokio::test]
+    async fn stop_then_reattach_uses_a_distinct_incarnation_and_still_works() {
+        // Guards the shared-registry race: create + attach for the same session
+        // must dial back under *different* ids, so a lingering old connection's
+        // close can never unregister the fresh incarnation's transport.
+        let api = FakeVelosApi::new();
+        let vendor = bind_vendor(api.clone()).await;
+
+        let rt1 = vendor.create("rt-9", &test_spec()).await.expect("create");
+        rt1.handle.stop().await;
+        let rt2 = vendor.attach("rt-9", &test_spec()).await.expect("attach");
+
+        let ids = api.incarnations();
+        assert_eq!(ids.len(), 2, "one dial-back per provision");
+        assert_ne!(ids[0], ids[1], "distinct incarnations for the same session");
+        assert!(ids.iter().all(|id| id.starts_with("rt-9-")));
+        // Both containers share the deterministic velos name.
+        assert_eq!(api.creates(), vec!["horsie-rt-9", "horsie-rt-9"]);
+
+        // The reattached incarnation's transport is live and round-trips.
+        let out = rt2
+            .runtime_client
+            .invoke(ToolCall::Bash(BashInput {
+                command: "x".into(),
+                timeout_secs: None,
+                workspace: None,
+            }))
+            .await
+            .expect("tool call after reattach");
+        assert_eq!(out.stdout, "remote-ok");
+    }
+
+    #[tokio::test]
+    async fn create_fails_fast_when_container_dies_before_connecting() {
+        // A ContainerApi that accepts the create but never dials back and reports
+        // a dead phase — the provider must give up well before the timeout.
+        struct DeadApi;
+        #[async_trait]
+        impl ContainerApi for DeadApi {
+            async fn create_container(
+                &self,
+                _n: &str,
+                _s: &ContainerLaunchSpec,
+            ) -> Result<(), VelosError> {
+                Ok(())
+            }
+            async fn delete_container(&self, _n: &str) -> Result<(), VelosError> {
+                Ok(())
+            }
+            async fn container_phase(
+                &self,
+                _n: &str,
+            ) -> Result<Option<ContainerPhase>, VelosError> {
+                Ok(Some(ContainerPhase::Failed))
+            }
+        }
+        let mut settings = test_settings();
+        settings.connect_timeout = Duration::from_secs(30);
+        let vendor = VelosVendor::bind(Arc::new(DeadApi), settings)
+            .await
+            .expect("bind");
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), vendor.create("rt-3", &test_spec()))
+                .await
+                .expect("should not hang until the 30s connect timeout");
+        match result {
+            Err(VendorError::Provision(msg)) => {
+                assert!(msg.contains("before connecting"), "{msg}")
+            }
+            Err(other) => panic!("expected Provision error, got {other:?}"),
+            Ok(_) => panic!("dead container should fail create"),
+        }
+    }
+}

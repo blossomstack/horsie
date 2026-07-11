@@ -77,6 +77,53 @@ State (the daemon control socket, per-job capability files) lives under
 
 A worked configuration and capability file are in [`examples/`](examples/README.md).
 
+## Session server & remote runtimes
+
+`horsie serve` runs the session-oriented HTTP + SSE server (recoverable,
+event-sourced sessions). Each session runs its tools in a **runtime vendor** — an
+execution sandbox. Two vendors ship:
+
+- **`local`** (default) — a nono-sandboxed `horsie-runtime` child process, like
+  the daemon.
+- **`velos`** (optional) — a remote container scheduled by
+  [velos](https://github.com/blossomstack/velos). The runtime dials *back* to the
+  server over an outbound WebSocket, so it works against a stock velos even
+  though velos publishes no inbound container ports.
+
+A session picks its vendor via `"vendor": "velos"` in the create request, or the
+server's `default_vendor`.
+
+### Enabling the velos vendor
+
+Add a `velos` section to the config. Only `server_url`, `image`, and
+`advertise_host` are required:
+
+```jsonc
+{
+  "velos": {
+    "server_url": "http://velos.internal:8080",
+    "token_env": "VELOS_TOKEN",              // or inline "token"
+    "image": "ghcr.io/you/horsie-runtime:latest",
+    "advertise_host": "10.0.0.5",            // reachable from velos workers
+    "listen": "0.0.0.0:0",                   // reverse-dial listener (ephemeral port)
+    "cpu": 2,
+    "memory_mib": 1024,
+    "connect_timeout_secs": 60
+  },
+  "default_vendor": "local"                    // set "velos" to make remote the default
+}
+```
+
+Build the runtime image with [`docker/runtime.Dockerfile`](docker/runtime.Dockerfile)
+(it builds `horsie-runtime` without the sandbox feature — the container is the
+boundary) and push it where velos workers can pull it.
+
+**Deployment requirements:** `advertise_host:<port>` must be routable from the
+velos worker's container network to this server (containers get outbound NAT).
+velos has no volumes, so a remote workspace is **ephemeral** — `stop` deletes the
+container and the next message schedules a fresh one; the durable session state
+(the journal) lives server-side and recovers on reconnect.
+
 ## Development
 
 The pre-PR gate (also `make check`):

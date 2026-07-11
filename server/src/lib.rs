@@ -4,6 +4,7 @@ pub mod http;
 mod registry;
 mod server;
 pub mod sessions;
+pub mod velos;
 pub mod vendor;
 
 pub use error::ServerError;
