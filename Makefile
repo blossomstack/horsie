@@ -18,7 +18,7 @@ PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build-cli
-.PHONY: build-cli build test fmt fmt-check clippy deny check ts-types install-cli uninstall-cli clean help
+.PHONY: build-cli build test fmt fmt-check clippy deny check ts-types web web-build install-cli uninstall-cli clean help
 
 ## build-cli: build the horsie CLI + its sandboxed runtime child ($(PROFILE))
 build-cli:
@@ -56,6 +56,14 @@ check: fmt-check clippy test
 ## `fluorite` CLI on PATH — `cargo install fluorite` — plus node/npm)
 ts-types:
 	cd clients/ts && npm install --no-audit --no-fund && npm run generate-types && npm run typecheck
+
+## web: run the web UI dev server (needs bun + a running `horsie serve`)
+web:
+	cd clients/web && bun install && bun run generate-types && bun run dev
+
+## web-build: typecheck + production-build the web UI (needs bun)
+web-build:
+	cd clients/web && bun install && bun run generate-types && bun run build
 
 ## install-cli: build + install horsie and horsie-runtime into $(BINDIR)
 install-cli: build-cli

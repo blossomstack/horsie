@@ -14,6 +14,7 @@ use horsie_models::session::GlobalSessionEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tower_http::services::{ServeDir, ServeFile};
 
 /// Finalizes a request-supplied capability spec (path expansion, plugin grants,
 /// platform seatbelt rules) — injected by the host binary, which owns the
@@ -32,10 +33,15 @@ pub struct AppState {
     pub hook_path: Vec<PathBuf>,
     /// Vendor name a create request defaults to when it omits `vendor`.
     pub default_vendor: String,
+    /// Directory of built web-UI assets to serve alongside the API. When set,
+    /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
+    /// the UI is served same-origin and no separate dev server is needed.
+    pub web_dir: Option<PathBuf>,
 }
 
 pub fn app(state: AppState) -> Router {
-    Router::new()
+    let web_dir = state.web_dir.clone();
+    let api = Router::new()
         .route("/api/health", get(handlers::health))
         .route(
             "/api/sessions",
@@ -49,7 +55,19 @@ pub fn app(state: AppState) -> Router {
         .route("/api/sessions/:id/stop", post(handlers::stop_session))
         .route("/api/sessions/:id/events", get(sse::session_events))
         .route("/api/events", get(sse::global_events))
-        .with_state(state)
+        .with_state(state);
+
+    match web_dir {
+        // Serve the built UI: hashed assets and favicon from disk, and every
+        // other (non-`/api`) path to index.html with a 200 so client-side
+        // routes like `/sessions/:id` survive a hard refresh. Using `ServeFile`
+        // as the fallback (rather than `not_found_service`) keeps the status 200.
+        Some(dir) => api
+            .nest_service("/assets", ServeDir::new(dir.join("assets")))
+            .route_service("/favicon.svg", ServeFile::new(dir.join("favicon.svg")))
+            .fallback_service(ServeFile::new(dir.join("index.html"))),
+        None => api,
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +119,7 @@ mod tests {
             plugins_dir: None,
             hook_path: vec![],
             default_vendor: "mock".to_string(),
+            web_dir: None,
         }
     }
 

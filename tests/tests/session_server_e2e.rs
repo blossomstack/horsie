@@ -89,6 +89,7 @@ async fn start_server(
         plugins_dir: None,
         hook_path: vec![],
         default_vendor: "mock".into(),
+        web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

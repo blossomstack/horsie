@@ -34,6 +34,7 @@ futures-util      = "0.3"
 uuid              = { version = "1", features = ["v4", "serde"] }
 async-llm         = { version = "0.7.0", git = "https://github.com/zhxiaogg/async-anthropic.git", rev = "89217381f63dc66ff437415da3227032130e9714" }
 axum              = { version = "0.7", features = ["macros"] }
+tower-http        = { version = "0.5", features = ["fs"] }
 parking_lot       = "0.12"
 tracing           = "0.1"
 reqwest           = { version = "0.12", features = ["json"] }

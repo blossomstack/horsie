@@ -17,10 +17,15 @@ use horsie_server::velos::VelosClient;
 use horsie_server::vendor::{LocalProcessVendor, RuntimeVendor, VelosVendor, VelosVendorSettings};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub async fn serve(cfg: HorsieConfig, addr: String) -> Result<(), CliError> {
+pub async fn serve(
+    cfg: HorsieConfig,
+    addr: String,
+    web_dir: Option<PathBuf>,
+) -> Result<(), CliError> {
     let state_dir = cfg.storage.state_dir.join("server");
     let data_dir = cfg.storage.data_dir.join("server");
     std::fs::create_dir_all(&state_dir).map_err(|e| CliError::Io(e.to_string()))?;
@@ -100,11 +105,15 @@ pub async fn serve(cfg: HorsieConfig, addr: String) -> Result<(), CliError> {
         plugins_dir,
         hook_path,
         default_vendor,
+        web_dir,
     };
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| CliError::Executor(format!("bind {addr}: {e}")))?;
     println!("horsie server listening on http://{addr}");
+    if let Some(dir) = state.web_dir.as_ref() {
+        println!("serving web UI from {}", dir.display());
+    }
     axum::serve(listener, app(state))
         .await
         .map_err(|e| CliError::Executor(e.to_string()))
