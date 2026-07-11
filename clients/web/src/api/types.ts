@@ -4,3 +4,4 @@ export * from "../generated/agent";
 export * from "../generated/capabilities";
 export * from "../generated/session";
 export * from "../generated/session_api";
+export * from "../generated/settings";

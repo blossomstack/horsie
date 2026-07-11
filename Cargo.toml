@@ -41,6 +41,10 @@ reqwest           = { version = "0.12", features = ["json"] }
 tempfile          = "3"
 jsonschema        = "0.46"
 eval              = "0.4"
+# SQLite-backed settings store for the session server (Postgres-ready: add the
+# `postgres` feature + a driver later). Runtime queries (no compile-time DB) +
+# embedded migrations, so CI needs no DATABASE_URL.
+sqlx              = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 
 # Production code bans panic-prone constructs; test code opts out per-file via
 # #![cfg_attr(test, allow(clippy::unwrap_used, ...))]

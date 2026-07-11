@@ -5,6 +5,8 @@ import type {
   GetSessionResponse,
   ListSessionsResponse,
   SessionAck,
+  SettingsUpdate,
+  SettingsView,
 } from "./types";
 
 // All horsie endpoints live under `/api`. In dev, Vite proxies this prefix to
@@ -85,6 +87,15 @@ export const api = {
         method: "POST",
         body: "{}",
       }),
+  },
+
+  config: {
+    /** The current redacted settings (providers, models, vendors, deployment info). */
+    get: (): Promise<SettingsView> => request("/config"),
+
+    /** Persist + live-apply a settings update; returns the new view. */
+    update: (body: SettingsUpdate): Promise<SettingsView> =>
+      request("/config", { method: "PUT", body: JSON.stringify(body) }),
   },
 
   /** SSE URL for a single session's durable + live event stream. */

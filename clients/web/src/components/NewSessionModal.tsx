@@ -1,12 +1,12 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { ChevronRight, Loader2, X } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { ChevronRight, Loader2, Settings2, X } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { ApiRequestError } from "../api/client";
 import type { CreateSessionRequest } from "../api/types";
 import { cn } from "../lib/cn";
 import { useCreateSession } from "../hooks/useSessions";
-
-const DEFAULT_MODEL = "kimi-code";
+import { useSettings } from "../hooks/useSettings";
 
 export function NewSessionModal({
   open,
@@ -18,10 +18,15 @@ export function NewSessionModal({
   onCreated: (id: string) => void;
 }) {
   const create = useCreateSession();
+  const { data: settings } = useSettings();
+  const models = settings?.models ?? [];
+  const activeVendors = (settings?.vendors ?? []).filter((v) => v.active);
+  const showVendor = activeVendors.length > 1;
+
   const [name, setName] = useState("");
-  const [model, setModel] = useState(DEFAULT_MODEL);
+  const [model, setModel] = useState("");
   const [workdir, setWorkdir] = useState("");
-  const [vendor, setVendor] = useState("local");
+  const [vendor, setVendor] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [allowAskUser, setAllowAskUser] = useState(true);
   const [usePlugins, setUsePlugins] = useState(false);
@@ -30,9 +35,9 @@ export function NewSessionModal({
 
   const reset = () => {
     setName("");
-    setModel(DEFAULT_MODEL);
+    setModel("");
     setWorkdir("");
-    setVendor("local");
+    setVendor("");
     setSystemPrompt("");
     setAllowAskUser(true);
     setUsePlugins(false);
@@ -40,10 +45,26 @@ export function NewSessionModal({
     setError(null);
   };
 
+  // Clear the form on close so a cancelled draft never carries into the next
+  // open (and a since-deleted model can't linger as a stale selection).
+  useEffect(() => {
+    if (!open) reset();
+  }, [open]);
+
+  // While open, keep model/vendor pointing at a choice that still exists —
+  // reseed from server config when the current selection is empty or stale.
+  useEffect(() => {
+    if (!open || !settings) return;
+    if (!models.some((m) => m.alias === model))
+      setModel(models[0]?.alias ?? "");
+    if (!activeVendors.some((v) => v.name === vendor))
+      setVendor(settings.defaultVendor);
+  }, [open, models, activeVendors, settings, model, vendor]);
+
   const submit = async () => {
     setError(null);
     const wd = workdir.trim();
-    if (!model.trim()) return setError("A model is required.");
+    if (!model.trim()) return setError("Select a model.");
     if (!wd) return setError("A workspace directory is required.");
 
     const body: CreateSessionRequest = {
@@ -65,12 +86,12 @@ export function NewSessionModal({
       onCreated(res.session.id);
     } catch (e) {
       setError(
-        e instanceof ApiRequestError
-          ? e.message
-          : "Failed to create session.",
+        e instanceof ApiRequestError ? e.message : "Failed to create session.",
       );
     }
   };
+
+  const noModels = !!settings && models.length === 0;
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -100,12 +121,28 @@ export function NewSessionModal({
             </Field>
 
             <Field label="Model">
-              <input
-                className="input font-mono"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="model alias from horsie config"
-              />
+              {noModels ? (
+                <Link
+                  to="/settings"
+                  onClick={() => onOpenChange(false)}
+                  className="flex items-center gap-1.5 rounded-[var(--radius)] border border-dashed px-3 py-2 text-sm text-muted transition-colors hover:text-text"
+                >
+                  <Settings2 size={14} />
+                  No models configured — add one in Settings
+                </Link>
+              ) : (
+                <select
+                  className="input font-mono"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                >
+                  {models.map((m) => (
+                    <option key={m.alias} value={m.alias}>
+                      {m.alias} — {m.modelId}
+                    </option>
+                  ))}
+                </select>
+              )}
             </Field>
 
             <Field
@@ -134,14 +171,22 @@ export function NewSessionModal({
 
             {advanced && (
               <div className="space-y-3.5 border-t pt-3.5">
-                <Field label="Vendor">
-                  <input
-                    className="input font-mono"
-                    value={vendor}
-                    onChange={(e) => setVendor(e.target.value)}
-                    placeholder="local"
-                  />
-                </Field>
+                {showVendor && (
+                  <Field label="Runtime vendor">
+                    <select
+                      className="input font-mono"
+                      value={vendor}
+                      onChange={(e) => setVendor(e.target.value)}
+                    >
+                      {activeVendors.map((v) => (
+                        <option key={v.name} value={v.name}>
+                          {v.name}
+                          {v.isDefault ? " (default)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                )}
                 <Field label="System prompt" hint="optional">
                   <textarea
                     className="input min-h-[68px] resize-y"
@@ -175,7 +220,7 @@ export function NewSessionModal({
             <button
               className="btn-primary"
               onClick={submit}
-              disabled={create.isPending}
+              disabled={create.isPending || noModels}
             >
               {create.isPending && (
                 <Loader2 size={15} className="animate-spin" />

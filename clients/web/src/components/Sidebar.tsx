@@ -1,4 +1,4 @@
-import { MessageSquarePlus, Plus, Search } from "lucide-react";
+import { MessageSquarePlus, Plus, Search, Settings } from "lucide-react";
 import { useMemo, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import type { SessionSummary } from "../api/types";
@@ -116,10 +116,26 @@ export function Sidebar() {
       </nav>
 
       <div className="flex items-center justify-between border-t px-3 py-2">
-        <span className="text-xs text-faint">
-          {sessions?.length ?? 0} session{sessions?.length === 1 ? "" : "s"}
-        </span>
-        <ThemeToggle />
+        <NavLink
+          to="/settings"
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-1.5 rounded-[var(--radius)] px-2 py-1.5 text-xs font-medium transition-colors",
+              isActive
+                ? "bg-surface-3 text-text"
+                : "text-muted hover:bg-surface-2 hover:text-text",
+            )
+          }
+        >
+          <Settings size={14} />
+          Settings
+        </NavLink>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-faint">
+            {sessions?.length ?? 0} session{sessions?.length === 1 ? "" : "s"}
+          </span>
+          <ThemeToggle />
+        </div>
       </div>
 
       <NewSessionModal

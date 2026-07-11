@@ -411,7 +411,7 @@ mod tests {
         let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
         vendors.insert("mock".into(), Arc::new(MockVendor::new()));
         ServerDeps {
-            provider_registry: HashMap::new(),
+            provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors,
             state_dir: tmp.path().to_path_buf(),
         }

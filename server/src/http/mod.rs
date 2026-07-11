@@ -1,10 +1,12 @@
 //! The session server's HTTP surface: REST handlers + SSE streams over the
 //! `SessionSupervisor`. All request/response bodies are fluorite wire types.
 
+mod config;
 pub mod error;
 mod handlers;
 mod sse;
 
+use crate::config::ConfigStore;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Router;
 use axum::routing::{get, post};
@@ -31,8 +33,10 @@ pub struct AppState {
     pub default_caps: CapabilitySpec,
     pub plugins_dir: Option<PathBuf>,
     pub hook_path: Vec<PathBuf>,
-    /// Vendor name a create request defaults to when it omits `vendor`.
-    pub default_vendor: String,
+    /// Reads and mutates the runtime-editable configuration (models, providers,
+    /// default vendor). Also the source of the default vendor a create request
+    /// falls back to when it omits one.
+    pub config_store: Arc<dyn ConfigStore>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
@@ -55,6 +59,10 @@ pub fn app(state: AppState) -> Router {
         .route("/api/sessions/:id/stop", post(handlers::stop_session))
         .route("/api/sessions/:id/events", get(sse::session_events))
         .route("/api/events", get(sse::global_events))
+        .route(
+            "/api/config",
+            get(config::get_config).put(config::update_config),
+        )
         .with_state(state);
 
     match web_dir {
@@ -99,11 +107,34 @@ mod tests {
         }
     }
 
-    fn test_state(tmp: &tempfile::TempDir) -> AppState {
+    fn test_info() -> horsie_models::settings::ServerInfo {
+        horsie_models::settings::ServerInfo {
+            config_path: String::new(),
+            database: String::new(),
+            state_dir: String::new(),
+            data_dir: String::new(),
+            plugins_dir: String::new(),
+            version: "test".into(),
+        }
+    }
+
+    async fn test_state(tmp: &tempfile::TempDir) -> AppState {
         let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
         vendors.insert("mock".into(), Arc::new(MockVendor::new()));
+        // A real DB store on a temp SQLite; the registry it opens is empty and
+        // shared with the supervisor. `mock` is the runtime vendor under test.
+        let db = tmp.path().join("config.db");
+        let opened = crate::config::DbConfigStore::open(
+            &format!("sqlite://{}", db.display()),
+            crate::config::StoreDeps {
+                runtime_bin: std::path::PathBuf::from("horsie-runtime"),
+                info: test_info(),
+            },
+        )
+        .await
+        .unwrap();
         let deps = ServerDeps {
-            provider_registry: HashMap::new(),
+            provider_registry: opened.registry,
             vendors,
             state_dir: tmp.path().to_path_buf(),
         };
@@ -118,7 +149,7 @@ mod tests {
             default_caps: block_caps(),
             plugins_dir: None,
             hook_path: vec![],
-            default_vendor: "mock".to_string(),
+            config_store: opened.store,
             web_dir: None,
         }
     }
@@ -144,6 +175,15 @@ mod tests {
             .unwrap()
     }
 
+    fn put_json(uri: &str, body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("PUT")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    }
+
     async fn read_json<T: serde::de::DeserializeOwned>(res: axum::response::Response) -> T {
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
             .await
@@ -154,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn health_responds_ok() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp));
+        let app = app(test_state(&tmp).await);
         let res = app.oneshot(get("/api/health")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
@@ -162,7 +202,7 @@ mod tests {
     #[tokio::test]
     async fn create_list_get_message_lifecycle_over_http() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp));
+        let app = app(test_state(&tmp).await);
         // create
         let body = serde_json::json!({
             "agent": {"model": "mock"},
@@ -229,9 +269,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_get_and_put_round_trip() {
+        use horsie_models::settings::SettingsView;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        // GET: fresh DB — no models, built-in `local` vendor is the default.
+        let res = app.clone().oneshot(get("/api/config")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let view: SettingsView = read_json(res).await;
+        assert_eq!(view.default_vendor, "local");
+        assert!(view.models.is_empty());
+        assert!(view.vendors.iter().any(|v| v.name == "local"));
+        // PUT a provider + model persists and redacts the key.
+        let body = serde_json::json!({
+            "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
+            "models": [{"alias": "m", "provider": "p", "modelId": "id"}],
+        });
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/config", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let view: SettingsView = read_json(res).await;
+        assert_eq!(view.models.len(), 1);
+        assert!(view.providers[0].has_inline_key);
+        // A model referencing a missing provider is a 422.
+        let bad =
+            serde_json::json!({ "models": [{"alias": "x", "provider": "ghost", "modelId": "y"}] });
+        let res = app.oneshot(put_json("/api/config", &bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
     async fn create_rejects_empty_workdirs() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp));
+        let app = app(test_state(&tmp).await);
         let body = serde_json::json!({
             "agent": {"model": "mock"},
             "workdirs": [],

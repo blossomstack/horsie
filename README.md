@@ -77,6 +77,17 @@ State (the daemon control socket, per-job capability files) lives under
 
 A worked configuration and capability file are in [`examples/`](examples/README.md).
 
+The **session server** splits config in two, and never mixes them: `config.json`
+holds only deployment/bootstrap settings (storage, sandbox, runtime, hackamore,
+and the settings-DB location), while its runtime-editable settings — providers,
+models, velos vendor instances, and the default vendor — live in a SQLite
+database managed from the web UI (**Settings**, or `GET`/`PUT /api/config`). The
+DB defaults to `<data_dir>/server/config.db` (override with `database.url` or
+`$HORSIE_DATABASE_URL`). Provider/model edits apply to new turns without a
+restart; velos-instance edits activate on the next restart. Secrets are never
+returned by the API; the UI stores keys inline or references an env var. (The
+job daemon still reads providers/models from `config.json`.)
+
 ## Session server & remote runtimes
 
 `horsie serve` runs the session-oriented HTTP + SSE server (recoverable,

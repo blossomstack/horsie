@@ -14,10 +14,12 @@ test-util = []
 horsie-models          = { path = "../models" }
 horsie-actor           = { path = "../actor", features = ["file-journal"] }
 horsie-agentcore       = { path = "../agentcore" }
+horsie-anthropic       = { path = "../providers/anthropic" }
 horsie-workflow        = { path = "../workflow" }
 horsie-executor        = { path = "../executor" }
 horsie-executor-client = { path = "../executor-client" }
 horsie-runtime-client  = { path = "../runtime-client" }
+sqlx              = { workspace = true }
 axum              = { workspace = true }
 tower-http        = { workspace = true }
 tokio             = { workspace = true }

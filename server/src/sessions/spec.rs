@@ -9,7 +9,13 @@ use horsie_models::session::SessionStatusKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+/// LLM providers keyed by model alias, behind a shared lock so the settings API
+/// can swap the whole set live. Read once per turn in
+/// [`crate::sessions::session_actor::SessionActor::ensure_agent`]; the guard is
+/// never held across an `.await`.
+pub type SharedProviderRegistry = Arc<RwLock<HashMap<String, Arc<dyn LlmProvider>>>>;
 
 /// A session's unique id (a UUID string). Equals the agent session uuid, so
 /// `session/<id>` and `agent/<id>` journals share the same `<id>`.
@@ -90,8 +96,8 @@ pub fn status_reason(s: &SessionStatus) -> Option<String> {
 /// Process-wide dependencies injected into every [`crate::sessions::session_actor::SessionActor`].
 #[derive(Clone)]
 pub struct ServerDeps {
-    /// LLM providers keyed by the session's `model`.
-    pub provider_registry: HashMap<String, Arc<dyn LlmProvider>>,
+    /// LLM providers keyed by the session's `model`, swappable at runtime.
+    pub provider_registry: SharedProviderRegistry,
     /// Runtime vendors keyed by the session spec's `vendor` name.
     pub vendors: HashMap<String, Arc<dyn RuntimeVendor>>,
     /// Per-session server state (capability files) under `<state_dir>/sessions/<id>/`.

@@ -1,28 +1,29 @@
 //! `horsie serve`: the standalone session server (HTTP + SSE).
 //!
-//! Shares config, providers, and capability resolution with the daemon, but owns
-//! a separate journal root (`<data_dir>/server`) and state root
-//! (`<state_dir>/server`), so it runs alongside the job daemon untouched.
+//! Deployment/bootstrap config comes from `config.json`/env (storage, sandbox,
+//! runtime, hackamore, and the settings-DB location). The runtime-editable
+//! settings — providers, models, vendors, default vendor — live in the settings
+//! database (owned by the `server` crate) and are managed from the web UI, never
+//! overlapping with the file. Journal root is `<data_dir>/server`, state root
+//! `<state_dir>/server`, so the server runs alongside the job daemon untouched.
 
 use crate::capabilities;
-use crate::config::{HorsieConfig, build_registry};
+use crate::config::HorsieConfig;
 use crate::daemon::default_runtime_bin;
 use crate::error::CliError;
 use horsie_actor::{FileJournal, Journal, spawn_root};
 use horsie_models::capabilities::CapabilitySpec;
+use horsie_models::settings::ServerInfo;
+use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::SessionSupervisor;
-use horsie_server::velos::VelosClient;
-use horsie_server::vendor::{LocalProcessVendor, RuntimeVendor, VelosVendor, VelosVendorSettings};
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 pub async fn serve(
     cfg: HorsieConfig,
+    config_path: Option<PathBuf>,
     addr: String,
     web_dir: Option<PathBuf>,
 ) -> Result<(), CliError> {
@@ -31,8 +32,7 @@ pub async fn serve(
     std::fs::create_dir_all(&state_dir).map_err(|e| CliError::Io(e.to_string()))?;
     std::fs::create_dir_all(&data_dir).map_err(|e| CliError::Io(e.to_string()))?;
 
-    let registry = build_registry(&cfg)?;
-    let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(data_dir));
+    let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(data_dir.clone()));
     let runtime_bin = cfg.runtime.bin.clone().unwrap_or_else(default_runtime_bin);
 
     // Resolve the default capability spec once, and a finalizer that applies path
@@ -58,36 +58,33 @@ pub async fn serve(
         });
     let default_caps = caps_finalize(default_caps);
 
-    let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
-    vendors.insert(
-        "local".into(),
-        Arc::new(LocalProcessVendor::new(runtime_bin)),
-    );
-
-    // Optional velos remote runtime vendor. Present → sessions may target
-    // `"vendor": "velos"` to run in a remote container; absent → local only.
-    if let Some(vc) = &cfg.velos {
-        let vendor = build_velos_vendor(vc).await?;
-        println!(
-            "velos remote runtime vendor enabled (server {}, image {})",
-            vc.server_url, vc.image
+    // Open the settings database (server-owned) and get the live registry +
+    // vendors it builds. Providers/models/vendors are the DB's concern, not the
+    // file's — warn if the file still carries them.
+    if !cfg.providers.is_empty() || !cfg.models.is_empty() {
+        eprintln!(
+            "note: `horsie serve` ignores config.json providers/models — manage them in Settings"
         );
-        vendors.insert("velos".into(), Arc::new(vendor));
     }
-
-    // The vendor a create request defaults to when it omits `vendor`.
-    let default_vendor = cfg.default_vendor.clone().unwrap_or_else(|| "local".into());
-    if !vendors.contains_key(&default_vendor) {
-        return Err(CliError::Config(format!(
-            "default_vendor '{default_vendor}' is not a configured vendor \
-             (available: {})",
-            available_vendors(&vendors)
-        )));
-    }
+    let db_url = resolve_db_url(&cfg, &data_dir);
+    let info = ServerInfo {
+        config_path: config_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        database: redact_db_url(&db_url),
+        state_dir: cfg.storage.state_dir.display().to_string(),
+        data_dir: cfg.storage.data_dir.display().to_string(),
+        plugins_dir: cfg.storage.plugins_dir.display().to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let opened = DbConfigStore::open(&db_url, StoreDeps { runtime_bin, info })
+        .await
+        .map_err(CliError::Config)?;
 
     let deps = ServerDeps {
-        provider_registry: registry,
-        vendors,
+        provider_registry: opened.registry,
+        vendors: opened.vendors,
         state_dir,
     };
     let (global_tx, _) = tokio::sync::broadcast::channel(256);
@@ -104,7 +101,7 @@ pub async fn serve(
         default_caps,
         plugins_dir,
         hook_path,
-        default_vendor,
+        config_store: opened.store,
         web_dir,
     };
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -119,36 +116,27 @@ pub async fn serve(
         .map_err(|e| CliError::Executor(e.to_string()))
 }
 
-/// Build the velos vendor from config: resolve the bearer token, construct the
-/// REST client, and bind the shared reverse-dial listener.
-async fn build_velos_vendor(
-    vc: &crate::config::VelosVendorConfig,
-) -> Result<VelosVendor, CliError> {
-    let token = vc.resolve_token()?;
-    let client = VelosClient::new(&vc.server_url, token)
-        .map_err(|e| CliError::Config(format!("velos client: {e}")))?;
-    let listen: SocketAddr = vc
-        .listen
-        .parse()
-        .map_err(|e| CliError::Config(format!("invalid velos listen '{}': {e}", vc.listen)))?;
-    let settings = VelosVendorSettings {
-        image: vc.image.clone(),
-        runtime_bin: vc.runtime_bin.clone(),
-        workspace_root: vc.workspace_root.clone(),
-        advertise_host: vc.advertise_host.clone(),
-        listen,
-        cpu: vc.cpu,
-        memory_bytes: vc.memory_bytes(),
-        connect_timeout: Duration::from_secs(vc.connect_timeout_secs),
-    };
-    VelosVendor::bind(Arc::new(client), settings)
-        .await
-        .map_err(|e| CliError::Executor(format!("velos vendor: {e}")))
+/// The settings-database URL: `$HORSIE_DATABASE_URL`, else `database.url` from
+/// config, else a SQLite file under the server data dir.
+fn resolve_db_url(cfg: &HorsieConfig, data_dir: &Path) -> String {
+    if let Ok(v) = std::env::var("HORSIE_DATABASE_URL")
+        && !v.is_empty()
+    {
+        return v;
+    }
+    if let Some(u) = cfg.database.url.as_ref().filter(|s| !s.is_empty()) {
+        return u.clone();
+    }
+    format!("sqlite://{}/config.db", data_dir.display())
 }
 
-/// Comma-separated sorted vendor names, for error messages.
-fn available_vendors(vendors: &HashMap<String, Arc<dyn RuntimeVendor>>) -> String {
-    let mut names: Vec<&str> = vendors.keys().map(String::as_str).collect();
-    names.sort_unstable();
-    names.join(", ")
+/// Hide credentials in a database URL's authority (e.g. `postgres://u:p@host`).
+fn redact_db_url(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://")
+        && let Some((auth, tail)) = rest.split_once('@')
+        && auth.contains(':')
+    {
+        return format!("{scheme}://***@{tail}");
+    }
+    url.to_string()
 }

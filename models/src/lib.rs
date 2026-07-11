@@ -51,6 +51,11 @@ pub mod session_api {
     include!(concat!(env!("OUT_DIR"), "/session_api/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod settings {
+    include!(concat!(env!("OUT_DIR"), "/settings/mod.rs"));
+}
+
 impl capabilities::CapabilitySpec {
     /// Load and parse a capability file (the runtime's `--sandbox-caps` path, or a
     /// user-authored file the CLI resolves). Shared by the runtime and the CLI; the

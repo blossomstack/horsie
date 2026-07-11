@@ -89,7 +89,9 @@ pub async fn create_session(
         agent: settings_from_wire(req.agent),
         workspaces,
         capabilities: caps,
-        vendor: req.vendor.unwrap_or_else(|| state.default_vendor.clone()),
+        vendor: req
+            .vendor
+            .unwrap_or_else(|| state.config_store.default_vendor()),
         plugins_dir: state.plugins_dir.clone(),
         hook_path: state.hook_path.clone(),
     };

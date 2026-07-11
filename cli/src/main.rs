@@ -498,7 +498,8 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
         },
         Command::Serve { config, addr, web } => {
             let cfg = HorsieConfig::resolve(config.as_deref())?;
-            horsie::serve::serve(cfg, addr, web).await?;
+            let config_path = HorsieConfig::resolve_path(config.as_deref());
+            horsie::serve::serve(cfg, config_path, addr, web).await?;
             Ok(0)
         }
         Command::Plugin { action } => match action {

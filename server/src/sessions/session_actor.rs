@@ -202,12 +202,18 @@ impl SessionActor {
         };
         let runtime_client = runtime.runtime_client.clone();
         let settings = &self.spec.agent;
-        let provider = self
-            .deps
-            .provider_registry
-            .get(&settings.model)
-            .cloned()
-            .ok_or_else(|| format!("no provider registered for model '{}'", settings.model))?;
+        // Resolve the provider from the shared registry under a short-lived read
+        // guard (dropped before the awaits below), so live config edits take
+        // effect on the next turn.
+        let provider = {
+            let reg = self
+                .deps
+                .provider_registry
+                .read()
+                .map_err(|_| "provider registry lock poisoned".to_string())?;
+            reg.get(&settings.model).cloned()
+        }
+        .ok_or_else(|| format!("no provider registered for model '{}'", settings.model))?;
         let def = WorkflowAgentDef {
             use_plugins: settings.use_plugins,
             name: "agent".to_string(),
@@ -637,7 +643,7 @@ mod tests {
         let mut vendors: HashMap<String, Arc<dyn crate::vendor::RuntimeVendor>> = HashMap::new();
         vendors.insert("mock".into(), vendor.clone());
         let deps = ServerDeps {
-            provider_registry: HashMap::new(),
+            provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors,
             state_dir: tmp.path().to_path_buf(),
         };

@@ -14,6 +14,7 @@ use horsie_agentcore::LlmProvider;
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
 use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
+use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand};
@@ -73,13 +74,32 @@ async fn start_server(
     let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
     vendors.insert("mock".into(), vendor);
     let deps = ServerDeps {
-        provider_registry: providers,
+        provider_registry: Arc::new(std::sync::RwLock::new(providers)),
         vendors,
         state_dir: journal_dir.join("state"),
     };
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
     let (gtx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
+    // A real (empty) settings store backs `/api/config`; the session flow uses the
+    // custom `mock` registry/vendor above, so the store's own registry is unused.
+    let db = journal_dir.join("config.db");
+    let opened = DbConfigStore::open(
+        &format!("sqlite://{}", db.display()),
+        StoreDeps {
+            runtime_bin: std::path::PathBuf::from("horsie-runtime"),
+            info: horsie_models::settings::ServerInfo {
+                config_path: String::new(),
+                database: String::new(),
+                state_dir: String::new(),
+                data_dir: String::new(),
+                plugins_dir: String::new(),
+                version: "test".into(),
+            },
+        },
+    )
+    .await
+    .unwrap();
     let state = AppState {
         supervisor: supervisor.clone(),
         journal,
@@ -88,7 +108,7 @@ async fn start_server(
         default_caps: block_caps(),
         plugins_dir: None,
         hook_path: vec![],
-        default_vendor: "mock".into(),
+        config_store: opened.store,
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

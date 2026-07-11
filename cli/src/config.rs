@@ -39,8 +39,25 @@ pub struct HorsieConfig {
     /// Vendor a session-create request defaults to when it omits `vendor`.
     /// Defaults to `"local"`; set to `"velos"` (with a `velos` section) to make
     /// remote sandboxes the default.
+    ///
+    /// NOTE: only the job daemon reads this. The session server (`horsie serve`)
+    /// keeps the default vendor in its settings database, not here.
     #[serde(default)]
     pub default_vendor: Option<String>,
+    /// Where the session server persists its runtime-editable settings
+    /// (providers, models, default vendor). Deployment config; never overlaps
+    /// with those settings.
+    #[serde(default)]
+    pub database: DatabaseConfig,
+}
+
+/// Session-server settings database location (hand-written serde — deployment
+/// config). Absent → a SQLite file under the server data dir. Set `url` to a
+/// `sqlite://…` path today, or a `postgres://…` URL once that backend lands.
+#[derive(Debug, Default, Deserialize)]
+pub struct DatabaseConfig {
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,22 +191,22 @@ pub struct VelosVendorConfig {
     pub connect_timeout_secs: u64,
 }
 
-fn default_container_runtime_bin() -> String {
+pub(crate) fn default_container_runtime_bin() -> String {
     "horsie-runtime".to_string()
 }
-fn default_workspace_root() -> String {
+pub(crate) fn default_workspace_root() -> String {
     "/workspace".to_string()
 }
-fn default_velos_listen() -> String {
+pub(crate) fn default_velos_listen() -> String {
     "0.0.0.0:0".to_string()
 }
-fn default_velos_cpu() -> u32 {
+pub(crate) fn default_velos_cpu() -> u32 {
     2
 }
-fn default_velos_memory_mib() -> u64 {
+pub(crate) fn default_velos_memory_mib() -> u64 {
     1024
 }
-fn default_velos_connect_timeout_secs() -> u64 {
+pub(crate) fn default_velos_connect_timeout_secs() -> u64 {
     60
 }
 
@@ -239,6 +256,16 @@ impl HorsieConfig {
     ///   otherwise fall back to an empty [`HorsieConfig::default`].
     pub fn resolve(explicit: Option<&Path>) -> Result<Self, CliError> {
         Self::resolve_with(explicit, user_config_path())
+    }
+
+    /// The path config would be loaded from / written back to: the explicit
+    /// `--config` path, else the default user config path. `None` only when no
+    /// home/XDG base is available (persisting settings is then impossible).
+    pub fn resolve_path(explicit: Option<&Path>) -> Option<PathBuf> {
+        match explicit {
+            Some(p) => Some(p.to_path_buf()),
+            None => user_config_path(),
+        }
     }
 
     /// Inner policy with the user-config path injected, so the precedence rules
@@ -324,15 +351,25 @@ fn storage_dir_from(
     }
 }
 
-/// Build the provider registry keyed by **model key** (matches `WorkflowAgentDef.model`).
-/// The key is resolved inline-then-env-then-none; a configured-but-missing/empty key
-/// fails here, before any runtime is spawned.
+/// Build the provider registry keyed by **model key** (matches `WorkflowAgentDef.model`)
+/// from the file config. Thin wrapper over [`build_registry_from`].
 pub fn build_registry(
     cfg: &HorsieConfig,
 ) -> Result<HashMap<String, Arc<dyn LlmProvider>>, CliError> {
+    build_registry_from(&cfg.providers, &cfg.models)
+}
+
+/// Build the provider registry keyed by **model key** from provider/model maps
+/// (file config for the daemon, or the settings DB for the session server). The
+/// key is resolved inline-then-env-then-none; a configured-but-missing/empty key
+/// fails here, before any runtime is spawned.
+pub fn build_registry_from(
+    providers: &HashMap<String, ProviderConfig>,
+    models: &HashMap<String, ModelConfig>,
+) -> Result<HashMap<String, Arc<dyn LlmProvider>>, CliError> {
     let mut reg: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
-    for (model_key, mc) in &cfg.models {
-        let pc = cfg.providers.get(&mc.provider).ok_or_else(|| {
+    for (model_key, mc) in models {
+        let pc = providers.get(&mc.provider).ok_or_else(|| {
             CliError::Config(format!(
                 "model '{model_key}' references unknown provider '{}'",
                 mc.provider
