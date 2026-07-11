@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use horsie_agentcore::LlmProvider;
+use horsie_agentcore::{LlmProvider, Secret};
 use horsie_anthropic::AnthropicProvider;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -52,7 +52,7 @@ pub enum ProviderConfig {
     /// Prefer `api_key_env` — it keeps the secret out of the config file.
     Anthropic {
         #[serde(default)]
-        api_key: Option<String>,
+        api_key: Option<Secret>,
         #[serde(default)]
         api_key_env: Option<String>,
         #[serde(default)]
@@ -143,7 +143,7 @@ pub struct VelosVendorConfig {
     pub server_url: String,
     /// Bearer token inline. Prefer `token_env` to keep the secret out of the file.
     #[serde(default)]
-    pub token: Option<String>,
+    pub token: Option<Secret>,
     /// Env var to read the bearer token from.
     #[serde(default)]
     pub token_env: Option<String>,
@@ -197,7 +197,7 @@ impl VelosVendorConfig {
     /// Resolve the bearer token: inline first, then env var, else none (an
     /// unauthenticated velos server). A configured-but-empty value fails here,
     /// before the vendor is built.
-    pub fn resolve_token(&self) -> Result<Option<String>, CliError> {
+    pub fn resolve_token(&self) -> Result<Option<Secret>, CliError> {
         match (&self.token, &self.token_env) {
             (Some(t), _) => {
                 if t.is_empty() {
@@ -214,7 +214,7 @@ impl VelosVendorConfig {
                         "velos token env var '{var}' is empty"
                     )));
                 }
-                Ok(Some(key))
+                Ok(Some(Secret::from(key)))
             }
             (None, None) => Ok(None),
         }
@@ -368,7 +368,7 @@ pub fn build_registry(
                                 mc.provider
                             )));
                         }
-                        Some(key)
+                        Some(Secret::from(key))
                     }
                     (None, None) => None,
                 };
@@ -435,6 +435,18 @@ mod tests {
         )
         .unwrap();
         assert!(build_registry(&cfg).is_err());
+    }
+
+    #[test]
+    fn debug_formatting_config_never_leaks_inline_api_key() {
+        let cfg: HorsieConfig = serde_json::from_str(
+            r#"{
+                "providers": { "p": { "type": "anthropic", "api_key": "sk-live-do-not-leak" } },
+                "models": { "m": { "provider": "p", "model_id": "id" } }
+            }"#,
+        )
+        .unwrap();
+        assert!(!format!("{cfg:?}").contains("sk-live-do-not-leak"));
     }
 
     #[test]
@@ -562,7 +574,12 @@ mod tests {
         let cfg: HorsieConfig =
             serde_json::from_str(&format!(r#"{base},"token":"secret"}}}}"#)).unwrap();
         assert_eq!(
-            cfg.velos.unwrap().resolve_token().unwrap().as_deref(),
+            cfg.velos
+                .unwrap()
+                .resolve_token()
+                .unwrap()
+                .as_ref()
+                .map(Secret::expose),
             Some("secret")
         );
         // Empty inline token is rejected.

@@ -9,9 +9,10 @@ use async_llm::{
 use async_trait::async_trait;
 use horsie_agentcore::{
     AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
-    EventSink, LlmError, LlmProvider, StopReason, TextBlockStartEvent, TextChunkEvent, TextPart,
-    ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingPart, ThinkingSignatureChunkEvent,
-    ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
+    EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent, TextChunkEvent,
+    TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingPart,
+    ThinkingSignatureChunkEvent, ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent,
+    ToolChoice, Usage,
 };
 use std::{collections::HashMap, env, time::Duration};
 use tokio_stream::StreamExt;
@@ -75,7 +76,7 @@ fn io_err(msg: impl std::fmt::Display) -> LlmError {
 pub struct AnthropicProvider {
     client: Client,
     model: String,
-    api_key: Option<String>,
+    api_key: Option<Secret>,
     base_url: Option<String>,
     session_id: Option<String>,
     thinking_budget: Option<u32>,
@@ -131,10 +132,10 @@ impl AnthropicProvider {
         })
     }
 
-    pub fn with_api_key(key: impl Into<String>) -> Result<Self, LlmError> {
+    pub fn with_api_key(key: impl Into<Secret>) -> Result<Self, LlmError> {
         let key = key.into();
         let base_url = env_base_url();
-        let client = Self::build_client(Some(&key), base_url.as_deref(), None)?;
+        let client = Self::build_client(Some(key.expose()), base_url.as_deref(), None)?;
         Ok(Self {
             client,
             model: DEFAULT_MODEL.into(),
@@ -187,7 +188,7 @@ impl AnthropicProvider {
 
     fn rebuild_client(&mut self) {
         match Self::build_client(
-            self.api_key.as_deref(),
+            self.api_key.as_ref().map(Secret::expose),
             self.base_url.as_deref(),
             self.session_id.as_deref(),
         ) {

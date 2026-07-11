@@ -5,6 +5,7 @@
 //! *reclaims* it. No watch streams, no listing, no status writes.
 
 use async_trait::async_trait;
+use horsie_agentcore::Secret;
 use std::collections::BTreeMap;
 
 /// Everything needed to schedule one container. Mirrors the subset of velos
@@ -83,14 +84,14 @@ pub trait ContainerApi: Send + Sync {
 pub struct VelosClient {
     http: reqwest::Client,
     base_url: String,
-    token: Option<String>,
+    token: Option<Secret>,
 }
 
 impl VelosClient {
     /// `base_url` is the velos server root (e.g. `http://velos:8080`); a trailing
     /// slash is tolerated. `token` is the bearer credential, if the server
     /// requires auth.
-    pub fn new(base_url: impl Into<String>, token: Option<String>) -> Result<Self, VelosError> {
+    pub fn new(base_url: impl Into<String>, token: Option<Secret>) -> Result<Self, VelosError> {
         let http = reqwest::Client::builder()
             .build()
             .map_err(|e| VelosError::Request(e.to_string()))?;
@@ -104,7 +105,7 @@ impl VelosClient {
 
     fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.token {
-            Some(t) => rb.bearer_auth(t),
+            Some(t) => rb.bearer_auth(t.expose()),
             None => rb,
         }
     }
@@ -296,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn create_posts_camelcase_body_with_bearer_auth() {
         let (base, st) = spawn_mock().await;
-        let client = VelosClient::new(base, Some("tok-123".to_string())).unwrap();
+        let client = VelosClient::new(base, Some(Secret::from("tok-123"))).unwrap();
         client
             .create_container("horsie-abc", &sample_spec())
             .await
