@@ -30,7 +30,7 @@ pub fn socket_path(root: &Path) -> PathBuf {
 
 /// Locate the sibling `horsie-runtime` binary next to this executable — the
 /// default when the config sets no explicit `runtime.bin`.
-fn default_runtime_bin() -> PathBuf {
+pub(crate) fn default_runtime_bin() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("horsie-runtime")))

@@ -1,6 +1,5 @@
-use crate::workflow_actor::{WorkflowCommand, WorkflowNotification};
+use crate::workflow_actor::WorkflowNotification;
 use async_trait::async_trait;
-use horsie_actor::ActorRef;
 use horsie_agentcore::{EventSink, LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
 use horsie_models::workflow::WorkflowAgentDef;
 use horsie_runtime_client::{RuntimeClient, add_runtime_tools};
@@ -48,6 +47,37 @@ impl WorkflowRuntimeContext {
     }
 }
 
+/// A terminal outcome an [`AgentActor`](crate::AgentActor) reports to whoever
+/// spawned it — the workflow that orchestrates it, or an interactive session.
+#[derive(Debug, Clone)]
+pub enum AgentOutcome {
+    /// The agent produced its output (structured, or its final text).
+    Concluded { session_id: Uuid, output: Value },
+    /// The agent paused to ask the user a question.
+    Asked {
+        session_id: Uuid,
+        tool_call_id: Option<String>,
+        question: String,
+    },
+    /// The agent parked itself awaiting its timers.
+    Parked { session_id: Uuid },
+    /// The agent run failed.
+    Failed {
+        session_id: Uuid,
+        error: String,
+        recoverable: bool,
+    },
+}
+
+/// Where an [`AgentActor`](crate::AgentActor) delivers its [`AgentOutcome`].
+/// Implemented by the workflow (mapping outcomes into its own commands) and by
+/// the session server; keeps the agent decoupled from any one parent's command
+/// enum.
+#[async_trait]
+pub trait AgentOutcomeSink: Send + Sync {
+    async fn deliver(&self, outcome: AgentOutcome);
+}
+
 /// Resources injected into an [`AgentActor`](crate::AgentActor) when a
 /// [`WorkflowActor`](crate::WorkflowActor) spawns it.
 #[derive(Clone)]
@@ -57,7 +87,8 @@ pub struct AgentRuntimeContext {
     /// `conclude` tool layered on when the agent has an output schema and/or may ask.
     pub toolbox: Arc<dyn Toolbox>,
     pub event_sink: Arc<dyn EventSink>,
-    pub parent_ref: ActorRef<WorkflowCommand>,
+    /// Whoever spawned this agent; receives its terminal outcome.
+    pub parent: Arc<dyn AgentOutcomeSink>,
     pub session_id: Uuid,
 }
 

@@ -1,0 +1,27 @@
+/// HTTP request/response contracts for the session server.
+package session_api;
+
+use session.AgentSettings;
+use session.SessionSummary;
+use session.SessionDetail;
+use capabilities.CapabilitySpec;
+
+struct CreateSessionRequest {
+    name: Option<String>,
+    agent: AgentSettings,
+    /// Workspace roots (>=1), like `horsie job run --workdir`.
+    workdirs: Vec<String>,
+    /// Runtime vendor name; defaults to "local".
+    vendor: Option<String>,
+    /// Capability spec overriding the server default.
+    capabilities: Option<CapabilitySpec>,
+}
+
+struct CreateSessionResponse { session: SessionSummary }
+struct ListSessionsResponse { sessions: Vec<SessionSummary> }
+struct GetSessionResponse { session: SessionDetail }
+struct SendMessageRequest { text: String }
+struct SessionAck {}
+
+/// Uniform HTTP error envelope.
+struct ApiError { code: String, message: String }

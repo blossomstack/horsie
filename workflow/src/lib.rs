@@ -15,8 +15,8 @@ mod workspace;
 
 pub use agent_actor::{AgentActor, AgentCommand, AgentDomainEvent, AgentParams, AgentState};
 pub use context::{
-    AgentRuntimeContext, CONCLUDE_TOOL, DefaultToolboxFactory, INSPECT_WORKSPACE_TOOL, SKILL_TOOL,
-    ToolboxFactory, WorkflowRuntimeContext, conclude_tool_spec,
+    AgentOutcome, AgentOutcomeSink, AgentRuntimeContext, CONCLUDE_TOOL, DefaultToolboxFactory,
+    INSPECT_WORKSPACE_TOOL, SKILL_TOOL, ToolboxFactory, WorkflowRuntimeContext, conclude_tool_spec,
 };
 pub use timers::{
     CancelSelector, TimerId, TimerKind, TimerRecord, TimerView, now_unix_ms, timer_tool_specs,
@@ -26,5 +26,5 @@ pub use workflow_actor::{
     WorkflowStatus,
 };
 pub use workspace::{
-    Skill, SkillSet, WorkspaceContext, compose_system_prompt, scan as scan_workspace,
+    SharedContext, Skill, SkillSet, WorkspaceContext, compose_system_prompt, scan as scan_workspace,
 };

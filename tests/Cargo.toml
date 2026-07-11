@@ -9,10 +9,19 @@ publish = false # internal application crate, never published to crates.io
 horsie-agentcore = { path = "../agentcore" }
 horsie-anthropic = { path = "../providers/anthropic" }
 horsie-mock-llm = { path = "../providers/mock-llm" }
+horsie-server = { path = "../server", features = ["test-util"] }
+horsie-actor = { path = "../actor", features = ["file-journal"] }
+horsie-workflow = { path = "../workflow" }
+horsie-models = { path = "../models" }
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-util  = { workspace = true }
 async-trait = { workspace = true }
 serde_json  = { workspace = true }
+axum        = { workspace = true }
+reqwest     = { workspace = true, features = ["stream"] }
+tempfile    = { workspace = true }
+uuid        = { workspace = true }
+futures-util = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,0 +1,85 @@
+/// Wire types for the session server: session views and the SSE event union.
+package session;
+
+use agent.Message;
+use agent.Usage;
+
+/// User-visible lifecycle state of a session. Failure reasons ride separately
+/// in `last_error` so the enum stays a plain discriminant.
+enum SessionStatusKind {
+    Provisioning,
+    Idle,
+    Running,
+    AwaitingInput,
+    Interrupted,
+    Stopped,
+    RecoveryFailed,
+    Failed,
+}
+
+/// Agent settings supplied at session creation.
+struct AgentSettings {
+    model: String,
+    system_prompt: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    allow_ask_user: Option<bool>,
+    use_plugins: Option<bool>,
+    max_iterations: Option<u32>,
+    max_retries: Option<u32>,
+}
+
+struct SessionSummary {
+    id: String,
+    name: Option<String>,
+    status: SessionStatusKind,
+    created_at: u64,
+    last_error: Option<String>,
+}
+
+struct SessionDetail {
+    id: String,
+    name: Option<String>,
+    status: SessionStatusKind,
+    created_at: u64,
+    last_error: Option<String>,
+    /// The question the agent is awaiting an answer to (status AwaitingInput).
+    pending_question: Option<String>,
+    model: String,
+    workdirs: Vec<String>,
+    vendor: String,
+}
+
+// --- SSE event payloads ---
+
+/// A complete transcript message (user, assistant, or tool result), replayed
+/// from the durable journal. Carries an SSE id (the journal sequence number).
+struct MessageEvent { message: Message }
+struct ToolOutputEvent { tool_call_id: String, output: String, is_error: bool }
+struct TurnCompletedEvent { iterations: u32, usage: Usage }
+struct AskedEvent { question: String }
+/// Live status transition. Sent without an SSE id (the session detail endpoint
+/// is the durable source for status).
+struct StatusChangedEvent { status: SessionStatusKind, reason: Option<String> }
+struct ErrorEvent { message: String }
+/// Streaming text delta — live only, never journaled, never carries an SSE id.
+struct DeltaEvent { text: String }
+struct ToolStartEvent { tool_call_id: String, name: String }
+
+#[type_tag = "type"]
+union SessionEvent {
+    Message(MessageEvent),
+    ToolResult(ToolOutputEvent),
+    TurnCompleted(TurnCompletedEvent),
+    Asked(AskedEvent),
+    StatusChanged(StatusChangedEvent),
+    Error(ErrorEvent),
+    Delta(DeltaEvent),
+    ToolStart(ToolStartEvent),
+}
+
+/// One frame on the global `/api/events` stream (live session-list updates).
+struct GlobalSessionEvent {
+    session_id: String,
+    status: SessionStatusKind,
+    reason: Option<String>,
+}

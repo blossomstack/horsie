@@ -1,7 +1,7 @@
 use crate::transport::ExecutorTransport;
 use horsie_models::executor::{
-    CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand, ExecutorEvent, RuntimeConfig,
-    RuntimeState,
+    AttachRuntimeCmd, CreateRuntimeCmd, DeleteRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand,
+    ExecutorEvent, RuntimeConfig, RuntimeState, StopRuntimeCmd,
 };
 use horsie_runtime_client::RuntimeTransport;
 use std::sync::Arc;
@@ -71,6 +71,88 @@ impl ExecutorClient {
             .send(
                 &req,
                 ExecutorCommand::DestroyRuntime(DestroyRuntimeCmd {
+                    runtime_id: id.to_string(),
+                }),
+            )
+            .await?;
+        loop {
+            match rx.recv().await {
+                Some(ExecutorEvent::RuntimeStateChanged(e)) if e.state == RuntimeState::Stopped => {
+                    return Ok(());
+                }
+                Some(ExecutorEvent::CommandFailed(e)) => {
+                    return Err(ClientError::CommandFailed(e.message));
+                }
+                Some(_) => continue,
+                None => return Err(ClientError::Disconnected),
+            }
+        }
+    }
+
+    /// Halt a runtime without destroying it (stop-preserve); resolves once the
+    /// executor reports `Stopped`. The runtime stays re-attachable.
+    pub async fn stop_runtime(&self, id: &str) -> Result<(), ClientError> {
+        let req = Uuid::new_v4().to_string();
+        let mut rx = self
+            .transport
+            .send(
+                &req,
+                ExecutorCommand::StopRuntime(StopRuntimeCmd {
+                    runtime_id: id.to_string(),
+                }),
+            )
+            .await?;
+        loop {
+            match rx.recv().await {
+                Some(ExecutorEvent::RuntimeStateChanged(e)) if e.state == RuntimeState::Stopped => {
+                    return Ok(());
+                }
+                Some(ExecutorEvent::CommandFailed(e)) => {
+                    return Err(ClientError::CommandFailed(e.message));
+                }
+                Some(_) => continue,
+                None => return Err(ClientError::Disconnected),
+            }
+        }
+    }
+
+    /// Re-attach to (revive) a preserved runtime; resolves once the executor
+    /// reports `Running`.
+    pub async fn attach_runtime(&self, id: &str, config: RuntimeConfig) -> Result<(), ClientError> {
+        let req = Uuid::new_v4().to_string();
+        let mut rx = self
+            .transport
+            .send(
+                &req,
+                ExecutorCommand::AttachRuntime(AttachRuntimeCmd {
+                    runtime_id: id.to_string(),
+                    config,
+                }),
+            )
+            .await?;
+        loop {
+            match rx.recv().await {
+                Some(ExecutorEvent::RuntimeStateChanged(e)) if e.state == RuntimeState::Running => {
+                    return Ok(());
+                }
+                Some(ExecutorEvent::CommandFailed(e)) => {
+                    return Err(ClientError::CommandFailed(e.message));
+                }
+                Some(_) => continue,
+                None => return Err(ClientError::Disconnected),
+            }
+        }
+    }
+
+    /// The owning session was deleted; the executor/vendor decides the runtime's
+    /// fate. Resolves once the executor reports `Stopped`.
+    pub async fn delete_runtime(&self, id: &str) -> Result<(), ClientError> {
+        let req = Uuid::new_v4().to_string();
+        let mut rx = self
+            .transport
+            .send(
+                &req,
+                ExecutorCommand::DeleteRuntime(DeleteRuntimeCmd {
                     runtime_id: id.to_string(),
                 }),
             )

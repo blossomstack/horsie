@@ -1,0 +1,86 @@
+//! `horsie serve`: the standalone session server (HTTP + SSE).
+//!
+//! Shares config, providers, and capability resolution with the daemon, but owns
+//! a separate journal root (`<data_dir>/server`) and state root
+//! (`<state_dir>/server`), so it runs alongside the job daemon untouched.
+
+use crate::capabilities;
+use crate::config::{HorsieConfig, build_registry};
+use crate::daemon::default_runtime_bin;
+use crate::error::CliError;
+use horsie_actor::{FileJournal, Journal, spawn_root};
+use horsie_models::capabilities::CapabilitySpec;
+use horsie_server::http::{AppState, app};
+use horsie_server::sessions::spec::ServerDeps;
+use horsie_server::sessions::supervisor::SessionSupervisor;
+use horsie_server::vendor::{LocalProcessVendor, RuntimeVendor};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+pub async fn serve(cfg: HorsieConfig, addr: String) -> Result<(), CliError> {
+    let state_dir = cfg.storage.state_dir.join("server");
+    let data_dir = cfg.storage.data_dir.join("server");
+    std::fs::create_dir_all(&state_dir).map_err(|e| CliError::Io(e.to_string()))?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| CliError::Io(e.to_string()))?;
+
+    let registry = build_registry(&cfg)?;
+    let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(data_dir));
+    let runtime_bin = cfg.runtime.bin.clone().unwrap_or_else(default_runtime_bin);
+
+    // Resolve the default capability spec once, and a finalizer that applies path
+    // expansion + plugin grants + platform seatbelt rules to request-supplied specs.
+    let default_caps = match &cfg.sandbox.capabilities_file {
+        Some(path) => CapabilitySpec::load(path).map_err(CliError::Config)?,
+        None => capabilities::builtin_default()?,
+    };
+    let plugins_dir = crate::plugins::plugins_dir_if_populated(&cfg.storage.plugins_dir);
+    let hook_path = if plugins_dir.is_some() {
+        crate::plugins::resolve_hook_path(cfg.runtime.hook_path.clone())
+    } else {
+        Vec::new()
+    };
+    let (pd, hp) = (plugins_dir.clone(), hook_path.clone());
+    let caps_finalize: Arc<dyn Fn(CapabilitySpec) -> CapabilitySpec + Send + Sync> =
+        Arc::new(move |caps| {
+            capabilities::with_default_seatbelt_rules(capabilities::with_plugin_grants(
+                capabilities::resolve_user_paths(caps),
+                pd.as_deref(),
+                &hp,
+            ))
+        });
+    let default_caps = caps_finalize(default_caps);
+
+    let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
+    vendors.insert(
+        "local".into(),
+        Arc::new(LocalProcessVendor::new(runtime_bin)),
+    );
+
+    let deps = ServerDeps {
+        provider_registry: registry,
+        vendors,
+        state_dir,
+    };
+    let (global_tx, _) = tokio::sync::broadcast::channel(256);
+    let supervisor = spawn_root(
+        SessionSupervisor::new(deps, global_tx.clone()),
+        journal.clone(),
+    );
+
+    let state = AppState {
+        supervisor,
+        journal,
+        global_events: global_tx,
+        caps_finalize,
+        default_caps,
+        plugins_dir,
+        hook_path,
+    };
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| CliError::Executor(format!("bind {addr}: {e}")))?;
+    println!("horsie server listening on http://{addr}");
+    axum::serve(listener, app(state))
+        .await
+        .map_err(|e| CliError::Executor(e.to_string()))
+}

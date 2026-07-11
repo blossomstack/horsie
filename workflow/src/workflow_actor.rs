@@ -1,11 +1,51 @@
 use crate::agent_actor::{AgentActor, AgentCommand, AgentParams};
-use crate::context::{AgentRuntimeContext, WorkflowRuntimeContext};
+use crate::context::{AgentOutcome, AgentOutcomeSink, AgentRuntimeContext, WorkflowRuntimeContext};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition, WorkflowTransition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 use uuid::Uuid;
+
+/// Adapts a workflow's mailbox to the [`AgentOutcomeSink`] its child agents
+/// report to, mapping each outcome onto the matching `WorkflowCommand`.
+pub(crate) struct WorkflowParent(pub ActorRef<WorkflowCommand>);
+
+/// Pure outcome → command mapping (kept separate so it is unit-testable).
+pub(crate) fn map_outcome(outcome: AgentOutcome) -> WorkflowCommand {
+    match outcome {
+        AgentOutcome::Concluded { session_id, output } => {
+            WorkflowCommand::AgentConcluded { session_id, output }
+        }
+        AgentOutcome::Asked {
+            session_id,
+            tool_call_id,
+            question,
+        } => WorkflowCommand::AgentAsked {
+            session_id,
+            tool_call_id,
+            question,
+        },
+        AgentOutcome::Parked { session_id } => WorkflowCommand::AgentParked { session_id },
+        AgentOutcome::Failed {
+            session_id,
+            error,
+            recoverable,
+        } => WorkflowCommand::AgentFailed {
+            session_id,
+            error,
+            recoverable,
+        },
+    }
+}
+
+#[async_trait]
+impl AgentOutcomeSink for WorkflowParent {
+    async fn deliver(&self, outcome: AgentOutcome) {
+        let _ = self.0.tell(map_outcome(outcome)).await;
+    }
+}
 
 /// Wall-clock epoch millis for stamping events on the command path. Saturates
 /// rather than panicking on a pre-epoch clock (prod lints deny panic/unwrap).
@@ -254,7 +294,7 @@ impl WorkflowActor {
             provider,
             toolbox,
             event_sink: self.rt.event_sink.clone(),
-            parent_ref: ctx.self_ref(),
+            parent: Arc::new(WorkflowParent(ctx.self_ref())),
             session_id,
         };
         let mut params = AgentParams::from_def(agent_def);
@@ -797,6 +837,56 @@ mod tests {
 
     fn sess() -> Uuid {
         Uuid::new_v4()
+    }
+
+    #[test]
+    fn workflow_parent_maps_outcomes_to_commands() {
+        let session_id = Uuid::new_v4();
+        let cmd = map_outcome(AgentOutcome::Failed {
+            session_id,
+            error: "boom".into(),
+            recoverable: true,
+        });
+        match cmd {
+            WorkflowCommand::AgentFailed {
+                session_id: s,
+                error,
+                recoverable,
+            } => {
+                assert_eq!(s, session_id);
+                assert_eq!(error, "boom");
+                assert!(recoverable);
+            }
+            WorkflowCommand::Start { .. }
+            | WorkflowCommand::Cancel
+            | WorkflowCommand::Resume { .. }
+            | WorkflowCommand::Fork { .. }
+            | WorkflowCommand::AgentConcluded { .. }
+            | WorkflowCommand::AgentAsked { .. }
+            | WorkflowCommand::AgentParked { .. } => panic!("wrong mapping"),
+        }
+        let cmd = map_outcome(AgentOutcome::Asked {
+            session_id,
+            tool_call_id: Some("tc".into()),
+            question: "q?".into(),
+        });
+        match cmd {
+            WorkflowCommand::AgentAsked {
+                tool_call_id,
+                question,
+                ..
+            } => {
+                assert_eq!(tool_call_id.as_deref(), Some("tc"));
+                assert_eq!(question, "q?");
+            }
+            WorkflowCommand::Start { .. }
+            | WorkflowCommand::Cancel
+            | WorkflowCommand::Resume { .. }
+            | WorkflowCommand::Fork { .. }
+            | WorkflowCommand::AgentConcluded { .. }
+            | WorkflowCommand::AgentParked { .. }
+            | WorkflowCommand::AgentFailed { .. } => panic!("wrong mapping"),
+        }
     }
 
     #[test]

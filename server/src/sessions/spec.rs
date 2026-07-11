@@ -1,0 +1,120 @@
+//! STORAGE types for sessions (journal-owned). Distinct from the fluorite wire
+//! types in `horsie_models::session` — wire formats evolve at the speed of the
+//! API contract, these evolve at the speed of data migrations.
+
+use crate::vendor::RuntimeVendor;
+use horsie_agentcore::LlmProvider;
+use horsie_models::capabilities::CapabilitySpec;
+use horsie_models::session::SessionStatusKind;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// A session's unique id (a UUID string). Equals the agent session uuid, so
+/// `session/<id>` and `agent/<id>` journals share the same `<id>`.
+pub type SessionId = String;
+
+/// Agent settings supplied at session creation. Storage copy of the wire
+/// `horsie_models::session::AgentSettings`, with defaults applied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSettings {
+    pub model: String,
+    pub system_prompt: Option<String>,
+    pub allowed_tools: Option<Vec<String>>,
+    pub allow_ask_user: bool,
+    pub use_plugins: Option<bool>,
+    pub max_iterations: Option<u32>,
+    pub max_retries: u32,
+}
+
+/// Persisted, self-contained description of one session (lives in the
+/// supervisor journal, like the daemon's `JobSpec`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionSpec {
+    pub name: Option<String>,
+    pub agent: AgentSettings,
+    pub workspaces: Vec<horsie_models::Workspace>,
+    /// Already resolved (paths expanded, plugin grants + seatbelt rules applied)
+    /// at creation.
+    pub capabilities: CapabilitySpec,
+    /// Runtime vendor name (key into [`ServerDeps::vendors`]).
+    pub vendor: String,
+    pub plugins_dir: Option<PathBuf>,
+    pub hook_path: Vec<PathBuf>,
+}
+
+/// User-visible lifecycle state. Failure reasons ride inside the variants;
+/// [`status_kind`]/[`status_reason`] project them onto the wire shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SessionStatus {
+    Provisioning,
+    Idle,
+    Running,
+    AwaitingInput,
+    Interrupted,
+    Stopped,
+    RecoveryFailed { reason: String },
+    Failed { reason: String },
+}
+
+/// Project a storage status onto its wire discriminant.
+pub fn status_kind(s: &SessionStatus) -> SessionStatusKind {
+    match s {
+        SessionStatus::Provisioning => SessionStatusKind::Provisioning,
+        SessionStatus::Idle => SessionStatusKind::Idle,
+        SessionStatus::Running => SessionStatusKind::Running,
+        SessionStatus::AwaitingInput => SessionStatusKind::AwaitingInput,
+        SessionStatus::Interrupted => SessionStatusKind::Interrupted,
+        SessionStatus::Stopped => SessionStatusKind::Stopped,
+        SessionStatus::RecoveryFailed { .. } => SessionStatusKind::RecoveryFailed,
+        SessionStatus::Failed { .. } => SessionStatusKind::Failed,
+    }
+}
+
+/// The failure reason a status carries, if any.
+pub fn status_reason(s: &SessionStatus) -> Option<String> {
+    match s {
+        SessionStatus::RecoveryFailed { reason } | SessionStatus::Failed { reason } => {
+            Some(reason.clone())
+        }
+        SessionStatus::Provisioning
+        | SessionStatus::Idle
+        | SessionStatus::Running
+        | SessionStatus::AwaitingInput
+        | SessionStatus::Interrupted
+        | SessionStatus::Stopped => None,
+    }
+}
+
+/// Process-wide dependencies injected into every [`crate::sessions::session_actor::SessionActor`].
+#[derive(Clone)]
+pub struct ServerDeps {
+    /// LLM providers keyed by the session's `model`.
+    pub provider_registry: HashMap<String, Arc<dyn LlmProvider>>,
+    /// Runtime vendors keyed by the session spec's `vendor` name.
+    pub vendors: HashMap<String, Arc<dyn RuntimeVendor>>,
+    /// Per-session server state (capability files) under `<state_dir>/sessions/<id>/`.
+    pub state_dir: PathBuf,
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_kind_and_reason_project_failures() {
+        let s = SessionStatus::RecoveryFailed {
+            reason: "gone".into(),
+        };
+        assert_eq!(status_kind(&s), SessionStatusKind::RecoveryFailed);
+        assert_eq!(status_reason(&s).as_deref(), Some("gone"));
+        assert_eq!(status_reason(&SessionStatus::Idle), None);
+    }
+}

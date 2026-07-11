@@ -41,6 +41,16 @@ pub mod daemon {
     include!(concat!(env!("OUT_DIR"), "/daemon/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod session {
+    include!(concat!(env!("OUT_DIR"), "/session/mod.rs"));
+}
+
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod session_api {
+    include!(concat!(env!("OUT_DIR"), "/session_api/mod.rs"));
+}
+
 impl capabilities::CapabilitySpec {
     /// Load and parse a capability file (the runtime's `--sandbox-caps` path, or a
     /// user-authored file the CLI resolves). Shared by the runtime and the CLI; the
@@ -283,6 +293,16 @@ mod tests {
     use super::capabilities::{
         Access, AllowNetwork, BlockNetwork, CapabilitySpec, Grant, NetworkPolicy, ProxyOnlyNetwork,
     };
+    use super::session;
+
+    #[test]
+    fn session_event_round_trips_with_type_tag() {
+        let ev = session::SessionEvent::Delta(session::DeltaEvent { text: "hi".into() });
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\""));
+        let back: session::SessionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+    }
 
     #[test]
     fn capability_spec_load_parses_a_file() {

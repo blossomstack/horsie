@@ -1,0 +1,13 @@
+{
+  "name": "@horsie/types",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript types generated from horsie's fluorite protocol schemas. Requires the `fluorite` CLI on PATH (cargo install fluorite).",
+  "scripts": {
+    "generate-types": "fluorite ts -i ../../models/fluorite/agent.fl ../../models/fluorite/capabilities.fl ../../models/fluorite/session.fl ../../models/fluorite/session_api.fl -o src/generated",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  }
+}

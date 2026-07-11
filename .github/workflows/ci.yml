@@ -59,3 +59,31 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check advisories bans licenses sources
+
+  ts-types:
+    name: TypeScript types (drift check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      # The `fluorite` CLI that generates the TypeScript types is shipped by the
+      # `fluorite_codegen` crate (the `fluorite` crate itself is a library). Pin
+      # to the EXACT workspace codegen version so the drift check is deterministic
+      # — bump this in lockstep with the `fluorite_codegen` workspace dep. Node is
+      # preinstalled on the GitHub-hosted runner.
+      - name: Install fluorite CLI
+        run: cargo install fluorite_codegen --version =0.6.0
+
+      - name: Regenerate and typecheck
+        run: make ts-types
+
+      - name: Fail on uncommitted drift
+        run: git diff --exit-code clients/ts/src/generated

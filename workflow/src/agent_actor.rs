@@ -1,5 +1,4 @@
-use crate::context::{AgentRuntimeContext, CONCLUDE_TOOL};
-use crate::workflow_actor::WorkflowCommand;
+use crate::context::{AgentOutcome, AgentOutcomeSink, AgentRuntimeContext, CONCLUDE_TOOL};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{
@@ -25,6 +24,11 @@ pub struct AgentParams {
     pub allow_timers: bool,
     pub max_iterations: Option<u32>,
     pub max_retries: u32,
+    /// Interactive (session) mode: recovery never injects a synthetic continue —
+    /// the next user message is the continuation — and the event log is never
+    /// snapshot-compacted (SSE cursors are journal sequence numbers and must
+    /// stay stable). Workflow agents keep the default `false`.
+    pub interactive: bool,
 }
 
 impl AgentParams {
@@ -36,7 +40,15 @@ impl AgentParams {
             allow_timers: def.allow_timers.unwrap_or(false),
             max_iterations: def.max_iterations,
             max_retries: def.max_retries.unwrap_or(0),
+            interactive: false,
         }
+    }
+
+    /// Whether a pause (ask/park/cancel) may snapshot-compact the journal.
+    /// Interactive sessions never compact: their journal sequence numbers are
+    /// the SSE cursor space and must stay stable across reconnects.
+    fn compact_on_pause(&self) -> bool {
+        !self.interactive
     }
 
     /// The agent's handoff tool — the synthesized `conclude` tool when it has an
@@ -248,8 +260,8 @@ impl AgentActor {
         });
     }
 
-    /// Interpret a `conclude` payload (or plain-text completion) and notify the
-    /// parent workflow accordingly. The conversation events were already persisted
+    /// Interpret a `conclude` payload (or plain-text completion) and deliver the
+    /// outcome to the parent. The conversation events were already persisted
     /// incrementally via [`AgentCommand::PersistProgress`], so this only records the
     /// terminal transition and decides the actor's lifecycle.
     async fn handle_finished(
@@ -260,13 +272,13 @@ impl AgentActor {
     ) -> CommandEffect<AgentDomainEvent> {
         self.running = None;
         let session_id = self.ctx.session_id;
-        let parent = self.ctx.parent_ref.clone();
+        let parent = self.ctx.parent.clone();
 
         match report.outcome {
             RunOutcome::Completed { text } => {
                 // No conclude tool: treat the final text as the output.
-                let _ = parent
-                    .tell(WorkflowCommand::AgentConcluded {
+                parent
+                    .deliver(AgentOutcome::Concluded {
                         session_id,
                         output: Value::String(text),
                     })
@@ -276,8 +288,8 @@ impl AgentActor {
             RunOutcome::Concluded { data, tool_call_id } => {
                 match self.interpret(data, tool_call_id) {
                     Conclusion::Output(output) => {
-                        let _ = parent
-                            .tell(WorkflowCommand::AgentConcluded { session_id, output })
+                        parent
+                            .deliver(AgentOutcome::Concluded { session_id, output })
                             .await;
                         CommandEffect::stop()
                     }
@@ -285,27 +297,38 @@ impl AgentActor {
                         tool_call_id,
                         question,
                     } => {
-                        let _ = parent
-                            .tell(WorkflowCommand::AgentAsked {
+                        parent
+                            .deliver(AgentOutcome::Asked {
                                 session_id,
                                 tool_call_id,
                                 question,
                             })
                             .await;
                         // Stay alive — InjectToolResult resumes this same session.
-                        // Snapshot to compact the incrementally-persisted log.
-                        CommandEffect::snapshot()
+                        // Snapshot to compact the incrementally-persisted log
+                        // (never in interactive mode: cursors must stay stable).
+                        if self.params.compact_on_pause() {
+                            CommandEffect::snapshot()
+                        } else {
+                            CommandEffect::none()
+                        }
                     }
                     Conclusion::Park => self.park_or_resume(state, ctx, session_id, parent).await,
                 }
             }
             RunOutcome::Cancelled => {
-                // Snapshot to compact the incrementally-persisted log on cancel.
-                CommandEffect::persist(vec![AgentDomainEvent::RunCancelled]).and_snapshot()
+                // Snapshot to compact the incrementally-persisted log on cancel
+                // (never in interactive mode: cursors must stay stable).
+                let eff = CommandEffect::persist(vec![AgentDomainEvent::RunCancelled]);
+                if self.params.compact_on_pause() {
+                    eff.and_snapshot()
+                } else {
+                    eff
+                }
             }
             RunOutcome::Failed { error, recoverable } => {
-                let _ = parent
-                    .tell(WorkflowCommand::AgentFailed {
+                parent
+                    .deliver(AgentOutcome::Failed {
                         session_id,
                         error,
                         recoverable,
@@ -339,11 +362,11 @@ impl AgentActor {
         state: &AgentState,
         ctx: &ActorContext<Self>,
         session_id: uuid::Uuid,
-        parent: ActorRef<WorkflowCommand>,
+        parent: Arc<dyn AgentOutcomeSink>,
     ) -> CommandEffect<AgentDomainEvent> {
         if state.timers.is_empty() {
-            let _ = parent
-                .tell(WorkflowCommand::AgentFailed {
+            parent
+                .deliver(AgentOutcome::Failed {
                     session_id,
                     error: "agent parked with no active timers — nothing would ever wake it"
                         .to_string(),
@@ -365,10 +388,13 @@ impl AgentActor {
             self.start_run(wake, ctx, state.messages.clone());
             return CommandEffect::persist(vec![input_event]);
         }
-        let _ = parent
-            .tell(WorkflowCommand::AgentParked { session_id })
-            .await;
-        CommandEffect::persist(vec![AgentDomainEvent::Parked]).and_snapshot()
+        parent.deliver(AgentOutcome::Parked { session_id }).await;
+        let eff = CommandEffect::persist(vec![AgentDomainEvent::Parked]);
+        if self.params.compact_on_pause() {
+            eff.and_snapshot()
+        } else {
+            eff
+        }
     }
 
     /// A timer's sleep elapsed. Re-arm a recurring timer, then resume the agent with
@@ -549,7 +575,13 @@ impl EventSourcedActor for AgentActor {
                 let input_event = AgentDomainEvent::InputMessage {
                     message: agent_input.to_message(),
                 };
-                self.start_run(agent_input, ctx, state.messages.clone());
+                // Sanitize on every turn start: a history recovered from a mid-turn
+                // crash may carry dangling tool calls (a no-op when well-formed).
+                self.start_run(
+                    agent_input,
+                    ctx,
+                    sanitize_for_resume(state.messages.clone()),
+                );
                 CommandEffect::persist(vec![input_event])
             }
             AgentCommand::InjectToolResult {
@@ -560,7 +592,11 @@ impl EventSourcedActor for AgentActor {
                 let input_event = AgentDomainEvent::InputMessage {
                     message: agent_input.to_message(),
                 };
-                self.start_run(agent_input, ctx, state.messages.clone());
+                self.start_run(
+                    agent_input,
+                    ctx,
+                    sanitize_for_resume(state.messages.clone()),
+                );
                 CommandEffect::persist(vec![input_event])
             }
             AgentCommand::PersistProgress { events, ack } => {
@@ -639,6 +675,11 @@ impl EventSourcedActor for AgentActor {
         let now = crate::timers::now_unix_ms();
         for t in &state.timers {
             spawn_timer_sleep(ctx.self_ref(), t.id.clone(), t.remaining(now));
+        }
+        // Interactive sessions never self-continue: the user's next message is
+        // the continuation (the session layer passes sanitized history on Run).
+        if self.params.interactive {
+            return;
         }
         // A parked agent waits for a timer — do not re-drive a turn.
         if state.parked {
@@ -1047,6 +1088,35 @@ mod tests {
             role: Role::User,
             parts: vec![ContentPart::Text(TextPart { text: text.into() })],
         }
+    }
+
+    fn def_fixture() -> WorkflowAgentDef {
+        WorkflowAgentDef {
+            use_plugins: None,
+            name: "a".into(),
+            system_prompt: None,
+            model: "m".into(),
+            output_schema: None,
+            allow_ask_user: false,
+            allow_timers: None,
+            transitions: None,
+            max_iterations: None,
+            max_retries: None,
+            allowed_tools: None,
+        }
+    }
+
+    #[test]
+    fn from_def_defaults_to_non_interactive() {
+        assert!(!AgentParams::from_def(&def_fixture()).interactive);
+    }
+
+    #[test]
+    fn interactive_pause_does_not_compact() {
+        let mut params = AgentParams::from_def(&def_fixture());
+        assert!(params.compact_on_pause());
+        params.interactive = true;
+        assert!(!params.compact_on_pause());
     }
 
     #[test]

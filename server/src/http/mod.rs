@@ -1,0 +1,224 @@
+//! The session server's HTTP surface: REST handlers + SSE streams over the
+//! `SessionSupervisor`. All request/response bodies are fluorite wire types.
+
+pub mod error;
+mod handlers;
+mod sse;
+
+use crate::sessions::supervisor::SessionSupervisorCommand;
+use axum::Router;
+use axum::routing::{get, post};
+use horsie_actor::{ActorRef, Journal};
+use horsie_models::capabilities::CapabilitySpec;
+use horsie_models::session::GlobalSessionEvent;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::broadcast;
+
+/// Finalizes a request-supplied capability spec (path expansion, plugin grants,
+/// platform seatbelt rules) — injected by the host binary, which owns the
+/// capability-resolution helpers.
+pub type CapsFinalize = Arc<dyn Fn(CapabilitySpec) -> CapabilitySpec + Send + Sync>;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub supervisor: ActorRef<SessionSupervisorCommand>,
+    pub journal: Arc<dyn Journal>,
+    pub global_events: broadcast::Sender<GlobalSessionEvent>,
+    pub caps_finalize: CapsFinalize,
+    /// Fully-resolved default capability spec for requests that omit one.
+    pub default_caps: CapabilitySpec,
+    pub plugins_dir: Option<PathBuf>,
+    pub hook_path: Vec<PathBuf>,
+}
+
+pub fn app(state: AppState) -> Router {
+    Router::new()
+        .route("/api/health", get(handlers::health))
+        .route(
+            "/api/sessions",
+            post(handlers::create_session).get(handlers::list_sessions),
+        )
+        .route(
+            "/api/sessions/:id",
+            get(handlers::get_session).delete(handlers::delete_session),
+        )
+        .route("/api/sessions/:id/messages", post(handlers::send_message))
+        .route("/api/sessions/:id/stop", post(handlers::stop_session))
+        .route("/api/sessions/:id/events", get(sse::session_events))
+        .route("/api/events", get(sse::global_events))
+        .with_state(state)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::sessions::spec::ServerDeps;
+    use crate::sessions::supervisor::SessionSupervisor;
+    use crate::vendor::RuntimeVendor;
+    use crate::vendor::mock::MockVendor;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use horsie_actor::{InMemoryJournal, spawn_root};
+    use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
+    use horsie_models::session_api::{CreateSessionResponse, ListSessionsResponse};
+    use std::collections::HashMap;
+    use tower::util::ServiceExt;
+
+    fn block_caps() -> CapabilitySpec {
+        CapabilitySpec {
+            network: NetworkPolicy::Block(BlockNetwork {}),
+            grants: vec![],
+            unsafe_seatbelt_rules: None,
+        }
+    }
+
+    fn test_state(tmp: &tempfile::TempDir) -> AppState {
+        let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
+        vendors.insert("mock".into(), Arc::new(MockVendor::new()));
+        let deps = ServerDeps {
+            provider_registry: HashMap::new(),
+            vendors,
+            state_dir: tmp.path().to_path_buf(),
+        };
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let (gtx, _) = broadcast::channel(64);
+        let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
+        AppState {
+            supervisor,
+            journal,
+            global_events: gtx,
+            caps_finalize: Arc::new(|caps| caps),
+            default_caps: block_caps(),
+            plugins_dir: None,
+            hook_path: vec![],
+        }
+    }
+
+    fn get(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    fn delete(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn post_json(uri: &str, body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    }
+
+    async fn read_json<T: serde::de::DeserializeOwned>(res: axum::response::Response) -> T {
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_responds_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp));
+        let res = app.oneshot(get("/api/health")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_list_get_message_lifecycle_over_http() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp));
+        // create
+        let body = serde_json::json!({
+            "agent": {"model": "mock"},
+            "workdirs": ["/tmp"],
+            "vendor": "mock"
+        });
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/sessions", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let created: CreateSessionResponse = read_json(res).await;
+        let id = created.session.id;
+        // list
+        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let list: ListSessionsResponse = read_json(res).await;
+        assert_eq!(list.sessions.len(), 1);
+        // get detail
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/api/sessions/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        // unknown session → 404
+        let res = app
+            .clone()
+            .oneshot(get("/api/sessions/00000000-0000-0000-0000-000000000000"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        // message: mock vendor is fine but no provider for the model → 502
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/sessions/{id}/messages"),
+                &serde_json::json!({"text": "hi"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        // stop / delete
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/sessions/{id}/stop"),
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .clone()
+            .oneshot(delete(&format!("/api/sessions/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        // gone from the list
+        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let list: ListSessionsResponse = read_json(res).await;
+        assert!(list.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_empty_workdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp));
+        let body = serde_json::json!({
+            "agent": {"model": "mock"},
+            "workdirs": [],
+            "vendor": "mock"
+        });
+        let res = app
+            .oneshot(post_json("/api/sessions", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}

@@ -282,6 +282,33 @@ async fn dispatch(
         ExecutorCommand::RestartRuntime(cmd) => {
             do_restart(cmd, registry, provider, sink, req).await
         }
+        // Stop-preserve: the process side is identical to destroy (kill the child);
+        // preservation is the caller's on-disk state, which the executor never owns.
+        // Kept as a distinct wire signal so vendors with richer lifecycles (pause a
+        // cloud sandbox, stop a container) can diverge without a protocol change.
+        ExecutorCommand::StopRuntime(cmd) => {
+            let destroy = DestroyRuntimeCmd {
+                runtime_id: cmd.runtime_id.clone(),
+            };
+            do_destroy(&destroy, registry, sink, req).await
+        }
+        // Attach: a local process cannot resume in place, so revive by provisioning
+        // a fresh child against the preserved config.
+        ExecutorCommand::AttachRuntime(cmd) => {
+            let create = CreateRuntimeCmd {
+                runtime_id: cmd.runtime_id.clone(),
+                config: cmd.config.clone(),
+            };
+            do_create(&create, registry, provider, sink, req).await
+        }
+        // Delete: the owning session is gone; this executor's choice is to tear the
+        // process down (the user's workspace is never touched).
+        ExecutorCommand::DeleteRuntime(cmd) => {
+            let destroy = DestroyRuntimeCmd {
+                runtime_id: cmd.runtime_id.clone(),
+            };
+            do_destroy(&destroy, registry, sink, req).await
+        }
         ExecutorCommand::QueryRuntimes(_) => {
             let runtimes = registry.list().await;
             let _ = send_outbound(

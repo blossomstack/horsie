@@ -56,6 +56,14 @@ enum Command {
         #[command(subcommand)]
         action: PluginAction,
     },
+    /// Run the session server (HTTP + SSE) in the foreground.
+    Serve {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Bind address for the HTTP server.
+        #[arg(long, default_value = "127.0.0.1:3789")]
+        addr: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -482,6 +490,11 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 Ok(0)
             }
         },
+        Command::Serve { config, addr } => {
+            let cfg = HorsieConfig::resolve(config.as_deref())?;
+            horsie::serve::serve(cfg, addr).await?;
+            Ok(0)
+        }
         Command::Plugin { action } => match action {
             PluginAction::Install {
                 url,

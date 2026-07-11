@@ -52,6 +52,15 @@ struct ToolResultEvent { runtime_id: String, call_id: String, result: ToolResult
 struct CreateRuntimeCmd { runtime_id: String, config: RuntimeConfig }
 struct DestroyRuntimeCmd { runtime_id: String }
 struct RestartRuntimeCmd { runtime_id: String }
+/// Halt a runtime without destroying it — the runtime stays re-attachable
+/// (workspace/state preserved). The explicit signal for "user stopped the session".
+struct StopRuntimeCmd { runtime_id: String }
+/// Re-attach to (revive) a preserved runtime. Vendors that cannot resume in
+/// place provision a fresh instance against the same config.
+struct AttachRuntimeCmd { runtime_id: String, config: RuntimeConfig }
+/// The owning session was deleted; the executor/vendor decides whether the
+/// underlying runtime is destroyed or kept.
+struct DeleteRuntimeCmd { runtime_id: String }
 struct QueryRuntimesCmd {}
 
 /// All commands the server can send to an executor
@@ -60,6 +69,9 @@ union ExecutorCommand {
     CreateRuntime(CreateRuntimeCmd),
     DestroyRuntime(DestroyRuntimeCmd),
     RestartRuntime(RestartRuntimeCmd),
+    StopRuntime(StopRuntimeCmd),
+    AttachRuntime(AttachRuntimeCmd),
+    DeleteRuntime(DeleteRuntimeCmd),
     QueryRuntimes(QueryRuntimesCmd),
     ToolCall(ToolCallCmd),
     CancelToolCall(CancelToolCallCmd),
