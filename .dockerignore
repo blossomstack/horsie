@@ -1,0 +1,8 @@
+# Both Dockerfiles COPY the workspace root — keep the build context lean.
+.git
+target/
+**/target/
+**/node_modules/
+clients/web/dist/
+.claude/
+.claire/
