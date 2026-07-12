@@ -1,4 +1,5 @@
 
+export * from './repoConfig';
 export * from './createSessionRequest';
 export * from './createSessionResponse';
 export * from './listSessionsResponse';

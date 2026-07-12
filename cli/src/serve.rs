@@ -78,9 +78,16 @@ pub async fn serve(
         plugins_dir: cfg.storage.plugins_dir.display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    let opened = DbConfigStore::open(&db_url, StoreDeps { runtime_bin, info })
-        .await
-        .map_err(CliError::Config)?;
+    let opened = DbConfigStore::open(
+        &db_url,
+        StoreDeps {
+            runtime_bin,
+            workspace_root: state_dir.join("workspaces"),
+            info,
+        },
+    )
+    .await
+    .map_err(CliError::Config)?;
 
     let deps = ServerDeps {
         provider_registry: opened.registry,

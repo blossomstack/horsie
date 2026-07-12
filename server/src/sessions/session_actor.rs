@@ -167,7 +167,36 @@ impl SessionActor {
         )
         .map_err(|e| e.to_string())?;
         Ok(RuntimeSpec {
-            workspaces: self.spec.workspaces.clone(),
+            workspaces: self
+                .spec
+                .workspaces
+                .iter()
+                .map(|w| crate::vendor::WorkspaceSpec {
+                    name: w.name.clone(),
+                    source: match &w.path {
+                        Some(p) => crate::vendor::WorkspaceSource::HostDir(p.clone()),
+                        None => crate::vendor::WorkspaceSource::Managed,
+                    },
+                })
+                .collect(),
+            provision: self
+                .spec
+                .provision
+                .iter()
+                .map(|s| horsie_models::executor::ProvisionStep {
+                    name: s.name.clone(),
+                    uses: s.uses.clone(),
+                    with: s
+                        .with
+                        .iter()
+                        .map(|(k, v)| horsie_models::executor::StepParam {
+                            key: k.clone(),
+                            value: v.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            env: vec![],
             capabilities_file: caps_path,
             plugins_dir: self.spec.plugins_dir.clone(),
             hook_path: self.spec.hook_path.clone(),
@@ -614,6 +643,7 @@ mod tests {
                 max_retries: 0,
             },
             workspaces: vec![],
+            provision: vec![],
             capabilities: CapabilitySpec {
                 network: NetworkPolicy::Block(BlockNetwork {}),
                 grants: vec![],

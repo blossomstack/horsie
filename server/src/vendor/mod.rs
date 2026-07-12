@@ -22,12 +22,33 @@ use horsie_runtime_client::RuntimeClient;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Where a session workspace comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkspaceSource {
+    /// User-supplied host directory (local vendor only).
+    HostDir(PathBuf),
+    /// The vendor allocates and owns the directory (local: under its
+    /// workspace root; velos: inside the container).
+    Managed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceSpec {
+    pub name: String,
+    pub source: WorkspaceSource,
+}
+
 /// Everything a vendor needs to provision (or revive) a runtime for a session.
 /// The capability file is written by the session layer before any vendor call —
 /// it is the durable source of truth a stopped runtime is revived against.
+///
+/// Workspaces are requests, not resolved paths — the vendor allocates `Managed`
+/// entries itself.
 #[derive(Debug, Clone)]
 pub struct RuntimeSpec {
-    pub workspaces: Vec<horsie_models::Workspace>,
+    pub workspaces: Vec<WorkspaceSpec>,
+    pub provision: Vec<horsie_models::executor::ProvisionStep>,
+    pub env: Vec<horsie_models::executor::EnvVar>,
     pub capabilities_file: PathBuf,
     pub plugins_dir: Option<PathBuf>,
     pub hook_path: Vec<PathBuf>,

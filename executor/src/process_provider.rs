@@ -9,6 +9,10 @@ use horsie_models::executor::{EnvVar, RuntimeConfig};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{process::Child, sync::Mutex};
 
+/// Extra time granted on top of `connect_timeout` when a runtime has provision
+/// steps to run (e.g. cloning) before it can announce Ready.
+const PROVISION_ALLOWANCE: Duration = Duration::from_secs(900);
+
 pub struct ProcessRuntimeHandle {
     child: Mutex<Option<Child>>,
     runtime_id: String,
@@ -150,17 +154,34 @@ impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
         if let Some(policy) = &self.sandbox {
             cmd.arg("--sandbox-caps").arg(&policy.capabilities_file);
         }
-        apply_child_env(&mut cmd, self.sandbox.is_some(), &config.env);
+        let mut injected = config.env.clone();
+        if !config.provision.is_empty() {
+            let json = serde_json::to_string(&config.provision)
+                .map_err(|e| RuntimeError::Provider(format!("encode provision steps: {e}")))?;
+            injected.push(EnvVar {
+                name: horsie_models::ENV_PROVISION.to_string(),
+                value: json,
+            });
+        }
+        apply_child_env(&mut cmd, self.sandbox.is_some(), &injected);
 
         cmd.kill_on_drop(true);
         let child = cmd
             .spawn()
             .map_err(|e| RuntimeError::Provider(e.to_string()))?;
 
-        tokio::time::timeout(self.connect_timeout, ready_rx)
+        // Provision steps (clones) may legitimately take minutes; the failure
+        // path stays fast because ProvisionFailed resolves the waiter early.
+        let wait = if config.provision.is_empty() {
+            self.connect_timeout
+        } else {
+            self.connect_timeout + PROVISION_ALLOWANCE
+        };
+        tokio::time::timeout(wait, ready_rx)
             .await
             .map_err(|_| RuntimeError::Provider("runtime connection timed out".to_string()))?
-            .map_err(|_| RuntimeError::Provider("connection channel dropped".to_string()))?;
+            .map_err(|_| RuntimeError::Provider("connection channel dropped".to_string()))?
+            .map_err(RuntimeError::Provider)?;
 
         Ok(Arc::new(ProcessRuntimeHandle {
             child: Mutex::new(Some(child)),

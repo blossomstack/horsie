@@ -76,7 +76,12 @@ where
                             let _ = tx.send(Ok(resp.context));
                         }
                     }
-                    Ok(RuntimeOutboundMessage::Ready(_)) | Err(_) => {}
+                    // Handshake-only messages (Ready / provisioning lifecycle) are
+                    // resolved before the transport takes over the link; ignore here.
+                    Ok(RuntimeOutboundMessage::Ready(_))
+                    | Ok(RuntimeOutboundMessage::Provisioning(_))
+                    | Ok(RuntimeOutboundMessage::ProvisionFailed(_))
+                    | Err(_) => {}
                 }
             }
             // Disconnected: fail every outstanding call so no invoke()/scan() hangs

@@ -47,6 +47,8 @@ struct SessionDetail {
     model: String,
     workdirs: Vec<String>,
     vendor: String,
+    /// Clone URLs of the session's provisioned repos (empty for workdir sessions).
+    repos: Vec<String>,
 }
 
 // --- SSE event payloads ---

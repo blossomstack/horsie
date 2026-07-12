@@ -56,6 +56,15 @@ pub mod settings {
     include!(concat!(env!("OUT_DIR"), "/settings/mod.rs"));
 }
 
+/// Env var carrying the provision-steps JSON a vendor injects into a runtime
+/// child. Read by `horsie-runtime` at startup; written by the executor
+/// providers from `RuntimeConfig.provision`.
+pub const ENV_PROVISION: &str = "HORSIE_PROVISION";
+
+/// Env var carrying a GitHub token used by `git_checkout` provision steps for
+/// github.com URLs.
+pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
+
 impl capabilities::CapabilitySpec {
     /// Load and parse a capability file (the runtime's `--sandbox-caps` path, or a
     /// user-authored file the CLI resolves). Shared by the runtime and the CLI; the
@@ -242,6 +251,85 @@ pub fn derive_workspaces(paths: &[std::path::PathBuf]) -> Result<Vec<Workspace>,
     }
 }
 
+/// Convert selected repos into `git_checkout` provision steps: default the
+/// checkout dir from the URL basename, de-duplicate collisions (`api`,
+/// `api-2`, …), and validate that dirs stay inside the workspace.
+pub fn provision_from_repos(
+    repos: &[session_api::RepoConfig],
+) -> Result<Vec<executor::ProvisionStep>, String> {
+    let mut taken: Vec<String> = Vec::new();
+    let mut steps = Vec::with_capacity(repos.len());
+    for r in repos {
+        let url = r.url.trim();
+        if url.is_empty() {
+            return Err("repo url cannot be empty".to_string());
+        }
+        let base = match r.dir.as_deref().map(str::trim) {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => {
+                // Strip the scheme before taking the last path segment, so a
+                // scheme-only URL (e.g. "https:///") has no path segment and
+                // errors instead of yielding "https:". Same fix as
+                // `runtime::steps::dir_from_url`.
+                let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+                let b = without_scheme
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(".git");
+                if b.is_empty() {
+                    return Err(format!("cannot derive a directory name from '{url}'"));
+                }
+                b.to_string()
+            }
+        };
+        let p = std::path::Path::new(&base);
+        if p.is_absolute()
+            || p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "repo dir '{base}' must be a relative path without '..'"
+            ));
+        }
+        let mut dir = base.clone();
+        let mut n = 2;
+        while taken.contains(&dir) {
+            dir = format!("{base}-{n}");
+            n += 1;
+        }
+        taken.push(dir.clone());
+        let mut with = vec![
+            executor::StepParam {
+                key: "url".into(),
+                value: url.to_string(),
+            },
+            executor::StepParam {
+                key: "dir".into(),
+                value: dir.clone(),
+            },
+        ];
+        if let Some(git_ref) = r
+            .git_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            with.push(executor::StepParam {
+                key: "ref".into(),
+                value: git_ref.to_string(),
+            });
+        }
+        steps.push(executor::ProvisionStep {
+            name: format!("checkout {dir}"),
+            uses: "git_checkout".into(),
+            with,
+        });
+    }
+    Ok(steps)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod workspace_tests {
@@ -379,6 +467,75 @@ mod tests {
         assert!(json.contains("\"type\":\"ScanWorkspace\""));
         let back: RuntimeInboundMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, RuntimeInboundMessage::ScanWorkspace(r) if r.call_id == "c1"));
+    }
+
+    #[test]
+    fn provision_from_repos_defaults_and_dedupes_dirs() {
+        use crate::session_api::RepoConfig;
+        let steps = crate::provision_from_repos(&[
+            RepoConfig {
+                url: "https://github.com/o/api.git".into(),
+                git_ref: None,
+                dir: None,
+            },
+            RepoConfig {
+                url: "https://github.com/other/api".into(),
+                git_ref: Some("dev".into()),
+                dir: None,
+            },
+            RepoConfig {
+                url: "https://github.com/o/web".into(),
+                git_ref: None,
+                dir: Some("frontend".into()),
+            },
+        ])
+        .unwrap();
+        let dirs: Vec<&str> = steps
+            .iter()
+            .map(|s| {
+                s.with
+                    .iter()
+                    .find(|p| p.key == "dir")
+                    .unwrap()
+                    .value
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(dirs, vec!["api", "api-2", "frontend"]);
+        assert_eq!(steps[0].uses, "git_checkout");
+        assert!(
+            steps[1]
+                .with
+                .iter()
+                .any(|p| p.key == "ref" && p.value == "dev")
+        );
+        assert_eq!(steps[1].name, "checkout api-2");
+    }
+
+    #[test]
+    fn provision_from_repos_rejects_bad_input() {
+        use crate::session_api::RepoConfig;
+        let empty = RepoConfig {
+            url: "  ".into(),
+            git_ref: None,
+            dir: None,
+        };
+        assert!(crate::provision_from_repos(&[empty]).is_err());
+        let escape = RepoConfig {
+            url: "https://github.com/o/x".into(),
+            git_ref: None,
+            dir: Some("../out".into()),
+        };
+        assert!(crate::provision_from_repos(&[escape]).is_err());
+        // Scheme-only URL: no path segment to derive a dir from. Same bug class
+        // as runtime::steps::dir_from_url — strip the scheme before taking the
+        // last path segment, or "https:///" wrongly yields "https:".
+        let scheme_only = RepoConfig {
+            url: "https:///".into(),
+            git_ref: None,
+            dir: None,
+        };
+        assert!(crate::provision_from_repos(&[scheme_only]).is_err());
     }
 
     #[test]

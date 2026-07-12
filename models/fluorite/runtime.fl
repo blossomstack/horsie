@@ -103,10 +103,21 @@ struct ToolCallResponse { call_id: String, result: ToolResult }
 /// First message the runtime sends after connecting.
 struct RuntimeReady { runtime_id: String }
 
+/// Announces that the runtime is executing provision steps before Ready. The
+/// executor extends its handshake deadline and expects Ready or
+/// ProvisionFailed next on this connection.
+struct RuntimeProvisioning { runtime_id: String }
+
+/// Provision steps failed; the runtime exits after sending this. `message` is
+/// surfaced as the create/attach failure reason.
+struct RuntimeProvisionFailed { runtime_id: String, message: String }
+
 /// All messages the runtime sends to the executor.
 #[type_tag = "type"]
 union RuntimeOutboundMessage {
     Ready(RuntimeReady),
+    Provisioning(RuntimeProvisioning),
+    ProvisionFailed(RuntimeProvisionFailed),
     ToolCallResponse(ToolCallResponse),
     ScanResult(ScanResponse),
     SessionStartResult(SessionStartResponse),

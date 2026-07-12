@@ -5,7 +5,9 @@
 //! daemon's `ProcessJobRuntime`. Stop kills the child but preserves all on-disk
 //! state (workspace + capability file), so attach can respawn against it.
 
-use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle};
+use crate::vendor::{
+    RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle, WorkspaceSource,
+};
 use async_trait::async_trait;
 use horsie_executor::{
     ConnectedRuntimeRegistry, InMemExecutorTransport, ProcessRuntimeProvider, RuntimeEndpoint,
@@ -20,11 +22,44 @@ use tokio_util::sync::CancellationToken;
 
 pub struct LocalProcessVendor {
     runtime_bin: PathBuf,
+    /// Root under which `Managed` workspaces are allocated
+    /// (`<workspace_root>/<runtime_id>/<name>`), deterministic so attach
+    /// re-finds them and delete can reclaim them.
+    workspace_root: PathBuf,
 }
 
 impl LocalProcessVendor {
-    pub fn new(runtime_bin: PathBuf) -> Self {
-        Self { runtime_bin }
+    pub fn new(runtime_bin: PathBuf, workspace_root: PathBuf) -> Self {
+        Self {
+            runtime_bin,
+            workspace_root,
+        }
+    }
+
+    /// Resolve workspace sources to concrete host paths, creating managed dirs.
+    fn resolve_workspaces(
+        &self,
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+    ) -> Result<Vec<WorkspaceConfig>, String> {
+        spec.workspaces
+            .iter()
+            .map(|w| {
+                let path = match &w.source {
+                    WorkspaceSource::HostDir(p) => p.clone(),
+                    WorkspaceSource::Managed => {
+                        let dir = self.workspace_root.join(runtime_id).join(&w.name);
+                        std::fs::create_dir_all(&dir)
+                            .map_err(|e| format!("allocate workspace '{}': {e}", w.name))?;
+                        dir
+                    }
+                };
+                Ok(WorkspaceConfig {
+                    name: w.name.clone(),
+                    path: path.to_string_lossy().into_owned(),
+                })
+            })
+            .collect()
     }
 
     /// Build one executor assembly and provision the child, signalling either
@@ -60,7 +95,8 @@ impl LocalProcessVendor {
         });
         let client =
             ExecutorClient::new(InMemExecutorTransport::new(Arc::new(provider), connected));
-        let config = runtime_config_from(spec);
+        let workspaces = self.resolve_workspaces(runtime_id, spec).map_err(wrap)?;
+        let config = runtime_config_from(spec, workspaces);
         let result = if attach {
             client.attach_runtime(runtime_id, config).await
         } else {
@@ -105,23 +141,20 @@ impl RuntimeVendor for LocalProcessVendor {
     }
 
     async fn delete(&self, runtime_id: &str) {
-        // Nothing beyond what stop released: the user's workspace is never
-        // touched, and per-session server state dirs are owned by the session
-        // layer. This vendor keeps preserved state until the OS cleans tmp.
-        tracing::debug!(runtime_id, "local vendor delete: nothing to reclaim");
+        // Bring-your-own host dirs are never touched; managed allocations for
+        // this runtime are reclaimed best-effort.
+        let dir = self.workspace_root.join(runtime_id);
+        if dir.is_dir()
+            && let Err(e) = std::fs::remove_dir_all(&dir)
+        {
+            tracing::warn!(runtime_id, error = %e, "failed to reclaim managed workspace");
+        }
     }
 }
 
-fn runtime_config_from(spec: &RuntimeSpec) -> RuntimeConfig {
+fn runtime_config_from(spec: &RuntimeSpec, workspaces: Vec<WorkspaceConfig>) -> RuntimeConfig {
     RuntimeConfig {
-        workspaces: spec
-            .workspaces
-            .iter()
-            .map(|w| WorkspaceConfig {
-                name: w.name.clone(),
-                path: w.path.to_string_lossy().into_owned(),
-            })
-            .collect(),
+        workspaces,
         plugins_dir: spec
             .plugins_dir
             .as_ref()
@@ -131,7 +164,8 @@ fn runtime_config_from(spec: &RuntimeSpec) -> RuntimeConfig {
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
-        env: vec![],
+        env: spec.env.clone(),
+        provision: spec.provision.clone(),
     }
 }
 
@@ -166,5 +200,48 @@ impl VendorRuntimeHandle for LocalHandle {
         // Explicit stop-preserve wire signal, then release the listener.
         let _ = self.client.stop_runtime(&self.runtime_id).await;
         self.cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::vendor::{WorkspaceSource, WorkspaceSpec};
+
+    #[test]
+    fn managed_workspace_allocates_deterministically_and_host_dir_passes_through() {
+        let root = tempfile::tempdir().unwrap();
+        let vendor = LocalProcessVendor::new("horsie-runtime".into(), root.path().to_path_buf());
+        let spec = RuntimeSpec {
+            workspaces: vec![
+                WorkspaceSpec {
+                    name: "main".into(),
+                    source: WorkspaceSource::Managed,
+                },
+                WorkspaceSpec {
+                    name: "byo".into(),
+                    source: WorkspaceSource::HostDir("/home/u/api".into()),
+                },
+            ],
+            provision: vec![],
+            env: vec![],
+            capabilities_file: root.path().join("caps.json"),
+            plugins_dir: None,
+            hook_path: vec![],
+        };
+        let ws = vendor.resolve_workspaces("rt-1", &spec).unwrap();
+        let managed = root.path().join("rt-1").join("main");
+        assert_eq!(ws[0].path, managed.to_string_lossy());
+        assert!(managed.is_dir(), "managed dir is created");
+        assert_eq!(ws[1].path, "/home/u/api");
+        // Same runtime_id resolves to the same dir (attach re-finds it).
+        let again = vendor.resolve_workspaces("rt-1", &spec).unwrap();
+        assert_eq!(again[0].path, ws[0].path);
     }
 }

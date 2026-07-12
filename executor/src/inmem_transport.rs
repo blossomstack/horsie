@@ -183,6 +183,7 @@ mod tests {
             plugins_dir: None,
             hook_path: vec![],
             env: vec![],
+            provision: vec![],
         }
     }
 

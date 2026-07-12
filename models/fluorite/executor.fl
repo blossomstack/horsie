@@ -11,6 +11,22 @@ struct WorkspaceConfig { name: String, path: String }
 /// (e.g. a capability token or a synthetic `HOME`).
 struct EnvVar { name: String, value: String }
 
+/// One key/value parameter of a provision step.
+struct StepParam { key: String, value: String }
+
+/// A setup step the runtime executes inside its sandbox after credential
+/// provisioning and before the agent message loop (e.g. cloning a repository).
+/// `uses` selects the step kind — "git_checkout" is the only kind today; the
+/// runtime fails on unknown kinds (fail-closed, forward-compatible).
+struct ProvisionStep {
+    /// Display label, e.g. "checkout horsie".
+    name: String,
+    /// Step kind: "git_checkout".
+    uses: String,
+    /// Open key/value params, interpreted per `uses`.
+    with: Vec<StepParam>,
+}
+
 /// Runtime configuration
 struct RuntimeConfig {
     workspaces: Vec<WorkspaceConfig>,
@@ -25,6 +41,9 @@ struct RuntimeConfig {
     /// Applied after the sandbox env scrub, so injection wins over the ambient
     /// allowlist on conflict. Empty injects nothing.
     env: Vec<EnvVar>,
+    /// Setup steps the runtime executes before the agent loop (vendor-injected
+    /// into the child via the HORSIE_PROVISION env var). Empty runs nothing.
+    provision: Vec<ProvisionStep>,
 }
 
 /// Current lifecycle state of a runtime

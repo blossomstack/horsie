@@ -128,6 +128,7 @@ mod tests {
             &format!("sqlite://{}", db.display()),
             crate::config::StoreDeps {
                 runtime_bin: std::path::PathBuf::from("horsie-runtime"),
+                workspace_root: tmp.path().join("workspaces"),
                 info: test_info(),
             },
         )
@@ -302,12 +303,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_rejects_empty_workdirs() {
+    async fn create_without_workdirs_gets_managed_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         let app = app(test_state(&tmp).await);
         let body = serde_json::json!({
             "agent": {"model": "mock"},
             "workdirs": [],
+            "vendor": "mock"
+        });
+        let res = app
+            .oneshot(post_json("/api/sessions", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_with_repos_builds_provision_steps() {
+        use horsie_models::session_api::GetSessionResponse;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        let body = serde_json::json!({
+            "agent": {"model": "mock"},
+            "workdirs": [],
+            "vendor": "mock",
+            "repos": [
+                {"url": "https://github.com/o/api.git"},
+                {"url": "https://github.com/o/web", "gitRef": "dev"}
+            ]
+        });
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/sessions", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let created: CreateSessionResponse = read_json(res).await;
+        let res = app
+            .oneshot(get(&format!("/api/sessions/{}", created.session.id)))
+            .await
+            .unwrap();
+        let detail: GetSessionResponse = read_json(res).await;
+        assert_eq!(
+            detail.session.repos,
+            vec!["https://github.com/o/api.git", "https://github.com/o/web"]
+        );
+        assert!(detail.session.workdirs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_workdirs_and_repos_together() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        let body = serde_json::json!({
+            "agent": {"model": "mock"},
+            "workdirs": ["/tmp"],
+            "repos": [{"url": "https://github.com/o/x"}],
             "vendor": "mock"
         });
         let res = app

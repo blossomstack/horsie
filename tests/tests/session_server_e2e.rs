@@ -88,6 +88,7 @@ async fn start_server(
         &format!("sqlite://{}", db.display()),
         StoreDeps {
             runtime_bin: std::path::PathBuf::from("horsie-runtime"),
+            workspace_root: journal_dir.join("workspaces"),
             info: horsie_models::settings::ServerInfo {
                 config_path: String::new(),
                 database: String::new(),
@@ -491,6 +492,52 @@ async fn last_event_id_replay_is_gap_free() {
         &after_ids[..expected_tail.len().min(after_ids.len())],
         &expected_tail[..expected_tail.len().min(after_ids.len())]
     );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn repos_session_creates_and_reports_repos() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let vendor = Arc::new(MockVendor::new());
+    let server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "agent": {"model": "mock"},
+        "workdirs": [],
+        "vendor": "mock",
+        "repos": [{"url": "https://github.com/o/api", "gitRef": "main"}]
+    });
+    let res = client
+        .post(format!("http://{}/api/sessions", server.addr))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201);
+    let created: serde_json::Value = res.json().await.unwrap();
+    let id = created["session"]["id"].as_str().unwrap().to_string();
+
+    // Provisioning runs the git_checkout step through the mock runtime and
+    // lands the session Idle — a real (doubled) provisioning handshake, not
+    // just a static echo of the request.
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{}/api/sessions/{id}", server.addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        detail["session"]["repos"],
+        serde_json::json!(["https://github.com/o/api"])
+    );
+    assert_eq!(detail["session"]["workdirs"], serde_json::json!([]));
 
     server.shutdown().await;
 }

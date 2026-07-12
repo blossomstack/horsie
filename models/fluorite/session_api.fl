@@ -6,15 +6,28 @@ use session.SessionSummary;
 use session.SessionDetail;
 use capabilities.CapabilitySpec;
 
+/// One repository to provision into the session workspace.
+struct RepoConfig {
+    /// HTTPS clone URL, e.g. "https://github.com/org/repo".
+    url: String,
+    /// Branch, tag, or commit to check out; absent → default branch.
+    git_ref: Option<String>,
+    /// Directory under the workspace; absent → repo basename (deduped).
+    dir: Option<String>,
+}
+
 struct CreateSessionRequest {
     name: Option<String>,
     agent: AgentSettings,
-    /// Workspace roots (>=1), like `horsie job run --workdir`.
+    /// Bring-your-own workspace roots (local vendor only). Mutually exclusive
+    /// with repos; both empty → one empty vendor-managed workspace.
     workdirs: Vec<String>,
     /// Runtime vendor name; defaults to "local".
     vendor: Option<String>,
     /// Capability spec overriding the server default.
     capabilities: Option<CapabilitySpec>,
+    /// Repositories cloned into a vendor-managed workspace at provision time.
+    repos: Option<Vec<RepoConfig>>,
 }
 
 struct CreateSessionResponse { session: SessionSummary }

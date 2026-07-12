@@ -6,7 +6,8 @@ use crate::http::error::Api;
 use crate::sessions::UserMessageError;
 use crate::sessions::events::fold_session_state;
 use crate::sessions::spec::{
-    AgentSettings, SessionSpec, SessionStatus, status_kind, status_reason,
+    AgentSettings, ProvisionStepSpec, SessionSpec, SessionStatus, WorkspaceDef, status_kind,
+    status_reason,
 };
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
@@ -73,21 +74,62 @@ pub async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, Api> {
-    if req.workdirs.is_empty() {
-        return Err(Api::unprocessable("at least one workdir is required"));
+    let repos = req.repos.unwrap_or_default();
+    if !req.workdirs.is_empty() && !repos.is_empty() {
+        return Err(Api::unprocessable(
+            "workdirs and repos are mutually exclusive",
+        ));
     }
-    let paths: Vec<std::path::PathBuf> =
-        req.workdirs.iter().map(std::path::PathBuf::from).collect();
-    let workspaces = horsie_models::derive_workspaces(&paths)
-        .map_err(|e| Api::unprocessable(format!("invalid workdirs: {e}")))?;
-    let caps = (state.caps_finalize)(
-        req.capabilities
-            .unwrap_or_else(|| state.default_caps.clone()),
-    );
+    let (workspaces, provision) = if !req.workdirs.is_empty() {
+        let paths: Vec<std::path::PathBuf> =
+            req.workdirs.iter().map(std::path::PathBuf::from).collect();
+        let ws = horsie_models::derive_workspaces(&paths)
+            .map_err(|e| Api::unprocessable(format!("invalid workdirs: {e}")))?
+            .into_iter()
+            .map(|w| WorkspaceDef {
+                name: w.name,
+                path: Some(w.path),
+            })
+            .collect();
+        (ws, vec![])
+    } else {
+        let steps = horsie_models::provision_from_repos(&repos)
+            .map_err(|e| Api::unprocessable(format!("invalid repos: {e}")))?;
+        let provision: Vec<ProvisionStepSpec> = steps
+            .into_iter()
+            .map(|s| ProvisionStepSpec {
+                name: s.name,
+                uses: s.uses,
+                with: s.with.into_iter().map(|p| (p.key, p.value)).collect(),
+            })
+            .collect();
+        (
+            vec![WorkspaceDef {
+                name: "main".into(),
+                path: None,
+            }],
+            provision,
+        )
+    };
+    // Repo provisioning clones inside the sandbox, so the default capability
+    // spec (which may block the network) gets a network-allow override; an
+    // explicit request-supplied spec always wins untouched.
+    let caps = match req.capabilities {
+        Some(c) => (state.caps_finalize)(c),
+        None if !provision.is_empty() => {
+            let mut c = state.default_caps.clone();
+            c.network = horsie_models::capabilities::NetworkPolicy::Allow(
+                horsie_models::capabilities::AllowNetwork {},
+            );
+            c
+        }
+        None => state.default_caps.clone(),
+    };
     let spec = SessionSpec {
         name: req.name,
         agent: settings_from_wire(req.agent),
         workspaces,
+        provision,
         capabilities: caps,
         vendor: req
             .vendor
@@ -152,9 +194,21 @@ pub async fn get_session(
             .spec
             .workspaces
             .iter()
-            .map(|w| w.path.to_string_lossy().into_owned())
+            .filter_map(|w| w.path.as_ref().map(|p| p.to_string_lossy().into_owned()))
             .collect(),
         vendor: rec.spec.vendor.clone(),
+        repos: rec
+            .spec
+            .provision
+            .iter()
+            .filter(|s| s.uses == "git_checkout")
+            .filter_map(|s| {
+                s.with
+                    .iter()
+                    .find(|(k, _)| k == "url")
+                    .map(|(_, v)| v.clone())
+            })
+            .collect(),
     };
     Ok(Json(GetSessionResponse { session: detail }))
 }

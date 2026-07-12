@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct MockVendor {
     signals: Arc<Mutex<Vec<String>>>,
+    /// The last spec seen by `create` or `attach`, so tests can assert
+    /// provision/env passthrough.
+    last_spec: Arc<Mutex<Option<RuntimeSpec>>>,
     fail_attach: Arc<Mutex<u32>>,
     fail_create: bool,
 }
@@ -25,8 +28,24 @@ impl MockVendor {
     pub fn new() -> Self {
         Self {
             signals: Arc::new(Mutex::new(Vec::new())),
+            last_spec: Arc::new(Mutex::new(None)),
             fail_attach: Arc::new(Mutex::new(0)),
             fail_create: false,
+        }
+    }
+
+    /// The spec passed to the most recent `create` or `attach` call.
+    pub fn last_create_spec(&self) -> Option<RuntimeSpec> {
+        self.last_spec
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|e| e.into_inner().clone())
+    }
+
+    fn record_spec(&self, spec: &RuntimeSpec) {
+        match self.last_spec.lock() {
+            Ok(mut g) => *g = Some(spec.clone()),
+            Err(e) => *e.into_inner() = Some(spec.clone()),
         }
     }
 
@@ -81,9 +100,10 @@ impl RuntimeVendor for MockVendor {
     async fn create(
         &self,
         runtime_id: &str,
-        _spec: &RuntimeSpec,
+        spec: &RuntimeSpec,
     ) -> Result<VendorRuntime, VendorError> {
         self.record(format!("create:{runtime_id}"));
+        self.record_spec(spec);
         if self.fail_create {
             return Err(VendorError::Provision("mock create failure".to_string()));
         }
@@ -93,9 +113,10 @@ impl RuntimeVendor for MockVendor {
     async fn attach(
         &self,
         runtime_id: &str,
-        _spec: &RuntimeSpec,
+        spec: &RuntimeSpec,
     ) -> Result<VendorRuntime, VendorError> {
         self.record(format!("attach:{runtime_id}"));
+        self.record_spec(spec);
         let should_fail = {
             match self.fail_attach.lock() {
                 Ok(mut guard) => {
@@ -149,6 +170,8 @@ mod tests {
     fn test_spec() -> RuntimeSpec {
         RuntimeSpec {
             workspaces: vec![],
+            provision: vec![],
+            env: vec![],
             capabilities_file: std::env::temp_dir().join("caps.json"),
             plugins_dir: None,
             hook_path: vec![],

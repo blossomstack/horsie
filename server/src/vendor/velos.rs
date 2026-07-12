@@ -16,7 +16,9 @@
 //! session state (the journal) lives server-side and recovers on attach.
 
 use crate::velos::{ContainerApi, ContainerLaunchSpec};
-use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle};
+use crate::vendor::{
+    RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle, WorkspaceSource,
+};
 use async_trait::async_trait;
 use horsie_executor::{
     ConnectedRuntimeRegistry, HealthStatus, InMemExecutorTransport, RuntimeEndpoint, RuntimeError,
@@ -30,6 +32,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::{CancellationToken, DropGuard};
+
+/// Extra time granted on top of `connect_timeout` when a runtime has provision
+/// steps to run (e.g. cloning) inside the container before it announces Ready.
+const PROVISION_ALLOWANCE: Duration = Duration::from_secs(900);
 
 /// Deployment-global knobs for the velos vendor. Built from config.
 #[derive(Debug, Clone)]
@@ -133,7 +139,6 @@ struct VelosRuntimeProvider {
     endpoint_ws: String,
     image: String,
     runtime_bin: String,
-    workspace_root: String,
     cpu: u32,
     memory_bytes: u64,
     connect_timeout: Duration,
@@ -141,27 +146,28 @@ struct VelosRuntimeProvider {
 
 impl VelosRuntimeProvider {
     fn mounts(&self, config: &RuntimeConfig) -> Vec<WorkspaceMount> {
-        let root = self.workspace_root.trim_end_matches('/');
         config
             .workspaces
             .iter()
             .map(|w| WorkspaceMount {
                 name: w.name.clone(),
-                container_path: format!("{root}/{}", w.name),
+                container_path: w.path.clone(),
             })
             .collect()
     }
 
     /// Wait for the runtime to dial back, polling velos so a container that dies
-    /// before connecting fails fast instead of burning the whole timeout.
+    /// before connecting fails fast instead of burning the whole timeout. `wait`
+    /// is the deadline — longer when provision steps (clones) run before Ready.
     async fn await_ready(
         &self,
         runtime_id: &str,
         name: &str,
-        ready_rx: tokio::sync::oneshot::Receiver<()>,
+        ready_rx: tokio::sync::oneshot::Receiver<Result<(), String>>,
+        wait: Duration,
     ) -> Result<(), RuntimeError> {
         tokio::pin!(ready_rx);
-        let deadline = tokio::time::sleep(self.connect_timeout);
+        let deadline = tokio::time::sleep(wait);
         tokio::pin!(deadline);
         let poll_period = Duration::from_millis(750);
         let mut poll =
@@ -169,9 +175,13 @@ impl VelosRuntimeProvider {
         loop {
             tokio::select! {
                 res = &mut ready_rx => {
-                    return res.map_err(|_| {
-                        RuntimeError::Provider("runtime readiness channel dropped".to_string())
-                    });
+                    return match res {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(message)) => Err(RuntimeError::Provider(message)),
+                        Err(_) => Err(RuntimeError::Provider(
+                            "runtime readiness channel dropped".to_string(),
+                        )),
+                    };
                 }
                 _ = &mut deadline => {
                     return Err(RuntimeError::Provider(format!(
@@ -209,11 +219,16 @@ impl RuntimeProvider for VelosRuntimeProvider {
             id,
             &self.mounts(config),
         );
-        let env: BTreeMap<String, String> = config
+        let mut env: BTreeMap<String, String> = config
             .env
             .iter()
             .map(|e| (e.name.clone(), e.value.clone()))
             .collect();
+        if !config.provision.is_empty() {
+            let json = serde_json::to_string(&config.provision)
+                .map_err(|e| RuntimeError::Provider(format!("encode provision steps: {e}")))?;
+            env.insert(horsie_models::ENV_PROVISION.to_string(), json);
+        }
         let spec = ContainerLaunchSpec {
             image: self.image.clone(),
             command,
@@ -226,7 +241,17 @@ impl RuntimeProvider for VelosRuntimeProvider {
             .await
             .map_err(|e| RuntimeError::Provider(e.to_string()))?;
 
-        if let Err(e) = self.await_ready(id, &self.container_name, ready_rx).await {
+        // Provision steps (clones) may legitimately take minutes; the failure
+        // path stays fast because ProvisionFailed resolves the waiter early.
+        let wait = if config.provision.is_empty() {
+            self.connect_timeout
+        } else {
+            self.connect_timeout + PROVISION_ALLOWANCE
+        };
+        if let Err(e) = self
+            .await_ready(id, &self.container_name, ready_rx, wait)
+            .await
+        {
             // Reclaim the container we scheduled but never heard from.
             let _ = self.api.delete_container(&self.container_name).await;
             self.connected.remove(id).await;
@@ -348,7 +373,6 @@ impl VelosVendor {
             endpoint_ws: self.endpoint_ws.clone(),
             image: self.image.clone(),
             runtime_bin: self.runtime_bin.clone(),
-            workspace_root: self.workspace_root.clone(),
             cpu: self.cpu,
             memory_bytes: self.memory_bytes,
             connect_timeout: self.connect_timeout,
@@ -357,7 +381,7 @@ impl VelosVendor {
             provider,
             self.connected.clone(),
         ));
-        let config = runtime_config_from(spec);
+        let config = runtime_config_from(spec, &self.workspace_root).map_err(wrap)?;
         let result = if attach {
             client.attach_runtime(&incarnation, config).await
         } else {
@@ -424,23 +448,34 @@ impl VendorRuntimeHandle for VelosHandle {
     }
 }
 
-/// Remote runtime config: workspace *names* carry over (the provider maps them to
-/// in-container paths), while local-only inputs (plugins/hooks/env) are dropped —
-/// the container is a fresh, self-contained sandbox.
-fn runtime_config_from(spec: &RuntimeSpec) -> RuntimeConfig {
-    RuntimeConfig {
-        workspaces: spec
-            .workspaces
-            .iter()
-            .map(|w| WorkspaceConfig {
+/// Remote runtime config: `Managed` workspaces map to in-container paths under
+/// the vendor's workspace root; host directories are impossible in a remote
+/// container and rejected. Env and provision steps carry over; local-only
+/// inputs (plugins/hooks) are dropped — the container is self-contained.
+fn runtime_config_from(spec: &RuntimeSpec, workspace_root: &str) -> Result<RuntimeConfig, String> {
+    let root = workspace_root.trim_end_matches('/');
+    let workspaces = spec
+        .workspaces
+        .iter()
+        .map(|w| match &w.source {
+            WorkspaceSource::Managed => Ok(WorkspaceConfig {
                 name: w.name.clone(),
-                path: w.path.to_string_lossy().into_owned(),
-            })
-            .collect(),
+                path: format!("{root}/{}", w.name),
+            }),
+            WorkspaceSource::HostDir(p) => Err(format!(
+                "velos cannot mount host directory '{}' (workspace '{}')",
+                p.display(),
+                w.name
+            )),
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(RuntimeConfig {
+        workspaces,
         plugins_dir: None,
         hook_path: vec![],
-        env: vec![],
-    }
+        env: spec.env.clone(),
+        provision: spec.provision.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -453,6 +488,7 @@ fn runtime_config_from(spec: &RuntimeSpec) -> RuntimeConfig {
 mod tests {
     use super::*;
     use crate::velos::{ContainerPhase, VelosError};
+    use crate::vendor::WorkspaceSpec;
     use futures_util::{SinkExt, StreamExt};
     use horsie_models::runtime::{
         BashInput, RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ToolCall,
@@ -621,10 +657,12 @@ mod tests {
 
     fn test_spec() -> RuntimeSpec {
         RuntimeSpec {
-            workspaces: vec![horsie_models::Workspace {
+            workspaces: vec![WorkspaceSpec {
                 name: "main".into(),
-                path: std::path::PathBuf::from("/host/main"),
+                source: WorkspaceSource::Managed,
             }],
+            provision: vec![],
+            env: vec![],
             capabilities_file: std::env::temp_dir().join("caps.json"),
             plugins_dir: None,
             hook_path: vec![],
@@ -660,6 +698,25 @@ mod tests {
         // Stop deletes the container (velos has no pause).
         rt.handle.stop().await;
         assert_eq!(api.deletes(), vec!["horsie-rt-1"]);
+    }
+
+    #[tokio::test]
+    async fn host_dir_workspace_is_rejected() {
+        let api = FakeVelosApi::new();
+        let vendor = bind_vendor(api.clone()).await;
+        let mut spec = test_spec();
+        spec.workspaces = vec![WorkspaceSpec {
+            name: "byo".into(),
+            source: WorkspaceSource::HostDir("/home/u/api".into()),
+        }];
+        match vendor.create("rt-h", &spec).await {
+            Err(err) => assert!(
+                err.to_string().contains("cannot mount host directory"),
+                "{err}"
+            ),
+            Ok(_) => panic!("host dir workspace must be rejected"),
+        }
+        assert!(api.creates().is_empty(), "no container scheduled");
     }
 
     #[tokio::test]

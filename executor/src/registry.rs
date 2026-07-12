@@ -194,6 +194,7 @@ mod tests {
             plugins_dir: None,
             hook_path: vec![],
             env: vec![],
+            provision: vec![],
             workspaces: vec![horsie_models::executor::WorkspaceConfig {
                 name: "tmp".to_string(),
                 path: "/tmp".to_string(),

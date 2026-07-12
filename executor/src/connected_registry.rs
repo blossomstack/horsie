@@ -5,7 +5,7 @@ use tokio::sync::{Mutex, oneshot};
 
 struct Inner {
     transports: HashMap<String, Arc<dyn RuntimeTransport>>,
-    pending: HashMap<String, oneshot::Sender<()>>,
+    pending: HashMap<String, oneshot::Sender<Result<(), String>>>,
 }
 
 /// Tracks the tool-call transport of each live runtime connection. The unit of
@@ -42,13 +42,18 @@ impl ConnectedRuntimeRegistry {
         let mut inner = self.inner.lock().await;
         inner.transports.insert(runtime_id.clone(), transport);
         if let Some(tx) = inner.pending.remove(&runtime_id) {
-            let _ = tx.send(());
+            let _ = tx.send(Ok(()));
         }
     }
 
     /// Returns a receiver that resolves when `register_transport` is called for
-    /// `runtime_id`. Must be called BEFORE the process is spawned.
-    pub async fn notify_when_ready(&self, runtime_id: &str) -> oneshot::Receiver<()> {
+    /// `runtime_id` (with `Ok`) or [`fail_pending`](Self::fail_pending) reports a
+    /// provisioning failure (with `Err(message)`). Must be called BEFORE the
+    /// process is spawned.
+    pub async fn notify_when_ready(
+        &self,
+        runtime_id: &str,
+    ) -> oneshot::Receiver<Result<(), String>> {
         let (tx, rx) = oneshot::channel();
         self.inner
             .lock()
@@ -56,6 +61,14 @@ impl ConnectedRuntimeRegistry {
             .pending
             .insert(runtime_id.to_string(), tx);
         rx
+    }
+
+    /// Resolve a pending `notify_when_ready` waiter with an error (e.g. the
+    /// runtime reported failed provisioning and exited). No-op without a waiter.
+    pub async fn fail_pending(&self, runtime_id: &str, message: String) {
+        if let Some(tx) = self.inner.lock().await.pending.remove(runtime_id) {
+            let _ = tx.send(Err(message));
+        }
     }
 
     /// Look up a connected runtime's tool transport.
@@ -87,10 +100,21 @@ mod tests {
         assert!(reg.runtime_transport("rt-1").await.is_none());
         reg.register_transport("rt-1".into(), Arc::new(MockTransport::ok("")))
             .await;
-        // The readiness waiter fired ...
-        rx.await.unwrap();
+        // The readiness waiter fired with success ...
+        assert!(rx.await.unwrap().is_ok());
         // ... and the transport is retrievable.
         assert!(reg.runtime_transport("rt-1").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn fail_pending_resolves_waiter_with_error() {
+        let reg = ConnectedRuntimeRegistry::new();
+        let rx = reg.notify_when_ready("rt-1").await;
+        reg.fail_pending("rt-1", "git clone failed: boom".into())
+            .await;
+        let err = rx.await.unwrap().unwrap_err();
+        assert!(err.contains("boom"));
+        assert!(reg.runtime_transport("rt-1").await.is_none());
     }
 
     #[tokio::test]

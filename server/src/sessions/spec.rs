@@ -34,13 +34,34 @@ pub struct AgentSettings {
     pub max_retries: u32,
 }
 
+/// One session workspace as persisted: a host path (bring-your-own) or `None`
+/// (vendor-allocated). Storage twin of the vendor layer's `WorkspaceSpec`;
+/// old journal rows (`{name, path}`) deserialize as `path: Some(_)`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceDef {
+    pub name: String,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+}
+
+/// One provision step as persisted (storage twin of the wire `ProvisionStep`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProvisionStepSpec {
+    pub name: String,
+    pub uses: String,
+    pub with: Vec<(String, String)>,
+}
+
 /// Persisted, self-contained description of one session (lives in the
 /// supervisor journal, like the daemon's `JobSpec`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSpec {
     pub name: Option<String>,
     pub agent: AgentSettings,
-    pub workspaces: Vec<horsie_models::Workspace>,
+    pub workspaces: Vec<WorkspaceDef>,
+    /// Setup steps run by the runtime at every create/attach (idempotent).
+    #[serde(default)]
+    pub provision: Vec<ProvisionStepSpec>,
     /// Already resolved (paths expanded, plugin grants + seatbelt rules applied)
     /// at creation.
     pub capabilities: CapabilitySpec,
@@ -113,6 +134,16 @@ pub struct ServerDeps {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_def_reads_old_journal_shape() {
+        let old = r#"{"name":"api","path":"/home/u/api"}"#;
+        let w: WorkspaceDef = serde_json::from_str(old).unwrap();
+        assert_eq!(w.path.as_deref(), Some(std::path::Path::new("/home/u/api")));
+        let managed = r#"{"name":"main"}"#;
+        let w: WorkspaceDef = serde_json::from_str(managed).unwrap();
+        assert_eq!(w.path, None);
+    }
 
     #[test]
     fn status_kind_and_reason_project_failures() {

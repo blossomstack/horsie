@@ -396,6 +396,7 @@ mod tests {
                 max_retries: 0,
             },
             workspaces: vec![],
+            provision: vec![],
             capabilities: CapabilitySpec {
                 network: NetworkPolicy::Block(BlockNetwork {}),
                 grants: vec![],

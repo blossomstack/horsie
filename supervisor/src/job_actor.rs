@@ -184,6 +184,7 @@ impl JobRuntime for ProcessJobRuntime {
                     // Per-job env injection: the hackamore token + synthetic home when
                     // minting is configured, empty otherwise.
                     env,
+                    provision: vec![],
                 },
             )
             .await

@@ -22,6 +22,10 @@ use tokio_tungstenite::{MaybeTlsStream, connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// How long a runtime may spend in provision steps (e.g. cloning) between its
+/// Provisioning announce and Ready before the executor drops the link.
+const PROVISION_WINDOW: Duration = Duration::from_secs(900);
+
 type WsSink = Arc<
     Mutex<
         futures_util::stream::SplitSink<
@@ -235,16 +239,25 @@ async fn handle_runtime_connection<S>(
 {
     let (sink, mut stream) = ws.split();
 
-    // First message must be RuntimeReady, within a bounded handshake window so a
-    // peer that connects but never announces itself can't leak this task forever.
-    let handshake = tokio::time::timeout(Duration::from_secs(10), async {
+    enum Handshake {
+        Ready(String),
+        Provisioning(String),
+    }
+
+    // First message must arrive within a bounded window so a peer that connects
+    // but never announces itself can't leak this task forever.
+    let first = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match stream.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(RuntimeOutboundMessage::Ready(ev)) =
-                        serde_json::from_str::<RuntimeOutboundMessage>(&text)
-                    {
-                        return Some(ev.runtime_id);
+                    match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
+                        Ok(RuntimeOutboundMessage::Ready(ev)) => {
+                            return Some(Handshake::Ready(ev.runtime_id));
+                        }
+                        Ok(RuntimeOutboundMessage::Provisioning(ev)) => {
+                            return Some(Handshake::Provisioning(ev.runtime_id));
+                        }
+                        _ => {}
                     }
                 }
                 _ => return None,
@@ -252,9 +265,45 @@ async fn handle_runtime_connection<S>(
         }
     })
     .await;
-    let runtime_id = match handshake {
-        Ok(Some(id)) => id,
-        // Timed out, stream closed, or non-Text/garbage before Ready — drop the link.
+
+    let runtime_id = match first {
+        Ok(Some(Handshake::Ready(id))) => id,
+        Ok(Some(Handshake::Provisioning(id))) => {
+            // Provision phase: wait (much longer) for Ready or ProvisionFailed.
+            let outcome = tokio::time::timeout(PROVISION_WINDOW, async {
+                loop {
+                    match stream.next().await {
+                        Some(Ok(Message::Text(text))) => {
+                            match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
+                                Ok(RuntimeOutboundMessage::Ready(ev)) => {
+                                    return Ok(ev.runtime_id);
+                                }
+                                Ok(RuntimeOutboundMessage::ProvisionFailed(ev)) => {
+                                    return Err(ev.message);
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => return Err("runtime disconnected during provisioning".to_string()),
+                    }
+                }
+            })
+            .await;
+            match outcome {
+                Ok(Ok(ready_id)) => ready_id,
+                Ok(Err(message)) => {
+                    registry.fail_pending(&id, message).await;
+                    return;
+                }
+                Err(_) => {
+                    registry
+                        .fail_pending(&id, "timed out during provisioning".to_string())
+                        .await;
+                    return;
+                }
+            }
+        }
+        // Timed out, stream closed, or garbage before an announce — drop the link.
         Ok(None) | Err(_) => return,
     };
 

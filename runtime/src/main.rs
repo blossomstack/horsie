@@ -11,8 +11,8 @@
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse,
-    SessionStartResponse, ToolCallResponse, ToolError, ToolResult,
+    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeProvisionFailed, RuntimeProvisioning,
+    RuntimeReady, ScanResponse, SessionStartResponse, ToolCallResponse, ToolError, ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -65,8 +65,7 @@ fn parse_endpoint(s: &str) -> Result<Endpoint, String> {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
 
     let endpoint = match parse_endpoint(&cli.endpoint) {
@@ -77,6 +76,13 @@ async fn main() {
         }
     };
 
+    // Apply the sandbox BEFORE starting the async runtime. Landlock's
+    // `restrict_self` confines only the calling thread plus threads and child
+    // processes created AFTER it — so it must run on this single startup thread,
+    // before tokio spawns its worker/blocking pool, for every worker (and any
+    // subprocess a tool later forks) to inherit the confinement. Applying it
+    // inside `#[tokio::main]` left workers spawned before `apply` unconfined, so
+    // a tool forked onto one of them could escape the workdir non-deterministically.
     if let Some(caps_file) = &cli.sandbox_caps {
         #[cfg(feature = "sandbox")]
         {
@@ -100,14 +106,43 @@ async fn main() {
         }
     }
 
-    // In-sandbox hackamore self-provisioning — after the sandbox is applied (so the
-    // provision fetch runs under the same confinement as the job) and before the
-    // message loop. Fail closed: a daemon that injected hackamore env expects a
-    // provisioned runtime, so any failure here must fail the job visibly.
+    // Build the multi-threaded runtime only after confinement is in place, so
+    // every worker thread it spawns inherits the Landlock domain.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("failed to build tokio runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(run(cli, endpoint));
+}
+
+/// The async body, run inside a runtime built after the sandbox was applied.
+async fn run(cli: Cli, endpoint: Endpoint) {
+    // In-sandbox hackamore self-provisioning — under the same confinement as the
+    // job and before the message loop. Fail closed: a daemon that injected
+    // hackamore env expects a provisioned runtime, so any failure fails the job.
     if let Err(e) = horsie_runtime::provision::provision_from_env().await {
         eprintln!("hackamore provisioning failed: {e}");
         std::process::exit(4);
     }
+
+    // Provision steps (vendor-injected JSON). Parsed before connecting so a
+    // malformed payload fails fast; executed after connecting so failures are
+    // reported over the wire instead of as a silent death.
+    let steps = match horsie_runtime::steps::steps_from_env(
+        std::env::var(horsie_models::ENV_PROVISION).ok(),
+    ) {
+        Ok(steps) => steps,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(5);
+        }
+    };
 
     let registry = Arc::new(
         horsie_runtime::workspace::WorkspaceRegistry::new(cli.workspaces)
@@ -116,7 +151,7 @@ async fn main() {
 
     match endpoint {
         Endpoint::Ws(url) => match connect_async(&url).await {
-            Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id).await,
+            Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id, steps).await,
             Err(e) => {
                 eprintln!("failed to connect to {url}: {e}");
                 std::process::exit(1);
@@ -124,7 +159,7 @@ async fn main() {
         },
         Endpoint::Unix(path) => match tokio::net::UnixStream::connect(&path).await {
             Ok(stream) => match client_async("ws://localhost/", stream).await {
-                Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id).await,
+                Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id, steps).await,
                 Err(e) => {
                     eprintln!("ws handshake failed on unix socket: {e}");
                     std::process::exit(1);
@@ -144,11 +179,46 @@ async fn run_loop<S>(
     ws: WebSocketStream<S>,
     registry: Arc<horsie_runtime::workspace::WorkspaceRegistry>,
     runtime_id: String,
+    steps: Vec<horsie_models::executor::ProvisionStep>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (sink_raw, mut stream) = ws.split();
     let sink = Arc::new(Mutex::new(sink_raw));
+
+    if !steps.is_empty() {
+        let announce = match serde_json::to_string(&RuntimeOutboundMessage::Provisioning(
+            RuntimeProvisioning {
+                runtime_id: runtime_id.clone(),
+            },
+        )) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("serialization error: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = sink.lock().await.send(Message::Text(announce.into())).await {
+            eprintln!("failed to send Provisioning: {e}");
+            std::process::exit(1);
+        }
+        let token = std::env::var(horsie_models::ENV_GITHUB_TOKEN).ok();
+        if let Err(message) =
+            horsie_runtime::steps::run_steps(&registry, &steps, token.as_deref()).await
+        {
+            eprintln!("provisioning failed: {message}");
+            if let Ok(json) = serde_json::to_string(&RuntimeOutboundMessage::ProvisionFailed(
+                RuntimeProvisionFailed {
+                    runtime_id: runtime_id.clone(),
+                    message,
+                },
+            )) {
+                let _ = sink.lock().await.send(Message::Text(json.into())).await;
+                let _ = sink.lock().await.flush().await;
+            }
+            std::process::exit(5);
+        }
+    }
 
     let ready = match serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
         runtime_id: runtime_id.clone(),

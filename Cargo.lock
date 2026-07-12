@@ -1562,10 +1562,12 @@ dependencies = [
 name = "horsie-runtime"
 version = "0.1.4"
 dependencies = [
+ "base64",
  "clap",
  "futures-util",
  "glob",
  "hackamore-agent",
+ "horsie-executor",
  "horsie-models",
  "nono",
  "regex",
@@ -1573,6 +1575,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
 ]
 

@@ -13,4 +13,8 @@ export interface SessionDetail {
   model: string;
   workdirs: string[];
   vendor: string;
+  /**
+   * Clone URLs of the session&#x27;s provisioned repos (empty for workdir sessions).
+   */
+  repos: string[];
 }

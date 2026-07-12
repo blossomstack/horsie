@@ -36,6 +36,9 @@ type Registry = HashMap<String, Arc<dyn LlmProvider>>;
 pub struct StoreDeps {
     /// `horsie-runtime` binary the built-in `local` vendor spawns.
     pub runtime_bin: PathBuf,
+    /// Root under which the built-in `local` vendor allocates managed
+    /// workspaces (`<workspace_root>/<runtime_id>/<name>`).
+    pub workspace_root: PathBuf,
     /// Read-only deployment paths, surfaced in the settings view.
     pub info: ServerInfo,
 }
@@ -72,7 +75,7 @@ impl DbConfigStore {
             Arc::new(RwLock::new(build_registry(&provs, &mods)?));
 
         let vendor_rows = read_vendors(&pool).await.map_err(|e| e.to_string())?;
-        let vendors = build_vendors(&vendor_rows, deps.runtime_bin).await;
+        let vendors = build_vendors(&vendor_rows, deps.runtime_bin, deps.workspace_root).await;
         let mut active_vendors: Vec<String> = vendors.keys().cloned().collect();
         active_vendors.sort();
 
@@ -446,11 +449,12 @@ fn build_anthropic(
 async fn build_vendors(
     rows: &[VendorRow],
     runtime_bin: PathBuf,
+    workspace_root: PathBuf,
 ) -> HashMap<String, Arc<dyn RuntimeVendor>> {
     let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
     vendors.insert(
         "local".into(),
-        Arc::new(LocalProcessVendor::new(runtime_bin)),
+        Arc::new(LocalProcessVendor::new(runtime_bin, workspace_root)),
     );
     for r in rows {
         match r.kind.as_str() {
@@ -751,6 +755,7 @@ mod tests {
             &format!("sqlite://{}/t.db", dir.display()),
             StoreDeps {
                 runtime_bin: PathBuf::from("horsie-runtime"),
+                workspace_root: dir.join("workspaces"),
                 info: info(),
             },
         )
