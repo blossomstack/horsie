@@ -18,7 +18,7 @@ sandbox = ["dep:nono"]
 horsie-models = { version = "0.1.4", path = "../models" }
 # In-process hackamore provisioning (replaces shelling out to the hackamore-agent binary).
 # Pinned by rev so the provisioning ABI is reproducible.
-hackamore-agent  = { version = "0.1.0", git = "https://github.com/zhxiaogg/hackamore", rev = "4b99c6272332132100dd92e92e1bf1471abe5f69" }
+hackamore-agent  = { version = "0.1.0", git = "https://github.com/blossomstack/hackamore", rev = "df526a5474e5a9e6296660365bc24f409ce3e66a" }
 tokio         = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util  = { workspace = true }

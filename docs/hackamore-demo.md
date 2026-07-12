@@ -1,6 +1,6 @@
 # hackamore demo: policy-scoped GitHub access for a sandboxed agent
 
-This runbook walks the full horsie + [hackamore](https://github.com/zhxiaogg/hackamore)
+This runbook walks the full horsie + [hackamore](https://github.com/blossomstack/hackamore)
 integration end to end on one machine, with a mock GitHub upstream so nothing real
 is touched:
 
@@ -37,7 +37,7 @@ All demo assets live in [`examples/hackamore-demo/`](../examples/hackamore-demo/
 ## Prerequisites
 
 - A recent Rust toolchain, `python3`, `jq`, and a checkout of
-  [hackamore](https://github.com/zhxiaogg/hackamore) as a sibling of this repo
+  [hackamore](https://github.com/blossomstack/hackamore) as a sibling of this repo
   (paths below assume `../hackamore`).
 - An Anthropic API key in `ANTHROPIC_API_KEY` (or adapt the provider snippet below).
 

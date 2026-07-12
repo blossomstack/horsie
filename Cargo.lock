@@ -177,7 +177,7 @@ dependencies = [
 [[package]]
 name = "async-llm"
 version = "0.7.0"
-source = "git+https://github.com/zhxiaogg/async-anthropic.git?rev=89217381f63dc66ff437415da3227032130e9714#89217381f63dc66ff437415da3227032130e9714"
+source = "git+https://github.com/blossomstack/async-llm.git?rev=97cac0124819c33a52e911bb8d29c281201a3a70#97cac0124819c33a52e911bb8d29c281201a3a70"
 dependencies = [
  "backoff",
  "derive_builder",
@@ -1364,7 +1364,7 @@ dependencies = [
 [[package]]
 name = "hackamore-agent"
 version = "0.1.0"
-source = "git+https://github.com/zhxiaogg/hackamore?rev=4b99c6272332132100dd92e92e1bf1471abe5f69#4b99c6272332132100dd92e92e1bf1471abe5f69"
+source = "git+https://github.com/blossomstack/hackamore?rev=df526a5474e5a9e6296660365bc24f409ce3e66a#df526a5474e5a9e6296660365bc24f409ce3e66a"
 dependencies = [
  "clap",
  "hackamore-models",
@@ -1376,7 +1376,7 @@ dependencies = [
 [[package]]
 name = "hackamore-models"
 version = "0.1.0"
-source = "git+https://github.com/zhxiaogg/hackamore?rev=4b99c6272332132100dd92e92e1bf1471abe5f69#4b99c6272332132100dd92e92e1bf1471abe5f69"
+source = "git+https://github.com/blossomstack/hackamore?rev=df526a5474e5a9e6296660365bc24f409ce3e66a#df526a5474e5a9e6296660365bc24f409ce3e66a"
 dependencies = [
  "derive-new 0.5.9",
  "fluorite",
@@ -4954,7 +4954,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

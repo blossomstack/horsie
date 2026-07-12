@@ -33,7 +33,7 @@ tokio-stream      = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = "0.26"
 futures-util      = "0.3"
 uuid              = { version = "1", features = ["v4", "serde"] }
-async-llm         = { version = "0.7.0", git = "https://github.com/zhxiaogg/async-anthropic.git", rev = "89217381f63dc66ff437415da3227032130e9714" }
+async-llm         = { version = "0.7.0", git = "https://github.com/blossomstack/async-llm.git", rev = "97cac0124819c33a52e911bb8d29c281201a3a70" }
 axum              = { version = "0.7", features = ["macros"] }
 tower-http        = { version = "0.5", features = ["fs"] }
 parking_lot       = "0.12"
