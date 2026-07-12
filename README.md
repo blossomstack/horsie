@@ -135,6 +135,19 @@ velos has no volumes, so a remote workspace is **ephemeral** — `stop` deletes 
 container and the next message schedules a fresh one; the durable session state
 (the journal) lives server-side and recovers on reconnect.
 
+### GitHub integration
+
+Connect a GitHub App once per deployment so sessions can be launched against
+repositories instead of local directories. The server converts the picked repos
+into `git_checkout` provision steps and mints a short-lived, repo-scoped
+installation token that the runtime uses to clone inside its sandbox — the token
+is never persisted and never sent to the browser.
+
+Create a GitHub App with **Repository permissions → Contents: Read-only**, then
+in **Settings → GitHub** fill in the client id/secret, app id, and private key
+(raw PEM or base64) and click **Connect**. Once connected, the new-session dialog
+offers a repo picker (0..N repos, optional ref per repo).
+
 ## Development
 
 The pre-PR gate (also `make check`):

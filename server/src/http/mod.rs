@@ -3,6 +3,7 @@
 
 mod config;
 pub mod error;
+mod github;
 mod handlers;
 mod sse;
 
@@ -37,6 +38,9 @@ pub struct AppState {
     /// default vendor). Also the source of the default vendor a create request
     /// falls back to when it omits one.
     pub config_store: Arc<dyn ConfigStore>,
+    /// Deployment-global GitHub connection: App config, OAuth credentials, repo
+    /// listing, and the scoped-token minter used at session provisioning.
+    pub github: Arc<crate::github::GithubService>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
@@ -63,6 +67,19 @@ pub fn app(state: AppState) -> Router {
             "/api/config",
             get(config::get_config).put(config::update_config),
         )
+        .route("/api/github/status", get(github::status))
+        .route("/api/github/auth", get(github::auth))
+        .route("/api/github/callback", get(github::callback))
+        .route(
+            "/api/github/app-config",
+            get(github::get_app_config).put(github::put_app_config),
+        )
+        .route(
+            "/api/github/disconnect",
+            axum::routing::delete(github::disconnect),
+        )
+        .route("/api/github/repos", get(github::repos))
+        .route("/api/github/repos/branches", get(github::branches))
         .with_state(state);
 
     match web_dir {
@@ -134,10 +151,15 @@ mod tests {
         )
         .await
         .unwrap();
+        let github = Arc::new(crate::github::GithubService::new(
+            crate::github::GithubStore::new(opened.pool.clone()),
+            crate::github::GithubApi::new(),
+        ));
         let deps = ServerDeps {
             provider_registry: opened.registry,
             vendors,
             state_dir: tmp.path().to_path_buf(),
+            github_tokens: None,
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = broadcast::channel(64);
@@ -151,6 +173,7 @@ mod tests {
             plugins_dir: None,
             hook_path: vec![],
             config_store: opened.store,
+            github,
             web_dir: None,
         }
     }
@@ -366,5 +389,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn github_status_and_app_config_round_trip() {
+        use horsie_models::github::{GitHubAppConfigView, GitHubStatus};
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        // Fresh deployment: nothing configured.
+        let res = app
+            .clone()
+            .oneshot(get("/api/github/status"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let s: GitHubStatus = read_json(res).await;
+        assert!(!s.connected);
+        assert!(!s.app_configured);
+
+        // Save app config; secrets come back redacted.
+        let body = serde_json::json!({
+            "clientId": "cid", "clientSecret": "sec", "appId": 7, "privateKey": "PEM"
+        });
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/github/app-config", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: GitHubAppConfigView = read_json(res).await;
+        assert!(v.has_client_secret);
+        assert!(v.has_private_key);
+        assert_eq!(v.client_id, "cid");
+
+        // Status now reports the app configured.
+        let res = app
+            .clone()
+            .oneshot(get("/api/github/status"))
+            .await
+            .unwrap();
+        let s: GitHubStatus = read_json(res).await;
+        assert!(s.app_configured);
+
+        // Auth redirect points at GitHub with our client id.
+        let res = app.clone().oneshot(get("/api/github/auth")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res.headers().get("location").unwrap().to_str().unwrap();
+        assert!(loc.contains("client_id=cid"), "{loc}");
+    }
+
+    #[tokio::test]
+    async fn github_disconnect_without_credentials_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        let res = app.oneshot(delete("/api/github/disconnect")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 }

@@ -3,10 +3,14 @@ import { ChevronRight, Loader2, Settings2, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ApiRequestError } from "../api/client";
-import type { CreateSessionRequest } from "../api/types";
+import type { CreateSessionRequest, RepoConfig } from "../api/types";
 import { cn } from "../lib/cn";
+import { useGithubRepos, useGithubStatus } from "../hooks/useGithub";
 import { useCreateSession } from "../hooks/useSessions";
 import { useSettings } from "../hooks/useSettings";
+
+/** Where a new session's workspace comes from. */
+type WorkspaceSource = "dir" | "repos";
 
 export function NewSessionModal({
   open,
@@ -33,6 +37,18 @@ export function NewSessionModal({
   const [advanced, setAdvanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Workspace source: a local directory, or a set of GitHub repos to clone
+  // (fullName → ref; "" = default branch).
+  const [source, setSource] = useState<WorkspaceSource>("dir");
+  const [selected, setSelected] = useState<Map<string, string>>(new Map());
+  const [repoFilter, setRepoFilter] = useState("");
+  const { data: ghStatus } = useGithubStatus();
+  const {
+    data: repoList,
+    isLoading: reposLoading,
+    refetch: refetchRepos,
+  } = useGithubRepos(open && source === "repos" && !!ghStatus?.connected);
+
   const reset = () => {
     setName("");
     setModel("");
@@ -43,6 +59,9 @@ export function NewSessionModal({
     setUsePlugins(false);
     setAdvanced(false);
     setError(null);
+    setSource("dir");
+    setSelected(new Map());
+    setRepoFilter("");
   };
 
   // Clear the form on close so a cancelled draft never carries into the next
@@ -65,7 +84,16 @@ export function NewSessionModal({
     setError(null);
     const wd = workdir.trim();
     if (!model.trim()) return setError("Select a model.");
-    if (!wd) return setError("A workspace directory is required.");
+    if (source === "dir" && !wd)
+      return setError("A workspace directory is required.");
+
+    const repos: RepoConfig[] =
+      source === "repos"
+        ? Array.from(selected.entries()).map(([fullName, ref]) => ({
+            url: `https://github.com/${fullName}`,
+            gitRef: ref.trim() || undefined,
+          }))
+        : [];
 
     const body: CreateSessionRequest = {
       name: name.trim() || undefined,
@@ -75,7 +103,8 @@ export function NewSessionModal({
         allowAskUser,
         usePlugins,
       },
-      workdirs: [wd],
+      workdirs: source === "dir" ? [wd] : [],
+      repos: source === "repos" ? repos : undefined,
       vendor: vendor.trim() || undefined,
     };
 
@@ -145,17 +174,118 @@ export function NewSessionModal({
               )}
             </Field>
 
-            <Field
-              label="Workspace directory"
-              hint="absolute path the agent can work in"
-            >
-              <input
-                className="input font-mono"
-                value={workdir}
-                onChange={(e) => setWorkdir(e.target.value)}
-                placeholder="/Users/you/project"
-                autoFocus
-              />
+            <Field label="Workspace">
+              <div className="mb-2 flex gap-1">
+                {(["dir", "repos"] as const).map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={cn(
+                      "chip cursor-pointer",
+                      source === s && "border-accent text-text",
+                    )}
+                    onClick={() => setSource(s)}
+                  >
+                    {s === "dir" ? "Local directory" : "GitHub repos"}
+                  </button>
+                ))}
+              </div>
+
+              {source === "dir" ? (
+                <input
+                  className="input font-mono"
+                  value={workdir}
+                  onChange={(e) => setWorkdir(e.target.value)}
+                  placeholder="/Users/you/project"
+                />
+              ) : !ghStatus?.connected ? (
+                <Link
+                  to="/settings"
+                  onClick={() => onOpenChange(false)}
+                  className="flex items-center gap-1.5 rounded-[var(--radius)] border border-dashed px-3 py-2 text-sm text-muted transition-colors hover:text-text"
+                >
+                  <Settings2 size={14} />
+                  Connect GitHub in Settings to pick repos
+                </Link>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      className="input"
+                      value={repoFilter}
+                      onChange={(e) => setRepoFilter(e.target.value)}
+                      placeholder="Filter repos…"
+                    />
+                    <button
+                      type="button"
+                      className="btn-outline shrink-0"
+                      onClick={() => refetchRepos()}
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                  <div className="max-h-40 space-y-1 overflow-y-auto rounded-[var(--radius)] border p-1">
+                    {reposLoading && (
+                      <p className="px-2 py-1 text-sm text-muted">
+                        Loading repos…
+                      </p>
+                    )}
+                    {(repoList?.repos ?? [])
+                      .filter((r) =>
+                        r.fullName
+                          .toLowerCase()
+                          .includes(repoFilter.toLowerCase()),
+                      )
+                      .map((r) => {
+                        const checked = selected.has(r.fullName);
+                        return (
+                          <div
+                            key={r.fullName}
+                            className="flex items-center gap-2 px-2 py-1"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() =>
+                                setSelected((m) => {
+                                  const next = new Map(m);
+                                  if (checked) next.delete(r.fullName);
+                                  else next.set(r.fullName, "");
+                                  return next;
+                                })
+                              }
+                            />
+                            <span className="min-w-0 flex-1 truncate font-mono text-sm">
+                              {r.fullName}
+                            </span>
+                            {checked && (
+                              <input
+                                className="input w-28 py-0.5 text-xs"
+                                value={selected.get(r.fullName) ?? ""}
+                                onChange={(e) =>
+                                  setSelected((m) =>
+                                    new Map(m).set(r.fullName, e.target.value),
+                                  )
+                                }
+                                placeholder={r.defaultBranch}
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    {repoList && repoList.repos.length === 0 && (
+                      <p className="px-2 py-1 text-sm text-muted">
+                        No repos visible to the app installation.
+                      </p>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-faint">
+                    {selected.size === 0
+                      ? "No repos selected — the session starts with an empty workspace."
+                      : `${selected.size} repo${selected.size > 1 ? "s" : ""} selected.`}
+                  </p>
+                </div>
+              )}
             </Field>
 
             <button

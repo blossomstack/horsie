@@ -123,6 +123,9 @@ pub struct ServerDeps {
     pub vendors: HashMap<String, Arc<dyn RuntimeVendor>>,
     /// Per-session server state (capability files) under `<state_dir>/sessions/<id>/`.
     pub state_dir: PathBuf,
+    /// Mints short-lived GitHub tokens for repo provisioning; `None` when the
+    /// deployment has no GitHub integration wired.
+    pub github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,
 }
 
 #[cfg(test)]

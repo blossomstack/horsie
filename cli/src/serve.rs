@@ -89,10 +89,16 @@ pub async fn serve(
     .await
     .map_err(CliError::Config)?;
 
+    let github = Arc::new(horsie_server::github::GithubService::new(
+        horsie_server::github::GithubStore::new(opened.pool.clone()),
+        horsie_server::github::GithubApi::new(),
+    ));
+
     let deps = ServerDeps {
         provider_registry: opened.registry,
         vendors: opened.vendors,
         state_dir,
+        github_tokens: Some(github.clone()),
     };
     let (global_tx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(
@@ -109,6 +115,7 @@ pub async fn serve(
         plugins_dir,
         hook_path,
         config_store: opened.store,
+        github,
         web_dir,
     };
     let listener = tokio::net::TcpListener::bind(&addr)

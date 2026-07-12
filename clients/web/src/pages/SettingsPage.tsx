@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   Check,
   ChevronRight,
+  GitBranch,
   Loader2,
   Plus,
   RotateCcw,
@@ -10,7 +11,8 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ApiRequestError } from "../api/client";
+import { useSearchParams } from "react-router-dom";
+import { api, ApiRequestError } from "../api/client";
 import type {
   ModelInput,
   ProviderInput,
@@ -18,6 +20,12 @@ import type {
   VendorInput,
 } from "../api/types";
 import { cn } from "../lib/cn";
+import {
+  useGithubAppConfig,
+  useGithubDisconnect,
+  useGithubStatus,
+  useSaveGithubAppConfig,
+} from "../hooks/useGithub";
 import { useSettings, useUpdateSettings } from "../hooks/useSettings";
 
 type ProviderDraft = {
@@ -393,12 +401,178 @@ export function SettingsPage() {
                 ))}
               </Section>
 
+              <GithubSection />
+
               <ServerInfoCard view={settings} />
             </>
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The GitHub connection settings: App config (write-only secrets),
+ * Connect/Disconnect, and the OAuth-callback outcome banner. Self-contained —
+ * it saves to `/api/github/app-config`, independent of the page Save button.
+ */
+function GithubSection() {
+  const { data: status } = useGithubStatus();
+  const { data: cfg } = useGithubAppConfig();
+  const save = useSaveGithubAppConfig();
+  const disconnect = useGithubDisconnect();
+  const [params, setParams] = useSearchParams();
+
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [appId, setAppId] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Seed the form from the stored config (once, until the user edits it).
+  useEffect(() => {
+    if (!cfg || dirty) return;
+    setClientId(cfg.clientId ?? "");
+    setAppId(cfg.appId != null ? String(cfg.appId) : "");
+  }, [cfg, dirty]);
+
+  // Surface the OAuth callback outcome, then strip the params from the URL.
+  const connected = params.get("github_connected");
+  const oauthError = params.get("github_error");
+  useEffect(() => {
+    if (connected || oauthError) {
+      const next = new URLSearchParams(params);
+      next.delete("github_connected");
+      next.delete("github_error");
+      setParams(next, { replace: true });
+      if (oauthError) setError(oauthError);
+    }
+  }, [connected, oauthError, params, setParams]);
+
+  const submit = async () => {
+    setError(null);
+    try {
+      await save.mutateAsync({
+        clientId: clientId.trim(),
+        clientSecret: clientSecret === "" ? undefined : clientSecret,
+        appId: appId.trim() === "" ? undefined : Number(appId),
+        privateKey: privateKey === "" ? undefined : privateKey,
+      });
+      setClientSecret("");
+      setPrivateKey("");
+      setDirty(false);
+    } catch (e) {
+      setError(e instanceof ApiRequestError ? e.message : "Failed to save.");
+    }
+  };
+
+  return (
+    <section className="card p-4">
+      <div className="mb-3 flex items-start gap-2">
+        <GitBranch size={15} className="mt-0.5 text-faint" />
+        <div>
+          <h2 className="text-sm font-semibold text-text">GitHub</h2>
+          <p className="mt-0.5 text-xs text-faint">
+            Connect a GitHub App so sessions can clone your repositories.
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {status?.connected ? (
+          <div className="flex items-center justify-between rounded-[var(--radius)] border px-3 py-2 text-sm">
+            <span>
+              Connected as <span className="font-mono">@{status.login}</span>
+            </span>
+            <button
+              className="btn-ghost text-error"
+              onClick={() => disconnect.mutate()}
+            >
+              Disconnect
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between rounded-[var(--radius)] border border-dashed px-3 py-2 text-sm text-muted">
+            <span>
+              {status?.appConfigured
+                ? "App configured — connect your account."
+                : "Configure the GitHub App below, then connect."}
+            </span>
+            <a
+              className="btn-outline"
+              href={api.github.authUrl()}
+              aria-disabled={!status?.appConfigured}
+              onClick={(e) => {
+                if (!status?.appConfigured) e.preventDefault();
+              }}
+            >
+              Connect GitHub
+            </a>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <TextField
+            label="Client ID"
+            value={clientId}
+            onChange={(v) => {
+              setClientId(v);
+              setDirty(true);
+            }}
+          />
+          <TextField
+            label="Client secret"
+            type="password"
+            value={clientSecret}
+            onChange={(v) => {
+              setClientSecret(v);
+              setDirty(true);
+            }}
+            placeholder={
+              cfg?.hasClientSecret ? "•••• stored — blank keeps it" : "not set"
+            }
+          />
+          <TextField
+            label="App ID"
+            value={appId}
+            onChange={(v) => {
+              setAppId(v);
+              setDirty(true);
+            }}
+          />
+          <TextField
+            label="Private key (PEM or base64)"
+            type="password"
+            value={privateKey}
+            onChange={(v) => {
+              setPrivateKey(v);
+              setDirty(true);
+            }}
+            placeholder={
+              cfg?.hasPrivateKey ? "•••• stored — blank keeps it" : "not set"
+            }
+          />
+        </div>
+
+        {error && (
+          <div className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+            {error}
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <button
+            className="btn-primary"
+            onClick={submit}
+            disabled={!dirty || save.isPending}
+          >
+            Save GitHub settings
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 

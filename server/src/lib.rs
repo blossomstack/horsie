@@ -1,5 +1,6 @@
 pub mod config;
 mod error;
+pub mod github;
 mod handler;
 pub mod http;
 mod registry;

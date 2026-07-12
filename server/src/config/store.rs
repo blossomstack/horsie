@@ -49,6 +49,9 @@ pub struct OpenedConfig {
     pub store: Arc<DbConfigStore>,
     pub registry: SharedProviderRegistry,
     pub vendors: HashMap<String, Arc<dyn RuntimeVendor>>,
+    /// The migrated connection pool, shared with feature stores (e.g. GitHub)
+    /// that persist into the same settings DB.
+    pub pool: SqlitePool,
 }
 
 pub struct DbConfigStore {
@@ -91,7 +94,7 @@ impl DbConfigStore {
         };
 
         let store = Arc::new(Self {
-            pool,
+            pool: pool.clone(),
             registry: registry.clone(),
             default_vendor: RwLock::new(default_vendor),
             active_vendors,
@@ -102,6 +105,7 @@ impl DbConfigStore {
             store,
             registry,
             vendors,
+            pool,
         })
     }
 

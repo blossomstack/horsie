@@ -415,6 +415,7 @@ mod tests {
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors,
             state_dir: tmp.path().to_path_buf(),
+            github_tokens: None,
         }
     }
 

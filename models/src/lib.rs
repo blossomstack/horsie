@@ -56,6 +56,11 @@ pub mod settings {
     include!(concat!(env!("OUT_DIR"), "/settings/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod github {
+    include!(concat!(env!("OUT_DIR"), "/github/mod.rs"));
+}
+
 /// Env var carrying the provision-steps JSON a vendor injects into a runtime
 /// child. Read by `horsie-runtime` at startup; written by the executor
 /// providers from `RuntimeConfig.provision`.

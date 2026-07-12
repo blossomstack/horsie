@@ -3,6 +3,11 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
+  GitHubAppConfigInput,
+  GitHubAppConfigView,
+  GitHubBranchList,
+  GitHubRepoList,
+  GitHubStatus,
   ListSessionsResponse,
   SessionAck,
   SettingsUpdate,
@@ -96,6 +101,32 @@ export const api = {
     /** Persist + live-apply a settings update; returns the new view. */
     update: (body: SettingsUpdate): Promise<SettingsView> =>
       request("/config", { method: "PUT", body: JSON.stringify(body) }),
+  },
+
+  github: {
+    status: (): Promise<GitHubStatus> => request("/github/status"),
+
+    /** Browser navigation target (not fetch) — starts the OAuth flow. */
+    authUrl: (): string => `${BASE}/github/auth`,
+
+    appConfig: (): Promise<GitHubAppConfigView> => request("/github/app-config"),
+
+    saveAppConfig: (body: GitHubAppConfigInput): Promise<GitHubAppConfigView> =>
+      request("/github/app-config", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    disconnect: (): Promise<void> =>
+      request("/github/disconnect", { method: "DELETE" }),
+
+    repos: (refresh = false): Promise<GitHubRepoList> =>
+      request(`/github/repos${refresh ? "?refresh=1" : ""}`),
+
+    branches: (repo: string): Promise<GitHubBranchList> =>
+      request(
+        `/github/repos/branches?repo=${encodeURIComponent(repo)}`,
+      ),
   },
 
   /** SSE URL for a single session's durable + live event stream. */

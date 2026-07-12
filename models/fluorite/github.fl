@@ -1,0 +1,65 @@
+/// Wire types for the deployment-global GitHub connection API: connection
+/// status, the GitHub App config (redacted view + write-only input), and the
+/// repo/branch listings that drive the session repo picker. Secrets are never
+/// returned — the view carries only `has_*` flags and the env-var-free config.
+package github;
+
+/// Current GitHub connection state, for the Settings UI.
+struct GitHubStatus {
+    /// True once an account is connected (OAuth credentials stored).
+    connected: bool,
+    /// Login of the connected account, when connected.
+    login: Option<String>,
+    /// True once the GitHub App is configured (client id present).
+    app_configured: bool,
+    /// Repos visible to the installation; 0 until the first repo listing.
+    repo_count: u32,
+}
+
+/// The GitHub App config, redacted for display. Secrets are reported only as
+/// `has_*` booleans.
+struct GitHubAppConfigView {
+    client_id: String,
+    app_id: Option<u64>,
+    app_slug: Option<String>,
+    /// True when a client secret is stored.
+    has_client_secret: bool,
+    /// True when a private key (PEM) is stored.
+    has_private_key: bool,
+    /// Public base URL for OAuth callbacks; NULL derives from the request host.
+    callback_base: Option<String>,
+}
+
+/// GitHub App config to persist. Write-only secrets: omit to keep the stored
+/// value, "" to clear, a value to set.
+struct GitHubAppConfigInput {
+    client_id: String,
+    client_secret: Option<String>,
+    app_id: Option<u64>,
+    private_key: Option<String>,
+    app_slug: Option<String>,
+    callback_base: Option<String>,
+}
+
+/// One repository visible to the App installation.
+struct GitHubRepo {
+    /// "owner/name".
+    full_name: String,
+    private: bool,
+    default_branch: String,
+}
+
+/// Repos visible to the installation.
+struct GitHubRepoList {
+    repos: Vec<GitHubRepo>,
+}
+
+/// One branch of a repository.
+struct GitHubBranch {
+    name: String,
+}
+
+/// Branches of a repository.
+struct GitHubBranchList {
+    branches: Vec<GitHubBranch>,
+}

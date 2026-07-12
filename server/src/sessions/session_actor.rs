@@ -209,7 +209,30 @@ impl SessionActor {
             return Ok(());
         }
         let vendor = self.vendor()?;
-        let rt_spec = self.write_runtime_spec()?;
+        let mut rt_spec = self.write_runtime_spec()?;
+        // Fresh, scoped token at every create AND attach — never persisted. It
+        // authorizes the `git_checkout` provision steps for github.com repos.
+        if let Some(minter) = &self.deps.github_tokens {
+            let urls: Vec<String> = rt_spec
+                .provision
+                .iter()
+                .filter(|s| s.uses == "git_checkout")
+                .filter_map(|s| {
+                    s.with
+                        .iter()
+                        .find(|p| p.key == "url")
+                        .map(|p| p.value.clone())
+                })
+                .collect();
+            if !urls.is_empty()
+                && let Some(token) = minter.mint_for(&urls).await?
+            {
+                rt_spec.env.push(horsie_models::executor::EnvVar {
+                    name: horsie_models::ENV_GITHUB_TOKEN.to_string(),
+                    value: token,
+                });
+            }
+        }
         let id = self.id.to_string();
         let runtime = match mode {
             WakeMode::Create => vendor.create(&id, &rt_spec).await,
@@ -668,6 +691,16 @@ mod tests {
     }
 
     fn harness_with_id(journal: Arc<dyn Journal>, vendor: MockVendor, id: Uuid) -> Harness {
+        harness_custom(journal, vendor, id, spec_fixture("mock"), None)
+    }
+
+    fn harness_custom(
+        journal: Arc<dyn Journal>,
+        vendor: MockVendor,
+        id: Uuid,
+        spec: SessionSpec,
+        github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,
+    ) -> Harness {
         let tmp = tempfile::tempdir().unwrap();
         let vendor = Arc::new(vendor);
         let mut vendors: HashMap<String, Arc<dyn crate::vendor::RuntimeVendor>> = HashMap::new();
@@ -676,13 +709,11 @@ mod tests {
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors,
             state_dir: tmp.path().to_path_buf(),
+            github_tokens,
         };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let parent = spawn_root(NullSupervisor { statuses: tx }, journal.clone());
-        let actor = spawn_root(
-            SessionActor::new(id, spec_fixture("mock"), deps, parent),
-            journal,
-        );
+        let actor = spawn_root(SessionActor::new(id, spec, deps, parent), journal);
         Harness {
             actor,
             vendor,
@@ -753,6 +784,45 @@ mod tests {
         // Status reports arrived in order: Idle (provisioned) then Stopped.
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Idle);
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Stopped);
+    }
+
+    struct FixedMinter(Option<String>);
+    #[async_trait]
+    impl crate::github::GithubTokenMinter for FixedMinter {
+        async fn mint_for(&self, _repo_urls: &[String]) -> Result<Option<String>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn provision_mints_github_token_into_env() {
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let mut spec = spec_fixture("mock");
+        spec.provision = vec![crate::sessions::spec::ProvisionStepSpec {
+            name: "checkout api".into(),
+            uses: "git_checkout".into(),
+            with: vec![
+                ("url".into(), "https://github.com/o/api".into()),
+                ("dir".into(), "api".into()),
+            ],
+        }];
+        let mut h = harness_custom(
+            journal,
+            MockVendor::new(),
+            Uuid::new_v4(),
+            spec,
+            Some(Arc::new(FixedMinter(Some("ghs_x".into())))),
+        );
+        h.actor.tell(SessionCommand::Provision).await.unwrap();
+        assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Idle);
+        let spec = h.vendor.last_create_spec().expect("vendor saw a spec");
+        assert!(
+            spec.env
+                .iter()
+                .any(|e| e.name == horsie_models::ENV_GITHUB_TOKEN && e.value == "ghs_x"),
+            "GITHUB_TOKEN injected: {:?}",
+            spec.env
+        );
     }
 
     #[tokio::test]
