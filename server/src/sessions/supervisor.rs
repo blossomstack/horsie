@@ -394,6 +394,7 @@ mod tests {
                 use_plugins: None,
                 max_iterations: None,
                 max_retries: 0,
+                mcp_servers: vec![],
             },
             workspaces: vec![],
             provision: vec![],
@@ -416,6 +417,7 @@ mod tests {
             vendors,
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
+            mcp: None,
         }
     }
 

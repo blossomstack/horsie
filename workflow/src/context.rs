@@ -1,3 +1,4 @@
+use crate::mcp_toolbox::CompositeToolbox;
 use crate::workflow_actor::WorkflowNotification;
 use async_trait::async_trait;
 use horsie_agentcore::{EventSink, LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
@@ -101,6 +102,7 @@ pub trait ToolboxFactory: Send + Sync + 'static {
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
         use_plugins: bool,
+        mcp: Vec<Arc<dyn Toolbox>>,
     ) -> Arc<dyn Toolbox>;
 }
 
@@ -115,13 +117,25 @@ impl ToolboxFactory for DefaultToolboxFactory {
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
         use_plugins: bool,
+        mcp: Vec<Arc<dyn Toolbox>>,
     ) -> Arc<dyn Toolbox> {
         let client = runtime_client.clone();
         let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client);
+        // Compose the runtime tools with any server-side MCP toolboxes *before*
+        // the allowlist, so `allowed_tools` gates MCP tools exactly like runtime
+        // tools and the agent sees them as one flat tool set.
+        let composed: Arc<dyn Toolbox> = if mcp.is_empty() {
+            Arc::new(runtime)
+        } else {
+            let mut boxes: Vec<Arc<dyn Toolbox>> = Vec::with_capacity(1 + mcp.len());
+            boxes.push(Arc::new(runtime));
+            boxes.extend(mcp);
+            Arc::new(CompositeToolbox::new(boxes))
+        };
         let base: Arc<dyn Toolbox> = match &agent_def.allowed_tools {
-            None => Arc::new(runtime),
+            None => composed,
             Some(list) => Arc::new(FilteredToolbox::new(
-                Arc::new(runtime),
+                composed,
                 list.iter().cloned().collect(),
             )),
         };
@@ -557,6 +571,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
+            Vec::new(),
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"bash".to_string()));
@@ -573,6 +588,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
+            Vec::new(),
         );
         let err = tb.execute(CONCLUDE_TOOL, json!({})).await.unwrap_err();
         assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
@@ -586,6 +602,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
+            Vec::new(),
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&SKILL_TOOL.to_string()));
@@ -601,6 +618,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
+            Vec::new(),
         );
 
         // Single workspace → `workspace` may be omitted.
@@ -631,6 +649,7 @@ mod tests {
             client,
             vec!["alpha".into(), "beta".into()],
             false,
+            Vec::new(),
         );
         // Omitting `workspace` with several workspaces is rejected before any scan.
         let err = tb
@@ -666,6 +685,7 @@ mod tests {
             client,
             vec!["october".into()],
             true,
+            Vec::new(),
         );
         let body = tb
             .execute(
@@ -689,6 +709,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
+            Vec::new(),
         );
         let err = tb
             .execute(
@@ -709,6 +730,7 @@ mod tests {
             client.clone(),
             vec!["october".into()],
             true,
+            Vec::new(),
         );
         let out = tb.execute(INSPECT_WORKSPACE_TOOL, json!({})).await.unwrap();
         let text = out.as_str().unwrap();
@@ -721,6 +743,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
+            Vec::new(),
         );
         let out = tb_off
             .execute(INSPECT_WORKSPACE_TOOL, json!({}))

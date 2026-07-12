@@ -9,6 +9,10 @@ import type {
   GitHubRepoList,
   GitHubStatus,
   ListSessionsResponse,
+  McpConnectResult,
+  McpServerInput,
+  McpServerList,
+  McpServerView,
   SessionAck,
   SettingsUpdate,
   SettingsView,
@@ -127,6 +131,28 @@ export const api = {
       request(
         `/github/repos/branches?repo=${encodeURIComponent(repo)}`,
       ),
+  },
+
+  mcp: {
+    /** The configured remote MCP servers, redacted (tokens as `hasToken`). */
+    list: (): Promise<McpServerList> => request("/mcp/servers"),
+
+    /** Upsert a server by name (the path is the id of record). */
+    upsert: (name: string, body: McpServerInput): Promise<McpServerView> =>
+      request(`/mcp/servers/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    remove: (name: string): Promise<void> =>
+      request(`/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+    /** Connect (`initialize` + `tools/list`); persists + returns the outcome. */
+    test: (name: string): Promise<McpConnectResult> =>
+      request(`/mcp/servers/${encodeURIComponent(name)}/test`, {
+        method: "POST",
+        body: "{}",
+      }),
   },
 
   /** SSE URL for a single session's durable + live event stream. */

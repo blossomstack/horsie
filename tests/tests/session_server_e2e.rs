@@ -78,6 +78,7 @@ async fn start_server(
         vendors,
         state_dir: journal_dir.join("state"),
         github_tokens: None,
+        mcp: None,
     };
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
     let (gtx, _) = tokio::sync::broadcast::channel(256);
@@ -106,6 +107,10 @@ async fn start_server(
         horsie_server::github::GithubStore::new(opened.pool.clone()),
         horsie_server::github::GithubApi::new(),
     ));
+    let mcp = Arc::new(horsie_server::mcp::McpService::new(
+        horsie_server::mcp::McpStore::new(opened.pool.clone()),
+        github.clone(),
+    ));
     let state = AppState {
         supervisor: supervisor.clone(),
         journal,
@@ -116,6 +121,7 @@ async fn start_server(
         hook_path: vec![],
         config_store: opened.store,
         github,
+        mcp,
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

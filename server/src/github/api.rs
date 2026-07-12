@@ -103,6 +103,54 @@ impl GithubApi {
         })
     }
 
+    /// Refresh an expiring user OAuth token via its refresh token (same token
+    /// endpoint as the code exchange, `grant_type=refresh_token`). GitHub
+    /// rotates the refresh token, so the response carries a new one.
+    pub async fn refresh_token(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        refresh_token: &str,
+    ) -> Result<ExchangedToken, String> {
+        #[derive(Deserialize)]
+        struct TokenResp {
+            access_token: Option<String>,
+            refresh_token: Option<String>,
+            expires_in: Option<u64>,
+            error_description: Option<String>,
+        }
+        let resp: TokenResp = self
+            .http
+            .post(format!("{}/login/oauth/access_token", self.web_base))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&serde_json::json!({
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("oauth refresh request failed: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("oauth refresh response decode failed: {e}"))?;
+        let access_token = resp.access_token.ok_or_else(|| {
+            resp.error_description
+                .unwrap_or_else(|| "github did not return a refreshed access token".to_string())
+        })?;
+        let login = self.fetch_login(&access_token).await?;
+        let expires_at = resp
+            .expires_in
+            .map(|secs| now_secs().saturating_add(secs).to_string());
+        Ok(ExchangedToken {
+            login,
+            access_token,
+            refresh_token: resp.refresh_token,
+            expires_at,
+        })
+    }
+
     async fn fetch_login(&self, access_token: &str) -> Result<String, String> {
         #[derive(Deserialize)]
         struct User {
@@ -265,7 +313,7 @@ impl GithubApi {
     }
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

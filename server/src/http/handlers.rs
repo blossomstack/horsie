@@ -57,6 +57,7 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         use_plugins: w.use_plugins,
         max_iterations: w.max_iterations,
         max_retries: w.max_retries.unwrap_or(0),
+        mcp_servers: w.mcp_servers.unwrap_or_default(),
     }
 }
 

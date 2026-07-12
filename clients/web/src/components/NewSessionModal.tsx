@@ -6,6 +6,7 @@ import { ApiRequestError } from "../api/client";
 import type { CreateSessionRequest, RepoConfig } from "../api/types";
 import { cn } from "../lib/cn";
 import { useGithubRepos, useGithubStatus } from "../hooks/useGithub";
+import { useMcpServers } from "../hooks/useMcp";
 import { useCreateSession } from "../hooks/useSessions";
 import { useSettings } from "../hooks/useSettings";
 
@@ -34,8 +35,12 @@ export function NewSessionModal({
   const [systemPrompt, setSystemPrompt] = useState("");
   const [allowAskUser, setAllowAskUser] = useState(true);
   const [usePlugins, setUsePlugins] = useState(false);
+  const [mcpSelected, setMcpSelected] = useState<string[]>([]);
   const [advanced, setAdvanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const { data: mcpServers } = useMcpServers();
+  const enabledMcp = (mcpServers ?? []).filter((s) => s.enabled);
 
   // Workspace source: a local directory, or a set of GitHub repos to clone
   // (fullName → ref; "" = default branch).
@@ -57,6 +62,7 @@ export function NewSessionModal({
     setSystemPrompt("");
     setAllowAskUser(true);
     setUsePlugins(false);
+    setMcpSelected([]);
     setAdvanced(false);
     setError(null);
     setSource("dir");
@@ -102,6 +108,7 @@ export function NewSessionModal({
         systemPrompt: systemPrompt.trim() || undefined,
         allowAskUser,
         usePlugins,
+        mcpServers: mcpSelected.length ? mcpSelected : undefined,
       },
       workdirs: source === "dir" ? [wd] : [],
       repos: source === "repos" ? repos : undefined,
@@ -335,6 +342,39 @@ export function NewSessionModal({
                   checked={usePlugins}
                   onChange={setUsePlugins}
                 />
+                {enabledMcp.length > 0 && (
+                  <Field label="MCP servers" hint="optional">
+                    <div className="space-y-1 rounded-[var(--radius)] border p-1.5">
+                      {enabledMcp.map((s) => {
+                        const checked = mcpSelected.includes(s.name);
+                        return (
+                          <label
+                            key={s.name}
+                            className="flex cursor-pointer items-center gap-2 px-1.5 py-1 text-sm"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() =>
+                                setMcpSelected((cur) =>
+                                  checked
+                                    ? cur.filter((n) => n !== s.name)
+                                    : [...cur, s.name],
+                                )
+                              }
+                            />
+                            <span className="min-w-0 flex-1 truncate font-mono">
+                              {s.name}
+                            </span>
+                            <span className="text-[11px] text-faint">
+                              {s.toolCount ?? 0} tools
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </Field>
+                )}
               </div>
             )}
 

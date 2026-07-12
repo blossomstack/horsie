@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Boxes,
   Check,
   ChevronRight,
   GitBranch,
@@ -14,6 +15,8 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, ApiRequestError } from "../api/client";
 import type {
+  McpServerInput,
+  McpServerView,
   ModelInput,
   ProviderInput,
   SettingsView,
@@ -26,7 +29,18 @@ import {
   useGithubStatus,
   useSaveGithubAppConfig,
 } from "../hooks/useGithub";
+import {
+  useDeleteMcpServer,
+  useMcpServers,
+  useTestMcpServer,
+  useUpsertMcpServer,
+} from "../hooks/useMcp";
 import { useSettings, useUpdateSettings } from "../hooks/useSettings";
+
+/** The remote GitHub MCP endpoint reused via the GitHub App connection. */
+const GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/";
+/** Row name of the GitHub MCP server (managed from the GitHub section). */
+const GITHUB_MCP_NAME = "github";
 
 type ProviderDraft = {
   name: string;
@@ -403,6 +417,8 @@ export function SettingsPage() {
 
               <GithubSection />
 
+              <McpSection />
+
               <ServerInfoCard view={settings} />
             </>
           )}
@@ -512,6 +528,8 @@ function GithubSection() {
             </a>
           </div>
         )}
+
+        {status?.connected && <GithubMcpToggle />}
 
         <div className="grid grid-cols-2 gap-3">
           <TextField
@@ -902,6 +920,329 @@ function VendorsCard({
         ))}
       </div>
     </section>
+  );
+}
+
+/**
+ * "Enable GitHub tools (MCP)" — upserts the `github` MCP server (`github_app`
+ * auth, reusing the App connection) and smoke-tests it; Disable deletes it.
+ * Rendered inside the GitHub section once an account is connected.
+ */
+function GithubMcpToggle() {
+  const { data: servers } = useMcpServers();
+  const upsert = useUpsertMcpServer();
+  const del = useDeleteMcpServer();
+  const test = useTestMcpServer();
+  const [error, setError] = useState<string | null>(null);
+  const gh = (servers ?? []).find((s) => s.name === GITHUB_MCP_NAME);
+  const busy = upsert.isPending || test.isPending;
+
+  const enable = async () => {
+    setError(null);
+    try {
+      await upsert.mutateAsync({
+        name: GITHUB_MCP_NAME,
+        body: {
+          name: GITHUB_MCP_NAME,
+          url: GITHUB_MCP_URL,
+          auth: { kind: "GithubApp", value: {} },
+        },
+      });
+      const r = await test.mutateAsync(GITHUB_MCP_NAME);
+      if (!r.ok && r.error) setError(r.error);
+    } catch (e) {
+      setError(e instanceof ApiRequestError ? e.message : "Failed to enable.");
+    }
+  };
+
+  const retest = async () => {
+    setError(null);
+    try {
+      const r = await test.mutateAsync(GITHUB_MCP_NAME);
+      if (!r.ok && r.error) setError(r.error);
+    } catch (e) {
+      setError(e instanceof ApiRequestError ? e.message : "Test failed.");
+    }
+  };
+
+  return (
+    <div
+      className="rounded-[var(--radius)] border px-3 py-2.5"
+      style={{ background: "var(--surface-2)" }}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-medium text-text">GitHub tools (MCP)</p>
+          <p className="mt-0.5 text-xs text-faint">
+            Let sessions call the GitHub MCP server (create PRs, search issues…)
+            using this connection.
+          </p>
+        </div>
+        {gh ? (
+          <button
+            className="btn-ghost text-error"
+            onClick={() => del.mutate(GITHUB_MCP_NAME)}
+          >
+            Disable
+          </button>
+        ) : (
+          <button className="btn-outline" onClick={enable} disabled={busy}>
+            {busy ? <Loader2 size={14} className="animate-spin" /> : null} Enable
+          </button>
+        )}
+      </div>
+      {gh && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+          {gh.enabled ? (
+            <span className="chip !py-0 text-[10px] text-success">
+              enabled · {gh.toolCount ?? 0} tools
+            </span>
+          ) : (
+            <span className="chip !py-0 text-[10px] text-faint">not tested</span>
+          )}
+          {gh.lastError && (
+            <span className="truncate text-error" title={gh.lastError}>
+              {gh.lastError}
+            </span>
+          )}
+          <button
+            className="btn-ghost ml-auto"
+            onClick={retest}
+            disabled={busy}
+          >
+            Test
+          </button>
+        </div>
+      )}
+      {error && (
+        <div className="mt-2 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Configured remote MCP servers (generic `none`/`bearer` auth). Self-contained —
+ * each row upserts/tests/deletes against `/api/mcp/servers`, independent of the
+ * page Save button. The GitHub MCP server (`github_app`) is managed from the
+ * GitHub section, so it is excluded here.
+ */
+function McpSection() {
+  const { data: servers } = useMcpServers();
+  const [adding, setAdding] = useState(false);
+  const generic = (servers ?? []).filter((s) => s.auth.kind !== "GithubApp");
+
+  return (
+    <section className="card p-4">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2">
+          <Boxes size={15} className="mt-0.5 text-faint" />
+          <div>
+            <h2 className="text-sm font-semibold text-text">MCP servers</h2>
+            <p className="mt-0.5 text-xs text-faint">
+              Remote Model Context Protocol servers. Sessions pick which to use;
+              their tools appear as <code>mcp__&lt;name&gt;__&lt;tool&gt;</code>.
+            </p>
+          </div>
+        </div>
+        <button
+          className="btn-outline shrink-0 !px-2.5 !py-1.5 text-xs"
+          onClick={() => setAdding(true)}
+        >
+          <Plus size={14} /> Add server
+        </button>
+      </div>
+      <div className="space-y-2.5">
+        {generic.length === 0 && !adding && (
+          <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+            No MCP servers configured.
+          </p>
+        )}
+        {adding && <McpServerRow onDone={() => setAdding(false)} />}
+        {generic.map((s) => (
+          <McpServerRow key={s.name} server={s} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * One MCP server row for both a new (unsaved) and an existing server. Holds a
+ * local draft; Save upserts, Test smoke-tests, Remove deletes (or drops the new
+ * draft). The name is the id of record, so it is fixed once saved.
+ */
+function McpServerRow({
+  server,
+  onDone,
+}: {
+  server?: McpServerView;
+  onDone?: () => void;
+}) {
+  const upsert = useUpsertMcpServer();
+  const del = useDeleteMcpServer();
+  const test = useTestMcpServer();
+  const isNew = !server;
+
+  const [name, setName] = useState(server?.name ?? "");
+  const [url, setUrl] = useState(server?.url ?? "");
+  const [authKind, setAuthKind] = useState<"None" | "Bearer">(
+    server?.auth.kind === "Bearer" ? "Bearer" : "None",
+  );
+  const [tokenInput, setTokenInput] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const hasToken =
+    server?.auth.kind === "Bearer" ? server.auth.value.hasToken : false;
+  const touch = () => setDirty(true);
+
+  const save = async () => {
+    setError(null);
+    if (!name.trim()) return setError("Name is required.");
+    if (!url.trim()) return setError("URL is required.");
+    const auth: McpServerInput["auth"] =
+      authKind === "Bearer"
+        ? {
+            kind: "Bearer",
+            value: { token: tokenInput === "" ? undefined : tokenInput },
+          }
+        : { kind: "None", value: {} };
+    try {
+      await upsert.mutateAsync({
+        name: name.trim(),
+        body: { name: name.trim(), url: url.trim(), auth },
+      });
+      setTokenInput("");
+      setDirty(false);
+      onDone?.();
+    } catch (e) {
+      setError(e instanceof ApiRequestError ? e.message : "Failed to save.");
+    }
+  };
+
+  const runTest = async () => {
+    setError(null);
+    try {
+      const r = await test.mutateAsync(name.trim());
+      if (!r.ok && r.error) setError(r.error);
+    } catch (e) {
+      setError(e instanceof ApiRequestError ? e.message : "Test failed.");
+    }
+  };
+
+  const remove = () => {
+    if (isNew) return onDone?.();
+    del.mutate(server.name);
+  };
+
+  return (
+    <RowShell onRemove={remove} removeLabel="Remove MCP server">
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          {isNew ? (
+            <TextField
+              label="Name"
+              value={name}
+              onChange={(v) => {
+                setName(v);
+                touch();
+              }}
+              placeholder="linear"
+            />
+          ) : (
+            <div>
+              <RowLabel>Name</RowLabel>
+              <div className="truncate py-1.5 font-mono text-sm text-text">
+                {name}
+              </div>
+            </div>
+          )}
+          <TextField
+            label="URL"
+            value={url}
+            onChange={(v) => {
+              setUrl(v);
+              touch();
+            }}
+            placeholder="https://mcp.example.com/"
+          />
+          <label className="block">
+            <RowLabel>Auth</RowLabel>
+            <select
+              className="input font-mono"
+              value={authKind}
+              onChange={(e) => {
+                setAuthKind(e.target.value === "Bearer" ? "Bearer" : "None");
+                touch();
+              }}
+            >
+              <option value="None">None (public)</option>
+              <option value="Bearer">Bearer token</option>
+            </select>
+          </label>
+          {authKind === "Bearer" && (
+            <TextField
+              label="Bearer token"
+              type="password"
+              value={tokenInput}
+              onChange={(v) => {
+                setTokenInput(v);
+                touch();
+              }}
+              placeholder={hasToken ? "•••• stored — blank keeps it" : "not set"}
+            />
+          )}
+        </div>
+
+        {!isNew && (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {server.enabled ? (
+              <span className="chip !py-0 text-[10px] text-success">
+                enabled · {server.toolCount ?? 0} tools
+              </span>
+            ) : (
+              <span className="chip !py-0 text-[10px] text-faint">not tested</span>
+            )}
+            {server.lastError && (
+              <span className="truncate text-error" title={server.lastError}>
+                {server.lastError}
+              </span>
+            )}
+          </div>
+        )}
+
+        {error && (
+          <div className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+            {error}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          {!isNew && (
+            <button
+              className="btn-outline"
+              onClick={runTest}
+              disabled={test.isPending}
+            >
+              {test.isPending ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : null}
+              Test
+            </button>
+          )}
+          <button
+            className="btn-primary"
+            onClick={save}
+            disabled={(!isNew && !dirty) || upsert.isPending}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </RowShell>
   );
 }
 

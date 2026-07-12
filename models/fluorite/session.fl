@@ -26,6 +26,9 @@ struct AgentSettings {
     use_plugins: Option<bool>,
     max_iterations: Option<u32>,
     max_retries: Option<u32>,
+    /// Names of enabled MCP servers this session may call, namespaced
+    /// `mcp__<name>__<tool>`; absent → none.
+    mcp_servers: Option<Vec<String>>,
 }
 
 struct SessionSummary {

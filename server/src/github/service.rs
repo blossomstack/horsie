@@ -11,12 +11,16 @@ use horsie_models::github::{
     GitHubAppConfigInput, GitHubAppConfigView, GitHubBranch, GitHubRepo, GitHubStatus,
 };
 
-use super::api::GithubApi;
+use super::api::{GithubApi, now_secs};
 use super::decode_private_key;
 use super::store::{AppConfigRow, CredentialsRow, GithubStore};
 
 /// How long a fetched repo list is served from memory before a refetch.
 const CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// Refresh a user token this many seconds before its stored expiry, to avoid
+/// racing an expiry mid-use.
+const REFRESH_SKEW_SECS: u64 = 120;
 
 pub struct GithubService {
     store: GithubStore,
@@ -184,6 +188,52 @@ impl GithubService {
         Ok(Some(token))
     }
 
+    /// The connected account's **user** OAuth token, refreshed if within the
+    /// skew window of expiry. `Ok(None)` when GitHub is not connected. Used as
+    /// the `Authorization: Bearer` for the GitHub remote MCP server. Unlike the
+    /// per-repo installation token from `mint_token_for`, this is account-scoped
+    /// (the documented Bearer shape for the remote endpoint).
+    pub async fn user_token(&self) -> Result<Option<String>, String> {
+        let Some(creds) = self.store.credentials().await? else {
+            return Ok(None);
+        };
+        if !needs_refresh(creds.expires_at.as_deref()) {
+            return Ok(Some(creds.access_token.expose().to_string()));
+        }
+        // Expiring: refresh when we can, else hand back the current token and
+        // let the caller's smoke test surface a dead one.
+        let Some(refresh) = creds.refresh_token.as_ref().map(|s| s.expose().to_string()) else {
+            return Ok(Some(creds.access_token.expose().to_string()));
+        };
+        let app = self
+            .store
+            .app_config()
+            .await?
+            .ok_or_else(|| "GitHub App is not configured".to_string())?;
+        let client_secret = app
+            .client_secret
+            .as_ref()
+            .ok_or_else(|| "GitHub App client secret is not set".to_string())?;
+        let exchanged = self
+            .api
+            .refresh_token(&app.client_id, client_secret.expose(), &refresh)
+            .await?;
+        self.store
+            .save_credentials(&CredentialsRow {
+                login: exchanged.login,
+                access_token: Secret::from(exchanged.access_token.clone()),
+                // GitHub rotates the refresh token; keep the old one if absent.
+                refresh_token: exchanged
+                    .refresh_token
+                    .map(Secret::from)
+                    .or(creds.refresh_token),
+                expires_at: exchanged.expires_at,
+                installation_id: creds.installation_id,
+            })
+            .await?;
+        Ok(Some(exchanged.access_token))
+    }
+
     /// Resolve `(app_id, decoded_pem, installation_id)` or fail with a
     /// "connect GitHub first" style message.
     async fn installation_creds(&self) -> Result<(u64, String, u64), String> {
@@ -220,6 +270,16 @@ fn app_view(row: &AppConfigRow) -> GitHubAppConfigView {
         has_client_secret: row.client_secret.is_some(),
         has_private_key: row.private_key.is_some(),
         callback_base: row.callback_base.clone(),
+    }
+}
+
+/// Whether a user token with this stored `expires_at` (unix seconds, as written
+/// by the token exchange) should be refreshed now. An absent expiry means the
+/// token does not expire (the App has token expiration disabled) → no refresh.
+fn needs_refresh(expires_at: Option<&str>) -> bool {
+    match expires_at.and_then(|s| s.trim().parse::<u64>().ok()) {
+        Some(exp) => now_secs().saturating_add(REFRESH_SKEW_SECS) >= exp,
+        None => false,
     }
 }
 
@@ -269,5 +329,21 @@ mod tests {
         );
         assert_eq!(github_short_name("https://gitlab.com/o/repo"), None);
         assert_eq!(github_short_name("file:///tmp/x"), None);
+    }
+
+    #[test]
+    fn needs_refresh_honors_expiry_and_skew() {
+        // No expiry → non-expiring token, never refresh.
+        assert!(!needs_refresh(None));
+        // Far future → no refresh.
+        let future = (now_secs() + 3600).to_string();
+        assert!(!needs_refresh(Some(&future)));
+        // Within the skew window → refresh.
+        let soon = (now_secs() + REFRESH_SKEW_SECS - 10).to_string();
+        assert!(needs_refresh(Some(&soon)));
+        // Already past → refresh.
+        assert!(needs_refresh(Some("1")));
+        // Garbage → treat as non-expiring (don't spuriously refresh).
+        assert!(!needs_refresh(Some("not-a-number")));
     }
 }

@@ -1,0 +1,84 @@
+/// Wire types for the MCP-server settings API: a redacted view of the
+/// configured remote MCP servers and the inputs that upsert them. Secrets are
+/// never returned — a bearer token surfaces only as a `has_token` flag.
+///
+/// Auth is a tag-`kind` union so a special-setup server (GitHub, reusing the
+/// App connection) shares the shape with generic bearer/none servers. OAuth is
+/// added in a later phase.
+package mcp;
+
+/// How horsie authenticates to a remote MCP server. Informational mirror of the
+/// `McpAuthView`/`McpAuthInput` tags.
+enum McpAuthKind {
+    None,
+    Bearer,
+    GithubApp,
+}
+
+/// A public server needing no credentials.
+struct McpNoAuth {}
+
+/// GitHub MCP over the existing GitHub App connection: the bearer is a user
+/// token minted from `GithubService` at use time, never stored on the row.
+struct McpGithubAppAuth {}
+
+/// Static bearer auth, redacted — the token is replaced by a stored flag.
+struct McpBearerView {
+    has_token: bool,
+}
+
+/// Static bearer auth input. `token`: omit to keep the stored value, "" to
+/// clear, a value to replace.
+struct McpBearerInput {
+    token: Option<String>,
+}
+
+/// Redacted auth view for a configured server.
+#[type_tag = "kind"]
+union McpAuthView {
+    None(McpNoAuth),
+    Bearer(McpBearerView),
+    GithubApp(McpGithubAppAuth),
+}
+
+/// Auth input for an upsert. Add an `OAuth` variant in the OAuth phase.
+#[type_tag = "kind"]
+union McpAuthInput {
+    None(McpNoAuth),
+    Bearer(McpBearerInput),
+    GithubApp(McpGithubAppAuth),
+}
+
+/// One configured remote MCP server, redacted for display.
+struct McpServerView {
+    /// Stable id and namespace prefix for its tools (`mcp__<name>__<tool>`).
+    name: String,
+    /// Streamable-HTTP endpoint.
+    url: String,
+    /// Whether the last connect/test succeeded and the server is usable.
+    enabled: bool,
+    auth: McpAuthView,
+    /// Tools advertised at the last successful test, for the UI.
+    tool_count: Option<u32>,
+    /// Last connect/test error, for the UI.
+    last_error: Option<String>,
+}
+
+/// Upsert input for a server. Secrets follow omit=keep, ""=clear semantics.
+struct McpServerInput {
+    name: String,
+    url: String,
+    auth: McpAuthInput,
+}
+
+/// The result of a connect/smoke test (`initialize` + `tools/list`).
+struct McpConnectResult {
+    ok: bool,
+    tool_count: Option<u32>,
+    error: Option<String>,
+}
+
+/// The configured servers, for the settings API.
+struct McpServerList {
+    servers: Vec<McpServerView>,
+}

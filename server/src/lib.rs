@@ -3,6 +3,7 @@ mod error;
 pub mod github;
 mod handler;
 pub mod http;
+pub mod mcp;
 mod registry;
 mod server;
 pub mod sessions;

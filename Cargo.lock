@@ -1630,6 +1630,7 @@ dependencies = [
  "horsie-anthropic",
  "horsie-executor",
  "horsie-executor-client",
+ "horsie-mcp-client",
  "horsie-models",
  "horsie-runtime-client",
  "horsie-workflow",

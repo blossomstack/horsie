@@ -289,6 +289,8 @@ impl WorkflowActor {
             self.rt.runtime_client.clone(),
             ws.names(),
             use_plugins,
+            // Workflow-engine agents don't use MCP servers (a session concept).
+            Vec::new(),
         );
         let agent_ctx = AgentRuntimeContext {
             provider,

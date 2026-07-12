@@ -93,12 +93,17 @@ pub async fn serve(
         horsie_server::github::GithubStore::new(opened.pool.clone()),
         horsie_server::github::GithubApi::new(),
     ));
+    let mcp = Arc::new(horsie_server::mcp::McpService::new(
+        horsie_server::mcp::McpStore::new(opened.pool.clone()),
+        github.clone(),
+    ));
 
     let deps = ServerDeps {
         provider_registry: opened.registry,
         vendors: opened.vendors,
         state_dir,
         github_tokens: Some(github.clone()),
+        mcp: Some(mcp.clone()),
     };
     let (global_tx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(
@@ -116,6 +121,7 @@ pub async fn serve(
         hook_path,
         config_store: opened.store,
         github,
+        mcp,
         web_dir,
     };
     let listener = tokio::net::TcpListener::bind(&addr)

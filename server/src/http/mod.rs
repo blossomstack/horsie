@@ -5,6 +5,7 @@ mod config;
 pub mod error;
 mod github;
 mod handlers;
+mod mcp;
 mod sse;
 
 use crate::config::ConfigStore;
@@ -41,6 +42,9 @@ pub struct AppState {
     /// Deployment-global GitHub connection: App config, OAuth credentials, repo
     /// listing, and the scoped-token minter used at session provisioning.
     pub github: Arc<crate::github::GithubService>,
+    /// Configured remote MCP servers: CRUD + connect/test, and the source of the
+    /// per-session toolboxes built at agent spawn.
+    pub mcp: Arc<crate::mcp::McpService>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
@@ -80,6 +84,12 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/github/repos", get(github::repos))
         .route("/api/github/repos/branches", get(github::branches))
+        .route("/api/mcp/servers", get(mcp::list))
+        .route(
+            "/api/mcp/servers/:name",
+            axum::routing::put(mcp::upsert).delete(mcp::delete),
+        )
+        .route("/api/mcp/servers/:name/test", post(mcp::test))
         .with_state(state);
 
     match web_dir {
@@ -155,11 +165,16 @@ mod tests {
             crate::github::GithubStore::new(opened.pool.clone()),
             crate::github::GithubApi::new(),
         ));
+        let mcp = Arc::new(crate::mcp::McpService::new(
+            crate::mcp::McpStore::new(opened.pool.clone()),
+            github.clone(),
+        ));
         let deps = ServerDeps {
             provider_registry: opened.registry,
             vendors,
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
+            mcp: Some(mcp.clone()),
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = broadcast::channel(64);
@@ -174,6 +189,7 @@ mod tests {
             hook_path: vec![],
             config_store: opened.store,
             github,
+            mcp,
             web_dir: None,
         }
     }
@@ -445,5 +461,63 @@ mod tests {
         let app = app(test_state(&tmp).await);
         let res = app.oneshot(delete("/api/github/disconnect")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mcp_server_crud_over_http() {
+        use horsie_models::mcp::{McpAuthView, McpConnectResult, McpServerList, McpServerView};
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        // Upsert a bearer server; the token is redacted to `has_token` in the view.
+        let body = serde_json::json!({
+            "name": "ignored-by-path",
+            "url": "http://127.0.0.1:0/",
+            "auth": { "kind": "Bearer", "value": { "token": "sekret" } }
+        });
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/mcp/servers/acme", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: McpServerView = read_json(res).await;
+        assert_eq!(v.name, "acme"); // path is the id of record
+        assert!(!v.enabled);
+        match v.auth {
+            McpAuthView::Bearer(b) => assert!(b.has_token),
+            other => panic!("expected bearer auth, got {other:?}"),
+        }
+
+        // List reflects it.
+        let res = app.clone().oneshot(get("/api/mcp/servers")).await.unwrap();
+        let list: McpServerList = read_json(res).await;
+        assert_eq!(list.servers.len(), 1);
+        assert_eq!(list.servers[0].name, "acme");
+
+        // Test against the unreachable URL: 200 with ok:false and an error.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/mcp/servers/acme/test",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let result: McpConnectResult = read_json(res).await;
+        assert!(!result.ok);
+        assert!(result.error.is_some());
+
+        // Delete.
+        let res = app
+            .clone()
+            .oneshot(delete("/api/mcp/servers/acme"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app.oneshot(get("/api/mcp/servers")).await.unwrap();
+        let list: McpServerList = read_json(res).await;
+        assert!(list.servers.is_empty());
     }
 }

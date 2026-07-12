@@ -331,6 +331,7 @@ impl ToolboxFactory for BlockingFactory {
         _client: RuntimeClient,
         _workspace_names: Vec<String>,
         _use_plugins: bool,
+        _mcp: Vec<Arc<dyn Toolbox>>,
     ) -> Arc<dyn Toolbox> {
         let conclude = conclude_tool_spec(def.output_schema.as_ref(), def.allow_ask_user, false)
             .expect("worker has an output schema");

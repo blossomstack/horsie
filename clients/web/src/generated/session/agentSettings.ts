@@ -10,4 +10,8 @@ export interface AgentSettings {
   usePlugins?: boolean;
   maxIterations?: number;
   maxRetries?: number;
+  /**
+   * Names of enabled MCP servers this session may call, namespaced
+   */
+  mcpServers?: string[];
 }

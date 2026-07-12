@@ -32,6 +32,11 @@ pub struct AgentSettings {
     pub use_plugins: Option<bool>,
     pub max_iterations: Option<u32>,
     pub max_retries: u32,
+    /// Enabled MCP servers this session may call (by name); tools appear as
+    /// `mcp__<name>__<tool>`. Empty → none. `#[serde(default)]` so pre-MCP
+    /// journal rows deserialize.
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
 }
 
 /// One session workspace as persisted: a host path (bring-your-own) or `None`
@@ -126,6 +131,10 @@ pub struct ServerDeps {
     /// Mints short-lived GitHub tokens for repo provisioning; `None` when the
     /// deployment has no GitHub integration wired.
     pub github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,
+    /// Builds per-session MCP toolboxes for the agent; `None` when the
+    /// deployment has no MCP integration wired (tests). A session that names an
+    /// MCP server with no service configured connects to nothing.
+    pub mcp: Option<Arc<crate::mcp::McpService>>,
 }
 
 #[cfg(test)]

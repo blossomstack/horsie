@@ -13,6 +13,7 @@ use crate::sessions::{SessionFrame, UserMessageError};
 use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorRuntime};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
+use horsie_agentcore::Toolbox;
 use horsie_models::workflow::WorkflowAgentDef;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentOutcome, AgentOutcomeSink, AgentParams, AgentRuntimeContext,
@@ -293,8 +294,30 @@ impl SessionActor {
         } else {
             None
         };
-        let toolbox =
-            DefaultToolboxFactory.for_agent(&def, runtime_client.clone(), ws.names(), use_plugins);
+        // Connect the session's enabled MCP servers and expose their tools next
+        // to the runtime tools (subject to the same allowlist). Done per spawn,
+        // like the workspace scan, so tools reflect the live servers each turn.
+        let mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
+            Vec::new()
+        } else if let Some(mcp_svc) = self.deps.mcp.as_ref() {
+            mcp_svc
+                .toolboxes_for(&settings.mcp_servers)
+                .await
+                .map_err(|e| format!("build MCP toolboxes: {e}"))?
+        } else {
+            tracing::warn!(
+                session = %self.id,
+                "session names MCP servers but no MCP service is configured; ignoring"
+            );
+            Vec::new()
+        };
+        let toolbox = DefaultToolboxFactory.for_agent(
+            &def,
+            runtime_client.clone(),
+            ws.names(),
+            use_plugins,
+            mcp,
+        );
         let mut params = AgentParams::from_def(&def);
         params.interactive = true;
         params.system_prompt =
@@ -664,6 +687,7 @@ mod tests {
                 use_plugins: None,
                 max_iterations: None,
                 max_retries: 0,
+                mcp_servers: vec![],
             },
             workspaces: vec![],
             provision: vec![],
@@ -710,6 +734,7 @@ mod tests {
             vendors,
             state_dir: tmp.path().to_path_buf(),
             github_tokens,
+            mcp: None,
         };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let parent = spawn_root(NullSupervisor { statuses: tx }, journal.clone());
