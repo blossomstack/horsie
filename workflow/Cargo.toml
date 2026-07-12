@@ -10,6 +10,7 @@ edition = "2024"
 horsie-actor = { version = "0.1.4", path = "../actor" }
 horsie-agentcore = { version = "0.1.4", path = "../agentcore" }
 horsie-runtime-client = { version = "0.1.4", path = "../runtime-client" }
+horsie-mcp-client = { version = "0.1.4", path = "../mcp-client" }
 horsie-models = { version = "0.1.4", path = "../models" }
 async-trait    = { workspace = true }
 thiserror      = { workspace = true }

@@ -1539,6 +1539,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "horsie-mcp-client"
+version = "0.1.4"
+dependencies = [
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "horsie-mock-llm"
 version = "0.1.4"
 dependencies = [
@@ -1670,6 +1682,7 @@ dependencies = [
  "horsie-actor",
  "horsie-agentcore",
  "horsie-anthropic",
+ "horsie-mcp-client",
  "horsie-mock-llm",
  "horsie-models",
  "horsie-runtime-client",
