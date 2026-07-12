@@ -6,12 +6,13 @@ pub mod error;
 mod github;
 mod handlers;
 mod mcp;
+mod plugins;
 mod sse;
 
 use crate::config::ConfigStore;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use horsie_actor::{ActorRef, Journal};
 use horsie_models::capabilities::CapabilitySpec;
 use horsie_models::session::GlobalSessionEvent;
@@ -45,6 +46,9 @@ pub struct AppState {
     /// Configured remote MCP servers: CRUD + connect/test, and the source of the
     /// per-session toolboxes built at agent spawn.
     pub mcp: Arc<crate::mcp::McpService>,
+    /// DB-managed plugin-bundle library: install/list/update/delete and the
+    /// token-guarded artifact endpoint runtimes fetch bundles from.
+    pub plugins: Arc<crate::plugins::PluginService>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
@@ -90,6 +94,13 @@ pub fn app(state: AppState) -> Router {
             axum::routing::put(mcp::upsert).delete(mcp::delete),
         )
         .route("/api/mcp/servers/:name/test", post(mcp::test))
+        .route("/api/plugins", get(plugins::list).post(plugins::install))
+        .route(
+            "/api/plugins/:name",
+            put(plugins::set_default).delete(plugins::remove),
+        )
+        .route("/api/plugins/:name/update", post(plugins::update))
+        .route("/api/plugin-artifacts/:file", get(plugins::get_artifact))
         .with_state(state);
 
     match web_dir {
@@ -157,6 +168,7 @@ mod tests {
                 runtime_bin: std::path::PathBuf::from("horsie-runtime"),
                 workspace_root: tmp.path().join("workspaces"),
                 info: test_info(),
+                public_http_base: None,
             },
         )
         .await
@@ -164,6 +176,11 @@ mod tests {
         let github = Arc::new(crate::github::GithubService::new(
             crate::github::GithubStore::new(opened.pool.clone()),
             crate::github::GithubApi::new(),
+        ));
+        let plugins = Arc::new(crate::plugins::PluginService::new(
+            crate::plugins::PluginStore::new(opened.pool.clone()),
+            crate::plugins::ArtifactStore::new(tmp.path().join("plugins")),
+            b"test-secret".to_vec(),
         ));
         let mcp = Arc::new(crate::mcp::McpService::new(
             crate::mcp::McpStore::new(opened.pool.clone()),
@@ -175,6 +192,7 @@ mod tests {
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: Some(mcp.clone()),
+            plugins: None,
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = broadcast::channel(64);
@@ -190,6 +208,7 @@ mod tests {
             config_store: opened.store,
             github,
             mcp,
+            plugins,
             web_dir: None,
         }
     }
@@ -461,6 +480,96 @@ mod tests {
         let app = app(test_state(&tmp).await);
         let res = app.oneshot(delete("/api/github/disconnect")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn plugins_install_list_artifact_delete_over_http() {
+        use crate::plugins::PluginProvisioner;
+        use horsie_models::plugins::PluginView;
+        let tmp = tempfile::tempdir().unwrap();
+        // A git plugin fixture (one skill).
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir_all(repo.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            repo.join(".claude-plugin").join("plugin.json"),
+            r#"{"name":"demo","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("skills").join("a")).unwrap();
+        std::fs::write(
+            repo.join("skills").join("a").join("SKILL.md"),
+            "---\nname: a\n---\nx",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "i"]);
+        let url = format!("file://{}", repo.display());
+
+        let state = test_state(&tmp).await;
+        let plugins = state.plugins.clone();
+        let app = app(state);
+
+        // Empty to start.
+        let res = app.clone().oneshot(get("/api/plugins")).await.unwrap();
+        let list: Vec<PluginView> = read_json(res).await;
+        assert!(list.is_empty());
+
+        // Install.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/plugins",
+                &serde_json::json!({ "sourceUrl": url }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let view: PluginView = read_json(res).await;
+        assert_eq!(view.name, "demo");
+        assert_eq!(view.skill_count, 1);
+
+        // Listed.
+        let res = app.clone().oneshot(get("/api/plugins")).await.unwrap();
+        let list: Vec<PluginView> = read_json(res).await;
+        assert_eq!(list.len(), 1);
+
+        // Artifact fetch: 403 without a token, 200 with a valid bearer.
+        let refs = plugins.resolve(&["demo".into()], "http://x").await.unwrap();
+        let hash = refs[0].hash.clone();
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/api/plugin-artifacts/{hash}.zip")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let token = plugins.mint_token("s", std::slice::from_ref(&hash));
+        let req = Request::builder()
+            .uri(format!("/api/plugin-artifacts/{hash}.zip"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Delete.
+        let res = app.oneshot(delete("/api/plugins/demo")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

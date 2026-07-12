@@ -7,6 +7,7 @@ import type { CreateSessionRequest, RepoConfig } from "../api/types";
 import { cn } from "../lib/cn";
 import { useGithubRepos, useGithubStatus } from "../hooks/useGithub";
 import { useMcpServers } from "../hooks/useMcp";
+import { usePlugins as usePluginBundles } from "../hooks/usePlugins";
 import { useCreateSession } from "../hooks/useSessions";
 import { useSettings } from "../hooks/useSettings";
 
@@ -24,6 +25,7 @@ export function NewSessionModal({
 }) {
   const create = useCreateSession();
   const { data: settings } = useSettings();
+  const { data: bundles } = usePluginBundles();
   const models = settings?.models ?? [];
   const activeVendors = (settings?.vendors ?? []).filter((v) => v.active);
   const showVendor = activeVendors.length > 1;
@@ -35,6 +37,9 @@ export function NewSessionModal({
   const [systemPrompt, setSystemPrompt] = useState("");
   const [allowAskUser, setAllowAskUser] = useState(true);
   const [usePlugins, setUsePlugins] = useState(false);
+  const [selectedPlugins, setSelectedPlugins] = useState<Set<string>>(
+    new Set(),
+  );
   const [mcpSelected, setMcpSelected] = useState<string[]>([]);
   const [advanced, setAdvanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +67,7 @@ export function NewSessionModal({
     setSystemPrompt("");
     setAllowAskUser(true);
     setUsePlugins(false);
+    setSelectedPlugins(new Set());
     setMcpSelected([]);
     setAdvanced(false);
     setError(null);
@@ -85,6 +91,14 @@ export function NewSessionModal({
     if (!activeVendors.some((v) => v.name === vendor))
       setVendor(settings.defaultVendor);
   }, [open, models, activeVendors, settings, model, vendor]);
+
+  // On open, pre-select the bundles the server marks as default.
+  useEffect(() => {
+    if (!open || !bundles) return;
+    setSelectedPlugins(
+      new Set(bundles.filter((b) => b.enabledDefault).map((b) => b.name)),
+    );
+  }, [open, bundles]);
 
   const submit = async () => {
     setError(null);
@@ -113,6 +127,8 @@ export function NewSessionModal({
       workdirs: source === "dir" ? [wd] : [],
       repos: source === "repos" ? repos : undefined,
       vendor: vendor.trim() || undefined,
+      // Selected skill bundles; empty → server uses the default-enabled set.
+      plugins: selectedPlugins.size ? Array.from(selectedPlugins) : undefined,
     };
 
     try {
@@ -342,6 +358,53 @@ export function NewSessionModal({
                   checked={usePlugins}
                   onChange={setUsePlugins}
                 />
+                {bundles && bundles.length > 0 && (
+                  <Field
+                    label="Skills"
+                    hint="bundles provisioned for this session"
+                  >
+                    <div className="max-h-40 space-y-1 overflow-y-auto rounded-[var(--radius)] border p-1">
+                      {bundles.map((b) => {
+                        const checked = selectedPlugins.has(b.name);
+                        return (
+                          <label
+                            key={b.name}
+                            className="flex cursor-pointer items-start gap-2 px-2 py-1"
+                          >
+                            <input
+                              type="checkbox"
+                              className="mt-0.5"
+                              checked={checked}
+                              onChange={() =>
+                                setSelectedPlugins((s) => {
+                                  const next = new Set(s);
+                                  if (checked) next.delete(b.name);
+                                  else next.add(b.name);
+                                  return next;
+                                })
+                              }
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="font-mono text-sm text-text">
+                                {b.name}
+                              </span>
+                              {b.hasHooks && (
+                                <span className="ml-1.5 rounded bg-surface-3 px-1 py-0.5 text-[10px] text-muted">
+                                  hooks
+                                </span>
+                              )}
+                              {b.description && (
+                                <span className="block truncate text-[11px] text-faint">
+                                  {b.description}
+                                </span>
+                              )}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </Field>
+                )}
                 {enabledMcp.length > 0 && (
                   <Field label="MCP servers" hint="optional">
                     <div className="space-y-1 rounded-[var(--radius)] border p-1.5">

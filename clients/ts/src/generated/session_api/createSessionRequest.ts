@@ -21,4 +21,8 @@ export interface CreateSessionRequest {
    * Repositories cloned into a vendor-managed workspace at provision time.
    */
   repos?: RepoConfig[];
+  /**
+   * Selected plugin-bundle names to provision for this session; absent →
+   */
+  plugins?: string[];
 }

@@ -66,6 +66,11 @@ pub mod mcp {
     include!(concat!(env!("OUT_DIR"), "/mcp/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod plugins {
+    include!(concat!(env!("OUT_DIR"), "/plugins/mod.rs"));
+}
+
 /// Env var carrying the provision-steps JSON a vendor injects into a runtime
 /// child. Read by `horsie-runtime` at startup; written by the executor
 /// providers from `RuntimeConfig.provision`.
@@ -74,6 +79,21 @@ pub const ENV_PROVISION: &str = "HORSIE_PROVISION";
 /// Env var carrying a GitHub token used by `git_checkout` provision steps for
 /// github.com URLs.
 pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
+
+/// JSON array of `{name, hash, url}` plugin-bundle refs the runtime fetches at
+/// startup (written by the server's plugin provisioner into the runtime env).
+pub const ENV_PLUGIN_MANIFEST: &str = "HORSIE_PLUGIN_MANIFEST";
+
+/// Bearer token the runtime presents when fetching bundle artifacts.
+pub const ENV_PLUGINS_TOKEN: &str = "HORSIE_PLUGINS_TOKEN";
+
+/// Directory the runtime unpacks fetched bundles into and scans as its
+/// plugins_dir.
+pub const ENV_PLUGINS_DIR: &str = "HORSIE_PLUGINS_DIR";
+
+/// Optional content-hash cache dir (local vendor) so repeated sessions avoid
+/// re-fetching and re-unpacking identical bundles.
+pub const ENV_PLUGINS_CACHE: &str = "HORSIE_PLUGINS_CACHE";
 
 impl capabilities::CapabilitySpec {
     /// Load and parse a capability file (the runtime's `--sandbox-caps` path, or a

@@ -126,9 +126,17 @@ pub async fn create_session(
         }
         None => state.default_caps.clone(),
     };
+    // Selected bundle names (empty → the provisioner falls back to the
+    // default-enabled set). Selecting bundles implies plugins are surfaced, so
+    // force the agent's opt-in when any are chosen.
+    let plugins = req.plugins.unwrap_or_default();
+    let mut agent = settings_from_wire(req.agent);
+    if !plugins.is_empty() {
+        agent.use_plugins = Some(true);
+    }
     let spec = SessionSpec {
         name: req.name,
-        agent: settings_from_wire(req.agent),
+        agent,
         workspaces,
         provision,
         capabilities: caps,
@@ -137,6 +145,7 @@ pub async fn create_session(
             .unwrap_or_else(|| state.config_store.default_vendor()),
         plugins_dir: state.plugins_dir.clone(),
         hook_path: state.hook_path.clone(),
+        plugins,
     };
     let created_at = now_ms();
     let id = ask(&state, |reply| SessionSupervisorCommand::Create {

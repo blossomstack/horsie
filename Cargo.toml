@@ -43,6 +43,8 @@ tempfile          = "3"
 jsonschema        = "0.47"
 jsonwebtoken      = "9"
 base64            = "0.22"
+sha2              = "0.10"
+zip               = { version = "2", default-features = false, features = ["deflate"] }
 eval              = "0.4"
 # SQLite-backed settings store for the session server (Postgres-ready: add the
 # `postgres` feature + a driver later). Runtime queries (no compile-time DB) +

@@ -4,6 +4,7 @@ pub mod github;
 mod handler;
 pub mod http;
 pub mod mcp;
+pub mod plugins;
 mod registry;
 mod server;
 pub mod sessions;

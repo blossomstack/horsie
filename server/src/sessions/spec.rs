@@ -74,6 +74,11 @@ pub struct SessionSpec {
     pub vendor: String,
     pub plugins_dir: Option<PathBuf>,
     pub hook_path: Vec<PathBuf>,
+    /// Selected plugin-bundle names to provision for this session. Resolved to
+    /// current artifact hashes at each create/attach (latest-at-start); the
+    /// runtime fetches them into its plugins dir before scanning.
+    #[serde(default)]
+    pub plugins: Vec<String>,
 }
 
 /// User-visible lifecycle state. Failure reasons ride inside the variants;
@@ -135,6 +140,9 @@ pub struct ServerDeps {
     /// deployment has no MCP integration wired (tests). A session that names an
     /// MCP server with no service configured connects to nothing.
     pub mcp: Option<Arc<crate::mcp::McpService>>,
+    /// Resolves selected plugin bundles to fetchable refs and mints capability
+    /// tokens at provisioning; `None` when no plugin library is wired.
+    pub plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
 }
 
 #[cfg(test)]

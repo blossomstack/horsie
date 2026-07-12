@@ -30,6 +30,10 @@ impl Api {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_spec", message)
     }
 
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "forbidden", message)
+    }
+
     pub fn bad_gateway(code: &str, message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_GATEWAY, code, message)
     }

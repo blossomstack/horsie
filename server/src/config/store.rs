@@ -41,6 +41,10 @@ pub struct StoreDeps {
     pub workspace_root: PathBuf,
     /// Read-only deployment paths, surfaced in the settings view.
     pub info: ServerInfo,
+    /// Server HTTP base a co-located `local`-vendor runtime fetches plugin
+    /// artifacts from (loopback, e.g. `http://127.0.0.1:3789`). `None` disables
+    /// local-vendor plugin provisioning.
+    pub public_http_base: Option<String>,
 }
 
 /// What [`DbConfigStore::open`] hands back: the store (for the HTTP layer) plus
@@ -78,7 +82,13 @@ impl DbConfigStore {
             Arc::new(RwLock::new(build_registry(&provs, &mods)?));
 
         let vendor_rows = read_vendors(&pool).await.map_err(|e| e.to_string())?;
-        let vendors = build_vendors(&vendor_rows, deps.runtime_bin, deps.workspace_root).await;
+        let vendors = build_vendors(
+            &vendor_rows,
+            deps.runtime_bin,
+            deps.workspace_root,
+            deps.public_http_base,
+        )
+        .await;
         let mut active_vendors: Vec<String> = vendors.keys().cloned().collect();
         active_vendors.sort();
 
@@ -360,6 +370,8 @@ struct VelosConfig {
     memory_mib: u64,
     #[serde(default = "default_connect_timeout_secs")]
     connect_timeout_secs: u64,
+    #[serde(default)]
+    http_port: Option<u32>,
 }
 
 fn default_runtime_bin() -> String {
@@ -454,11 +466,16 @@ async fn build_vendors(
     rows: &[VendorRow],
     runtime_bin: PathBuf,
     workspace_root: PathBuf,
+    public_http_base: Option<String>,
 ) -> HashMap<String, Arc<dyn RuntimeVendor>> {
     let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
     vendors.insert(
         "local".into(),
-        Arc::new(LocalProcessVendor::new(runtime_bin, workspace_root)),
+        Arc::new(LocalProcessVendor::new(
+            runtime_bin,
+            workspace_root,
+            public_http_base,
+        )),
     );
     for r in rows {
         match r.kind.as_str() {
@@ -501,6 +518,7 @@ async fn build_velos_vendor(vc: &VelosConfig) -> Result<VelosVendor, String> {
         cpu: vc.cpu,
         memory_bytes: vc.memory_mib.saturating_mul(1024 * 1024),
         connect_timeout: Duration::from_secs(vc.connect_timeout_secs),
+        http_port: vc.http_port,
     };
     VelosVendor::bind(Arc::new(client), settings)
         .await
@@ -576,6 +594,9 @@ fn build_vendor_config(
             if let Some(x) = v.connect_timeout_secs {
                 m.insert("connect_timeout_secs".into(), json!(x));
             }
+            if let Some(x) = v.http_port {
+                m.insert("http_port".into(), json!(x));
+            }
             let config = serde_json::to_string(&Value::Object(m)).map_err(|e| e.to_string())?;
             Ok(("velos", config))
         }
@@ -642,6 +663,7 @@ fn velos_view(vc: &VelosConfig) -> VelosView {
         cpu: vc.cpu,
         memory_mib: vc.memory_mib,
         connect_timeout_secs: vc.connect_timeout_secs,
+        http_port: vc.http_port,
     }
 }
 
@@ -761,6 +783,7 @@ mod tests {
                 runtime_bin: PathBuf::from("horsie-runtime"),
                 workspace_root: dir.join("workspaces"),
                 info: info(),
+                public_http_base: None,
             },
         )
         .await
@@ -886,6 +909,7 @@ mod tests {
                         cpu: None,
                         memory_mib: None,
                         connect_timeout_secs: None,
+                        http_port: None,
                     }),
                 }]),
                 default_vendor: None,

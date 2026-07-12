@@ -26,14 +26,29 @@ pub struct LocalProcessVendor {
     /// (`<workspace_root>/<runtime_id>/<name>`), deterministic so attach
     /// re-finds them and delete can reclaim them.
     workspace_root: PathBuf,
+    /// Server HTTP base a co-located runtime fetches plugin artifacts from
+    /// (loopback). `None` disables plugin provisioning for this vendor.
+    public_http_base: Option<String>,
 }
 
 impl LocalProcessVendor {
-    pub fn new(runtime_bin: PathBuf, workspace_root: PathBuf) -> Self {
+    pub fn new(
+        runtime_bin: PathBuf,
+        workspace_root: PathBuf,
+        public_http_base: Option<String>,
+    ) -> Self {
         Self {
             runtime_bin,
             workspace_root,
+            public_http_base,
         }
+    }
+
+    /// Root for materialized bundles, `<workspace_root>/.plugins`. Granted
+    /// read/write in the session capability spec so the sandboxed runtime can
+    /// unpack and scan there.
+    fn plugins_root(&self) -> PathBuf {
+        self.workspace_root.join(".plugins")
     }
 
     /// Resolve workspace sources to concrete host paths, creating managed dirs.
@@ -122,6 +137,28 @@ impl LocalProcessVendor {
 impl RuntimeVendor for LocalProcessVendor {
     fn name(&self) -> &'static str {
         "local"
+    }
+
+    fn artifact_base_url(&self) -> Option<String> {
+        self.public_http_base.clone()
+    }
+
+    fn plugins_dir_for(&self, runtime_id: &str) -> Option<String> {
+        Some(
+            self.plugins_root()
+                .join(runtime_id)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    fn plugins_cache_dir(&self) -> Option<String> {
+        Some(
+            self.plugins_root()
+                .join(".cache")
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     async fn create(
@@ -217,7 +254,8 @@ mod tests {
     #[test]
     fn managed_workspace_allocates_deterministically_and_host_dir_passes_through() {
         let root = tempfile::tempdir().unwrap();
-        let vendor = LocalProcessVendor::new("horsie-runtime".into(), root.path().to_path_buf());
+        let vendor =
+            LocalProcessVendor::new("horsie-runtime".into(), root.path().to_path_buf(), None);
         let spec = RuntimeSpec {
             workspaces: vec![
                 WorkspaceSpec {

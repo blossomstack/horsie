@@ -13,6 +13,9 @@ import type {
   McpServerInput,
   McpServerList,
   McpServerView,
+  PluginDefaultInput,
+  PluginInstallInput,
+  PluginView,
   SessionAck,
   SettingsUpdate,
   SettingsView,
@@ -131,6 +134,31 @@ export const api = {
       request(
         `/github/repos/branches?repo=${encodeURIComponent(repo)}`,
       ),
+  },
+
+  plugins: {
+    /** All installed skill bundles (metadata only). */
+    list: (): Promise<PluginView[]> => request("/plugins"),
+
+    /** Install a bundle from a git repo; may take a few seconds. */
+    install: (body: PluginInstallInput): Promise<PluginView> =>
+      request("/plugins", { method: "POST", body: JSON.stringify(body) }),
+
+    /** Re-clone a bundle at its ref to pick up upstream changes. */
+    update: (name: string): Promise<PluginView> =>
+      request(`/plugins/${encodeURIComponent(name)}/update`, {
+        method: "POST",
+      }),
+
+    /** Toggle whether a bundle is pre-selected for new sessions. */
+    setDefault: (name: string, body: PluginDefaultInput): Promise<PluginView> =>
+      request(`/plugins/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    remove: (name: string): Promise<void> =>
+      request(`/plugins/${encodeURIComponent(name)}`, { method: "DELETE" }),
   },
 
   mcp: {

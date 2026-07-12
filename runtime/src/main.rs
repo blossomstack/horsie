@@ -144,9 +144,15 @@ async fn run(cli: Cli, endpoint: Endpoint) {
         }
     };
 
+    // Fetch the session's selected plugin bundles (if the server injected a
+    // manifest) and scan that dir; otherwise fall back to any `--plugins-dir`.
+    let plugins_dir = match horsie_runtime::plugins_fetch::provision_plugins().await {
+        Some(dir) => Some(dir),
+        None => cli.plugins_dir,
+    };
     let registry = Arc::new(
         horsie_runtime::workspace::WorkspaceRegistry::new(cli.workspaces)
-            .with_plugins(cli.plugins_dir, cli.hook_path),
+            .with_plugins(plugins_dir, cli.hook_path),
     );
 
     match endpoint {

@@ -79,6 +79,7 @@ async fn start_server(
         state_dir: journal_dir.join("state"),
         github_tokens: None,
         mcp: None,
+        plugins: None,
     };
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
     let (gtx, _) = tokio::sync::broadcast::channel(256);
@@ -99,6 +100,7 @@ async fn start_server(
                 plugins_dir: String::new(),
                 version: "test".into(),
             },
+            public_http_base: None,
         },
     )
     .await
@@ -106,6 +108,11 @@ async fn start_server(
     let github = Arc::new(horsie_server::github::GithubService::new(
         horsie_server::github::GithubStore::new(opened.pool.clone()),
         horsie_server::github::GithubApi::new(),
+    ));
+    let plugins = Arc::new(horsie_server::plugins::PluginService::new(
+        horsie_server::plugins::PluginStore::new(opened.pool.clone()),
+        horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
+        b"e2e-secret".to_vec(),
     ));
     let mcp = Arc::new(horsie_server::mcp::McpService::new(
         horsie_server::mcp::McpStore::new(opened.pool.clone()),
@@ -122,6 +129,7 @@ async fn start_server(
         config_store: opened.store,
         github,
         mcp,
+        plugins,
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -22,12 +22,16 @@ hackamore-agent  = { version = "0.1.0", git = "https://github.com/zhxiaogg/hacka
 tokio         = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util  = { workspace = true }
+serde         = { workspace = true }
 serde_json    = { workspace = true }
 clap          = { version = "4", features = ["derive"] }
 tracing       = { workspace = true }
 regex         = "1"
 glob          = "0.3"
 base64        = { workspace = true }
+reqwest       = { workspace = true }
+sha2          = { workspace = true }
+zip           = { workspace = true }
 # Upstream nono. The macOS SecurityServer TLS allow is injected as a capability rule
 # (see cli/src/capabilities.rs), not a fork. default-features=false drops system-keyring.
 nono          = { version = "0.66", default-features = false, optional = true }

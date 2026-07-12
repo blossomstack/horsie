@@ -28,6 +28,9 @@ struct CreateSessionRequest {
     capabilities: Option<CapabilitySpec>,
     /// Repositories cloned into a vendor-managed workspace at provision time.
     repos: Option<Vec<RepoConfig>>,
+    /// Selected plugin-bundle names to provision for this session; absent →
+    /// the server's default-enabled bundles. Non-empty implies plugins are on.
+    plugins: Option<Vec<String>>,
 }
 
 struct CreateSessionResponse { session: SessionSummary }

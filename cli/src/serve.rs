@@ -16,6 +16,7 @@ use horsie_models::capabilities::CapabilitySpec;
 use horsie_models::settings::ServerInfo;
 use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
+use horsie_server::plugins::{ArtifactStore, PluginService, PluginStore};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::SessionSupervisor;
 use std::path::{Path, PathBuf};
@@ -48,13 +49,29 @@ pub async fn serve(
         Vec::new()
     };
     let (pd, hp) = (plugins_dir.clone(), hook_path.clone());
+    // The local vendor materializes selected bundles under
+    // `<workspace_root>/.plugins`; grant the sandboxed runtime read/write there
+    // so it can fetch, unpack, and scan them (harmless for velos, which is
+    // unsandboxed and ignores the capability file).
+    let local_plugins_root = state_dir
+        .join("workspaces")
+        .join(".plugins")
+        .to_string_lossy()
+        .into_owned();
     let caps_finalize: Arc<dyn Fn(CapabilitySpec) -> CapabilitySpec + Send + Sync> =
         Arc::new(move |caps| {
-            capabilities::with_default_seatbelt_rules(capabilities::with_plugin_grants(
+            let mut spec = capabilities::with_plugin_grants(
                 capabilities::resolve_user_paths(caps),
                 pd.as_deref(),
                 &hp,
-            ))
+            );
+            spec.grants.push(horsie_models::capabilities::Grant::Dir(
+                horsie_models::capabilities::DirGrant {
+                    path: local_plugins_root.clone(),
+                    access: horsie_models::capabilities::Access::ReadWrite,
+                },
+            ));
+            capabilities::with_default_seatbelt_rules(spec)
         });
     let default_caps = caps_finalize(default_caps);
 
@@ -67,6 +84,14 @@ pub async fn serve(
         );
     }
     let db_url = resolve_db_url(&cfg, &data_dir);
+    // Loopback base a co-located local-vendor runtime fetches plugin artifacts
+    // from (same host as the server). Velos derives its own base from the
+    // vendor config's advertise_host + http_port.
+    let public_http_base = addr
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .map(|port| format!("http://127.0.0.1:{port}"));
     let info = ServerInfo {
         config_path: config_path
             .as_ref()
@@ -84,6 +109,7 @@ pub async fn serve(
             runtime_bin,
             workspace_root: state_dir.join("workspaces"),
             info,
+            public_http_base: public_http_base.clone(),
         },
     )
     .await
@@ -98,12 +124,22 @@ pub async fn serve(
         github.clone(),
     ));
 
+    // Plugin-bundle library: artifacts live on the data volume beside the
+    // journal; the token secret comes from the env or is random per-process
+    // (tokens are short-lived and minted fresh at each provisioning).
+    let plugins = Arc::new(PluginService::new(
+        PluginStore::new(opened.pool.clone()),
+        ArtifactStore::new(data_dir.join("plugins")),
+        artifact_secret(),
+    ));
+
     let deps = ServerDeps {
         provider_registry: opened.registry,
         vendors: opened.vendors,
         state_dir,
         github_tokens: Some(github.clone()),
         mcp: Some(mcp.clone()),
+        plugins: Some(plugins.clone() as Arc<dyn horsie_server::plugins::PluginProvisioner>),
     };
     let (global_tx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(
@@ -122,6 +158,7 @@ pub async fn serve(
         config_store: opened.store,
         github,
         mcp,
+        plugins,
         web_dir,
     };
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -148,6 +185,21 @@ fn resolve_db_url(cfg: &HorsieConfig, data_dir: &Path) -> String {
         return u.clone();
     }
     format!("sqlite://{}/config.db", data_dir.display())
+}
+
+/// The HS256 secret for artifact capability tokens: `$HORSIE_ARTIFACT_SECRET`
+/// if set, else 32 random bytes (fine per-process — tokens are short-lived and
+/// minted on demand at provisioning, never persisted across a restart).
+fn artifact_secret() -> Vec<u8> {
+    std::env::var("HORSIE_ARTIFACT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(String::into_bytes)
+        .unwrap_or_else(|| {
+            let mut v = uuid::Uuid::new_v4().as_bytes().to_vec();
+            v.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+            v
+        })
 }
 
 /// Hide credentials in a database URL's authority (e.g. `postgres://u:p@host`).

@@ -1,0 +1,31 @@
+/// Wire contracts for the DB-managed plugin-bundle library (skills + hooks).
+package plugins;
+
+/// A library entry as shown in the web UI (metadata only — never the bytes).
+struct PluginView {
+    /// Canonical bundle name (from plugin.json, else repo basename).
+    name: String,
+    description: Option<String>,
+    /// Resolved version (manifest version, else the cloned commit sha).
+    version: Option<String>,
+    source_url: String,
+    source_ref: Option<String>,
+    /// Number of SKILL.md skills the bundle provides.
+    skill_count: u32,
+    /// Whether the bundle ships a SessionStart hook.
+    has_hooks: bool,
+    /// Pre-checked in the new-session bundle picker.
+    enabled_default: bool,
+    artifact_size: u64,
+}
+
+/// Install a publicly shared bundle from a git repo.
+struct PluginInstallInput {
+    source_url: String,
+    source_ref: Option<String>,
+}
+
+/// Toggle whether a bundle is pre-selected for new sessions.
+struct PluginDefaultInput {
+    enabled_default: bool,
+}

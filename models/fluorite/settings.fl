@@ -61,6 +61,9 @@ struct VelosView {
     cpu: u32,
     memory_mib: u64,
     connect_timeout_secs: u64,
+    /// Server HTTP port reachable from the worker network at `advertise_host`;
+    /// used to build the plugin-artifact base URL runtimes fetch bundles from.
+    http_port: Option<u32>,
 }
 
 /// Read-only deployment paths and version, for transparency. `config_path` is
@@ -133,6 +136,9 @@ struct VelosInput {
     cpu: Option<u32>,
     memory_mib: Option<u64>,
     connect_timeout_secs: Option<u64>,
+    /// Server HTTP port reachable from the worker network at `advertise_host`
+    /// (for plugin-artifact fetches). Omit to keep the stored value.
+    http_port: Option<u32>,
 }
 
 /// Replace the runtime-editable settings. Each present field fully replaces

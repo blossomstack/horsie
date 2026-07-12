@@ -235,6 +235,45 @@ impl SessionActor {
             }
         }
         let id = self.id.to_string();
+        // Resolve the session's selected bundles → fetch refs + a scoped token,
+        // injected as env the runtime reads at startup. Same for create and
+        // attach (re-resolves current versions). Only vendors that advertise an
+        // artifact base URL participate (mock does not).
+        if let (Some(prov), Some(base)) = (self.deps.plugins.as_ref(), vendor.artifact_base_url()) {
+            let mut names = self.spec.plugins.clone();
+            if names.is_empty() {
+                names = prov.default_names().await;
+            }
+            if !names.is_empty() {
+                let refs = prov.resolve(&names, &base).await?;
+                let hashes: Vec<String> = refs.iter().map(|r| r.hash.clone()).collect();
+                let token = prov.mint_token(&id, &hashes);
+                let manifest = serde_json::to_string(&refs).map_err(|e| e.to_string())?;
+                let mut env = vec![
+                    horsie_models::executor::EnvVar {
+                        name: horsie_models::ENV_PLUGIN_MANIFEST.to_string(),
+                        value: manifest,
+                    },
+                    horsie_models::executor::EnvVar {
+                        name: horsie_models::ENV_PLUGINS_TOKEN.to_string(),
+                        value: token,
+                    },
+                ];
+                if let Some(dir) = vendor.plugins_dir_for(&id) {
+                    env.push(horsie_models::executor::EnvVar {
+                        name: horsie_models::ENV_PLUGINS_DIR.to_string(),
+                        value: dir,
+                    });
+                }
+                if let Some(cache) = vendor.plugins_cache_dir() {
+                    env.push(horsie_models::executor::EnvVar {
+                        name: horsie_models::ENV_PLUGINS_CACHE.to_string(),
+                        value: cache,
+                    });
+                }
+                rt_spec.env.extend(env);
+            }
+        }
         let runtime = match mode {
             WakeMode::Create => vendor.create(&id, &rt_spec).await,
             WakeMode::Attach => vendor.attach(&id, &rt_spec).await,
@@ -699,6 +738,7 @@ mod tests {
             vendor: vendor.into(),
             plugins_dir: None,
             hook_path: vec![],
+            plugins: vec![],
         }
     }
 
@@ -735,6 +775,7 @@ mod tests {
             state_dir: tmp.path().to_path_buf(),
             github_tokens,
             mcp: None,
+            plugins: None,
         };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let parent = spawn_root(NullSupervisor { statuses: tx }, journal.clone());

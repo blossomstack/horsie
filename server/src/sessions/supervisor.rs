@@ -406,6 +406,7 @@ mod tests {
             vendor: "mock".into(),
             plugins_dir: None,
             hook_path: vec![],
+            plugins: vec![],
         }
     }
 
@@ -418,6 +419,7 @@ mod tests {
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: None,
+            plugins: None,
         }
     }
 

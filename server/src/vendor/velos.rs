@@ -57,6 +57,10 @@ pub struct VelosVendorSettings {
     pub memory_bytes: u64,
     /// How long to wait for a scheduled container's runtime to dial back.
     pub connect_timeout: Duration,
+    /// Server HTTP port reachable from the worker network at `advertise_host`;
+    /// combined into the plugin-artifact base URL. `None` → plugins disabled
+    /// for this vendor.
+    pub http_port: Option<u32>,
 }
 
 /// One workspace, resolved to the directory it lives at inside the container.
@@ -313,6 +317,9 @@ pub struct VelosVendor {
     cpu: u32,
     memory_bytes: u64,
     connect_timeout: Duration,
+    /// `http://<advertise_host>:<http_port>` when configured; the base a
+    /// scheduled runtime fetches plugin artifacts from over its outbound NAT.
+    public_http_base: Option<String>,
     _serve_guard: DropGuard,
 }
 
@@ -331,6 +338,9 @@ impl VelosVendor {
             .ok_or_else(|| VendorError::Provision("velos vendor requires a TCP listener".into()))?
             .port();
         let endpoint_ws = format!("ws://{}:{port}", settings.advertise_host);
+        let public_http_base = settings
+            .http_port
+            .map(|p| format!("http://{}:{p}", settings.advertise_host));
         let connected = Arc::new(ConnectedRuntimeRegistry::new());
         let cancel = CancellationToken::new();
         serve_runtime_connections(listener, connected.clone(), cancel.clone());
@@ -344,6 +354,7 @@ impl VelosVendor {
             cpu: settings.cpu,
             memory_bytes: settings.memory_bytes,
             connect_timeout: settings.connect_timeout,
+            public_http_base,
             _serve_guard: cancel.drop_guard(),
         })
     }
@@ -406,6 +417,16 @@ impl VelosVendor {
 impl RuntimeVendor for VelosVendor {
     fn name(&self) -> &'static str {
         "velos"
+    }
+
+    fn artifact_base_url(&self) -> Option<String> {
+        self.public_http_base.clone()
+    }
+
+    fn plugins_dir_for(&self, _runtime_id: &str) -> Option<String> {
+        // A fixed in-container path; the container is ephemeral and isolated, so
+        // one dir per runtime is unnecessary.
+        Some("/horsie/plugins".to_string())
     }
 
     async fn create(
@@ -652,6 +673,7 @@ mod tests {
             cpu: 1,
             memory_bytes: 536_870_912,
             connect_timeout: Duration::from_secs(5),
+            http_port: None,
         }
     }
 

@@ -1,4 +1,5 @@
 pub mod plugins;
+pub mod plugins_fetch;
 pub mod provision;
 pub mod scan;
 pub mod steps;

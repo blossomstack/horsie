@@ -14,4 +14,8 @@ export interface VelosView {
   cpu: number;
   memoryMib: number;
   connectTimeoutSecs: number;
+  /**
+   * Server HTTP port reachable from the worker network at `advertise_host`;
+   */
+  httpPort?: number;
 }

@@ -91,6 +91,27 @@ pub trait RuntimeVendor: Send + Sync + 'static {
     /// The owning session was deleted; the vendor decides the runtime's fate.
     /// Callable with no live handle (e.g. after a server restart).
     async fn delete(&self, runtime_id: &str);
+
+    /// Base URL a runtime should GET plugin-bundle artifacts from, reachable
+    /// from where the runtime executes (loopback for local; `advertise_host`
+    /// for velos). `None` disables plugin provisioning for this vendor (e.g.
+    /// the mock vendor), so `ensure_runtime` injects no plugin env.
+    fn artifact_base_url(&self) -> Option<String> {
+        None
+    }
+
+    /// Filesystem path (host or in-container) the runtime unpacks bundles into
+    /// and scans as its plugins dir. `None` → the runtime does not materialize
+    /// bundles for this vendor.
+    fn plugins_dir_for(&self, _runtime_id: &str) -> Option<String> {
+        None
+    }
+
+    /// Optional content-hash cache dir (local vendor) so repeated sessions skip
+    /// re-fetching and re-unpacking identical bundles.
+    fn plugins_cache_dir(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

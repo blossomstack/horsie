@@ -37,8 +37,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---- Stage 3: minimal runtime ------------------------------------------------
 FROM debian:bookworm-slim
 # ca-certificates: outbound TLS to the LLM provider. curl: the HEALTHCHECK probe.
+# git: cloning plugin-bundle repos at install time (skill-bundle ingestion).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
+ && apt-get install -y --no-install-recommends ca-certificates curl git \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --create-home --home-dir /home/horsie --shell /usr/sbin/nologin horsie \
  && install -d -o horsie -g horsie /data

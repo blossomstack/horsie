@@ -21,9 +21,11 @@ RUN cargo build -p horsie-runtime --no-default-features --release
 
 FROM debian:bookworm-slim
 # ca-certificates: outbound TLS from tools; git: the workspace scan / git-aware
-# tools. /workspace is the default in-container root the vendor mounts under.
+# tools; libssl3: the plugin-bundle fetch (reqwest's TLS backend is initialized
+# when the HTTP client is built, even for plain-HTTP artifact URLs).
+# /workspace is the default in-container root the vendor mounts under.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git \
+ && apt-get install -y --no-install-recommends ca-certificates git libssl3 \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /workspace
 COPY --from=build /src/target/release/horsie-runtime /usr/local/bin/horsie-runtime
