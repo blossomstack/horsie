@@ -26,6 +26,17 @@ use tower_http::services::{ServeDir, ServeFile};
 /// capability-resolution helpers.
 pub type CapsFinalize = Arc<dyn Fn(CapabilitySpec) -> CapabilitySpec + Send + Sync>;
 
+/// "http://host" from the request headers (horsie serves same-origin; a
+/// configured `callback_base` overrides this inside a service). Shared by the
+/// github and mcp OAuth callbacks.
+pub(crate) fn request_base(headers: &axum::http::HeaderMap) -> String {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+    format!("http://{host}")
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub supervisor: ActorRef<SessionSupervisorCommand>,
@@ -94,6 +105,11 @@ pub fn app(state: AppState) -> Router {
             axum::routing::put(mcp::upsert).delete(mcp::delete),
         )
         .route("/api/mcp/servers/:name/test", post(mcp::test))
+        .route("/api/mcp/servers/:name/connect", post(mcp::connect))
+        .route(
+            "/api/mcp/servers/:name/oauth/callback",
+            get(mcp::oauth_callback),
+        )
         .route("/api/plugins", get(plugins::list).post(plugins::install))
         .route(
             "/api/plugins/:name",
@@ -628,5 +644,39 @@ mod tests {
         let res = app.oneshot(get("/api/mcp/servers")).await.unwrap();
         let list: McpServerList = read_json(res).await;
         assert!(list.servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_connect_on_non_oauth_is_unprocessable_and_callback_needs_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        // A bearer server can't be OAuth-connected.
+        let body = serde_json::json!({
+            "name": "x", "url": "http://127.0.0.1:0/",
+            "auth": { "kind": "Bearer", "value": { "token": "t" } }
+        });
+        app.clone()
+            .oneshot(put_json("/api/mcp/servers/x", &body))
+            .await
+            .unwrap();
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/mcp/servers/x/connect",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // The callback without a code redirects to Settings with an error.
+        let res = app
+            .oneshot(get("/api/mcp/servers/x/oauth/callback"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res.headers().get("location").unwrap().to_str().unwrap();
+        assert!(loc.starts_with("/settings?mcp_error="), "{loc}");
     }
 }
