@@ -30,6 +30,7 @@ import {
   useSaveGithubAppConfig,
 } from "../hooks/useGithub";
 import {
+  useConnectMcpServer,
   useDeleteMcpServer,
   useMcpServers,
   useTestMcpServer,
@@ -1034,8 +1035,34 @@ function McpSection() {
   const [adding, setAdding] = useState(false);
   const generic = (servers ?? []).filter((s) => s.auth.kind !== "GithubApp");
 
+  // Surface the OAuth-callback outcome, then strip the params from the URL.
+  const [params, setParams] = useSearchParams();
+  const [banner, setBanner] = useState<{ ok: boolean; text: string } | null>(
+    null,
+  );
+  useEffect(() => {
+    const ok = params.get("mcp_connected");
+    const err = params.get("mcp_error");
+    if (ok || err) {
+      setBanner(
+        ok ? { ok: true, text: `Connected ${ok}.` } : { ok: false, text: err ?? "" },
+      );
+      const next = new URLSearchParams(params);
+      next.delete("mcp_connected");
+      next.delete("mcp_error");
+      setParams(next, { replace: true });
+    }
+  }, [params, setParams]);
+
   return (
     <section className="card p-4">
+      {banner && (
+        <div
+          className={`mb-3 rounded-[var(--radius)] border px-3 py-2 text-sm ${banner.ok ? "border-success/40 bg-success-soft text-success" : "border-error/40 bg-error-soft text-error"}`}
+        >
+          {banner.text}
+        </div>
+      )}
       <div className="mb-3 flex items-start justify-between gap-3">
         <div className="flex items-start gap-2">
           <Boxes size={15} className="mt-0.5 text-faint" />
@@ -1084,19 +1111,32 @@ function McpServerRow({
   const upsert = useUpsertMcpServer();
   const del = useDeleteMcpServer();
   const test = useTestMcpServer();
+  const connect = useConnectMcpServer();
   const isNew = !server;
 
   const [name, setName] = useState(server?.name ?? "");
   const [url, setUrl] = useState(server?.url ?? "");
-  const [authKind, setAuthKind] = useState<"None" | "Bearer">(
-    server?.auth.kind === "Bearer" ? "Bearer" : "None",
+  const [authKind, setAuthKind] = useState<"None" | "Bearer" | "OAuth">(
+    server?.auth.kind === "Bearer"
+      ? "Bearer"
+      : server?.auth.kind === "OAuth"
+        ? "OAuth"
+        : "None",
   );
   const [tokenInput, setTokenInput] = useState("");
+  const [clientId, setClientId] = useState(
+    server?.auth.kind === "OAuth" ? (server.auth.value.clientId ?? "") : "",
+  );
+  const [clientSecret, setClientSecret] = useState("");
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const hasToken =
     server?.auth.kind === "Bearer" ? server.auth.value.hasToken : false;
+  const connected =
+    server?.auth.kind === "OAuth" ? server.auth.value.connected : false;
+  const hasClientSecret =
+    server?.auth.kind === "OAuth" ? server.auth.value.hasClientSecret : false;
   const touch = () => setDirty(true);
 
   const save = async () => {
@@ -1109,13 +1149,22 @@ function McpServerRow({
             kind: "Bearer",
             value: { token: tokenInput === "" ? undefined : tokenInput },
           }
-        : { kind: "None", value: {} };
+        : authKind === "OAuth"
+          ? {
+              kind: "OAuth",
+              value: {
+                clientId: clientId.trim() === "" ? undefined : clientId.trim(),
+                clientSecret: clientSecret === "" ? undefined : clientSecret,
+              },
+            }
+          : { kind: "None", value: {} };
     try {
       await upsert.mutateAsync({
         name: name.trim(),
         body: { name: name.trim(), url: url.trim(), auth },
       });
       setTokenInput("");
+      setClientSecret("");
       setDirty(false);
       onDone?.();
     } catch (e) {
@@ -1175,12 +1224,13 @@ function McpServerRow({
               className="input font-mono"
               value={authKind}
               onChange={(e) => {
-                setAuthKind(e.target.value === "Bearer" ? "Bearer" : "None");
+                setAuthKind(e.target.value as "None" | "Bearer" | "OAuth");
                 touch();
               }}
             >
               <option value="None">None (public)</option>
               <option value="Bearer">Bearer token</option>
+              <option value="OAuth">OAuth 2.1</option>
             </select>
           </label>
           {authKind === "Bearer" && (
@@ -1195,6 +1245,31 @@ function McpServerRow({
               placeholder={hasToken ? "•••• stored — blank keeps it" : "not set"}
             />
           )}
+          {authKind === "OAuth" && (
+            <>
+              <TextField
+                label="Client ID (optional)"
+                value={clientId}
+                onChange={(v) => {
+                  setClientId(v);
+                  touch();
+                }}
+                placeholder="blank = auto-register"
+              />
+              <TextField
+                label="Client secret (optional)"
+                type="password"
+                value={clientSecret}
+                onChange={(v) => {
+                  setClientSecret(v);
+                  touch();
+                }}
+                placeholder={
+                  hasClientSecret ? "•••• stored — blank keeps it" : "none"
+                }
+              />
+            </>
+          )}
         </div>
 
         {!isNew && (
@@ -1205,6 +1280,11 @@ function McpServerRow({
               </span>
             ) : (
               <span className="chip !py-0 text-[10px] text-faint">not tested</span>
+            )}
+            {authKind === "OAuth" && connected && (
+              <span className="chip !py-0 text-[10px] text-success">
+                authorized
+              </span>
             )}
             {server.lastError && (
               <span className="truncate text-error" title={server.lastError}>
@@ -1221,6 +1301,30 @@ function McpServerRow({
         )}
 
         <div className="flex justify-end gap-2">
+          {!isNew && authKind === "OAuth" && (
+            <button
+              className="btn-outline"
+              disabled={connect.isPending || upsert.isPending}
+              onClick={async () => {
+                setError(null);
+                try {
+                  // Persist any client/endpoint edits first so connect uses them.
+                  if (dirty) await save();
+                  const { url } = await connect.mutateAsync(name.trim());
+                  window.location.href = url;
+                } catch (e) {
+                  setError(
+                    e instanceof ApiRequestError ? e.message : "Connect failed.",
+                  );
+                }
+              }}
+            >
+              {connect.isPending ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : null}
+              {connected ? "Reauthorize" : "Connect"}
+            </button>
+          )}
           {!isNew && (
             <button
               className="btn-outline"

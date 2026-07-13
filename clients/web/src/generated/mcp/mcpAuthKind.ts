@@ -5,5 +5,6 @@
 export enum McpAuthKind {
   None = "None",
   Bearer = "Bearer",
+  OAuth = "OAuth",
   GithubApp = "GithubApp",
 }

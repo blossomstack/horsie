@@ -19,7 +19,7 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<GitHubStatus>,
 }
 
 pub async fn auth(State(state): State<AppState>, headers: HeaderMap) -> Result<Redirect, Api> {
-    let base = request_base(&headers);
+    let base = crate::http::request_base(&headers);
     let url = state
         .github
         .auth_redirect(&base)
@@ -33,7 +33,7 @@ pub async fn callback(
     Query(q): Query<CallbackQuery>,
     headers: HeaderMap,
 ) -> Redirect {
-    let base = request_base(&headers);
+    let base = crate::http::request_base(&headers);
     let dest = match q.code {
         Some(code) => match state.github.handle_callback(&code, &base).await {
             Ok(()) => "/settings?github_connected=1".to_string(),
@@ -111,16 +111,6 @@ pub async fn branches(
         .await
         .map_err(Api::unprocessable)?;
     Ok(Json(GitHubBranchList { branches }))
-}
-
-/// "http://host" from the request headers (horsie serves same-origin; a
-/// configured `callback_base` overrides this inside the service).
-fn request_base(headers: &HeaderMap) -> String {
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost");
-    format!("http://{host}")
 }
 
 #[derive(Deserialize)]

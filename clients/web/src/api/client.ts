@@ -9,6 +9,7 @@ import type {
   GitHubRepoList,
   GitHubStatus,
   ListSessionsResponse,
+  McpAuthorizeUrl,
   McpConnectResult,
   McpServerInput,
   McpServerList,
@@ -178,6 +179,13 @@ export const api = {
     /** Connect (`initialize` + `tools/list`); persists + returns the outcome. */
     test: (name: string): Promise<McpConnectResult> =>
       request(`/mcp/servers/${encodeURIComponent(name)}/test`, {
+        method: "POST",
+        body: "{}",
+      }),
+
+    /** Begin OAuth for an `oauth` server; returns the authorize URL to navigate to. */
+    connect: (name: string): Promise<McpAuthorizeUrl> =>
+      request(`/mcp/servers/${encodeURIComponent(name)}/connect`, {
         method: "POST",
         body: "{}",
       }),

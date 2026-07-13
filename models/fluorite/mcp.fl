@@ -12,6 +12,7 @@ package mcp;
 enum McpAuthKind {
     None,
     Bearer,
+    OAuth,
     GithubApp,
 }
 
@@ -33,19 +34,42 @@ struct McpBearerInput {
     token: Option<String>,
 }
 
+/// Redacted OAuth 2.1 auth view. `connected` = a stored access token exists;
+/// secrets are redacted to flags. `client_id` is safe to surface (public).
+struct McpOAuthView {
+    connected: bool,
+    client_id: Option<String>,
+    has_client_secret: bool,
+}
+
+/// OAuth 2.1 auth input. All fields optional: leave everything empty to let
+/// horsie discover the authorization server and dynamically register a client
+/// (RFC 9728 / 8414 / 7591). Set `client_id`/`client_secret` to reuse a
+/// pre-registered client; set the `*_endpoint` fields to override discovery when
+/// the server exposes no metadata. Secrets: omit=keep, ""=clear, value=set.
+struct McpOAuthInput {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+    registration_endpoint: Option<String>,
+}
+
 /// Redacted auth view for a configured server.
 #[type_tag = "kind"]
 union McpAuthView {
     None(McpNoAuth),
     Bearer(McpBearerView),
+    OAuth(McpOAuthView),
     GithubApp(McpGithubAppAuth),
 }
 
-/// Auth input for an upsert. Add an `OAuth` variant in the OAuth phase.
+/// Auth input for an upsert.
 #[type_tag = "kind"]
 union McpAuthInput {
     None(McpNoAuth),
     Bearer(McpBearerInput),
+    OAuth(McpOAuthInput),
     GithubApp(McpGithubAppAuth),
 }
 
@@ -81,4 +105,10 @@ struct McpConnectResult {
 /// The configured servers, for the settings API.
 struct McpServerList {
     servers: Vec<McpServerView>,
+}
+
+/// The authorize URL to redirect the browser to, returned by `connect` for an
+/// `oauth` server after discovery + (if needed) dynamic client registration.
+struct McpAuthorizeUrl {
+    url: String,
 }

@@ -39,3 +39,10 @@ export function useTestMcpServer() {
     onSuccess: () => qc.invalidateQueries({ queryKey: mcpKeys.servers }),
   });
 }
+
+/** Start the OAuth flow for a server; returns the authorize URL to redirect to. */
+export function useConnectMcpServer() {
+  return useMutation({
+    mutationFn: (name: string) => api.mcp.connect(name),
+  });
+}
