@@ -77,7 +77,11 @@ pub async fn oauth_callback(
     let base = crate::http::request_base(&headers);
     let dest = match (q.code, q.state) {
         (Some(code), Some(st)) => {
-            match state.mcp.handle_oauth_callback(&name, &code, &st, &base).await {
+            match state
+                .mcp
+                .handle_oauth_callback(&name, &code, &st, &base)
+                .await
+            {
                 Ok(()) => format!("/settings?mcp_connected={}", urlencode(&name)),
                 Err(e) => format!("/settings?mcp_error={}", urlencode(&e)),
             }

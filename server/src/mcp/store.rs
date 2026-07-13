@@ -538,9 +538,14 @@ mod tests {
         assert!(st.access_token.is_none());
 
         // The flow writes tokens + endpoint metadata out of band.
-        s.save_oauth_client("o", "cid", Some("csec"), r#"{"token_endpoint":"https://as/token"}"#)
-            .await
-            .unwrap();
+        s.save_oauth_client(
+            "o",
+            "cid",
+            Some("csec"),
+            r#"{"token_endpoint":"https://as/token"}"#,
+        )
+        .await
+        .unwrap();
         s.save_oauth_tokens("o", "at", Some("rt"), Some("9999999999"))
             .await
             .unwrap();
@@ -554,7 +559,10 @@ mod tests {
         assert!(st.meta.as_deref().unwrap().contains("token_endpoint"));
 
         // A user re-upsert (omit secret → keep) must NOT wipe the stored tokens/meta.
-        let row = s.upsert(&oauth_input("o", Some("cid"), None)).await.unwrap();
+        let row = s
+            .upsert(&oauth_input("o", Some("cid"), None))
+            .await
+            .unwrap();
         let StoredAuth::Oauth(st) = &row.auth else {
             panic!()
         };

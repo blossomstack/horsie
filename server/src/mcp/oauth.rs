@@ -265,7 +265,10 @@ pub fn build_authorize_url(
 pub fn gen_pkce() -> Pkce {
     let verifier = random_b64url(2); // 2 × 16 random bytes = 32 → 43 chars
     let challenge = challenge_s256(&verifier);
-    Pkce { verifier, challenge }
+    Pkce {
+        verifier,
+        challenge,
+    }
 }
 
 /// A random opaque `state` (128 bits, url-safe).
