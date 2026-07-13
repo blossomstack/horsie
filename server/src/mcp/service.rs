@@ -113,6 +113,17 @@ impl McpService {
         match &row.auth {
             StoredAuth::None => Ok(None),
             StoredAuth::Bearer(tok) => Ok(tok.as_ref().map(|s| s.expose().to_string())),
+            StoredAuth::Oauth(st) => {
+                // Refresh-at-use is added in the OAuth-orchestration task; for now
+                // hand back the stored token, or fail if not yet authorized.
+                let access = st.access_token.as_ref().ok_or_else(|| {
+                    format!(
+                        "MCP server '{}' is not authorized — connect it in Settings",
+                        row.name
+                    )
+                })?;
+                Ok(Some(access.expose().to_string()))
+            }
             StoredAuth::GithubApp => {
                 let token = self.github.user_token().await?.ok_or_else(|| {
                     "GitHub is not connected — connect it in Settings to enable GitHub MCP"
@@ -129,6 +140,11 @@ fn server_view(row: &McpServerRow) -> McpServerView {
         StoredAuth::None => McpAuthView::None(McpNoAuth {}),
         StoredAuth::Bearer(tok) => McpAuthView::Bearer(McpBearerView {
             has_token: tok.is_some(),
+        }),
+        StoredAuth::Oauth(st) => McpAuthView::OAuth(horsie_models::mcp::McpOAuthView {
+            connected: st.access_token.is_some(),
+            client_id: st.client_id.clone(),
+            has_client_secret: st.client_secret.is_some(),
         }),
         StoredAuth::GithubApp => McpAuthView::GithubApp(McpGithubAppAuth {}),
     };
