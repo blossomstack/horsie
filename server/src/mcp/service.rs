@@ -1,14 +1,16 @@
 //! The MCP-server service: ties the SQLite store to the MCP client and exposes
 //! the operations the HTTP layer and the session agent need. Secrets stay
-//! inside — `bearer_for` resolves a token (stored, or minted from the GitHub App
-//! connection for `github_app`) only to build a client, never returning it.
+//! inside — `resolve_bearer` resolves a token (stored, or minted from the GitHub
+//! App connection for `github_app`) only to build a client, never returning it;
+//! a per-server `McpServerBearerProvider` force-refreshes it on a mid-turn 401.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use horsie_agentcore::Toolbox;
-use horsie_mcp_client::{HttpTransport, McpClient};
+use horsie_mcp_client::{BearerProvider, HttpTransport, McpClient, McpError};
 use horsie_models::mcp::{
     McpAuthView, McpBearerView, McpConnectResult, McpGithubAppAuth, McpNoAuth, McpServerInput,
     McpServerView,
@@ -269,67 +271,113 @@ impl McpService {
         (p.created_at.elapsed() < PENDING_TTL).then_some(p)
     }
 
-    /// Connect to a server and capture its tools.
+    /// Connect to a server and capture its tools. The transport's bearer comes
+    /// from a per-server [`McpServerBearerProvider`], so a token expiring
+    /// mid-turn is force-refreshed and the request retried on a 401.
     async fn build_toolbox(&self, row: &McpServerRow) -> Result<McpToolbox, String> {
-        let bearer = self.bearer_for(row).await?;
-        let transport = Arc::new(HttpTransport::new(row.url.clone(), bearer));
+        let provider = Arc::new(McpServerBearerProvider {
+            store: self.store.clone(),
+            oauth: self.oauth.clone(),
+            github: self.github.clone(),
+            server: row.name.clone(),
+            cached: tokio::sync::Mutex::new(None),
+        });
+        let transport = Arc::new(HttpTransport::new(row.url.clone(), provider));
         let client = Arc::new(McpClient::new(transport));
         McpToolbox::connect(row.name.clone(), client)
             .await
             .map_err(|e| e.to_string())
     }
+}
 
-    /// The `Authorization: Bearer` for a server, if any. `github_app` mints the
-    /// user token from the GitHub App connection.
-    async fn bearer_for(&self, row: &McpServerRow) -> Result<Option<String>, String> {
-        match &row.auth {
-            StoredAuth::None => Ok(None),
-            StoredAuth::Bearer(tok) => Ok(tok.as_ref().map(|s| s.expose().to_string())),
-            StoredAuth::Oauth(st) => {
-                let Some(access) = st.access_token.as_ref() else {
-                    return Err(format!(
-                        "MCP server '{}' is not authorized — connect it in Settings",
-                        row.name
-                    ));
-                };
-                if !needs_refresh(st.expires_at.as_deref()) {
-                    return Ok(Some(access.expose().to_string()));
-                }
-                // Expiring: refresh when possible, else hand back the current token.
-                let (Some(meta), Some(refresh), Some(client_id)) = (
-                    parse_meta(st.meta.as_deref()),
-                    st.refresh_token.as_ref(),
-                    st.client_id.as_ref().filter(|s| !s.is_empty()),
-                ) else {
-                    return Ok(Some(access.expose().to_string()));
-                };
-                let tokens = self
-                    .oauth
-                    .refresh(
-                        &meta.token_endpoint,
-                        client_id,
-                        st.client_secret.as_ref().map(|s| s.expose()),
-                        refresh.expose(),
-                    )
-                    .await?;
-                self.store
-                    .save_oauth_tokens(
-                        &row.name,
-                        &tokens.access_token,
-                        tokens.refresh_token.as_deref(),
-                        tokens.expires_at.as_deref(),
-                    )
-                    .await?;
-                Ok(Some(tokens.access_token))
+/// Resolve the `Authorization: Bearer` for a server row. `github_app` mints the
+/// user token from the GitHub App connection; `oauth` returns the stored access
+/// token, refreshing it when it is near expiry — or, when `force` (issued by the
+/// transport after a 401), unconditionally.
+async fn resolve_bearer(
+    store: &McpStore,
+    oauth: &McpOAuthClient,
+    github: &GithubService,
+    row: &McpServerRow,
+    force: bool,
+) -> Result<Option<String>, String> {
+    match &row.auth {
+        StoredAuth::None => Ok(None),
+        StoredAuth::Bearer(tok) => Ok(tok.as_ref().map(|s| s.expose().to_string())),
+        StoredAuth::Oauth(st) => {
+            let Some(access) = st.access_token.as_ref() else {
+                return Err(format!(
+                    "MCP server '{}' is not authorized — connect it in Settings",
+                    row.name
+                ));
+            };
+            if !force && !needs_refresh(st.expires_at.as_deref()) {
+                return Ok(Some(access.expose().to_string()));
             }
-            StoredAuth::GithubApp => {
-                let token = self.github.user_token().await?.ok_or_else(|| {
-                    "GitHub is not connected — connect it in Settings to enable GitHub MCP"
-                        .to_string()
-                })?;
-                Ok(Some(token))
-            }
+            // Refresh when possible, else hand back the current token.
+            let (Some(meta), Some(refresh), Some(client_id)) = (
+                parse_meta(st.meta.as_deref()),
+                st.refresh_token.as_ref(),
+                st.client_id.as_ref().filter(|s| !s.is_empty()),
+            ) else {
+                return Ok(Some(access.expose().to_string()));
+            };
+            let tokens = oauth
+                .refresh(
+                    &meta.token_endpoint,
+                    client_id,
+                    st.client_secret.as_ref().map(|s| s.expose()),
+                    refresh.expose(),
+                )
+                .await?;
+            store
+                .save_oauth_tokens(
+                    &row.name,
+                    &tokens.access_token,
+                    tokens.refresh_token.as_deref(),
+                    tokens.expires_at.as_deref(),
+                )
+                .await?;
+            Ok(Some(tokens.access_token))
         }
+        StoredAuth::GithubApp => {
+            let token = github.user_token(force).await?.ok_or_else(|| {
+                "GitHub is not connected — connect it in Settings to enable GitHub MCP".to_string()
+            })?;
+            Ok(Some(token))
+        }
+    }
+}
+
+/// A per-server [`BearerProvider`] for [`HttpTransport`]: resolves the token from
+/// the store once per turn (cached), and force-refreshes it after a 401.
+struct McpServerBearerProvider {
+    store: McpStore,
+    oauth: McpOAuthClient,
+    github: Arc<GithubService>,
+    server: String,
+    /// Outer `None` = not yet fetched; inner `Option<String>` = the resolved token.
+    cached: tokio::sync::Mutex<Option<Option<String>>>,
+}
+
+#[async_trait]
+impl BearerProvider for McpServerBearerProvider {
+    async fn bearer(&self, force: bool) -> Result<Option<String>, McpError> {
+        let mut cache = self.cached.lock().await;
+        if !force && let Some(tok) = cache.as_ref() {
+            return Ok(tok.clone());
+        }
+        let row = self
+            .store
+            .get(&self.server)
+            .await
+            .map_err(McpError::Transport)?
+            .ok_or_else(|| McpError::Transport(format!("unknown MCP server '{}'", self.server)))?;
+        let tok = resolve_bearer(&self.store, &self.oauth, &self.github, &row, force)
+            .await
+            .map_err(McpError::Transport)?;
+        *cache = Some(tok.clone());
+        Ok(tok)
     }
 }
 
@@ -553,6 +601,53 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("state"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_bearer_force_refreshes_even_when_not_near_expiry() {
+        let (svc, _t) = service().await;
+        let as_base = mock_as().await;
+        // An oauth row, already "connected", token valid far into the future.
+        svc.upsert(McpServerInput {
+            name: "o".into(),
+            url: "https://mcp.example/".into(),
+            auth: McpAuthInput::OAuth(horsie_models::mcp::McpOAuthInput {
+                client_id: Some("cid".into()),
+                client_secret: None,
+                authorization_endpoint: Some(format!("{as_base}/authorize")),
+                token_endpoint: Some(format!("{as_base}/token")),
+                registration_endpoint: None,
+            }),
+        })
+        .await
+        .unwrap();
+        svc.store
+            .save_oauth_tokens("o", "at-old", Some("rt-1"), Some("9999999999"))
+            .await
+            .unwrap();
+        let row = svc.store.get("o").await.unwrap().unwrap();
+
+        // force=false, not near expiry → keep the current token.
+        let keep = resolve_bearer(&svc.store, &svc.oauth, &svc.github, &row, false)
+            .await
+            .unwrap();
+        assert_eq!(keep.as_deref(), Some("at-old"));
+
+        // force=true → refresh via the mock AS even though it is not near expiry.
+        let fresh = resolve_bearer(&svc.store, &svc.oauth, &svc.github, &row, true)
+            .await
+            .unwrap();
+        assert_eq!(fresh.as_deref(), Some("at-2"));
+
+        // The refreshed token is persisted.
+        let row = svc.store.get("o").await.unwrap().unwrap();
+        match &row.auth {
+            StoredAuth::Oauth(st) => assert_eq!(
+                st.access_token.as_ref().map(|s| s.expose().to_string()).as_deref(),
+                Some("at-2")
+            ),
+            other => panic!("expected oauth, got {other:?}"),
+        }
     }
 
     #[tokio::test]

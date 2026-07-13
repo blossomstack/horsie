@@ -69,6 +69,7 @@ pub struct McpServerRow {
     pub last_error: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct McpStore {
     pool: SqlitePool,
 }
