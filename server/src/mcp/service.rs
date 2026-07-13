@@ -643,7 +643,10 @@ mod tests {
         let row = svc.store.get("o").await.unwrap().unwrap();
         match &row.auth {
             StoredAuth::Oauth(st) => assert_eq!(
-                st.access_token.as_ref().map(|s| s.expose().to_string()).as_deref(),
+                st.access_token
+                    .as_ref()
+                    .map(|s| s.expose().to_string())
+                    .as_deref(),
                 Some("at-2")
             ),
             other => panic!("expected oauth, got {other:?}"),

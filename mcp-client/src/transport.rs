@@ -280,7 +280,8 @@ mod tests {
         use axum::response::{IntoResponse, Response};
         use axum::{Json, Router, http::HeaderMap, http::StatusCode, routing::post};
         async fn handle(headers: HeaderMap, Json(req): Json<Value>) -> Response {
-            let ok = headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer new");
+            let ok =
+                headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer new");
             if !ok {
                 return (StatusCode::UNAUTHORIZED, "expired").into_response();
             }
