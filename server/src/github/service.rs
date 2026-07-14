@@ -189,15 +189,16 @@ impl GithubService {
     }
 
     /// The connected account's **user** OAuth token, refreshed if within the
-    /// skew window of expiry. `Ok(None)` when GitHub is not connected. Used as
+    /// skew window of expiry (or unconditionally when `force`, e.g. after a
+    /// remote 401). `Ok(None)` when GitHub is not connected. Used as
     /// the `Authorization: Bearer` for the GitHub remote MCP server. Unlike the
     /// per-repo installation token from `mint_token_for`, this is account-scoped
     /// (the documented Bearer shape for the remote endpoint).
-    pub async fn user_token(&self) -> Result<Option<String>, String> {
+    pub async fn user_token(&self, force: bool) -> Result<Option<String>, String> {
         let Some(creds) = self.store.credentials().await? else {
             return Ok(None);
         };
-        if !needs_refresh(creds.expires_at.as_deref()) {
+        if !force && !needs_refresh(creds.expires_at.as_deref()) {
             return Ok(Some(creds.access_token.expose().to_string()));
         }
         // Expiring: refresh when we can, else hand back the current token and

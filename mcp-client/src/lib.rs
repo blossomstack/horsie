@@ -14,5 +14,5 @@ mod types;
 
 pub use client::McpClient;
 pub use error::McpError;
-pub use transport::{HttpTransport, McpTransport};
+pub use transport::{BearerProvider, HttpTransport, McpTransport};
 pub use types::{McpCallOutcome, McpToolDef};

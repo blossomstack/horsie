@@ -43,6 +43,7 @@ pub struct Pkce {
     pub challenge: String,
 }
 
+#[derive(Clone)]
 pub struct McpOAuthClient {
     http: reqwest::Client,
 }

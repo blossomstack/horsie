@@ -1,6 +1,7 @@
 use crate::error::McpError;
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,38 +15,47 @@ pub trait McpTransport: Send + Sync {
     async fn notify(&self, method: &str, params: Value) -> Result<(), McpError>;
 }
 
+/// Supplies the `Authorization: Bearer` for an MCP connection, refreshably.
+/// `force = true` (issued by the transport after a 401) must attempt a fresh
+/// token, bypassing any cache. `Ok(None)` means "no auth" (public server).
+#[async_trait]
+pub trait BearerProvider: Send + Sync {
+    async fn bearer(&self, force: bool) -> Result<Option<String>, McpError>;
+}
+
 /// MCP Streamable HTTP transport: POSTs JSON-RPC to a single endpoint and reads
 /// back either a JSON body or an SSE stream, carrying the `Mcp-Session-Id`
-/// across requests. An optional bearer token is injected as `Authorization`.
+/// across requests. The bearer comes from a [`BearerProvider`], so an expired
+/// token is force-refreshed and the request retried once on a `401`.
 pub struct HttpTransport {
     endpoint: String,
-    bearer: Option<String>,
+    auth: Arc<dyn BearerProvider>,
     http: reqwest::Client,
     next_id: AtomicU64,
     session_id: Mutex<Option<String>>,
 }
 
 impl HttpTransport {
-    pub fn new(endpoint: String, bearer: Option<String>) -> Self {
+    pub fn new(endpoint: String, auth: Arc<dyn BearerProvider>) -> Self {
         Self {
             endpoint,
-            bearer,
+            auth,
             http: reqwest::Client::new(),
             next_id: AtomicU64::new(1),
             session_id: Mutex::new(None),
         }
     }
 
-    /// Build a POST for `body`, adding auth and session headers. The session-id
-    /// lock is released before the request is awaited.
-    fn build(&self, body: &Value) -> reqwest::RequestBuilder {
+    /// Build a POST for `body` with the given bearer (if any) and the session
+    /// header. The session-id lock is released before the request is awaited.
+    fn build(&self, body: &Value, token: Option<&str>) -> reqwest::RequestBuilder {
         let mut req = self
             .http
             .post(&self.endpoint)
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .json(body);
-        if let Some(token) = &self.bearer {
+        if let Some(token) = token {
             req = req.bearer_auth(token);
         }
         let sid = self.session_id.lock().ok().and_then(|g| g.clone());
@@ -71,12 +81,28 @@ impl McpTransport for HttpTransport {
     async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let resp = self
-            .build(&body)
+
+        let token = self.auth.bearer(false).await?;
+        let mut resp = self
+            .build(&body, token.as_deref())
             .send()
             .await
             .map_err(|e| McpError::Transport(e.to_string()))?;
         self.capture_session(&resp);
+
+        // On 401, force one token refresh and retry once (only if it changed).
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let fresh = self.auth.bearer(true).await?;
+            if fresh.is_some() && fresh != token {
+                resp = self
+                    .build(&body, fresh.as_deref())
+                    .send()
+                    .await
+                    .map_err(|e| McpError::Transport(e.to_string()))?;
+                self.capture_session(&resp);
+            }
+        }
+
         let status = resp.status();
         let ctype = resp
             .headers()
@@ -101,8 +127,9 @@ impl McpTransport for HttpTransport {
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
         let body = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        let token = self.auth.bearer(false).await?;
         let resp = self
-            .build(&body)
+            .build(&body, token.as_deref())
             .send()
             .await
             .map_err(|e| McpError::Transport(e.to_string()))?;
@@ -214,5 +241,76 @@ mod tests {
             }
             other => panic!("expected rpc error, got {other:?}"),
         }
+    }
+
+    use std::sync::atomic::AtomicBool;
+
+    /// A provider that serves "old" until it sees a `force` call, then "new".
+    struct SwitchingProvider {
+        forced: AtomicBool,
+    }
+
+    #[async_trait]
+    impl BearerProvider for SwitchingProvider {
+        async fn bearer(&self, force: bool) -> Result<Option<String>, McpError> {
+            if force {
+                self.forced.store(true, Ordering::SeqCst);
+            }
+            let tok = if self.forced.load(Ordering::SeqCst) {
+                "new"
+            } else {
+                "old"
+            };
+            Ok(Some(tok.to_string()))
+        }
+    }
+
+    /// A provider whose token never changes, even on force.
+    struct StaticProvider;
+
+    #[async_trait]
+    impl BearerProvider for StaticProvider {
+        async fn bearer(&self, _force: bool) -> Result<Option<String>, McpError> {
+            Ok(Some("old".to_string()))
+        }
+    }
+
+    /// Mock MCP server: 401 unless `Authorization: Bearer new`, else a JSON-RPC ok.
+    async fn mock_needs_new_token() -> String {
+        use axum::response::{IntoResponse, Response};
+        use axum::{Json, Router, http::HeaderMap, http::StatusCode, routing::post};
+        async fn handle(headers: HeaderMap, Json(req): Json<Value>) -> Response {
+            let ok =
+                headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer new");
+            if !ok {
+                return (StatusCode::UNAUTHORIZED, "expired").into_response();
+            }
+            let id = req.get("id").cloned().unwrap_or(json!(1));
+            Json(json!({ "jsonrpc": "2.0", "id": id, "result": { "ok": true } })).into_response()
+        }
+        let app = Router::new().route("/", post(handle));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn request_refreshes_and_retries_on_401() {
+        let url = mock_needs_new_token().await;
+        let provider = Arc::new(SwitchingProvider {
+            forced: AtomicBool::new(false),
+        });
+        let t = HttpTransport::new(url, provider);
+        let v = t.request("tools/call", json!({})).await.unwrap();
+        assert_eq!(v["ok"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn request_propagates_401_when_token_unchanged() {
+        let url = mock_needs_new_token().await;
+        let t = HttpTransport::new(url, Arc::new(StaticProvider));
+        let err = t.request("tools/call", json!({})).await.unwrap_err();
+        assert!(matches!(err, McpError::Transport(_)));
     }
 }
