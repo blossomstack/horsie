@@ -10,7 +10,9 @@
 use crate::config::ConfigStore;
 use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
 use crate::velos::VelosClient;
-use crate::vendor::{LocalProcessVendor, RuntimeVendor, VelosVendor, VelosVendorSettings};
+use crate::vendor::{
+    LocalProcessVendor, RuntimeVendor, VelosMutableSettings, VelosVendor, VelosVendorSettings,
+};
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret};
 use horsie_anthropic::AnthropicProvider;
@@ -65,6 +67,12 @@ pub struct DbConfigStore {
     /// Live runtime vendors, kept in sync with the DB by `update()`'s
     /// reconciliation so most vendor edits apply without a restart.
     vendors: SharedVendors,
+    /// Concrete handles for vendor kinds that support live reconfigure
+    /// (currently only `velos`), keyed by name — lets `update()` call
+    /// `.reconfigure()` on the right concrete type without downcasting the
+    /// generic `vendors` map. Wired into `update()`'s reconciliation next.
+    #[allow(dead_code)]
+    velos_instances: RwLock<HashMap<String, Arc<VelosVendor>>>,
     /// Set once a vendor is edited — those changes need a restart, so the view
     /// reports `restart_required` until then.
     vendors_dirty: AtomicBool,
@@ -83,7 +91,7 @@ impl DbConfigStore {
             Arc::new(RwLock::new(build_registry(&provs, &mods)?));
 
         let vendor_rows = read_vendors(&pool).await.map_err(|e| e.to_string())?;
-        let vendors = build_vendors(
+        let (vendors, velos_instances) = build_vendors(
             &vendor_rows,
             deps.runtime_bin,
             deps.workspace_root,
@@ -108,6 +116,7 @@ impl DbConfigStore {
             registry: registry.clone(),
             default_vendor: RwLock::new(default_vendor),
             vendors: vendors.clone(),
+            velos_instances: RwLock::new(velos_instances),
             vendors_dirty: AtomicBool::new(false),
             info: deps.info,
         });
@@ -454,15 +463,49 @@ fn build_anthropic(
     Ok(Arc::new(p))
 }
 
+/// A freshly built vendor, tagged so the caller can register it under both
+/// the generic `vendors` map and (for kinds that support live reconfigure) a
+/// concrete-typed side table — without ever downcasting a `dyn RuntimeVendor`.
+enum BuiltVendor {
+    Velos(Arc<VelosVendor>),
+}
+
+impl BuiltVendor {
+    fn as_dyn(&self) -> Arc<dyn RuntimeVendor> {
+        match self {
+            BuiltVendor::Velos(v) => v.clone(),
+        }
+    }
+}
+
+/// Build one row's vendor instance, kind-dispatched. Used both at boot
+/// (`build_vendors`'s loop) and per-row during a live config update.
+async fn build_one_vendor(row: &VendorRow) -> Result<BuiltVendor, String> {
+    match row.kind.as_str() {
+        "velos" => {
+            let vc = serde_json::from_str::<VelosConfig>(&row.config)
+                .map_err(|e| format!("invalid config: {e}"))?;
+            let vendor = build_velos_vendor(&vc).await?;
+            Ok(BuiltVendor::Velos(Arc::new(vendor)))
+        }
+        other => Err(format!("unknown kind '{other}'")),
+    }
+}
+
 /// Build the vendor set: `local` always, plus one per configured row. A vendor
-/// that fails to start is logged and left out (reported inactive), never fatal.
+/// that fails to build is logged and left out (reported inactive), never
+/// fatal — matches `reconcile_vendors`'s per-update behavior.
 async fn build_vendors(
     rows: &[VendorRow],
     runtime_bin: PathBuf,
     workspace_root: PathBuf,
     public_http_base: Option<String>,
-) -> HashMap<String, Arc<dyn RuntimeVendor>> {
+) -> (
+    HashMap<String, Arc<dyn RuntimeVendor>>,
+    HashMap<String, Arc<VelosVendor>>,
+) {
     let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
+    let mut velos_instances: HashMap<String, Arc<VelosVendor>> = HashMap::new();
     vendors.insert(
         "local".into(),
         Arc::new(LocalProcessVendor::new(
@@ -472,27 +515,17 @@ async fn build_vendors(
         )),
     );
     for r in rows {
-        match r.kind.as_str() {
-            "velos" => match serde_json::from_str::<VelosConfig>(&r.config) {
-                Ok(vc) => match build_velos_vendor(&vc).await {
-                    Ok(v) => {
-                        println!(
-                            "velos vendor '{}' enabled (server {})",
-                            r.name, vc.server_url
-                        );
-                        vendors.insert(r.name.clone(), Arc::new(v));
-                    }
-                    Err(e) => eprintln!("warning: velos vendor '{}' failed to start ({e})", r.name),
-                },
-                Err(e) => eprintln!(
-                    "warning: velos vendor '{}' has invalid config ({e})",
-                    r.name
-                ),
-            },
-            other => eprintln!("warning: vendor '{}' has unknown kind '{other}'", r.name),
+        match build_one_vendor(r).await {
+            Ok(built) => {
+                println!("vendor '{}' ({}) enabled", r.name, r.kind);
+                let BuiltVendor::Velos(v) = &built;
+                velos_instances.insert(r.name.clone(), v.clone());
+                vendors.insert(r.name.clone(), built.as_dyn());
+            }
+            Err(e) => eprintln!("warning: vendor '{}' failed to start ({e})", r.name),
         }
     }
-    vendors
+    (vendors, velos_instances)
 }
 
 async fn build_velos_vendor(vc: &VelosConfig) -> Result<VelosVendor, String> {
@@ -517,6 +550,26 @@ async fn build_velos_vendor(vc: &VelosConfig) -> Result<VelosVendor, String> {
     VelosVendor::bind(Arc::new(client), settings)
         .await
         .map_err(|e| format!("velos vendor: {e}"))
+}
+
+/// Build a fresh `VelosMutableSettings` from a row's config — used by
+/// `reconcile_vendors` to `reconfigure()` an already-bound vendor whose
+/// listener-affecting fields didn't change. Wired in next.
+#[allow(dead_code)]
+fn velos_mutable_settings(vc: &VelosConfig) -> Result<VelosMutableSettings, String> {
+    let token = resolve_velos_token(vc)?;
+    let client =
+        VelosClient::new(&vc.server_url, token).map_err(|e| format!("velos client: {e}"))?;
+    Ok(VelosMutableSettings {
+        api: Arc::new(client),
+        image: vc.image.clone(),
+        runtime_bin: vc.runtime_bin.clone(),
+        workspace_root: vc.workspace_root.clone(),
+        cpu: vc.cpu,
+        memory_bytes: vc.memory_mib.saturating_mul(1024 * 1024),
+        connect_timeout: Duration::from_secs(vc.connect_timeout_secs),
+        public_http_base: vc.http_port.map(|p| format!("http://{}:{p}", vc.advertise_host)),
+    })
 }
 
 fn resolve_velos_token(vc: &VelosConfig) -> Result<Option<Secret>, String> {
@@ -975,5 +1028,36 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("cluster-a"));
         assert_eq!(o.store.default_vendor(), "local");
+    }
+
+    #[tokio::test]
+    async fn build_one_vendor_reports_unknown_kind() {
+        let row = VendorRow {
+            name: "x".into(),
+            kind: "bogus".into(),
+            config: "{}".into(),
+        };
+        let err = match build_one_vendor(&row).await {
+            Err(e) => e,
+            Ok(_) => panic!("unknown kind must be rejected"),
+        };
+        assert!(err.contains("bogus"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn build_one_vendor_velos_returns_arc_dyn_runtime_vendor() {
+        let row = VendorRow {
+            name: "cluster-a".into(),
+            kind: "velos".into(),
+            config: serde_json::json!({
+                "server_url": "http://velos:8080",
+                "image": "img",
+                "advertise_host": "10.0.0.5",
+                "listen": "127.0.0.1:0",
+            })
+            .to_string(),
+        };
+        let built = build_one_vendor(&row).await.expect("velos row builds");
+        assert_eq!(built.as_dyn().name(), "velos");
     }
 }
