@@ -70,12 +70,16 @@ pub struct DbConfigStore {
     /// Concrete handles for vendor kinds that support live reconfigure
     /// (currently only `velos`), keyed by name — lets `update()` call
     /// `.reconfigure()` on the right concrete type without downcasting the
-    /// generic `vendors` map. Wired into `update()`'s reconciliation next.
-    #[allow(dead_code)]
+    /// generic `vendors` map.
     velos_instances: RwLock<HashMap<String, Arc<VelosVendor>>>,
-    /// Set once a vendor is edited — those changes need a restart, so the view
-    /// reports `restart_required` until then.
-    vendors_dirty: AtomicBool,
+    /// Last build/reconfigure failure per vendor name, surfaced on
+    /// `VendorView.error`. Cleared when that vendor next builds or
+    /// reconfigures successfully.
+    vendor_errors: RwLock<HashMap<String, String>>,
+    /// Set once an *active* vendor's listener-affecting fields (`listen`/
+    /// `advertise_host`/`server_url`) change — that one case still needs a
+    /// process restart; never reset within a process's lifetime.
+    restart_required: AtomicBool,
     info: ServerInfo,
 }
 
@@ -117,7 +121,8 @@ impl DbConfigStore {
             default_vendor: RwLock::new(default_vendor),
             vendors: vendors.clone(),
             velos_instances: RwLock::new(velos_instances),
-            vendors_dirty: AtomicBool::new(false),
+            vendor_errors: RwLock::new(HashMap::new()),
+            restart_required: AtomicBool::new(false),
             info: deps.info,
         });
         Ok(OpenedConfig {
@@ -141,18 +146,20 @@ impl DbConfigStore {
             vendors: self.vendors_view(&default_vendor, &vendor_rows),
             default_vendor,
             info: self.info.clone(),
-            restart_required: self.vendors_dirty.load(Ordering::Relaxed),
+            restart_required: self.restart_required.load(Ordering::Relaxed),
         })
     }
 
     fn vendors_view(&self, default_vendor: &str, rows: &[VendorRow]) -> Vec<VendorView> {
         let live = self.vendors.read().unwrap_or_else(|e| e.into_inner());
+        let errors = self.vendor_errors.read().unwrap_or_else(|e| e.into_inner());
         let active = |name: &str| live.contains_key(name);
         let mut out = vec![VendorView {
             name: "local".into(),
             active: active("local"),
             is_default: default_vendor == "local",
             config: None,
+            error: None,
         }];
         for r in rows {
             let config = match r.kind.as_str() {
@@ -166,10 +173,139 @@ impl DbConfigStore {
                 active: active(&r.name),
                 is_default: default_vendor == r.name,
                 config,
+                error: errors.get(&r.name).cloned(),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+
+    /// After vendor rows are persisted, bring the live vendor map in line with
+    /// the new DB state: build newly-added or previously-inactive rows,
+    /// live-reconfigure an active `velos` vendor whose listener-affecting
+    /// fields are unchanged, leave an active vendor's old instance running
+    /// (flagged) when those fields did change, and drop rows that were
+    /// removed. Never fails the caller — outcomes land in `vendor_errors` /
+    /// `restart_required` for the view to report.
+    async fn reconcile_vendors(&self, before: &[VendorRow], after: &[VendorRow]) {
+        let before_by_name: HashMap<&str, &VendorRow> =
+            before.iter().map(|r| (r.name.as_str(), r)).collect();
+        let after_names: HashSet<&str> = after.iter().map(|r| r.name.as_str()).collect();
+
+        for name in before_by_name.keys().filter(|n| !after_names.contains(*n)) {
+            self.vendors
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(*name);
+            self.velos_instances
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(*name);
+            self.vendor_errors
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(*name);
+        }
+
+        for row in after {
+            let was_active = self
+                .vendors
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&row.name);
+            if was_active
+                && let Some(prior) = before_by_name.get(row.name.as_str()).copied()
+                && prior.kind == row.kind
+            {
+                self.apply_active_vendor_edit(row, prior).await;
+            } else {
+                self.activate_vendor(row).await;
+            }
+        }
+    }
+
+    /// A previously-active vendor of the same kind was edited: reconfigure it
+    /// in place if the listener-affecting fields (`listen`/`advertise_host`/
+    /// `server_url`) didn't change, else leave the running instance untouched
+    /// and flag that vendor as needing a restart.
+    async fn apply_active_vendor_edit(&self, row: &VendorRow, prior: &VendorRow) {
+        if row.kind != "velos" {
+            return;
+        }
+        let parsed = (
+            serde_json::from_str::<VelosConfig>(&prior.config),
+            serde_json::from_str::<VelosConfig>(&row.config),
+        );
+        let (Ok(old_vc), Ok(new_vc)) = parsed else {
+            self.vendor_errors
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(row.name.clone(), "stored config no longer parses".to_string());
+            return;
+        };
+        let listener_unchanged = old_vc.listen == new_vc.listen
+            && old_vc.advertise_host == new_vc.advertise_host
+            && old_vc.server_url == new_vc.server_url;
+        if listener_unchanged {
+            match velos_mutable_settings(&new_vc) {
+                Ok(settings) => {
+                    let handle = self
+                        .velos_instances
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&row.name)
+                        .cloned();
+                    if let Some(handle) = handle {
+                        handle.reconfigure(settings);
+                        self.vendor_errors
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&row.name);
+                        return;
+                    }
+                }
+                Err(e) => {
+                    self.vendor_errors
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(row.name.clone(), e);
+                    return;
+                }
+            }
+        }
+        self.restart_required.store(true, Ordering::Relaxed);
+        self.vendor_errors.write().unwrap_or_else(|e| e.into_inner()).insert(
+            row.name.clone(),
+            "listen/advertise_host/server_url changed — restart the server to apply".to_string(),
+        );
+    }
+
+    /// Bring a row online: a brand-new vendor, a previously-inactive one, or a
+    /// kind change (which can't reuse an old listener, so it's rebuilt fresh).
+    async fn activate_vendor(&self, row: &VendorRow) {
+        match build_one_vendor(row).await {
+            Ok(built) => {
+                let BuiltVendor::Velos(v) = &built;
+                self.velos_instances
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(row.name.clone(), v.clone());
+                self.vendors
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(row.name.clone(), built.as_dyn());
+                self.vendor_errors
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&row.name);
+            }
+            Err(e) => {
+                self.vendor_errors
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(row.name.clone(), e);
+            }
+        }
     }
 }
 
@@ -251,6 +387,7 @@ impl ConfigStore for DbConfigStore {
             }
         }
 
+        let mut vendor_rows_before: Option<Vec<VendorRow>> = None;
         if let Some(vendors) = &update.vendors {
             let existing = read_vendors(&mut *tx).await.map_err(|e| e.to_string())?;
             let keep: HashMap<&str, &str> = existing
@@ -282,6 +419,7 @@ impl ConfigStore for DbConfigStore {
                     .await
                     .map_err(|e| e.to_string())?;
             }
+            vendor_rows_before = Some(existing);
         }
 
         if let Some(dv) = &update.default_vendor {
@@ -324,8 +462,9 @@ impl ConfigStore for DbConfigStore {
                 .write()
                 .unwrap_or_else(|e| e.into_inner()) = dv.clone();
         }
-        if update.vendors.is_some() {
-            self.vendors_dirty.store(true, Ordering::Relaxed);
+        if let Some(before) = vendor_rows_before {
+            let after = read_vendors(&self.pool).await.map_err(|e| e.to_string())?;
+            self.reconcile_vendors(&before, &after).await;
         }
 
         self.build_view().await
@@ -554,8 +693,7 @@ async fn build_velos_vendor(vc: &VelosConfig) -> Result<VelosVendor, String> {
 
 /// Build a fresh `VelosMutableSettings` from a row's config — used by
 /// `reconcile_vendors` to `reconfigure()` an already-bound vendor whose
-/// listener-affecting fields didn't change. Wired in next.
-#[allow(dead_code)]
+/// listener-affecting fields didn't change.
 fn velos_mutable_settings(vc: &VelosConfig) -> Result<VelosMutableSettings, String> {
     let token = resolve_velos_token(vc)?;
     let client =
@@ -914,8 +1052,32 @@ mod tests {
         assert!(o.registry.read().unwrap().contains_key("m"));
     }
 
+    fn velos_input(
+        image: &str,
+        listen: &str,
+        http_port: Option<u32>,
+        token: Option<&str>,
+    ) -> VendorInput {
+        VendorInput {
+            name: "cluster-a".into(),
+            config: VendorConfigInput::Velos(VelosInput {
+                server_url: "http://velos:8080".into(),
+                image: image.into(),
+                advertise_host: "10.0.0.5".into(),
+                token: token.map(str::to_string),
+                runtime_bin: None,
+                workspace_root: None,
+                listen: Some(listen.into()),
+                cpu: None,
+                memory_mib: None,
+                connect_timeout_secs: None,
+                http_port,
+            }),
+        }
+    }
+
     #[tokio::test]
-    async fn velos_vendor_persists_redacted_and_flags_restart() {
+    async fn new_vendor_activates_live_without_restart() {
         let dir = tempfile::tempdir().unwrap();
         let o = open(dir.path()).await;
         let view = o
@@ -923,33 +1085,19 @@ mod tests {
             .update(SettingsUpdate {
                 providers: None,
                 models: None,
-                vendors: Some(vec![VendorInput {
-                    name: "cluster-a".into(),
-                    config: VendorConfigInput::Velos(VelosInput {
-                        server_url: "http://velos:8080".into(),
-                        image: "img".into(),
-                        advertise_host: "10.0.0.5".into(),
-                        token: Some("secret".into()),
-                        runtime_bin: None,
-                        workspace_root: None,
-                        listen: None,
-                        cpu: None,
-                        memory_mib: None,
-                        connect_timeout_secs: None,
-                        http_port: None,
-                    }),
-                }]),
+                vendors: Some(vec![velos_input("img", "127.0.0.1:0", None, Some("secret"))]),
                 default_vendor: None,
             })
             .await
             .expect("velos update ok");
-        assert!(view.restart_required);
+        assert!(!view.restart_required);
         let v = view
             .vendors
             .iter()
             .find(|v| v.name == "cluster-a")
-            .expect("vendor present");
-        assert!(!v.active); // built at startup only
+            .expect("present");
+        assert!(v.active, "a valid new vendor activates immediately");
+        assert!(v.error.is_none());
         match &v.config {
             Some(VendorConfigView::Velos(velos)) => {
                 assert!(velos.has_inline_token);
@@ -957,6 +1105,189 @@ mod tests {
             }
             None => panic!("expected velos config"),
         }
+        assert!(o.vendors.read().unwrap().contains_key("cluster-a"));
+    }
+
+    #[tokio::test]
+    async fn not_yet_active_vendor_build_failure_reports_error_then_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+
+        // Occupy a port so the vendor's listener bind fails deterministically
+        // (a real "bad token" only surfaces on the vendor's first actual velos
+        // API call, not at build time — an unbindable listen is the reliable,
+        // portable way to force a build-time failure here).
+        let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = blocker.local_addr().unwrap().to_string();
+
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![velos_input("img", &busy, None, Some("secret"))]),
+                default_vendor: None,
+            })
+            .await
+            .expect("persists even though the vendor fails to build");
+        let v = view
+            .vendors
+            .iter()
+            .find(|v| v.name == "cluster-a")
+            .expect("present");
+        assert!(!v.active);
+        assert!(v.error.is_some());
+        assert!(!view.restart_required);
+
+        drop(blocker);
+        let view2 = o
+            .store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![velos_input("img", "127.0.0.1:0", None, None)]),
+                default_vendor: None,
+            })
+            .await
+            .expect("second update ok");
+        let v2 = view2
+            .vendors
+            .iter()
+            .find(|v| v.name == "cluster-a")
+            .expect("present");
+        assert!(v2.active);
+        assert!(v2.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn active_vendor_non_listener_edit_applies_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        o.store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![velos_input(
+                    "img-v1",
+                    "127.0.0.1:0",
+                    None,
+                    Some("secret"),
+                )]),
+                default_vendor: None,
+            })
+            .await
+            .unwrap();
+        assert!(o.vendors.read().unwrap().contains_key("cluster-a"));
+
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![velos_input(
+                    "img-v2",
+                    "127.0.0.1:0",
+                    Some(9000),
+                    None,
+                )]),
+                default_vendor: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(!view.restart_required);
+        let handle = o
+            .store
+            .velos_instances
+            .read()
+            .unwrap()
+            .get("cluster-a")
+            .cloned()
+            .expect("still the live instance");
+        let settings = handle.settings();
+        assert_eq!(settings.image, "img-v2");
+        assert_eq!(
+            settings.public_http_base.as_deref(),
+            Some("http://10.0.0.5:9000")
+        );
+    }
+
+    #[tokio::test]
+    async fn active_vendor_listener_edit_requires_restart_and_keeps_old_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        o.store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![velos_input("img", "127.0.0.1:0", None, Some("secret"))]),
+                default_vendor: None,
+            })
+            .await
+            .unwrap();
+        let before = o
+            .store
+            .velos_instances
+            .read()
+            .unwrap()
+            .get("cluster-a")
+            .cloned()
+            .unwrap();
+
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![velos_input("img", "127.0.0.1:4551", None, None)]),
+                default_vendor: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(view.restart_required);
+        let v = view.vendors.iter().find(|v| v.name == "cluster-a").unwrap();
+        assert!(v.active, "the old instance keeps serving");
+        assert!(v.error.as_deref().unwrap_or_default().contains("restart"));
+        let after = o
+            .store
+            .velos_instances
+            .read()
+            .unwrap()
+            .get("cluster-a")
+            .cloned()
+            .unwrap();
+        assert!(Arc::ptr_eq(&before, &after), "no rebuild happened");
+    }
+
+    #[tokio::test]
+    async fn removed_vendor_row_drops_from_live_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        o.store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![velos_input("img", "127.0.0.1:0", None, Some("secret"))]),
+                default_vendor: None,
+            })
+            .await
+            .unwrap();
+        assert!(o.vendors.read().unwrap().contains_key("cluster-a"));
+
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![]),
+                default_vendor: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(!o.vendors.read().unwrap().contains_key("cluster-a"));
+        assert!(view.vendors.iter().all(|v| v.name != "cluster-a"));
     }
 
     #[tokio::test]
