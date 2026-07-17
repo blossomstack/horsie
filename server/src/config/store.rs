@@ -199,13 +199,11 @@ impl ConfigStore for DbConfigStore {
                 }
                 let api_key = resolve_secret(&p.api_key, keep.get(name).copied());
                 sqlx::query(
-                    "INSERT INTO providers (name, kind, base_url, api_key_env, api_key) \
-                     VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO providers (name, kind, base_url, api_key) VALUES (?, ?, ?, ?)",
                 )
                 .bind(name)
                 .bind(&p.kind)
                 .bind(trimmed(&p.base_url))
-                .bind(trimmed(&p.api_key_env))
                 .bind(api_key)
                 .execute(&mut *tx)
                 .await
@@ -329,7 +327,6 @@ struct ProviderRow {
     name: String,
     kind: String,
     base_url: Option<String>,
-    api_key_env: Option<String>,
     api_key: Option<String>,
 }
 
@@ -420,7 +417,6 @@ fn build_registry(providers: &[ProviderRow], models: &[ModelRow]) -> Result<Regi
             build_anthropic(
                 p.base_url.as_deref(),
                 p.api_key.as_deref(),
-                p.api_key_env.as_deref(),
                 &m.model_id,
                 max_tokens,
             )?,
@@ -432,22 +428,13 @@ fn build_registry(providers: &[ProviderRow], models: &[ModelRow]) -> Result<Regi
 fn build_anthropic(
     base_url: Option<&str>,
     api_key: Option<&str>,
-    api_key_env: Option<&str>,
     model_id: &str,
     max_tokens: Option<u32>,
 ) -> Result<Arc<dyn LlmProvider>, String> {
-    let key: Option<Secret> = match (api_key, api_key_env) {
-        (Some(k), _) if !k.is_empty() => Some(Secret::from(k)),
-        (Some(_), _) => return Err("inline api_key is empty".into()),
-        (None, Some(var)) => {
-            let v = std::env::var(var)
-                .map_err(|_| format!("env var '{var}' for provider is not set"))?;
-            if v.is_empty() {
-                return Err(format!("env var '{var}' for provider is empty"));
-            }
-            Some(Secret::from(v))
-        }
-        (None, None) => None,
+    let key: Option<Secret> = match api_key {
+        Some(k) if !k.is_empty() => Some(Secret::from(k)),
+        Some(_) => return Err("inline api_key is empty".into()),
+        None => None,
     };
     let mut p = match key {
         Some(k) => AnthropicProvider::with_api_key(k).map_err(|e| e.to_string())?,
@@ -636,7 +623,7 @@ fn provider_view(r: &ProviderRow) -> ProviderView {
         name: r.name.clone(),
         kind: r.kind.clone(),
         base_url: r.base_url.clone(),
-        api_key_env: r.api_key_env.clone(),
+        api_key_env: None, // dropped in a later task's wire-schema change
         has_inline_key: r.api_key.as_deref().is_some_and(|s| !s.is_empty()),
     }
 }
@@ -687,18 +674,15 @@ async fn read_providers<'e, E>(ex: E) -> Result<Vec<ProviderRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let rows = sqlx::query(
-        "SELECT name, kind, base_url, api_key_env, api_key FROM providers ORDER BY name",
-    )
-    .fetch_all(ex)
-    .await?;
+    let rows = sqlx::query("SELECT name, kind, base_url, api_key FROM providers ORDER BY name")
+        .fetch_all(ex)
+        .await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ProviderRow {
             name: r.try_get("name")?,
             kind: r.try_get("kind")?,
             base_url: r.try_get("base_url")?,
-            api_key_env: r.try_get("api_key_env")?,
             api_key: r.try_get("api_key")?,
         });
     }
@@ -930,6 +914,59 @@ mod tests {
             }
             None => panic!("expected velos config"),
         }
+    }
+
+    #[tokio::test]
+    async fn migration_0006_drops_api_key_env_and_preserves_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}/old.db", dir.path().display());
+        let opts = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(opts).await.unwrap();
+
+        // Mirror the pre-0006 `providers` shape (0001_init.sql).
+        sqlx::query(
+            "CREATE TABLE providers (
+                name TEXT PRIMARY KEY, kind TEXT NOT NULL, base_url TEXT,
+                api_key_env TEXT, api_key TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO providers (name, kind, base_url, api_key_env, api_key) \
+             VALUES ('p', 'anthropic', NULL, 'OLD_ENV_VAR', 'sk-inline')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(include_str!("../../migrations/0006_drop_api_key_env.sql"))
+            .execute(&pool)
+            .await
+            .expect("DROP COLUMN should succeed on the bundled sqlite");
+
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('providers')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.try_get::<String, _>("name").unwrap())
+            .collect();
+        assert!(!cols.iter().any(|c| c == "api_key_env"));
+
+        let row = sqlx::query("SELECT name, api_key FROM providers WHERE name = 'p'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.try_get::<String, _>("name").unwrap(), "p");
+        assert_eq!(
+            row.try_get::<Option<String>, _>("api_key")
+                .unwrap()
+                .as_deref(),
+            Some("sk-inline")
+        );
     }
 
     #[tokio::test]
