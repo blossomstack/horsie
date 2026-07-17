@@ -1,7 +1,10 @@
 //! SQLite-backed [`ConfigStore`]. Owns the settings database, builds the live
 //! provider registry and the runtime vendors from it, and applies edits:
-//! provider/model/default-vendor changes swap the live registry (next turn sees
-//! them); vendor changes persist and activate on the next restart.
+//! provider/model/default-vendor changes swap the live registry (next turn
+//! sees them); vendor changes reconcile the live vendor map immediately in
+//! the common case (new, previously-inactive, or an active vendor's
+//! non-listener settings) — only a change to an already-active vendor's
+//! `listen`/`advertise_host`/`server_url` still needs a restart.
 //!
 //! Vendors are generic — a `vendors(name, kind, config)` table plus a
 //! kind-tagged config union — so a new vendor kind is a new match arm, not a
@@ -240,7 +243,10 @@ impl DbConfigStore {
             self.vendor_errors
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(row.name.clone(), "stored config no longer parses".to_string());
+                .insert(
+                    row.name.clone(),
+                    "stored config no longer parses".to_string(),
+                );
             return;
         };
         let listener_unchanged = old_vc.listen == new_vc.listen
@@ -274,10 +280,14 @@ impl DbConfigStore {
             }
         }
         self.restart_required.store(true, Ordering::Relaxed);
-        self.vendor_errors.write().unwrap_or_else(|e| e.into_inner()).insert(
-            row.name.clone(),
-            "listen/advertise_host/server_url changed — restart the server to apply".to_string(),
-        );
+        self.vendor_errors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                row.name.clone(),
+                "listen/advertise_host/server_url changed — restart the server to apply"
+                    .to_string(),
+            );
     }
 
     /// Bring a row online: a brand-new vendor, a previously-inactive one, or a
@@ -706,7 +716,9 @@ fn velos_mutable_settings(vc: &VelosConfig) -> Result<VelosMutableSettings, Stri
         cpu: vc.cpu,
         memory_bytes: vc.memory_mib.saturating_mul(1024 * 1024),
         connect_timeout: Duration::from_secs(vc.connect_timeout_secs),
-        public_http_base: vc.http_port.map(|p| format!("http://{}:{p}", vc.advertise_host)),
+        public_http_base: vc
+            .http_port
+            .map(|p| format!("http://{}:{p}", vc.advertise_host)),
     })
 }
 
@@ -1085,7 +1097,12 @@ mod tests {
             .update(SettingsUpdate {
                 providers: None,
                 models: None,
-                vendors: Some(vec![velos_input("img", "127.0.0.1:0", None, Some("secret"))]),
+                vendors: Some(vec![velos_input(
+                    "img",
+                    "127.0.0.1:0",
+                    None,
+                    Some("secret"),
+                )]),
                 default_vendor: None,
             })
             .await
@@ -1184,12 +1201,7 @@ mod tests {
             .update(SettingsUpdate {
                 providers: None,
                 models: None,
-                vendors: Some(vec![velos_input(
-                    "img-v2",
-                    "127.0.0.1:0",
-                    Some(9000),
-                    None,
-                )]),
+                vendors: Some(vec![velos_input("img-v2", "127.0.0.1:0", Some(9000), None)]),
                 default_vendor: None,
             })
             .await
@@ -1220,7 +1232,12 @@ mod tests {
             .update(SettingsUpdate {
                 providers: None,
                 models: None,
-                vendors: Some(vec![velos_input("img", "127.0.0.1:0", None, Some("secret"))]),
+                vendors: Some(vec![velos_input(
+                    "img",
+                    "127.0.0.1:0",
+                    None,
+                    Some("secret"),
+                )]),
                 default_vendor: None,
             })
             .await
@@ -1268,7 +1285,12 @@ mod tests {
             .update(SettingsUpdate {
                 providers: None,
                 models: None,
-                vendors: Some(vec![velos_input("img", "127.0.0.1:0", None, Some("secret"))]),
+                vendors: Some(vec![velos_input(
+                    "img",
+                    "127.0.0.1:0",
+                    None,
+                    Some("secret"),
+                )]),
                 default_vendor: None,
             })
             .await
