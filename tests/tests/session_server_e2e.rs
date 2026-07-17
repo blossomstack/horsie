@@ -75,7 +75,7 @@ async fn start_server(
     vendors.insert("mock".into(), vendor);
     let deps = ServerDeps {
         provider_registry: Arc::new(std::sync::RwLock::new(providers)),
-        vendors,
+        vendors: Arc::new(std::sync::RwLock::new(vendors)),
         state_dir: journal_dir.join("state"),
         github_tokens: None,
         mcp: None,

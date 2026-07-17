@@ -1,7 +1,7 @@
 /// Wire types for the server settings API: a redacted view of the
 /// runtime-editable configuration, and the update inputs that replace it.
-/// Secrets are never returned — provider/vendor views carry only the env-var
-/// name and a boolean flag for a stored inline secret.
+/// Secrets are never returned — provider/vendor views carry only a boolean
+/// flag for a stored inline secret.
 package settings;
 
 /// One configured LLM provider, redacted for display.
@@ -11,8 +11,6 @@ struct ProviderView {
     /// Provider kind, e.g. "anthropic" (the only kind today).
     kind: String,
     base_url: Option<String>,
-    /// Env var the API key is read from, when configured that way.
-    api_key_env: Option<String>,
     /// True when an inline `api_key` is stored.
     has_inline_key: bool,
 }
@@ -32,13 +30,15 @@ struct ModelView {
 /// config; every other vendor carries a kind-tagged config block.
 struct VendorView {
     name: String,
-    /// Loaded and usable in the running server (configurable vendors activate on
-    /// the next restart, so this can lag what is persisted).
+    /// Loaded and usable in the running server right now.
     active: bool,
     /// Whether new sessions default to this vendor.
     is_default: bool,
     /// Kind-specific config, redacted. Absent for the built-in `local` vendor.
     config: Option<VendorConfigView>,
+    /// The last build/reconfigure failure for this vendor, if any. `None`
+    /// when active or never attempted.
+    error: Option<String>,
 }
 
 /// Redacted config for a configurable vendor, tagged by kind. Add a variant to
@@ -53,7 +53,6 @@ struct VelosView {
     server_url: String,
     image: String,
     advertise_host: String,
-    token_env: Option<String>,
     has_inline_token: bool,
     runtime_bin: String,
     workspace_root: String,
@@ -85,8 +84,9 @@ struct SettingsView {
     vendors: Vec<VendorView>,
     default_vendor: String,
     info: ServerInfo,
-    /// True when a persisted change (a vendor edit) needs a restart to take
-    /// effect. Provider/model/default-vendor edits apply live.
+    /// True only when an already-active vendor's listener-affecting fields
+    /// (`listen`/`advertise_host`/`server_url`) changed and are pending a
+    /// restart. Every other provider/model/vendor edit applies live.
     restart_required: bool,
 }
 
@@ -97,7 +97,6 @@ struct ProviderInput {
     name: String,
     kind: String,
     base_url: Option<String>,
-    api_key_env: Option<String>,
     /// New inline key. Omit to keep the existing stored key; "" to clear.
     api_key: Option<String>,
 }
@@ -129,7 +128,6 @@ struct VelosInput {
     image: String,
     advertise_host: String,
     token: Option<String>,
-    token_env: Option<String>,
     runtime_bin: Option<String>,
     workspace_root: Option<String>,
     listen: Option<String>,

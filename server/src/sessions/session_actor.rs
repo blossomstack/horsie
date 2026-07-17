@@ -145,8 +145,12 @@ impl SessionActor {
     }
 
     fn vendor(&self) -> Result<Arc<dyn RuntimeVendor>, String> {
-        self.deps
+        let vendors = self
+            .deps
             .vendors
+            .read()
+            .map_err(|_| "vendor registry lock poisoned".to_string())?;
+        vendors
             .get(&self.spec.vendor)
             .cloned()
             .ok_or_else(|| format!("unknown runtime vendor '{}'", self.spec.vendor))
@@ -771,7 +775,7 @@ mod tests {
         vendors.insert("mock".into(), vendor.clone());
         let deps = ServerDeps {
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            vendors,
+            vendors: Arc::new(std::sync::RwLock::new(vendors)),
             state_dir: tmp.path().to_path_buf(),
             github_tokens,
             mcp: None,

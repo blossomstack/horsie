@@ -415,7 +415,7 @@ mod tests {
         vendors.insert("mock".into(), Arc::new(MockVendor::new()));
         ServerDeps {
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            vendors,
+            vendors: Arc::new(std::sync::RwLock::new(vendors)),
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: None,

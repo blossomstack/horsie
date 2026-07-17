@@ -13,10 +13,6 @@ export interface ProviderView {
   kind: string;
   baseUrl?: string;
   /**
-   * Env var the API key is read from, when configured that way.
-   */
-  apiKeyEnv?: string;
-  /**
    * True when an inline `api_key` is stored.
    */
   hasInlineKey: boolean;

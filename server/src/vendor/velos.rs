@@ -29,7 +29,7 @@ use horsie_models::executor::{RuntimeConfig, WorkspaceConfig};
 use horsie_runtime_client::RuntimeClient;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -304,22 +304,33 @@ impl RuntimeHandle for VelosRuntimeHandle {
     }
 }
 
+/// Settings that can change under a vendor's feet without rebinding its
+/// listener — everything `provision()` reads except the immutable
+/// listener/registry/endpoint bound once in `bind()`.
+#[derive(Clone)]
+pub struct VelosMutableSettings {
+    pub api: Arc<dyn ContainerApi>,
+    pub image: String,
+    pub runtime_bin: String,
+    pub workspace_root: String,
+    pub cpu: u32,
+    pub memory_bytes: u64,
+    pub connect_timeout: Duration,
+    /// `http://<advertise_host>:<http_port>` when configured — recomputed by
+    /// the caller on every reconfigure since `advertise_host` itself is
+    /// listener-affecting (frozen) but `http_port` is not.
+    pub public_http_base: Option<String>,
+}
+
 /// The velos runtime vendor. Owns the shared reverse-dial listener + connection
 /// registry for its whole lifetime; drops the serve loop when the vendor drops.
 pub struct VelosVendor {
-    api: Arc<dyn ContainerApi>,
     connected: Arc<ConnectedRuntimeRegistry>,
-    /// `ws://<advertise_host>:<bound_port>` — where scheduled runtimes dial back.
+    /// `ws://<advertise_host>:<bound_port>` — where scheduled runtimes dial
+    /// back. Immutable: baked in at `bind()` time from `advertise_host` + the
+    /// actually-bound port, and never revisited by `reconfigure()`.
     endpoint_ws: String,
-    image: String,
-    runtime_bin: String,
-    workspace_root: String,
-    cpu: u32,
-    memory_bytes: u64,
-    connect_timeout: Duration,
-    /// `http://<advertise_host>:<http_port>` when configured; the base a
-    /// scheduled runtime fetches plugin artifacts from over its outbound NAT.
-    public_http_base: Option<String>,
+    settings: RwLock<VelosMutableSettings>,
     _serve_guard: DropGuard,
 }
 
@@ -345,18 +356,37 @@ impl VelosVendor {
         let cancel = CancellationToken::new();
         serve_runtime_connections(listener, connected.clone(), cancel.clone());
         Ok(Self {
-            api,
             connected,
             endpoint_ws,
-            image: settings.image,
-            runtime_bin: settings.runtime_bin,
-            workspace_root: settings.workspace_root,
-            cpu: settings.cpu,
-            memory_bytes: settings.memory_bytes,
-            connect_timeout: settings.connect_timeout,
-            public_http_base,
+            settings: RwLock::new(VelosMutableSettings {
+                api,
+                image: settings.image,
+                runtime_bin: settings.runtime_bin,
+                workspace_root: settings.workspace_root,
+                cpu: settings.cpu,
+                memory_bytes: settings.memory_bytes,
+                connect_timeout: settings.connect_timeout,
+                public_http_base,
+            }),
             _serve_guard: cancel.drop_guard(),
         })
+    }
+
+    /// Current mutable settings (a cheap clone under a read lock) — for
+    /// inspection (tests, a future debug endpoint) and as the base a caller
+    /// mutates before calling `reconfigure`.
+    pub fn settings(&self) -> VelosMutableSettings {
+        self.settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Swap in new mutable settings (e.g. after a live config edit). Never
+    /// touches the listener — only the next `provision()` call sees the new
+    /// values.
+    pub fn reconfigure(&self, settings: VelosMutableSettings) {
+        *self.settings.write().unwrap_or_else(|e| e.into_inner()) = settings;
     }
 
     async fn provision(
@@ -377,22 +407,26 @@ impl VelosVendor {
         // registry, so a lingering old connection can't unregister this one).
         let container = container_name(runtime_id);
         let incarnation = format!("{runtime_id}-{}", uuid::Uuid::new_v4().simple());
-        let provider = Arc::new(VelosRuntimeProvider {
-            api: self.api.clone(),
-            connected: self.connected.clone(),
-            container_name: container,
-            endpoint_ws: self.endpoint_ws.clone(),
-            image: self.image.clone(),
-            runtime_bin: self.runtime_bin.clone(),
-            cpu: self.cpu,
-            memory_bytes: self.memory_bytes,
-            connect_timeout: self.connect_timeout,
-        });
+        let (provider, workspace_root) = {
+            let settings = self.settings.read().unwrap_or_else(|e| e.into_inner());
+            let provider = Arc::new(VelosRuntimeProvider {
+                api: settings.api.clone(),
+                connected: self.connected.clone(),
+                container_name: container,
+                endpoint_ws: self.endpoint_ws.clone(),
+                image: settings.image.clone(),
+                runtime_bin: settings.runtime_bin.clone(),
+                cpu: settings.cpu,
+                memory_bytes: settings.memory_bytes,
+                connect_timeout: settings.connect_timeout,
+            });
+            (provider, settings.workspace_root.clone())
+        };
         let client = ExecutorClient::new(InMemExecutorTransport::new(
             provider,
             self.connected.clone(),
         ));
-        let config = runtime_config_from(spec, &self.workspace_root).map_err(wrap)?;
+        let config = runtime_config_from(spec, &workspace_root).map_err(wrap)?;
         let result = if attach {
             client.attach_runtime(&incarnation, config).await
         } else {
@@ -420,7 +454,11 @@ impl RuntimeVendor for VelosVendor {
     }
 
     fn artifact_base_url(&self) -> Option<String> {
-        self.public_http_base.clone()
+        self.settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .public_http_base
+            .clone()
     }
 
     fn plugins_dir_for(&self, _runtime_id: &str) -> Option<String> {
@@ -450,7 +488,13 @@ impl RuntimeVendor for VelosVendor {
         // container by its deterministic name. Any live incarnation's transport
         // was already removed by its handle's `stop` (the session halts before
         // delete), so there is nothing to unregister here.
-        let _ = self.api.delete_container(&container_name(runtime_id)).await;
+        let api = self
+            .settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .api
+            .clone();
+        let _ = api.delete_container(&container_name(runtime_id)).await;
     }
 }
 
@@ -566,6 +610,9 @@ mod tests {
         deletes: Mutex<Vec<String>>,
         /// The `--runtime-id` (incarnation id) each container was told to announce.
         incarnations: Mutex<Vec<String>>,
+        /// The image each `create_container` call was asked to run — used to
+        /// assert `reconfigure()` changes what the next `provision()` sees.
+        images: Mutex<Vec<String>>,
         tasks: Mutex<HashMap<String, JoinHandle<()>>>,
     }
 
@@ -575,6 +622,7 @@ mod tests {
                 creates: Mutex::new(Vec::new()),
                 deletes: Mutex::new(Vec::new()),
                 incarnations: Mutex::new(Vec::new()),
+                images: Mutex::new(Vec::new()),
                 tasks: Mutex::new(HashMap::new()),
             })
         }
@@ -586,6 +634,9 @@ mod tests {
         }
         fn incarnations(&self) -> Vec<String> {
             self.incarnations.lock().unwrap().clone()
+        }
+        fn images(&self) -> Vec<String> {
+            self.images.lock().unwrap().clone()
         }
     }
 
@@ -636,6 +687,7 @@ mod tests {
             spec: &ContainerLaunchSpec,
         ) -> Result<(), VelosError> {
             self.creates.lock().unwrap().push(name.to_string());
+            self.images.lock().unwrap().push(spec.image.clone());
             // Dial exactly where/how the vendor's command tells the container to.
             let script = spec.command.get(2).cloned().unwrap_or_default();
             let endpoint = arg_after(&script, "--endpoint").expect("endpoint in command");
@@ -695,6 +747,33 @@ mod tests {
         VelosVendor::bind(api.clone(), test_settings())
             .await
             .expect("bind")
+    }
+
+    #[tokio::test]
+    async fn reconfigure_swaps_settings_without_rebinding_listener() {
+        let api = FakeVelosApi::new();
+        let vendor = bind_vendor(api.clone()).await;
+        let bound_before = vendor.endpoint_ws.clone();
+
+        vendor.create("rt-1", &test_spec()).await.expect("create");
+        assert_eq!(api.images(), vec!["test/image".to_string()]);
+
+        let mut new_settings = vendor.settings();
+        new_settings.image = "test/image-v2".into();
+        vendor.reconfigure(new_settings);
+
+        vendor
+            .create("rt-2", &test_spec())
+            .await
+            .expect("create after reconfigure");
+        assert_eq!(
+            api.images(),
+            vec!["test/image".to_string(), "test/image-v2".to_string()]
+        );
+        assert_eq!(
+            vendor.endpoint_ws, bound_before,
+            "reconfigure must not rebind the listener"
+        );
     }
 
     #[tokio::test]

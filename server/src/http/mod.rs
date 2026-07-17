@@ -204,7 +204,7 @@ mod tests {
         ));
         let deps = ServerDeps {
             provider_registry: opened.registry,
-            vendors,
+            vendors: Arc::new(std::sync::RwLock::new(vendors)),
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: Some(mcp.clone()),

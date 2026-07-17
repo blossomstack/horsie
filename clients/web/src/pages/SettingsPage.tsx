@@ -46,7 +46,6 @@ const GITHUB_MCP_NAME = "github";
 type ProviderDraft = {
   name: string;
   baseUrl: string;
-  apiKeyEnv: string;
   apiKeyInput: string; // "" = leave the stored key unchanged
   hasInlineKey: boolean;
 };
@@ -65,7 +64,6 @@ type VelosDraft = {
   advertiseHost: string;
   tokenInput: string; // "" = keep stored token
   hasInlineToken: boolean;
-  tokenEnv: string;
   runtimeBin: string;
   workspaceRoot: string;
   listen: string;
@@ -73,13 +71,13 @@ type VelosDraft = {
   memoryMib: string;
   connectTimeoutSecs: string;
   active: boolean;
+  error: string | null;
 };
 
 const toProviderDrafts = (v: SettingsView): ProviderDraft[] =>
   v.providers.map((p) => ({
     name: p.name,
     baseUrl: p.baseUrl ?? "",
-    apiKeyEnv: p.apiKeyEnv ?? "",
     apiKeyInput: "",
     hasInlineKey: p.hasInlineKey,
   }));
@@ -107,7 +105,6 @@ const toVelosDrafts = (v: SettingsView): VelosDraft[] =>
             advertiseHost: vd.config.value.advertiseHost,
             tokenInput: "",
             hasInlineToken: vd.config.value.hasInlineToken,
-            tokenEnv: vd.config.value.tokenEnv ?? "",
             runtimeBin: vd.config.value.runtimeBin,
             workspaceRoot: vd.config.value.workspaceRoot,
             listen: vd.config.value.listen,
@@ -115,6 +112,7 @@ const toVelosDrafts = (v: SettingsView): VelosDraft[] =>
             memoryMib: num(vd.config.value.memoryMib),
             connectTimeoutSecs: num(vd.config.value.connectTimeoutSecs),
             active: vd.active,
+            error: vd.error ?? null,
           },
         ]
       : [],
@@ -185,7 +183,6 @@ export function SettingsPage() {
       name: p.name.trim(),
       kind: "anthropic",
       baseUrl: p.baseUrl.trim() || undefined,
-      apiKeyEnv: p.apiKeyEnv.trim() || undefined,
       apiKey: p.apiKeyInput === "" ? undefined : p.apiKeyInput,
     }));
     const modelInputs: ModelInput[] = models.map((m) => ({
@@ -203,7 +200,6 @@ export function SettingsPage() {
           image: v.image.trim(),
           advertiseHost: v.advertiseHost.trim(),
           token: v.tokenInput === "" ? undefined : v.tokenInput,
-          tokenEnv: v.tokenEnv.trim() || undefined,
           runtimeBin: v.runtimeBin.trim() || undefined,
           workspaceRoot: v.workspaceRoot.trim() || undefined,
           listen: v.listen.trim() || undefined,
@@ -297,8 +293,9 @@ export function SettingsPage() {
           {settings?.restartRequired && (
             <div className="flex items-start gap-2 rounded-[var(--radius)] border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-warning">
               <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-              Velos vendor changes are saved but need a server restart to become
-              active.
+              A vendor's server URL, listen address, or advertise host changed
+              and needs a server restart to take effect. Other vendor edits
+              apply immediately.
             </div>
           )}
 
@@ -306,11 +303,11 @@ export function SettingsPage() {
             <>
               <Section
                 title="Providers"
-                desc="Anthropic-compatible API endpoints. Prefer an env var for the key to keep secrets out of the database."
+                desc="Anthropic-compatible API endpoints."
                 onAdd={() => {
                   setProviders((ps) => [
                     ...ps,
-                    { name: "", baseUrl: "", apiKeyEnv: "", apiKeyInput: "", hasInlineKey: false },
+                    { name: "", baseUrl: "", apiKeyInput: "", hasInlineKey: false },
                   ]);
                   touch();
                 }}
@@ -374,7 +371,7 @@ export function SettingsPage() {
 
               <Section
                 title="Velos remote runtimes"
-                desc="Remote container runtimes (velos clusters). Add as many as you need; changes apply on the next server restart."
+                desc="Remote container runtimes (velos clusters). Add as many as you need — most changes apply immediately; changing a vendor's listen address or server URL needs a restart."
                 onAdd={() => {
                   setVelos((vs) => [
                     ...vs,
@@ -385,7 +382,6 @@ export function SettingsPage() {
                       advertiseHost: "",
                       tokenInput: "",
                       hasInlineToken: false,
-                      tokenEnv: "",
                       runtimeBin: "",
                       workspaceRoot: "",
                       listen: "",
@@ -393,6 +389,7 @@ export function SettingsPage() {
                       memoryMib: "",
                       connectTimeoutSecs: "",
                       active: false,
+                      error: null,
                     },
                   ]);
                   touch();
@@ -717,12 +714,6 @@ function ProviderRow({
           placeholder="https://api.anthropic.com"
         />
         <TextField
-          label="API key env var"
-          value={draft.apiKeyEnv}
-          onChange={(v) => set({ apiKeyEnv: v })}
-          placeholder="ANTHROPIC_API_KEY"
-        />
-        <TextField
           label="Inline key"
           type="password"
           value={draft.apiKeyInput}
@@ -821,12 +812,6 @@ function VelosRow({
             placeholder="10.0.0.5"
           />
           <TextField
-            label="Token env var"
-            value={draft.tokenEnv}
-            onChange={(v) => set({ tokenEnv: v })}
-            placeholder="VELOS_TOKEN"
-          />
-          <TextField
             label="Inline token"
             type="password"
             value={draft.tokenInput}
@@ -873,8 +858,9 @@ function VelosRow({
             />
           </div>
         )}
-        {!draft.active && draft.name.trim() && (
-          <p className="text-[11px] text-faint">Not loaded — restart to activate.</p>
+        {draft.error && <p className="text-[11px] text-error">{draft.error}</p>}
+        {!draft.active && !draft.error && draft.name.trim() && (
+          <p className="text-[11px] text-faint">Not loaded yet.</p>
         )}
       </div>
     </RowShell>
