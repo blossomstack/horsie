@@ -71,6 +71,7 @@ type VelosDraft = {
   memoryMib: string;
   connectTimeoutSecs: string;
   active: boolean;
+  error: string | null;
 };
 
 const toProviderDrafts = (v: SettingsView): ProviderDraft[] =>
@@ -111,6 +112,7 @@ const toVelosDrafts = (v: SettingsView): VelosDraft[] =>
             memoryMib: num(vd.config.value.memoryMib),
             connectTimeoutSecs: num(vd.config.value.connectTimeoutSecs),
             active: vd.active,
+            error: vd.error ?? null,
           },
         ]
       : [],
@@ -291,8 +293,9 @@ export function SettingsPage() {
           {settings?.restartRequired && (
             <div className="flex items-start gap-2 rounded-[var(--radius)] border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-warning">
               <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-              Velos vendor changes are saved but need a server restart to become
-              active.
+              A vendor's server URL, listen address, or advertise host changed
+              and needs a server restart to take effect. Other vendor edits
+              apply immediately.
             </div>
           )}
 
@@ -368,7 +371,7 @@ export function SettingsPage() {
 
               <Section
                 title="Velos remote runtimes"
-                desc="Remote container runtimes (velos clusters). Add as many as you need; changes apply on the next server restart."
+                desc="Remote container runtimes (velos clusters). Add as many as you need — most changes apply immediately; changing a vendor's listen address or server URL needs a restart."
                 onAdd={() => {
                   setVelos((vs) => [
                     ...vs,
@@ -386,6 +389,7 @@ export function SettingsPage() {
                       memoryMib: "",
                       connectTimeoutSecs: "",
                       active: false,
+                      error: null,
                     },
                   ]);
                   touch();
@@ -854,8 +858,9 @@ function VelosRow({
             />
           </div>
         )}
-        {!draft.active && draft.name.trim() && (
-          <p className="text-[11px] text-faint">Not loaded — restart to activate.</p>
+        {draft.error && <p className="text-[11px] text-error">{draft.error}</p>}
+        {!draft.active && !draft.error && draft.name.trim() && (
+          <p className="text-[11px] text-faint">Not loaded yet.</p>
         )}
       </div>
     </RowShell>
