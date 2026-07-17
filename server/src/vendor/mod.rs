@@ -15,7 +15,7 @@ pub mod mock;
 mod velos;
 
 pub use local::LocalProcessVendor;
-pub use velos::{VelosVendor, VelosVendorSettings};
+pub use velos::{VelosMutableSettings, VelosVendor, VelosVendorSettings};
 
 use async_trait::async_trait;
 use horsie_runtime_client::RuntimeClient;
