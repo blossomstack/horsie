@@ -554,7 +554,6 @@ fn build_vendor_config(
             if let Some(t) = token {
                 m.insert("token".into(), json!(t));
             }
-            insert_trimmed(&mut m, "token_env", &v.token_env);
             insert_trimmed(&mut m, "runtime_bin", &v.runtime_bin);
             insert_trimmed(&mut m, "workspace_root", &v.workspace_root);
             insert_trimmed(&mut m, "listen", &v.listen);
@@ -609,7 +608,6 @@ fn provider_view(r: &ProviderRow) -> ProviderView {
         name: r.name.clone(),
         kind: r.kind.clone(),
         base_url: r.base_url.clone(),
-        api_key_env: None, // dropped in a later task's wire-schema change
         has_inline_key: r.api_key.as_deref().is_some_and(|s| !s.is_empty()),
     }
 }
@@ -628,7 +626,6 @@ fn velos_view(vc: &VelosConfig) -> VelosView {
         server_url: vc.server_url.clone(),
         image: vc.image.clone(),
         advertise_host: vc.advertise_host.clone(),
-        token_env: None, // dropped in a later task's wire-schema change
         has_inline_token: vc.token.as_ref().is_some_and(|t| !t.is_empty()),
         runtime_bin: vc.runtime_bin.clone(),
         workspace_root: vc.workspace_root.clone(),
@@ -765,7 +762,6 @@ mod tests {
             name: name.into(),
             kind: "anthropic".into(),
             base_url: Some("http://localhost:1".into()),
-            api_key_env: None,
             api_key: key.map(str::to_string),
         }
     }
@@ -872,7 +868,6 @@ mod tests {
                         image: "img".into(),
                         advertise_host: "10.0.0.5".into(),
                         token: Some("secret".into()),
-                        token_env: None,
                         runtime_bin: None,
                         workspace_root: None,
                         listen: None,
