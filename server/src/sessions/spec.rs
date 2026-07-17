@@ -17,6 +17,11 @@ use std::sync::{Arc, RwLock};
 /// never held across an `.await`.
 pub type SharedProviderRegistry = Arc<RwLock<HashMap<String, Arc<dyn LlmProvider>>>>;
 
+/// Runtime vendors keyed by name, behind a shared lock so a settings-API vendor
+/// edit can activate/reconfigure/retire a vendor without a restart. Read once
+/// per provision call in [`crate::sessions::session_actor::SessionActor::vendor`].
+pub type SharedVendors = Arc<RwLock<HashMap<String, Arc<dyn RuntimeVendor>>>>;
+
 /// A session's unique id (a UUID string). Equals the agent session uuid, so
 /// `session/<id>` and `agent/<id>` journals share the same `<id>`.
 pub type SessionId = String;
@@ -130,7 +135,7 @@ pub struct ServerDeps {
     /// LLM providers keyed by the session's `model`, swappable at runtime.
     pub provider_registry: SharedProviderRegistry,
     /// Runtime vendors keyed by the session spec's `vendor` name.
-    pub vendors: HashMap<String, Arc<dyn RuntimeVendor>>,
+    pub vendors: SharedVendors,
     /// Per-session server state (capability files) under `<state_dir>/sessions/<id>/`.
     pub state_dir: PathBuf,
     /// Mints short-lived GitHub tokens for repo provisioning; `None` when the
