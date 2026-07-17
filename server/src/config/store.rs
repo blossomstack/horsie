@@ -353,8 +353,6 @@ struct VelosConfig {
     advertise_host: String,
     #[serde(default)]
     token: Option<Secret>,
-    #[serde(default)]
-    token_env: Option<String>,
     #[serde(default = "default_runtime_bin")]
     runtime_bin: String,
     #[serde(default = "default_workspace_root")]
@@ -513,22 +511,10 @@ async fn build_velos_vendor(vc: &VelosConfig) -> Result<VelosVendor, String> {
 }
 
 fn resolve_velos_token(vc: &VelosConfig) -> Result<Option<Secret>, String> {
-    match (&vc.token, &vc.token_env) {
-        (Some(t), _) => {
-            if t.is_empty() {
-                return Err("velos inline token is empty".into());
-            }
-            Ok(Some(t.clone()))
-        }
-        (None, Some(var)) => {
-            let v = std::env::var(var)
-                .map_err(|_| format!("velos token env var '{var}' is not set"))?;
-            if v.is_empty() {
-                return Err(format!("velos token env var '{var}' is empty"));
-            }
-            Ok(Some(Secret::from(v)))
-        }
-        (None, None) => Ok(None),
+    match &vc.token {
+        Some(t) if t.is_empty() => Err("velos inline token is empty".into()),
+        Some(t) => Ok(Some(t.clone())),
+        None => Ok(None),
     }
 }
 
@@ -642,7 +628,7 @@ fn velos_view(vc: &VelosConfig) -> VelosView {
         server_url: vc.server_url.clone(),
         image: vc.image.clone(),
         advertise_host: vc.advertise_host.clone(),
-        token_env: vc.token_env.clone(),
+        token_env: None, // dropped in a later task's wire-schema change
         has_inline_token: vc.token.as_ref().is_some_and(|t| !t.is_empty()),
         runtime_bin: vc.runtime_bin.clone(),
         workspace_root: vc.workspace_root.clone(),
