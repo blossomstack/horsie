@@ -13,7 +13,7 @@ export interface SettingsView {
   defaultVendor: string;
   info: ServerInfo;
   /**
-   * True when a persisted change (a vendor edit) needs a restart to take
+   * True only when an already-active vendor&#x27;s listener-affecting fields
    */
   restartRequired: boolean;
 }

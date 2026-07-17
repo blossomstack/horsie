@@ -6,7 +6,7 @@ import { VendorConfigView } from './vendorConfigView';
 export interface VendorView {
   name: string;
   /**
-   * Loaded and usable in the running server (configurable vendors activate on
+   * Loaded and usable in the running server right now.
    */
   active: boolean;
   /**
@@ -17,4 +17,8 @@ export interface VendorView {
    * Kind-specific config, redacted. Absent for the built-in `local` vendor.
    */
   config?: VendorConfigView;
+  /**
+   * The last build/reconfigure failure for this vendor, if any. `None`
+   */
+  error?: string;
 }
