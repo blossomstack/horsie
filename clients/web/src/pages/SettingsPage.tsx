@@ -46,7 +46,6 @@ const GITHUB_MCP_NAME = "github";
 type ProviderDraft = {
   name: string;
   baseUrl: string;
-  apiKeyEnv: string;
   apiKeyInput: string; // "" = leave the stored key unchanged
   hasInlineKey: boolean;
 };
@@ -65,7 +64,6 @@ type VelosDraft = {
   advertiseHost: string;
   tokenInput: string; // "" = keep stored token
   hasInlineToken: boolean;
-  tokenEnv: string;
   runtimeBin: string;
   workspaceRoot: string;
   listen: string;
@@ -79,7 +77,6 @@ const toProviderDrafts = (v: SettingsView): ProviderDraft[] =>
   v.providers.map((p) => ({
     name: p.name,
     baseUrl: p.baseUrl ?? "",
-    apiKeyEnv: p.apiKeyEnv ?? "",
     apiKeyInput: "",
     hasInlineKey: p.hasInlineKey,
   }));
@@ -107,7 +104,6 @@ const toVelosDrafts = (v: SettingsView): VelosDraft[] =>
             advertiseHost: vd.config.value.advertiseHost,
             tokenInput: "",
             hasInlineToken: vd.config.value.hasInlineToken,
-            tokenEnv: vd.config.value.tokenEnv ?? "",
             runtimeBin: vd.config.value.runtimeBin,
             workspaceRoot: vd.config.value.workspaceRoot,
             listen: vd.config.value.listen,
@@ -185,7 +181,6 @@ export function SettingsPage() {
       name: p.name.trim(),
       kind: "anthropic",
       baseUrl: p.baseUrl.trim() || undefined,
-      apiKeyEnv: p.apiKeyEnv.trim() || undefined,
       apiKey: p.apiKeyInput === "" ? undefined : p.apiKeyInput,
     }));
     const modelInputs: ModelInput[] = models.map((m) => ({
@@ -203,7 +198,6 @@ export function SettingsPage() {
           image: v.image.trim(),
           advertiseHost: v.advertiseHost.trim(),
           token: v.tokenInput === "" ? undefined : v.tokenInput,
-          tokenEnv: v.tokenEnv.trim() || undefined,
           runtimeBin: v.runtimeBin.trim() || undefined,
           workspaceRoot: v.workspaceRoot.trim() || undefined,
           listen: v.listen.trim() || undefined,
@@ -306,11 +300,11 @@ export function SettingsPage() {
             <>
               <Section
                 title="Providers"
-                desc="Anthropic-compatible API endpoints. Prefer an env var for the key to keep secrets out of the database."
+                desc="Anthropic-compatible API endpoints."
                 onAdd={() => {
                   setProviders((ps) => [
                     ...ps,
-                    { name: "", baseUrl: "", apiKeyEnv: "", apiKeyInput: "", hasInlineKey: false },
+                    { name: "", baseUrl: "", apiKeyInput: "", hasInlineKey: false },
                   ]);
                   touch();
                 }}
@@ -385,7 +379,6 @@ export function SettingsPage() {
                       advertiseHost: "",
                       tokenInput: "",
                       hasInlineToken: false,
-                      tokenEnv: "",
                       runtimeBin: "",
                       workspaceRoot: "",
                       listen: "",
@@ -717,12 +710,6 @@ function ProviderRow({
           placeholder="https://api.anthropic.com"
         />
         <TextField
-          label="API key env var"
-          value={draft.apiKeyEnv}
-          onChange={(v) => set({ apiKeyEnv: v })}
-          placeholder="ANTHROPIC_API_KEY"
-        />
-        <TextField
           label="Inline key"
           type="password"
           value={draft.apiKeyInput}
@@ -819,12 +806,6 @@ function VelosRow({
             value={draft.advertiseHost}
             onChange={(v) => set({ advertiseHost: v })}
             placeholder="10.0.0.5"
-          />
-          <TextField
-            label="Token env var"
-            value={draft.tokenEnv}
-            onChange={(v) => set({ tokenEnv: v })}
-            placeholder="VELOS_TOKEN"
           />
           <TextField
             label="Inline token"
