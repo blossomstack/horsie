@@ -7,7 +7,6 @@ export interface VelosInput {
   image: string;
   advertiseHost: string;
   token?: string;
-  tokenEnv?: string;
   runtimeBin?: string;
   workspaceRoot?: string;
   listen?: string;
