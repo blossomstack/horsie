@@ -8,7 +8,7 @@
 //! schema change. `postgres` is a future driver swap behind the same code.
 
 use crate::config::ConfigStore;
-use crate::sessions::spec::SharedProviderRegistry;
+use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
 use crate::velos::VelosClient;
 use crate::vendor::{LocalProcessVendor, RuntimeVendor, VelosVendor, VelosVendorSettings};
 use async_trait::async_trait;
@@ -52,7 +52,7 @@ pub struct StoreDeps {
 pub struct OpenedConfig {
     pub store: Arc<DbConfigStore>,
     pub registry: SharedProviderRegistry,
-    pub vendors: HashMap<String, Arc<dyn RuntimeVendor>>,
+    pub vendors: SharedVendors,
     /// The migrated connection pool, shared with feature stores (e.g. GitHub)
     /// that persist into the same settings DB.
     pub pool: SqlitePool,
@@ -62,8 +62,9 @@ pub struct DbConfigStore {
     pool: SqlitePool,
     registry: SharedProviderRegistry,
     default_vendor: RwLock<String>,
-    /// Vendor names loaded this process (`local` + each vendor built at open).
-    active_vendors: Vec<String>,
+    /// Live runtime vendors, kept in sync with the DB by `update()`'s
+    /// reconciliation so most vendor edits apply without a restart.
+    vendors: SharedVendors,
     /// Set once a vendor is edited — those changes need a restart, so the view
     /// reports `restart_required` until then.
     vendors_dirty: AtomicBool,
@@ -89,8 +90,6 @@ impl DbConfigStore {
             deps.public_http_base,
         )
         .await;
-        let mut active_vendors: Vec<String> = vendors.keys().cloned().collect();
-        active_vendors.sort();
 
         let default_vendor = read_setting(&pool, "default_vendor")
             .await
@@ -103,11 +102,12 @@ impl DbConfigStore {
             "local".into()
         };
 
+        let vendors: SharedVendors = Arc::new(RwLock::new(vendors));
         let store = Arc::new(Self {
             pool: pool.clone(),
             registry: registry.clone(),
             default_vendor: RwLock::new(default_vendor),
-            active_vendors,
+            vendors: vendors.clone(),
             vendors_dirty: AtomicBool::new(false),
             info: deps.info,
         });
@@ -137,7 +137,8 @@ impl DbConfigStore {
     }
 
     fn vendors_view(&self, default_vendor: &str, rows: &[VendorRow]) -> Vec<VendorView> {
-        let active = |name: &str| self.active_vendors.iter().any(|n| n == name);
+        let live = self.vendors.read().unwrap_or_else(|e| e.into_inner());
+        let active = |name: &str| live.contains_key(name);
         let mut out = vec![VendorView {
             name: "local".into(),
             active: active("local"),
@@ -275,10 +276,18 @@ impl ConfigStore for DbConfigStore {
         }
 
         if let Some(dv) = &update.default_vendor {
-            if !self.active_vendors.iter().any(|n| n == dv) {
+            let (is_loaded, mut names) = {
+                let loaded = self.vendors.read().unwrap_or_else(|e| e.into_inner());
+                (
+                    loaded.contains_key(dv),
+                    loaded.keys().cloned().collect::<Vec<_>>(),
+                )
+            };
+            if !is_loaded {
+                names.sort();
                 return Err(format!(
                     "vendor '{dv}' is not loaded (available: {})",
-                    self.active_vendors.join(", ")
+                    names.join(", ")
                 ));
             }
             sqlx::query(
