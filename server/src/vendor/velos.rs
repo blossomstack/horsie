@@ -653,9 +653,11 @@ mod tests {
             Err(_) => return,
         };
         let (mut sink, mut stream) = ws.split();
-        let ready =
-            serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady { runtime_id }))
-                .unwrap();
+        let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
+            runtime_id,
+            workdir: "/workspace".to_string(),
+        }))
+        .unwrap();
         if sink.send(Message::Text(ready.into())).await.is_err() {
             return;
         }
