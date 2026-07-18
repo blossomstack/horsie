@@ -235,11 +235,17 @@ for the first time — no pre-registration step.
   `runtime_id`s against one registered transport all succeed without
   interference.
 - **Integration, vendor-level** (`server/src/vendor/local.rs`'s own test
-  module, against a directly-constructed `LocalDaemonRegistry`): two fake
-  daemons under two labels; two sessions sharing one label plus one session
-  on the other; concurrent tool calls across the shared-label sessions don't
-  cross-talk; stopping/deleting one shared-label session doesn't disturb the
-  other; disconnect → reconnect → resume, at the vendor object level.
+  module, against a directly-constructed `LocalDaemonRegistry`): two sessions
+  sharing one label run concurrent tool calls without cross-talk; stopping/
+  deleting one shared-label session doesn't disturb the other; a second
+  daemon dialing in under an already-live label is rejected while the
+  original keeps serving; disconnect → reconnect → resume reuses the same
+  vendor object, at the vendor object level. (Isolation *between* two
+  different labels isn't separately tested — `ConnectedRuntimeRegistry` and
+  the label→vendor map are both plain `HashMap`s keyed by label, so it's
+  guaranteed by construction, the same way two unrelated keys in any
+  `HashMap` can't collide — not something a dedicated test adds real
+  confidence over.)
 - **Integration, full-stack** (`tests/tests/session_server_e2e.rs`, reusing
   the fake-WS-runtime pattern built for velos): a real `DbConfigStore::open()`
   with `local_runtime_listen` set, so the daemon-registers → mirrors-into-
