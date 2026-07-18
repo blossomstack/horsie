@@ -50,6 +50,14 @@ pub struct Agent {
     /// a `Handoff`, rather than being executed. Validated to exist in the toolbox
     /// at build time.
     pub(crate) handoff_tool: Option<String>,
+    /// Whether the model is *forced* to call `handoff_tool` (`tool_choice: any`,
+    /// and a text-only turn is nudged/rejected). `false` means the tool is offered
+    /// but purely voluntary — the model may end its turn with plain text just as
+    /// freely as with any other tool (`tool_choice: auto`); calling the tool is
+    /// still recognized as a handoff rather than executed, for tools the agent may
+    /// choose to use to pause (e.g. asking a clarifying question) rather than ones
+    /// it must call to finish. See [`with_handoff_tool_optional`](AgentBuilder::with_handoff_tool_optional).
+    pub(crate) force_handoff_choice: bool,
     /// Validator for the handoff tool's input, compiled from its declared
     /// `input_schema`. `None` when there is no handoff tool.
     pub(crate) handoff_validator: Option<Arc<jsonschema::Validator>>,
@@ -62,6 +70,7 @@ pub struct AgentBuilder {
     system_prompt: String,
     toolbox: Arc<dyn Toolbox>,
     handoff_tool: Option<String>,
+    force_handoff_choice: bool,
     config: AgentConfig,
     history: Vec<Message>,
 }
@@ -73,6 +82,7 @@ impl AgentBuilder {
             system_prompt: String::new(),
             toolbox,
             handoff_tool: None,
+            force_handoff_choice: true,
             config: AgentConfig::default(),
             history: Vec::new(),
         }
@@ -83,10 +93,27 @@ impl AgentBuilder {
         self
     }
 
-    /// Register the tool that ends the run as a `Handoff`. The tool must be present
-    /// in the toolbox (checked by [`build`](Self::build)).
+    /// Register the tool that ends the run as a `Handoff`. The model is forced to
+    /// call it (`tool_choice: any`) — for a workflow sub-agent that must terminate
+    /// via a specific tool. The tool must be present in the toolbox (checked by
+    /// [`build`](Self::build)).
     pub fn with_handoff_tool(mut self, n: impl Into<String>) -> Self {
         self.handoff_tool = Some(n.into());
+        self.force_handoff_choice = true;
+        self
+    }
+
+    /// Like [`with_handoff_tool`](Self::with_handoff_tool), but the model is never
+    /// forced to call it: `tool_choice` stays `auto`, and the model may end its
+    /// turn with plain text exactly as if the tool weren't registered. A call to
+    /// the tool is still recognized as a handoff (not executed as a regular tool
+    /// call) when the model does choose to make one. For an interactive agent
+    /// whose only "must finish" state is the next user message, and which may
+    /// optionally pause to ask a clarifying question rather than being made to
+    /// route every ordinary reply through a tool call.
+    pub fn with_handoff_tool_optional(mut self, n: impl Into<String>) -> Self {
+        self.handoff_tool = Some(n.into());
+        self.force_handoff_choice = false;
         self
     }
 
@@ -136,6 +163,7 @@ impl AgentBuilder {
             system_prompt: self.system_prompt,
             toolbox: self.toolbox,
             handoff_tool: self.handoff_tool,
+            force_handoff_choice: self.force_handoff_choice,
             handoff_validator,
             config: self.config,
             history: self.history,
@@ -230,10 +258,12 @@ impl Agent {
         let mut recent_fingerprints: VecDeque<String> = VecDeque::new();
         let mut handoff_retries: u32 = 0;
         let mut handoff_missing_retries: u32 = 0;
-        // With a handoff tool, force a tool call every turn (`Any`) so the model can
-        // never end with bare text — it must keep working or call the handoff tool to
-        // finish. Without one, the model may end its turn with text (`Auto`).
-        let tool_choice = if self.handoff_tool.is_some() {
+        // With a *forced* handoff tool, require a tool call every turn (`Any`) so
+        // the model can never end with bare text — it must keep working or call the
+        // handoff tool to finish. Without one (or with an optional handoff tool —
+        // see `with_handoff_tool_optional`), the model may end its turn with text
+        // (`Auto`) exactly as freely as it may call any other tool.
+        let tool_choice = if self.handoff_tool.is_some() && self.force_handoff_choice {
             ToolChoice::Any
         } else {
             ToolChoice::Auto
@@ -303,11 +333,16 @@ impl Agent {
             let tool_calls = extract_tool_calls(&response.parts);
 
             if tool_calls.is_empty() {
-                // A handoff agent must finish by *calling* its handoff tool, never by
-                // ending its turn with plain text. `tool_choice: any` already pushes the
-                // model toward a tool call; this is the safety net if a provider returns
-                // text anyway — nudge and retry, then fail rather than silently accept it.
-                if let Some(handoff_name) = self.handoff_tool.clone() {
+                // A *forced* handoff agent must finish by *calling* its handoff tool,
+                // never by ending its turn with plain text. `tool_choice: any` already
+                // pushes the model toward a tool call; this is the safety net if a
+                // provider returns text anyway — nudge and retry, then fail rather
+                // than silently accept it. An optional handoff tool (`force_handoff_choice
+                // = false`) skips this entirely: plain text is a perfectly normal way
+                // to finish, exactly as if the tool weren't registered.
+                if let Some(handoff_name) = self.handoff_tool.clone()
+                    && self.force_handoff_choice
+                {
                     if handoff_missing_retries >= self.config.handoff_max_retries {
                         return Err(AgentError::HandoffValidationFailed {
                             tool: handoff_name,
@@ -1259,6 +1294,104 @@ mod tests {
             provider.seen.lock().unwrap().clone(),
             Some(ToolChoice::Auto)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_optional_handoff_tool_uses_tool_choice_auto() {
+        // An *optional* handoff tool must not force tool_choice=Any, even though
+        // one is registered — the model stays free to respond with plain text.
+        let provider = Arc::new(RecordingProvider {
+            seen: Mutex::new(None),
+            response: CompletionResponse {
+                parts: vec![ContentPart::Text(TextPart {
+                    text: "just chatting, no tool".into(),
+                })],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            },
+        });
+        let mut agent = Agent::builder(provider.clone(), MockToolbox::echo("finish"))
+            .with_handoff_tool_optional("finish")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            provider.seen.lock().unwrap().clone(),
+            Some(ToolChoice::Auto)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_optional_handoff_tool_accepts_plain_text_completion() {
+        // Unlike a forced handoff tool, an optional one never nudges/rejects a
+        // text-only turn — it's accepted immediately as `Completed`.
+        let provider = MockProvider::text("just chatting, no tool");
+        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"))
+            .with_handoff_tool_optional("finish")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let output = agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            output.result,
+            AgentResult::Completed(CompletedOutput { text }) if text == "just chatting, no tool"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_optional_handoff_tool_still_recognized_when_voluntarily_called() {
+        // A voluntary call to the optional handoff tool is still interpreted as a
+        // Handoff (not executed as a regular tool), exactly as a forced one would be.
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: "h1".to_string(),
+                name: "finish".to_string(),
+                input: json!({"answer": 42}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        }]);
+        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"))
+            .with_handoff_tool_optional("finish")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let output = agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        match output.result {
+            AgentResult::Handoff(HandoffOutput { tool_name, data }) => {
+                assert_eq!(tool_name, "finish");
+                assert_eq!(data["answer"], 42);
+            }
+            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
+        }
     }
 
     #[tokio::test]

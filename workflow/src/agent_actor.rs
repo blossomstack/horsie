@@ -60,6 +60,16 @@ impl AgentParams {
             None
         }
     }
+
+    /// Whether the model must be forced to call `handoff_tool` (`tool_choice: any`)
+    /// to finish. Workflow agents are: a sub-agent has no other way to signal it's
+    /// done. Interactive (session) agents are not — the *next user message* is
+    /// what "finishes" a turn, so `conclude`/ask is purely an optional tool the
+    /// model may choose to call to pause; every ordinary reply is plain text, free
+    /// to be given without being routed through a forced tool call.
+    fn force_handoff_choice(&self) -> bool {
+        !self.interactive
+    }
 }
 
 /// Commands accepted by an [`AgentActor`].
@@ -226,6 +236,7 @@ impl AgentActor {
         let inner_sink = self.ctx.event_sink.clone();
         let system_prompt = self.params.system_prompt.clone().unwrap_or_default();
         let handoff_tool = self.params.handoff_tool();
+        let force_handoff_choice = self.params.force_handoff_choice();
         let max_iterations = self.params.max_iterations;
         let max_retries = self.params.max_retries;
 
@@ -245,6 +256,7 @@ impl AgentActor {
                 sink,
                 system_prompt,
                 handoff_tool,
+                force_handoff_choice,
                 max_iterations,
                 max_retries,
                 history,
@@ -998,6 +1010,7 @@ async fn run_with_retries(
     sink: Arc<dyn EventSink>,
     system_prompt: String,
     handoff_tool: Option<String>,
+    force_handoff_choice: bool,
     max_iterations: Option<u32>,
     max_retries: u32,
     history: Vec<Message>,
@@ -1018,7 +1031,11 @@ async fn run_with_retries(
             .with_config(config)
             .with_history(history.clone());
         if let Some(name) = &handoff_tool {
-            builder = builder.with_handoff_tool(name.clone());
+            builder = if force_handoff_choice {
+                builder.with_handoff_tool(name.clone())
+            } else {
+                builder.with_handoff_tool_optional(name.clone())
+            };
         }
 
         let mut agent = match builder.build() {
@@ -1109,6 +1126,18 @@ mod tests {
     #[test]
     fn from_def_defaults_to_non_interactive() {
         assert!(!AgentParams::from_def(&def_fixture()).interactive);
+    }
+
+    #[test]
+    fn force_handoff_choice_is_true_for_workflow_agents_false_for_interactive() {
+        // Workflow sub-agents must be forced to call their handoff tool to
+        // terminate; interactive (session) agents are never forced — the next
+        // user message is what "finishes" a turn, and ask/conclude is optional.
+        let mut params = AgentParams::from_def(&def_fixture());
+        params.allow_ask_user = true;
+        assert!(params.force_handoff_choice());
+        params.interactive = true;
+        assert!(!params.force_handoff_choice());
     }
 
     #[test]
