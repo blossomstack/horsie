@@ -9,11 +9,16 @@
     clippy::wildcard_enum_match_arm
 )]
 
+use futures_util::{SinkExt, StreamExt};
 use horsie_actor::{ActorRef, FileJournal, Journal, spawn_root};
 use horsie_agentcore::LlmProvider;
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
 use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
+use horsie_models::runtime::{
+    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse,
+    SessionStartResponse, ToolCallResponse, ToolOutput, ToolResult,
+};
 use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
 use horsie_server::sessions::spec::ServerDeps;
@@ -25,6 +30,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinHandle;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 // ── harness ──────────────────────────────────────────────────────────────────
 
@@ -159,6 +166,181 @@ async fn create_session(client: &reqwest::Client, addr: &SocketAddr) -> String {
     assert_eq!(res.status().as_u16(), 201);
     let v: serde_json::Value = res.json().await.unwrap();
     v["session"]["id"].as_str().unwrap().to_string()
+}
+
+/// Like `create_session`, but selects a named vendor with no `workdirs`/
+/// `repos` — the shape a shared-local-vendor session must use (it never
+/// resolves a caller-supplied path).
+async fn create_session_for_vendor(
+    client: &reqwest::Client,
+    addr: &SocketAddr,
+    vendor: &str,
+) -> String {
+    let body = serde_json::json!({
+        "agent": { "model": "mock", "use_plugins": false },
+        "workdirs": [],
+        "vendor": vendor
+    });
+    let res = client
+        .post(format!("http://{addr}/api/sessions"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201);
+    let v: serde_json::Value = res.json().await.unwrap();
+    v["session"]["id"].as_str().unwrap().to_string()
+}
+
+/// Start a server wired for the shared local runtime vendor: `DbConfigStore`
+/// binds a real `local_runtime_listen` listener, and — unlike `start_server`,
+/// whose `ServerDeps.vendors` is a hand-rolled map bypassing the store
+/// entirely — `ServerDeps.vendors` is the SAME `SharedVendors` map
+/// `DbConfigStore::open()` returns, so a daemon dialing in is visible to
+/// session resolution exactly as it would be in production. Returns the
+/// server handle plus the listener's bound address for dialing fake daemons
+/// into.
+async fn start_server_with_shared_local(journal_dir: &Path, mock_url: &str) -> (Server, SocketAddr) {
+    let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
+    providers.insert("mock".into(), provider_at(mock_url));
+    let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
+    let db = journal_dir.join("config.db");
+    let opened = DbConfigStore::open(
+        &format!("sqlite://{}", db.display()),
+        StoreDeps {
+            info: horsie_models::settings::ServerInfo {
+                config_path: String::new(),
+                database: String::new(),
+                state_dir: String::new(),
+                data_dir: String::new(),
+                plugins_dir: String::new(),
+                version: "test".into(),
+            },
+            local_runtime_listen: Some("127.0.0.1:0".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    let local_addr = opened
+        .store
+        .local_daemon_listen_addr()
+        .expect("shared local runtime vendor listener bound");
+    let deps = ServerDeps {
+        provider_registry: Arc::new(std::sync::RwLock::new(providers)),
+        vendors: opened.vendors.clone(),
+        state_dir: journal_dir.join("state"),
+        github_tokens: None,
+        mcp: None,
+        plugins: None,
+    };
+    let (gtx, _) = tokio::sync::broadcast::channel(256);
+    let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
+    let github = Arc::new(horsie_server::github::GithubService::new(
+        horsie_server::github::GithubStore::new(opened.pool.clone()),
+        horsie_server::github::GithubApi::new(),
+    ));
+    let plugins = Arc::new(horsie_server::plugins::PluginService::new(
+        horsie_server::plugins::PluginStore::new(opened.pool.clone()),
+        horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
+        b"e2e-secret".to_vec(),
+    ));
+    let mcp = Arc::new(horsie_server::mcp::McpService::new(
+        horsie_server::mcp::McpStore::new(opened.pool.clone()),
+        github.clone(),
+    ));
+    let state = AppState {
+        supervisor: supervisor.clone(),
+        journal,
+        global_events: gtx,
+        caps_finalize: Arc::new(|c| c),
+        default_caps: block_caps(),
+        plugins_dir: None,
+        hook_path: vec![],
+        config_store: opened.store,
+        github,
+        mcp,
+        plugins,
+        web_dir: None,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app(state)).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (
+        Server {
+            addr,
+            supervisor,
+            task,
+        },
+        local_addr,
+    )
+}
+
+/// A fake `horsie-runtime --endpoint ws://... --runtime-id <label>` daemon:
+/// dials the shared local vendor's listener, announces Ready under `label`,
+/// answers every tool call with a fixed stdout, and answers the workspace
+/// scan every session provisioning always performs
+/// (`session_actor.rs`'s `scan_workspace(...)` call, regardless of
+/// `use_plugins`) with an empty result — otherwise the real `RuntimeClient`
+/// awaits a `ScanResult` that never arrives and provisioning hangs forever.
+fn spawn_fake_local_daemon(addr: SocketAddr, label: &str, reply: &str) -> JoinHandle<()> {
+    let label = label.to_string();
+    let reply = reply.to_string();
+    tokio::spawn(async move {
+        let (ws, _) = match connect_async(format!("ws://{addr}")).await {
+            Ok(x) => x,
+            Err(_) => return,
+        };
+        let (mut sink, mut stream) = ws.split();
+        let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
+            runtime_id: label,
+            workdir: "/home/u/proj".to_string(),
+        }))
+        .unwrap();
+        if sink.send(Message::Text(ready.into())).await.is_err() {
+            return;
+        }
+        while let Some(Ok(msg)) = stream.next().await {
+            let Message::Text(text) = msg else { continue };
+            match serde_json::from_str::<RuntimeInboundMessage>(&text) {
+                Ok(RuntimeInboundMessage::ToolCall(req)) => {
+                    let resp = RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
+                        call_id: req.call_id,
+                        result: ToolResult::Ok(ToolOutput {
+                            stdout: reply.clone(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                        }),
+                    });
+                    if let Ok(json) = serde_json::to_string(&resp) {
+                        let _ = sink.send(Message::Text(json.into())).await;
+                    }
+                }
+                Ok(RuntimeInboundMessage::ScanWorkspace(req)) => {
+                    let resp = RuntimeOutboundMessage::ScanResult(ScanResponse {
+                        call_id: req.call_id,
+                        workspaces: vec![],
+                        shared_skills: vec![],
+                    });
+                    if let Ok(json) = serde_json::to_string(&resp) {
+                        let _ = sink.send(Message::Text(json.into())).await;
+                    }
+                }
+                Ok(RuntimeInboundMessage::SessionStart(req)) => {
+                    let resp = RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
+                        call_id: req.call_id,
+                        context: String::new(),
+                    });
+                    if let Ok(json) = serde_json::to_string(&resp) {
+                        let _ = sink.send(Message::Text(json.into())).await;
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
 }
 
 async fn send_message(
@@ -588,5 +770,70 @@ async fn turn_in_flight_conflicts() {
     block.release();
     wait_status(&client, &server.addr, &id, "Idle").await;
 
+    server.shutdown().await;
+}
+
+/// End-to-end for the shared local runtime vendor's `open()` wiring: a real
+/// `DbConfigStore` binds `local_runtime_listen`, a fake daemon dials in under
+/// a label, and a session resolves that label through the SAME `SharedVendors`
+/// map the store returns — the one seam a unit test of `LocalDaemonRegistry`
+/// in isolation can't cover. Also exercises the vendor's disconnect →
+/// `RecoveryFailed` → reconnect → resume cycle end to end over real HTTP.
+#[tokio::test]
+async fn shared_local_vendor_resolves_dialed_in_daemon_and_recovers_after_disconnect() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("hello from my-laptop");
+    let tmp = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::new();
+
+    let (server, local_addr) = start_server_with_shared_local(tmp.path(), &mock.url()).await;
+    let daemon = spawn_fake_local_daemon(local_addr, "my-laptop", "shared-ok");
+    // Give the dial-back handshake a beat to land before the session tries
+    // to resolve the label.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let id = create_session_for_vendor(&client, &server.addr, "my-laptop").await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    assert_eq!(
+        send_message(&client, &server.addr, &id, "hi")
+            .await
+            .as_u16(),
+        202
+    );
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    // Stop, so the next message must re-attach — then disconnect the daemon
+    // before that happens (simulating the user closing their laptop).
+    client
+        .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    wait_status(&client, &server.addr, &id, "Stopped").await;
+    daemon.abort();
+    // Give the abort a beat to actually drop the socket server-side.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Re-attach against a disconnected label fails → 502 + RecoveryFailed.
+    let status = send_message(&client, &server.addr, &id, "are you still there").await;
+    assert_eq!(status.as_u16(), 502);
+    wait_status(&client, &server.addr, &id, "RecoveryFailed").await;
+
+    // Reconnect a fresh daemon under the SAME label — the next message
+    // resolves it via the same map and resumes normally.
+    let daemon2 = spawn_fake_local_daemon(local_addr, "my-laptop", "shared-ok-again");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    mock.queue_response("resumed after reconnect");
+    assert_eq!(
+        send_message(&client, &server.addr, &id, "welcome back")
+            .await
+            .as_u16(),
+        202
+    );
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    daemon2.abort();
     server.shutdown().await;
 }

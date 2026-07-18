@@ -79,13 +79,20 @@ pub struct DbConfigStore {
     /// process restart; never reset within a process's lifetime.
     restart_required: AtomicBool,
     info: ServerInfo,
-    /// Held only to keep the shared local-runtime listener bound for the
-    /// store's lifetime (unlike `velos_instances`, nothing reads this yet —
-    /// no DB persistence, no live reconfigure, no listing endpoint).
-    _local_daemon_registry: Option<LocalDaemonRegistry>,
+    /// Kept alive for the store's lifetime to hold the shared local-runtime
+    /// listener bound (no DB persistence, no live reconfigure, no listing
+    /// endpoint yet — `local_daemon_listen_addr` below is its one reader).
+    local_daemon_registry: Option<LocalDaemonRegistry>,
 }
 
 impl DbConfigStore {
+    /// The shared local-runtime-vendor listener's bound address, if
+    /// `local_runtime_listen` was configured and the bind succeeded. `None`
+    /// if the vendor is disabled (unset, unparsable, or the bind failed).
+    pub fn local_daemon_listen_addr(&self) -> Option<SocketAddr> {
+        self.local_daemon_registry.as_ref().map(|r| r.listen_addr())
+    }
+
     /// Open (creating if absent) the database, run migrations, and build the
     /// live registry + vendors from it.
     pub async fn open(db_url: &str, deps: StoreDeps) -> Result<OpenedConfig, String> {
@@ -150,7 +157,7 @@ impl DbConfigStore {
             vendor_errors: RwLock::new(HashMap::new()),
             restart_required: AtomicBool::new(false),
             info: deps.info,
-            _local_daemon_registry: local_daemon_registry,
+            local_daemon_registry,
         });
         Ok(OpenedConfig {
             store,
