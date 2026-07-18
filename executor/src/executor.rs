@@ -35,6 +35,12 @@ type WsSink = Arc<
     >,
 >;
 
+/// Fires `(runtime_id, workdir)` after a runtime successfully registers (not
+/// on a rejected collision). Lets a vendor that registers runtimes outside
+/// any `create`/`attach` call (e.g. a user-launched daemon dialing in on its
+/// own) learn about a newly (re)connected id without polling.
+pub type ConnectHook = Arc<dyn Fn(String, String) + Send + Sync>;
+
 async fn send_outbound(sink: &WsSink, msg: ExecutorOutboundMessage) -> Result<(), ExecutorError> {
     let json =
         serde_json::to_string(&msg).map_err(|e| ExecutorError::Serialization(e.to_string()))?;
@@ -89,16 +95,35 @@ pub fn serve_runtime_connections(
     registry: Arc<ConnectedRuntimeRegistry>,
     cancel: CancellationToken,
 ) {
+    serve_runtime_connections_with_hook(listener, registry, cancel, None)
+}
+
+/// Like [`serve_runtime_connections`], but `on_registered` (if given) fires
+/// after each successful registration with `(runtime_id, workdir)`.
+pub fn serve_runtime_connections_with_hook(
+    listener: RuntimeListenerServer,
+    registry: Arc<ConnectedRuntimeRegistry>,
+    cancel: CancellationToken,
+    on_registered: Option<ConnectHook>,
+) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 result = listener.accept() => match result {
                     Ok(AcceptedConn::Tcp(ws)) => {
-                        tokio::spawn(handle_runtime_connection(ws, registry.clone()));
+                        tokio::spawn(handle_runtime_connection(
+                            ws,
+                            registry.clone(),
+                            on_registered.clone(),
+                        ));
                     }
                     Ok(AcceptedConn::Unix(ws)) => {
-                        tokio::spawn(handle_runtime_connection(ws, registry.clone()));
+                        tokio::spawn(handle_runtime_connection(
+                            ws,
+                            registry.clone(),
+                            on_registered.clone(),
+                        ));
                     }
                     Err(_) => break,
                 }
@@ -234,13 +259,14 @@ impl Executor {
 async fn handle_runtime_connection<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     registry: Arc<ConnectedRuntimeRegistry>,
+    on_registered: Option<ConnectHook>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (sink, mut stream) = ws.split();
 
     enum Handshake {
-        Ready(String),
+        Ready(String, String),
         Provisioning(String),
     }
 
@@ -252,7 +278,7 @@ async fn handle_runtime_connection<S>(
                 Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
                         Ok(RuntimeOutboundMessage::Ready(ev)) => {
-                            return Some(Handshake::Ready(ev.runtime_id));
+                            return Some(Handshake::Ready(ev.runtime_id, ev.workdir));
                         }
                         Ok(RuntimeOutboundMessage::Provisioning(ev)) => {
                             return Some(Handshake::Provisioning(ev.runtime_id));
@@ -266,8 +292,8 @@ async fn handle_runtime_connection<S>(
     })
     .await;
 
-    let runtime_id = match first {
-        Ok(Some(Handshake::Ready(id))) => id,
+    let (runtime_id, workdir) = match first {
+        Ok(Some(Handshake::Ready(id, workdir))) => (id, workdir),
         Ok(Some(Handshake::Provisioning(id))) => {
             // Provision phase: wait (much longer) for Ready or ProvisionFailed.
             let outcome = tokio::time::timeout(PROVISION_WINDOW, async {
@@ -276,7 +302,7 @@ async fn handle_runtime_connection<S>(
                         Some(Ok(Message::Text(text))) => {
                             match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
                                 Ok(RuntimeOutboundMessage::Ready(ev)) => {
-                                    return Ok(ev.runtime_id);
+                                    return Ok((ev.runtime_id, ev.workdir));
                                 }
                                 Ok(RuntimeOutboundMessage::ProvisionFailed(ev)) => {
                                     return Err(ev.message);
@@ -290,7 +316,7 @@ async fn handle_runtime_connection<S>(
             })
             .await;
             match outcome {
-                Ok(Ok(ready_id)) => ready_id,
+                Ok(Ok(ready)) => ready,
                 Ok(Err(message)) => {
                     registry.fail_pending(&id, message).await;
                     return;
@@ -307,10 +333,33 @@ async fn handle_runtime_connection<S>(
         Ok(None) | Err(_) => return,
     };
 
+    // Check BEFORE building the transport: `SocketRuntimeTransport::from_split`
+    // unconditionally spawns a reader task that owns `stream` until the
+    // socket itself closes, so rejecting *after* building it would leak that
+    // task (dropping the transport handle alone doesn't stop it). A cheap
+    // pre-check here means the common case (a duplicate label dialing in
+    // well after the first is registered) drops `sink`/`stream` directly —
+    // no task ever spawned, socket closes immediately.
+    if registry.runtime_transport(&runtime_id).await.is_some() {
+        return;
+    }
     let (transport, closed) = SocketRuntimeTransport::from_split(sink, stream);
-    registry
-        .register_transport(runtime_id.clone(), Arc::new(transport))
-        .await;
+    if !registry
+        .try_register_transport(runtime_id.clone(), Arc::new(transport))
+        .await
+    {
+        // The narrow remaining race (two connections announcing the same id
+        // within the same instant, both passing the check above before
+        // either registers): `try_register_transport` is still the atomic
+        // source of truth, so the loser is never reachable via
+        // `runtime_transport()` — correctness holds. Its reader task isn't
+        // proactively closed here, but it's inert (nothing will ever poll
+        // it) and exits on its own once its peer disconnects.
+        return;
+    }
+    if let Some(hook) = &on_registered {
+        hook(runtime_id.clone(), workdir);
+    }
     // Deregister when the link drops so health checks observe the loss and a stale
     // transport never lingers (explicit destroy also removes it; double-remove is safe).
     let _ = closed.await;
@@ -546,5 +595,112 @@ async fn run_health_check(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::runtime_listener::RuntimeEndpoint;
+    use futures_util::SinkExt;
+    use horsie_models::runtime::RuntimeReady;
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration as StdDuration;
+    use tokio_tungstenite::connect_async;
+
+    async fn announce(addr: std::net::SocketAddr, runtime_id: &str, workdir: &str) -> WsSinkPair {
+        let (ws, _) = connect_async(format!("ws://{addr}")).await.expect("connect");
+        let (mut sink, stream) = ws.split();
+        let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
+            runtime_id: runtime_id.to_string(),
+            workdir: workdir.to_string(),
+        }))
+        .unwrap();
+        sink.send(Message::Text(ready.into())).await.unwrap();
+        (sink, stream)
+    }
+
+    type WsSinkPair = (
+        futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+    );
+
+    async fn wait_registered(registry: &ConnectedRuntimeRegistry, id: &str) {
+        for _ in 0..50 {
+            if registry.runtime_transport(id).await.is_some() {
+                return;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        panic!("'{id}' never registered within 1s");
+    }
+
+    #[tokio::test]
+    async fn duplicate_runtime_id_is_rejected_without_disturbing_the_live_one() {
+        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let addr = listener.tcp_addr().unwrap();
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let cancel = CancellationToken::new();
+        serve_runtime_connections(listener, registry.clone(), cancel.clone());
+
+        let (_sink1, _stream1) = announce(addr, "dup-id", "/one").await;
+        wait_registered(&registry, "dup-id").await;
+
+        // A second connection announcing the SAME id must be rejected: its
+        // socket closes, and the first transport stays registered.
+        let (mut sink2, mut stream2) = announce(addr, "dup-id", "/two").await;
+        let closed = tokio::time::timeout(StdDuration::from_secs(2), stream2.next()).await;
+        assert!(
+            matches!(closed, Ok(None) | Ok(Some(Err(_)))),
+            "expected the duplicate connection to be closed, got {closed:?}"
+        );
+        let _ = sink2.close().await;
+        assert!(
+            registry.runtime_transport("dup-id").await.is_some(),
+            "the original transport must still be registered"
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn on_registered_hook_fires_with_id_and_workdir_once_per_registration() {
+        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let addr = listener.tcp_addr().unwrap();
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let cancel = CancellationToken::new();
+        let seen: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let hook_seen = seen.clone();
+        let hook: ConnectHook = Arc::new(move |id: String, workdir: String| {
+            hook_seen.lock().unwrap().push((id, workdir));
+        });
+        serve_runtime_connections_with_hook(listener, registry.clone(), cancel.clone(), Some(hook));
+
+        let (_sink, _stream) = announce(addr, "rt-1", "/proj").await;
+        wait_registered(&registry, "rt-1").await;
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[("rt-1".to_string(), "/proj".to_string())]
+        );
+        cancel.cancel();
     }
 }
