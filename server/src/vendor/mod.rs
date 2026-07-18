@@ -64,6 +64,15 @@ pub struct VendorRuntime {
     pub handle: Arc<dyn VendorRuntimeHandle>,
 }
 
+impl std::fmt::Debug for VendorRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VendorRuntime")
+            .field("runtime_client", &"<RuntimeClient>")
+            .field("handle", &"<dyn VendorRuntimeHandle>")
+            .finish()
+    }
+}
+
 /// Lifecycle handle for one live runtime instance.
 #[async_trait]
 pub trait VendorRuntimeHandle: Send + Sync {

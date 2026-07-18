@@ -182,10 +182,8 @@ mod tests {
         let opened = crate::config::DbConfigStore::open(
             &format!("sqlite://{}", db.display()),
             crate::config::StoreDeps {
-                runtime_bin: std::path::PathBuf::from("horsie-runtime"),
-                workspace_root: tmp.path().join("workspaces"),
                 info: test_info(),
-                public_http_base: None,
+                local_runtime_listen: None,
             },
         )
         .await
