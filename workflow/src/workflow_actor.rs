@@ -1,5 +1,7 @@
 use crate::agent_actor::{AgentActor, AgentCommand, AgentParams};
-use crate::context::{AgentOutcome, AgentOutcomeSink, AgentRuntimeContext, WorkflowRuntimeContext};
+use crate::context::{
+    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, WorkflowRuntimeContext,
+};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition, WorkflowTransition};
@@ -284,8 +286,9 @@ impl WorkflowActor {
         } else {
             None
         };
+        let run_def = AgentRunDef::from(agent_def);
         let toolbox = self.rt.toolbox_factory.for_agent(
-            agent_def,
+            &run_def,
             self.rt.runtime_client.clone(),
             ws.names(),
             use_plugins,
@@ -299,7 +302,7 @@ impl WorkflowActor {
             parent: Arc::new(WorkflowParent(ctx.self_ref())),
             session_id,
         };
-        let mut params = AgentParams::from_def(agent_def);
+        let mut params = AgentParams::from_def(&run_def);
         params.system_prompt = crate::workspace::compose_system_prompt(
             agent_def.system_prompt.as_deref(),
             &ws,

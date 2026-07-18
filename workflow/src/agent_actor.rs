@@ -1,18 +1,19 @@
-use crate::context::{AgentOutcome, AgentOutcomeSink, AgentRuntimeContext, CONCLUDE_TOOL};
+use crate::context::{
+    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL,
+};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
     EventSinkError, LlmProvider, Message, Role, Toolbox, Usage,
 };
-use horsie_models::workflow::WorkflowAgentDef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// Per-agent configuration distilled from a [`WorkflowAgentDef`]. Runtime only.
+/// Per-agent configuration distilled from an [`AgentRunDef`]. Runtime only.
 #[derive(Clone)]
 pub struct AgentParams {
     pub system_prompt: Option<String>,
@@ -29,10 +30,17 @@ pub struct AgentParams {
     /// snapshot-compacted (SSE cursors are journal sequence numbers and must
     /// stay stable). Workflow agents keep the default `false`.
     pub interactive: bool,
+    /// An optional, never-forced handoff tool name, set by callers with their
+    /// own terminal tool that isn't the workflow `conclude` mechanism above
+    /// (e.g. the server crate's `ask_user` tool for interactive sessions). When
+    /// set, this takes over from `handoff_tool()`/forced `conclude`: `tool_choice`
+    /// stays `auto`, plain text is a perfectly normal reply, and a voluntary call
+    /// to this tool is still recognized as a handoff. `None` for workflow agents.
+    pub optional_handoff_tool: Option<String>,
 }
 
 impl AgentParams {
-    pub fn from_def(def: &WorkflowAgentDef) -> Self {
+    pub fn from_def(def: &AgentRunDef) -> Self {
         Self {
             system_prompt: def.system_prompt.clone(),
             has_output_schema: def.output_schema.is_some(),
@@ -41,6 +49,7 @@ impl AgentParams {
             max_iterations: def.max_iterations,
             max_retries: def.max_retries.unwrap_or(0),
             interactive: false,
+            optional_handoff_tool: None,
         }
     }
 
@@ -225,7 +234,13 @@ impl AgentActor {
         };
         let inner_sink = self.ctx.event_sink.clone();
         let system_prompt = self.params.system_prompt.clone().unwrap_or_default();
-        let handoff_tool = self.params.handoff_tool();
+        // An explicit optional handoff tool (e.g. the server crate's `ask_user`
+        // tool for interactive sessions) always wins over the workflow `conclude`
+        // mechanism and is never forced.
+        let (handoff_tool, force_handoff_choice) = match self.params.optional_handoff_tool.clone() {
+            Some(name) => (Some(name), false),
+            None => (self.params.handoff_tool(), true),
+        };
         let max_iterations = self.params.max_iterations;
         let max_retries = self.params.max_retries;
 
@@ -245,6 +260,7 @@ impl AgentActor {
                 sink,
                 system_prompt,
                 handoff_tool,
+                force_handoff_choice,
                 max_iterations,
                 max_retries,
                 history,
@@ -342,9 +358,24 @@ impl AgentActor {
         }
     }
 
-    /// Decide whether a `conclude` payload is a final output, an ask, or a park,
-    /// based on the agent's configured variant.
+    /// Decide whether a handoff payload is a final output, an ask, or a park.
+    /// An `optional_handoff_tool` (e.g. the server crate's `ask_user` tool) is
+    /// single-purpose — always an ask — so it bypasses `classify_conclusion`'s
+    /// `has_output_schema`/`allow_ask_user`-based branching entirely, which
+    /// exists only to disambiguate the workflow crate's multi-purpose `conclude`
+    /// payload shape.
     fn interpret(&self, data: Value, tool_call_id: Option<String>) -> Conclusion {
+        if self.params.optional_handoff_tool.is_some() {
+            let question = data
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            return Conclusion::Ask {
+                tool_call_id,
+                question,
+            };
+        }
         classify_conclusion(
             self.params.has_output_schema,
             self.params.allow_ask_user,
@@ -998,6 +1029,7 @@ async fn run_with_retries(
     sink: Arc<dyn EventSink>,
     system_prompt: String,
     handoff_tool: Option<String>,
+    force_handoff_choice: bool,
     max_iterations: Option<u32>,
     max_retries: u32,
     history: Vec<Message>,
@@ -1018,7 +1050,11 @@ async fn run_with_retries(
             .with_config(config)
             .with_history(history.clone());
         if let Some(name) = &handoff_tool {
-            builder = builder.with_handoff_tool(name.clone());
+            builder = if force_handoff_choice {
+                builder.with_handoff_tool(name.clone())
+            } else {
+                builder.with_handoff_tool_optional(name.clone())
+            };
         }
 
         let mut agent = match builder.build() {
@@ -1090,16 +1126,12 @@ mod tests {
         }
     }
 
-    fn def_fixture() -> WorkflowAgentDef {
-        WorkflowAgentDef {
-            use_plugins: None,
-            name: "a".into(),
+    fn def_fixture() -> AgentRunDef {
+        AgentRunDef {
             system_prompt: None,
-            model: "m".into(),
             output_schema: None,
             allow_ask_user: false,
             allow_timers: None,
-            transitions: None,
             max_iterations: None,
             max_retries: None,
             allowed_tools: None,
@@ -1109,6 +1141,15 @@ mod tests {
     #[test]
     fn from_def_defaults_to_non_interactive() {
         assert!(!AgentParams::from_def(&def_fixture()).interactive);
+    }
+
+    #[test]
+    fn from_def_defaults_optional_handoff_tool_to_none() {
+        assert!(
+            AgentParams::from_def(&def_fixture())
+                .optional_handoff_tool
+                .is_none()
+        );
     }
 
     #[test]

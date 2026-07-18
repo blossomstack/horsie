@@ -2,12 +2,41 @@ import {
   ChevronRight,
   CircleAlert,
   CircleCheck,
+  HelpCircle,
   Loader2,
   Wrench,
 } from "lucide-react";
 import { useState } from "react";
 import type { RenderedToolCall } from "../hooks/useSessionStream";
 import { cn } from "../lib/cn";
+
+/** The server's dedicated "ask the user" tool for sessions (see
+ * server/src/sessions/ask_tool.rs) — rendered as a question, not a generic
+ * tool call. */
+const ASK_USER_TOOL = "ask_user";
+
+function AskUserCard({ call }: { call: RenderedToolCall }) {
+  const input = call.input as { question?: string; choices?: string[] } | undefined;
+  const choices = input?.choices ?? [];
+  return (
+    <div className="flex items-start gap-2 rounded-[var(--radius)] border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-text">
+      <HelpCircle size={16} className="mt-0.5 shrink-0 text-warning" />
+      <div className="min-w-0 flex-1">
+        <span className="font-medium text-warning">Asked: </span>
+        {input?.question ?? ""}
+        {choices.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {choices.map((c) => (
+              <span key={c} className="chip">
+                {c}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function stringifyInput(input: unknown): string {
   if (input == null) return "";
@@ -35,6 +64,7 @@ function inputPreview(input: unknown): string | null {
 
 export function ToolCallCard({ call }: { call: RenderedToolCall }) {
   const [open, setOpen] = useState(false);
+  if (call.name === ASK_USER_TOOL) return <AskUserCard call={call} />;
   const preview = inputPreview(call.input);
   const hasOutput = call.output !== undefined && call.output.length > 0;
   const inputStr = stringifyInput(call.input);

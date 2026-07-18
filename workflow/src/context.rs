@@ -13,6 +13,37 @@ use uuid::Uuid;
 /// delivering its structured output or asking the user a question.
 pub const CONCLUDE_TOOL: &str = "conclude";
 
+/// The subset of an agent's configuration that [`ToolboxFactory::for_agent`] and
+/// [`AgentParams::from_def`](crate::AgentParams::from_def) actually need: tool
+/// shape and turn-shape, nothing about *where this agent sits* (a workflow
+/// graph node's `name`/`model`/`transitions`, none of which those two care
+/// about). A [`WorkflowAgentDef`] converts into one via [`From`]; an interactive
+/// session (which is not a workflow graph node at all) builds one directly.
+#[derive(Debug, Clone, Default)]
+pub struct AgentRunDef {
+    pub system_prompt: Option<String>,
+    pub output_schema: Option<Value>,
+    pub allow_ask_user: bool,
+    pub allow_timers: Option<bool>,
+    pub max_iterations: Option<u32>,
+    pub max_retries: Option<u32>,
+    pub allowed_tools: Option<Vec<String>>,
+}
+
+impl From<&WorkflowAgentDef> for AgentRunDef {
+    fn from(def: &WorkflowAgentDef) -> Self {
+        Self {
+            system_prompt: def.system_prompt.clone(),
+            output_schema: def.output_schema.clone(),
+            allow_ask_user: def.allow_ask_user,
+            allow_timers: def.allow_timers,
+            max_iterations: def.max_iterations,
+            max_retries: def.max_retries,
+            allowed_tools: def.allowed_tools.clone(),
+        }
+    }
+}
+
 /// Name of the builtin tool an agent calls to load a skill's full instructions on
 /// demand (progressive disclosure). Always advertised; re-scans the workspace live.
 pub const SKILL_TOOL: &str = "skill";
@@ -98,7 +129,7 @@ pub struct AgentRuntimeContext {
 pub trait ToolboxFactory: Send + Sync + 'static {
     fn for_agent(
         &self,
-        agent_def: &WorkflowAgentDef,
+        agent_def: &AgentRunDef,
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
         use_plugins: bool,
@@ -113,7 +144,7 @@ pub struct DefaultToolboxFactory;
 impl ToolboxFactory for DefaultToolboxFactory {
     fn for_agent(
         &self,
-        agent_def: &WorkflowAgentDef,
+        agent_def: &AgentRunDef,
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
         use_plugins: bool,
@@ -470,16 +501,12 @@ mod tests {
     use super::*;
     use horsie_runtime_client::MockTransport;
 
-    fn def(allowed: Option<Vec<String>>, output: Option<Value>, ask: bool) -> WorkflowAgentDef {
-        WorkflowAgentDef {
-            use_plugins: None,
-            name: "a".into(),
+    fn def(allowed: Option<Vec<String>>, output: Option<Value>, ask: bool) -> AgentRunDef {
+        AgentRunDef {
             system_prompt: None,
-            model: "m".into(),
             output_schema: output,
             allow_ask_user: ask,
             allow_timers: None,
-            transitions: None,
             max_iterations: None,
             max_retries: None,
             allowed_tools: allowed,

@@ -35,7 +35,6 @@ export function NewSessionModal({
   const [workdir, setWorkdir] = useState("");
   const [vendor, setVendor] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
-  const [allowAskUser, setAllowAskUser] = useState(true);
   const [usePlugins, setUsePlugins] = useState(false);
   const [selectedPlugins, setSelectedPlugins] = useState<Set<string>>(
     new Set(),
@@ -65,7 +64,6 @@ export function NewSessionModal({
     setWorkdir("");
     setVendor("");
     setSystemPrompt("");
-    setAllowAskUser(true);
     setUsePlugins(false);
     setSelectedPlugins(new Set());
     setMcpSelected([]);
@@ -117,7 +115,6 @@ export function NewSessionModal({
       agent: {
         model: model.trim(),
         systemPrompt: systemPrompt.trim() || undefined,
-        allowAskUser,
         usePlugins,
         mcpServers: mcpSelected.length ? mcpSelected : undefined,
       },
@@ -360,11 +357,6 @@ export function NewSessionModal({
                     placeholder="Override the default system prompt…"
                   />
                 </Field>
-                <Toggle
-                  label="Allow the agent to ask you questions"
-                  checked={allowAskUser}
-                  onChange={setAllowAskUser}
-                />
                 <Toggle
                   label="Enable plugins"
                   checked={usePlugins}

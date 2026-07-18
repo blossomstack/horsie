@@ -390,7 +390,6 @@ mod tests {
                 model: "mock".into(),
                 system_prompt: None,
                 allowed_tools: None,
-                allow_ask_user: false,
                 use_plugins: None,
                 max_iterations: None,
                 max_retries: 0,

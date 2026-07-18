@@ -53,7 +53,6 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         model: w.model,
         system_prompt: w.system_prompt,
         allowed_tools: w.allowed_tools,
-        allow_ask_user: w.allow_ask_user.unwrap_or(false),
         use_plugins: w.use_plugins,
         max_iterations: w.max_iterations,
         max_retries: w.max_retries.unwrap_or(0),

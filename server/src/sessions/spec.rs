@@ -33,7 +33,6 @@ pub struct AgentSettings {
     pub model: String,
     pub system_prompt: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
-    pub allow_ask_user: bool,
     pub use_plugins: Option<bool>,
     pub max_iterations: Option<u32>,
     pub max_retries: u32,
