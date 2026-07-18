@@ -555,9 +555,14 @@ function GithubSection() {
                 : "Configure the GitHub App below, then connect."}
             </span>
             <a
-              className="btn-outline"
+              className="btn-outline aria-disabled:pointer-events-none aria-disabled:opacity-40"
               href={api.github.authUrl()}
               aria-disabled={!status?.appConfigured}
+              title={
+                status?.appConfigured
+                  ? undefined
+                  : "Configure the GitHub App below first"
+              }
               onClick={(e) => {
                 if (!status?.appConfigured) e.preventDefault();
               }}
