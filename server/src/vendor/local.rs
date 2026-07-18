@@ -469,7 +469,9 @@ mod tests {
             "second".into(),
         );
         wait_connected(&registry, "resumable").await;
-        let vendor_after = registry.vendor("resumable").expect("vendor still registered");
+        let vendor_after = registry
+            .vendor("resumable")
+            .expect("vendor still registered");
         assert!(
             Arc::ptr_eq(&vendor_before, &vendor_after),
             "vendor object identity must survive a reconnect"

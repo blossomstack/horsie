@@ -615,7 +615,9 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     async fn announce(addr: std::net::SocketAddr, runtime_id: &str, workdir: &str) -> WsSinkPair {
-        let (ws, _) = connect_async(format!("ws://{addr}")).await.expect("connect");
+        let (ws, _) = connect_async(format!("ws://{addr}"))
+            .await
+            .expect("connect");
         let (mut sink, stream) = ws.split();
         let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
             runtime_id: runtime_id.to_string(),
@@ -652,9 +654,10 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_runtime_id_is_rejected_without_disturbing_the_live_one() {
-        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
-            .await
-            .unwrap();
+        let listener =
+            RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+                .await
+                .unwrap();
         let addr = listener.tcp_addr().unwrap();
         let registry = Arc::new(ConnectedRuntimeRegistry::new());
         let cancel = CancellationToken::new();
@@ -681,9 +684,10 @@ mod tests {
 
     #[tokio::test]
     async fn on_registered_hook_fires_with_id_and_workdir_once_per_registration() {
-        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
-            .await
-            .unwrap();
+        let listener =
+            RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+                .await
+                .unwrap();
         let addr = listener.tcp_addr().unwrap();
         let registry = Arc::new(ConnectedRuntimeRegistry::new());
         let cancel = CancellationToken::new();

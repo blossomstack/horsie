@@ -200,7 +200,10 @@ async fn create_session_for_vendor(
 /// session resolution exactly as it would be in production. Returns the
 /// server handle plus the listener's bound address for dialing fake daemons
 /// into.
-async fn start_server_with_shared_local(journal_dir: &Path, mock_url: &str) -> (Server, SocketAddr) {
+async fn start_server_with_shared_local(
+    journal_dir: &Path,
+    mock_url: &str,
+) -> (Server, SocketAddr) {
     let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
     providers.insert("mock".into(), provider_at(mock_url));
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));

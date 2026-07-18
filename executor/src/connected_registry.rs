@@ -140,7 +140,10 @@ mod tests {
             !reg.try_register_transport("rt-1".into(), second).await,
             "a live collision must be rejected"
         );
-        let still_registered = reg.runtime_transport("rt-1").await.expect("still registered");
+        let still_registered = reg
+            .runtime_transport("rt-1")
+            .await
+            .expect("still registered");
         assert!(
             Arc::ptr_eq(&first, &still_registered),
             "collision must not disturb the original transport"
