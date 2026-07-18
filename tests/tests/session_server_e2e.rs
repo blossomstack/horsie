@@ -90,8 +90,6 @@ async fn start_server(
     let opened = DbConfigStore::open(
         &format!("sqlite://{}", db.display()),
         StoreDeps {
-            runtime_bin: std::path::PathBuf::from("horsie-runtime"),
-            workspace_root: journal_dir.join("workspaces"),
             info: horsie_models::settings::ServerInfo {
                 config_path: String::new(),
                 database: String::new(),
@@ -100,7 +98,7 @@ async fn start_server(
                 plugins_dir: String::new(),
                 version: "test".into(),
             },
-            public_http_base: None,
+            local_runtime_listen: None,
         },
     )
     .await
