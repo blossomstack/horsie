@@ -216,9 +216,9 @@ impl LocalDaemonRegistry {
     }
 
     /// The label's vendor object, if a daemon has ever announced it (whether
-    /// currently connected or not).
-    #[cfg(test)]
-    fn vendor(&self, label: &str) -> Option<Arc<LocalDaemonVendor>> {
+    /// currently connected or not). Used by tests today; a future
+    /// connected-instance listing endpoint would read this the same way.
+    pub fn vendor(&self, label: &str) -> Option<Arc<LocalDaemonVendor>> {
         self.local_vendors
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -226,8 +226,8 @@ impl LocalDaemonRegistry {
             .cloned()
     }
 
-    #[cfg(test)]
-    async fn is_connected(&self, label: &str) -> bool {
+    /// Whether `label` currently has a live connection.
+    pub async fn is_connected(&self, label: &str) -> bool {
         self.connected.runtime_transport(label).await.is_some()
     }
 }
