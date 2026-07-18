@@ -12,7 +12,7 @@
 
 use crate::config::ConfigStore;
 use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
-use crate::velos::VelosClient;
+use crate::velos::{VelosClient, VelosError};
 use crate::vendor::{
     LocalProcessVendor, RuntimeVendor, VelosMutableSettings, VelosVendor, VelosVendorSettings,
 };
@@ -21,7 +21,7 @@ use horsie_agentcore::{LlmProvider, Secret};
 use horsie_anthropic::AnthropicProvider;
 use horsie_models::settings::{
     ModelView, ProviderView, ServerInfo, SettingsUpdate, SettingsView, VelosView,
-    VendorConfigInput, VendorConfigView, VendorView,
+    VendorConfigInput, VendorConfigView, VendorTestResult, VendorView,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -485,6 +485,41 @@ impl ConfigStore for DbConfigStore {
             .read()
             .map(|g| g.clone())
             .unwrap_or_default()
+    }
+
+    async fn test_vendor(&self, name: &str) -> Result<VendorTestResult, String> {
+        let rows = read_vendors(&self.pool).await.map_err(|e| e.to_string())?;
+        let row = rows
+            .into_iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| format!("unknown vendor '{name}'"))?;
+        match row.kind.as_str() {
+            "velos" => {
+                let vc = serde_json::from_str::<VelosConfig>(&row.config)
+                    .map_err(|e| format!("invalid config: {e}"))?;
+                let token = resolve_velos_token(&vc)?;
+                let client = VelosClient::new(&vc.server_url, token)
+                    .map_err(|e| format!("velos client: {e}"))?;
+                Ok(match client.whoami().await {
+                    Ok(identity) => VendorTestResult {
+                        ok: true,
+                        identity: Some(identity),
+                        error: None,
+                    },
+                    Err(VelosError::Status { status: 401, .. }) => VendorTestResult {
+                        ok: false,
+                        identity: None,
+                        error: Some("token rejected (401 Unauthorized)".into()),
+                    },
+                    Err(e) => VendorTestResult {
+                        ok: false,
+                        identity: None,
+                        error: Some(e.to_string()),
+                    },
+                })
+            }
+            other => Err(format!("vendor kind '{other}' does not support testing")),
+        }
     }
 }
 
@@ -1412,5 +1447,104 @@ mod tests {
         };
         let built = build_one_vendor(&row).await.expect("velos row builds");
         assert_eq!(built.as_dyn().name(), "velos");
+    }
+
+    // A tiny mock velos server exposing just `/auth/v1/me`, for `test_vendor`.
+    async fn spawn_mock_velos(accept_token: &str) -> String {
+        use axum::extract::State as AxumState;
+        use axum::http::HeaderMap;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+
+        #[derive(Clone)]
+        struct S {
+            accept: std::sync::Arc<String>,
+        }
+        async fn whoami(AxumState(s): AxumState<S>, headers: HeaderMap) -> impl IntoResponse {
+            let ok = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v == format!("Bearer {}", s.accept))
+                .unwrap_or(false);
+            if ok {
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({ "identity": "admin" })),
+                )
+            } else {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": "unauthorized" })),
+                )
+            }
+        }
+        let state = S {
+            accept: std::sync::Arc::new(accept_token.to_string()),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route("/auth/v1/me", get(whoami))
+            .with_state(state);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn test_vendor_reports_ok_for_a_good_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let base = spawn_mock_velos("good-token").await;
+        let mut input = velos_input("img", "127.0.0.1:0", None, Some("good-token"));
+        let VendorConfigInput::Velos(v) = &mut input.config;
+        v.server_url = base;
+        o.store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![input]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+
+        let result = o.store.test_vendor("cluster-a").await.expect("test ran");
+        assert!(result.ok);
+        assert_eq!(result.identity.as_deref(), Some("admin"));
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_vendor_reports_error_for_a_bad_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let base = spawn_mock_velos("good-token").await;
+        let mut input = velos_input("img", "127.0.0.1:0", None, Some("wrong-token"));
+        let VendorConfigInput::Velos(v) = &mut input.config;
+        v.server_url = base;
+        o.store
+            .update(SettingsUpdate {
+                providers: None,
+                models: None,
+                vendors: Some(vec![input]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+
+        let result = o.store.test_vendor("cluster-a").await.expect("test ran");
+        assert!(!result.ok);
+        assert!(result.identity.is_none());
+        assert!(result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_vendor_errors_for_unknown_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let err = o.store.test_vendor("ghost").await.unwrap_err();
+        assert!(err.contains("ghost"), "error names the vendor: {err}");
     }
 }
