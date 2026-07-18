@@ -151,9 +151,16 @@ session sharing the label.)
    `workdir`, so a new-session picker can list them the way the repo picker
    lists GitHub repos. Deliberately separate from `GET /api/config` /
    `ConfigStore` (see below) rather than merged into it.
-6. **`server/src/http/handlers.rs` `create_session`** — reject a request that
-   combines this vendor's kind with `repos`, `provision`, or `workdirs`
-   (see Non-goals) instead of silently ignoring them.
+6. **Validation of `repos`/`provision`/`workdirs` against this vendor** —
+   implemented inside `LocalDaemonVendor::create`/`attach` (checked against
+   the resolved `RuntimeSpec`), not at `create_session`'s HTTP layer. A
+   create-time (HTTP) rejection would need to know the target vendor's kind
+   before its label is necessarily connected — the same reason `create_session`
+   already can't reject velos's `HostDir` rejection up front either. This
+   means a request combining an unconnected/not-yet-known label with
+   `repos`/`workdirs` succeeds at `POST /api/sessions` time, and only surfaces
+   as a `RecoveryFailed` session status on the first attach attempt — a
+   deferred, not silent, rejection (see Non-goals).
 
 No DB/config-store involvement: unlike velos, this vendor kind has no
 persisted configuration, no `VendorRow`/`kind` match arm, no Settings UI
@@ -195,9 +202,11 @@ for the first time — no pre-registration step.
 
 - **No `git_checkout` or any provisioning.** A `CreateSessionRequest` that
   combines this vendor with `repos`, `provision` steps, or `workdirs` is
-  rejected at creation time with a clear error — not silently ignored. The
-  directory is whatever the daemon already has open; the request can't
-  choose or populate it.
+  rejected with a clear error, not silently ignored — but at first
+  vendor-resolution (the first `create`/`attach` call, surfacing as
+  `RecoveryFailed`), not at the `POST /api/sessions` HTTP layer (see
+  component 6 above for why). The directory is whatever the daemon already
+  has open; the request can't choose or populate it.
 - **No sandboxing.** `RuntimeSpec.capabilities_file` doesn't apply — the
   daemon runs with whatever access the user's own machine already grants it,
   same trust level as the user running it themselves.
@@ -225,12 +234,22 @@ for the first time — no pre-registration step.
 - **Unit (`LocalDaemonVendor`)**: `create`/`attach` from multiple distinct
   `runtime_id`s against one registered transport all succeed without
   interference.
-- **Integration** (extend `tests/tests/session_server_e2e.rs`, reusing the
-  fake-WS-runtime harness built for velos): two fake daemons under two
-  labels; two sessions sharing one label plus one session on the other;
-  concurrent tool calls across the shared-label sessions don't cross-talk;
-  stopping/deleting one shared-label session doesn't disturb the other;
-  full disconnect → `Interrupted` → reconnect → resume cycle.
+- **Integration, vendor-level** (`server/src/vendor/local.rs`'s own test
+  module, against a directly-constructed `LocalDaemonRegistry`): two fake
+  daemons under two labels; two sessions sharing one label plus one session
+  on the other; concurrent tool calls across the shared-label sessions don't
+  cross-talk; stopping/deleting one shared-label session doesn't disturb the
+  other; disconnect → reconnect → resume, at the vendor object level.
+- **Integration, full-stack** (`tests/tests/session_server_e2e.rs`, reusing
+  the fake-WS-runtime pattern built for velos): a real `DbConfigStore::open()`
+  with `local_runtime_listen` set, so the daemon-registers → mirrors-into-
+  `SharedVendors` → session-resolves seam runs for real (not just at the
+  vendor level) — a fake daemon dials in, a session resolves it by label
+  through the actual server, then disconnect → `RecoveryFailed` → reconnect
+  → resume is driven over real HTTP. (Narrower than originally sketched here:
+  one label, not two-labels-with-cross-talk — the vendor-level tests already
+  cover concurrency and cross-talk; this test's job is proving the `open()`
+  wiring itself, which they can't reach.)
 - **Validation test**: a create-session request combining this vendor with
   `repos`/`provision`/`workdirs` is rejected with a clear error.
 
