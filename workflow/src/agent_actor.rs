@@ -358,9 +358,24 @@ impl AgentActor {
         }
     }
 
-    /// Decide whether a `conclude` payload is a final output, an ask, or a park,
-    /// based on the agent's configured variant.
+    /// Decide whether a handoff payload is a final output, an ask, or a park.
+    /// An `optional_handoff_tool` (e.g. the server crate's `ask_user` tool) is
+    /// single-purpose — always an ask — so it bypasses `classify_conclusion`'s
+    /// `has_output_schema`/`allow_ask_user`-based branching entirely, which
+    /// exists only to disambiguate the workflow crate's multi-purpose `conclude`
+    /// payload shape.
     fn interpret(&self, data: Value, tool_call_id: Option<String>) -> Conclusion {
+        if self.params.optional_handoff_tool.is_some() {
+            let question = data
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            return Conclusion::Ask {
+                tool_call_id,
+                question,
+            };
+        }
         classify_conclusion(
             self.params.has_output_schema,
             self.params.allow_ask_user,
