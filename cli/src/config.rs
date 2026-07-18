@@ -44,6 +44,14 @@ pub struct HorsieConfig {
     /// keeps the default vendor in its settings database, not here.
     #[serde(default)]
     pub default_vendor: Option<String>,
+    /// Address the shared local-runtime-vendor listener binds (session
+    /// server only) — user-launched `horsie-runtime --endpoint ws://...`
+    /// daemons dial back here so any number of sessions can share one
+    /// already-running, already-open directory. Absent → the shared local
+    /// vendor is disabled (no listener bound, no `"local"` vendor kind ever
+    /// registered).
+    #[serde(default)]
+    pub local_runtime_listen: Option<String>,
     /// Where the session server persists its runtime-editable settings
     /// (providers, models, default vendor). Deployment config; never overlaps
     /// with those settings.
@@ -602,6 +610,20 @@ mod tests {
     fn parses_default_vendor() {
         let cfg: HorsieConfig = serde_json::from_str(r#"{ "default_vendor": "velos" }"#).unwrap();
         assert_eq!(cfg.default_vendor.as_deref(), Some("velos"));
+    }
+
+    #[test]
+    fn parses_local_runtime_listen() {
+        let cfg: HorsieConfig =
+            serde_json::from_str(r#"{ "local_runtime_listen": "0.0.0.0:7080" }"#).unwrap();
+        assert_eq!(cfg.local_runtime_listen.as_deref(), Some("0.0.0.0:7080"));
+    }
+
+    #[test]
+    fn local_runtime_listen_absent_by_default() {
+        let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.local_runtime_listen.is_none());
+        assert!(HorsieConfig::default().local_runtime_listen.is_none());
     }
 
     #[test]
