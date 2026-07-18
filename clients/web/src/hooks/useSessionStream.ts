@@ -86,6 +86,7 @@ type Action =
   | { kind: "reset" }
   | { kind: "connected"; value: boolean }
   | { kind: "optimistic"; id: string; text: string }
+  | { kind: "remove-optimistic"; id: string }
   | { kind: "event"; event: SessionEvent };
 
 function textOf(parts: ContentPart[]): string {
@@ -175,6 +176,11 @@ function reducer(state: State, action: Action): State {
           { id: action.id, text: action.text },
         ],
       };
+    case "remove-optimistic":
+      return {
+        ...state,
+        optimistic: state.optimistic.filter((o) => o.id !== action.id),
+      };
     case "event": {
       const ev = action.event;
       switch (ev.type) {
@@ -252,7 +258,8 @@ let optimisticSeq = 0;
  */
 export function useSessionStream(sessionId: string | undefined): {
   stream: SessionStream;
-  addOptimisticUser: (text: string) => void;
+  addOptimisticUser: (text: string) => string;
+  removeOptimisticUser: (id: string) => void;
 } {
   const [state, dispatch] = useReducer(reducer, INITIAL);
   const esRef = useRef<EventSource | null>(null);
@@ -282,7 +289,13 @@ export function useSessionStream(sessionId: string | undefined): {
   }, [sessionId]);
 
   const addOptimisticUser = (text: string) => {
-    dispatch({ kind: "optimistic", id: `optim-${optimisticSeq++}`, text });
+    const id = `optim-${optimisticSeq++}`;
+    dispatch({ kind: "optimistic", id, text });
+    return id;
+  };
+
+  const removeOptimisticUser = (id: string) => {
+    dispatch({ kind: "remove-optimistic", id });
   };
 
   const stream = useMemo<SessionStream>(() => {
@@ -345,5 +358,5 @@ export function useSessionStream(sessionId: string | undefined): {
     };
   }, [state]);
 
-  return { stream, addOptimisticUser };
+  return { stream, addOptimisticUser, removeOptimisticUser };
 }
