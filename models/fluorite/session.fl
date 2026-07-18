@@ -22,7 +22,6 @@ struct AgentSettings {
     model: String,
     system_prompt: Option<String>,
     allowed_tools: Option<Vec<String>>,
-    allow_ask_user: Option<bool>,
     use_plugins: Option<bool>,
     max_iterations: Option<u32>,
     max_retries: Option<u32>,

@@ -1,18 +1,19 @@
-use crate::context::{AgentOutcome, AgentOutcomeSink, AgentRuntimeContext, CONCLUDE_TOOL};
+use crate::context::{
+    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL,
+};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
     EventSinkError, LlmProvider, Message, Role, Toolbox, Usage,
 };
-use horsie_models::workflow::WorkflowAgentDef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// Per-agent configuration distilled from a [`WorkflowAgentDef`]. Runtime only.
+/// Per-agent configuration distilled from an [`AgentRunDef`]. Runtime only.
 #[derive(Clone)]
 pub struct AgentParams {
     pub system_prompt: Option<String>,
@@ -29,10 +30,17 @@ pub struct AgentParams {
     /// snapshot-compacted (SSE cursors are journal sequence numbers and must
     /// stay stable). Workflow agents keep the default `false`.
     pub interactive: bool,
+    /// An optional, never-forced handoff tool name, set by callers with their
+    /// own terminal tool that isn't the workflow `conclude` mechanism above
+    /// (e.g. the server crate's `ask_user` tool for interactive sessions). When
+    /// set, this takes over from `handoff_tool()`/forced `conclude`: `tool_choice`
+    /// stays `auto`, plain text is a perfectly normal reply, and a voluntary call
+    /// to this tool is still recognized as a handoff. `None` for workflow agents.
+    pub optional_handoff_tool: Option<String>,
 }
 
 impl AgentParams {
-    pub fn from_def(def: &WorkflowAgentDef) -> Self {
+    pub fn from_def(def: &AgentRunDef) -> Self {
         Self {
             system_prompt: def.system_prompt.clone(),
             has_output_schema: def.output_schema.is_some(),
@@ -41,6 +49,7 @@ impl AgentParams {
             max_iterations: def.max_iterations,
             max_retries: def.max_retries.unwrap_or(0),
             interactive: false,
+            optional_handoff_tool: None,
         }
     }
 
@@ -59,16 +68,6 @@ impl AgentParams {
         } else {
             None
         }
-    }
-
-    /// Whether the model must be forced to call `handoff_tool` (`tool_choice: any`)
-    /// to finish. Workflow agents are: a sub-agent has no other way to signal it's
-    /// done. Interactive (session) agents are not — the *next user message* is
-    /// what "finishes" a turn, so `conclude`/ask is purely an optional tool the
-    /// model may choose to call to pause; every ordinary reply is plain text, free
-    /// to be given without being routed through a forced tool call.
-    fn force_handoff_choice(&self) -> bool {
-        !self.interactive
     }
 }
 
@@ -235,8 +234,13 @@ impl AgentActor {
         };
         let inner_sink = self.ctx.event_sink.clone();
         let system_prompt = self.params.system_prompt.clone().unwrap_or_default();
-        let handoff_tool = self.params.handoff_tool();
-        let force_handoff_choice = self.params.force_handoff_choice();
+        // An explicit optional handoff tool (e.g. the server crate's `ask_user`
+        // tool for interactive sessions) always wins over the workflow `conclude`
+        // mechanism and is never forced.
+        let (handoff_tool, force_handoff_choice) = match self.params.optional_handoff_tool.clone() {
+            Some(name) => (Some(name), false),
+            None => (self.params.handoff_tool(), true),
+        };
         let max_iterations = self.params.max_iterations;
         let max_retries = self.params.max_retries;
 
@@ -1107,16 +1111,12 @@ mod tests {
         }
     }
 
-    fn def_fixture() -> WorkflowAgentDef {
-        WorkflowAgentDef {
-            use_plugins: None,
-            name: "a".into(),
+    fn def_fixture() -> AgentRunDef {
+        AgentRunDef {
             system_prompt: None,
-            model: "m".into(),
             output_schema: None,
             allow_ask_user: false,
             allow_timers: None,
-            transitions: None,
             max_iterations: None,
             max_retries: None,
             allowed_tools: None,
@@ -1129,15 +1129,12 @@ mod tests {
     }
 
     #[test]
-    fn force_handoff_choice_is_true_for_workflow_agents_false_for_interactive() {
-        // Workflow sub-agents must be forced to call their handoff tool to
-        // terminate; interactive (session) agents are never forced — the next
-        // user message is what "finishes" a turn, and ask/conclude is optional.
-        let mut params = AgentParams::from_def(&def_fixture());
-        params.allow_ask_user = true;
-        assert!(params.force_handoff_choice());
-        params.interactive = true;
-        assert!(!params.force_handoff_choice());
+    fn from_def_defaults_optional_handoff_tool_to_none() {
+        assert!(
+            AgentParams::from_def(&def_fixture())
+                .optional_handoff_tool
+                .is_none()
+        );
     }
 
     #[test]

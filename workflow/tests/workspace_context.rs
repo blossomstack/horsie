@@ -11,22 +11,17 @@
 )]
 
 use horsie_models::runtime::{ScannedFile, WorkspaceScan};
-use horsie_models::workflow::WorkflowAgentDef;
 use horsie_runtime_client::{MockTransport, RuntimeClient};
 use horsie_workflow::{
-    DefaultToolboxFactory, ToolboxFactory, compose_system_prompt, scan_workspace,
+    AgentRunDef, DefaultToolboxFactory, ToolboxFactory, compose_system_prompt, scan_workspace,
 };
 
-fn agent_def() -> WorkflowAgentDef {
-    WorkflowAgentDef {
-        use_plugins: None,
-        name: "coder".into(),
+fn agent_def() -> AgentRunDef {
+    AgentRunDef {
         system_prompt: Some("You are a coder.".into()),
-        model: "m".into(),
         output_schema: None,
         allow_ask_user: false,
         allow_timers: None,
-        transitions: None,
         max_iterations: None,
         max_retries: None,
         allowed_tools: Some(vec!["bash".into()]),

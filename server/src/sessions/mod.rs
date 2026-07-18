@@ -5,6 +5,7 @@
 //! session hosts a reused `AgentActor` (journal `agent/<id>`). Recovery is lazy:
 //! journals replay at startup, runtimes respawn only on user action.
 
+pub mod ask_tool;
 pub mod events;
 pub mod session_actor;
 pub mod spec;

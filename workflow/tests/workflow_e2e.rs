@@ -25,8 +25,8 @@ use horsie_mock_llm::MockLlmServer;
 use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition, WorkflowTransition};
 use horsie_runtime_client::{MockTransport, RuntimeClient};
 use horsie_workflow::{
-    AgentActor, AgentDomainEvent, CONCLUDE_TOOL, DefaultToolboxFactory, ToolboxFactory,
-    WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowNotification,
+    AgentActor, AgentDomainEvent, AgentRunDef, CONCLUDE_TOOL, DefaultToolboxFactory,
+    ToolboxFactory, WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowNotification,
     WorkflowRuntimeContext, WorkflowState, WorkflowStatus, conclude_tool_spec,
 };
 use serde_json::{Value, json};
@@ -327,7 +327,7 @@ struct BlockingFactory {
 impl ToolboxFactory for BlockingFactory {
     fn for_agent(
         &self,
-        def: &WorkflowAgentDef,
+        def: &AgentRunDef,
         _client: RuntimeClient,
         _workspace_names: Vec<String>,
         _use_plugins: bool,

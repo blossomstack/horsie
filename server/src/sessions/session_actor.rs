@@ -6,6 +6,7 @@
 //! (`Running` → `Interrupted`); no vendor call and no agent spawn happens until
 //! the next user action ("a user message means make it run").
 
+use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::SessionEventSink;
 use crate::sessions::spec::{ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::supervisor::SessionSupervisorCommand;
@@ -14,10 +15,10 @@ use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorRuntime};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::Toolbox;
-use horsie_models::workflow::WorkflowAgentDef;
 use horsie_workflow::{
-    AgentActor, AgentCommand, AgentOutcome, AgentOutcomeSink, AgentParams, AgentRuntimeContext,
-    DefaultToolboxFactory, SharedContext, ToolboxFactory, compose_system_prompt, scan_workspace,
+    AgentActor, AgentCommand, AgentOutcome, AgentOutcomeSink, AgentParams, AgentRunDef,
+    AgentRuntimeContext, DefaultToolboxFactory, SharedContext, ToolboxFactory,
+    compose_system_prompt, scan_workspace,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -310,15 +311,16 @@ impl SessionActor {
             reg.get(&settings.model).cloned()
         }
         .ok_or_else(|| format!("no provider registered for model '{}'", settings.model))?;
-        let def = WorkflowAgentDef {
-            use_plugins: settings.use_plugins,
-            name: "agent".to_string(),
+        // A session is not a workflow graph node -- it has no `name`/`model`/
+        // `transitions`, so it builds an `AgentRunDef` directly rather than a
+        // `WorkflowAgentDef`. `allow_ask_user` stays `false`: sessions get their
+        // own dedicated, always-available `ask_user` tool (below) instead of the
+        // workflow crate's `conclude`-based ask mechanism.
+        let def = AgentRunDef {
             system_prompt: settings.system_prompt.clone(),
-            model: settings.model.clone(),
             output_schema: None,
-            allow_ask_user: settings.allow_ask_user,
+            allow_ask_user: false,
             allow_timers: None,
-            transitions: None,
             max_iterations: settings.max_iterations,
             max_retries: Some(settings.max_retries),
             allowed_tools: settings.allowed_tools.clone(),
@@ -354,15 +356,17 @@ impl SessionActor {
             );
             Vec::new()
         };
-        let toolbox = DefaultToolboxFactory.for_agent(
-            &def,
-            runtime_client.clone(),
-            ws.names(),
-            use_plugins,
-            mcp,
-        );
+        let toolbox: Arc<dyn Toolbox> =
+            Arc::new(AskUserToolbox::new(DefaultToolboxFactory.for_agent(
+                &def,
+                runtime_client.clone(),
+                ws.names(),
+                use_plugins,
+                mcp,
+            )));
         let mut params = AgentParams::from_def(&def);
         params.interactive = true;
+        params.optional_handoff_tool = Some(ASK_USER_TOOL.to_string());
         params.system_prompt =
             compose_system_prompt(def.system_prompt.as_deref(), &ws, shared.as_ref());
         let agent_ctx = AgentRuntimeContext {
@@ -726,7 +730,6 @@ mod tests {
                 model: "mock".into(),
                 system_prompt: None,
                 allowed_tools: None,
-                allow_ask_user: false,
                 use_plugins: None,
                 max_iterations: None,
                 max_retries: 0,
