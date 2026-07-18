@@ -86,10 +86,7 @@ pub fn app(state: AppState) -> Router {
             "/api/config",
             get(config::get_config).put(config::update_config),
         )
-        .route(
-            "/api/config/vendors/:name/test",
-            post(config::test_vendor),
-        )
+        .route("/api/config/vendors/:name/test", post(config::test_vendor))
         .route("/api/github/status", get(github::status))
         .route("/api/github/auth", get(github::auth))
         .route("/api/github/callback", get(github::callback))
