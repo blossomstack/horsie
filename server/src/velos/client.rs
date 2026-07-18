@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use horsie_agentcore::Secret;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// Everything needed to schedule one container. Mirrors the subset of velos
 /// `ContainerSpec` we use; `restartPolicy` is always `Never` (the runtime is a
@@ -112,6 +113,37 @@ impl VelosClient {
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
+    }
+
+    /// `GET /auth/v1/me` — validate the client's token and return the
+    /// authenticated identity as a display string (`"admin"` or
+    /// `"worker:<name>"`). A lightweight reachability + auth check,
+    /// independent of any container operation; bounded by its own timeout
+    /// since (unlike the container methods) it can be triggered against a
+    /// dead `server_url` by an operator clicking a button.
+    pub async fn whoami(&self) -> Result<String, VelosError> {
+        let resp = self
+            .auth(self.http.get(self.url("/auth/v1/me")))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(request_err)?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(VelosError::Status { status, body });
+        }
+        let doc: serde_json::Value = resp.json().await.map_err(request_err)?;
+        Ok(match doc.get("identity") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Object(o)) => format!(
+                "worker:{}",
+                o.get("worker")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?")
+            ),
+            _ => "unknown".to_string(),
+        })
     }
 }
 
@@ -224,6 +256,10 @@ mod tests {
         phase: Arc<Mutex<Option<String>>>,
         /// Status code the POST handler returns (default 201).
         create_status: Arc<Mutex<u16>>,
+        /// Status code the `/auth/v1/me` handler returns (default 200).
+        whoami_status: Arc<Mutex<u16>>,
+        /// Body the `/auth/v1/me` handler returns (default `{"identity": "admin"}`).
+        whoami_body: Arc<Mutex<serde_json::Value>>,
     }
 
     async fn mock_create(
@@ -264,9 +300,20 @@ mod tests {
         StatusCode::NO_CONTENT
     }
 
+    async fn mock_whoami(State(st): State<MockState>) -> impl IntoResponse {
+        let status = *st.whoami_status.lock().unwrap();
+        let body = st.whoami_body.lock().unwrap().clone();
+        (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+            Json(body),
+        )
+    }
+
     async fn spawn_mock() -> (String, MockState) {
         let st = MockState::default();
         *st.create_status.lock().unwrap() = 201;
+        *st.whoami_status.lock().unwrap() = 200;
+        *st.whoami_body.lock().unwrap() = serde_json::json!({ "identity": "admin" });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = Router::new()
@@ -275,6 +322,7 @@ mod tests {
                 "/api/v1/containers/:name",
                 get(mock_get).delete(mock_delete),
             )
+            .route("/auth/v1/me", get(mock_whoami))
             .with_state(st.clone());
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -370,5 +418,47 @@ mod tests {
         assert_eq!(ContainerPhase::parse("Weird"), ContainerPhase::Unknown);
         assert!(!ContainerPhase::Unknown.is_dead());
         assert!(ContainerPhase::Succeeded.is_dead());
+    }
+
+    #[tokio::test]
+    async fn whoami_returns_admin_identity() {
+        let (base, _st) = spawn_mock().await;
+        let client = VelosClient::new(base, Some(Secret::from("tok"))).unwrap();
+        assert_eq!(client.whoami().await.unwrap(), "admin");
+    }
+
+    #[tokio::test]
+    async fn whoami_returns_worker_identity() {
+        let (base, st) = spawn_mock().await;
+        *st.whoami_body.lock().unwrap() = serde_json::json!({ "identity": { "worker": "w1" } });
+        let client = VelosClient::new(base, None).unwrap();
+        assert_eq!(client.whoami().await.unwrap(), "worker:w1");
+    }
+
+    #[tokio::test]
+    async fn whoami_maps_401_to_status_error() {
+        let (base, st) = spawn_mock().await;
+        *st.whoami_status.lock().unwrap() = 401;
+        let client = VelosClient::new(base, Some(Secret::from("bad"))).unwrap();
+        let err = client.whoami().await.unwrap_err();
+        match err {
+            VelosError::Status { status, .. } => assert_eq!(status, 401),
+            other => panic!("expected Status error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn whoami_reports_unreachable_server_as_request_error() {
+        // Bind then drop: frees a local port nothing listens on, so the
+        // connect fails fast (refused) instead of hanging.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = VelosClient::new(format!("http://{dead_addr}"), None).unwrap();
+        let err = client.whoami().await.unwrap_err();
+        match err {
+            VelosError::Request(_) => {}
+            other => panic!("expected Request error, got {other:?}"),
+        }
     }
 }

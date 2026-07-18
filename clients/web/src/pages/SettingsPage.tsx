@@ -21,6 +21,7 @@ import type {
   ProviderInput,
   SettingsView,
   VendorInput,
+  VendorTestResult,
 } from "../api/types";
 import { cn } from "../lib/cn";
 import {
@@ -36,7 +37,7 @@ import {
   useTestMcpServer,
   useUpsertMcpServer,
 } from "../hooks/useMcp";
-import { useSettings, useUpdateSettings } from "../hooks/useSettings";
+import { useSettings, useTestVendor, useUpdateSettings } from "../hooks/useSettings";
 
 /** The remote GitHub MCP endpoint reused via the GitHub App connection. */
 const GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/";
@@ -121,6 +122,7 @@ const toVelosDrafts = (v: SettingsView): VelosDraft[] =>
 export function SettingsPage() {
   const { data: settings, isLoading, isError } = useSettings();
   const update = useUpdateSettings();
+  const testVendor = useTestVendor();
 
   const [providers, setProviders] = useState<ProviderDraft[]>([]);
   const [models, setModels] = useState<ModelDraft[]>([]);
@@ -128,6 +130,32 @@ export function SettingsPage() {
   const [defaultVendor, setDefaultVendor] = useState("");
   const [dirty, setDirty] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [velosTests, setVelosTests] = useState<
+    Record<string, { pending: boolean; result: VendorTestResult | null }>
+  >({});
+
+  const runVelosTest = async (name: string) => {
+    setVelosTests((m) => ({
+      ...m,
+      [name]: { pending: true, result: m[name]?.result ?? null },
+    }));
+    try {
+      const result = await testVendor.mutateAsync(name);
+      setVelosTests((m) => ({ ...m, [name]: { pending: false, result } }));
+    } catch (e) {
+      setVelosTests((m) => ({
+        ...m,
+        [name]: {
+          pending: false,
+          result: {
+            ok: false,
+            identity: undefined,
+            error: e instanceof ApiRequestError ? e.message : "Test failed.",
+          },
+        },
+      }));
+    }
+  };
 
   // (Re)seed the form from the server view on load and after a successful save.
   useEffect(() => {
@@ -212,12 +240,21 @@ export function SettingsPage() {
       },
     }));
 
-    update.mutate({
-      providers: providerInputs,
-      models: modelInputs,
-      vendors: vendorInputs,
-      defaultVendor: defaultVendor || undefined,
-    });
+    update.mutate(
+      {
+        providers: providerInputs,
+        models: modelInputs,
+        vendors: vendorInputs,
+        defaultVendor: defaultVendor || undefined,
+      },
+      {
+        onSuccess: (view) => {
+          for (const vd of view.vendors) {
+            if (vd.config?.kind === "Velos") runVelosTest(vd.name);
+          }
+        },
+      },
+    );
   };
 
   const discard = () => {
@@ -409,6 +446,9 @@ export function SettingsPage() {
                       setVelos((vs) => vs.filter((_, j) => j !== i));
                       touch();
                     }}
+                    testDisabled={dirty}
+                    test={velosTests[v.name]}
+                    onTest={() => runVelosTest(v.name)}
                   />
                 ))}
               </Section>
@@ -781,10 +821,16 @@ function VelosRow({
   draft,
   onChange,
   onRemove,
+  testDisabled,
+  test,
+  onTest,
 }: {
   draft: VelosDraft;
   onChange: (next: VelosDraft) => void;
   onRemove: () => void;
+  testDisabled: boolean;
+  test: { pending: boolean; result: VendorTestResult | null } | undefined;
+  onTest: () => void;
 }) {
   const [advanced, setAdvanced] = useState(false);
   const set = (patch: Partial<VelosDraft>) => onChange({ ...draft, ...patch });
@@ -858,6 +904,31 @@ function VelosRow({
             />
           </div>
         )}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="btn-outline text-xs"
+            disabled={testDisabled || test?.pending}
+            title={testDisabled ? "Save changes to test" : undefined}
+            onClick={onTest}
+          >
+            {test?.pending && <Loader2 size={13} className="animate-spin" />}
+            Test connection
+          </button>
+          {test?.result &&
+            (test.result.ok ? (
+              <span className="chip !py-0 text-[10px] text-success">
+                Connected as {test.result.identity}
+              </span>
+            ) : (
+              <span
+                className="truncate text-[11px] text-error"
+                title={test.result.error ?? undefined}
+              >
+                {test.result.error}
+              </span>
+            ))}
+        </div>
         {draft.error && <p className="text-[11px] text-error">{draft.error}</p>}
         {!draft.active && !draft.error && draft.name.trim() && (
           <p className="text-[11px] text-faint">Not loaded yet.</p>

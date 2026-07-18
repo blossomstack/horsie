@@ -148,3 +148,13 @@ struct SettingsUpdate {
     vendors: Option<Vec<VendorInput>>,
     default_vendor: Option<String>,
 }
+
+/// The outcome of an on-demand connection check for a configurable vendor
+/// (currently velos only) — reachability + token validity, checked live.
+/// Never persisted; a fresh check every call.
+struct VendorTestResult {
+    ok: bool,
+    /// The authenticated identity when `ok` (e.g. "admin", "worker:name").
+    identity: Option<String>,
+    error: Option<String>,
+}

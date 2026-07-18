@@ -12,3 +12,4 @@ export * from './vendorInput';
 export * from './vendorConfigInput';
 export * from './velosInput';
 export * from './settingsUpdate';
+export * from './vendorTestResult';
