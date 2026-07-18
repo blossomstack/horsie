@@ -192,13 +192,19 @@ export function SessionView() {
         ) : stream.messages.length === 0 &&
           stream.streaming.length === 0 &&
           status !== SessionStatusKind.Running ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
             <p className="text-sm font-medium text-muted">
               {statusMeta(status).hint}
             </p>
-            <p className="text-xs text-faint">
-              Send a message below to start the conversation.
-            </p>
+            {stream.statusReason ?? detail?.lastError ? (
+              <p className="max-w-md text-xs text-error">
+                {stream.statusReason ?? detail?.lastError}
+              </p>
+            ) : (
+              <p className="text-xs text-faint">
+                Send a message below to start the conversation.
+              </p>
+            )}
           </div>
         ) : (
           <Transcript
