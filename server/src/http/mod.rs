@@ -86,6 +86,10 @@ pub fn app(state: AppState) -> Router {
             "/api/config",
             get(config::get_config).put(config::update_config),
         )
+        .route(
+            "/api/config/vendors/:name/test",
+            post(config::test_vendor),
+        )
         .route("/api/github/status", get(github::status))
         .route("/api/github/auth", get(github::auth))
         .route("/api/github/callback", get(github::callback))
@@ -374,6 +378,64 @@ mod tests {
             serde_json::json!({ "models": [{"alias": "x", "provider": "ghost", "modelId": "y"}] });
         let res = app.oneshot(put_json("/api/config", &bad)).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn vendor_test_endpoint_round_trips() {
+        use horsie_models::settings::VendorTestResult;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        // A bound-then-dropped listener frees a port nothing listens on, so
+        // the check fails fast (connection refused) instead of hanging.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let body = serde_json::json!({
+            "vendors": [{
+                "name": "cluster-a",
+                "config": {
+                    "kind": "Velos",
+                    "value": {
+                        "serverUrl": format!("http://{dead_addr}"),
+                        "image": "img",
+                        "advertiseHost": "10.0.0.5",
+                        "token": "tok",
+                        "listen": "127.0.0.1:0"
+                    }
+                }
+            }]
+        });
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/config", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/config/vendors/cluster-a/test",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let result: VendorTestResult = read_json(res).await;
+        assert!(!result.ok);
+        assert!(result.error.is_some());
+
+        // Unknown vendor name -> 500 (mirrors mcp::test's unknown-server case).
+        let res = app
+            .oneshot(post_json(
+                "/api/config/vendors/ghost/test",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

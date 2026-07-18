@@ -4,8 +4,8 @@
 use crate::http::AppState;
 use crate::http::error::Api;
 use axum::Json;
-use axum::extract::State;
-use horsie_models::settings::{SettingsUpdate, SettingsView};
+use axum::extract::{Path, State};
+use horsie_models::settings::{SettingsUpdate, SettingsView, VendorTestResult};
 
 /// `GET /api/config` — the current redacted settings view.
 pub async fn get_config(State(state): State<AppState>) -> Result<Json<SettingsView>, Api> {
@@ -29,4 +29,20 @@ pub async fn update_config(
         .await
         .map(Json)
         .map_err(Api::unprocessable)
+}
+
+/// `POST /api/config/vendors/:name/test` — an on-demand reachability +
+/// token check for a configured vendor (currently velos only). Always `200`
+/// for a completed check; `ok: false` + `error` on a failed check, not an
+/// HTTP error. An unknown vendor name is a 500 (mirrors `mcp::test`).
+pub async fn test_vendor(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<VendorTestResult>, Api> {
+    state
+        .config_store
+        .test_vendor(&name)
+        .await
+        .map(Json)
+        .map_err(Api::internal)
 }
