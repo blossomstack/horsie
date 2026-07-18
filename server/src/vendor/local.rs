@@ -1,87 +1,84 @@
-//! Runtime vendor backed by a nono-sandboxed `horsie-runtime` child process.
+//! Runtime vendor backed by a user-launched daemon dialing back over a
+//! shared TCP listener, fixed to whatever directory it was started in.
 //!
-//! Each create/attach builds a fresh executor assembly (runtime listener +
-//! connected registry + process provider + in-mem transport), exactly like the
-//! daemon's `ProcessJobRuntime`. Stop kills the child but preserves all on-disk
-//! state (workspace + capability file), so attach can respawn against it.
+//! Unlike every other vendor, a connected daemon isn't created or owned by
+//! any session: it registers itself under a caller-chosen label the moment
+//! it dials in (see [`LocalDaemonRegistry::bind`]), and any number of
+//! sessions may subsequently `create`/`attach` against that same label
+//! concurrently, sharing the one live connection. That's safe — the wire
+//! protocol already correlates concurrent calls by `call_id`, not by
+//! connection order, the same mechanism a single session's parallel tool
+//! calls already exercise. `stop`/`delete` are no-ops: the daemon isn't
+//! owned by any one session, so halting or deleting a session must never
+//! disturb others sharing the label. No provisioning (no `git_checkout`)
+//! and no sandboxing — the directory and the machine are already the
+//! user's own.
 
+use crate::sessions::spec::SharedVendors;
 use crate::vendor::{
     RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle, WorkspaceSource,
 };
 use async_trait::async_trait;
 use horsie_executor::{
-    ConnectedRuntimeRegistry, InMemExecutorTransport, ProcessRuntimeProvider, RuntimeEndpoint,
-    RuntimeListenerServer, SandboxPolicy, serve_runtime_connections,
+    ConnectHook, ConnectedRuntimeRegistry, RuntimeEndpoint, RuntimeListenerServer,
+    serve_runtime_connections_with_hook,
 };
-use horsie_executor_client::ExecutorClient;
-use horsie_models::executor::{RuntimeConfig, WorkspaceConfig};
 use horsie_runtime_client::RuntimeClient;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
+use tokio_util::sync::{CancellationToken, DropGuard};
 
-pub struct LocalProcessVendor {
-    runtime_bin: PathBuf,
-    /// Root under which `Managed` workspaces are allocated
-    /// (`<workspace_root>/<runtime_id>/<name>`), deterministic so attach
-    /// re-finds them and delete can reclaim them.
-    workspace_root: PathBuf,
-    /// Server HTTP base a co-located runtime fetches plugin artifacts from
-    /// (loopback). `None` disables plugin provisioning for this vendor.
-    public_http_base: Option<String>,
+/// One connected daemon's vendor identity. Never spawns anything: `create`/
+/// `attach` look up whatever's currently registered for `label` in the
+/// shared [`ConnectedRuntimeRegistry`] and hand back a client wrapping it.
+pub struct LocalDaemonVendor {
+    label: String,
+    connected: Arc<ConnectedRuntimeRegistry>,
+    workdir: RwLock<String>,
 }
 
-impl LocalProcessVendor {
-    pub fn new(
-        runtime_bin: PathBuf,
-        workspace_root: PathBuf,
-        public_http_base: Option<String>,
-    ) -> Self {
-        Self {
-            runtime_bin,
-            workspace_root,
-            public_http_base,
+impl LocalDaemonVendor {
+    /// The directory the connected daemon reported at its last (re)connect.
+    pub fn workdir(&self) -> String {
+        self.workdir
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn set_workdir(&self, workdir: String) {
+        *self.workdir.write().unwrap_or_else(|e| e.into_inner()) = workdir;
+    }
+
+    /// Reject inputs this vendor can't honor: it never provisions (no
+    /// `git_checkout`) and never resolves a caller-supplied host path (the
+    /// daemon's own directory is implicit and fixed). The common case — no
+    /// `workdirs`/`repos` in the request — produces one `Managed` workspace
+    /// with no provision steps, which this vendor silently ignores instead
+    /// of rejecting (that's exactly "just use the daemon's own dir").
+    fn reject_unsupported_inputs(spec: &RuntimeSpec) -> Result<(), String> {
+        if !spec.provision.is_empty() {
+            return Err(
+                "shared local runtime vendor does not support repo provisioning".to_string(),
+            );
         }
-    }
-
-    /// Root for materialized bundles, `<workspace_root>/.plugins`. Granted
-    /// read/write in the session capability spec so the sandboxed runtime can
-    /// unpack and scan there.
-    fn plugins_root(&self) -> PathBuf {
-        self.workspace_root.join(".plugins")
-    }
-
-    /// Resolve workspace sources to concrete host paths, creating managed dirs.
-    fn resolve_workspaces(
-        &self,
-        runtime_id: &str,
-        spec: &RuntimeSpec,
-    ) -> Result<Vec<WorkspaceConfig>, String> {
-        spec.workspaces
+        if spec
+            .workspaces
             .iter()
-            .map(|w| {
-                let path = match &w.source {
-                    WorkspaceSource::HostDir(p) => p.clone(),
-                    WorkspaceSource::Managed => {
-                        let dir = self.workspace_root.join(runtime_id).join(&w.name);
-                        std::fs::create_dir_all(&dir)
-                            .map_err(|e| format!("allocate workspace '{}': {e}", w.name))?;
-                        dir
-                    }
-                };
-                Ok(WorkspaceConfig {
-                    name: w.name.clone(),
-                    path: path.to_string_lossy().into_owned(),
-                })
-            })
-            .collect()
+            .any(|w| matches!(w.source, WorkspaceSource::HostDir(_)))
+        {
+            return Err(
+                "shared local runtime vendor ignores workdirs; sessions use the connected \
+                 daemon's own directory"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
-    /// Build one executor assembly and provision the child, signalling either
-    /// `CreateRuntime` or `AttachRuntime` on the wire.
-    async fn provision(
+    async fn resolve(
         &self,
-        runtime_id: &str,
         spec: &RuntimeSpec,
         attach: bool,
     ) -> Result<VendorRuntime, VendorError> {
@@ -92,151 +89,146 @@ impl LocalProcessVendor {
                 VendorError::Provision(e)
             }
         };
-        let connected = Arc::new(ConnectedRuntimeRegistry::new());
-        let sock = socket_path().map_err(wrap)?;
-        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Unix(sock.clone()))
+        Self::reject_unsupported_inputs(spec).map_err(wrap)?;
+        let transport = self
+            .connected
+            .runtime_transport(&self.label)
             .await
-            .map_err(|e| wrap(e.to_string()))?;
-        let cancel = CancellationToken::new();
-        serve_runtime_connections(listener, connected.clone(), cancel.clone());
-
-        let provider = ProcessRuntimeProvider::new(
-            self.runtime_bin.clone(),
-            RuntimeEndpoint::Unix(sock),
-            connected.clone(),
-        )
-        .with_sandbox(SandboxPolicy {
-            capabilities_file: spec.capabilities_file.clone(),
-        });
-        let client =
-            ExecutorClient::new(InMemExecutorTransport::new(Arc::new(provider), connected));
-        let workspaces = self.resolve_workspaces(runtime_id, spec).map_err(wrap)?;
-        let config = runtime_config_from(spec, workspaces);
-        let result = if attach {
-            client.attach_runtime(runtime_id, config).await
-        } else {
-            client.create_runtime(runtime_id, config).await
-        };
-        result.map_err(|e| wrap(e.to_string()))?;
-        let transport = client
-            .runtime_transport(runtime_id)
-            .await
-            .map_err(|e| wrap(e.to_string()))?;
+            .ok_or_else(|| {
+                wrap(format!(
+                    "local runtime '{}' is not currently connected",
+                    self.label
+                ))
+            })?;
         Ok(VendorRuntime {
             runtime_client: RuntimeClient::from_arc(transport),
-            handle: Arc::new(LocalHandle {
-                client,
-                cancel,
-                runtime_id: runtime_id.to_string(),
-            }),
+            handle: Arc::new(NoopHandle),
         })
     }
 }
 
 #[async_trait]
-impl RuntimeVendor for LocalProcessVendor {
+impl RuntimeVendor for LocalDaemonVendor {
     fn name(&self) -> &'static str {
         "local"
     }
 
-    fn artifact_base_url(&self) -> Option<String> {
-        self.public_http_base.clone()
-    }
-
-    fn plugins_dir_for(&self, runtime_id: &str) -> Option<String> {
-        Some(
-            self.plugins_root()
-                .join(runtime_id)
-                .to_string_lossy()
-                .into_owned(),
-        )
-    }
-
-    fn plugins_cache_dir(&self) -> Option<String> {
-        Some(
-            self.plugins_root()
-                .join(".cache")
-                .to_string_lossy()
-                .into_owned(),
-        )
-    }
-
     async fn create(
         &self,
-        runtime_id: &str,
+        _runtime_id: &str,
         spec: &RuntimeSpec,
     ) -> Result<VendorRuntime, VendorError> {
-        self.provision(runtime_id, spec, false).await
+        self.resolve(spec, false).await
     }
 
     async fn attach(
         &self,
-        runtime_id: &str,
+        _runtime_id: &str,
         spec: &RuntimeSpec,
     ) -> Result<VendorRuntime, VendorError> {
-        self.provision(runtime_id, spec, true).await
+        self.resolve(spec, true).await
     }
 
-    async fn delete(&self, runtime_id: &str) {
-        // Bring-your-own host dirs are never touched; managed allocations for
-        // this runtime are reclaimed best-effort.
-        let dir = self.workspace_root.join(runtime_id);
-        if dir.is_dir()
-            && let Err(e) = std::fs::remove_dir_all(&dir)
-        {
-            tracing::warn!(runtime_id, error = %e, "failed to reclaim managed workspace");
-        }
+    async fn delete(&self, _runtime_id: &str) {
+        // No-op: the vendor never created the daemon or its directory, so it
+        // has nothing to reclaim, and other sessions may still be using it.
     }
 }
 
-fn runtime_config_from(spec: &RuntimeSpec, workspaces: Vec<WorkspaceConfig>) -> RuntimeConfig {
-    RuntimeConfig {
-        workspaces,
-        plugins_dir: spec
-            .plugins_dir
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned()),
-        hook_path: spec
-            .hook_path
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect(),
-        env: spec.env.clone(),
-        provision: spec.provision.clone(),
-    }
-}
-
-/// Ephemeral unix socket for one executor assembly, kept short (sockaddr_un caps
-/// the path at ~108 bytes) and unique per call so concurrent sessions never
-/// collide. Mirrors the daemon's `ProcessJobRuntime`.
-fn socket_path() -> Result<PathBuf, String> {
-    let token = uuid::Uuid::new_v4().simple().to_string();
-    let path = std::env::temp_dir()
-        .join(format!("horsie-{}", &token[..12]))
-        .join("rt.sock");
-    let max = if cfg!(target_os = "macos") { 103 } else { 107 };
-    if path.as_os_str().len() > max {
-        return Err(format!(
-            "unix socket path too long ({} bytes, max {max}): {}",
-            path.as_os_str().len(),
-            path.display()
-        ));
-    }
-    Ok(path)
-}
-
-struct LocalHandle {
-    client: ExecutorClient,
-    cancel: CancellationToken,
-    runtime_id: String,
-}
+/// Lifecycle handle for one session's use of a shared daemon. `stop` is a
+/// no-op — halting one session must never disturb others sharing the label.
+struct NoopHandle;
 
 #[async_trait]
-impl VendorRuntimeHandle for LocalHandle {
-    async fn stop(&self) {
-        // Explicit stop-preserve wire signal, then release the listener.
-        let _ = self.client.stop_runtime(&self.runtime_id).await;
-        self.cancel.cancel();
+impl VendorRuntimeHandle for NoopHandle {
+    async fn stop(&self) {}
+}
+
+/// Binds the shared reverse-dial listener every "local" daemon connects to,
+/// and mirrors each newly (or re-)connected label into `ServerDeps.vendors`
+/// so sessions can select it by name exactly like any other vendor.
+pub struct LocalDaemonRegistry {
+    connected: Arc<ConnectedRuntimeRegistry>,
+    local_vendors: Arc<RwLock<HashMap<String, Arc<LocalDaemonVendor>>>>,
+    listen_addr: SocketAddr,
+    _serve_guard: DropGuard,
+}
+
+impl LocalDaemonRegistry {
+    /// Bind the listener and start accepting daemon connections. `vendors`
+    /// is the same map session lookups read (`ServerDeps.vendors`) — every
+    /// connected label is inserted into it as it announces itself.
+    pub async fn bind(listen: SocketAddr, vendors: SharedVendors) -> Result<Self, VendorError> {
+        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Tcp(listen))
+            .await
+            .map_err(|e| VendorError::Provision(format!("local daemon listener: {e}")))?;
+        let listen_addr = listener.tcp_addr().ok_or_else(|| {
+            VendorError::Provision("local daemon vendor requires a TCP listener".into())
+        })?;
+        let connected = Arc::new(ConnectedRuntimeRegistry::new());
+        let local_vendors: Arc<RwLock<HashMap<String, Arc<LocalDaemonVendor>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+
+        let hook_connected = connected.clone();
+        let hook_local_vendors = local_vendors.clone();
+        let hook_vendors = vendors;
+        let hook: ConnectHook = Arc::new(move |label: String, workdir: String| {
+            let vendor = {
+                let mut locals = hook_local_vendors
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                locals
+                    .entry(label.clone())
+                    .or_insert_with(|| {
+                        Arc::new(LocalDaemonVendor {
+                            label: label.clone(),
+                            connected: hook_connected.clone(),
+                            workdir: RwLock::new(String::new()),
+                        })
+                    })
+                    .clone()
+            };
+            vendor.set_workdir(workdir);
+            let mut all = hook_vendors.write().unwrap_or_else(|e| e.into_inner());
+            all.entry(label)
+                .or_insert_with(|| vendor.clone() as Arc<dyn RuntimeVendor>);
+        });
+
+        serve_runtime_connections_with_hook(
+            listener,
+            connected.clone(),
+            cancel.clone(),
+            Some(hook),
+        );
+
+        Ok(Self {
+            connected,
+            local_vendors,
+            listen_addr,
+            _serve_guard: cancel.drop_guard(),
+        })
+    }
+
+    /// The bound address, e.g. for logging or (in tests) dialing a fake daemon in.
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.listen_addr
+    }
+
+    /// The label's vendor object, if a daemon has ever announced it (whether
+    /// currently connected or not).
+    #[cfg(test)]
+    fn vendor(&self, label: &str) -> Option<Arc<LocalDaemonVendor>> {
+        self.local_vendors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(label)
+            .cloned()
+    }
+
+    #[cfg(test)]
+    async fn is_connected(&self, label: &str) -> bool {
+        self.connected.runtime_transport(label).await.is_some()
     }
 }
 
@@ -249,37 +241,284 @@ impl VendorRuntimeHandle for LocalHandle {
 )]
 mod tests {
     use super::*;
-    use crate::vendor::{WorkspaceSource, WorkspaceSpec};
+    use crate::vendor::WorkspaceSpec;
+    use futures_util::{SinkExt, StreamExt};
+    use horsie_models::runtime::{
+        BashInput, RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ToolCall,
+        ToolCallResponse, ToolOutput, ToolResult,
+    };
+    use std::time::Duration;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-    #[test]
-    fn managed_workspace_allocates_deterministically_and_host_dir_passes_through() {
-        let root = tempfile::tempdir().unwrap();
-        let vendor =
-            LocalProcessVendor::new("horsie-runtime".into(), root.path().to_path_buf(), None);
-        let spec = RuntimeSpec {
-            workspaces: vec![
-                WorkspaceSpec {
-                    name: "main".into(),
-                    source: WorkspaceSource::Managed,
-                },
-                WorkspaceSpec {
-                    name: "byo".into(),
-                    source: WorkspaceSource::HostDir("/home/u/api".into()),
-                },
-            ],
+    fn empty_vendors() -> SharedVendors {
+        Arc::new(RwLock::new(HashMap::new()))
+    }
+
+    fn test_spec() -> RuntimeSpec {
+        RuntimeSpec {
+            workspaces: vec![WorkspaceSpec {
+                name: "main".into(),
+                source: WorkspaceSource::Managed,
+            }],
             provision: vec![],
             env: vec![],
-            capabilities_file: root.path().join("caps.json"),
+            capabilities_file: std::env::temp_dir().join("caps.json"),
             plugins_dir: None,
             hook_path: vec![],
-        };
-        let ws = vendor.resolve_workspaces("rt-1", &spec).unwrap();
-        let managed = root.path().join("rt-1").join("main");
-        assert_eq!(ws[0].path, managed.to_string_lossy());
-        assert!(managed.is_dir(), "managed dir is created");
-        assert_eq!(ws[1].path, "/home/u/api");
-        // Same runtime_id resolves to the same dir (attach re-finds it).
-        let again = vendor.resolve_workspaces("rt-1", &spec).unwrap();
-        assert_eq!(again[0].path, ws[0].path);
+        }
+    }
+
+    /// A fake `horsie-runtime --endpoint ws://... --runtime-id <label>`
+    /// daemon: dials in, announces Ready under `label`, then answers every
+    /// tool call with a fixed stdout so tests can tell which daemon actually
+    /// served a call.
+    fn spawn_fake_daemon(
+        addr: SocketAddr,
+        label: String,
+        workdir: String,
+        reply: String,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let (ws, _) = match connect_async(format!("ws://{addr}")).await {
+                Ok(x) => x,
+                Err(_) => return,
+            };
+            let (mut sink, mut stream) = ws.split();
+            let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
+                runtime_id: label,
+                workdir,
+            }))
+            .unwrap();
+            if sink.send(Message::Text(ready.into())).await.is_err() {
+                return;
+            }
+            while let Some(Ok(msg)) = stream.next().await {
+                if let Message::Text(text) = msg
+                    && let Ok(RuntimeInboundMessage::ToolCall(req)) =
+                        serde_json::from_str::<RuntimeInboundMessage>(&text)
+                {
+                    let resp = RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
+                        call_id: req.call_id,
+                        result: ToolResult::Ok(ToolOutput {
+                            stdout: reply.clone(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                        }),
+                    });
+                    if let Ok(json) = serde_json::to_string(&resp) {
+                        let _ = sink.send(Message::Text(json.into())).await;
+                    }
+                }
+            }
+        })
+    }
+
+    async fn bind_registry() -> LocalDaemonRegistry {
+        LocalDaemonRegistry::bind("127.0.0.1:0".parse().unwrap(), empty_vendors())
+            .await
+            .expect("bind")
+    }
+
+    async fn wait_connected(registry: &LocalDaemonRegistry, label: &str) {
+        for _ in 0..50 {
+            if registry.is_connected(label).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("'{label}' never connected within 1s");
+    }
+
+    async fn wait_disconnected(registry: &LocalDaemonRegistry, label: &str) {
+        for _ in 0..50 {
+            if !registry.is_connected(label).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("'{label}' never disconnected within 1s");
+    }
+
+    fn bash(command: &str) -> ToolCall {
+        ToolCall::Bash(BashInput {
+            command: command.into(),
+            timeout_secs: None,
+            workspace: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn connect_registers_label_as_a_vendor() {
+        let registry = bind_registry().await;
+        let daemon = spawn_fake_daemon(
+            registry.listen_addr(),
+            "my-laptop".into(),
+            "/home/u/proj".into(),
+            "ok".into(),
+        );
+        wait_connected(&registry, "my-laptop").await;
+        let vendor = registry.vendor("my-laptop").expect("vendor registered");
+        assert_eq!(vendor.workdir(), "/home/u/proj");
+        assert_eq!(vendor.name(), "local");
+        daemon.abort();
+    }
+
+    #[tokio::test]
+    async fn create_and_attach_from_different_sessions_share_one_connection() {
+        let registry = bind_registry().await;
+        let daemon = spawn_fake_daemon(
+            registry.listen_addr(),
+            "shared".into(),
+            "/home/u/proj".into(),
+            "shared-ok".into(),
+        );
+        wait_connected(&registry, "shared").await;
+        let vendor = registry.vendor("shared").expect("vendor registered");
+
+        let rt_a = vendor
+            .create("session-a", &test_spec())
+            .await
+            .expect("create a");
+        let rt_b = vendor
+            .attach("session-b", &test_spec())
+            .await
+            .expect("attach b");
+
+        let (out_a, out_b) = tokio::join!(
+            rt_a.runtime_client.invoke(bash("a")),
+            rt_b.runtime_client.invoke(bash("b")),
+        );
+        assert_eq!(out_a.unwrap().stdout, "shared-ok");
+        assert_eq!(out_b.unwrap().stdout, "shared-ok");
+
+        // Stopping/deleting one session must not disturb the other.
+        rt_a.handle.stop().await;
+        vendor.delete("session-a").await;
+        let out_b_again = rt_b
+            .runtime_client
+            .invoke(bash("still there"))
+            .await
+            .expect("session b unaffected by session a's stop/delete");
+        assert_eq!(out_b_again.stdout, "shared-ok");
+        daemon.abort();
+    }
+
+    #[tokio::test]
+    async fn duplicate_label_is_rejected_and_original_keeps_serving() {
+        let registry = bind_registry().await;
+        let daemon1 = spawn_fake_daemon(
+            registry.listen_addr(),
+            "dup".into(),
+            "/one".into(),
+            "one".into(),
+        );
+        wait_connected(&registry, "dup").await;
+        let daemon2 = spawn_fake_daemon(
+            registry.listen_addr(),
+            "dup".into(),
+            "/two".into(),
+            "two".into(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let vendor = registry.vendor("dup").expect("vendor registered");
+        let rt = vendor
+            .create("session-x", &test_spec())
+            .await
+            .expect("create");
+        let out = rt
+            .runtime_client
+            .invoke(bash("x"))
+            .await
+            .expect("tool call");
+        assert_eq!(
+            out.stdout, "one",
+            "the original daemon must still be the one serving"
+        );
+        daemon1.abort();
+        daemon2.abort();
+    }
+
+    #[tokio::test]
+    async fn reconnect_under_same_label_resumes_service() {
+        let registry = bind_registry().await;
+        let daemon1 = spawn_fake_daemon(
+            registry.listen_addr(),
+            "resumable".into(),
+            "/proj".into(),
+            "first".into(),
+        );
+        wait_connected(&registry, "resumable").await;
+        let vendor_before = registry.vendor("resumable").expect("vendor registered");
+
+        daemon1.abort();
+        wait_disconnected(&registry, "resumable").await;
+        assert!(
+            vendor_before
+                .attach("session-y", &test_spec())
+                .await
+                .is_err(),
+            "attach must fail while disconnected"
+        );
+
+        let daemon2 = spawn_fake_daemon(
+            registry.listen_addr(),
+            "resumable".into(),
+            "/proj".into(),
+            "second".into(),
+        );
+        wait_connected(&registry, "resumable").await;
+        let vendor_after = registry.vendor("resumable").expect("vendor still registered");
+        assert!(
+            Arc::ptr_eq(&vendor_before, &vendor_after),
+            "vendor object identity must survive a reconnect"
+        );
+        let rt = vendor_after
+            .attach("session-y", &test_spec())
+            .await
+            .expect("attach after reconnect");
+        let out = rt
+            .runtime_client
+            .invoke(bash("y"))
+            .await
+            .expect("tool call after reconnect");
+        assert_eq!(out.stdout, "second");
+        daemon2.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_provision_steps_and_host_dir_workspaces() {
+        let registry = bind_registry().await;
+        let daemon = spawn_fake_daemon(
+            registry.listen_addr(),
+            "strict".into(),
+            "/proj".into(),
+            "ok".into(),
+        );
+        wait_connected(&registry, "strict").await;
+        let vendor = registry.vendor("strict").expect("vendor registered");
+
+        let mut with_provision = test_spec();
+        with_provision.provision = vec![horsie_models::executor::ProvisionStep {
+            name: "clone".into(),
+            uses: "git_checkout".into(),
+            with: vec![],
+        }];
+        match vendor.create("session-p", &with_provision).await {
+            Err(VendorError::Provision(msg)) => assert!(msg.contains("provisioning"), "{msg}"),
+            other => panic!("expected provisioning to be rejected, got {other:?}"),
+        }
+
+        let mut with_host_dir = test_spec();
+        with_host_dir.workspaces = vec![WorkspaceSpec {
+            name: "byo".into(),
+            source: WorkspaceSource::HostDir("/home/u/api".into()),
+        }];
+        match vendor.create("session-h", &with_host_dir).await {
+            Err(VendorError::Provision(msg)) => assert!(msg.contains("workdirs"), "{msg}"),
+            other => panic!("expected host-dir workspace to be rejected, got {other:?}"),
+        }
+        daemon.abort();
     }
 }

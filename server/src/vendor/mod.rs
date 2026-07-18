@@ -14,7 +14,7 @@ mod local;
 pub mod mock;
 mod velos;
 
-pub use local::LocalProcessVendor;
+pub use local::{LocalDaemonRegistry, LocalDaemonVendor};
 pub use velos::{VelosMutableSettings, VelosVendor, VelosVendorSettings};
 
 use async_trait::async_trait;
@@ -25,7 +25,10 @@ use std::sync::Arc;
 /// Where a session workspace comes from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkspaceSource {
-    /// User-supplied host directory (local vendor only).
+    /// User-supplied host directory. No vendor kind currently accepts this
+    /// (the shared local vendor ignores the daemon's fixed directory
+    /// instead; velos rejects it outright) — kept for a future vendor kind
+    /// that can honor it.
     HostDir(PathBuf),
     /// The vendor allocates and owns the directory (local: under its
     /// workspace root; velos: inside the container).
