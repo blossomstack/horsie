@@ -17,3 +17,15 @@ export function useUpdateSettings() {
     onSuccess: (view: SettingsView) => client.setQueryData(settingsKey, view),
   });
 }
+
+/**
+ * On-demand connection check for a configured vendor (velos only) — checks
+ * the *saved* config, never mutates settings. Callers manage their own
+ * per-vendor pending/result display since multiple checks can run at once
+ * (e.g. one per vendor right after a save).
+ */
+export function useTestVendor() {
+  return useMutation({
+    mutationFn: (name: string) => api.config.testVendor(name),
+  });
+}
