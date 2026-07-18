@@ -29,7 +29,7 @@ use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -113,8 +113,18 @@ impl DbConfigStore {
         let default_vendor = if vendors.contains_key(&default_vendor) {
             default_vendor
         } else {
-            eprintln!("warning: default vendor '{default_vendor}' is not loaded; using 'local'");
-            "local".into()
+            // `local` isn't guaranteed to be loaded (its runtime binary may be
+            // missing), so fall back to whatever vendor IS available rather
+            // than hardcoding a name that might not exist either.
+            let fallback = vendors
+                .keys()
+                .min()
+                .cloned()
+                .unwrap_or_else(|| "local".into());
+            eprintln!(
+                "warning: default vendor '{default_vendor}' is not loaded; using '{fallback}'"
+            );
+            fallback
         };
 
         let vendors: SharedVendors = Arc::new(RwLock::new(vendors));
@@ -676,9 +686,11 @@ async fn build_one_vendor(row: &VendorRow) -> Result<BuiltVendor, String> {
     }
 }
 
-/// Build the vendor set: `local` always, plus one per configured row. A vendor
-/// that fails to build is logged and left out (reported inactive), never
-/// fatal — matches `reconcile_vendors`'s per-update behavior.
+/// Build the vendor set: `local` if its runtime binary is actually runnable,
+/// plus one per configured row. A vendor that fails to build (or, for
+/// `local`, whose binary can't be found) is logged and left out (reported
+/// inactive), never fatal — matches `reconcile_vendors`'s per-update
+/// behavior.
 async fn build_vendors(
     rows: &[VendorRow],
     runtime_bin: PathBuf,
@@ -690,14 +702,21 @@ async fn build_vendors(
 ) {
     let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
     let mut velos_instances: HashMap<String, Arc<VelosVendor>> = HashMap::new();
-    vendors.insert(
-        "local".into(),
-        Arc::new(LocalProcessVendor::new(
-            runtime_bin,
-            workspace_root,
-            public_http_base,
-        )),
-    );
+    if local_runtime_available(&runtime_bin).await {
+        vendors.insert(
+            "local".into(),
+            Arc::new(LocalProcessVendor::new(
+                runtime_bin,
+                workspace_root,
+                public_http_base,
+            )),
+        );
+    } else {
+        eprintln!(
+            "warning: vendor 'local' disabled — runtime binary '{}' not found or not runnable",
+            runtime_bin.display()
+        );
+    }
     for r in rows {
         match build_one_vendor(r).await {
             Ok(built) => {
@@ -710,6 +729,24 @@ async fn build_vendors(
         }
     }
     (vendors, velos_instances)
+}
+
+/// Whether `bin` resolves to a runnable executable (`bin --version` exits
+/// zero). Cheap, side-effect-free, and doesn't require any of the runtime's
+/// real arguments (clap handles `--version` before validating them).
+async fn local_runtime_available(bin: &Path) -> bool {
+    let bin = bin.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&bin)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn build_velos_vendor(vc: &VelosConfig) -> Result<VelosVendor, String> {
@@ -1447,6 +1484,42 @@ mod tests {
         };
         let built = build_one_vendor(&row).await.expect("velos row builds");
         assert_eq!(built.as_dyn().name(), "velos");
+    }
+
+    #[tokio::test]
+    async fn local_runtime_available_is_false_for_a_missing_binary() {
+        assert!(
+            !local_runtime_available(std::path::Path::new(
+                "definitely-not-a-real-horsie-runtime-binary"
+            ))
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn local_runtime_available_is_true_for_a_runnable_binary() {
+        // `true` accepts (and ignores) any args, including `--version`, and
+        // always exits 0 — stands in for a real `horsie-runtime` binary here.
+        assert!(local_runtime_available(std::path::Path::new("true")).await);
+    }
+
+    #[tokio::test]
+    async fn build_vendors_excludes_local_when_its_binary_is_missing() {
+        let (vendors, _) = build_vendors(
+            &[],
+            PathBuf::from("definitely-not-a-real-horsie-runtime-binary"),
+            std::env::temp_dir(),
+            None,
+        )
+        .await;
+        assert!(!vendors.contains_key("local"));
+    }
+
+    #[tokio::test]
+    async fn build_vendors_includes_local_when_its_binary_resolves() {
+        let (vendors, _) =
+            build_vendors(&[], PathBuf::from("true"), std::env::temp_dir(), None).await;
+        assert!(vendors.contains_key("local"));
     }
 
     // A tiny mock velos server exposing just `/auth/v1/me`, for `test_vendor`.

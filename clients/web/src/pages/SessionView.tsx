@@ -46,7 +46,7 @@ export function SessionView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: detail, isLoading } = useSession(id);
-  const { stream, addOptimisticUser } = useSessionStream(id);
+  const { stream, addOptimisticUser, removeOptimisticUser } = useSessionStream(id);
   const send = useSendMessage();
   const stop = useStopSession();
   const del = useDeleteSession();
@@ -81,10 +81,15 @@ export function SessionView() {
 
   const handleSend = async (text: string) => {
     setSendError(null);
+    // Echo the message immediately — a live session's SSE push for this same
+    // message can arrive before this request resolves, so the echo must exist
+    // *before* the request goes out or the real message beats it and the
+    // echo is left stuck as an unmatched duplicate.
+    const optimisticId = addOptimisticUser(text);
     try {
       await send.mutateAsync({ id, text });
-      addOptimisticUser(text);
     } catch (e) {
+      removeOptimisticUser(optimisticId);
       setSendError(
         e instanceof ApiRequestError ? e.message : "Failed to send message.",
       );
@@ -192,13 +197,19 @@ export function SessionView() {
         ) : stream.messages.length === 0 &&
           stream.streaming.length === 0 &&
           status !== SessionStatusKind.Running ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
             <p className="text-sm font-medium text-muted">
               {statusMeta(status).hint}
             </p>
-            <p className="text-xs text-faint">
-              Send a message below to start the conversation.
-            </p>
+            {stream.statusReason ?? detail?.lastError ? (
+              <p className="max-w-md text-xs text-error">
+                {stream.statusReason ?? detail?.lastError}
+              </p>
+            ) : (
+              <p className="text-xs text-faint">
+                Send a message below to start the conversation.
+              </p>
+            )}
           </div>
         ) : (
           <Transcript

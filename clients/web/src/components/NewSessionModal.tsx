@@ -102,10 +102,7 @@ export function NewSessionModal({
 
   const submit = async () => {
     setError(null);
-    const wd = workdir.trim();
     if (!model.trim()) return setError("Select a model.");
-    if (source === "dir" && !wd)
-      return setError("A workspace directory is required.");
 
     const repos: RepoConfig[] =
       source === "repos"
@@ -124,7 +121,7 @@ export function NewSessionModal({
         usePlugins,
         mcpServers: mcpSelected.length ? mcpSelected : undefined,
       },
-      workdirs: source === "dir" ? [wd] : [],
+      workdirs: source === "dir" && wd ? [wd] : [],
       repos: source === "repos" ? repos : undefined,
       vendor: vendor.trim() || undefined,
       // Selected skill bundles; empty → server uses the default-enabled set.
@@ -144,6 +141,8 @@ export function NewSessionModal({
   };
 
   const noModels = !!settings && models.length === 0;
+  const wd = workdir.trim();
+  const effectiveVendor = vendor || settings?.defaultVendor || "";
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -215,12 +214,25 @@ export function NewSessionModal({
               </div>
 
               {source === "dir" ? (
-                <input
-                  className="input font-mono"
-                  value={workdir}
-                  onChange={(e) => setWorkdir(e.target.value)}
-                  placeholder="/Users/you/project"
-                />
+                <>
+                  <input
+                    className="input font-mono"
+                    value={workdir}
+                    onChange={(e) => setWorkdir(e.target.value)}
+                    placeholder="/Users/you/project"
+                  />
+                  {wd && effectiveVendor && effectiveVendor !== "local" ? (
+                    <p className="mt-1 text-[11px] text-warning">
+                      Vendor "{effectiveVendor}" can't mount a local
+                      directory — pick the "local" runtime vendor under
+                      Advanced, or leave this blank for a scratch workspace.
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-[11px] text-faint">
+                      Leave blank for a scratch workspace.
+                    </p>
+                  )}
+                </>
               ) : !ghStatus?.connected ? (
                 <Link
                   to="/settings"
