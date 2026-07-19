@@ -12,6 +12,7 @@ import type {
   GlobalSessionEvent,
   ListSessionsResponse,
 } from "../api/types";
+import { deriveTitle } from "../lib/format";
 
 export const qk = {
   sessions: ["sessions"] as const,
@@ -111,9 +112,35 @@ export function useStopSession() {
   });
 }
 
+/** Give an unnamed session an instant title on its first send, mirroring what
+ * the server derives — otherwise the title only appears after a refetch. */
+function applyOptimisticTitle(client: QueryClient, id: string, text: string) {
+  const detail = client.getQueryData<GetSessionResponse>(qk.session(id));
+  if (detail?.session.name) return;
+  const list = client.getQueryData<ListSessionsResponse>(qk.sessions);
+  if (list?.sessions.find((s) => s.id === id)?.name) return;
+  const title = deriveTitle(text);
+  if (!title) return;
+
+  client.setQueryData<GetSessionResponse>(qk.session(id), (prev) =>
+    prev ? { session: { ...prev.session, name: title } } : prev,
+  );
+  client.setQueryData<ListSessionsResponse>(qk.sessions, (prev) =>
+    prev
+      ? {
+          sessions: prev.sessions.map((s) =>
+            s.id === id ? { ...s, name: title } : s,
+          ),
+        }
+      : prev,
+  );
+}
+
 export function useSendMessage() {
+  const client = useQueryClient();
   return useMutation({
     mutationFn: ({ id, text }: { id: string; text: string }) =>
       api.sessions.send(id, text),
+    onMutate: ({ id, text }) => applyOptimisticTitle(client, id, text),
   });
 }

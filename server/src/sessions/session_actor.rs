@@ -97,6 +97,24 @@ enum WakeMode {
     Attach,
 }
 
+/// Longest auto-derived session title, in characters (display metadata only —
+/// mirrors how chat products title a conversation from its first message).
+const TITLE_MAX_CHARS: usize = 60;
+
+/// A short title derived from a user's first message, or `None` if it has no
+/// usable text (e.g. all whitespace).
+fn derive_title(text: &str) -> Option<String> {
+    let first_line = text.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return None;
+    }
+    if first_line.chars().count() <= TITLE_MAX_CHARS {
+        return Some(first_line.to_string());
+    }
+    let truncated: String = first_line.chars().take(TITLE_MAX_CHARS).collect();
+    Some(format!("{}…", truncated.trim_end()))
+}
+
 pub struct SessionActor {
     id: Uuid,
     spec: SessionSpec,
@@ -404,6 +422,21 @@ impl SessionActor {
         reply: oneshot::Sender<Result<(), UserMessageError>>,
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
+        // An unnamed session is titled from its first message, once — like
+        // other chat products. A caller-supplied name at creation always wins.
+        if self.spec.name.is_none()
+            && let Some(title) = derive_title(&text)
+        {
+            self.spec.name = Some(title.clone());
+            let _ = self
+                .parent
+                .tell(SessionSupervisorCommand::SessionNamed {
+                    id: self.id.to_string(),
+                    name: title,
+                })
+                .await;
+        }
+
         match state.status.clone() {
             Some(SessionStatus::Running) => {
                 let _ = reply.send(Err(UserMessageError::TurnInFlight));
@@ -835,6 +868,24 @@ mod tests {
         );
         assert_eq!(s.status, Some(SessionStatus::Idle));
         assert_eq!(s.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn derive_title_uses_trimmed_first_line() {
+        assert_eq!(
+            derive_title("what's the project about?").as_deref(),
+            Some("what's the project about?")
+        );
+        assert_eq!(
+            derive_title("  fix the login bug  \nmore detail here").as_deref(),
+            Some("fix the login bug")
+        );
+        assert_eq!(derive_title("   \n\n  ").as_deref(), None);
+        assert_eq!(derive_title("").as_deref(), None);
+        let long = "x".repeat(80);
+        let title = derive_title(&long).unwrap();
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1); // +1 for the ellipsis
+        assert!(title.ends_with('…'));
     }
 
     #[tokio::test]
