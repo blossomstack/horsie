@@ -77,76 +77,30 @@ State (the daemon control socket, per-job capability files) lives under
 
 A worked configuration and capability file are in [`examples/`](examples/README.md).
 
-The **session server** splits config in two, and never mixes them: `config.json`
-holds only deployment/bootstrap settings (storage, sandbox, runtime, hackamore,
-and the settings-DB location), while its runtime-editable settings — providers,
-models, velos vendor instances, and the default vendor — live in a SQLite
-database managed from the web UI (**Settings**, or `GET`/`PUT /api/config`). The
-DB defaults to `<data_dir>/server/config.db` (override with `database.url` or
-`$HORSIE_DATABASE_URL`). Provider/model edits apply to new turns without a
-restart; velos-instance edits activate on the next restart. Secrets are never
-returned by the API; the UI stores keys inline or references an env var. (The
-job daemon still reads providers/models from `config.json`.)
+## horsie server
 
-## Session server & remote runtimes
+`horsie-server` is a separate binary — a self-hosted web app for running LLM
+agents as recoverable, event-sourced chat **sessions**. It's independent of the
+CLI above. Build it with `make build-server` (or the container image in
+[`docker/server.Dockerfile`](docker/server.Dockerfile)) and run it:
 
-`horsie serve` runs the session-oriented HTTP + SSE server (recoverable,
-event-sourced sessions). Each session runs its tools in a **runtime vendor** — an
-execution sandbox. Two vendors ship:
-
-- **`local`** (default) — a nono-sandboxed `horsie-runtime` child process, like
-  the daemon.
-- **`velos`** (optional) — a remote container scheduled by
-  [velos](https://github.com/blossomstack/velos). The runtime dials *back* to the
-  server over an outbound WebSocket, so it works against a stock velos even
-  though velos publishes no inbound container ports.
-
-A session picks its vendor via `"vendor": "velos"` in the create request, or the
-server's `default_vendor`.
-
-### Enabling the velos vendor
-
-Add a `velos` section to the config. Only `server_url`, `image`, and
-`advertise_host` are required:
-
-```jsonc
-{
-  "velos": {
-    "server_url": "http://velos.internal:8080",
-    "token_env": "VELOS_TOKEN",              // or inline "token"
-    "image": "ghcr.io/you/horsie-runtime:latest",
-    "advertise_host": "10.0.0.5",            // reachable from velos workers
-    "listen": "0.0.0.0:0",                   // reverse-dial listener (ephemeral port)
-    "cpu": 2,
-    "memory_mib": 1024,
-    "connect_timeout_secs": 60
-  },
-  "default_vendor": "local"                    // set "velos" to make remote the default
-}
+```bash
+horsie-server --addr 0.0.0.0:3789 --web clients/web/dist
 ```
 
-Build the runtime image with [`docker/runtime.Dockerfile`](docker/runtime.Dockerfile)
-(it builds `horsie-runtime` without the sandbox feature — the container is the
-boundary) and push it where velos workers can pull it.
+Then open `http://<host>:3789`. Each session runs its tools in a **runtime
+vendor**: the `local` runtime, a daemon you run on your own machine that dials
+back to the server, or `velos`, managed ephemeral containers the server
+provisions for you.
+Providers, models, runtime vendors, GitHub, MCP servers, and skill bundles are
+all configured from the **Settings** page in the UI (stored in a SQLite settings
+database); `config.json` holds only deployment settings (storage paths, the
+`local_runtime` opt-in, and the database location).
 
-**Deployment requirements:** `advertise_host:<port>` must be routable from the
-velos worker's container network to this server (containers get outbound NAT).
-velos has no volumes, so a remote workspace is **ephemeral** — `stop` deletes the
-container and the next message schedules a fresh one; the durable session state
-(the journal) lives server-side and recovers on reconnect.
+📖 **Full user guide: [`docs/guide/`](docs/guide/README.md)** — installing and
+running the server, runtime vendors, sessions, GitHub, MCP, and skill bundles.
 
-### GitHub integration
-
-Connect a GitHub App once per deployment so sessions can be launched against
-repositories instead of local directories. The server converts the picked repos
-into `git_checkout` provision steps and mints a short-lived, repo-scoped
-installation token that the runtime uses to clone inside its sandbox — the token
-is never persisted and never sent to the browser.
-
-Create a GitHub App with **Repository permissions → Contents: Read-only**, then
-in **Settings → GitHub** fill in the client id/secret, app id, and private key
-(raw PEM or base64) and click **Connect**. Once connected, the new-session dialog
-offers a repo picker (0..N repos, optional ref per repo).
+> There is no built-in authentication — bind `0.0.0.0` only on a trusted network.
 
 ## Development
 
