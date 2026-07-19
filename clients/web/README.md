@@ -28,8 +28,8 @@ the [fluorite](https://github.com/zhxiaogg/fluorite)-generated protocol types.
 
   ```bash
   # from the repo root
-  make build-cli            # builds `horsie` + `horsie-runtime`
-  ./target/release/horsie serve      # listens on 127.0.0.1:3789
+  make build-server                    # builds `horsie-server`
+  ./target/release/horsie-server       # listens on 127.0.0.1:3789
   ```
 
   The server needs at least one model provider configured in
@@ -61,14 +61,14 @@ bun run build     # emits static assets to dist/
 
 ## Serve from the horsie server (single origin)
 
-For a network-reachable deploy without a separate dev server, point `horsie
-serve` at the built assets with `--web`; it serves them same-origin alongside
-the API (unmatched non-`/api` paths fall back to `index.html`, so client-side
-routes survive a hard refresh) and needs no CORS:
+For a network-reachable deploy without a separate dev server, point
+`horsie-server` at the built assets with `--web`; it serves them same-origin
+alongside the API (unmatched non-`/api` paths fall back to `index.html`, so
+client-side routes survive a hard refresh) and needs no CORS:
 
 ```bash
 make web-build                                     # builds clients/web/dist
-./target/release/horsie serve \
+./target/release/horsie-server \
   --addr 0.0.0.0:3789 \
   --web clients/web/dist                           # UI + API on http://<host>:3789
 ```
