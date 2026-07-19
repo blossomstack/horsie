@@ -87,3 +87,47 @@ jobs:
 
       - name: Fail on uncommitted drift
         run: git diff --exit-code clients/ts/src/generated
+
+  web-e2e:
+    name: Web e2e (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      # Build the three binaries the harness spawns (debug — the harness resolves
+      # them from target/debug). HORSIE_E2E_SKIP_BUILD below makes global-setup
+      # assert-and-use these rather than rebuild, so build failures surface here.
+      - name: Build server, runtime, mock-llm
+        run: cargo build --locked -p horsie-server -p horsie-runtime -p horsie-mock-llm
+
+      # Install Bun via its official script (no new pinned action) and add it to PATH.
+      - name: Install Bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install web dependencies
+        working-directory: clients/web
+        run: bun install --frozen-lockfile
+
+      - name: Build web assets
+        working-directory: clients/web
+        run: bun run build
+
+      - name: Install Playwright Chromium (+ OS deps)
+        working-directory: clients/web
+        run: ./node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Run e2e suite
+        working-directory: clients/web
+        env:
+          HORSIE_E2E_SKIP_BUILD: "1"
+        run: ./node_modules/.bin/playwright test
