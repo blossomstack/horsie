@@ -9,7 +9,6 @@
 
 use crate::capabilities;
 use crate::config::HorsieConfig;
-use crate::daemon::default_runtime_bin;
 use crate::error::CliError;
 use horsie_actor::{FileJournal, Journal, spawn_root};
 use horsie_models::capabilities::CapabilitySpec;
@@ -34,7 +33,6 @@ pub async fn serve(
     std::fs::create_dir_all(&data_dir).map_err(|e| CliError::Io(e.to_string()))?;
 
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(data_dir.clone()));
-    let runtime_bin = cfg.runtime.bin.clone().unwrap_or_else(default_runtime_bin);
 
     // Resolve the default capability spec once, and a finalizer that applies path
     // expansion + plugin grants + platform seatbelt rules to request-supplied specs.
@@ -49,28 +47,13 @@ pub async fn serve(
         Vec::new()
     };
     let (pd, hp) = (plugins_dir.clone(), hook_path.clone());
-    // The local vendor materializes selected bundles under
-    // `<workspace_root>/.plugins`; grant the sandboxed runtime read/write there
-    // so it can fetch, unpack, and scan them (harmless for velos, which is
-    // unsandboxed and ignores the capability file).
-    let local_plugins_root = state_dir
-        .join("workspaces")
-        .join(".plugins")
-        .to_string_lossy()
-        .into_owned();
     let caps_finalize: Arc<dyn Fn(CapabilitySpec) -> CapabilitySpec + Send + Sync> =
         Arc::new(move |caps| {
-            let mut spec = capabilities::with_plugin_grants(
+            let spec = capabilities::with_plugin_grants(
                 capabilities::resolve_user_paths(caps),
                 pd.as_deref(),
                 &hp,
             );
-            spec.grants.push(horsie_models::capabilities::Grant::Dir(
-                horsie_models::capabilities::DirGrant {
-                    path: local_plugins_root.clone(),
-                    access: horsie_models::capabilities::Access::ReadWrite,
-                },
-            ));
             capabilities::with_default_seatbelt_rules(spec)
         });
     let default_caps = caps_finalize(default_caps);
@@ -84,14 +67,6 @@ pub async fn serve(
         );
     }
     let db_url = resolve_db_url(&cfg, &data_dir);
-    // Loopback base a co-located local-vendor runtime fetches plugin artifacts
-    // from (same host as the server). Velos derives its own base from the
-    // vendor config's advertise_host + http_port.
-    let public_http_base = addr
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse::<u16>().ok())
-        .map(|port| format!("http://127.0.0.1:{port}"));
     let info = ServerInfo {
         config_path: config_path
             .as_ref()
@@ -106,10 +81,8 @@ pub async fn serve(
     let opened = DbConfigStore::open(
         &db_url,
         StoreDeps {
-            runtime_bin,
-            workspace_root: state_dir.join("workspaces"),
             info,
-            public_http_base: public_http_base.clone(),
+            local_runtime_listen: cfg.local_runtime_listen.clone(),
         },
     )
     .await

@@ -1,8 +1,9 @@
 //! Runtime vendor backed by a [velos](https://github.com/blossomstack)-scheduled
 //! remote container.
 //!
-//! Unlike [`crate::vendor::LocalProcessVendor`], which spawns a child process
-//! and lets it dial a per-session unix socket, this vendor binds **one shared
+//! Unlike [`crate::vendor::LocalDaemonVendor`], which looks up an
+//! already-connected daemon rather than spawning anything, this vendor binds
+//! **one shared
 //! TCP listener** and asks velos to run a container whose command is
 //! `horsie-runtime --endpoint ws://<advertise>:<port> …`. The runtime dials back
 //! over that outbound connection (velos exposes no inbound networking), and the
@@ -653,9 +654,11 @@ mod tests {
             Err(_) => return,
         };
         let (mut sink, mut stream) = ws.split();
-        let ready =
-            serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady { runtime_id }))
-                .unwrap();
+        let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
+            runtime_id,
+            workdir: "/workspace".to_string(),
+        }))
+        .unwrap();
         if sink.send(Message::Text(ready.into())).await.is_err() {
             return;
         }

@@ -46,6 +46,27 @@ impl ConnectedRuntimeRegistry {
         }
     }
 
+    /// Register a runtime's tool transport only if `runtime_id` isn't already
+    /// live. Returns `false` (leaving the existing transport untouched) on a
+    /// collision — used by vendors whose announced id is a caller-chosen
+    /// label that could collide (unlike the unique per-attempt ids other
+    /// vendors mint).
+    pub async fn try_register_transport(
+        &self,
+        runtime_id: String,
+        transport: Arc<dyn RuntimeTransport>,
+    ) -> bool {
+        let mut inner = self.inner.lock().await;
+        if inner.transports.contains_key(&runtime_id) {
+            return false;
+        }
+        inner.transports.insert(runtime_id.clone(), transport);
+        if let Some(tx) = inner.pending.remove(&runtime_id) {
+            let _ = tx.send(Ok(()));
+        }
+        true
+    }
+
     /// Returns a receiver that resolves when `register_transport` is called for
     /// `runtime_id` (with `Ok`) or [`fail_pending`](Self::fail_pending) reports a
     /// provisioning failure (with `Err(message)`). Must be called BEFORE the
@@ -104,6 +125,29 @@ mod tests {
         assert!(rx.await.unwrap().is_ok());
         // ... and the transport is retrievable.
         assert!(reg.runtime_transport("rt-1").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn try_register_transport_rejects_a_live_collision() {
+        let reg = ConnectedRuntimeRegistry::new();
+        let first: Arc<dyn RuntimeTransport> = Arc::new(MockTransport::ok("first"));
+        assert!(
+            reg.try_register_transport("rt-1".into(), first.clone())
+                .await
+        );
+        let second: Arc<dyn RuntimeTransport> = Arc::new(MockTransport::ok("second"));
+        assert!(
+            !reg.try_register_transport("rt-1".into(), second).await,
+            "a live collision must be rejected"
+        );
+        let still_registered = reg
+            .runtime_transport("rt-1")
+            .await
+            .expect("still registered");
+        assert!(
+            Arc::ptr_eq(&first, &still_registered),
+            "collision must not disturb the original transport"
+        );
     }
 
     #[tokio::test]

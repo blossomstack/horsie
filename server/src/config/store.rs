@@ -14,7 +14,7 @@ use crate::config::ConfigStore;
 use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
 use crate::velos::{VelosClient, VelosError};
 use crate::vendor::{
-    LocalProcessVendor, RuntimeVendor, VelosMutableSettings, VelosVendor, VelosVendorSettings,
+    LocalDaemonRegistry, RuntimeVendor, VelosMutableSettings, VelosVendor, VelosVendorSettings,
 };
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret};
@@ -29,7 +29,6 @@ use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -39,17 +38,13 @@ type Registry = HashMap<String, Arc<dyn LlmProvider>>;
 
 /// Deployment inputs the host supplies when opening the store.
 pub struct StoreDeps {
-    /// `horsie-runtime` binary the built-in `local` vendor spawns.
-    pub runtime_bin: PathBuf,
-    /// Root under which the built-in `local` vendor allocates managed
-    /// workspaces (`<workspace_root>/<runtime_id>/<name>`).
-    pub workspace_root: PathBuf,
     /// Read-only deployment paths, surfaced in the settings view.
     pub info: ServerInfo,
-    /// Server HTTP base a co-located `local`-vendor runtime fetches plugin
-    /// artifacts from (loopback, e.g. `http://127.0.0.1:3789`). `None` disables
-    /// local-vendor plugin provisioning.
-    pub public_http_base: Option<String>,
+    /// Address the shared local-runtime-vendor listener binds. User-launched
+    /// `horsie-runtime --endpoint ws://...` daemons dial back here. `None`
+    /// disables the shared local vendor entirely (no listener bound, no
+    /// `"local"` vendor kind ever registered).
+    pub local_runtime_listen: Option<String>,
 }
 
 /// What [`DbConfigStore::open`] hands back: the store (for the HTTP layer) plus
@@ -84,9 +79,20 @@ pub struct DbConfigStore {
     /// process restart; never reset within a process's lifetime.
     restart_required: AtomicBool,
     info: ServerInfo,
+    /// Kept alive for the store's lifetime to hold the shared local-runtime
+    /// listener bound (no DB persistence, no live reconfigure, no listing
+    /// endpoint yet — `local_daemon_listen_addr` below is its one reader).
+    local_daemon_registry: Option<LocalDaemonRegistry>,
 }
 
 impl DbConfigStore {
+    /// The shared local-runtime-vendor listener's bound address, if
+    /// `local_runtime_listen` was configured and the bind succeeded. `None`
+    /// if the vendor is disabled (unset, unparsable, or the bind failed).
+    pub fn local_daemon_listen_addr(&self) -> Option<SocketAddr> {
+        self.local_daemon_registry.as_ref().map(|r| r.listen_addr())
+    }
+
     /// Open (creating if absent) the database, run migrations, and build the
     /// live registry + vendors from it.
     pub async fn open(db_url: &str, deps: StoreDeps) -> Result<OpenedConfig, String> {
@@ -98,13 +104,7 @@ impl DbConfigStore {
             Arc::new(RwLock::new(build_registry(&provs, &mods)?));
 
         let vendor_rows = read_vendors(&pool).await.map_err(|e| e.to_string())?;
-        let (vendors, velos_instances) = build_vendors(
-            &vendor_rows,
-            deps.runtime_bin,
-            deps.workspace_root,
-            deps.public_http_base,
-        )
-        .await;
+        let (vendors, velos_instances) = build_vendors(&vendor_rows).await;
 
         let default_vendor = read_setting(&pool, "default_vendor")
             .await
@@ -113,9 +113,10 @@ impl DbConfigStore {
         let default_vendor = if vendors.contains_key(&default_vendor) {
             default_vendor
         } else {
-            // `local` isn't guaranteed to be loaded (its runtime binary may be
-            // missing), so fall back to whatever vendor IS available rather
-            // than hardcoding a name that might not exist either.
+            // A connected shared-local-vendor label isn't known at open()
+            // time either (daemons dial in after startup), so fall back to
+            // whatever vendor IS already loaded rather than hardcoding a
+            // name that might not exist yet.
             let fallback = vendors
                 .keys()
                 .min()
@@ -128,6 +129,25 @@ impl DbConfigStore {
         };
 
         let vendors: SharedVendors = Arc::new(RwLock::new(vendors));
+        let local_daemon_registry = match deps.local_runtime_listen.as_deref() {
+            Some(addr_str) => match addr_str.parse::<SocketAddr>() {
+                Ok(addr) => match LocalDaemonRegistry::bind(addr, vendors.clone()).await {
+                    Ok(registry) => Some(registry),
+                    Err(e) => {
+                        eprintln!("warning: shared local runtime vendor disabled: {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "warning: shared local runtime vendor disabled — invalid \
+                         local_runtime_listen '{addr_str}': {e}"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         let store = Arc::new(Self {
             pool: pool.clone(),
             registry: registry.clone(),
@@ -137,6 +157,7 @@ impl DbConfigStore {
             vendor_errors: RwLock::new(HashMap::new()),
             restart_required: AtomicBool::new(false),
             info: deps.info,
+            local_daemon_registry,
         });
         Ok(OpenedConfig {
             store,
@@ -686,37 +707,19 @@ async fn build_one_vendor(row: &VendorRow) -> Result<BuiltVendor, String> {
     }
 }
 
-/// Build the vendor set: `local` if its runtime binary is actually runnable,
-/// plus one per configured row. A vendor that fails to build (or, for
-/// `local`, whose binary can't be found) is logged and left out (reported
-/// inactive), never fatal — matches `reconcile_vendors`'s per-update
-/// behavior.
+/// Build the vendor set from configured rows. A vendor that fails to build
+/// is logged and left out (reported inactive), never fatal — matches
+/// `reconcile_vendors`'s per-update behavior. The shared local-runtime
+/// vendor isn't built here: it's not a DB row, and its listener is bound
+/// separately in `open()` (see [`LocalDaemonRegistry`]).
 async fn build_vendors(
     rows: &[VendorRow],
-    runtime_bin: PathBuf,
-    workspace_root: PathBuf,
-    public_http_base: Option<String>,
 ) -> (
     HashMap<String, Arc<dyn RuntimeVendor>>,
     HashMap<String, Arc<VelosVendor>>,
 ) {
     let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
     let mut velos_instances: HashMap<String, Arc<VelosVendor>> = HashMap::new();
-    if local_runtime_available(&runtime_bin).await {
-        vendors.insert(
-            "local".into(),
-            Arc::new(LocalProcessVendor::new(
-                runtime_bin,
-                workspace_root,
-                public_http_base,
-            )),
-        );
-    } else {
-        eprintln!(
-            "warning: vendor 'local' disabled — runtime binary '{}' not found or not runnable",
-            runtime_bin.display()
-        );
-    }
     for r in rows {
         match build_one_vendor(r).await {
             Ok(built) => {
@@ -729,24 +732,6 @@ async fn build_vendors(
         }
     }
     (vendors, velos_instances)
-}
-
-/// Whether `bin` resolves to a runnable executable (`bin --version` exits
-/// zero). Cheap, side-effect-free, and doesn't require any of the runtime's
-/// real arguments (clap handles `--version` before validating them).
-async fn local_runtime_available(bin: &Path) -> bool {
-    let bin = bin.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        std::process::Command::new(&bin)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false)
 }
 
 async fn build_velos_vendor(vc: &VelosConfig) -> Result<VelosVendor, String> {
@@ -1028,13 +1013,12 @@ mod tests {
     }
 
     async fn open(dir: &std::path::Path) -> OpenedConfig {
+        let _ = dir; // kept for signature symmetry with other test helpers in this crate
         DbConfigStore::open(
             &format!("sqlite://{}/t.db", dir.display()),
             StoreDeps {
-                runtime_bin: PathBuf::from("horsie-runtime"),
-                workspace_root: dir.join("workspaces"),
                 info: info(),
-                public_http_base: None,
+                local_runtime_listen: None,
             },
         )
         .await
@@ -1484,42 +1468,6 @@ mod tests {
         };
         let built = build_one_vendor(&row).await.expect("velos row builds");
         assert_eq!(built.as_dyn().name(), "velos");
-    }
-
-    #[tokio::test]
-    async fn local_runtime_available_is_false_for_a_missing_binary() {
-        assert!(
-            !local_runtime_available(std::path::Path::new(
-                "definitely-not-a-real-horsie-runtime-binary"
-            ))
-            .await
-        );
-    }
-
-    #[tokio::test]
-    async fn local_runtime_available_is_true_for_a_runnable_binary() {
-        // `true` accepts (and ignores) any args, including `--version`, and
-        // always exits 0 — stands in for a real `horsie-runtime` binary here.
-        assert!(local_runtime_available(std::path::Path::new("true")).await);
-    }
-
-    #[tokio::test]
-    async fn build_vendors_excludes_local_when_its_binary_is_missing() {
-        let (vendors, _) = build_vendors(
-            &[],
-            PathBuf::from("definitely-not-a-real-horsie-runtime-binary"),
-            std::env::temp_dir(),
-            None,
-        )
-        .await;
-        assert!(!vendors.contains_key("local"));
-    }
-
-    #[tokio::test]
-    async fn build_vendors_includes_local_when_its_binary_resolves() {
-        let (vendors, _) =
-            build_vendors(&[], PathBuf::from("true"), std::env::temp_dir(), None).await;
-        assert!(vendors.contains_key("local"));
     }
 
     // A tiny mock velos server exposing just `/auth/v1/me`, for `test_vendor`.

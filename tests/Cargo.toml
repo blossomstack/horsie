@@ -22,6 +22,7 @@ reqwest     = { workspace = true, features = ["stream"] }
 tempfile    = { workspace = true }
 uuid        = { workspace = true }
 futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 [lints]
 workspace = true
