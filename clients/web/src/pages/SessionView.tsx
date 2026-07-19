@@ -167,6 +167,7 @@ export function SessionView() {
               onClick={handleStop}
               disabled={stop.isPending}
               title="Stop the session (preserves the runtime)"
+              data-testid="session-stop"
             >
               <Square size={14} />
               Stop
@@ -177,6 +178,7 @@ export function SessionView() {
             onClick={handleDelete}
             disabled={del.isPending}
             title="Delete session"
+            data-testid="session-delete"
           >
             <Trash2 size={17} />
           </button>
@@ -224,7 +226,10 @@ export function SessionView() {
       {/* Errors */}
       {(sendError || stream.streamError) && (
         <div className="mx-auto w-full max-w-3xl px-4">
-          <div className="flex items-start gap-2 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+          <div
+            data-testid="session-error"
+            className="flex items-start gap-2 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error"
+          >
             <CircleAlert size={16} className="mt-0.5 shrink-0" />
             <span>{sendError ?? stream.streamError}</span>
           </div>

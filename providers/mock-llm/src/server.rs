@@ -204,6 +204,7 @@ impl MockLlmServerBuilder {
         let app = Router::new()
             .route("/v1/messages", post(handle_messages))
             .route("/queue", post(handle_queue))
+            .route("/reset", post(handle_reset))
             .route("/scenarios/load", post(handle_load_scenarios))
             .route("/scenarios", get(handle_list_scenarios))
             .route(
@@ -313,15 +314,6 @@ struct MessagesRequest {
     stream: Option<bool>,
 }
 
-#[derive(Deserialize)]
-struct QueueRequest {
-    #[serde(rename = "type")]
-    response_type: String,
-    content: Option<String>,
-    tool_name: Option<String>,
-    tool_input: Option<serde_json::Value>,
-}
-
 #[derive(Serialize)]
 struct StatusResponse {
     status: String,
@@ -399,13 +391,22 @@ async fn handle_messages(
                         thinking_sse(&msg_id, &text, &signature)
                     }
                     // Error in stream mode: emit a StreamError-compatible SSE event so
-                    // async-anthropic parses it as AnthropicError::StreamError.
-                    Some(MockResponse::Error { message, .. }) => vec![(
-                        "error".into(),
-                        // Top-level "type" + "message" matches async-anthropic's StreamError shape.
-                        serde_json::json!({"type": "overloaded_error", "message": message})
-                            .to_string(),
-                    )],
+                    // async-anthropic parses it as AnthropicError::StreamError. The
+                    // error `type` is derived from `status` so tests can choose a
+                    // retryable (`overloaded_error`/`rate_limit_error`) or a
+                    // non-retryable (`invalid_request_error`) failure deterministically.
+                    Some(MockResponse::Error { status, message }) => {
+                        let etype = match status {
+                            429 => "rate_limit_error",
+                            529 => "overloaded_error",
+                            _ => "invalid_request_error",
+                        };
+                        vec![(
+                            "error".into(),
+                            // Top-level "type" + "message" matches async-anthropic's StreamError shape.
+                            serde_json::json!({ "type": etype, "message": message }).to_string(),
+                        )]
+                    }
                     None => text_sse(&msg_id, "No mock response queued"),
                     Some(MockResponse::TextStream { .. } | MockResponse::ToolCallStream { .. }) => {
                         unreachable!()
@@ -438,25 +439,31 @@ async fn handle_messages(
     }
 }
 
+/// Append one response to the FIFO queue. The body is a full [`MockResponse`]
+/// (tagged `type`, snake_case), so every variant is expressible over HTTP:
+/// `{"type":"text","content":…}`, `{"type":"text_stream","chunks":[…]}`,
+/// `{"type":"tool_call","name":…,"input":…}`, `{"type":"error","status":…,
+/// "message":…}`, `{"type":"thinking","text":…,"signature":…}`.
 async fn handle_queue(
     State(state): State<Arc<MockState>>,
-    Json(req): Json<QueueRequest>,
+    Json(response): Json<MockResponse>,
 ) -> Json<StatusResponse> {
-    let response = match req.response_type.as_str() {
-        "text" => MockResponse::Text {
-            content: req.content.unwrap_or_default(),
-        },
-        "tool_call" => MockResponse::ToolCall {
-            name: req.tool_name.unwrap_or_default(),
-            input: req.tool_input.unwrap_or_else(|| serde_json::json!({})),
-        },
-        _ => MockResponse::Text {
-            content: "Unknown type".into(),
-        },
-    };
     state.queue.lock().push(QueueEntry::immediate(response));
     Json(StatusResponse {
         status: "queued".into(),
+        message: None,
+    })
+}
+
+/// Clear all per-test state: the FIFO queue and any per-session scenario
+/// cursors/bindings. Loaded scenario definitions are left intact. Tests call
+/// this before each case so nothing leaks across the serially-run suite.
+async fn handle_reset(State(state): State<Arc<MockState>>) -> Json<StatusResponse> {
+    state.queue.lock().clear();
+    state.session_states.lock().clear();
+    state.session_bindings.lock().clear();
+    Json(StatusResponse {
+        status: "reset".into(),
         message: None,
     })
 }

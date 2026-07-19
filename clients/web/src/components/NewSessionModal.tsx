@@ -169,6 +169,7 @@ export function NewSessionModal({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Untitled session"
+                data-testid="session-name-input"
               />
             </Field>
 
@@ -187,6 +188,7 @@ export function NewSessionModal({
                   className="input font-mono"
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
+                  data-testid="model-select"
                 >
                   {models.map((m) => (
                     <option key={m.alias} value={m.alias}>
@@ -203,6 +205,7 @@ export function NewSessionModal({
                   className="input font-mono"
                   value={effectiveVendorName}
                   onChange={(e) => setVendor(e.target.value)}
+                  data-testid="vendor-select"
                 >
                   {activeVendors.map((v) => (
                     <option key={v.name} value={v.name}>
@@ -438,6 +441,7 @@ export function NewSessionModal({
               className="btn-primary"
               onClick={submit}
               disabled={create.isPending || noModels}
+              data-testid="create-session-submit"
             >
               {create.isPending && (
                 <Loader2 size={15} className="animate-spin" />

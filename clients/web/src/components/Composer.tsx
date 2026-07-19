@@ -48,7 +48,10 @@ export function Composer({
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-4">
       {awaiting && pendingQuestion && (
-        <div className="mb-2 flex items-start gap-2 rounded-[var(--radius)] border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-text">
+        <div
+          data-testid="ask-question-banner"
+          className="mb-2 flex items-start gap-2 rounded-[var(--radius)] border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-text"
+        >
           <HelpCircle size={16} className="mt-0.5 shrink-0 text-warning" />
           <div>
             <span className="font-medium text-warning">Agent is asking:</span>{" "}
@@ -70,6 +73,7 @@ export function Composer({
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
+          data-testid="composer-input"
           placeholder={
             meta.canSend
               ? awaiting
@@ -87,6 +91,7 @@ export function Composer({
             onClick={onStop}
             disabled={busy}
             title="Stop the session (preserves the runtime)"
+            data-testid="composer-stop"
           >
             <Square size={15} className="fill-current" />
             Stop
@@ -98,6 +103,7 @@ export function Composer({
             disabled={!text.trim() || !meta.canSend || busy}
             title="Send"
             aria-label="Send message"
+            data-testid="composer-send"
           >
             <ArrowUp size={18} />
           </button>

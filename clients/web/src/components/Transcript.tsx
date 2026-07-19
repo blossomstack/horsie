@@ -39,7 +39,11 @@ function AssistantMessage({ msg }: { msg: RenderedMessage }) {
         {msg.thinking.map((t, i) => (
           <ThinkingBlock key={`t${i}`} text={t} />
         ))}
-        {msg.text && <Prose text={msg.text} />}
+        {msg.text && (
+          <div data-testid="assistant-text">
+            <Prose text={msg.text} />
+          </div>
+        )}
         {msg.toolCalls.map((tc) => (
           <ToolCallCard key={tc.id} call={tc} />
         ))}
@@ -51,7 +55,11 @@ function AssistantMessage({ msg }: { msg: RenderedMessage }) {
 
 function MessageRow({ msg }: { msg: RenderedMessage }) {
   return (
-    <div className={cn("animate-rise", msg.optimistic && "opacity-70")}>
+    <div
+      data-testid="message"
+      data-role={msg.role}
+      className={cn("animate-rise", msg.optimistic && "opacity-70")}
+    >
       {msg.role === "User" ? (
         <UserBubble text={msg.text} />
       ) : (
@@ -73,7 +81,9 @@ function StreamingMessage({
       <AssistantAvatar />
       <div className="min-w-0 flex-1 space-y-2.5 pt-0.5">
         {text ? (
-          <Prose text={text} />
+          <div data-testid="assistant-streaming">
+            <Prose text={text} />
+          </div>
         ) : orphanTools.length === 0 ? (
           <div className="flex items-center gap-1.5 pt-1 text-sm text-faint">
             <span className="cursor-dot" />
