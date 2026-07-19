@@ -188,13 +188,22 @@ impl DbConfigStore {
         let live = self.vendors.read().unwrap_or_else(|e| e.into_inner());
         let errors = self.vendor_errors.read().unwrap_or_else(|e| e.into_inner());
         let active = |name: &str| live.contains_key(name);
-        let mut out = vec![VendorView {
-            name: "local".into(),
-            active: active("local"),
-            is_default: default_vendor == "local",
-            config: None,
-            error: None,
-        }];
+        // Daemon-registered vendors (e.g. "local") aren't DB rows — they only
+        // exist once a daemon has actually dialed in and claimed a label, so
+        // unlike `rows` below they're read straight off the live map instead
+        // of being listed unconditionally.
+        let row_names: HashSet<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        let mut out: Vec<VendorView> = live
+            .keys()
+            .filter(|name| !row_names.contains(name.as_str()))
+            .map(|name| VendorView {
+                name: name.clone(),
+                active: true,
+                is_default: default_vendor == name.as_str(),
+                config: None,
+                error: None,
+            })
+            .collect();
         for r in rows {
             let config = match r.kind.as_str() {
                 "velos" => serde_json::from_str::<VelosConfig>(&r.config)

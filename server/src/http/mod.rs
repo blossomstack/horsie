@@ -347,13 +347,15 @@ mod tests {
         use horsie_models::settings::SettingsView;
         let tmp = tempfile::tempdir().unwrap();
         let app = app(test_state(&tmp).await);
-        // GET: fresh DB — no models, built-in `local` vendor is the default.
+        // GET: fresh DB — no models, no configured vendors, and "local"
+        // falls back to being the (unloaded) default since no daemon has
+        // registered it and no other vendor is configured either.
         let res = app.clone().oneshot(get("/api/config")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
         assert_eq!(view.default_vendor, "local");
         assert!(view.models.is_empty());
-        assert!(view.vendors.iter().any(|v| v.name == "local"));
+        assert!(view.vendors.is_empty());
         // PUT a provider + model persists and redacts the key.
         let body = serde_json::json!({
             "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
