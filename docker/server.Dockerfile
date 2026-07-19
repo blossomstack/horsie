@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Container image for the horsie **session server** (`horsie serve`): the HTTP +
+# Container image for the horsie **session server** (`horsie-server`): the HTTP +
 # SSE API plus the bundled web UI. Pairs with docker/runtime.Dockerfile, which
 # builds the horsie-runtime image this server schedules onto velos workers.
 #
@@ -13,7 +13,7 @@
 # ---- Stage 1: build the web UI (clients/web -> dist) -------------------------
 # The generated fluorite types are committed under clients/web/src/generated, so
 # the build needs no fluorite CLI -- just `bun run build` (tsc -b && vite build),
-# which emits ./dist (index.html + assets/), the layout `serve --web` expects.
+# which emits ./dist (index.html + assets/), the layout `--web` expects.
 FROM oven/bun:1 AS web
 WORKDIR /web
 COPY clients/web/package.json clients/web/bun.lock ./
@@ -21,7 +21,7 @@ RUN bun install --frozen-lockfile
 COPY clients/web/ ./
 RUN bun run build
 
-# ---- Stage 2: build the horsie binary (cli crate, package `horsie`) ----------
+# ---- Stage 2: build the horsie-server binary (server crate) ------------------
 FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY . .
@@ -31,8 +31,8 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p horsie \
-    && cp target/release/horsie /usr/local/bin/horsie
+    cargo build --release --locked -p horsie-server \
+    && cp target/release/horsie-server /usr/local/bin/horsie-server
 
 # ---- Stage 3: minimal runtime ------------------------------------------------
 FROM debian:bookworm-slim
@@ -43,8 +43,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --create-home --home-dir /home/horsie --shell /usr/sbin/nologin horsie \
  && install -d -o horsie -g horsie /data
-COPY --from=build /usr/local/bin/horsie /usr/local/bin/horsie
-# Web UI assets served via `serve --web`.
+COPY --from=build /usr/local/bin/horsie-server /usr/local/bin/horsie-server
+# Web UI assets served via `--web`.
 COPY --from=web /web/dist /usr/local/share/horsie/web
 USER horsie
 # /data holds the session journal + state (mount a volume here); config is
@@ -55,7 +55,7 @@ WORKDIR /data
 EXPOSE 3789 3790
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:3789/api/health || exit 1
-ENTRYPOINT ["horsie"]
+ENTRYPOINT ["horsie-server"]
 # Sane default; the deploy stack overrides `command:` with the full invocation
 # (--config /etc/horsie/config.json, etc.).
-CMD ["serve", "--addr", "0.0.0.0:3789", "--web", "/usr/local/share/horsie/web"]
+CMD ["--addr", "0.0.0.0:3789", "--web", "/usr/local/share/horsie/web"]

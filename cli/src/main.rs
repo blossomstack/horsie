@@ -56,20 +56,6 @@ enum Command {
         #[command(subcommand)]
         action: PluginAction,
     },
-    /// Run the session server (HTTP + SSE) in the foreground.
-    Serve {
-        #[arg(long)]
-        config: Option<PathBuf>,
-        /// Bind address for the HTTP server. Use `0.0.0.0:3789` to accept
-        /// connections from other hosts on the network.
-        #[arg(long, default_value = "127.0.0.1:3789")]
-        addr: String,
-        /// Directory of built web-UI assets to serve alongside the API (e.g.
-        /// `clients/web/dist`). When set, the UI is served same-origin, so no
-        /// separate dev server or CORS setup is needed.
-        #[arg(long)]
-        web: Option<PathBuf>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -496,12 +482,6 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 Ok(0)
             }
         },
-        Command::Serve { config, addr, web } => {
-            let cfg = HorsieConfig::resolve(config.as_deref())?;
-            let config_path = HorsieConfig::resolve_path(config.as_deref());
-            horsie::serve::serve(cfg, config_path, addr, web).await?;
-            Ok(0)
-        }
         Command::Plugin { action } => match action {
             PluginAction::Install {
                 url,

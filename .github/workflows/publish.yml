@@ -114,12 +114,12 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --locked -p horsie -p horsie-runtime --target ${{ matrix.target }}
+        run: cargo build --release --locked -p horsie -p horsie-runtime -p horsie-server --target ${{ matrix.target }}
 
       - name: Package
         run: |
           tar -czf "horsie-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" horsie horsie-runtime
+            -C "target/${{ matrix.target }}/release" horsie horsie-runtime horsie-server
 
       - name: Upload to GitHub release
         env:
