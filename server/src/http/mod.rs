@@ -7,6 +7,7 @@ mod github;
 mod handlers;
 mod mcp;
 mod plugins;
+mod runtime_connect;
 mod sse;
 
 use crate::config::ConfigStore;
@@ -14,6 +15,7 @@ use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Router;
 use axum::routing::{get, post, put};
 use horsie_actor::{ActorRef, Journal};
+use horsie_executor::{ConnectHook, ConnectedRuntimeRegistry};
 use horsie_models::capabilities::CapabilitySpec;
 use horsie_models::session::GlobalSessionEvent;
 use std::path::PathBuf;
@@ -60,6 +62,14 @@ pub struct AppState {
     /// DB-managed plugin-bundle library: install/list/update/delete and the
     /// token-guarded artifact endpoint runtimes fetch bundles from.
     pub plugins: Arc<crate::plugins::PluginService>,
+    /// Server-wide registry every runtime dial-back (velos container or local
+    /// daemon) lands in, keyed by `runtime_id`. Shared with the vendors so a
+    /// vendor's `provision()` finds the connection the HTTP route registered.
+    pub runtime_registry: Arc<ConnectedRuntimeRegistry>,
+    /// Hook that registers a `?register=local` daemon as a vendor. `None` when
+    /// the `local_runtime` opt-in is off, which makes the route refuse such
+    /// registrations.
+    pub local_daemon_hook: Option<ConnectHook>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
@@ -118,6 +128,10 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/plugins/:name/update", post(plugins::update))
         .route("/api/plugin-artifacts/:file", get(plugins::get_artifact))
+        .route(
+            "/api/runtime/connect",
+            get(runtime_connect::runtime_connect),
+        )
         .with_state(state);
 
     match web_dir {
@@ -179,11 +193,12 @@ mod tests {
         // A real DB store on a temp SQLite; the registry it opens is empty and
         // shared with the supervisor. `mock` is the runtime vendor under test.
         let db = tmp.path().join("config.db");
+        let runtime_registry = Arc::new(ConnectedRuntimeRegistry::new());
         let opened = crate::config::DbConfigStore::open(
             &format!("sqlite://{}", db.display()),
             crate::config::StoreDeps {
                 info: test_info(),
-                local_runtime_listen: None,
+                runtime_registry: runtime_registry.clone(),
             },
         )
         .await
@@ -224,6 +239,8 @@ mod tests {
             github,
             mcp,
             plugins,
+            runtime_registry,
+            local_daemon_hook: None,
             web_dir: None,
         }
     }
@@ -396,9 +413,8 @@ mod tests {
                     "value": {
                         "serverUrl": format!("http://{dead_addr}"),
                         "image": "img",
-                        "advertiseHost": "10.0.0.5",
-                        "token": "tok",
-                        "listen": "127.0.0.1:0"
+                        "advertiseAddress": "10.0.0.5:3789",
+                        "token": "tok"
                     }
                 }
             }]

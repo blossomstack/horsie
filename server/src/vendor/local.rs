@@ -19,15 +19,10 @@ use crate::vendor::{
     RuntimeSpec, RuntimeVendor, VendorCapabilities, VendorError, VendorRuntime, VendorRuntimeHandle,
 };
 use async_trait::async_trait;
-use horsie_executor::{
-    ConnectHook, ConnectedRuntimeRegistry, RuntimeEndpoint, RuntimeListenerServer,
-    serve_runtime_connections_with_hook,
-};
+use horsie_executor::{ConnectHook, ConnectedRuntimeRegistry};
 use horsie_runtime_client::RuntimeClient;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
-use tokio_util::sync::{CancellationToken, DropGuard};
 
 /// One connected daemon's vendor identity. Never spawns anything: `create`/
 /// `attach` look up whatever's currently registered for `label` in the
@@ -136,31 +131,26 @@ impl VendorRuntimeHandle for NoopHandle {
     async fn stop(&self) {}
 }
 
-/// Binds the shared reverse-dial listener every "local" daemon connects to,
-/// and mirrors each newly (or re-)connected label into `ServerDeps.vendors`
-/// so sessions can select it by name exactly like any other vendor.
+/// Registers each "local" daemon that dials the shared HTTP
+/// `/api/runtime/connect` route (with `?register=local`) as a vendor: it mirrors
+/// every newly (or re-)connected label into `ServerDeps.vendors` so sessions can
+/// select it by name exactly like any other vendor. Owns no listener — it hands
+/// the HTTP route a [`ConnectHook`] via [`hook`](Self::hook) that fires on each
+/// successful registration into the shared [`ConnectedRuntimeRegistry`].
 pub struct LocalDaemonRegistry {
     connected: Arc<ConnectedRuntimeRegistry>,
     local_vendors: Arc<RwLock<HashMap<String, Arc<LocalDaemonVendor>>>>,
-    listen_addr: SocketAddr,
-    _serve_guard: DropGuard,
+    hook: ConnectHook,
 }
 
 impl LocalDaemonRegistry {
-    /// Bind the listener and start accepting daemon connections. `vendors`
+    /// Build the registry over the server-wide `connected` registry. `vendors`
     /// is the same map session lookups read (`ServerDeps.vendors`) — every
-    /// connected label is inserted into it as it announces itself.
-    pub async fn bind(listen: SocketAddr, vendors: SharedVendors) -> Result<Self, VendorError> {
-        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Tcp(listen))
-            .await
-            .map_err(|e| VendorError::Provision(format!("local daemon listener: {e}")))?;
-        let listen_addr = listener.tcp_addr().ok_or_else(|| {
-            VendorError::Provision("local daemon vendor requires a TCP listener".into())
-        })?;
-        let connected = Arc::new(ConnectedRuntimeRegistry::new());
+    /// connected label is inserted into it as it announces itself. No listener
+    /// is bound; the HTTP route drives connections through [`hook`](Self::hook).
+    pub fn new(connected: Arc<ConnectedRuntimeRegistry>, vendors: SharedVendors) -> Self {
         let local_vendors: Arc<RwLock<HashMap<String, Arc<LocalDaemonVendor>>>> =
             Arc::new(RwLock::new(HashMap::new()));
-        let cancel = CancellationToken::new();
 
         let hook_connected = connected.clone();
         let hook_local_vendors = local_vendors.clone();
@@ -187,24 +177,18 @@ impl LocalDaemonRegistry {
                 .or_insert_with(|| vendor.clone() as Arc<dyn RuntimeVendor>);
         });
 
-        serve_runtime_connections_with_hook(
-            listener,
-            connected.clone(),
-            cancel.clone(),
-            Some(hook),
-        );
-
-        Ok(Self {
+        Self {
             connected,
             local_vendors,
-            listen_addr,
-            _serve_guard: cancel.drop_guard(),
-        })
+            hook,
+        }
     }
 
-    /// The bound address, e.g. for logging or (in tests) dialing a fake daemon in.
-    pub fn listen_addr(&self) -> SocketAddr {
-        self.listen_addr
+    /// The connect hook the HTTP `/api/runtime/connect?register=local` handler
+    /// passes to `handle_runtime_connection`; it fires once per successful
+    /// registration with `(label, workdir)`.
+    pub fn hook(&self) -> ConnectHook {
+        self.hook.clone()
     }
 
     /// The label's vendor object, if a daemon has ever announced it (whether
@@ -235,16 +219,43 @@ mod tests {
     use super::*;
     use crate::vendor::WorkspaceSpec;
     use futures_util::{SinkExt, StreamExt};
+    use horsie_executor::{
+        RuntimeEndpoint, RuntimeListenerServer, serve_runtime_connections_with_hook,
+    };
     use horsie_models::runtime::{
         BashInput, RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ToolCall,
         ToolCallResponse, ToolOutput, ToolResult,
     };
+    use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::task::JoinHandle;
     use tokio_tungstenite::{connect_async, tungstenite::Message};
+    use tokio_util::sync::CancellationToken;
 
     fn empty_vendors() -> SharedVendors {
         Arc::new(RwLock::new(HashMap::new()))
+    }
+
+    /// Test wrapper that binds a real listener onto the registry's shared
+    /// `connected` map with the registry's hook — standing in for the HTTP
+    /// `/api/runtime/connect?register=local` route — and exposes the same
+    /// accessors the tests used before the listener moved into HTTP.
+    struct TestHarness {
+        registry: LocalDaemonRegistry,
+        connected: Arc<ConnectedRuntimeRegistry>,
+        addr: SocketAddr,
+    }
+
+    impl TestHarness {
+        fn listen_addr(&self) -> SocketAddr {
+            self.addr
+        }
+        fn vendor(&self, label: &str) -> Option<Arc<LocalDaemonVendor>> {
+            self.registry.vendor(label)
+        }
+        async fn is_connected(&self, label: &str) -> bool {
+            self.connected.runtime_transport(label).await.is_some()
+        }
     }
 
     fn test_spec() -> RuntimeSpec {
@@ -305,13 +316,32 @@ mod tests {
         })
     }
 
-    async fn bind_registry() -> LocalDaemonRegistry {
-        LocalDaemonRegistry::bind("127.0.0.1:0".parse().unwrap(), empty_vendors())
-            .await
-            .expect("bind")
+    async fn bind_registry() -> TestHarness {
+        bind_registry_with(empty_vendors()).await
     }
 
-    async fn wait_connected(registry: &LocalDaemonRegistry, label: &str) {
+    async fn bind_registry_with(vendors: SharedVendors) -> TestHarness {
+        let connected = Arc::new(ConnectedRuntimeRegistry::new());
+        let registry = LocalDaemonRegistry::new(connected.clone(), vendors);
+        let listener =
+            RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+                .await
+                .expect("bind listener");
+        let addr = listener.tcp_addr().expect("tcp addr");
+        serve_runtime_connections_with_hook(
+            listener,
+            connected.clone(),
+            CancellationToken::new(),
+            Some(registry.hook()),
+        );
+        TestHarness {
+            registry,
+            connected,
+            addr,
+        }
+    }
+
+    async fn wait_connected(registry: &TestHarness, label: &str) {
         for _ in 0..50 {
             if registry.is_connected(label).await {
                 return;
@@ -321,7 +351,7 @@ mod tests {
         panic!("'{label}' never connected within 1s");
     }
 
-    async fn wait_disconnected(registry: &LocalDaemonRegistry, label: &str) {
+    async fn wait_disconnected(registry: &TestHarness, label: &str) {
         for _ in 0..50 {
             if !registry.is_connected(label).await {
                 return;

@@ -62,12 +62,11 @@ type VelosDraft = {
   name: string;
   serverUrl: string;
   image: string;
-  advertiseHost: string;
+  advertiseAddress: string;
   tokenInput: string; // "" = keep stored token
   hasInlineToken: boolean;
   runtimeBin: string;
   workspaceRoot: string;
-  listen: string;
   cpu: string;
   memoryMib: string;
   connectTimeoutSecs: string;
@@ -103,12 +102,11 @@ const toVelosDrafts = (v: SettingsView): VelosDraft[] =>
             name: vd.name,
             serverUrl: vd.config.value.serverUrl,
             image: vd.config.value.image,
-            advertiseHost: vd.config.value.advertiseHost,
+            advertiseAddress: vd.config.value.advertiseAddress,
             tokenInput: "",
             hasInlineToken: vd.config.value.hasInlineToken,
             runtimeBin: vd.config.value.runtimeBin,
             workspaceRoot: vd.config.value.workspaceRoot,
-            listen: vd.config.value.listen,
             cpu: num(vd.config.value.cpu),
             memoryMib: num(vd.config.value.memoryMib),
             connectTimeoutSecs: num(vd.config.value.connectTimeoutSecs),
@@ -194,9 +192,13 @@ export function SettingsPage() {
     if (!uniq(velos.map((v) => v.name.trim())))
       return setLocalError("Velos vendor names must be unique.");
     for (const v of velos) {
-      if (!v.serverUrl.trim() || !v.image.trim() || !v.advertiseHost.trim())
+      if (!v.serverUrl.trim() || !v.image.trim() || !v.advertiseAddress.trim())
         return setLocalError(
-          `Velos vendor "${v.name}" needs a server URL, image, and advertise host.`,
+          `Velos vendor "${v.name}" needs a server URL, image, and advertise address.`,
+        );
+      if (v.advertiseAddress.trim() && !/^[^:]+:\d+$/.test(v.advertiseAddress.trim()))
+        return setLocalError(
+          `Advertise address for "${v.name}" must be host:port.`,
         );
       for (const [label, val] of [
         ["CPU", v.cpu],
@@ -226,11 +228,10 @@ export function SettingsPage() {
         value: {
           serverUrl: v.serverUrl.trim(),
           image: v.image.trim(),
-          advertiseHost: v.advertiseHost.trim(),
+          advertiseAddress: v.advertiseAddress.trim(),
           token: v.tokenInput === "" ? undefined : v.tokenInput,
           runtimeBin: v.runtimeBin.trim() || undefined,
           workspaceRoot: v.workspaceRoot.trim() || undefined,
-          listen: v.listen.trim() || undefined,
           cpu: v.cpu.trim() ? Number(v.cpu.trim()) : undefined,
           memoryMib: v.memoryMib.trim() ? Number(v.memoryMib.trim()) : undefined,
           connectTimeoutSecs: v.connectTimeoutSecs.trim()
@@ -408,7 +409,7 @@ export function SettingsPage() {
 
               <Section
                 title="Velos remote runtimes"
-                desc="Remote container runtimes (velos clusters). Add as many as you need — most changes apply immediately; changing a vendor's listen address or server URL needs a restart."
+                desc="Remote container runtimes (velos clusters). Add as many as you need — all changes apply immediately."
                 onAdd={() => {
                   setVelos((vs) => [
                     ...vs,
@@ -416,12 +417,11 @@ export function SettingsPage() {
                       name: "",
                       serverUrl: "",
                       image: "",
-                      advertiseHost: "",
+                      advertiseAddress: "",
                       tokenInput: "",
                       hasInlineToken: false,
                       runtimeBin: "",
                       workspaceRoot: "",
-                      listen: "",
                       cpu: "",
                       memoryMib: "",
                       connectTimeoutSecs: "",
@@ -857,10 +857,10 @@ function VelosRow({
             placeholder="ghcr.io/…/horsie-runtime:tag"
           />
           <TextField
-            label="Advertise host"
-            value={draft.advertiseHost}
-            onChange={(v) => set({ advertiseHost: v })}
-            placeholder="10.0.0.5"
+            label="Advertise address"
+            value={draft.advertiseAddress}
+            onChange={(v) => set({ advertiseAddress: v })}
+            placeholder="10.0.0.5:3789"
           />
           <TextField
             label="Inline token"
@@ -881,7 +881,6 @@ function VelosRow({
         </button>
         {advanced && (
           <div className="grid grid-cols-2 gap-3 border-t pt-3">
-            <TextField label="Listen" value={draft.listen} onChange={(v) => set({ listen: v })} placeholder="0.0.0.0:0" />
             <TextField
               label="Runtime bin"
               value={draft.runtimeBin}

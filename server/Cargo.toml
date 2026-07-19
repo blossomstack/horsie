@@ -23,6 +23,8 @@ horsie-mcp-client      = { path = "../mcp-client" }
 clap              = { version = "4", features = ["derive"] }
 sqlx              = { workspace = true }
 axum              = { workspace = true }
+hyper             = "1"
+hyper-util        = { version = "0.1", features = ["tokio"] }
 tower-http        = { workspace = true }
 tokio             = { workspace = true }
 tokio-stream      = { workspace = true }

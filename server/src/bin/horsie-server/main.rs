@@ -103,15 +103,32 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         plugins_dir: cfg.storage.plugins_dir.display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
+    // The one registry every runtime dial-back lands in, shared by the vendors
+    // (velos) and the HTTP `/api/runtime/connect` route.
+    let runtime_registry = Arc::new(horsie_executor::ConnectedRuntimeRegistry::new());
     let opened = DbConfigStore::open(
         &db_url,
         StoreDeps {
             info,
-            local_runtime_listen: cfg.local_runtime_listen.clone(),
+            runtime_registry: runtime_registry.clone(),
         },
     )
     .await
     .map_err(BootError::Config)?;
+
+    // When opted in, the shared local-runtime vendor registers each daemon that
+    // dials `/api/runtime/connect?register=local` as a vendor. It owns no
+    // listener — it hands the route a hook that fires on registration. Kept
+    // alive by moving its hook into `AppState`.
+    let local_daemon_hook = if cfg.local_runtime {
+        let registry = horsie_server::vendor::LocalDaemonRegistry::new(
+            runtime_registry.clone(),
+            opened.vendors.clone(),
+        );
+        Some(registry.hook())
+    } else {
+        None
+    };
 
     let github = Arc::new(horsie_server::github::GithubService::new(
         horsie_server::github::GithubStore::new(opened.pool.clone()),
@@ -153,6 +170,8 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         github,
         mcp,
         plugins,
+        runtime_registry,
+        local_daemon_hook,
         web_dir: cli.web,
     };
     let listener = tokio::net::TcpListener::bind(&cli.addr)

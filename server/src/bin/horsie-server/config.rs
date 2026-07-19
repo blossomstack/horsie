@@ -24,11 +24,14 @@ pub struct BootConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
-    /// Address the shared local-runtime-vendor listener binds. User-launched
-    /// `horsie-runtime --endpoint ws://...` daemons dial back here. `None`
-    /// disables the shared local vendor entirely.
+    /// Opt-in for the shared local-runtime vendor. When `true`, a user-launched
+    /// `horsie-runtime --endpoint ws://<host>:<http_port>/api/runtime/connect?register=local`
+    /// daemon may dial the server's HTTP port and register itself as a vendor
+    /// named after its `--runtime-id`. `false` (default) rejects such
+    /// registrations. There is no dedicated port anymore — it shares the HTTP
+    /// listener.
     #[serde(default)]
-    pub local_runtime_listen: Option<String>,
+    pub local_runtime: bool,
     /// Where the session server persists its runtime-editable settings.
     #[serde(default)]
     pub database: DatabaseConfig,
@@ -216,14 +219,13 @@ mod tests {
         let cfg = BootConfig::default();
         assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
         assert!(cfg.database.url.is_none());
-        assert!(cfg.local_runtime_listen.is_none());
+        assert!(!cfg.local_runtime);
     }
 
     #[test]
-    fn parses_local_runtime_listen() {
-        let cfg: BootConfig =
-            serde_json::from_str(r#"{ "local_runtime_listen": "0.0.0.0:3790" }"#).unwrap();
-        assert_eq!(cfg.local_runtime_listen.as_deref(), Some("0.0.0.0:3790"));
+    fn parses_local_runtime() {
+        let cfg: BootConfig = serde_json::from_str(r#"{ "local_runtime": true }"#).unwrap();
+        assert!(cfg.local_runtime);
     }
 
     #[test]

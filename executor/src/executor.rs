@@ -256,7 +256,12 @@ impl Executor {
 
 /// Handshake on an accepted runtime link, then register it as a direct transport.
 /// Generic over the socket type so TCP and unix share one accept/handshake/frame path.
-async fn handle_runtime_connection<S>(
+///
+/// Public so a host that owns its own listener (e.g. the session server serving
+/// runtime dial-backs as a WebSocket-upgrade route over its HTTP port) can drive
+/// the same handshake/registration logic without going through
+/// [`RuntimeListenerServer`]. `ws` is any already-upgraded WebSocket stream.
+pub async fn handle_runtime_connection<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     registry: Arc<ConnectedRuntimeRegistry>,
     on_registered: Option<ConnectHook>,

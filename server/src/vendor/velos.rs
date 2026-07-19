@@ -2,15 +2,15 @@
 //! remote container.
 //!
 //! Unlike [`crate::vendor::LocalDaemonVendor`], which looks up an
-//! already-connected daemon rather than spawning anything, this vendor binds
-//! **one shared
-//! TCP listener** and asks velos to run a container whose command is
-//! `horsie-runtime --endpoint ws://<advertise>:<port> …`. The runtime dials back
-//! over that outbound connection (velos exposes no inbound networking), and the
-//! shared [`ConnectedRuntimeRegistry`] demultiplexes connections by
-//! `runtime_id`. Everything downstream of the provider — the listener, registry,
-//! executor client, and socket transport — is reused unchanged from the local
-//! path; only the [`RuntimeProvider`] differs.
+//! already-connected daemon rather than spawning anything, this vendor asks
+//! velos to run a container whose command is
+//! `horsie-runtime --endpoint ws://<advertise_address>/api/runtime/connect …`.
+//! The runtime dials back over that outbound connection (velos exposes no
+//! inbound networking) to the server's HTTP port, where the `/api/runtime/connect`
+//! route feeds it into the server-wide [`ConnectedRuntimeRegistry`] that this
+//! vendor shares; the registry demultiplexes connections by `runtime_id`. The
+//! vendor no longer owns a listener — only the [`RuntimeProvider`] differs from
+//! the local path.
 //!
 //! velos containers are ephemeral (no volumes), so `stop` deletes the container
 //! and `attach` schedules a fresh one under the same `runtime_id`; the durable
@@ -22,17 +22,15 @@ use crate::vendor::{
 };
 use async_trait::async_trait;
 use horsie_executor::{
-    ConnectedRuntimeRegistry, HealthStatus, InMemExecutorTransport, RuntimeEndpoint, RuntimeError,
-    RuntimeHandle, RuntimeListenerServer, RuntimeProvider, serve_runtime_connections,
+    ConnectedRuntimeRegistry, HealthStatus, InMemExecutorTransport, RuntimeError, RuntimeHandle,
+    RuntimeProvider,
 };
 use horsie_executor_client::ExecutorClient;
 use horsie_models::executor::{RuntimeConfig, WorkspaceConfig};
 use horsie_runtime_client::RuntimeClient;
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio_util::sync::{CancellationToken, DropGuard};
 
 /// Extra time granted on top of `connect_timeout` when a runtime has provision
 /// steps to run (e.g. cloning) inside the container before it announces Ready.
@@ -48,20 +46,16 @@ pub struct VelosVendorSettings {
     pub runtime_bin: String,
     /// In-container root under which each workspace is created (`<root>/<name>`).
     pub workspace_root: String,
-    /// Host/IP the container dials back to. Must be reachable from the velos
-    /// worker's container network.
-    pub advertise_host: String,
-    /// Address the shared reverse-dial listener binds. Port `0` picks an
-    /// ephemeral port, which is combined with `advertise_host` into the URL.
-    pub listen: SocketAddr,
+    /// `host:port` the container dials back to — the server's externally
+    /// reachable HTTP endpoint, published on the velos worker's container
+    /// network. Both the reverse-dial WebSocket (`ws://<addr>/api/runtime/connect`)
+    /// and the plugin-artifact fetch (`http://<addr>/...`) target this one
+    /// address; there is no separate reverse-dial port anymore.
+    pub advertise_address: String,
     pub cpu: u32,
     pub memory_bytes: u64,
     /// How long to wait for a scheduled container's runtime to dial back.
     pub connect_timeout: Duration,
-    /// Server HTTP port reachable from the worker network at `advertise_host`;
-    /// combined into the plugin-artifact base URL. `None` → plugins disabled
-    /// for this vendor.
-    pub http_port: Option<u32>,
 }
 
 /// One workspace, resolved to the directory it lives at inside the container.
@@ -305,9 +299,9 @@ impl RuntimeHandle for VelosRuntimeHandle {
     }
 }
 
-/// Settings that can change under a vendor's feet without rebinding its
-/// listener — everything `provision()` reads except the immutable
-/// listener/registry/endpoint bound once in `bind()`.
+/// Settings that can change under a vendor's feet. Every field is live-editable
+/// via [`VelosVendor::reconfigure`] — there is no listener to rebind, so unlike
+/// the old design nothing is frozen, `advertise_address` included.
 #[derive(Clone)]
 pub struct VelosMutableSettings {
     pub api: Arc<dyn ContainerApi>,
@@ -317,48 +311,36 @@ pub struct VelosMutableSettings {
     pub cpu: u32,
     pub memory_bytes: u64,
     pub connect_timeout: Duration,
-    /// `http://<advertise_host>:<http_port>` when configured — recomputed by
-    /// the caller on every reconfigure since `advertise_host` itself is
-    /// listener-affecting (frozen) but `http_port` is not.
-    pub public_http_base: Option<String>,
+    /// `host:port` the container dials back to; both the reverse-dial WS URL
+    /// and the plugin-artifact base are derived from it per `provision()`.
+    pub advertise_address: String,
 }
 
-/// The velos runtime vendor. Owns the shared reverse-dial listener + connection
-/// registry for its whole lifetime; drops the serve loop when the vendor drops.
+/// The reverse-dial WebSocket URL a scheduled runtime is told to connect to:
+/// the server's HTTP endpoint plus the runtime-connect route.
+fn endpoint_ws_for(advertise_address: &str) -> String {
+    format!("ws://{advertise_address}/api/runtime/connect")
+}
+
+/// The velos runtime vendor. Shares the server-wide [`ConnectedRuntimeRegistry`]
+/// (fed by the HTTP `/api/runtime/connect` route) rather than owning a listener.
 pub struct VelosVendor {
     connected: Arc<ConnectedRuntimeRegistry>,
-    /// `ws://<advertise_host>:<bound_port>` — where scheduled runtimes dial
-    /// back. Immutable: baked in at `bind()` time from `advertise_host` + the
-    /// actually-bound port, and never revisited by `reconfigure()`.
-    endpoint_ws: String,
     settings: RwLock<VelosMutableSettings>,
-    _serve_guard: DropGuard,
 }
 
 impl VelosVendor {
-    /// Bind the shared reverse-dial listener and start accepting runtime
-    /// connections. `api` is how containers are scheduled/reclaimed.
-    pub async fn bind(
+    /// Build the vendor against the shared reverse-dial registry. No listener is
+    /// bound — the HTTP server accepts runtime dial-backs and demultiplexes them
+    /// into `connected` by `runtime_id`. `api` is how containers are
+    /// scheduled/reclaimed.
+    pub fn new(
         api: Arc<dyn ContainerApi>,
         settings: VelosVendorSettings,
-    ) -> Result<Self, VendorError> {
-        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Tcp(settings.listen))
-            .await
-            .map_err(|e| VendorError::Provision(format!("velos vendor listener: {e}")))?;
-        let port = listener
-            .tcp_addr()
-            .ok_or_else(|| VendorError::Provision("velos vendor requires a TCP listener".into()))?
-            .port();
-        let endpoint_ws = format!("ws://{}:{port}", settings.advertise_host);
-        let public_http_base = settings
-            .http_port
-            .map(|p| format!("http://{}:{p}", settings.advertise_host));
-        let connected = Arc::new(ConnectedRuntimeRegistry::new());
-        let cancel = CancellationToken::new();
-        serve_runtime_connections(listener, connected.clone(), cancel.clone());
-        Ok(Self {
+        connected: Arc<ConnectedRuntimeRegistry>,
+    ) -> Self {
+        Self {
             connected,
-            endpoint_ws,
             settings: RwLock::new(VelosMutableSettings {
                 api,
                 image: settings.image,
@@ -367,10 +349,9 @@ impl VelosVendor {
                 cpu: settings.cpu,
                 memory_bytes: settings.memory_bytes,
                 connect_timeout: settings.connect_timeout,
-                public_http_base,
+                advertise_address: settings.advertise_address,
             }),
-            _serve_guard: cancel.drop_guard(),
-        })
+        }
     }
 
     /// Current mutable settings (a cheap clone under a read lock) — for
@@ -414,7 +395,7 @@ impl VelosVendor {
                 api: settings.api.clone(),
                 connected: self.connected.clone(),
                 container_name: container,
-                endpoint_ws: self.endpoint_ws.clone(),
+                endpoint_ws: endpoint_ws_for(&settings.advertise_address),
                 image: settings.image.clone(),
                 runtime_bin: settings.runtime_bin.clone(),
                 cpu: settings.cpu,
@@ -459,11 +440,15 @@ impl RuntimeVendor for VelosVendor {
     }
 
     fn artifact_base_url(&self) -> Option<String> {
-        self.settings
+        // Same host:port the runtime dials back on, over HTTP — the worker
+        // fetches plugin bundles from the server's one published endpoint.
+        let addr = self
+            .settings
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .public_http_base
-            .clone()
+            .advertise_address
+            .clone();
+        Some(format!("http://{addr}"))
     }
 
     fn plugins_dir_for(&self, _runtime_id: &str) -> Option<String> {
@@ -553,6 +538,7 @@ mod tests {
     use crate::velos::{ContainerPhase, VelosError};
     use crate::vendor::WorkspaceSpec;
     use futures_util::{SinkExt, StreamExt};
+    use horsie_executor::{RuntimeEndpoint, RuntimeListenerServer, serve_runtime_connections};
     use horsie_models::runtime::{
         BashInput, RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ToolCall,
         ToolCallResponse, ToolOutput, ToolResult,
@@ -561,6 +547,7 @@ mod tests {
     use std::sync::Mutex;
     use tokio::task::JoinHandle;
     use tokio_tungstenite::{connect_async, tungstenite::Message};
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn command_creates_dirs_and_execs_runtime_without_sandbox_flags() {
@@ -715,17 +702,15 @@ mod tests {
         }
     }
 
-    fn test_settings() -> VelosVendorSettings {
+    fn test_settings(advertise_address: String) -> VelosVendorSettings {
         VelosVendorSettings {
             image: "test/image".into(),
             runtime_bin: "horsie-runtime".into(),
             workspace_root: "/workspace".into(),
-            advertise_host: "127.0.0.1".into(),
-            listen: "127.0.0.1:0".parse().unwrap(),
+            advertise_address,
             cpu: 1,
             memory_bytes: 536_870_912,
             connect_timeout: Duration::from_secs(5),
-            http_port: None,
         }
     }
 
@@ -742,17 +727,27 @@ mod tests {
         }
     }
 
+    /// Bind a real reverse-dial listener onto a fresh shared registry and build
+    /// the vendor against that registry, with `advertise_address` pointed at the
+    /// listener. Mirrors how the HTTP `/api/runtime/connect` route feeds the
+    /// server-wide registry in production. The serve loop runs until process
+    /// exit (the cancel token is never fired), which is fine for a test.
     async fn bind_vendor(api: Arc<FakeVelosApi>) -> VelosVendor {
-        VelosVendor::bind(api.clone(), test_settings())
-            .await
-            .expect("bind")
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let listener =
+            RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+                .await
+                .expect("bind listener");
+        let addr = listener.tcp_addr().expect("tcp addr");
+        serve_runtime_connections(listener, registry.clone(), CancellationToken::new());
+        VelosVendor::new(api, test_settings(addr.to_string()), registry)
     }
 
     #[tokio::test]
-    async fn reconfigure_swaps_settings_without_rebinding_listener() {
+    async fn reconfigure_swaps_settings_without_changing_endpoint() {
         let api = FakeVelosApi::new();
         let vendor = bind_vendor(api.clone()).await;
-        let bound_before = vendor.endpoint_ws.clone();
+        let addr_before = vendor.settings().advertise_address.clone();
 
         vendor.create("rt-1", &test_spec()).await.expect("create");
         assert_eq!(api.images(), vec!["test/image".to_string()]);
@@ -770,7 +765,8 @@ mod tests {
             vec!["test/image".to_string(), "test/image-v2".to_string()]
         );
         assert_eq!(
-            vendor.endpoint_ws, bound_before,
+            vendor.settings().advertise_address,
+            addr_before,
             "reconfigure must not rebind the listener"
         );
     }
@@ -871,11 +867,15 @@ mod tests {
                 Ok(Some(ContainerPhase::Failed))
             }
         }
-        let mut settings = test_settings();
+        let mut settings = test_settings("127.0.0.1:0".to_string());
         settings.connect_timeout = Duration::from_secs(30);
-        let vendor = VelosVendor::bind(Arc::new(DeadApi), settings)
-            .await
-            .expect("bind");
+        // DeadApi never dials back, so no listener is needed — a bare shared
+        // registry is enough to exercise the connect-timeout path.
+        let vendor = VelosVendor::new(
+            Arc::new(DeadApi),
+            settings,
+            Arc::new(ConnectedRuntimeRegistry::new()),
+        );
         let result =
             tokio::time::timeout(Duration::from_secs(5), vendor.create("rt-3", &test_spec()))
                 .await

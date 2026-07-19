@@ -10,6 +10,7 @@ horsie-agentcore = { path = "../agentcore" }
 horsie-anthropic = { path = "../providers/anthropic" }
 horsie-mock-llm = { path = "../providers/mock-llm" }
 horsie-server = { path = "../server", features = ["test-util"] }
+horsie-executor = { path = "../executor" }
 horsie-actor = { path = "../actor", features = ["file-journal"] }
 horsie-workflow = { path = "../workflow" }
 horsie-models = { path = "../models" }
