@@ -2,22 +2,30 @@
 
 Every session runs its tools inside a **runtime** — a sandbox where the agent
 reads files, runs commands, and (optionally) clones repositories. A **runtime
-vendor** is a source of runtimes. The server ships two:
+vendor** is a source of runtimes. The server ships two, differing mainly in
+*who runs the compute*:
 
-| Vendor | Where it runs | Repos & skill bundles | Best for |
-| --- | --- | --- | --- |
-| **local** | A daemon you launch on the server host | ✗ not supported | Quick local use, a fixed working directory |
-| **velos** | Ephemeral containers on a [velos](https://github.com/blossomstack/velos) cluster | ✓ supported | Running against GitHub repos, isolation per session |
+| Vendor | Where it runs | Who manages it | Repos & skill bundles | Best for |
+| --- | --- | --- | --- | --- |
+| **local** | **Your own machine** — a daemon you run, dialing back to the server | You | ✗ not supported | Working against code already on your machine |
+| **velos** | Managed, ephemeral containers the server provisions for you | The server | ✓ supported | Running against GitHub repos; isolation per session |
 
 > **Out of the box there is no active runtime.** A session can be created, but it
 > cannot run a turn until at least one vendor is available. Set one up below.
 
-## The `local` vendor
+## The `local` vendor — run on your own machine
 
-The local vendor is a `horsie-runtime` daemon that you start yourself on the
-server host. It dials back to the server and registers as a selectable vendor.
+The `local` vendor lets you run the runtime **on your own machine** — your laptop
+or workstation, where your working files already are — and connect it back to the
+server. You run a small `horsie-runtime` daemon; it dials the server over an
+outbound WebSocket and registers itself as a selectable vendor. The server never
+reaches into your machine; your machine reaches out to it.
 
-**Enable it** in `config.json`:
+This is the way to point an agent at code on your own computer. (The daemon can
+run anywhere that can reach the server — including the same host as the server —
+but its purpose is bring-your-own-machine compute.)
+
+**Enable it on the server** in `config.json`:
 
 ```jsonc
 { "local_runtime": true }
@@ -25,36 +33,43 @@ server host. It dials back to the server and registers as a selectable vendor.
 
 Without this, the server rejects the daemon's connection with `403`.
 
-**Launch the daemon:**
+**Run the daemon on your machine**, pointing it at the server's address:
 
 ```bash
 horsie-runtime \
-  --endpoint "ws://127.0.0.1:3789/api/runtime/connect?register=local" \
-  --runtime-id local \
-  --workspace main=/path/to/working/directory
+  --endpoint "ws://SERVER-HOST:3789/api/runtime/connect?register=local" \
+  --runtime-id my-laptop \
+  --workspace main=/path/to/your/project
 ```
 
-- `--endpoint` — the server's HTTP address with `/api/runtime/connect?register=local`.
-  Use the address other machines can reach if the daemon runs elsewhere.
-- `--runtime-id` — the name the vendor appears under in the UI. Use `local` to
-  match the server's default vendor, so sessions pick it automatically.
-- `--workspace name=path` — the working directory the agent operates in
+- `--endpoint` — the server's address with `/api/runtime/connect?register=local`.
+  Replace `SERVER-HOST` with wherever the server is reachable (use `127.0.0.1`
+  only if the server runs on the same machine).
+- `--runtime-id` — the name the vendor shows up as in the UI (e.g. `my-laptop`).
+  Use `local` if you want it to match the server's default vendor so sessions
+  pick it automatically.
+- `--workspace name=path` — the directory on your machine the agent works in
   (repeatable). At least one is required.
 
-Keep the process running; sessions use it while it's connected.
+Keep the process running; sessions use it while it's connected. Once it dials in,
+it appears as an active vendor in the UI.
 
 **What the local vendor does *not* do:** it can't check out GitHub repos or
-install skill/plugin bundles, and it runs in the fixed working directory you gave
-it (there's no per-session provisioning). Session **stop** and **delete** don't
-tear anything down — the daemon keeps running and is shared across sessions. If
-you need per-session repos or bundles, use velos.
+install skill/plugin bundles, and it works in the fixed directory you gave it
+(there's no per-session provisioning). Session **stop** and **delete** don't tear
+anything down — your daemon keeps running and is shared across sessions. If you
+need per-session repos or bundles, use velos.
 
-## The `velos` vendor
+## The `velos` vendor — managed runtimes
 
-The velos vendor schedules a fresh runtime **container** per session on a
-[velos](https://github.com/blossomstack/velos) cluster. It supports full
-provisioning: it can check out GitHub repositories and install skill/plugin
-bundles into the sandbox.
+The `velos` vendor is a **managed** runtime: instead of running anything
+yourself, the server provisions a fresh, isolated **container** per session on a
+[velos](https://github.com/blossomstack/velos) backend and tears it down when the
+session ends. It supports full provisioning — it can check out GitHub
+repositories and install skill/plugin bundles into the sandbox.
+
+You configure velos once (below); after that, sessions get a runtime with nothing
+to launch or babysit.
 
 **Configure it in the UI** — Settings → **Velos remote runtimes** → add a vendor:
 
@@ -95,9 +110,10 @@ durable transcript lives on the server and reconnects automatically.
 
 ## Which should I use?
 
-- Trying things out on one machine, or you want the agent to work in a specific
-  local directory → **local**.
-- Running against GitHub repos, want per-session isolation, or want skill bundles
-  provisioned into the sandbox → **velos**.
+- You want the agent to work on code that lives **on your own machine**, and
+  you're happy to run a small daemon there → **local**.
+- You want a **managed** runtime with nothing to run yourself — per-session
+  isolation, GitHub repo checkout, or skill bundles provisioned into the sandbox
+  → **velos**.
 
 You can configure both and choose per session.

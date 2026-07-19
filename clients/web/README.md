@@ -1,6 +1,6 @@
 # @horsie/web
 
-A modern web UI for the horsie session server — create sessions, drive agents in
+A modern web UI for the horsie server — create sessions, drive agents in
 sandboxed runtimes, and watch turns stream live over SSE.
 
 Built with **Bun + Vite + React 19 + Tailwind v4**, talking to the server over
@@ -24,7 +24,7 @@ the [fluorite](https://github.com/zhxiaogg/fluorite)-generated protocol types.
 - [Bun](https://bun.sh)
 - The [`fluorite`](https://github.com/zhxiaogg/fluorite) CLI on `PATH`
   (`cargo install fluorite`) — only needed to regenerate protocol types.
-- A running horsie session server:
+- A running horsie server:
 
   ```bash
   # from the repo root

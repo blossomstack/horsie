@@ -1,12 +1,12 @@
-# horsie session server — user guide
+# horsie server — user guide
 
-The **session server** (`horsie-server`) is a self-hosted web app for running
+**horsie server** (`horsie-server`) is a self-hosted web app for running
 LLM agents. You open it in a browser, create a **session**, and chat with an
 agent that runs its tools inside a sandboxed **runtime**. Sessions are durable:
 the full transcript is journaled server-side and streams live to the browser, so
 you can close the tab, reconnect, and pick up where you left off.
 
-This guide covers the session server only. It does **not** cover the separate
+This guide covers horsie server only. It does **not** cover the separate
 `horsie` CLI (`horsie job`/`horsie daemon` and workflow files) — that is a
 different tool.
 
@@ -21,8 +21,9 @@ different tool.
   them per session. → [MCP servers](mcp-servers.md)
 - **Ship skills & plugins** — install skill/plugin bundles from git and make them
   available to sessions. → [Skills & plugins](skills-and-plugins.md)
-- **Choose where tools run** — a local runtime on the server host, or remote
-  ephemeral containers via velos. → [Runtime vendors](runtime-vendors.md)
+- **Choose where tools run** — on your own machine (the `local` runtime), or on
+  managed containers the server provisions for you (`velos`).
+  → [Runtime vendors](runtime-vendors.md)
 
 ## How the pieces fit
 
@@ -35,8 +36,8 @@ different tool.
     │  runs each session's tools in a…
     ▼
  Runtime vendor
-    ├─ local  — a horsie-runtime daemon you launch on the server host
-    └─ velos  — an ephemeral container scheduled on a velos cluster
+    ├─ local  — a horsie-runtime daemon on your own machine, dialing back
+    └─ velos  — a managed, ephemeral container the server provisions for you
 ```
 
 The server holds two kinds of configuration, and never mixes them:

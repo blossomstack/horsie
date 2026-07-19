@@ -4,7 +4,7 @@ This walks you from nothing to a working chat session.
 
 ## 1. Get the server binary
 
-The session server is a single binary, `horsie-server`. Choose one:
+horsie server is a single binary, `horsie-server`. Choose one:
 
 **Build from source** (needs a recent Rust toolchain), from the repo root:
 
@@ -90,21 +90,24 @@ run yet. Two more steps:
 3. **Save changes.** Provider and model edits take effect on the next turn — no
    restart.
 
-**Make a runtime available.** The quickest option is a local runtime daemon on
-the server host. With `"local_runtime": true` in `config.json` (step 2), launch:
+**Make a runtime available.** The quickest option is the `local` runtime: a small
+daemon you run **on your own machine** (where your working files are) that dials
+back to the server. With `"local_runtime": true` in `config.json` (step 2), run
+it, pointing `--endpoint` at the server's address:
 
 ```bash
 horsie-runtime \
-  --endpoint "ws://127.0.0.1:3789/api/runtime/connect?register=local" \
+  --endpoint "ws://SERVER-HOST:3789/api/runtime/connect?register=local" \
   --runtime-id local \
-  --workspace main=/path/to/a/working/directory
+  --workspace main=/path/to/your/project
 ```
 
 It dials the server and registers as a runtime vendor named after `--runtime-id`.
 Using `--runtime-id local` matches the server's default, so new sessions use it
-automatically. Keep this process running. For the full picture — including the
-remote **velos** option and what each vendor can do — see
-[Runtime vendors](runtime-vendors.md).
+automatically. (If you're just trying things out on the same host as the server,
+use `127.0.0.1` for `SERVER-HOST`.) Keep this process running. For the full
+picture — including the managed **velos** option and what each vendor can do —
+see [Runtime vendors](runtime-vendors.md).
 
 ## 6. Create your first session
 

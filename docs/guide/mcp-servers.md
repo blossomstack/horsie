@@ -1,8 +1,8 @@
 # MCP servers
 
-[MCP](https://modelcontextprotocol.io) servers give agents extra tools. The
-session server connects to **remote MCP servers** and lets you enable them per
-session. Their tools show up to the agent as `mcp__<server-name>__<tool>`.
+[MCP](https://modelcontextprotocol.io) servers give agents extra tools. horsie
+server connects to **remote MCP servers** and lets you enable them per session.
+Their tools show up to the agent as `mcp__<server-name>__<tool>`.
 
 ## Add a server
 

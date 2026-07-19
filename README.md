@@ -77,7 +77,7 @@ State (the daemon control socket, per-job capability files) lives under
 
 A worked configuration and capability file are in [`examples/`](examples/README.md).
 
-## Session server
+## horsie server
 
 `horsie-server` is a separate binary — a self-hosted web app for running LLM
 agents as recoverable, event-sourced chat **sessions**. It's independent of the
@@ -89,7 +89,9 @@ horsie-server --addr 0.0.0.0:3789 --web clients/web/dist
 ```
 
 Then open `http://<host>:3789`. Each session runs its tools in a **runtime
-vendor**: a `local` daemon on the server host, or ephemeral `velos` containers.
+vendor**: the `local` runtime, a daemon you run on your own machine that dials
+back to the server, or `velos`, managed ephemeral containers the server
+provisions for you.
 Providers, models, runtime vendors, GitHub, MCP servers, and skill bundles are
 all configured from the **Settings** page in the UI (stored in a SQLite settings
 database); `config.json` holds only deployment settings (storage paths, the
