@@ -20,6 +20,7 @@ horsie-executor        = { path = "../executor" }
 horsie-executor-client = { path = "../executor-client" }
 horsie-runtime-client  = { path = "../runtime-client" }
 horsie-mcp-client      = { path = "../mcp-client" }
+clap              = { version = "4", features = ["derive"] }
 sqlx              = { workspace = true }
 axum              = { workspace = true }
 tower-http        = { workspace = true }
