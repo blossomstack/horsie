@@ -13,6 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use horsie_actor::{ActorRef, FileJournal, Journal, spawn_root};
 use horsie_agentcore::LlmProvider;
 use horsie_anthropic::AnthropicProvider;
+use horsie_executor::ConnectedRuntimeRegistry;
 use horsie_mock_llm::MockLlmServer;
 use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
 use horsie_models::runtime::{
@@ -23,8 +24,8 @@ use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand};
-use horsie_server::vendor::RuntimeVendor;
 use horsie_server::vendor::mock::MockVendor;
+use horsie_server::vendor::{LocalDaemonRegistry, RuntimeVendor};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -105,7 +106,7 @@ async fn start_server(
                 plugins_dir: String::new(),
                 version: "test".into(),
             },
-            local_runtime_listen: None,
+            runtime_registry: Arc::new(ConnectedRuntimeRegistry::new()),
         },
     )
     .await
@@ -135,6 +136,8 @@ async fn start_server(
         github,
         mcp,
         plugins,
+        runtime_registry: Arc::new(ConnectedRuntimeRegistry::new()),
+        local_daemon_hook: None,
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -189,14 +192,14 @@ async fn create_session_for_vendor(
     v["session"]["id"].as_str().unwrap().to_string()
 }
 
-/// Start a server wired for the shared local runtime vendor: `DbConfigStore`
-/// binds a real `local_runtime_listen` listener, and — unlike `start_server`,
-/// whose `ServerDeps.vendors` is a hand-rolled map bypassing the store
-/// entirely — `ServerDeps.vendors` is the SAME `SharedVendors` map
-/// `DbConfigStore::open()` returns, so a daemon dialing in is visible to
-/// session resolution exactly as it would be in production. Returns the
-/// server handle plus the listener's bound address for dialing fake daemons
-/// into.
+/// Start a server wired for the shared local runtime vendor over the single
+/// HTTP port: a shared `ConnectedRuntimeRegistry` is threaded into the store
+/// (for velos) and into `AppState`, and a `LocalDaemonRegistry` hook is
+/// installed so a daemon dialing `/api/runtime/connect?register=local` registers
+/// itself as a vendor. Unlike `start_server`, `ServerDeps.vendors` is the SAME
+/// `SharedVendors` map `DbConfigStore::open()` returns, so a daemon dialing in is
+/// visible to session resolution exactly as in production. Returns the server
+/// handle plus the HTTP address fake daemons dial the connect route on.
 async fn start_server_with_shared_local(
     journal_dir: &Path,
     mock_url: &str,
@@ -205,6 +208,7 @@ async fn start_server_with_shared_local(
     providers.insert("mock".into(), provider_at(mock_url));
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
     let db = journal_dir.join("config.db");
+    let runtime_registry = Arc::new(ConnectedRuntimeRegistry::new());
     let opened = DbConfigStore::open(
         &format!("sqlite://{}", db.display()),
         StoreDeps {
@@ -216,15 +220,15 @@ async fn start_server_with_shared_local(
                 plugins_dir: String::new(),
                 version: "test".into(),
             },
-            local_runtime_listen: Some("127.0.0.1:0".to_string()),
+            runtime_registry: runtime_registry.clone(),
         },
     )
     .await
     .unwrap();
-    let local_addr = opened
-        .store
-        .local_daemon_listen_addr()
-        .expect("shared local runtime vendor listener bound");
+    // Install the local-daemon registration hook over the shared registry and
+    // the store's live vendor map (the same one sessions resolve against).
+    let local_daemon_hook =
+        LocalDaemonRegistry::new(runtime_registry.clone(), opened.vendors.clone()).hook();
     let deps = ServerDeps {
         provider_registry: Arc::new(std::sync::RwLock::new(providers)),
         vendors: opened.vendors.clone(),
@@ -260,6 +264,8 @@ async fn start_server_with_shared_local(
         github,
         mcp,
         plugins,
+        runtime_registry,
+        local_daemon_hook: Some(local_daemon_hook),
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -274,7 +280,7 @@ async fn start_server_with_shared_local(
             supervisor,
             task,
         },
-        local_addr,
+        addr,
     )
 }
 
@@ -289,7 +295,8 @@ fn spawn_fake_local_daemon(addr: SocketAddr, label: &str, reply: &str) -> JoinHa
     let label = label.to_string();
     let reply = reply.to_string();
     tokio::spawn(async move {
-        let (ws, _) = match connect_async(format!("ws://{addr}")).await {
+        let url = format!("ws://{addr}/api/runtime/connect?register=local");
+        let (ws, _) = match connect_async(url).await {
             Ok(x) => x,
             Err(_) => return,
         };
@@ -771,12 +778,13 @@ async fn turn_in_flight_conflicts() {
     server.shutdown().await;
 }
 
-/// End-to-end for the shared local runtime vendor's `open()` wiring: a real
-/// `DbConfigStore` binds `local_runtime_listen`, a fake daemon dials in under
-/// a label, and a session resolves that label through the SAME `SharedVendors`
-/// map the store returns — the one seam a unit test of `LocalDaemonRegistry`
-/// in isolation can't cover. Also exercises the vendor's disconnect →
-/// `RecoveryFailed` → reconnect → resume cycle end to end over real HTTP.
+/// End-to-end for the shared local runtime vendor over the single HTTP port: a
+/// fake daemon dials `/api/runtime/connect?register=local`, the installed
+/// `LocalDaemonRegistry` hook registers the label into the SAME `SharedVendors`
+/// map the store returns, and a session resolves that label — the one seam a
+/// unit test of `LocalDaemonRegistry` in isolation can't cover. Also exercises
+/// the vendor's disconnect → `RecoveryFailed` → reconnect → resume cycle end to
+/// end over real HTTP.
 #[tokio::test]
 async fn shared_local_vendor_resolves_dialed_in_daemon_and_recovers_after_disconnect() {
     let mock = MockLlmServer::builder().build().await;

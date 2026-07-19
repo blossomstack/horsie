@@ -5,16 +5,14 @@
 export interface VelosView {
   serverUrl: string;
   image: string;
-  advertiseHost: string;
+  /**
+   * `host:port` the runtime dials back on — the server&#x27;s externally reachable
+   */
+  advertiseAddress: string;
   hasInlineToken: boolean;
   runtimeBin: string;
   workspaceRoot: string;
-  listen: string;
   cpu: number;
   memoryMib: number;
   connectTimeoutSecs: number;
-  /**
-   * Server HTTP port reachable from the worker network at `advertise_host`;
-   */
-  httpPort?: number;
 }

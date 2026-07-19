@@ -13,7 +13,7 @@ export interface SettingsView {
   defaultVendor: string;
   info: ServerInfo;
   /**
-   * True only when an already-active vendor&#x27;s listener-affecting fields
+   * Always false: every provider/model/vendor edit now applies live (no
    */
   restartRequired: boolean;
 }
