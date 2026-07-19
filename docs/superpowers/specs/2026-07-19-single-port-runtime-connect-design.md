@@ -104,10 +104,13 @@ cannot register themselves as vendors. Velos connections are always accepted
 - Drop the owned `RuntimeListenerServer` + `_serve_guard` + private
   `ConnectedRuntimeRegistry`. `VelosVendor::bind` becomes
   `VelosVendor::new(client, settings, shared_registry)` — no bind, no port.
-- Config: remove `listen`; remove `advertise_host`; add **`advertise_address`**
-  (`host:port`, the externally-reachable HTTP endpoint the worker containers
-  dial). The runtime `--endpoint` the provider injects becomes
-  `ws://<advertise_address>/api/runtime/connect?id=<dialback_id>`.
+- Config: collapse `listen` + `advertise_host` + `http_port` into a single
+  **`advertise_address`** (`host:port`, the externally-reachable HTTP endpoint
+  worker containers dial). Both the runtime dial-back and the plugin-artifact
+  fetch now target this one endpoint: the provider injects
+  `--endpoint ws://<advertise_address>/api/runtime/connect?id=<dialback_id>`,
+  and `artifact_base_url()` returns `http://<advertise_address>` (host parsed
+  from `advertise_address`).
   (`RuntimeProvisioning`/`RuntimeReady` still carry the id in-band; the `?id=`
   query is advisory/logging only — registration keys off the handshake id as
   today.)
@@ -127,7 +130,9 @@ cannot register themselves as vendors. Velos connections are always accepted
   listener. The `restart_required` special-case for changing
   `listen`/`advertise_host` collapses — there is no listener to rebind; all
   velos edits (including `advertise_address`) apply live.
-- `VelosConfig` / views: `listen` + `advertise_host` → `advertise_address`.
+- `VelosConfig` / `settings.fl` velos view: `listen` + `advertise_host` +
+  `http_port` → `advertise_address`. (The `VendorCapabilities` announced by #11
+  is orthogonal and unchanged — each vendor keeps its existing `capabilities()`.)
 
 ### `server/src/bin/horsie-server/{config,main}.rs`
 - Boot config: replace `local_runtime_listen: Option<String>` (a bind address)
