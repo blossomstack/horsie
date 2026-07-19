@@ -98,7 +98,10 @@ impl BootConfig {
         }
     }
 
-    fn resolve_with(explicit: Option<&Path>, user_path: Option<PathBuf>) -> Result<Self, BootError> {
+    fn resolve_with(
+        explicit: Option<&Path>,
+        user_path: Option<PathBuf>,
+    ) -> Result<Self, BootError> {
         match explicit {
             Some(p) => Self::load(p),
             None => match user_path {
