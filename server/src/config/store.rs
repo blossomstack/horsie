@@ -1476,7 +1476,7 @@ mod tests {
             .to_string(),
         };
         let built = build_one_vendor(&row).await.expect("velos row builds");
-        assert_eq!(built.as_dyn().name(), "velos");
+        assert!(matches!(built, BuiltVendor::Velos(_)));
     }
 
     // A tiny mock velos server exposing just `/auth/v1/me`, for `test_vendor`.

@@ -109,10 +109,6 @@ impl LocalDaemonVendor {
 
 #[async_trait]
 impl RuntimeVendor for LocalDaemonVendor {
-    fn name(&self) -> &'static str {
-        "local"
-    }
-
     async fn create(
         &self,
         _runtime_id: &str,
@@ -360,7 +356,6 @@ mod tests {
         wait_connected(&registry, "my-laptop").await;
         let vendor = registry.vendor("my-laptop").expect("vendor registered");
         assert_eq!(vendor.workdir(), "/home/u/proj");
-        assert_eq!(vendor.name(), "local");
         daemon.abort();
     }
 

@@ -83,8 +83,6 @@ pub trait VendorRuntimeHandle: Send + Sync {
 
 #[async_trait]
 pub trait RuntimeVendor: Send + Sync + 'static {
-    fn name(&self) -> &'static str;
-
     /// Provision a brand-new runtime.
     async fn create(
         &self,

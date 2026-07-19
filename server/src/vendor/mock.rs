@@ -93,10 +93,6 @@ impl MockVendor {
 
 #[async_trait]
 impl RuntimeVendor for MockVendor {
-    fn name(&self) -> &'static str {
-        "mock"
-    }
-
     async fn create(
         &self,
         runtime_id: &str,

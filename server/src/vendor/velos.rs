@@ -450,10 +450,6 @@ impl VelosVendor {
 
 #[async_trait]
 impl RuntimeVendor for VelosVendor {
-    fn name(&self) -> &'static str {
-        "velos"
-    }
-
     fn artifact_base_url(&self) -> Option<String> {
         self.settings
             .read()
