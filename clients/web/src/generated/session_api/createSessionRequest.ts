@@ -6,7 +6,7 @@ export interface CreateSessionRequest {
   name?: string;
   agent: AgentSettings;
   /**
-   * Bring-your-own workspace roots (local vendor only). Mutually exclusive
+   * Bring-your-own workspace roots; currently accepted by no vendor kind.
    */
   workdirs: string[];
   /**

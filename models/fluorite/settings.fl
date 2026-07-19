@@ -26,15 +26,18 @@ struct ModelView {
     max_tokens: Option<u32>,
 }
 
-/// A runtime vendor sessions can target. `local` is built-in and carries no
-/// config; every other vendor carries a kind-tagged config block.
+/// A runtime vendor sessions can target: DB-configured, or daemon-registered.
+/// A daemon-registered vendor (e.g. a connected shared local runtime) is
+/// listed under whatever label it dialed in as, and only once it has
+/// actually registered. A DB-configured vendor carries a kind-tagged config
+/// block; a daemon-registered one carries none.
 struct VendorView {
     name: String,
     /// Loaded and usable in the running server right now.
     active: bool,
     /// Whether new sessions default to this vendor.
     is_default: bool,
-    /// Kind-specific config, redacted. Absent for the built-in `local` vendor.
+    /// Kind-specific config, redacted. Absent for a daemon-registered vendor.
     config: Option<VendorConfigView>,
     /// The last build/reconfigure failure for this vendor, if any. `None`
     /// when active or never attempted.

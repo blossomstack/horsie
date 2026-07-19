@@ -19,7 +19,8 @@ struct RepoConfig {
 struct CreateSessionRequest {
     name: Option<String>,
     agent: AgentSettings,
-    /// Bring-your-own workspace roots (local vendor only). Mutually exclusive
+    /// Bring-your-own workspace roots; currently accepted by no vendor kind.
+    /// Kept for a future vendor kind that can honor it. Mutually exclusive
     /// with repos; both empty → one empty vendor-managed workspace.
     workdirs: Vec<String>,
     /// Runtime vendor name; defaults to "local".

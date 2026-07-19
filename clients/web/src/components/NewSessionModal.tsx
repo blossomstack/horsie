@@ -11,8 +11,10 @@ import { usePlugins as usePluginBundles } from "../hooks/usePlugins";
 import { useCreateSession } from "../hooks/useSessions";
 import { useSettings } from "../hooks/useSettings";
 
-/** Where a new session's workspace comes from. */
-type WorkspaceSource = "dir" | "repos";
+/** Where a new session's workspace comes from. No vendor kind currently
+ * accepts a bring-your-own directory, so the only choices are an empty
+ * scratch workspace or repos cloned in at provision time. */
+type WorkspaceSource = "scratch" | "repos";
 
 export function NewSessionModal({
   open,
@@ -32,7 +34,6 @@ export function NewSessionModal({
 
   const [name, setName] = useState("");
   const [model, setModel] = useState("");
-  const [workdir, setWorkdir] = useState("");
   const [vendor, setVendor] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [usePlugins, setUsePlugins] = useState(false);
@@ -46,9 +47,9 @@ export function NewSessionModal({
   const { data: mcpServers } = useMcpServers();
   const enabledMcp = (mcpServers ?? []).filter((s) => s.enabled);
 
-  // Workspace source: a local directory, or a set of GitHub repos to clone
+  // Workspace source: empty (scratch), or a set of GitHub repos to clone
   // (fullName → ref; "" = default branch).
-  const [source, setSource] = useState<WorkspaceSource>("dir");
+  const [source, setSource] = useState<WorkspaceSource>("scratch");
   const [selected, setSelected] = useState<Map<string, string>>(new Map());
   const [repoFilter, setRepoFilter] = useState("");
   const { data: ghStatus } = useGithubStatus();
@@ -61,7 +62,6 @@ export function NewSessionModal({
   const reset = () => {
     setName("");
     setModel("");
-    setWorkdir("");
     setVendor("");
     setSystemPrompt("");
     setUsePlugins(false);
@@ -69,7 +69,7 @@ export function NewSessionModal({
     setMcpSelected([]);
     setAdvanced(false);
     setError(null);
-    setSource("dir");
+    setSource("scratch");
     setSelected(new Map());
     setRepoFilter("");
   };
@@ -118,7 +118,7 @@ export function NewSessionModal({
         usePlugins,
         mcpServers: mcpSelected.length ? mcpSelected : undefined,
       },
-      workdirs: source === "dir" && wd ? [wd] : [],
+      workdirs: [],
       repos: source === "repos" ? repos : undefined,
       vendor: vendor.trim() || undefined,
       // Selected skill bundles; empty → server uses the default-enabled set.
@@ -138,8 +138,6 @@ export function NewSessionModal({
   };
 
   const noModels = !!settings && models.length === 0;
-  const wd = workdir.trim();
-  const effectiveVendor = vendor || settings?.defaultVendor || "";
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -195,7 +193,7 @@ export function NewSessionModal({
 
             <Field label="Workspace">
               <div className="mb-2 flex gap-1">
-                {(["dir", "repos"] as const).map((s) => (
+                {(["scratch", "repos"] as const).map((s) => (
                   <button
                     key={s}
                     type="button"
@@ -205,31 +203,15 @@ export function NewSessionModal({
                     )}
                     onClick={() => setSource(s)}
                   >
-                    {s === "dir" ? "Local directory" : "GitHub repos"}
+                    {s === "scratch" ? "Scratch" : "GitHub repos"}
                   </button>
                 ))}
               </div>
 
-              {source === "dir" ? (
-                <>
-                  <input
-                    className="input font-mono"
-                    value={workdir}
-                    onChange={(e) => setWorkdir(e.target.value)}
-                    placeholder="/Users/you/project"
-                  />
-                  {wd && effectiveVendor && effectiveVendor !== "local" ? (
-                    <p className="mt-1 text-[11px] text-warning">
-                      Vendor "{effectiveVendor}" can't mount a local
-                      directory — pick the "local" runtime vendor under
-                      Advanced, or leave this blank for a scratch workspace.
-                    </p>
-                  ) : (
-                    <p className="mt-1 text-[11px] text-faint">
-                      Leave blank for a scratch workspace.
-                    </p>
-                  )}
-                </>
+              {source === "scratch" ? (
+                <p className="text-[11px] text-faint">
+                  Starts with an empty, vendor-managed workspace.
+                </p>
               ) : !ghStatus?.connected ? (
                 <Link
                   to="/settings"
