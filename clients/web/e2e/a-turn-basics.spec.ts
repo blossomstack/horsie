@@ -34,6 +34,15 @@ test("A2: a text turn renders the mock's reply", async ({ page, appBase, mock })
     "Hello from the mock LLM — 42.",
   );
   await expectStatus(page, "Idle");
+
+  // An unnamed session titles itself from the first message — client-side
+  // optimistic update and, after reload, the server's own persisted title.
+  await expect(page.getByTestId("session-title")).toHaveText("hi there");
+  await expect(
+    page.locator('[data-testid="session-row"]', { hasText: "hi there" }),
+  ).toBeVisible();
+  await page.reload();
+  await expect(page.getByTestId("session-title")).toHaveText("hi there");
 });
 
 test("A3: a streamed response accumulates into the final message", async ({

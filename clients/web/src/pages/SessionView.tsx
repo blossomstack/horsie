@@ -22,7 +22,7 @@ import {
   useSession,
   useStopSession,
 } from "../hooks/useSessions";
-import { basename, compactNumber } from "../lib/format";
+import { basename, compactNumber, sessionTitle } from "../lib/format";
 import { statusMeta } from "../lib/status";
 
 function Chip({
@@ -114,7 +114,7 @@ export function SessionView() {
     }
   };
 
-  const title = detail?.name?.trim() || `Session ${id.slice(0, 8)}`;
+  const title = sessionTitle(detail?.name);
   const stoppable =
     status !== SessionStatusKind.Stopped &&
     status !== SessionStatusKind.Failed &&
@@ -130,7 +130,9 @@ export function SessionView() {
       >
         <div className="min-w-0">
           <div className="flex items-center gap-2.5">
-            <h1 className="truncate text-sm font-semibold text-text">{title}</h1>
+            <h1 data-testid="session-title" className="truncate text-sm font-semibold text-text">
+              {title}
+            </h1>
             <StatusBadge status={status} />
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">

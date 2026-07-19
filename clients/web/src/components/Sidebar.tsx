@@ -2,7 +2,7 @@ import { Boxes, MessageSquarePlus, Plus, Search, Settings } from "lucide-react";
 import { useMemo, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import type { SessionSummary } from "../api/types";
-import { relativeTime } from "../lib/format";
+import { relativeTime, sessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 import { useSessionList } from "../hooks/useSessions";
 import { NewSessionModal } from "./NewSessionModal";
@@ -10,7 +10,7 @@ import { StatusDot } from "./StatusBadge";
 import { ThemeToggle } from "./ThemeToggle";
 
 function SessionRow({ s }: { s: SessionSummary }) {
-  const title = s.name?.trim() || `Session ${s.id.slice(0, 8)}`;
+  const title = sessionTitle(s.name);
   return (
     <NavLink
       to={`/sessions/${s.id}`}

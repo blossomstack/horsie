@@ -33,3 +33,23 @@ export function basename(path: string): string {
   const idx = trimmed.lastIndexOf("/");
   return idx >= 0 ? trimmed.slice(idx + 1) || trimmed : trimmed;
 }
+
+/** Display title for a session: its name once titled, else a plain
+ * placeholder (never the raw uuid — nobody wants to scan session ids). */
+export function sessionTitle(name: string | undefined): string {
+  return name?.trim() || "New session";
+}
+
+const TITLE_MAX_CHARS = 60;
+
+/**
+ * A short title derived from a user's first message — mirrors the server's
+ * own derivation (session_actor.rs `derive_title`) so an unnamed session's
+ * title appears instantly on send instead of waiting for the next refetch.
+ */
+export function deriveTitle(text: string): string | null {
+  const firstLine = (text.split("\n")[0] ?? "").trim();
+  if (!firstLine) return null;
+  if (firstLine.length <= TITLE_MAX_CHARS) return firstLine;
+  return `${firstLine.slice(0, TITLE_MAX_CHARS).trimEnd()}…`;
+}

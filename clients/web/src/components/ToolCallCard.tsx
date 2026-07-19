@@ -73,35 +73,31 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
   const inputStr = stringifyInput(call.input);
 
   return (
-    <div
-      data-testid="tool-call-card"
-      data-tool={call.name}
-      data-error={call.isError ? "true" : "false"}
-      className={cn(
-        "overflow-hidden rounded-[var(--radius)] border",
-        call.isError ? "border-error/40" : "border-border",
-      )}
-      style={{ background: "var(--surface-2)" }}
-    >
+    <div data-testid="tool-call-card" data-tool={call.name} data-error={call.isError ? "true" : "false"}>
       <button
-        className="flex w-full items-center gap-2.5 px-3 py-2 text-left"
+        className="-mx-1 flex w-full items-center gap-2 rounded px-1 py-1 text-left hover:bg-surface-2"
         onClick={() => setOpen((o) => !o)}
         data-testid="tool-call-toggle"
       >
-        <span className="text-faint">
+        <ChevronRight
+          size={11}
+          className={cn(
+            "shrink-0 text-faint transition-transform",
+            open && "rotate-90",
+          )}
+        />
+        <span className="shrink-0 text-faint">
           {call.running ? (
-            <Loader2 size={14} className="animate-spin text-accent" />
+            <Loader2 size={13} className="animate-spin text-accent" />
           ) : call.isError ? (
-            <CircleAlert size={14} className="text-error" />
+            <CircleAlert size={13} className="text-error" />
           ) : hasOutput ? (
-            <CircleCheck size={14} className="text-success" />
+            <CircleCheck size={13} className="text-success" />
           ) : (
-            <Wrench size={14} />
+            <Wrench size={13} />
           )}
         </span>
-        <span className="font-mono text-[13px] font-medium text-text">
-          {call.name}
-        </span>
+        <span className="font-mono text-[13px] text-text">{call.name}</span>
         {preview && (
           <span className="min-w-0 flex-1 truncate font-mono text-xs text-faint">
             {preview}
@@ -109,45 +105,27 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
         )}
         {!preview && <span className="flex-1" />}
         {call.running && (
-          <span className="chip border-0 bg-transparent text-accent">running…</span>
+          <span className="shrink-0 text-xs text-accent">running…</span>
         )}
-        <ChevronRight
-          size={14}
-          className={cn(
-            "shrink-0 text-faint transition-transform",
-            open && "rotate-90",
-          )}
-        />
       </button>
 
       {open && (
-        <div className="space-y-2 border-t px-3 py-2.5">
+        <div className="mt-1 ml-3 space-y-2 border-l pl-3">
           {inputStr && (
-            <div>
-              <div className="mb-1 text-[10px] font-semibold tracking-wide text-faint uppercase">
-                Input
-              </div>
-              <pre className="overflow-x-auto rounded-md bg-[var(--surface-3)] p-2 font-mono text-xs leading-relaxed text-muted">
-                {inputStr}
-              </pre>
-            </div>
+            <pre className="overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap text-faint">
+              {inputStr}
+            </pre>
           )}
           {hasOutput && (
-            <div>
-              <div className="mb-1 text-[10px] font-semibold tracking-wide text-faint uppercase">
-                {call.isError ? "Error" : "Output"}
-              </div>
-              <pre
-                data-testid="tool-call-output"
-                className={cn(
-                  "max-h-72 overflow-auto rounded-md p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap",
-                  call.isError ? "text-error" : "text-muted",
-                )}
-                style={{ background: "var(--surface-3)" }}
-              >
-                {call.output}
-              </pre>
-            </div>
+            <pre
+              data-testid="tool-call-output"
+              className={cn(
+                "max-h-72 overflow-auto font-mono text-xs leading-relaxed whitespace-pre-wrap",
+                call.isError ? "text-error" : "text-muted",
+              )}
+            >
+              {call.output}
+            </pre>
           )}
           {!hasOutput && !call.running && (
             <div className="text-xs text-faint">No output.</div>

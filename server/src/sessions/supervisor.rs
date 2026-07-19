@@ -65,6 +65,8 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         status: SessionStatus,
     },
+    /// Internal: a session actor derived a title from its first message.
+    SessionNamed { id: SessionId, name: String },
 }
 
 /// Events recording the session registry. Persisted.
@@ -82,6 +84,10 @@ pub enum SessionSupervisorEvent {
     },
     SessionDeleted {
         id: SessionId,
+    },
+    SessionNamed {
+        id: SessionId,
+        name: String,
     },
 }
 
@@ -188,6 +194,11 @@ impl EventSourcedActor for SessionSupervisor {
             }
             SessionSupervisorEvent::SessionDeleted { id } => {
                 state.sessions.remove(&id);
+            }
+            SessionSupervisorEvent::SessionNamed { id, name } => {
+                if let Some(rec) = state.sessions.get_mut(&id) {
+                    rec.spec.name = Some(name);
+                }
             }
         }
         state
@@ -337,6 +348,9 @@ impl EventSourcedActor for SessionSupervisor {
                     id,
                     status,
                 }])
+            }
+            SessionSupervisorCommand::SessionNamed { id, name } => {
+                CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed { id, name }])
             }
         }
     }
