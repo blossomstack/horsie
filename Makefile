@@ -1,6 +1,8 @@
 # horsie — common developer tasks.
-# The CLI is two binaries: `horsie` (cli crate) spawns the sibling
-# `horsie-runtime` (runtime crate), so build-cli builds both.
+# Three binaries: `horsie` (cli crate) spawns the sibling `horsie-runtime`
+# (runtime crate) per job, so build-cli builds both. `horsie-server` (server
+# crate) is the standalone session server, independent of the CLI — build it
+# with build-server.
 
 CARGO ?= cargo
 PROFILE ?= release
@@ -18,11 +20,11 @@ PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build-cli
-.PHONY: build-cli build test fmt fmt-check clippy deny check ts-types web web-build install-cli uninstall-cli clean help
+.PHONY: build-cli build-server build test fmt fmt-check clippy deny check ts-types web web-build install-cli uninstall-cli install-server uninstall-server clean help
 
 ## build-cli: build the horsie CLI + its sandboxed runtime child ($(PROFILE))
 build-cli:
-	$(CARGO) build $(PROFILE_FLAG) -p cli -p runtime
+	$(CARGO) build $(PROFILE_FLAG) -p horsie -p horsie-runtime
 	@echo "built: $(TARGET_DIR)/horsie  $(TARGET_DIR)/horsie-runtime"
 
 ## build: build the whole workspace
@@ -57,7 +59,7 @@ check: fmt-check clippy test
 ts-types:
 	cd clients/ts && npm install --no-audit --no-fund && npm run generate-types && npm run typecheck
 
-## web: run the web UI dev server (needs bun + a running `horsie serve`)
+## web: run the web UI dev server (needs bun + a running `horsie-server`)
 web:
 	cd clients/web && bun install && bun run generate-types && bun run dev
 
@@ -77,6 +79,23 @@ install-cli: build-cli
 uninstall-cli:
 	rm -f "$(DESTDIR)$(BINDIR)/horsie" "$(DESTDIR)$(BINDIR)/horsie-runtime"
 	@echo "removed horsie + horsie-runtime from $(DESTDIR)$(BINDIR)"
+
+## build-server: build the horsie-server binary ($(PROFILE))
+build-server:
+	$(CARGO) build $(PROFILE_FLAG) -p horsie-server
+	@echo "built: $(TARGET_DIR)/horsie-server"
+
+## install-server: build + install horsie-server into $(BINDIR)
+install-server: build-server
+	@mkdir -p "$(DESTDIR)$(BINDIR)"
+	install -m 0755 "$(TARGET_DIR)/horsie-server" "$(DESTDIR)$(BINDIR)/horsie-server"
+	@echo "installed: $(DESTDIR)$(BINDIR)/horsie-server"
+	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "note: $(BINDIR) is not on your PATH — add it to run \`horsie-server\` directly";; esac
+
+## uninstall-server: remove horsie-server from $(BINDIR)
+uninstall-server:
+	rm -f "$(DESTDIR)$(BINDIR)/horsie-server"
+	@echo "removed horsie-server from $(DESTDIR)$(BINDIR)"
 
 ## clean: remove build artifacts
 clean:
