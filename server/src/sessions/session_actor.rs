@@ -179,10 +179,6 @@ impl SessionActor {
                 .iter()
                 .map(|w| crate::vendor::WorkspaceSpec {
                     name: w.name.clone(),
-                    source: match &w.path {
-                        Some(p) => crate::vendor::WorkspaceSource::HostDir(p.clone()),
-                        None => crate::vendor::WorkspaceSource::Managed,
-                    },
                 })
                 .collect(),
             provision: self

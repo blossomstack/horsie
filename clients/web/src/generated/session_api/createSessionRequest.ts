@@ -6,10 +6,6 @@ export interface CreateSessionRequest {
   name?: string;
   agent: AgentSettings;
   /**
-   * Bring-your-own workspace roots; currently accepted by no vendor kind.
-   */
-  workdirs: string[];
-  /**
    * Runtime vendor name; defaults to &quot;local&quot;.
    */
   vendor?: string;

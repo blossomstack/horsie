@@ -3,7 +3,9 @@
 //! `delete:<id>`), so tests can assert the invariant that every user action on a
 //! session emits exactly the specified vendor signal.
 
-use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle};
+use crate::vendor::{
+    RuntimeSpec, RuntimeVendor, VendorCapabilities, VendorError, VendorRuntime, VendorRuntimeHandle,
+};
 use async_trait::async_trait;
 use horsie_runtime_client::{MockTransport, RuntimeClient};
 use std::sync::{Arc, Mutex};
@@ -93,6 +95,14 @@ impl MockVendor {
 
 #[async_trait]
 impl RuntimeVendor for MockVendor {
+    fn capabilities(&self) -> VendorCapabilities {
+        // Provisioning-capable so tests exercising the provision path keep
+        // working; flip via a field here if a non-provisioning mock is needed.
+        VendorCapabilities {
+            supports_provisioning: true,
+        }
+    }
+
     async fn create(
         &self,
         runtime_id: &str,

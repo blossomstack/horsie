@@ -1,4 +1,5 @@
 
+import { VendorCapabilities } from './vendorCapabilities';
 import { VendorConfigView } from './vendorConfigView';
 /**
  * A runtime vendor sessions can target: DB-configured, or daemon-registered.
@@ -21,4 +22,8 @@ export interface VendorView {
    * The last build/reconfigure failure for this vendor, if any. `None`
    */
   error?: string;
+  /**
+   * Announced capabilities of the live vendor instance. `None` when the
+   */
+  capabilities?: VendorCapabilities;
 }

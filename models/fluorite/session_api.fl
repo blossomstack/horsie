@@ -19,15 +19,13 @@ struct RepoConfig {
 struct CreateSessionRequest {
     name: Option<String>,
     agent: AgentSettings,
-    /// Bring-your-own workspace roots; currently accepted by no vendor kind.
-    /// Kept for a future vendor kind that can honor it. Mutually exclusive
-    /// with repos; both empty → one empty vendor-managed workspace.
-    workdirs: Vec<String>,
     /// Runtime vendor name; defaults to "local".
     vendor: Option<String>,
     /// Capability spec overriding the server default.
     capabilities: Option<CapabilitySpec>,
     /// Repositories cloned into a vendor-managed workspace at provision time.
+    /// Only honored by a vendor that supports provisioning; the UI sends these
+    /// only for such a vendor.
     repos: Option<Vec<RepoConfig>>,
     /// Selected plugin-bundle names to provision for this session; absent →
     /// the server's default-enabled bundles. Non-empty implies plugins are on.

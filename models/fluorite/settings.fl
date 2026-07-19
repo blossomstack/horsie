@@ -26,6 +26,16 @@ struct ModelView {
     max_tokens: Option<u32>,
 }
 
+/// What a vendor can do with a session workspace. Announced by the vendor
+/// itself; the new-session UI reads it to decide what to prompt for, instead
+/// of branching on the vendor's name or kind.
+struct VendorCapabilities {
+    /// The vendor provisions a workspace it owns — cloning repos, installing
+    /// skill bundles, running provision steps. A vendor that runs in a fixed,
+    /// user-owned directory (the shared local daemon) provisions nothing.
+    supports_provisioning: bool,
+}
+
 /// A runtime vendor sessions can target: DB-configured, or daemon-registered.
 /// A daemon-registered vendor (e.g. a connected shared local runtime) is
 /// listed under whatever label it dialed in as, and only once it has
@@ -42,6 +52,11 @@ struct VendorView {
     /// The last build/reconfigure failure for this vendor, if any. `None`
     /// when active or never attempted.
     error: Option<String>,
+    /// Announced capabilities of the live vendor instance. `None` when the
+    /// vendor is configured but not currently loaded (no instance to ask);
+    /// the new-session UI only offers active vendors, so it always has a
+    /// value where it matters.
+    capabilities: Option<VendorCapabilities>,
 }
 
 /// Redacted config for a configurable vendor, tagged by kind. Add a variant to

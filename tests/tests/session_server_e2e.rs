@@ -154,7 +154,6 @@ async fn start_server(
 async fn create_session(client: &reqwest::Client, addr: &SocketAddr) -> String {
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
-        "workdirs": ["/tmp"],
         "vendor": "mock"
     });
     let res = client
@@ -168,9 +167,8 @@ async fn create_session(client: &reqwest::Client, addr: &SocketAddr) -> String {
     v["session"]["id"].as_str().unwrap().to_string()
 }
 
-/// Like `create_session`, but selects a named vendor with no `workdirs`/
-/// `repos` — the shape a shared-local-vendor session must use (it never
-/// resolves a caller-supplied path).
+/// Like `create_session`, but selects a named vendor with no `repos` — the
+/// shape a shared-local-vendor session must use (it provisions nothing).
 async fn create_session_for_vendor(
     client: &reqwest::Client,
     addr: &SocketAddr,
@@ -178,7 +176,6 @@ async fn create_session_for_vendor(
 ) -> String {
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
-        "workdirs": [],
         "vendor": vendor
     });
     let res = client
@@ -709,7 +706,6 @@ async fn repos_session_creates_and_reports_repos() {
 
     let body = serde_json::json!({
         "agent": {"model": "mock"},
-        "workdirs": [],
         "vendor": "mock",
         "repos": [{"url": "https://github.com/o/api", "gitRef": "main"}]
     });
@@ -740,7 +736,6 @@ async fn repos_session_creates_and_reports_repos() {
         detail["session"]["repos"],
         serde_json::json!(["https://github.com/o/api"])
     );
-    assert_eq!(detail["session"]["workdirs"], serde_json::json!([]));
 
     server.shutdown().await;
 }

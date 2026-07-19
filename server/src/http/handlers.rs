@@ -74,43 +74,23 @@ pub async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, Api> {
+    // The workspace is always vendor-allocated; `repos` (when the vendor
+    // supports provisioning) become git-checkout provision steps that clone
+    // into it. The UI only sends repos to a provisioning-capable vendor; a
+    // vendor that can't provision rejects them at `create()`.
     let repos = req.repos.unwrap_or_default();
-    if !req.workdirs.is_empty() && !repos.is_empty() {
-        return Err(Api::unprocessable(
-            "workdirs and repos are mutually exclusive",
-        ));
-    }
-    let (workspaces, provision) = if !req.workdirs.is_empty() {
-        let paths: Vec<std::path::PathBuf> =
-            req.workdirs.iter().map(std::path::PathBuf::from).collect();
-        let ws = horsie_models::derive_workspaces(&paths)
-            .map_err(|e| Api::unprocessable(format!("invalid workdirs: {e}")))?
-            .into_iter()
-            .map(|w| WorkspaceDef {
-                name: w.name,
-                path: Some(w.path),
-            })
-            .collect();
-        (ws, vec![])
-    } else {
-        let steps = horsie_models::provision_from_repos(&repos)
-            .map_err(|e| Api::unprocessable(format!("invalid repos: {e}")))?;
-        let provision: Vec<ProvisionStepSpec> = steps
-            .into_iter()
-            .map(|s| ProvisionStepSpec {
-                name: s.name,
-                uses: s.uses,
-                with: s.with.into_iter().map(|p| (p.key, p.value)).collect(),
-            })
-            .collect();
-        (
-            vec![WorkspaceDef {
-                name: "main".into(),
-                path: None,
-            }],
-            provision,
-        )
-    };
+    let provision: Vec<ProvisionStepSpec> = horsie_models::provision_from_repos(&repos)
+        .map_err(|e| Api::unprocessable(format!("invalid repos: {e}")))?
+        .into_iter()
+        .map(|s| ProvisionStepSpec {
+            name: s.name,
+            uses: s.uses,
+            with: s.with.into_iter().map(|p| (p.key, p.value)).collect(),
+        })
+        .collect();
+    let workspaces = vec![WorkspaceDef {
+        name: "main".into(),
+    }];
     // Repo provisioning clones inside the sandbox, so the default capability
     // spec (which may block the network) gets a network-allow override; an
     // explicit request-supplied spec always wins untouched.
@@ -199,12 +179,6 @@ pub async fn get_session(
         last_error: status_reason(&rec.status),
         pending_question,
         model: rec.spec.agent.model.clone(),
-        workdirs: rec
-            .spec
-            .workspaces
-            .iter()
-            .filter_map(|w| w.path.as_ref().map(|p| p.to_string_lossy().into_owned()))
-            .collect(),
         vendor: rec.spec.vendor.clone(),
         repos: rec
             .spec

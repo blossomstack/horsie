@@ -144,9 +144,9 @@ export function SessionView() {
                 {detail.vendor}
               </Chip>
             )}
-            {detail?.workdirs?.map((w) => (
-              <Chip key={w} icon={<FolderGit2 size={12} />} title={w}>
-                {basename(w)}
+            {detail?.repos?.map((r) => (
+              <Chip key={r} icon={<FolderGit2 size={12} />} title={r}>
+                {basename(r)}
               </Chip>
             ))}
             {totalTokens > 0 && (

@@ -280,7 +280,6 @@ mod tests {
         // create
         let body = serde_json::json!({
             "agent": {"model": "mock"},
-            "workdirs": ["/tmp"],
             "vendor": "mock"
         });
         let res = app
@@ -436,12 +435,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_without_workdirs_gets_managed_workspace() {
+    async fn create_without_repos_gets_managed_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         let app = app(test_state(&tmp).await);
         let body = serde_json::json!({
             "agent": {"model": "mock"},
-            "workdirs": [],
             "vendor": "mock"
         });
         let res = app
@@ -458,7 +456,6 @@ mod tests {
         let app = app(test_state(&tmp).await);
         let body = serde_json::json!({
             "agent": {"model": "mock"},
-            "workdirs": [],
             "vendor": "mock",
             "repos": [
                 {"url": "https://github.com/o/api.git"},
@@ -481,24 +478,6 @@ mod tests {
             detail.session.repos,
             vec!["https://github.com/o/api.git", "https://github.com/o/web"]
         );
-        assert!(detail.session.workdirs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn create_rejects_workdirs_and_repos_together() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
-        let body = serde_json::json!({
-            "agent": {"model": "mock"},
-            "workdirs": ["/tmp"],
-            "repos": [{"url": "https://github.com/o/x"}],
-            "vendor": "mock"
-        });
-        let res = app
-            .oneshot(post_json("/api/sessions", &body))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
