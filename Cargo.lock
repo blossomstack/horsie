@@ -1674,6 +1674,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "clap",
  "futures-util",
  "horsie-actor",
  "horsie-agentcore",
