@@ -1482,7 +1482,6 @@ name = "horsie"
 version = "0.1.4"
 dependencies = [
  "async-trait",
- "axum",
  "clap",
  "eval",
  "horsie-actor",
@@ -1493,7 +1492,6 @@ dependencies = [
  "horsie-mock-llm",
  "horsie-models",
  "horsie-runtime-client",
- "horsie-server",
  "horsie-supervisor",
  "horsie-workflow",
  "serde",

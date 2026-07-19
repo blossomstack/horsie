@@ -19,9 +19,7 @@ horsie-executor-client = { version = "0.1.4", path = "../executor-client", defau
 horsie-runtime-client = { version = "0.1.4", path = "../runtime-client" }
 horsie-workflow = { version = "0.1.4", path = "../workflow" }
 horsie-supervisor = { version = "0.1.4", path = "../supervisor" }
-horsie-server = { version = "0.1.4", path = "../server" }
 horsie-models = { version = "0.1.4", path = "../models" }
-axum            = { workspace = true }
 clap            = { version = "4", features = ["derive"] }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
