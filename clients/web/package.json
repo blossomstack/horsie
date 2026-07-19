@@ -9,6 +9,8 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
     "generate-types": "fluorite ts -i ../../models/fluorite/agent.fl ../../models/fluorite/capabilities.fl ../../models/fluorite/session.fl ../../models/fluorite/session_api.fl ../../models/fluorite/settings.fl ../../models/fluorite/github.fl ../../models/fluorite/mcp.fl ../../models/fluorite/plugins.fl -o src/generated"
   },
   "dependencies": {
@@ -25,6 +27,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.3.2",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",

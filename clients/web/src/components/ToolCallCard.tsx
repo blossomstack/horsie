@@ -19,7 +19,10 @@ function AskUserCard({ call }: { call: RenderedToolCall }) {
   const input = call.input as { question?: string; choices?: string[] } | undefined;
   const choices = input?.choices ?? [];
   return (
-    <div className="flex items-start gap-2 rounded-[var(--radius)] border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-text">
+    <div
+      data-testid="ask-user-card"
+      className="flex items-start gap-2 rounded-[var(--radius)] border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-text"
+    >
       <HelpCircle size={16} className="mt-0.5 shrink-0 text-warning" />
       <div className="min-w-0 flex-1">
         <span className="font-medium text-warning">Asked: </span>
@@ -27,7 +30,7 @@ function AskUserCard({ call }: { call: RenderedToolCall }) {
         {choices.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1.5">
             {choices.map((c) => (
-              <span key={c} className="chip">
+              <span key={c} data-testid="ask-user-choice" className="chip">
                 {c}
               </span>
             ))}
@@ -71,6 +74,9 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
 
   return (
     <div
+      data-testid="tool-call-card"
+      data-tool={call.name}
+      data-error={call.isError ? "true" : "false"}
       className={cn(
         "overflow-hidden rounded-[var(--radius)] border",
         call.isError ? "border-error/40" : "border-border",
@@ -80,6 +86,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
       <button
         className="flex w-full items-center gap-2.5 px-3 py-2 text-left"
         onClick={() => setOpen((o) => !o)}
+        data-testid="tool-call-toggle"
       >
         <span className="text-faint">
           {call.running ? (
@@ -131,6 +138,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
                 {call.isError ? "Error" : "Output"}
               </div>
               <pre
+                data-testid="tool-call-output"
                 className={cn(
                   "max-h-72 overflow-auto rounded-md p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap",
                   call.isError ? "text-error" : "text-muted",

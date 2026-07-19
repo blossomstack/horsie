@@ -14,6 +14,8 @@ function SessionRow({ s }: { s: SessionSummary }) {
   return (
     <NavLink
       to={`/sessions/${s.id}`}
+      data-testid="session-row"
+      data-session-id={s.id}
       className={({ isActive }) =>
         cn(
           "group flex items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-2 text-sm transition-colors",
@@ -70,6 +72,7 @@ export function Sidebar() {
         <button
           className="btn-primary ml-auto !px-2.5 !py-1.5 text-xs"
           onClick={() => setModal(true)}
+          data-testid="new-session-button"
         >
           <Plus size={15} />
           New
@@ -87,6 +90,7 @@ export function Sidebar() {
             placeholder="Search sessions"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            data-testid="session-search"
           />
         </div>
       </div>

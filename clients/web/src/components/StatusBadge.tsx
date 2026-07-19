@@ -27,6 +27,8 @@ export function StatusBadge({ status }: { status: SessionStatusKind }) {
   const meta = statusMeta(status);
   return (
     <span
+      data-testid="status-badge"
+      data-status={status}
       className={cn(
         "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium",
         TONE_TEXT[meta.tone],
