@@ -11,10 +11,9 @@ export interface SessionDetail {
    */
   pendingQuestion?: string;
   model: string;
-  workdirs: string[];
   vendor: string;
   /**
-   * Clone URLs of the session&#x27;s provisioned repos (empty for workdir sessions).
+   * Clone URLs of the session&#x27;s provisioned repos (empty when none).
    */
   repos: string[];
 }

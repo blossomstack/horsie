@@ -16,7 +16,7 @@
 
 use crate::sessions::spec::SharedVendors;
 use crate::vendor::{
-    RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle, WorkspaceSource,
+    RuntimeSpec, RuntimeVendor, VendorCapabilities, VendorError, VendorRuntime, VendorRuntimeHandle,
 };
 use async_trait::async_trait;
 use horsie_executor::{
@@ -52,27 +52,15 @@ impl LocalDaemonVendor {
     }
 
     /// Reject inputs this vendor can't honor: it never provisions (no
-    /// `git_checkout`) and never resolves a caller-supplied host path (the
-    /// daemon's own directory is implicit and fixed). The common case — no
-    /// `workdirs`/`repos` in the request — produces one `Managed` workspace
-    /// with no provision steps, which this vendor silently ignores instead
-    /// of rejecting (that's exactly "just use the daemon's own dir").
+    /// `git_checkout`, no bundle install) — the daemon's own directory is
+    /// implicit and fixed. The common case — no `repos`/provision steps in
+    /// the request — leaves the daemon's own dir untouched, which is exactly
+    /// what this vendor does. This enforces the `supports_provisioning: false`
+    /// it announces in [`capabilities`](RuntimeVendor::capabilities); the UI
+    /// won't send provisioning here, so this is a backstop.
     fn reject_unsupported_inputs(spec: &RuntimeSpec) -> Result<(), String> {
         if !spec.provision.is_empty() {
-            return Err(
-                "shared local runtime vendor does not support repo provisioning".to_string(),
-            );
-        }
-        if spec
-            .workspaces
-            .iter()
-            .any(|w| matches!(w.source, WorkspaceSource::HostDir(_)))
-        {
-            return Err(
-                "shared local runtime vendor ignores workdirs; sessions use the connected \
-                 daemon's own directory"
-                    .to_string(),
-            );
+            return Err("shared local runtime vendor does not support provisioning".to_string());
         }
         Ok(())
     }
@@ -109,8 +97,12 @@ impl LocalDaemonVendor {
 
 #[async_trait]
 impl RuntimeVendor for LocalDaemonVendor {
-    fn name(&self) -> &'static str {
-        "local"
+    fn capabilities(&self) -> VendorCapabilities {
+        // Runs in the connected daemon's own fixed directory; provisions
+        // nothing (no repo clone, no bundle install).
+        VendorCapabilities {
+            supports_provisioning: false,
+        }
     }
 
     async fn create(
@@ -259,7 +251,6 @@ mod tests {
         RuntimeSpec {
             workspaces: vec![WorkspaceSpec {
                 name: "main".into(),
-                source: WorkspaceSource::Managed,
             }],
             provision: vec![],
             env: vec![],
@@ -360,7 +351,6 @@ mod tests {
         wait_connected(&registry, "my-laptop").await;
         let vendor = registry.vendor("my-laptop").expect("vendor registered");
         assert_eq!(vendor.workdir(), "/home/u/proj");
-        assert_eq!(vendor.name(), "local");
         daemon.abort();
     }
 
@@ -490,7 +480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_provision_steps_and_host_dir_workspaces() {
+    async fn announces_no_provisioning_and_rejects_provision_steps() {
         let registry = bind_registry().await;
         let daemon = spawn_fake_daemon(
             registry.listen_addr(),
@@ -501,6 +491,11 @@ mod tests {
         wait_connected(&registry, "strict").await;
         let vendor = registry.vendor("strict").expect("vendor registered");
 
+        assert!(
+            !vendor.capabilities().supports_provisioning,
+            "the shared local vendor announces it cannot provision"
+        );
+
         let mut with_provision = test_spec();
         with_provision.provision = vec![horsie_models::executor::ProvisionStep {
             name: "clone".into(),
@@ -510,16 +505,6 @@ mod tests {
         match vendor.create("session-p", &with_provision).await {
             Err(VendorError::Provision(msg)) => assert!(msg.contains("provisioning"), "{msg}"),
             other => panic!("expected provisioning to be rejected, got {other:?}"),
-        }
-
-        let mut with_host_dir = test_spec();
-        with_host_dir.workspaces = vec![WorkspaceSpec {
-            name: "byo".into(),
-            source: WorkspaceSource::HostDir("/home/u/api".into()),
-        }];
-        match vendor.create("session-h", &with_host_dir).await {
-            Err(VendorError::Provision(msg)) => assert!(msg.contains("workdirs"), "{msg}"),
-            other => panic!("expected host-dir workspace to be rejected, got {other:?}"),
         }
         daemon.abort();
     }

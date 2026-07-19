@@ -18,7 +18,7 @@
 
 use crate::velos::{ContainerApi, ContainerLaunchSpec};
 use crate::vendor::{
-    RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle, WorkspaceSource,
+    RuntimeSpec, RuntimeVendor, VendorCapabilities, VendorError, VendorRuntime, VendorRuntimeHandle,
 };
 use async_trait::async_trait;
 use horsie_executor::{
@@ -427,7 +427,7 @@ impl VelosVendor {
             provider,
             self.connected.clone(),
         ));
-        let config = runtime_config_from(spec, &workspace_root).map_err(wrap)?;
+        let config = runtime_config_from(spec, &workspace_root);
         let result = if attach {
             client.attach_runtime(&incarnation, config).await
         } else {
@@ -450,8 +450,12 @@ impl VelosVendor {
 
 #[async_trait]
 impl RuntimeVendor for VelosVendor {
-    fn name(&self) -> &'static str {
-        "velos"
+    fn capabilities(&self) -> VendorCapabilities {
+        // Schedules a fresh container and clones repos / installs bundles into
+        // the managed workspace at provision time.
+        VendorCapabilities {
+            supports_provisioning: true,
+        }
     }
 
     fn artifact_base_url(&self) -> Option<String> {
@@ -518,30 +522,23 @@ impl VendorRuntimeHandle for VelosHandle {
 /// the vendor's workspace root; host directories are impossible in a remote
 /// container and rejected. Env and provision steps carry over; local-only
 /// inputs (plugins/hooks) are dropped — the container is self-contained.
-fn runtime_config_from(spec: &RuntimeSpec, workspace_root: &str) -> Result<RuntimeConfig, String> {
+fn runtime_config_from(spec: &RuntimeSpec, workspace_root: &str) -> RuntimeConfig {
     let root = workspace_root.trim_end_matches('/');
     let workspaces = spec
         .workspaces
         .iter()
-        .map(|w| match &w.source {
-            WorkspaceSource::Managed => Ok(WorkspaceConfig {
-                name: w.name.clone(),
-                path: format!("{root}/{}", w.name),
-            }),
-            WorkspaceSource::HostDir(p) => Err(format!(
-                "velos cannot mount host directory '{}' (workspace '{}')",
-                p.display(),
-                w.name
-            )),
+        .map(|w| WorkspaceConfig {
+            name: w.name.clone(),
+            path: format!("{root}/{}", w.name),
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(RuntimeConfig {
+        .collect();
+    RuntimeConfig {
         workspaces,
         plugins_dir: None,
         hook_path: vec![],
         env: spec.env.clone(),
         provision: spec.provision.clone(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -736,7 +733,6 @@ mod tests {
         RuntimeSpec {
             workspaces: vec![WorkspaceSpec {
                 name: "main".into(),
-                source: WorkspaceSource::Managed,
             }],
             provision: vec![],
             env: vec![],
@@ -802,25 +798,6 @@ mod tests {
         // Stop deletes the container (velos has no pause).
         rt.handle.stop().await;
         assert_eq!(api.deletes(), vec!["horsie-rt-1"]);
-    }
-
-    #[tokio::test]
-    async fn host_dir_workspace_is_rejected() {
-        let api = FakeVelosApi::new();
-        let vendor = bind_vendor(api.clone()).await;
-        let mut spec = test_spec();
-        spec.workspaces = vec![WorkspaceSpec {
-            name: "byo".into(),
-            source: WorkspaceSource::HostDir("/home/u/api".into()),
-        }];
-        match vendor.create("rt-h", &spec).await {
-            Err(err) => assert!(
-                err.to_string().contains("cannot mount host directory"),
-                "{err}"
-            ),
-            Ok(_) => panic!("host dir workspace must be rejected"),
-        }
-        assert!(api.creates().is_empty(), "no container scheduled");
     }
 
     #[tokio::test]

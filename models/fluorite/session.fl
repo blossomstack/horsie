@@ -47,9 +47,8 @@ struct SessionDetail {
     /// The question the agent is awaiting an answer to (status AwaitingInput).
     pending_question: Option<String>,
     model: String,
-    workdirs: Vec<String>,
     vendor: String,
-    /// Clone URLs of the session's provisioned repos (empty for workdir sessions).
+    /// Clone URLs of the session's provisioned repos (empty when none).
     repos: Vec<String>,
 }
 

@@ -22,23 +22,24 @@ use horsie_runtime_client::RuntimeClient;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Where a session workspace comes from.
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkspaceSource {
-    /// User-supplied host directory. No vendor kind currently accepts this
-    /// (the shared local vendor ignores the daemon's fixed directory
-    /// instead; velos rejects it outright) — kept for a future vendor kind
-    /// that can honor it.
-    HostDir(PathBuf),
-    /// The vendor allocates and owns the directory (local: under its
-    /// workspace root; velos: inside the container).
-    Managed,
-}
-
+/// A session workspace request. The directory is always vendor-allocated
+/// (velos: inside the container; local: the connected daemon's own dir), so a
+/// workspace is just a name the vendor maps to a path it owns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceSpec {
     pub name: String,
-    pub source: WorkspaceSource,
+}
+
+/// What a vendor can do with a session's workspace, announced by the vendor
+/// itself so the server and UI never branch on vendor name/kind. Extensible:
+/// add a field here and each vendor declares its own value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VendorCapabilities {
+    /// The vendor provisions a fresh workspace it owns — cloning repos,
+    /// installing skill bundles, running provision steps. A vendor that runs
+    /// in a fixed, user-owned directory (e.g. the shared local daemon)
+    /// provisions nothing and announces `false`.
+    pub supports_provisioning: bool,
 }
 
 /// Everything a vendor needs to provision (or revive) a runtime for a session.
@@ -83,7 +84,9 @@ pub trait VendorRuntimeHandle: Send + Sync {
 
 #[async_trait]
 pub trait RuntimeVendor: Send + Sync + 'static {
-    fn name(&self) -> &'static str;
+    /// What this vendor can do with a session workspace. Read by the settings
+    /// view so the UI adapts to the vendor without hardcoding its name/kind.
+    fn capabilities(&self) -> VendorCapabilities;
 
     /// Provision a brand-new runtime.
     async fn create(

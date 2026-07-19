@@ -1,6 +1,7 @@
 
 export * from './providerView';
 export * from './modelView';
+export * from './vendorCapabilities';
 export * from './vendorView';
 export * from './vendorConfigView';
 export * from './velosView';

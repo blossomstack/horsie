@@ -43,14 +43,13 @@ pub struct AgentSettings {
     pub mcp_servers: Vec<String>,
 }
 
-/// One session workspace as persisted: a host path (bring-your-own) or `None`
-/// (vendor-allocated). Storage twin of the vendor layer's `WorkspaceSpec`;
-/// old journal rows (`{name, path}`) deserialize as `path: Some(_)`.
+/// One session workspace as persisted: just a name — the directory is always
+/// vendor-allocated. Storage twin of the vendor layer's `WorkspaceSpec`. Old
+/// journal rows carrying a `path` field still deserialize (the extra field is
+/// ignored), so recovered sessions load without migration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceDef {
     pub name: String,
-    #[serde(default)]
-    pub path: Option<PathBuf>,
 }
 
 /// One provision step as persisted (storage twin of the wire `ProvisionStep`).
@@ -161,12 +160,13 @@ mod tests {
 
     #[test]
     fn workspace_def_reads_old_journal_shape() {
+        // Old rows carried a now-removed `path`; it must still load (ignored).
         let old = r#"{"name":"api","path":"/home/u/api"}"#;
         let w: WorkspaceDef = serde_json::from_str(old).unwrap();
-        assert_eq!(w.path.as_deref(), Some(std::path::Path::new("/home/u/api")));
+        assert_eq!(w.name, "api");
         let managed = r#"{"name":"main"}"#;
         let w: WorkspaceDef = serde_json::from_str(managed).unwrap();
-        assert_eq!(w.path, None);
+        assert_eq!(w.name, "main");
     }
 
     #[test]

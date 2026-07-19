@@ -21,7 +21,7 @@ use horsie_agentcore::{LlmProvider, Secret};
 use horsie_anthropic::AnthropicProvider;
 use horsie_models::settings::{
     ModelView, ProviderView, ServerInfo, SettingsUpdate, SettingsView, VelosView,
-    VendorConfigInput, VendorConfigView, VendorTestResult, VendorView,
+    VendorCapabilities, VendorConfigInput, VendorConfigView, VendorTestResult, VendorView,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -187,14 +187,28 @@ impl DbConfigStore {
     fn vendors_view(&self, default_vendor: &str, rows: &[VendorRow]) -> Vec<VendorView> {
         let live = self.vendors.read().unwrap_or_else(|e| e.into_inner());
         let errors = self.vendor_errors.read().unwrap_or_else(|e| e.into_inner());
+        // Capabilities are announced by the live vendor instance, so a
+        // configured-but-inactive row reports `None` (nothing to ask). No
+        // branching on vendor name/kind — each vendor declares its own.
+        let caps = |name: &str| live.get(name).map(|v| vendor_caps_view(v.capabilities()));
         let active = |name: &str| live.contains_key(name);
-        let mut out = vec![VendorView {
-            name: "local".into(),
-            active: active("local"),
-            is_default: default_vendor == "local",
-            config: None,
-            error: None,
-        }];
+        // Daemon-registered vendors (e.g. "local") aren't DB rows — they only
+        // exist once a daemon has actually dialed in and claimed a label, so
+        // unlike `rows` below they're read straight off the live map instead
+        // of being listed unconditionally.
+        let row_names: HashSet<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        let mut out: Vec<VendorView> = live
+            .keys()
+            .filter(|name| !row_names.contains(name.as_str()))
+            .map(|name| VendorView {
+                name: name.clone(),
+                active: true,
+                is_default: default_vendor == name.as_str(),
+                config: None,
+                error: None,
+                capabilities: caps(name),
+            })
+            .collect();
         for r in rows {
             let config = match r.kind.as_str() {
                 "velos" => serde_json::from_str::<VelosConfig>(&r.config)
@@ -208,6 +222,7 @@ impl DbConfigStore {
                 is_default: default_vendor == r.name,
                 config,
                 error: errors.get(&r.name).cloned(),
+                capabilities: caps(&r.name),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -872,6 +887,13 @@ fn insert_trimmed(m: &mut Map<String, Value>, key: &str, v: &Option<String>) {
 
 // ── projections ──────────────────────────────────────────────────────────────
 
+/// Map a vendor's announced (domain) capabilities to the settings-wire view.
+fn vendor_caps_view(caps: crate::vendor::VendorCapabilities) -> VendorCapabilities {
+    VendorCapabilities {
+        supports_provisioning: caps.supports_provisioning,
+    }
+}
+
 fn provider_view(r: &ProviderRow) -> ProviderView {
     ProviderView {
         name: r.name.clone(),
@@ -1171,6 +1193,12 @@ mod tests {
             .expect("present");
         assert!(v.active, "a valid new vendor activates immediately");
         assert!(v.error.is_none());
+        // An active vendor announces its capabilities off the live instance.
+        assert_eq!(
+            v.capabilities.as_ref().map(|c| c.supports_provisioning),
+            Some(true),
+            "velos announces it provisions"
+        );
         match &v.config {
             Some(VendorConfigView::Velos(velos)) => {
                 assert!(velos.has_inline_token);
@@ -1467,7 +1495,7 @@ mod tests {
             .to_string(),
         };
         let built = build_one_vendor(&row).await.expect("velos row builds");
-        assert_eq!(built.as_dyn().name(), "velos");
+        assert!(matches!(built, BuiltVendor::Velos(_)));
     }
 
     // A tiny mock velos server exposing just `/auth/v1/me`, for `test_vendor`.

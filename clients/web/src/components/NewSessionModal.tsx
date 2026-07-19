@@ -11,9 +11,6 @@ import { usePlugins as usePluginBundles } from "../hooks/usePlugins";
 import { useCreateSession } from "../hooks/useSessions";
 import { useSettings } from "../hooks/useSettings";
 
-/** Where a new session's workspace comes from. */
-type WorkspaceSource = "dir" | "repos";
-
 export function NewSessionModal({
   open,
   onOpenChange,
@@ -32,7 +29,6 @@ export function NewSessionModal({
 
   const [name, setName] = useState("");
   const [model, setModel] = useState("");
-  const [workdir, setWorkdir] = useState("");
   const [vendor, setVendor] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [usePlugins, setUsePlugins] = useState(false);
@@ -46,9 +42,18 @@ export function NewSessionModal({
   const { data: mcpServers } = useMcpServers();
   const enabledMcp = (mcpServers ?? []).filter((s) => s.enabled);
 
-  // Workspace source: a local directory, or a set of GitHub repos to clone
-  // (fullName → ref; "" = default branch).
-  const [source, setSource] = useState<WorkspaceSource>("dir");
+  // The selected vendor and what it can do. Everything provisioning-related
+  // (repos, skill bundles, plugins) is gated on this announced capability —
+  // no branching on the vendor's name. A vendor that provisions nothing
+  // (the shared local daemon) prompts for none of it.
+  const effectiveVendorName = vendor || settings?.defaultVendor || "";
+  const selectedVendor = activeVendors.find(
+    (v) => v.name === effectiveVendorName,
+  );
+  const provisions = !!selectedVendor?.capabilities?.supportsProvisioning;
+
+  // Selected repos to clone (fullName → ref; "" = default branch). Only used
+  // when the vendor provisions.
   const [selected, setSelected] = useState<Map<string, string>>(new Map());
   const [repoFilter, setRepoFilter] = useState("");
   const { data: ghStatus } = useGithubStatus();
@@ -56,12 +61,11 @@ export function NewSessionModal({
     data: repoList,
     isLoading: reposLoading,
     refetch: refetchRepos,
-  } = useGithubRepos(open && source === "repos" && !!ghStatus?.connected);
+  } = useGithubRepos(open && provisions && !!ghStatus?.connected);
 
   const reset = () => {
     setName("");
     setModel("");
-    setWorkdir("");
     setVendor("");
     setSystemPrompt("");
     setUsePlugins(false);
@@ -69,7 +73,6 @@ export function NewSessionModal({
     setMcpSelected([]);
     setAdvanced(false);
     setError(null);
-    setSource("dir");
     setSelected(new Map());
     setRepoFilter("");
   };
@@ -102,27 +105,30 @@ export function NewSessionModal({
     setError(null);
     if (!model.trim()) return setError("Select a model.");
 
-    const repos: RepoConfig[] =
-      source === "repos"
-        ? Array.from(selected.entries()).map(([fullName, ref]) => ({
-            url: `https://github.com/${fullName}`,
-            gitRef: ref.trim() || undefined,
-          }))
-        : [];
+    // Provisioning inputs (repos, skill bundles) go only to a vendor that
+    // announced it can provision; otherwise they're omitted entirely.
+    const repos: RepoConfig[] = provisions
+      ? Array.from(selected.entries()).map(([fullName, ref]) => ({
+          url: `https://github.com/${fullName}`,
+          gitRef: ref.trim() || undefined,
+        }))
+      : [];
 
     const body: CreateSessionRequest = {
       name: name.trim() || undefined,
       agent: {
         model: model.trim(),
         systemPrompt: systemPrompt.trim() || undefined,
-        usePlugins,
+        usePlugins: provisions ? usePlugins : undefined,
         mcpServers: mcpSelected.length ? mcpSelected : undefined,
       },
-      workdirs: source === "dir" && wd ? [wd] : [],
-      repos: source === "repos" ? repos : undefined,
+      repos: repos.length ? repos : undefined,
       vendor: vendor.trim() || undefined,
       // Selected skill bundles; empty → server uses the default-enabled set.
-      plugins: selectedPlugins.size ? Array.from(selectedPlugins) : undefined,
+      plugins:
+        provisions && selectedPlugins.size
+          ? Array.from(selectedPlugins)
+          : undefined,
     };
 
     try {
@@ -138,8 +144,6 @@ export function NewSessionModal({
   };
 
   const noModels = !!settings && models.length === 0;
-  const wd = workdir.trim();
-  const effectiveVendor = vendor || settings?.defaultVendor || "";
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -193,132 +197,120 @@ export function NewSessionModal({
               )}
             </Field>
 
-            <Field label="Workspace">
-              <div className="mb-2 flex gap-1">
-                {(["dir", "repos"] as const).map((s) => (
-                  <button
-                    key={s}
-                    type="button"
-                    className={cn(
-                      "chip cursor-pointer",
-                      source === s && "border-accent text-text",
-                    )}
-                    onClick={() => setSource(s)}
-                  >
-                    {s === "dir" ? "Local directory" : "GitHub repos"}
-                  </button>
-                ))}
-              </div>
-
-              {source === "dir" ? (
-                <>
-                  <input
-                    className="input font-mono"
-                    value={workdir}
-                    onChange={(e) => setWorkdir(e.target.value)}
-                    placeholder="/Users/you/project"
-                  />
-                  {wd && effectiveVendor && effectiveVendor !== "local" ? (
-                    <p className="mt-1 text-[11px] text-warning">
-                      Vendor "{effectiveVendor}" can't mount a local
-                      directory — pick the "local" runtime vendor under
-                      Advanced, or leave this blank for a scratch workspace.
-                    </p>
-                  ) : (
-                    <p className="mt-1 text-[11px] text-faint">
-                      Leave blank for a scratch workspace.
-                    </p>
-                  )}
-                </>
-              ) : !ghStatus?.connected ? (
-                <Link
-                  to="/settings"
-                  onClick={() => onOpenChange(false)}
-                  className="flex items-center gap-1.5 rounded-[var(--radius)] border border-dashed px-3 py-2 text-sm text-muted transition-colors hover:text-text"
+            {showVendor && (
+              <Field label="Runtime vendor">
+                <select
+                  className="input font-mono"
+                  value={effectiveVendorName}
+                  onChange={(e) => setVendor(e.target.value)}
                 >
-                  <Settings2 size={14} />
-                  Connect GitHub in Settings to pick repos
-                </Link>
-              ) : (
-                <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <input
-                      className="input"
-                      value={repoFilter}
-                      onChange={(e) => setRepoFilter(e.target.value)}
-                      placeholder="Filter repos…"
-                    />
-                    <button
-                      type="button"
-                      className="btn-outline shrink-0"
-                      onClick={() => refetchRepos()}
-                    >
-                      Refresh
-                    </button>
-                  </div>
-                  <div className="max-h-40 space-y-1 overflow-y-auto rounded-[var(--radius)] border p-1">
-                    {reposLoading && (
-                      <p className="px-2 py-1 text-sm text-muted">
-                        Loading repos…
-                      </p>
-                    )}
-                    {(repoList?.repos ?? [])
-                      .filter((r) =>
-                        r.fullName
-                          .toLowerCase()
-                          .includes(repoFilter.toLowerCase()),
-                      )
-                      .map((r) => {
-                        const checked = selected.has(r.fullName);
-                        return (
-                          <div
-                            key={r.fullName}
-                            className="flex items-center gap-2 px-2 py-1"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() =>
-                                setSelected((m) => {
-                                  const next = new Map(m);
-                                  if (checked) next.delete(r.fullName);
-                                  else next.set(r.fullName, "");
-                                  return next;
-                                })
-                              }
-                            />
-                            <span className="min-w-0 flex-1 truncate font-mono text-sm">
-                              {r.fullName}
-                            </span>
-                            {checked && (
+                  {activeVendors.map((v) => (
+                    <option key={v.name} value={v.name}>
+                      {v.name}
+                      {v.isDefault ? " (default)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+
+            {/* Workspace inputs appear only for a vendor that provisions; a
+                fixed-directory vendor (e.g. local) prompts for nothing. */}
+            {provisions && (
+              <Field label="Repositories" hint="optional">
+                {!ghStatus?.connected ? (
+                  <Link
+                    to="/settings"
+                    onClick={() => onOpenChange(false)}
+                    className="flex items-center gap-1.5 rounded-[var(--radius)] border border-dashed px-3 py-2 text-sm text-muted transition-colors hover:text-text"
+                  >
+                    <Settings2 size={14} />
+                    Connect GitHub in Settings to pick repos
+                  </Link>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        className="input"
+                        value={repoFilter}
+                        onChange={(e) => setRepoFilter(e.target.value)}
+                        placeholder="Filter repos…"
+                      />
+                      <button
+                        type="button"
+                        className="btn-outline shrink-0"
+                        onClick={() => refetchRepos()}
+                      >
+                        Refresh
+                      </button>
+                    </div>
+                    <div className="max-h-40 space-y-1 overflow-y-auto rounded-[var(--radius)] border p-1">
+                      {reposLoading && (
+                        <p className="px-2 py-1 text-sm text-muted">
+                          Loading repos…
+                        </p>
+                      )}
+                      {(repoList?.repos ?? [])
+                        .filter((r) =>
+                          r.fullName
+                            .toLowerCase()
+                            .includes(repoFilter.toLowerCase()),
+                        )
+                        .map((r) => {
+                          const checked = selected.has(r.fullName);
+                          return (
+                            <div
+                              key={r.fullName}
+                              className="flex items-center gap-2 px-2 py-1"
+                            >
                               <input
-                                className="input w-28 py-0.5 text-xs"
-                                value={selected.get(r.fullName) ?? ""}
-                                onChange={(e) =>
-                                  setSelected((m) =>
-                                    new Map(m).set(r.fullName, e.target.value),
-                                  )
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() =>
+                                  setSelected((m) => {
+                                    const next = new Map(m);
+                                    if (checked) next.delete(r.fullName);
+                                    else next.set(r.fullName, "");
+                                    return next;
+                                  })
                                 }
-                                placeholder={r.defaultBranch}
                               />
-                            )}
-                          </div>
-                        );
-                      })}
-                    {repoList && repoList.repos.length === 0 && (
-                      <p className="px-2 py-1 text-sm text-muted">
-                        No repos visible to the app installation.
-                      </p>
-                    )}
+                              <span className="min-w-0 flex-1 truncate font-mono text-sm">
+                                {r.fullName}
+                              </span>
+                              {checked && (
+                                <input
+                                  className="input w-28 py-0.5 text-xs"
+                                  value={selected.get(r.fullName) ?? ""}
+                                  onChange={(e) =>
+                                    setSelected((m) =>
+                                      new Map(m).set(
+                                        r.fullName,
+                                        e.target.value,
+                                      ),
+                                    )
+                                  }
+                                  placeholder={r.defaultBranch}
+                                />
+                              )}
+                            </div>
+                          );
+                        })}
+                      {repoList && repoList.repos.length === 0 && (
+                        <p className="px-2 py-1 text-sm text-muted">
+                          No repos visible to the app installation.
+                        </p>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-faint">
+                      {selected.size === 0
+                        ? "No repos selected — the session starts with an empty workspace."
+                        : `${selected.size} repo${selected.size > 1 ? "s" : ""} selected.`}
+                    </p>
                   </div>
-                  <p className="text-[11px] text-faint">
-                    {selected.size === 0
-                      ? "No repos selected — the session starts with an empty workspace."
-                      : `${selected.size} repo${selected.size > 1 ? "s" : ""} selected.`}
-                  </p>
-                </div>
-              )}
-            </Field>
+                )}
+              </Field>
+            )}
 
             <button
               className="flex items-center gap-1 text-xs font-medium text-muted transition-colors hover:text-text"
@@ -333,22 +325,6 @@ export function NewSessionModal({
 
             {advanced && (
               <div className="space-y-3.5 border-t pt-3.5">
-                {showVendor && (
-                  <Field label="Runtime vendor">
-                    <select
-                      className="input font-mono"
-                      value={vendor}
-                      onChange={(e) => setVendor(e.target.value)}
-                    >
-                      {activeVendors.map((v) => (
-                        <option key={v.name} value={v.name}>
-                          {v.name}
-                          {v.isDefault ? " (default)" : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                )}
                 <Field label="System prompt" hint="optional">
                   <textarea
                     className="input min-h-[68px] resize-y"
@@ -357,12 +333,16 @@ export function NewSessionModal({
                     placeholder="Override the default system prompt…"
                   />
                 </Field>
-                <Toggle
-                  label="Enable plugins"
-                  checked={usePlugins}
-                  onChange={setUsePlugins}
-                />
-                {bundles && bundles.length > 0 && (
+                {/* Skills/plugins are provisioned into the workspace, so they
+                    only apply to a vendor that provisions. */}
+                {provisions && (
+                  <Toggle
+                    label="Enable plugins"
+                    checked={usePlugins}
+                    onChange={setUsePlugins}
+                  />
+                )}
+                {provisions && bundles && bundles.length > 0 && (
                   <Field
                     label="Skills"
                     hint="bundles provisioned for this session"
