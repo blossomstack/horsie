@@ -89,8 +89,15 @@ item across several message boundaries.
 - `{ kind: "text"; text: string; streaming?: boolean }` — rendered via
   `Prose`, exactly as today. Never grouped.
 - `{ kind: "work"; items: WorkItem[]; live: boolean }` — a maximal run of
-  consecutive thinking blocks and tool calls, spanning message boundaries,
-  with no text in between. Rendered by the new `WorkGroup` component.
+  consecutive thinking blocks and *regular* tool calls, spanning message
+  boundaries, with no text or `ask_user` call in between. Rendered by the
+  new `WorkGroup` component.
+- `{ kind: "ask"; call: RenderedToolCall }` — an `ask_user` tool call.
+  `ToolCallCard` already special-cases this name to render the
+  always-visible `AskUserCard` (question + choices) instead of a
+  collapsible row; a pending question must never be hidden inside a
+  collapsed group, so it breaks work grouping exactly like text does and
+  renders as its own standalone segment via the existing `ToolCallCard`.
 - `{ kind: "pulse" }` — nothing has arrived yet for the live tail (replaces
   today's inline cursor-dot branch in `LiveTail`).
 
@@ -104,10 +111,14 @@ flushWork(live) { if (work.length) segments.push({kind:"work", items: work, live
 for each message m in turn.msgs:
   work.push(...m.thinking as thinking-items)
   if m.text: flushWork(false); segments.push({kind:"text", text: m.text})
-  work.push(...m.toolCalls as tool-items)
+  for each toolCall in m.toolCalls:
+    if toolCall.name === "ask_user": flushWork(false); segments.push({kind:"ask", call: toolCall})
+    else: work.push(toolCall as tool-item)
 
 if turn has a live tail:
-  work.push(...orphanTools as tool-items)
+  for each toolCall in orphanTools:
+    if toolCall.name === "ask_user": flushWork(false); segments.push({kind:"ask", call: toolCall})
+    else: work.push(toolCall as tool-item)
   if live.text: flushWork(false); segments.push({kind:"text", text: live.text, streaming:true})
   if work.length: flushWork(true)      // trailing group is the live one
   else if !live.text: segments.push({kind:"pulse"})
