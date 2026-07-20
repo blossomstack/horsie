@@ -1,0 +1,36 @@
+# One-command self-host: `docker compose -f docker/docker-compose.yml up -d`.
+# Pulls the published server image (server+web on one port, see
+# ../docker/server.Dockerfile) and seeds `local_runtime: true` so a
+# `horsie connect` from any machine has a listener to dial. Providers/models
+# are NOT seeded here — add them via Settings after first boot.
+name: horsie
+
+services:
+  horsie:
+    image: ghcr.io/blossomstack/horsie:latest
+    container_name: horsie
+    restart: unless-stopped
+    ports:
+      - "3789:3789" # HTTP API + web UI
+    configs:
+      - source: horsie_config
+        target: /etc/horsie/config.json
+    volumes:
+      - horsie-data:/data
+    command:
+      - --config
+      - /etc/horsie/config.json
+      - --addr
+      - 0.0.0.0:3789
+      - --web
+      - /usr/local/share/horsie/web
+
+configs:
+  horsie_config:
+    content: |
+      {
+        "local_runtime": true
+      }
+
+volumes:
+  horsie-data:

@@ -54,6 +54,17 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}-linux/amd64
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}-linux/amd64
 
+  compose-validate:
+    name: Validate docker-compose.yml
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: docker compose config
+        run: docker compose -f docker/docker-compose.yml config
+
   build:
     name: Build ${{ matrix.image }} (${{ matrix.platform }})
     if: github.event_name != 'pull_request'
