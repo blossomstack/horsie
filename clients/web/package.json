@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -b",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "generate-types": "fluorite ts -i ../../models/fluorite/agent.fl ../../models/fluorite/capabilities.fl ../../models/fluorite/session.fl ../../models/fluorite/session_api.fl ../../models/fluorite/settings.fl ../../models/fluorite/github.fl ../../models/fluorite/mcp.fl ../../models/fluorite/plugins.fl -o src/generated"
