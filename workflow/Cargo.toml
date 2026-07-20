@@ -3,15 +3,15 @@ name = "horsie-workflow"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "Agent workflow graphs for horsie"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 
 [dependencies]
-horsie-actor = { version = "0.1.4", path = "../actor" }
-horsie-agentcore = { version = "0.1.4", path = "../agentcore" }
-horsie-runtime-client = { version = "0.1.4", path = "../runtime-client" }
-horsie-mcp-client = { version = "0.1.4", path = "../mcp-client" }
-horsie-models = { version = "0.1.4", path = "../models" }
+horsie-actor = { version = "0.1.6", path = "../actor" }
+horsie-agentcore = { version = "0.1.6", path = "../agentcore" }
+horsie-runtime-client = { version = "0.1.6", path = "../runtime-client" }
+horsie-mcp-client = { version = "0.1.6", path = "../mcp-client" }
+horsie-models = { version = "0.1.6", path = "../models" }
 async-trait    = { workspace = true }
 thiserror      = { workspace = true }
 tokio          = { workspace = true }
