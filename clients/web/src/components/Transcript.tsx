@@ -52,7 +52,7 @@ function SegmentView({
       return <ToolCallCard call={segment.call} />;
     case "pulse":
       return (
-        <div className="flex items-center gap-1.5 pt-1 text-sm text-faint">
+        <div className="flex items-center gap-1.5 pt-1 text-sm text-faint" data-testid="pulse">
           <span className="cursor-dot" />
         </div>
       );

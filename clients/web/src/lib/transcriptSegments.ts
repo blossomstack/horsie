@@ -64,7 +64,12 @@ export function buildSegments(
       segments.push({ kind: "text", key: `text${seq++}`, text: live.text, streaming: true });
     }
     if (work.length > 0) flushWork(true);
-    else if (!live.text) segments.push({ kind: "pulse", key: `pulse${seq++}` });
+    // Only pulse when the turn has produced nothing at all yet — not after
+    // e.g. a finalized text answer, which can still be the merge target for
+    // one more render (streaming reset to "", status not yet Idle).
+    else if (!live.text && segments.length === 0) {
+      segments.push({ kind: "pulse", key: `pulse${seq++}` });
+    }
   } else {
     flushWork(false);
   }
