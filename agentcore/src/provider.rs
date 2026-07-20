@@ -31,9 +31,38 @@ pub enum ToolChoice {
     Required(String),
 }
 
+/// What a backend can do, so the agent loop can degrade rather than send a
+/// request the backend will reject.
+///
+/// Only fields with a live consumer belong here. Anthropic-specific behavior
+/// that is already encapsulated in its own provider crate (prompt caching,
+/// thinking replay, error-body classification) needs no flag — the trait
+/// boundary is doing that job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    /// Whether the backend honors `tool_choice`. OpenAI proper does; Ollama and
+    /// llama.cpp may ignore or reject it. When false, a forced handoff degrades
+    /// to `Auto` and relies on the loop's nudge-and-retry.
+    pub supports_tool_choice: bool,
+}
+
+impl Default for ProviderCapabilities {
+    fn default() -> Self {
+        Self {
+            supports_tool_choice: true,
+        }
+    }
+}
+
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     fn model_id(&self) -> &str;
+
+    /// What this backend can do. Defaults to fully capable — an existing
+    /// provider needs no change.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
 
     /// Perform a completion. `message_id` is the agent-assigned ID for the assistant
     /// message being generated; providers should tag any streaming events they emit with it.

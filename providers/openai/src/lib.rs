@@ -14,8 +14,9 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use horsie_agentcore::{
     AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
-    EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent, TextChunkEvent,
-    TextPart, ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
+    EventSink, LlmError, LlmProvider, ProviderCapabilities, Secret, StopReason,
+    TextBlockStartEvent, TextChunkEvent, TextPart, ToolCallInputDeltaEvent, ToolCallPart,
+    ToolCallStartEvent, ToolChoice, Usage,
 };
 use reqwest_eventsource::{Event, EventSource};
 use std::{collections::BTreeMap, env, time::Duration};
@@ -309,6 +310,15 @@ impl OpenAiProvider {
 impl LlmProvider for OpenAiProvider {
     fn model_id(&self) -> &str {
         &self.model
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        // The OpenAI schema defines `tool_choice`, and OpenRouter/DeepSeek/vLLM
+        // honor it. Ollama and llama.cpp are inconsistent; when that bites, this
+        // becomes configurable rather than hardcoded.
+        ProviderCapabilities {
+            supports_tool_choice: true,
+        }
     }
 
     async fn complete(

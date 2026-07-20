@@ -1,7 +1,7 @@
 use crate::{
     error::{AgentBuildError, AgentError},
     events::EventSink,
-    provider::{CompletionRequest, LlmProvider, ToolChoice},
+    provider::{CompletionRequest, LlmProvider, StopReason, ToolChoice},
     tool::Toolbox,
 };
 use horsie_models::agent::{
@@ -263,7 +263,14 @@ impl Agent {
         // handoff tool to finish. Without one (or with an optional handoff tool —
         // see `with_handoff_tool_optional`), the model may end its turn with text
         // (`Auto`) exactly as freely as it may call any other tool.
-        let tool_choice = if self.handoff_tool.is_some() && self.force_handoff_choice {
+        //
+        // A backend that cannot honor `tool_choice` at all gets `Auto` regardless:
+        // sending a directive it rejects would fail the call outright, whereas
+        // `Auto` plus the nudge-and-retry below degrades gracefully.
+        let tool_choice = if self.handoff_tool.is_some()
+            && self.force_handoff_choice
+            && self.provider.capabilities().supports_tool_choice
+        {
             ToolChoice::Any
         } else {
             ToolChoice::Auto
@@ -329,6 +336,17 @@ impl Agent {
                 }))
                 .await?;
             self.history.push(assistant_msg);
+
+            // A truncated turn is not a finished turn. Tool calls are exempt: a
+            // backend may report `length` alongside a complete tool call, and the
+            // loop can still execute it and continue.
+            if response.stop_reason == StopReason::MaxTokens
+                && extract_tool_calls(&response.parts).is_empty()
+            {
+                return Err(AgentError::Truncated {
+                    max_tokens: self.config.max_tokens,
+                });
+            }
 
             let tool_calls = extract_tool_calls(&response.parts);
 
@@ -1370,6 +1388,110 @@ mod tests {
         assert!(
             !timed_out.load(std::sync::atomic::Ordering::SeqCst),
             "tool calls in a turn ran sequentially, not concurrently"
+        );
+    }
+
+    /// A provider that reports it cannot honor `tool_choice`, and records what
+    /// the loop asked for anyway.
+    struct NoToolChoiceProvider {
+        seen: Mutex<Option<ToolChoice>>,
+    }
+
+    #[async_trait]
+    impl crate::provider::LlmProvider for NoToolChoiceProvider {
+        fn model_id(&self) -> &str {
+            "no-tool-choice"
+        }
+
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                supports_tool_choice: false,
+            }
+        }
+
+        async fn complete(
+            &self,
+            request: crate::provider::CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn EventSink,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            *self.seen.lock().unwrap() = Some(request.tool_choice.clone());
+            Ok(CompletionResponse {
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "call-1".into(),
+                    name: "done".into(),
+                    input: json!({}),
+                })],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_forced_handoff_falls_back_to_auto_when_unsupported() {
+        // A forced handoff would normally send tool_choice=Any. A backend that
+        // cannot honor it (Ollama, llama.cpp) must get Auto instead — the
+        // nudge-and-retry net already covers a text-only reply.
+        let provider = Arc::new(NoToolChoiceProvider {
+            seen: Mutex::new(None),
+        });
+        let mut agent = Agent::builder(provider.clone(), MockToolbox::echo("done"))
+            .with_handoff_tool("done")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let seen = provider.seen.lock().unwrap().clone();
+        assert!(
+            matches!(seen, Some(ToolChoice::Auto)),
+            "expected Auto, got {seen:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_tokens_truncation_is_an_error_not_a_completion() {
+        // stop_reason was computed but never read in production: a response cut
+        // off by max_tokens looked exactly like a normal end of turn, so the
+        // caller received a silently truncated answer as a success.
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![ContentPart::Text(TextPart {
+                text: "half an ans".into(),
+            })],
+            stop_reason: StopReason::MaxTokens,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        }]);
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+
+        let err = agent
+            .run(
+                AgentInput::user_message("msg-1", "hi"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("truncation must not be reported as a completed turn");
+
+        assert!(
+            matches!(err, AgentError::Truncated { .. }),
+            "expected Truncated, got {err:?}",
         );
     }
 }
