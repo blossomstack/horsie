@@ -5,6 +5,13 @@ import { cn } from "../lib/cn";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard } from "./ToolCallCard";
 
+function getItemKey(item: WorkItem, originalIndex: number): string {
+  if (item.kind === "tool") {
+    return item.call.id;
+  }
+  return `thinking-${originalIndex}`;
+}
+
 function renderItem(item: WorkItem, key: string) {
   return item.kind === "thinking" ? (
     <ThinkingBlock key={key} text={item.text} />
@@ -37,9 +44,11 @@ export function WorkGroup({
   showThinking: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const visible = items.filter((i) => i.kind === "tool" || showThinking);
+  const visibleWithIndices = items
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.kind === "tool" || showThinking);
 
-  if (visible.length === 0) {
+  if (visibleWithIndices.length === 0) {
     if (!live) return null;
     return (
       <div
@@ -52,8 +61,12 @@ export function WorkGroup({
     );
   }
 
-  if (visible.length === 1) return renderItem(visible[0], "solo");
+  if (visibleWithIndices.length === 1) {
+    const { item, index } = visibleWithIndices[0];
+    return renderItem(item, getItemKey(item, index));
+  }
 
+  const visible = visibleWithIndices.map(({ item }) => item);
   const runningTool = live
     ? [...visible]
         .reverse()
@@ -84,7 +97,9 @@ export function WorkGroup({
       </button>
       {open && (
         <div className="mt-1 ml-3 space-y-2 border-l pl-3">
-          {visible.map((item, i) => renderItem(item, `item${i}`))}
+          {visibleWithIndices.map(({ item, index }) =>
+            renderItem(item, getItemKey(item, index))
+          )}
         </div>
       )}
     </div>
