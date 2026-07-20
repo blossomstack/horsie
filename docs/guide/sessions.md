@@ -28,8 +28,6 @@ Click **New**. The dialog adapts to what you've configured:
   (velos) **and** GitHub is connected. Pick 0..N repos, each with an optional
   ref. See [GitHub](github.md).
 - **Advanced:**
-  - **System prompt** — override the agent's default system prompt for this
-    session.
   - **Enable plugins** + **Skills** — turn on plugin hooks and pick which skill
     bundles to load. Shown only for provisioning vendors; bundles marked as
     defaults are pre-checked. See [Skills & plugins](skills-and-plugins.md).

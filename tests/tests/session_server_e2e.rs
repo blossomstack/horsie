@@ -303,7 +303,6 @@ fn spawn_fake_local_daemon(addr: SocketAddr, label: &str, reply: &str) -> JoinHa
         let (mut sink, mut stream) = ws.split();
         let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
             runtime_id: label,
-            workdir: "/home/u/proj".to_string(),
         }))
         .unwrap();
         if sink.send(Message::Text(ready.into())).await.is_err() {

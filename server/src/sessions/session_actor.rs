@@ -29,6 +29,11 @@ use uuid::Uuid;
 /// drops and catch up from the journal.
 const FRAME_BROADCAST_CAPACITY: usize = 256;
 
+/// The baseline system prompt given to every session agent: role, tool-usage
+/// norms, and environment guidance. Not user-overridable — layered under the
+/// `# Workspaces` / skills sections `compose_system_prompt` appends.
+const SESSION_AGENT_PROMPT: &str = include_str!("system_prompt.md");
+
 /// Commands accepted by a [`SessionActor`].
 pub enum SessionCommand {
     /// Provision the runtime after creation (sent once by the supervisor).
@@ -331,7 +336,7 @@ impl SessionActor {
         // own dedicated, always-available `ask_user` tool (below) instead of the
         // workflow crate's `conclude`-based ask mechanism.
         let def = AgentRunDef {
-            system_prompt: settings.system_prompt.clone(),
+            system_prompt: None,
             output_schema: None,
             allow_ask_user: false,
             allow_timers: None,
@@ -382,7 +387,7 @@ impl SessionActor {
         params.interactive = true;
         params.optional_handoff_tool = Some(ASK_USER_TOOL.to_string());
         params.system_prompt =
-            compose_system_prompt(def.system_prompt.as_deref(), &ws, shared.as_ref());
+            compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
         let agent_ctx = AgentRuntimeContext {
             provider,
             toolbox,
@@ -757,7 +762,6 @@ mod tests {
             name: None,
             agent: AgentSettings {
                 model: "mock".into(),
-                system_prompt: None,
                 allowed_tools: None,
                 use_plugins: None,
                 max_iterations: None,

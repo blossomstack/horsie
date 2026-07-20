@@ -30,22 +30,9 @@ use std::sync::{Arc, RwLock};
 pub struct LocalDaemonVendor {
     label: String,
     connected: Arc<ConnectedRuntimeRegistry>,
-    workdir: RwLock<String>,
 }
 
 impl LocalDaemonVendor {
-    /// The directory the connected daemon reported at its last (re)connect.
-    pub fn workdir(&self) -> String {
-        self.workdir
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    fn set_workdir(&self, workdir: String) {
-        *self.workdir.write().unwrap_or_else(|e| e.into_inner()) = workdir;
-    }
-
     /// Reject inputs this vendor can't honor: it never provisions (no
     /// `git_checkout`, no bundle install) — the daemon's own directory is
     /// implicit and fixed. The common case — no `repos`/provision steps in
@@ -155,7 +142,7 @@ impl LocalDaemonRegistry {
         let hook_connected = connected.clone();
         let hook_local_vendors = local_vendors.clone();
         let hook_vendors = vendors;
-        let hook: ConnectHook = Arc::new(move |label: String, workdir: String| {
+        let hook: ConnectHook = Arc::new(move |label: String| {
             let vendor = {
                 let mut locals = hook_local_vendors
                     .write()
@@ -166,12 +153,10 @@ impl LocalDaemonRegistry {
                         Arc::new(LocalDaemonVendor {
                             label: label.clone(),
                             connected: hook_connected.clone(),
-                            workdir: RwLock::new(String::new()),
                         })
                     })
                     .clone()
             };
-            vendor.set_workdir(workdir);
             let mut all = hook_vendors.write().unwrap_or_else(|e| e.into_inner());
             all.entry(label)
                 .or_insert_with(|| vendor.clone() as Arc<dyn RuntimeVendor>);
@@ -186,7 +171,7 @@ impl LocalDaemonRegistry {
 
     /// The connect hook the HTTP `/api/runtime/connect?register=local` handler
     /// passes to `handle_runtime_connection`; it fires once per successful
-    /// registration with `(label, workdir)`.
+    /// registration with the `label`.
     pub fn hook(&self) -> ConnectHook {
         self.hook.clone()
     }
@@ -275,12 +260,7 @@ mod tests {
     /// daemon: dials in, announces Ready under `label`, then answers every
     /// tool call with a fixed stdout so tests can tell which daemon actually
     /// served a call.
-    fn spawn_fake_daemon(
-        addr: SocketAddr,
-        label: String,
-        workdir: String,
-        reply: String,
-    ) -> JoinHandle<()> {
+    fn spawn_fake_daemon(addr: SocketAddr, label: String, reply: String) -> JoinHandle<()> {
         tokio::spawn(async move {
             let (ws, _) = match connect_async(format!("ws://{addr}")).await {
                 Ok(x) => x,
@@ -289,7 +269,6 @@ mod tests {
             let (mut sink, mut stream) = ws.split();
             let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
                 runtime_id: label,
-                workdir,
             }))
             .unwrap();
             if sink.send(Message::Text(ready.into())).await.is_err() {
@@ -372,27 +351,16 @@ mod tests {
     #[tokio::test]
     async fn connect_registers_label_as_a_vendor() {
         let registry = bind_registry().await;
-        let daemon = spawn_fake_daemon(
-            registry.listen_addr(),
-            "my-laptop".into(),
-            "/home/u/proj".into(),
-            "ok".into(),
-        );
+        let daemon = spawn_fake_daemon(registry.listen_addr(), "my-laptop".into(), "ok".into());
         wait_connected(&registry, "my-laptop").await;
-        let vendor = registry.vendor("my-laptop").expect("vendor registered");
-        assert_eq!(vendor.workdir(), "/home/u/proj");
+        registry.vendor("my-laptop").expect("vendor registered");
         daemon.abort();
     }
 
     #[tokio::test]
     async fn create_and_attach_from_different_sessions_share_one_connection() {
         let registry = bind_registry().await;
-        let daemon = spawn_fake_daemon(
-            registry.listen_addr(),
-            "shared".into(),
-            "/home/u/proj".into(),
-            "shared-ok".into(),
-        );
+        let daemon = spawn_fake_daemon(registry.listen_addr(), "shared".into(), "shared-ok".into());
         wait_connected(&registry, "shared").await;
         let vendor = registry.vendor("shared").expect("vendor registered");
 
@@ -427,19 +395,9 @@ mod tests {
     #[tokio::test]
     async fn duplicate_label_is_rejected_and_original_keeps_serving() {
         let registry = bind_registry().await;
-        let daemon1 = spawn_fake_daemon(
-            registry.listen_addr(),
-            "dup".into(),
-            "/one".into(),
-            "one".into(),
-        );
+        let daemon1 = spawn_fake_daemon(registry.listen_addr(), "dup".into(), "one".into());
         wait_connected(&registry, "dup").await;
-        let daemon2 = spawn_fake_daemon(
-            registry.listen_addr(),
-            "dup".into(),
-            "/two".into(),
-            "two".into(),
-        );
+        let daemon2 = spawn_fake_daemon(registry.listen_addr(), "dup".into(), "two".into());
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let vendor = registry.vendor("dup").expect("vendor registered");
@@ -463,12 +421,7 @@ mod tests {
     #[tokio::test]
     async fn reconnect_under_same_label_resumes_service() {
         let registry = bind_registry().await;
-        let daemon1 = spawn_fake_daemon(
-            registry.listen_addr(),
-            "resumable".into(),
-            "/proj".into(),
-            "first".into(),
-        );
+        let daemon1 = spawn_fake_daemon(registry.listen_addr(), "resumable".into(), "first".into());
         wait_connected(&registry, "resumable").await;
         let vendor_before = registry.vendor("resumable").expect("vendor registered");
 
@@ -482,12 +435,8 @@ mod tests {
             "attach must fail while disconnected"
         );
 
-        let daemon2 = spawn_fake_daemon(
-            registry.listen_addr(),
-            "resumable".into(),
-            "/proj".into(),
-            "second".into(),
-        );
+        let daemon2 =
+            spawn_fake_daemon(registry.listen_addr(), "resumable".into(), "second".into());
         wait_connected(&registry, "resumable").await;
         let vendor_after = registry
             .vendor("resumable")
@@ -512,12 +461,7 @@ mod tests {
     #[tokio::test]
     async fn announces_no_provisioning_and_rejects_provision_steps() {
         let registry = bind_registry().await;
-        let daemon = spawn_fake_daemon(
-            registry.listen_addr(),
-            "strict".into(),
-            "/proj".into(),
-            "ok".into(),
-        );
+        let daemon = spawn_fake_daemon(registry.listen_addr(), "strict".into(), "ok".into());
         wait_connected(&registry, "strict").await;
         let vendor = registry.vendor("strict").expect("vendor registered");
 

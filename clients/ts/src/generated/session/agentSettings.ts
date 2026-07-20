@@ -4,7 +4,6 @@
  */
 export interface AgentSettings {
   model: string;
-  systemPrompt?: string;
   allowedTools?: string[];
   usePlugins?: boolean;
   maxIterations?: number;

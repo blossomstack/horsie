@@ -150,11 +150,6 @@ async fn run(cli: Cli, endpoint: Endpoint) {
         Some(dir) => Some(dir),
         None => cli.plugins_dir,
     };
-    let workdir = cli
-        .workspaces
-        .first()
-        .map(|w| w.path.display().to_string())
-        .unwrap_or_default();
     let registry = Arc::new(
         horsie_runtime::workspace::WorkspaceRegistry::new(cli.workspaces)
             .with_plugins(plugins_dir, cli.hook_path),
@@ -162,7 +157,7 @@ async fn run(cli: Cli, endpoint: Endpoint) {
 
     match endpoint {
         Endpoint::Ws(url) => match connect_async(&url).await {
-            Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id, steps, workdir).await,
+            Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id, steps).await,
             Err(e) => {
                 eprintln!("failed to connect to {url}: {e}");
                 std::process::exit(1);
@@ -170,7 +165,7 @@ async fn run(cli: Cli, endpoint: Endpoint) {
         },
         Endpoint::Unix(path) => match tokio::net::UnixStream::connect(&path).await {
             Ok(stream) => match client_async("ws://localhost/", stream).await {
-                Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id, steps, workdir).await,
+                Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id, steps).await,
                 Err(e) => {
                     eprintln!("ws handshake failed on unix socket: {e}");
                     std::process::exit(1);
@@ -191,7 +186,6 @@ async fn run_loop<S>(
     registry: Arc<horsie_runtime::workspace::WorkspaceRegistry>,
     runtime_id: String,
     steps: Vec<horsie_models::executor::ProvisionStep>,
-    workdir: String,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -234,7 +228,6 @@ async fn run_loop<S>(
 
     let ready = match serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
         runtime_id: runtime_id.clone(),
-        workdir,
     })) {
         Ok(json) => json,
         Err(e) => {
