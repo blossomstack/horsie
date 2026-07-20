@@ -1,9 +1,9 @@
 #!/bin/sh
 # Installs the `horsie` CLI: detects OS/arch, downloads the matching release
-# tarball from the latest GitHub release, and extracts just `horsie` (not
-# horsie-runtime/horsie-server — the CLI subcommand `horsie connect` spawns
-# its own sibling horsie-runtime, downloaded separately, see below) into
-# ~/.local/bin.
+# tarball from the latest GitHub release, and extracts `horsie` and its
+# sibling `horsie-runtime` (skipping `horsie-server`, which is server-side
+# only) into ~/.local/bin. The CLI subcommand `horsie connect` spawns
+# horsie-runtime from the same directory, so both must be installed together.
 #
 # Usage: curl -fsSL https://get.horsie.dev | sh
 set -eu
@@ -41,11 +41,12 @@ trap 'rm -rf "$tmp"' EXIT
 
 echo "downloading ${url}"
 curl -fsSL "$url" -o "$tmp/horsie.tar.gz"
-tar -xzf "$tmp/horsie.tar.gz" -C "$tmp" horsie
+tar -xzf "$tmp/horsie.tar.gz" -C "$tmp" horsie horsie-runtime
 
 mkdir -p "$BINDIR"
 install -m 0755 "$tmp/horsie" "$BINDIR/horsie"
-echo "installed horsie to ${BINDIR}/horsie"
+install -m 0755 "$tmp/horsie-runtime" "$BINDIR/horsie-runtime"
+echo "installed horsie and horsie-runtime to ${BINDIR}"
 
 case ":$PATH:" in
   *":$BINDIR:"*) ;;

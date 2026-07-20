@@ -109,9 +109,10 @@ and confirm it produces real, downloadable binaries.
 ### 4. `scripts/install.sh`
 
 Detects OS/arch, resolves the latest GitHub release, downloads the matching
-`horsie-<version>-<target>.tar.gz`, extracts only the `horsie` binary (not
-`horsie-runtime`/`horsie-server` — end users installing the CLI don't need
-those), and installs it to `~/.local/bin` (matching the `PREFIX`/`BINDIR`
+`horsie-<version>-<target>.tar.gz`, extracts the `horsie` and `horsie-runtime`
+binaries (not `horsie-server` — that one's server-side only) — `horsie
+connect` spawns `horsie-runtime` as a sibling, so both must be installed
+together — and installs them to `~/.local/bin` (matching the `PREFIX`/`BINDIR`
 convention already in the `Makefile`). Written so it's ready to sit behind
 `get.horsie.dev` once that redirect exists (DNS/hosting is out of scope here
 — see Non-goals).

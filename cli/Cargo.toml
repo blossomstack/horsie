@@ -33,7 +33,6 @@ eval            = { workspace = true }
 
 [dev-dependencies]
 horsie-mock-llm = { path = "../providers/mock-llm" }
-horsie-executor = { path = "../executor" }
 tempfile = "3"
 
 [lints]

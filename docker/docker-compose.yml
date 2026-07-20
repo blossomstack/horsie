@@ -29,6 +29,10 @@ configs:
   horsie_config:
     content: |
       {
+        "storage": {
+          "state_dir": "/data/state",
+          "data_dir": "/data/data"
+        },
         "local_runtime": true
       }
 
