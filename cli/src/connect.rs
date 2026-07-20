@@ -3,6 +3,8 @@
 //! binary, `horsie`, is enough to connect a machine to a session server.
 
 use crate::error::CliError;
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 /// Translate a `--server` URL (`http(s)://host[:port]`) into the
 /// `ws(s)://.../api/runtime/connect?register=<runtime_id>` endpoint
@@ -52,6 +54,70 @@ pub fn connection_summary(server: &str, runtime_id: &str, workspaces: &[String])
     format!("connected to {server} as runtime \"{runtime_id}\" · {list}")
 }
 
+/// Spawn `horsie-runtime` to dial `server` as this machine's runtime.
+/// Foreground by default — the child inherits this process's stdio, so its
+/// errors surface directly and the parent blocks until it exits or is
+/// interrupted. `background` detaches it instead, with output redirected to
+/// `<state_dir>/connect.log`.
+pub fn run(
+    runtime_bin: &Path,
+    server: &str,
+    workspaces: &[String],
+    runtime_id: &str,
+    background: bool,
+    state_dir: &Path,
+) -> Result<i32, CliError> {
+    let endpoint = server_to_endpoint(server, runtime_id)?;
+    let normalized: Vec<String> = workspaces
+        .iter()
+        .map(|w| normalize_workspace_arg(w))
+        .collect();
+
+    let mut cmd = Command::new(runtime_bin);
+    cmd.arg("--endpoint")
+        .arg(&endpoint)
+        .arg("--runtime-id")
+        .arg(runtime_id);
+    for w in &normalized {
+        cmd.arg("--workspace").arg(w);
+    }
+
+    println!("{}", connection_summary(server, runtime_id, &normalized));
+    println!("open {server} in your browser to start a session");
+
+    if background {
+        std::fs::create_dir_all(state_dir).map_err(|e| CliError::Io(e.to_string()))?;
+        let log_path = state_dir.join("connect.log");
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| CliError::Io(e.to_string()))?;
+        let err_log = log.try_clone().map_err(|e| CliError::Io(e.to_string()))?;
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(err_log));
+        let child = cmd.spawn().map_err(|e| spawn_error(runtime_bin, &e))?;
+        println!(
+            "running in background (pid {}, log at {})",
+            child.id(),
+            log_path.display()
+        );
+        Ok(0)
+    } else {
+        let status = cmd.status().map_err(|e| spawn_error(runtime_bin, &e))?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+fn spawn_error(runtime_bin: &Path, e: &std::io::Error) -> CliError {
+    CliError::Executor(format!(
+        "failed to launch horsie-runtime at {} ({e}); reinstall the CLI so \
+         horsie-runtime is installed alongside horsie",
+        runtime_bin.display()
+    ))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -90,7 +156,10 @@ mod tests {
     #[test]
     fn normalize_workspace_arg_defaults_bare_path_to_main() {
         assert_eq!(normalize_workspace_arg("."), "main=.");
-        assert_eq!(normalize_workspace_arg("/home/shawn/proj"), "main=/home/shawn/proj");
+        assert_eq!(
+            normalize_workspace_arg("/home/shawn/proj"),
+            "main=/home/shawn/proj"
+        );
     }
 
     #[test]

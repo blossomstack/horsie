@@ -11,6 +11,7 @@
 use clap::{Parser, Subcommand};
 use horsie::client;
 use horsie::config::HorsieConfig;
+use horsie::connect;
 use horsie::daemon;
 use horsie::error::CliError;
 use horsie::validate::validate;
@@ -55,6 +56,26 @@ enum Command {
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
+    },
+    /// Dial a session server as this machine's runtime — wraps the standalone
+    /// `horsie-runtime --endpoint ...` flow so installing `horsie` is enough.
+    Connect {
+        /// `http(s)://host:port` of the session server to dial.
+        #[arg(long)]
+        server: String,
+        /// Repeatable `[name=]path` workspace root. A bare path defaults to
+        /// name "main". At least one is required.
+        #[arg(long = "workspace", required = true)]
+        workspace: Vec<String>,
+        /// Runtime label the server groups sessions under. Defaults to
+        /// "local", matching the server's default vendor pickup.
+        #[arg(long, default_value = "local")]
+        runtime_id: String,
+        /// Run detached, with output redirected to `<state>/connect.log`.
+        #[arg(long)]
+        background: bool,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -526,6 +547,28 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 Ok(0)
             }
         },
+        Command::Connect {
+            server,
+            workspace,
+            runtime_id,
+            background,
+            config,
+        } => {
+            let cfg = HorsieConfig::resolve(config.as_deref())?;
+            let runtime_bin = cfg
+                .runtime
+                .bin
+                .clone()
+                .unwrap_or_else(daemon::default_runtime_bin);
+            connect::run(
+                &runtime_bin,
+                &server,
+                &workspace,
+                &runtime_id,
+                background,
+                &cfg.storage.state_dir,
+            )
+        }
     }
 }
 
