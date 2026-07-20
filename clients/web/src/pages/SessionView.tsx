@@ -13,9 +13,11 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError } from "../api/client";
 import { SessionStatusKind } from "../api/types";
 import { Composer } from "../components/Composer";
+import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { Transcript } from "../components/Transcript";
 import { useSessionStream } from "../hooks/useSessionStream";
+import { useUiSettings } from "../hooks/useUiSettings";
 import {
   useDeleteSession,
   useSendMessage,
@@ -50,6 +52,7 @@ export function SessionView() {
   const send = useSendMessage();
   const stop = useStopSession();
   const del = useDeleteSession();
+  const { values: uiSettings } = useUiSettings();
   const [sendError, setSendError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -163,6 +166,7 @@ export function SessionView() {
         </div>
 
         <div className="ml-auto flex items-center gap-1">
+          <SettingsMenu />
           {stoppable && (
             <button
               className="btn-ghost !px-2.5 text-xs"
@@ -221,6 +225,7 @@ export function SessionView() {
             streaming={stream.streaming}
             orphanTools={stream.orphanTools}
             showLive={status === SessionStatusKind.Running}
+            showThinking={uiSettings.showThinking}
           />
         )}
       </div>
