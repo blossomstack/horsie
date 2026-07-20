@@ -1627,6 +1627,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "horsie-openai"
+version = "0.1.4"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "horsie-agentcore",
+ "horsie-mock-llm",
+ "horsie-models",
+ "reqwest 0.12.28",
+ "reqwest-eventsource",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "horsie-runtime"
 version = "0.1.4"
 dependencies = [
