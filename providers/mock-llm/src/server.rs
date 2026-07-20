@@ -40,12 +40,17 @@ pub enum MockResponse {
         text: String,
         signature: String,
     },
+    /// A response cut off by the output-token ceiling: `stop_reason: max_tokens`
+    /// on the Anthropic wire, `finish_reason: length` on the OpenAI wire.
+    Truncated {
+        content: String,
+    },
 }
 
-struct QueueEntry {
-    response: MockResponse,
-    reached: Option<Arc<Notify>>,
-    gate: Option<Arc<Notify>>,
+pub(crate) struct QueueEntry {
+    pub(crate) response: MockResponse,
+    pub(crate) reached: Option<Arc<Notify>>,
+    pub(crate) gate: Option<Arc<Notify>>,
 }
 
 impl QueueEntry {
@@ -104,7 +109,7 @@ pub struct ScenarioConfig {
 }
 
 #[derive(Default)]
-struct MockState {
+pub(crate) struct MockState {
     queue: Mutex<Vec<QueueEntry>>,
     scenarios: Mutex<HashMap<String, Scenario>>,
     session_bindings: Mutex<HashMap<String, String>>,
@@ -112,7 +117,7 @@ struct MockState {
 }
 
 impl MockState {
-    fn dequeue_entry(&self) -> Option<QueueEntry> {
+    pub(crate) fn dequeue_entry(&self) -> Option<QueueEntry> {
         let mut q = self.queue.lock();
         (!q.is_empty()).then(|| q.remove(0))
     }
@@ -203,6 +208,10 @@ impl MockLlmServerBuilder {
         });
         let app = Router::new()
             .route("/v1/messages", post(handle_messages))
+            .route(
+                "/v1/chat/completions",
+                post(crate::openai::handle_chat_completions),
+            )
             .route("/queue", post(handle_queue))
             .route("/reset", post(handle_reset))
             .route("/scenarios/load", post(handle_load_scenarios))
@@ -280,6 +289,15 @@ impl MockLlmServer {
                 message: message.into(),
             }));
     }
+    /// Queue a response the backend cut off at its output-token ceiling.
+    pub fn queue_truncated(&self, content: impl Into<String>) {
+        self.state
+            .queue
+            .lock()
+            .push(QueueEntry::immediate(MockResponse::Truncated {
+                content: content.into(),
+            }));
+    }
     pub fn blocking_response(&self, text: impl Into<String>) -> BlockHandle {
         let gate = Arc::new(Notify::new());
         let reached = Arc::new(Notify::new());
@@ -338,7 +356,7 @@ struct ScenariosListResponse {
     scenarios: Vec<String>,
 }
 
-enum ResponseKind {
+pub(crate) enum ResponseKind {
     Json(axum::Json<serde_json::Value>),
     Sse(Sse<BoxStream<'static, Result<Event, Infallible>>>),
     HttpError(StatusCode, axum::Json<serde_json::Value>),
@@ -402,6 +420,7 @@ async fn handle_messages(
                     Some(MockResponse::Thinking { text, signature }) => {
                         thinking_sse(&msg_id, &text, &signature)
                     }
+                    Some(MockResponse::Truncated { content }) => truncated_sse(&msg_id, &content),
                     // Error in stream mode: emit a StreamError-compatible SSE event so
                     // async-anthropic parses it as AnthropicError::StreamError. The
                     // error `type` is derived from `status` so tests can choose a
@@ -435,6 +454,9 @@ async fn handle_messages(
                     }
                     Some(MockResponse::Thinking { text, signature }) => {
                         ResponseKind::Json(axum::Json(thinking_json(&text, &signature)))
+                    }
+                    Some(MockResponse::Truncated { content }) => {
+                        ResponseKind::Json(axum::Json(text_json(&content)))
                     }
                     Some(MockResponse::Error { status, message }) => {
                         let code = StatusCode::from_u16(status)
@@ -534,7 +556,7 @@ async fn handle_register_session(
 
 // ── SSE helpers ───────────────────────────────────────────────────────────────
 
-fn sse_from_pairs(pairs: Vec<(String, String)>) -> ResponseKind {
+pub(crate) fn sse_from_pairs(pairs: Vec<(String, String)>) -> ResponseKind {
     let events: Vec<Result<Event, Infallible>> = pairs
         .into_iter()
         .map(|(t, d)| Ok(Event::default().event(t).data(d)))
@@ -570,6 +592,23 @@ fn text_sse(msg_id: &str, text: &str) -> Vec<(String, String)> {
             serde_json::json!({"type":"message_stop"}).to_string(),
         ),
     ]
+}
+
+/// Like [`text_sse`], but the turn ends with `stop_reason: max_tokens` — the
+/// backend hit its output ceiling mid-answer.
+fn truncated_sse(msg_id: &str, text: &str) -> Vec<(String, String)> {
+    let mut pairs = text_sse(msg_id, text);
+    for (event, data) in &mut pairs {
+        if event == "message_delta" {
+            *data = serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "max_tokens", "stop_sequence": null},
+                "usage": {"output_tokens": 5}
+            })
+            .to_string();
+        }
+    }
+    pairs
 }
 
 fn tool_sse(
