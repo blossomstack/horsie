@@ -2077,6 +2077,7 @@ dependencies = [
  "horsie-executor",
  "horsie-mock-llm",
  "horsie-models",
+ "horsie-openai",
  "horsie-server",
  "horsie-workflow",
  "reqwest 0.12.28",
