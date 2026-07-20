@@ -69,6 +69,7 @@ cannot run a turn yet. Do these in order:
 | Guide | For |
 | --- | --- |
 | [Getting started](getting-started.md) | Install, configure, and run the server; first session |
+| [Self-hosting the server](self-hosting.md) | Stand up the server with Docker; manual/advanced setup |
 | [Runtime vendors](runtime-vendors.md) | Local daemon vs. velos; enabling each; picking one per session |
 | [Sessions](sessions.md) | Creating sessions, the chat view, per-session options |
 | [GitHub integration](github.md) | Connect a GitHub App; run sessions against repos |
