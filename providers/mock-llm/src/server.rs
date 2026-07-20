@@ -268,6 +268,18 @@ impl MockLlmServer {
                 input,
             }));
     }
+    /// Queue an error response. On the Anthropic wire this becomes an SSE error
+    /// event whose type is derived from `status`; on the OpenAI wire it becomes
+    /// a real HTTP error status, which is how those backends signal failure.
+    pub fn queue_error(&self, status: u16, message: impl Into<String>) {
+        self.state
+            .queue
+            .lock()
+            .push(QueueEntry::immediate(MockResponse::Error {
+                status,
+                message: message.into(),
+            }));
+    }
     pub fn blocking_response(&self, text: impl Into<String>) -> BlockHandle {
         let gate = Arc::new(Notify::new());
         let reached = Arc::new(Notify::new());

@@ -6,7 +6,7 @@ edition = "2024"
 publish = false # internal application crate, never published to crates.io
 
 [dev-dependencies]
-horsie-agentcore = { path = "../agentcore" }
+horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
 horsie-anthropic = { path = "../providers/anthropic" }
 horsie-mock-llm = { path = "../providers/mock-llm" }
 horsie-server = { path = "../server", features = ["test-util"] }
