@@ -15,8 +15,8 @@ use futures_util::StreamExt;
 use horsie_agentcore::{
     AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
     EventSink, LlmError, LlmProvider, ProviderCapabilities, Secret, StopReason,
-    TextBlockStartEvent, TextChunkEvent, TextPart, ToolCallInputDeltaEvent, ToolCallPart,
-    ToolCallStartEvent, ToolChoice, Usage,
+    TextBlockStartEvent, TextChunkEvent, TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent,
+    ThinkingPart, ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
 };
 use reqwest_eventsource::{Event, EventSource};
 use std::{collections::BTreeMap, env, time::Duration};
@@ -185,16 +185,26 @@ struct ToolAcc {
 
 /// Everything folded out of one attempt's stream.
 struct StreamState {
+    /// Reasoning trace, when the backend streams one (DeepSeek/vLLM/OpenRouter).
+    /// Surfaced as a `ThinkingPart` for display, but never sent back on the next
+    /// turn — see [`wire::to_wire_messages`], which drops thinking parts.
+    reasoning: String,
     text: String,
     tools: BTreeMap<usize, ToolAcc>,
     usage: Usage,
+    reasoning_started: bool,
     text_started: bool,
+    /// The content-block index the text uses. Reasoning always precedes text on
+    /// these backends, so when a thinking block opens first the text becomes
+    /// block 1; otherwise block 0.
+    text_index: u32,
     emitted_anything: bool,
 }
 
 impl Default for StreamState {
     fn default() -> Self {
         Self {
+            reasoning: String::new(),
             text: String::new(),
             tools: BTreeMap::new(),
             // `Usage` has no `Default` impl in the models crate.
@@ -202,7 +212,9 @@ impl Default for StreamState {
                 input_tokens: 0,
                 output_tokens: 0,
             },
+            reasoning_started: false,
             text_started: false,
+            text_index: 0,
             emitted_anything: false,
         }
     }
@@ -225,15 +237,42 @@ impl OpenAiProvider {
         let mut finish = None;
 
         for choice in &chunk.choices {
+            // Reasoning trace, if any, streams before content on these backends.
+            // Surface it as a thinking block (index 0) so the UI can show it.
+            if let Some(r) = choice.delta.reasoning_trace()
+                && !r.is_empty()
+            {
+                if !state.reasoning_started {
+                    state.reasoning_started = true;
+                    events
+                        .emit(AgentEvent::ThinkingBlockStart(ThinkingBlockStartEvent {
+                            message_id: message_id.to_string(),
+                            index: 0,
+                        }))
+                        .await?;
+                }
+                state.reasoning.push_str(r);
+                state.emitted_anything = true;
+                events
+                    .emit(AgentEvent::ThinkingChunk(ThinkingChunkEvent {
+                        message_id: message_id.to_string(),
+                        index: 0,
+                        text: r.to_string(),
+                    }))
+                    .await?;
+            }
+
             if let Some(c) = &choice.delta.content
                 && !c.is_empty()
             {
                 if !state.text_started {
                     state.text_started = true;
+                    // A thinking block, if present, is block 0; text follows it.
+                    state.text_index = u32::from(state.reasoning_started);
                     events
                         .emit(AgentEvent::TextBlockStart(TextBlockStartEvent {
                             message_id: message_id.to_string(),
-                            index: 0,
+                            index: state.text_index,
                         }))
                         .await?;
                 }
@@ -242,7 +281,7 @@ impl OpenAiProvider {
                 events
                     .emit(AgentEvent::TextChunk(TextChunkEvent {
                         message_id: message_id.to_string(),
-                        index: 0,
+                        index: state.text_index,
                         text: c.clone(),
                     }))
                     .await?;
@@ -387,11 +426,25 @@ impl LlmProvider for OpenAiProvider {
             es.close();
 
             let mut parts: Vec<ContentPart> = Vec::new();
-            if !state.text.is_empty() {
+            // Thinking first: it precedes text on the wire and is block 0.
+            if !state.reasoning.is_empty() {
                 events
                     .emit(AgentEvent::ContentBlockStop(ContentBlockStopEvent {
                         message_id: message_id.to_string(),
                         index: 0,
+                    }))
+                    .await?;
+                parts.push(ContentPart::Thinking(ThinkingPart {
+                    text: state.reasoning.clone(),
+                    // No cross-provider signature exists; Anthropic-only.
+                    signature: None,
+                }));
+            }
+            if !state.text.is_empty() {
+                events
+                    .emit(AgentEvent::ContentBlockStop(ContentBlockStopEvent {
+                        message_id: message_id.to_string(),
+                        index: state.text_index,
                     }))
                     .await?;
                 parts.push(ContentPart::Text(TextPart {
@@ -450,6 +503,12 @@ mod tests {
         fn new() -> Self {
             Self(Mutex::new(Vec::new()))
         }
+        fn events(&self) -> Vec<AgentEvent> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
     }
 
     #[async_trait]
@@ -505,6 +564,47 @@ mod tests {
             ContentPart::Text(t) => assert_eq!(t.text, "hello from openai"),
             other => panic!("expected text, got {:?}", std::mem::discriminant(other)),
         }
+    }
+
+    #[tokio::test]
+    async fn captures_reasoning_content_as_a_thinking_part() {
+        // DeepSeek/vLLM stream a reasoning trace before the answer. It surfaces
+        // as a ThinkingPart (for display) ahead of the text, and emits thinking
+        // events — but is never replayed (see wire::to_wire_messages).
+        let server = MockLlmServer::builder().build().await;
+        server.queue_reasoning("let me think about it", "the answer is 42");
+
+        let history = vec![user("hi")];
+        let sink = NullSink::new();
+        let resp = provider(&server.url())
+            .complete(req(&history), "msg-1", &sink)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+        match &resp.parts[0] {
+            ContentPart::Thinking(t) => {
+                assert_eq!(t.text, "let me think about it");
+                assert_eq!(t.signature, None);
+            }
+            other => panic!(
+                "expected thinking first, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        match &resp.parts[1] {
+            ContentPart::Text(t) => assert_eq!(t.text, "the answer is 42"),
+            other => panic!(
+                "expected text second, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert!(
+            sink.events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ThinkingChunk(_))),
+            "expected a ThinkingChunk event",
+        );
     }
 
     #[tokio::test]

@@ -97,9 +97,15 @@ base URL the service's endpoint, and an inline API key.
 
 Two behaviors differ by kind, and are handled automatically:
 
-- **Thinking** (extended reasoning) is an Anthropic-only feature. On an
-  OpenAI-compatible backend there are no thinking blocks; nothing is lost, the
-  agent simply does not stream them.
+- **Reasoning / thinking.** Reasoning models surface their thinking differently
+  by backend, and horsie shows it the same way it shows Claude's. DeepSeek
+  (`deepseek-reasoner`), vLLM started with a reasoning parser, and OpenRouter
+  stream a reasoning trace over `/v1/chat/completions`, which horsie displays as
+  a thinking block. **Genuine OpenAI** models (the o-series, GPT-5) keep their
+  reasoning hidden on chat completions — only OpenAI's separate Responses API
+  exposes summaries — so with those you see the answer but not the thinking. In
+  all cases the reasoning is shown but never sent back to the model on the next
+  turn, since some backends reject that.
 - **Streaming is required.** Both kinds stream responses; a backend that cannot
   stream `/v1/chat/completions` is not supported.
 
