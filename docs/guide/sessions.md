@@ -38,11 +38,15 @@ Click **Create** to open the session.
 
 ## The chat view
 
-- **Composer** — type a message and send it. The agent's reply streams in live:
-  its thinking, tool calls (with results), and file edits appear as they happen.
+- **Composer** — type a message and send it. The agent's reply text streams in
+  live. Tool calls appear as collapsible rows you can expand to see the raw
+  input and output; file edits show up there as tool calls, not as diffs — there
+  is no file browser or diff view yet. Thinking is shown once the reply
+  finishes, not streamed.
 - **Stop** — interrupt the current run mid-turn.
 - **Status badge** — shows whether the session is idle, running, or errored.
-- **Token usage** — a running total for the session.
+- **Token usage** — a running total of tokens used across the session. Note this
+  is cumulative usage, not a measure of how full the context window is.
 - **Repo chips** — the repositories checked out for this session, if any.
 - **Delete** — remove the session.
 
