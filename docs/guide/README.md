@@ -12,9 +12,9 @@ different tool.
 
 ## What you can do
 
-- **Chat sessions** — start a session, pick a model, watch the agent think, call
-  tools, and edit files live. Stop a run mid-turn, delete a session, reconnect
-  anytime. → [Sessions](sessions.md)
+- **Chat sessions** — start a session, pick a model, and watch the agent's reply
+  and tool calls stream in as it works. Stop a run mid-turn, delete a session,
+  reconnect anytime. → [Sessions](sessions.md)
 - **Run against GitHub repos** — connect a GitHub App once, then launch sessions
   with one or more repositories checked out into the runtime. → [GitHub](github.md)
 - **Give agents more tools with MCP** — connect remote MCP servers and enable
