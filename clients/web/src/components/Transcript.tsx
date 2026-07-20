@@ -1,8 +1,9 @@
 import { cn } from "../lib/cn";
 import type { RenderedMessage, RenderedToolCall } from "../hooks/useSessionStream";
+import { buildSegments, type Segment } from "../lib/transcriptSegments";
 import { Prose } from "./Prose";
-import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard } from "./ToolCallCard";
+import { WorkGroup } from "./WorkGroup";
 
 function AssistantAvatar() {
   return (
@@ -29,76 +30,61 @@ function UserBubble({ text }: { text: string }) {
   );
 }
 
-/** One agent iteration's content (thinking / text / tool calls), unadorned —
- * the enclosing turn supplies the avatar and spacing. */
-function AssistantStep({ msg }: { msg: RenderedMessage }) {
-  return (
-    <div data-testid="message" data-role={msg.role} className="space-y-2">
-      {msg.thinking.map((t, i) => (
-        <ThinkingBlock key={`t${i}`} text={t} />
-      ))}
-      {msg.text && (
-        <div data-testid="assistant-text">
-          <Prose text={msg.text} />
-        </div>
-      )}
-      {msg.toolCalls.map((tc) => (
-        <ToolCallCard key={tc.id} call={tc} />
-      ))}
-    </div>
-  );
-}
-
-/** The live, not-yet-finalized tail of a turn: streaming text and/or tool
- * calls still running. Shares its parent turn's avatar. */
-function LiveTail({
-  text,
-  orphanTools,
+function SegmentView({
+  segment,
+  showThinking,
 }: {
-  text: string;
-  orphanTools: RenderedToolCall[];
+  segment: Segment;
+  showThinking: boolean;
 }) {
-  return (
-    <>
-      {text ? (
-        <div data-testid="assistant-streaming">
-          <Prose text={text} />
+  switch (segment.kind) {
+    case "text":
+      return (
+        <div data-testid={segment.streaming ? "assistant-streaming" : "assistant-text"}>
+          <Prose text={segment.text} />
         </div>
-      ) : orphanTools.length === 0 ? (
-        <div className="flex items-center gap-1.5 pt-1 text-sm text-faint">
+      );
+    case "work":
+      return (
+        <WorkGroup items={segment.items} live={segment.live} showThinking={showThinking} />
+      );
+    case "ask":
+      return <ToolCallCard call={segment.call} />;
+    case "pulse":
+      return (
+        <div className="flex items-center gap-1.5 pt-1 text-sm text-faint" data-testid="pulse">
           <span className="cursor-dot" />
         </div>
-      ) : null}
-      {orphanTools.map((tc) => (
-        <ToolCallCard key={tc.id} call={tc} />
-      ))}
-    </>
-  );
+      );
+  }
 }
 
 /** A run of consecutive assistant messages (no interleaved user turn) shares
  * one avatar — an agent's multi-step tool-call trajectory is one continuous
  * thread of work, not a series of separate replies. `live` merges a
- * still-streaming tail into the same avatar when it continues this turn. */
+ * still-streaming tail into the same avatar when it continues this turn;
+ * with empty `msgs` it renders a turn that is entirely live. */
 function AssistantTurn({
   msgs,
   live,
+  showThinking,
 }: {
   msgs: RenderedMessage[];
   live?: { text: string; orphanTools: RenderedToolCall[] };
+  showThinking: boolean;
 }) {
-  const hasBody =
-    msgs.some((m) => m.text.length > 0 || m.thinking.length > 0 || m.toolCalls.length > 0) ||
-    !!live;
+  const segments = buildSegments(msgs, live);
   return (
-    <div className={cn("flex gap-3 animate-rise", msgs[0]?.optimistic && "opacity-70")}>
+    <div data-testid="message" data-role="Assistant" className="flex gap-3 animate-rise">
       <AssistantAvatar />
       <div className="min-w-0 flex-1 space-y-2 pt-0.5">
-        {msgs.map((m) => (
-          <AssistantStep key={m.id} msg={m} />
-        ))}
-        {live && <LiveTail text={live.text} orphanTools={live.orphanTools} />}
-        {!hasBody && <span className="text-sm text-faint">…</span>}
+        {segments.length === 0 ? (
+          <span className="text-sm text-faint">…</span>
+        ) : (
+          segments.map((s) => (
+            <SegmentView key={s.key} segment={s} showThinking={showThinking} />
+          ))
+        )}
       </div>
     </div>
   );
@@ -136,36 +122,24 @@ function groupTurns(messages: RenderedMessage[]): Turn[] {
   return turns;
 }
 
-function StreamingTurn({
-  text,
-  orphanTools,
-}: {
-  text: string;
-  orphanTools: RenderedToolCall[];
-}) {
-  return (
-    <div className="flex gap-3">
-      <AssistantAvatar />
-      <div className="min-w-0 flex-1 space-y-2 pt-0.5">
-        <LiveTail text={text} orphanTools={orphanTools} />
-      </div>
-    </div>
-  );
-}
-
 export function Transcript({
   messages,
   streaming,
   orphanTools,
   showLive,
+  showThinking,
 }: {
   messages: RenderedMessage[];
   streaming: string;
   orphanTools: RenderedToolCall[];
   showLive: boolean;
+  showThinking: boolean;
 }) {
   const turns = groupTurns(messages);
-  const hasLive = showLive && (streaming.length > 0 || orphanTools.length > 0);
+  // Gated on session status alone (not on whether content has arrived yet)
+  // so the live tail — and its `pulse` progress indicator — is reachable
+  // during the gap between "Running" and the first token/tool.
+  const hasLive = showLive;
   const lastTurn = turns[turns.length - 1];
   // A live tail with no interleaved user message continues the last turn —
   // merge it into that turn's avatar instead of popping in a new one.
@@ -180,6 +154,7 @@ export function Transcript({
           <AssistantTurn
             key={t.id}
             msgs={t.msgs}
+            showThinking={showThinking}
             live={
               mergeLiveIntoLastTurn && i === turns.length - 1
                 ? { text: streaming, orphanTools }
@@ -189,7 +164,12 @@ export function Transcript({
         ),
       )}
       {hasLive && !mergeLiveIntoLastTurn && (
-        <StreamingTurn text={streaming} orphanTools={orphanTools} />
+        <AssistantTurn
+          key="streaming"
+          msgs={[]}
+          showThinking={showThinking}
+          live={{ text: streaming, orphanTools }}
+        />
       )}
     </div>
   );
