@@ -131,6 +131,19 @@ that is still actively streaming (has a live tail with no finalized closing
 text yet) — i.e. at most one live work segment per turn, always the last
 one.
 
+**Fixed alongside:** today's `Transcript.tsx` only ever constructs a live
+tail (`hasLive`) when `streaming.length > 0 || orphanTools.length > 0` —
+so during the gap between the session entering `Running` and the first
+token/tool actually arriving, nothing live-tail-shaped renders at all (the
+`pulse`/cursor-dot branch that exists for exactly this case is therefore
+dead code today). Gating `hasLive` on `showLive` (the session's `Running`
+status) alone, instead of on non-empty content, makes that branch reachable
+and gives requirement 2's "status indicating the agent is progressing" its
+missing first frame. Low-risk, same code being rewritten regardless; not
+independently e2e-tested since the window is sub-second and not worth an
+artificial delay to pin down — covered by code review and manual smoke
+instead.
+
 ### 3. `WorkGroup` component (new)
 
 Wraps the existing `ThinkingBlock`/`ToolCallCard` unchanged — just adds an
@@ -142,10 +155,18 @@ outer collapse and a `showThinking`-gated filter.
   - live → render a bare spinner + `Working…` row, no chevron (nothing to
     expand into) — keeps the "agent is progressing" signal visible without
     leaking thinking content.
-- **Non-empty:** single-line summary row (chevron + icon + label),
-  collapsed by default; expands in place into the ordered `visibleItems`
-  list (each `ThinkingBlock`/`ToolCallCard` still independently
-  expandable, unchanged from today).
+- **Exactly one visible item:** render that single `ThinkingBlock` or
+  `ToolCallCard` directly, with no extra wrapper. A single tool call (the
+  common case — one iteration, one tool, then the final answer) already had
+  a perfectly adequate one-click-to-detail row before this change; forcing
+  it through an additional group-level collapse would be a regression, not
+  an improvement, and the goal was always to compress *runs* of steps, not
+  add friction to a single one. (This also means a lone thinking block, once
+  revealed via the setting, renders exactly as it does today.)
+- **Two or more visible items:** single-line summary row (chevron + icon +
+  label), collapsed by default; expands in place into the ordered
+  `visibleItems` list (each `ThinkingBlock`/`ToolCallCard` still
+  independently expandable, unchanged from today).
   - **Live:** spinner + `Running <tool name>…` if the last visible item is
     a tool call with `running === true`, else spinner + `Working…`.
   - **Finished:** static summary built from visible counts —
