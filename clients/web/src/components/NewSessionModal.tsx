@@ -30,7 +30,6 @@ export function NewSessionModal({
   const [name, setName] = useState("");
   const [model, setModel] = useState("");
   const [vendor, setVendor] = useState("");
-  const [systemPrompt, setSystemPrompt] = useState("");
   const [usePlugins, setUsePlugins] = useState(false);
   const [selectedPlugins, setSelectedPlugins] = useState<Set<string>>(
     new Set(),
@@ -67,7 +66,6 @@ export function NewSessionModal({
     setName("");
     setModel("");
     setVendor("");
-    setSystemPrompt("");
     setUsePlugins(false);
     setSelectedPlugins(new Set());
     setMcpSelected([]);
@@ -118,7 +116,6 @@ export function NewSessionModal({
       name: name.trim() || undefined,
       agent: {
         model: model.trim(),
-        systemPrompt: systemPrompt.trim() || undefined,
         usePlugins: provisions ? usePlugins : undefined,
         mcpServers: mcpSelected.length ? mcpSelected : undefined,
       },
@@ -328,14 +325,6 @@ export function NewSessionModal({
 
             {advanced && (
               <div className="space-y-3.5 border-t pt-3.5">
-                <Field label="System prompt" hint="optional">
-                  <textarea
-                    className="input min-h-[68px] resize-y"
-                    value={systemPrompt}
-                    onChange={(e) => setSystemPrompt(e.target.value)}
-                    placeholder="Override the default system prompt…"
-                  />
-                </Field>
                 {/* Skills/plugins are provisioned into the workspace, so they
                     only apply to a vendor that provisions. */}
                 {provisions && (

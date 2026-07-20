@@ -402,7 +402,6 @@ mod tests {
             name: Some("test".into()),
             agent: AgentSettings {
                 model: "mock".into(),
-                system_prompt: None,
                 allowed_tools: None,
                 use_plugins: None,
                 max_iterations: None,

@@ -51,7 +51,6 @@ where
 fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
     AgentSettings {
         model: w.model,
-        system_prompt: w.system_prompt,
         allowed_tools: w.allowed_tools,
         use_plugins: w.use_plugins,
         max_iterations: w.max_iterations,

@@ -20,7 +20,6 @@ enum SessionStatusKind {
 /// Agent settings supplied at session creation.
 struct AgentSettings {
     model: String,
-    system_prompt: Option<String>,
     allowed_tools: Option<Vec<String>>,
     use_plugins: Option<bool>,
     max_iterations: Option<u32>,
