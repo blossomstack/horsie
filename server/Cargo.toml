@@ -15,6 +15,7 @@ horsie-models          = { path = "../models" }
 horsie-actor           = { path = "../actor", features = ["file-journal"] }
 horsie-agentcore       = { path = "../agentcore" }
 horsie-anthropic       = { path = "../providers/anthropic" }
+horsie-openai          = { path = "../providers/openai" }
 horsie-workflow        = { path = "../workflow" }
 horsie-executor        = { path = "../executor" }
 horsie-executor-client = { path = "../executor-client" }

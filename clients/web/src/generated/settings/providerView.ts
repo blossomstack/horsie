@@ -8,7 +8,7 @@ export interface ProviderView {
    */
   name: string;
   /**
-   * Provider kind, e.g. &quot;anthropic&quot; (the only kind today).
+   * Provider kind: &quot;anthropic&quot; or &quot;openai&quot;.
    */
   kind: string;
   baseUrl?: string;

@@ -82,9 +82,12 @@ run yet. Two more steps:
 
 **Add a provider and a model.** Open **Settings**:
 
-1. Under **Providers**, add a provider — a name and an **inline API key** (leave
-   the key blank on a later edit to keep the stored one). Add an optional base
-   URL for gateways/proxies.
+1. Under **Providers**, add a provider — a name, a **kind** (Anthropic or
+   OpenAI-compatible), and an **inline API key** (leave the key blank on a later
+   edit to keep the stored one). Add an optional base URL for gateways, proxies,
+   or a local server. To point at a local Ollama, pick **OpenAI-compatible**,
+   set the base URL to `http://127.0.0.1:11434`, and leave the key blank. See
+   [Provider kinds](settings-reference.md#provider-kinds).
 2. Under **Models**, add a model — an alias you'll pick in the UI, the provider,
    and the model id (plus an optional max-tokens).
 3. **Save changes.** Provider and model edits take effect on the next turn — no

@@ -67,7 +67,7 @@ Open **Settings**. Sections, top to bottom:
 
 | Section | What you configure |
 | --- | --- |
-| **Providers** | Model providers: name, optional base URL, inline API key. |
+| **Providers** | Model providers: name, **kind** (Anthropic or OpenAI-compatible), optional base URL, inline API key. See [Provider kinds](#provider-kinds). |
 | **Models** | Models you can pick per session: alias, provider, model id, optional max tokens. |
 | **Default vendor** | Which runtime vendor new sessions use (only *active* vendors are selectable). Falls back to `local`. |
 | **Velos remote runtimes** | Remote runtime vendors: name, server URL, image, advertise address, token, and advanced compute settings. Includes a per-row **Test connection**. See [Runtime vendors](runtime-vendors.md). |
@@ -77,6 +77,35 @@ Open **Settings**. Sections, top to bottom:
 
 **Skill/plugin bundles** are managed on the separate **Skills** page. See
 [Skills & plugins](skills-and-plugins.md).
+
+### Provider kinds
+
+Every provider has a **kind** that selects the wire protocol the server speaks
+to it. The same provider fields (name, base URL, inline key) apply to both.
+
+| Kind | Speaks | Use it for |
+| --- | --- | --- |
+| **Anthropic** | the Anthropic Messages API | Claude models, or any endpoint that speaks the Anthropic wire (set a base URL). |
+| **OpenAI-compatible** | `/v1/chat/completions` | OpenAI, plus self-hosted and third-party servers that expose the same API — Ollama, vLLM, llama.cpp, OpenRouter, DeepSeek. |
+
+**Example — a local Ollama server** (no API key needed): add a provider with
+kind **OpenAI-compatible** and base URL `http://127.0.0.1:11434`, then a model
+whose model id is a tag you have pulled (e.g. `qwen2.5`).
+
+**Example — a hosted OpenAI-compatible service**: kind **OpenAI-compatible**,
+base URL the service's endpoint, and an inline API key.
+
+Two behaviors differ by kind, and are handled automatically:
+
+- **Thinking** (extended reasoning) is an Anthropic-only feature. On an
+  OpenAI-compatible backend there are no thinking blocks; nothing is lost, the
+  agent simply does not stream them.
+- **Streaming is required.** Both kinds stream responses; a backend that cannot
+  stream `/v1/chat/completions` is not supported.
+
+If a model's turn fails immediately after you add an OpenAI-compatible provider,
+the usual cause is a base URL that does not end at the server root (the server
+appends `/v1/chat/completions` itself) or a model id the backend has not loaded.
 
 ### When changes take effect
 

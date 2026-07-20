@@ -4,6 +4,9 @@
  */
 export interface ProviderInput {
   name: string;
+  /**
+   * Provider kind: &quot;anthropic&quot; or &quot;openai&quot;.
+   */
   kind: string;
   baseUrl?: string;
   /**
