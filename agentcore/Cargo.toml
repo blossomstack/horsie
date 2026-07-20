@@ -6,6 +6,11 @@ description = "Core agent abstractions for horsie"
 version = "0.1.4"
 edition = "2024"
 
+[features]
+# Exposes `testkit` (MockProvider, MockToolbox, CollectingEventSink) to other
+# crates. agentcore's own unit tests get it via `cfg(test)` without the feature.
+test-util = []
+
 [dependencies]
 horsie-models = { version = "0.1.4", path = "../models" }
 async-trait = { workspace = true }

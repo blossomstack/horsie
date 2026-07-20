@@ -3,6 +3,8 @@ mod error;
 mod events;
 mod provider;
 mod secret;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testkit;
 mod tool;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig};

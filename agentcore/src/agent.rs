@@ -545,6 +545,7 @@ mod tests {
         error::ToolCallError,
         events::EventSink,
         provider::{CompletionResponse, StopReason, ToolChoice},
+        testkit::{CollectingEventSink, MockProvider, MockToolbox},
         tool::{EmptyToolbox, ToolSpec, Toolbox},
     };
     use async_trait::async_trait;
@@ -553,148 +554,6 @@ mod tests {
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
-
-    // --- support types ---
-
-    struct MockProvider {
-        responses: Vec<CompletionResponse>,
-        call_index: Mutex<usize>,
-    }
-
-    impl MockProvider {
-        fn new(responses: Vec<CompletionResponse>) -> Arc<Self> {
-            Arc::new(Self {
-                responses,
-                call_index: Mutex::new(0),
-            })
-        }
-
-        fn text(text: &str) -> Arc<Self> {
-            Self::new(vec![CompletionResponse {
-                parts: vec![ContentPart::Text(TextPart {
-                    text: text.to_string(),
-                })],
-                stop_reason: StopReason::EndTurn,
-                usage: Usage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                },
-            }])
-        }
-
-        fn tool_then_text(tool_id: &str, tool_name: &str, input: Value, reply: &str) -> Arc<Self> {
-            Self::new(vec![
-                CompletionResponse {
-                    parts: vec![ContentPart::ToolCall(ToolCallPart {
-                        id: tool_id.to_string(),
-                        name: tool_name.to_string(),
-                        input,
-                    })],
-                    stop_reason: StopReason::ToolUse,
-                    usage: Usage {
-                        input_tokens: 20,
-                        output_tokens: 10,
-                    },
-                },
-                CompletionResponse {
-                    parts: vec![ContentPart::Text(TextPart {
-                        text: reply.to_string(),
-                    })],
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage {
-                        input_tokens: 30,
-                        output_tokens: 8,
-                    },
-                },
-            ])
-        }
-    }
-
-    #[async_trait]
-    impl crate::provider::LlmProvider for MockProvider {
-        fn model_id(&self) -> &str {
-            "mock-model"
-        }
-
-        async fn complete(
-            &self,
-            _request: crate::provider::CompletionRequest<'_>,
-            _message_id: &str,
-            _events: &dyn EventSink,
-        ) -> Result<CompletionResponse, crate::error::LlmError> {
-            let mut idx = self.call_index.lock().unwrap();
-            let response = self.responses[*idx % self.responses.len()].clone();
-            *idx += 1;
-            Ok(response)
-        }
-    }
-
-    type ToolHandler = Arc<dyn Fn(&str, Value) -> Result<Value, ToolCallError> + Send + Sync>;
-
-    struct MockToolbox {
-        specs: Vec<ToolSpec>,
-        handler: ToolHandler,
-    }
-
-    impl MockToolbox {
-        fn echo(name: &str) -> Arc<Self> {
-            let spec = ToolSpec {
-                name: name.to_string(),
-                description: "echo tool".to_string(),
-                input_schema: json!({ "type": "object" }),
-            };
-            Arc::new(Self {
-                specs: vec![spec],
-                handler: Arc::new(|_, input| Ok(input)),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl Toolbox for MockToolbox {
-        fn specs(&self) -> Vec<ToolSpec> {
-            self.specs.clone()
-        }
-
-        async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
-            (self.handler)(name, input)
-        }
-    }
-
-    struct CollectingEventSink {
-        events: Mutex<Vec<AgentEvent>>,
-    }
-
-    impl CollectingEventSink {
-        fn new() -> Self {
-            Self {
-                events: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn events(&self) -> Vec<AgentEvent> {
-            self.events.lock().unwrap().clone()
-        }
-
-        fn message_complete_ids(&self) -> Vec<String> {
-            self.events()
-                .into_iter()
-                .filter_map(|e| match e {
-                    AgentEvent::MessageComplete(mc) => Some(mc.message_id),
-                    _ => None,
-                })
-                .collect()
-        }
-    }
-
-    #[async_trait]
-    #[async_trait]
-    impl EventSink for CollectingEventSink {
-        async fn emit(&self, event: AgentEvent) -> Result<(), crate::events::EventSinkError> {
-            self.events.lock().unwrap().push(event);
-            Ok(())
-        }
-    }
 
     // --- tests ---
 
@@ -921,10 +780,7 @@ mod tests {
                     "properties": { "answer": { "type": "number" } }
                 }),
             };
-            Arc::new(MockToolbox {
-                specs: vec![spec],
-                handler: Arc::new(|_, input| Ok(input)),
-            })
+            MockToolbox::new(vec![spec], Arc::new(|_, input| Ok(input)))
         };
         let provider = MockProvider::new(vec![
             CompletionResponse {
@@ -983,10 +839,7 @@ mod tests {
                     "properties": { "answer": { "type": "number" } }
                 }),
             };
-            Arc::new(MockToolbox {
-                specs: vec![spec],
-                handler: Arc::new(|_, input| Ok(input)),
-            })
+            MockToolbox::new(vec![spec], Arc::new(|_, input| Ok(input)))
         };
         // Always returns invalid input.
         let provider = MockProvider::new(vec![CompletionResponse {
@@ -1399,14 +1252,14 @@ mod tests {
         // A tool returning a JSON string should reach the conversation verbatim —
         // no surrounding quotes, no `\n` escapes from a second JSON encoding.
         let provider = MockProvider::tool_then_text("t1", "cat", json!({}), "done");
-        let toolbox = Arc::new(MockToolbox {
-            specs: vec![ToolSpec {
+        let toolbox = MockToolbox::new(
+            vec![ToolSpec {
                 name: "cat".to_string(),
                 description: "cat".to_string(),
                 input_schema: json!({ "type": "object" }),
             }],
-            handler: Arc::new(|_, _| Ok(Value::String("line1\nline2".to_string()))),
-        });
+            Arc::new(|_, _| Ok(Value::String("line1\nline2".to_string()))),
+        );
         let mut agent = Agent::builder(provider, toolbox).build().unwrap();
         let sink = CollectingEventSink::new();
         agent
