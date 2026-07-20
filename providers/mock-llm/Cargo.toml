@@ -14,5 +14,9 @@ futures     = "0.3"
 parking_lot = { workspace = true }
 uuid        = { workspace = true }
 
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio   = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
 [lints]
 workspace = true

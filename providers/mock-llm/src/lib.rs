@@ -5,6 +5,7 @@
     clippy::wildcard_enum_match_arm
 )]
 
+mod openai;
 mod server;
 pub use server::{
     BlockHandle, MockLlmServer, MockLlmServerBuilder, MockResponse, Scenario, ScenarioConfig,

@@ -23,19 +23,23 @@ use horsie_agentcore::{
 };
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
+use horsie_openai::OpenAiProvider;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderKind {
     Anthropic,
+    Openai,
 }
 
 /// Every kind the suite runs against. Adding a variant here is the only change
 /// needed to subject a new backend to the full suite.
-const KINDS: &[ProviderKind] = &[ProviderKind::Anthropic];
+const KINDS: &[ProviderKind] = &[ProviderKind::Anthropic, ProviderKind::Openai];
 
 fn build_provider(kind: ProviderKind, base_url: &str) -> Arc<dyn LlmProvider> {
+    // `with_retry_delay_secs(0)` on both: without it a queued 429 costs the
+    // suite minutes of real backoff before it fails.
     match kind {
         ProviderKind::Anthropic => Arc::new(
             AnthropicProvider::with_api_key("test-key")
@@ -43,8 +47,14 @@ fn build_provider(kind: ProviderKind, base_url: &str) -> Arc<dyn LlmProvider> {
                 .with_model("mock-model")
                 .with_base_url(base_url)
                 .with_max_tokens(Some(1024))
-                // Without this a queued 429 costs the suite ~5 minutes of
-                // real backoff before it fails.
+                .with_retry_delay_secs(0),
+        ),
+        ProviderKind::Openai => Arc::new(
+            OpenAiProvider::with_api_key("test-key")
+                .unwrap()
+                .with_model("mock-model")
+                .with_base_url(base_url)
+                .with_max_tokens(Some(1024))
                 .with_retry_delay_secs(0),
         ),
     }
