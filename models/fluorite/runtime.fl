@@ -100,11 +100,8 @@ union ToolResult { Ok(ToolOutput), Err(ToolError) }
 
 struct ToolCallResponse { call_id: String, result: ToolResult }
 
-/// First message the runtime sends after connecting. `workdir` is the
-/// runtime's primary workspace path, reported for display (e.g. a shared
-/// local vendor's connected-instance listing) — every invocation always has
-/// at least one workspace, so this is never empty.
-struct RuntimeReady { runtime_id: String, workdir: String }
+/// First message the runtime sends after connecting.
+struct RuntimeReady { runtime_id: String }
 
 /// Announces that the runtime is executing provision steps before Ready. The
 /// executor extends its handshake deadline and expects Ready or

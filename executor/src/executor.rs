@@ -35,11 +35,11 @@ type WsSink = Arc<
     >,
 >;
 
-/// Fires `(runtime_id, workdir)` after a runtime successfully registers (not
-/// on a rejected collision). Lets a vendor that registers runtimes outside
-/// any `create`/`attach` call (e.g. a user-launched daemon dialing in on its
-/// own) learn about a newly (re)connected id without polling.
-pub type ConnectHook = Arc<dyn Fn(String, String) + Send + Sync>;
+/// Fires with `runtime_id` after a runtime successfully registers (not on a
+/// rejected collision). Lets a vendor that registers runtimes outside any
+/// `create`/`attach` call (e.g. a user-launched daemon dialing in on its own)
+/// learn about a newly (re)connected id without polling.
+pub type ConnectHook = Arc<dyn Fn(String) + Send + Sync>;
 
 async fn send_outbound(sink: &WsSink, msg: ExecutorOutboundMessage) -> Result<(), ExecutorError> {
     let json =
@@ -99,7 +99,7 @@ pub fn serve_runtime_connections(
 }
 
 /// Like [`serve_runtime_connections`], but `on_registered` (if given) fires
-/// after each successful registration with `(runtime_id, workdir)`.
+/// after each successful registration with the `runtime_id`.
 pub fn serve_runtime_connections_with_hook(
     listener: RuntimeListenerServer,
     registry: Arc<ConnectedRuntimeRegistry>,
@@ -271,7 +271,7 @@ pub async fn handle_runtime_connection<S>(
     let (sink, mut stream) = ws.split();
 
     enum Handshake {
-        Ready(String, String),
+        Ready(String),
         Provisioning(String),
     }
 
@@ -283,7 +283,7 @@ pub async fn handle_runtime_connection<S>(
                 Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
                         Ok(RuntimeOutboundMessage::Ready(ev)) => {
-                            return Some(Handshake::Ready(ev.runtime_id, ev.workdir));
+                            return Some(Handshake::Ready(ev.runtime_id));
                         }
                         Ok(RuntimeOutboundMessage::Provisioning(ev)) => {
                             return Some(Handshake::Provisioning(ev.runtime_id));
@@ -297,8 +297,8 @@ pub async fn handle_runtime_connection<S>(
     })
     .await;
 
-    let (runtime_id, workdir) = match first {
-        Ok(Some(Handshake::Ready(id, workdir))) => (id, workdir),
+    let runtime_id = match first {
+        Ok(Some(Handshake::Ready(id))) => id,
         Ok(Some(Handshake::Provisioning(id))) => {
             // Provision phase: wait (much longer) for Ready or ProvisionFailed.
             let outcome = tokio::time::timeout(PROVISION_WINDOW, async {
@@ -307,7 +307,7 @@ pub async fn handle_runtime_connection<S>(
                         Some(Ok(Message::Text(text))) => {
                             match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
                                 Ok(RuntimeOutboundMessage::Ready(ev)) => {
-                                    return Ok((ev.runtime_id, ev.workdir));
+                                    return Ok(ev.runtime_id);
                                 }
                                 Ok(RuntimeOutboundMessage::ProvisionFailed(ev)) => {
                                     return Err(ev.message);
@@ -363,7 +363,7 @@ pub async fn handle_runtime_connection<S>(
         return;
     }
     if let Some(hook) = &on_registered {
-        hook(runtime_id.clone(), workdir);
+        hook(runtime_id.clone());
     }
     // Deregister when the link drops so health checks observe the loss and a stale
     // transport never lingers (explicit destroy also removes it; double-remove is safe).
@@ -619,14 +619,13 @@ mod tests {
     use std::time::Duration as StdDuration;
     use tokio_tungstenite::connect_async;
 
-    async fn announce(addr: std::net::SocketAddr, runtime_id: &str, workdir: &str) -> WsSinkPair {
+    async fn announce(addr: std::net::SocketAddr, runtime_id: &str) -> WsSinkPair {
         let (ws, _) = connect_async(format!("ws://{addr}"))
             .await
             .expect("connect");
         let (mut sink, stream) = ws.split();
         let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
             runtime_id: runtime_id.to_string(),
-            workdir: workdir.to_string(),
         }))
         .unwrap();
         sink.send(Message::Text(ready.into())).await.unwrap();
@@ -668,12 +667,12 @@ mod tests {
         let cancel = CancellationToken::new();
         serve_runtime_connections(listener, registry.clone(), cancel.clone());
 
-        let (_sink1, _stream1) = announce(addr, "dup-id", "/one").await;
+        let (_sink1, _stream1) = announce(addr, "dup-id").await;
         wait_registered(&registry, "dup-id").await;
 
         // A second connection announcing the SAME id must be rejected: its
         // socket closes, and the first transport stays registered.
-        let (mut sink2, mut stream2) = announce(addr, "dup-id", "/two").await;
+        let (mut sink2, mut stream2) = announce(addr, "dup-id").await;
         let closed = tokio::time::timeout(StdDuration::from_secs(2), stream2.next()).await;
         assert!(
             matches!(closed, Ok(None) | Ok(Some(Err(_)))),
@@ -688,7 +687,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_registered_hook_fires_with_id_and_workdir_once_per_registration() {
+    async fn on_registered_hook_fires_with_id_once_per_registration() {
         let listener =
             RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
                 .await
@@ -696,20 +695,17 @@ mod tests {
         let addr = listener.tcp_addr().unwrap();
         let registry = Arc::new(ConnectedRuntimeRegistry::new());
         let cancel = CancellationToken::new();
-        let seen: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let seen: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
         let hook_seen = seen.clone();
-        let hook: ConnectHook = Arc::new(move |id: String, workdir: String| {
-            hook_seen.lock().unwrap().push((id, workdir));
+        let hook: ConnectHook = Arc::new(move |id: String| {
+            hook_seen.lock().unwrap().push(id);
         });
         serve_runtime_connections_with_hook(listener, registry.clone(), cancel.clone(), Some(hook));
 
-        let (_sink, _stream) = announce(addr, "rt-1", "/proj").await;
+        let (_sink, _stream) = announce(addr, "rt-1").await;
         wait_registered(&registry, "rt-1").await;
 
-        assert_eq!(
-            seen.lock().unwrap().as_slice(),
-            &[("rt-1".to_string(), "/proj".to_string())]
-        );
+        assert_eq!(seen.lock().unwrap().as_slice(), &["rt-1".to_string()]);
         cancel.cancel();
     }
 }
