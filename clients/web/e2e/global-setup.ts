@@ -59,7 +59,6 @@ export default async function globalSetup(): Promise<void> {
   fs.writeFileSync(
     configPath,
     JSON.stringify({
-      local_runtime: true,
       storage: {
         state_dir: path.join(tmpDir, "state"),
         data_dir: path.join(tmpDir, "data"),

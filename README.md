@@ -94,8 +94,8 @@ back to the server, or `velos`, managed ephemeral containers the server
 provisions for you.
 Providers, models, runtime vendors, GitHub, MCP servers, and skill bundles are
 all configured from the **Settings** page in the UI (stored in a SQLite settings
-database); `config.json` holds only deployment settings (storage paths, the
-`local_runtime` opt-in, and the database location).
+database); `config.json` holds only deployment settings (storage paths and the
+database location).
 
 📖 **Full user guide: [`docs/guide/`](docs/guide/README.md)** — installing and
 running the server, runtime vendors, sessions, GitHub, MCP, and skill bundles.

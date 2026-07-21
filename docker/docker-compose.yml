@@ -1,7 +1,7 @@
 # One-command self-host: `docker compose -f docker/docker-compose.yml up -d`.
 # Pulls the published server image (server+web on one port, see
-# ../docker/server.Dockerfile) and seeds `local_runtime: true` so a
-# `horsie connect` from any machine has a listener to dial. Providers/models
+# ../docker/server.Dockerfile). A `horsie connect` from any machine can dial
+# straight in — user runtimes are accepted by default. Providers/models
 # are NOT seeded here — add them via Settings after first boot.
 name: horsie
 
@@ -32,8 +32,7 @@ configs:
         "storage": {
           "state_dir": "/data/state",
           "data_dir": "/data/data"
-        },
-        "local_runtime": true
+        }
       }
 
 volumes:

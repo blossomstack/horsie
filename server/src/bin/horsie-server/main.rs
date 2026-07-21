@@ -116,18 +116,16 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     .await
     .map_err(BootError::Config)?;
 
-    // When opted in, the shared local-runtime vendor registers each daemon that
-    // dials `/api/runtime/connect?register=local` as a vendor. It owns no
-    // listener — it hands the route a hook that fires on registration. Kept
-    // alive by moving its hook into `AppState`.
-    let local_daemon_hook = if cfg.local_runtime {
+    // The shared local-runtime vendor registers each daemon that dials
+    // `/api/runtime/connect?register=local` as a vendor. It owns no listener —
+    // it hands the route a hook that fires on registration. Kept alive by
+    // moving its hook into `AppState`.
+    let local_daemon_hook = {
         let registry = horsie_server::vendor::LocalDaemonRegistry::new(
             runtime_registry.clone(),
             opened.vendors.clone(),
         );
-        Some(registry.hook())
-    } else {
-        None
+        registry.hook()
     };
 
     let github = Arc::new(horsie_server::github::GithubService::new(

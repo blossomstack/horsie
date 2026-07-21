@@ -10,8 +10,8 @@
 //!
 //! The `register` query parameter is the only vendor discriminator:
 //! - `?register=local` → a user daemon; fire the local-vendor registration hook
-//!   so the label becomes a selectable vendor. Gated by the `local_runtime`
-//!   opt-in (absent hook → `403`).
+//!   so the label becomes a selectable vendor. Always accepted: any runtime a
+//!   user dials in (same host or remote) is a first-class vendor by default.
 //! - anything else → a velos container; no hook, it just lands in the shared
 //!   registry for a waiting `provision()`.
 
@@ -49,20 +49,10 @@ pub async fn runtime_connect(
         return (StatusCode::BAD_REQUEST, "expected a websocket upgrade").into_response();
     };
 
-    // Resolve the (optional) local-vendor registration hook. `register=local`
-    // requires the opt-in; without it the daemon is refused rather than silently
-    // treated as a velos dial-back.
+    // The local-vendor registration hook fires only for `register=local`;
+    // any other dial (a velos container) just lands in the shared registry.
     let hook = if params.register.as_deref() == Some("local") {
-        match &state.local_daemon_hook {
-            Some(h) => Some(h.clone()),
-            None => {
-                return (
-                    StatusCode::FORBIDDEN,
-                    "shared local runtime vendor is disabled (set local_runtime = true)",
-                )
-                    .into_response();
-            }
-        }
+        Some(state.local_daemon_hook.clone())
     } else {
         None
     };

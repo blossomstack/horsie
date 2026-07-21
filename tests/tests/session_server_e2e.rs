@@ -137,7 +137,7 @@ async fn start_server(
         mcp,
         plugins,
         runtime_registry: Arc::new(ConnectedRuntimeRegistry::new()),
-        local_daemon_hook: None,
+        local_daemon_hook: Arc::new(|_label: String| {}),
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -265,7 +265,7 @@ async fn start_server_with_shared_local(
         mcp,
         plugins,
         runtime_registry,
-        local_daemon_hook: Some(local_daemon_hook),
+        local_daemon_hook,
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

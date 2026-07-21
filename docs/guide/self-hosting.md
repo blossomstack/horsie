@@ -28,9 +28,9 @@ proxy / auth layer — all still work exactly as before:
 
 **`config.json`** holds only deployment settings (storage locations, the
 database URL, plugin hook paths — see the [Settings reference](settings-reference.md)).
-Everything you tune later lives in the Settings UI. `docker/docker-compose.yml`
-seeds the minimal `{"local_runtime": true}` for you; if you're running the
-binary directly, write that file yourself and pass `--config <path>`.
+Everything you tune later lives in the Settings UI; `docker/docker-compose.yml`
+seeds just the storage paths for you. If you're running the binary directly
+and want non-default paths, write that file yourself and pass `--config <path>`.
 
 **Security:** there is no authentication. Only bind `0.0.0.0` on a trusted
 network, or front the server with your own auth proxy.
