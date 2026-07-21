@@ -192,6 +192,33 @@ async fn conformance_multi_turn_history_is_replayed() {
 }
 
 #[tokio::test]
+async fn conformance_max_tokens_truncation_surfaces() {
+    for &kind in KINDS {
+        let server = spawn_mock().await;
+        server.queue_truncated("cut off here");
+        let provider = build_provider(kind, &base_url_for(kind, &server));
+
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let err = agent
+            .run(
+                AgentInput::user_message("msg-1", "hi"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("truncation must surface as an error");
+
+        assert!(
+            matches!(err, AgentError::Truncated { .. }),
+            "{kind:?}: expected Truncated, got {err:?}",
+        );
+    }
+}
+
+#[tokio::test]
 async fn conformance_rate_limit_is_classified() {
     for &kind in KINDS {
         let server = spawn_mock().await;

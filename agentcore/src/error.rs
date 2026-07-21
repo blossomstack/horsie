@@ -33,6 +33,12 @@ pub enum AgentError {
     #[error("event sink error: {0}")]
     EventSink(#[from] EventSinkError),
 
+    /// The backend stopped because it hit the output-token ceiling. The partial
+    /// text is not a valid answer, so the run fails rather than returning it as
+    /// a completed turn.
+    #[error("response truncated at the max_tokens limit ({max_tokens:?})")]
+    Truncated { max_tokens: Option<u32> },
+
     #[error("cancelled")]
     Cancelled,
 }

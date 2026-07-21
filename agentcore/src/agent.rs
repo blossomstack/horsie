@@ -1,7 +1,7 @@
 use crate::{
     error::{AgentBuildError, AgentError},
     events::EventSink,
-    provider::{CompletionRequest, LlmProvider, ToolChoice},
+    provider::{CompletionRequest, LlmProvider, StopReason, ToolChoice},
     tool::Toolbox,
 };
 use horsie_models::agent::{
@@ -262,7 +262,8 @@ impl Agent {
         // the model can never end with bare text — it must keep working or call the
         // handoff tool to finish. Without one (or with an optional handoff tool —
         // see `with_handoff_tool_optional`), the model may end its turn with text
-        // (`Auto`) exactly as freely as it may call any other tool.
+        // (`Auto`) exactly as freely as it may call any other tool. Honoring
+        // `tool_choice` is a hard requirement of every provider.
         let tool_choice = if self.handoff_tool.is_some() && self.force_handoff_choice {
             ToolChoice::Any
         } else {
@@ -329,6 +330,17 @@ impl Agent {
                 }))
                 .await?;
             self.history.push(assistant_msg);
+
+            // A truncated turn is not a finished turn. Tool calls are exempt: a
+            // backend may report `length` alongside a complete tool call, and the
+            // loop can still execute it and continue.
+            if response.stop_reason == StopReason::MaxTokens
+                && extract_tool_calls(&response.parts).is_empty()
+            {
+                return Err(AgentError::Truncated {
+                    max_tokens: self.config.max_tokens,
+                });
+            }
 
             let tool_calls = extract_tool_calls(&response.parts);
 
@@ -1370,6 +1382,41 @@ mod tests {
         assert!(
             !timed_out.load(std::sync::atomic::Ordering::SeqCst),
             "tool calls in a turn ran sequentially, not concurrently"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_tokens_truncation_is_an_error_not_a_completion() {
+        // stop_reason was computed but never read in production: a response cut
+        // off by max_tokens looked exactly like a normal end of turn, so the
+        // caller received a silently truncated answer as a success.
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![ContentPart::Text(TextPart {
+                text: "half an ans".into(),
+            })],
+            stop_reason: StopReason::MaxTokens,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        }]);
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+
+        let err = agent
+            .run(
+                AgentInput::user_message("msg-1", "hi"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("truncation must not be reported as a completed turn");
+
+        assert!(
+            matches!(err, AgentError::Truncated { .. }),
+            "expected Truncated, got {err:?}",
         );
     }
 }
