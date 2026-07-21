@@ -22,6 +22,7 @@ use horsie_models::settings::{
     ModelView, ProviderView, ServerInfo, SettingsUpdate, SettingsView, VelosView,
     VendorCapabilities, VendorConfigInput, VendorConfigView, VendorTestResult, VendorView,
 };
+use horsie_openai::OpenAiProvider;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sqlx::Row;
@@ -351,9 +352,9 @@ impl ConfigStore for DbConfigStore {
                 if name.is_empty() {
                     return Err("provider name cannot be empty".into());
                 }
-                if p.kind != "anthropic" {
+                if !matches!(p.kind.as_str(), "anthropic" | "openai") {
                     return Err(format!(
-                        "unsupported provider kind '{}' (only 'anthropic')",
+                        "unsupported provider kind '{}' (expected 'anthropic' or 'openai')",
                         p.kind
                     ));
                 }
@@ -608,22 +609,28 @@ fn build_registry(providers: &[ProviderRow], models: &[ModelRow]) -> Result<Regi
                 m.alias, m.provider
             )
         })?;
-        if p.kind != "anthropic" {
-            return Err(format!(
-                "provider '{}' has unsupported kind '{}'",
-                p.name, p.kind
-            ));
-        }
         let max_tokens = m.max_tokens.and_then(|v| u32::try_from(v).ok());
-        reg.insert(
-            m.alias.clone(),
-            build_anthropic(
+        let built = match p.kind.as_str() {
+            "anthropic" => build_anthropic(
                 p.base_url.as_deref(),
                 p.api_key.as_deref(),
                 &m.model_id,
                 max_tokens,
             )?,
-        );
+            "openai" => build_openai(
+                p.base_url.as_deref(),
+                p.api_key.as_deref(),
+                &m.model_id,
+                max_tokens,
+            )?,
+            other => {
+                return Err(format!(
+                    "provider '{}' has unsupported kind '{other}'",
+                    p.name
+                ));
+            }
+        };
+        reg.insert(m.alias.clone(), built);
     }
     Ok(reg)
 }
@@ -642,6 +649,28 @@ fn build_anthropic(
     let mut p = match key {
         Some(k) => AnthropicProvider::with_api_key(k).map_err(|e| e.to_string())?,
         None => AnthropicProvider::new().map_err(|e| e.to_string())?,
+    };
+    p = p.with_model(model_id).with_max_tokens(max_tokens);
+    if let Some(u) = base_url {
+        p = p.with_base_url(u);
+    }
+    Ok(Arc::new(p))
+}
+
+fn build_openai(
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+    model_id: &str,
+    max_tokens: Option<u32>,
+) -> Result<Arc<dyn LlmProvider>, String> {
+    let key: Option<Secret> = match api_key {
+        Some(k) if !k.is_empty() => Some(Secret::from(k)),
+        Some(_) => return Err("inline api_key is empty".into()),
+        None => None,
+    };
+    let mut p = match key {
+        Some(k) => OpenAiProvider::with_api_key(k).map_err(|e| e.to_string())?,
+        None => OpenAiProvider::new().map_err(|e| e.to_string())?,
     };
     p = p.with_model(model_id).with_max_tokens(max_tokens);
     if let Some(u) = base_url {
@@ -1103,6 +1132,54 @@ mod tests {
         assert_eq!(view.providers.len(), 1);
         assert_eq!(view.models.len(), 1);
         assert!(o.registry.read().unwrap().contains_key("m"));
+    }
+
+    fn provider_kind(name: &str, kind: &str) -> ProviderInput {
+        ProviderInput {
+            name: name.into(),
+            kind: kind.into(),
+            base_url: Some("http://localhost:1".into()),
+            api_key: Some("k".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_provider_kind_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider_kind("local", "openai")]),
+                models: Some(vec![model("m", "local")]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect("openai must be an accepted provider kind");
+
+        assert_eq!(view.providers.len(), 1);
+        assert_eq!(view.providers[0].kind, "openai");
+        // The model's provider was constructed and registered.
+        assert!(o.registry.read().unwrap().contains_key("m"));
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_kind_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let err = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider_kind("bogus", "cohere")]),
+                models: None,
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect_err("unknown kinds must be rejected");
+
+        assert!(err.contains("cohere"), "error names the kind: {err}");
     }
 
     fn velos_input(image: &str, advertise_address: &str, token: Option<&str>) -> VendorInput {

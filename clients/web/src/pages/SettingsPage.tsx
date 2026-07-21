@@ -44,8 +44,11 @@ const GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/";
 /** Row name of the GitHub MCP server (managed from the GitHub section). */
 const GITHUB_MCP_NAME = "github";
 
+type ProviderKind = "anthropic" | "openai";
+
 type ProviderDraft = {
   name: string;
+  kind: ProviderKind;
   baseUrl: string;
   apiKeyInput: string; // "" = leave the stored key unchanged
   hasInlineKey: boolean;
@@ -77,6 +80,7 @@ type VelosDraft = {
 const toProviderDrafts = (v: SettingsView): ProviderDraft[] =>
   v.providers.map((p) => ({
     name: p.name,
+    kind: p.kind === "openai" ? "openai" : "anthropic",
     baseUrl: p.baseUrl ?? "",
     apiKeyInput: "",
     hasInlineKey: p.hasInlineKey,
@@ -211,7 +215,7 @@ export function SettingsPage() {
 
     const providerInputs: ProviderInput[] = providers.map((p) => ({
       name: p.name.trim(),
-      kind: "anthropic",
+      kind: p.kind,
       baseUrl: p.baseUrl.trim() || undefined,
       apiKey: p.apiKeyInput === "" ? undefined : p.apiKeyInput,
     }));
@@ -345,7 +349,13 @@ export function SettingsPage() {
                 onAdd={() => {
                   setProviders((ps) => [
                     ...ps,
-                    { name: "", baseUrl: "", apiKeyInput: "", hasInlineKey: false },
+                    {
+                      name: "",
+                      kind: "anthropic",
+                      baseUrl: "",
+                      apiKeyInput: "",
+                      hasInlineKey: false,
+                    },
                   ]);
                   touch();
                 }}
@@ -752,11 +762,24 @@ function ProviderRow({
     <RowShell onRemove={onRemove} removeLabel="Remove provider">
       <div className="grid grid-cols-2 gap-3">
         <TextField label="Name" value={draft.name} onChange={(v) => set({ name: v })} placeholder="anthropic" />
+        <label className="block">
+          <RowLabel>Kind</RowLabel>
+          <select
+            className="input font-mono"
+            value={draft.kind}
+            onChange={(e) => set({ kind: e.target.value as ProviderKind })}
+          >
+            <option value="anthropic">Anthropic</option>
+            <option value="openai">OpenAI-compatible</option>
+          </select>
+        </label>
         <TextField
           label="Base URL (optional)"
           value={draft.baseUrl}
           onChange={(v) => set({ baseUrl: v })}
-          placeholder="https://api.anthropic.com"
+          placeholder={
+            draft.kind === "openai" ? "http://127.0.0.1:11434" : "https://api.anthropic.com"
+          }
         />
         <TextField
           label="Inline key"
