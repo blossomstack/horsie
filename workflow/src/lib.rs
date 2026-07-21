@@ -10,6 +10,7 @@
 mod agent_actor;
 mod context;
 mod mcp_toolbox;
+mod task_list;
 mod timers;
 mod workflow_actor;
 mod workspace;
@@ -21,6 +22,7 @@ pub use context::{
     WorkflowRuntimeContext, conclude_tool_spec,
 };
 pub use mcp_toolbox::{CompositeToolbox, McpToolbox};
+pub use task_list::TASK_LIST_TOOL;
 pub use timers::{
     CancelSelector, TimerId, TimerKind, TimerRecord, TimerView, now_unix_ms, timer_tool_specs,
 };
