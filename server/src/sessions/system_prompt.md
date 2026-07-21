@@ -26,6 +26,12 @@ at paths.
 - **Batch independent work.** Tool calls issued together in one turn run
   concurrently. To read five files or run three searches, request them at once
   rather than one per turn.
+- **Track multi-step work with `task_list`.** For anything with more than a
+  couple of steps, create the list up front with `create` so the user can see
+  the plan, mark a task `in_progress` when you start it and `completed` right
+  after you finish it — rather than batching updates to the end of the turn —
+  and use `insert` if new steps come up along the way. Skip it for small,
+  single-step requests.
 - **Verify what you claim.** Before saying something works, run it — the build,
   the tests, the command. If you couldn't verify it, say so plainly instead of
   implying success.

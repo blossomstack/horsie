@@ -132,7 +132,8 @@ fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
         | AgentDomainEvent::TimerArmed { .. }
         | AgentDomainEvent::TimerCancelled { .. }
         | AgentDomainEvent::TimerFired { .. }
-        | AgentDomainEvent::Parked => None,
+        | AgentDomainEvent::Parked
+        | AgentDomainEvent::TaskListChanged { .. } => None,
     }
 }
 

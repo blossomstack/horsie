@@ -25,7 +25,7 @@ use horsie_mock_llm::MockLlmServer;
 use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition, WorkflowTransition};
 use horsie_runtime_client::{MockTransport, RuntimeClient};
 use horsie_workflow::{
-    AgentActor, AgentDomainEvent, AgentRunDef, CONCLUDE_TOOL, DefaultToolboxFactory,
+    AgentActor, AgentDomainEvent, AgentRunDef, AgentState, CONCLUDE_TOOL, DefaultToolboxFactory,
     ToolboxFactory, WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowNotification,
     WorkflowRuntimeContext, WorkflowState, WorkflowStatus, conclude_tool_spec,
 };
@@ -451,6 +451,60 @@ async fn agent_session_history_reconstructs_from_journal() {
     assert!(concluded, "expected a conclude tool call in the history");
 }
 
+// ── the task list is durable: journal-only reconstruction sees it ────────────
+
+#[tokio::test]
+async fn task_list_persists_across_journal_reconstruction() {
+    // Create a two-item list, then complete the first item, before concluding.
+    let mock = MockLlmServer::builder()
+        .tool_call(
+            "task_list",
+            json!({"action": "create", "tasks": ["write tests", "open PR"]}),
+        )
+        .tool_call(
+            "task_list",
+            json!({"action": "update_status", "ids": [1], "status": "completed"}),
+        )
+        .tool_call(CONCLUDE_TOOL, json!({"answer": "done"}))
+        .build()
+        .await;
+
+    let mut solo = agent("solo");
+    solo.output_schema = Some(json!({
+        "type": "object",
+        "properties": { "answer": { "type": "string" } }
+    }));
+
+    let def = WorkflowDefinition {
+        default_use_plugins: None,
+        start: "solo".into(),
+        agents: vec![solo],
+    };
+
+    let journal = Arc::new(InMemoryJournal::new());
+    let (rt, _events) = runtime_context(provider_at(&mock.url()), Arc::new(DefaultToolboxFactory));
+    let wf = spawn_root(WorkflowActor::new("wf-task-list", def, rt), journal.clone());
+
+    wf.tell(WorkflowCommand::Start {
+        input: "track this work".into(),
+    })
+    .await
+    .unwrap();
+
+    let state = wait_for_status(&journal, "wf-task-list", WorkflowStatus::Finished).await;
+    let session_id = state.current_session_id.unwrap();
+
+    // Fold the agent's journal fresh -- exactly what a cold-restarted actor
+    // would see. The mutation must already be there: the task list is
+    // durable state, not something living only in an in-memory toolbox that
+    // a restart would silently reset.
+    let agent_state = reconstruct_agent_state(&journal, &session_id.to_string()).await;
+    let rendered = agent_state.task_list.render();
+    assert!(rendered.contains("Tasks (1/2 done)"), "{rendered}");
+    assert!(rendered.contains("[x] 1. write tests"), "{rendered}");
+    assert!(rendered.contains("[ ] 2. open PR"), "{rendered}");
+}
+
 // ── a failed agent run still journals its captured history ───────────────────
 
 #[tokio::test]
@@ -494,10 +548,7 @@ async fn failed_agent_run_journals_its_history() {
     );
 }
 
-async fn reconstruct_agent_history(
-    journal: &Arc<InMemoryJournal>,
-    session_id: &str,
-) -> Vec<horsie_agentcore::Message> {
+async fn reconstruct_agent_state(journal: &Arc<InMemoryJournal>, session_id: &str) -> AgentState {
     let pid = PersistenceId::new("agent", session_id);
     let (mut state, seq) = match journal.latest_snapshot(&pid).await.unwrap() {
         Some((bytes, seq)) => (serde_json::from_slice(&bytes).unwrap(), seq),
@@ -508,7 +559,14 @@ async fn reconstruct_agent_history(
         let ev: AgentDomainEvent = serde_json::from_slice(&item.unwrap()).unwrap();
         state = AgentActor::apply_event(state, ev);
     }
-    state.messages
+    state
+}
+
+async fn reconstruct_agent_history(
+    journal: &Arc<InMemoryJournal>,
+    session_id: &str,
+) -> Vec<horsie_agentcore::Message> {
+    reconstruct_agent_state(journal, session_id).await.messages
 }
 
 // ── timers: park / fire / resume ─────────────────────────────────────────────
