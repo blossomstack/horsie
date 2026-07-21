@@ -25,13 +25,10 @@ This is the way to point an agent at code on your own computer. (The daemon can
 run anywhere that can reach the server — including the same host as the server —
 but its purpose is bring-your-own-machine compute.)
 
-**Enable it on the server** in `config.json`:
-
-```jsonc
-{ "local_runtime": true }
-```
-
-Without this, the server rejects the daemon's connection with `403`.
+No server-side opt-in is needed: the server accepts user-launched runtimes by
+default, from the same host or a remote machine. (There is no authentication on
+the dial-in route, as on the rest of the API — only bind the server to networks
+you trust.)
 
 **Run the daemon on your machine**, pointing it at the server's address:
 

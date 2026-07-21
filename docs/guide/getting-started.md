@@ -56,6 +56,7 @@ Building the CLI from source instead of the install script:
 - **A session won't run a turn** — you have no active runtime. Check that
   `horsie connect` (or a velos vendor) is connected and that a model is set.
   See [Runtime vendors](runtime-vendors.md).
-- **`403` when connecting** — the shared local runtime is disabled. Set
-  `"local_runtime": true` in the server's config and restart it (already the
-  default in `docker/docker-compose.yml`).
+- **Your runtime doesn't appear in Settings** — confirm the `horsie connect`
+  process is still running (registrations are in-memory only: a server restart
+  drops them, and the daemon exits rather than reconnecting, so rerun
+  `horsie connect` after restarting the server).

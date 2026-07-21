@@ -7,9 +7,12 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Translate a `--server` URL (`http(s)://host[:port]`) into the
-/// `ws(s)://.../api/runtime/connect?register=<runtime_id>` endpoint
-/// `horsie-runtime` expects.
-pub fn server_to_endpoint(server: &str, runtime_id: &str) -> Result<String, CliError> {
+/// `ws(s)://.../api/runtime/connect?register=local` endpoint
+/// `horsie-runtime` expects. `register` is the server's vendor-kind
+/// discriminator — only the literal `local` fires the local-daemon
+/// registration hook; the runtime's own identity travels separately via
+/// `--runtime-id` (announced as `RuntimeReady.runtime_id`).
+pub fn server_to_endpoint(server: &str) -> Result<String, CliError> {
     let (scheme, rest) = server
         .split_once("://")
         .ok_or_else(|| CliError::Validation(format!("--server must be a URL, got '{server}'")))?;
@@ -24,7 +27,7 @@ pub fn server_to_endpoint(server: &str, runtime_id: &str) -> Result<String, CliE
     };
     let rest = rest.trim_end_matches('/');
     Ok(format!(
-        "{ws_scheme}://{rest}/api/runtime/connect?register={runtime_id}"
+        "{ws_scheme}://{rest}/api/runtime/connect?register=local"
     ))
 }
 
@@ -67,7 +70,7 @@ pub fn run(
     background: bool,
     state_dir: &Path,
 ) -> Result<i32, CliError> {
-    let endpoint = server_to_endpoint(server, runtime_id)?;
+    let endpoint = server_to_endpoint(server)?;
     let normalized: Vec<String> = workspaces
         .iter()
         .map(|w| normalize_workspace_arg(w))
@@ -126,7 +129,7 @@ mod tests {
     #[test]
     fn server_to_endpoint_maps_http_to_ws() {
         assert_eq!(
-            server_to_endpoint("http://localhost:3789", "local").unwrap(),
+            server_to_endpoint("http://localhost:3789").unwrap(),
             "ws://localhost:3789/api/runtime/connect?register=local"
         );
     }
@@ -134,23 +137,35 @@ mod tests {
     #[test]
     fn server_to_endpoint_maps_https_to_wss() {
         assert_eq!(
-            server_to_endpoint("https://horsie.example.com", "shawn-laptop").unwrap(),
-            "wss://horsie.example.com/api/runtime/connect?register=shawn-laptop"
+            server_to_endpoint("https://horsie.example.com").unwrap(),
+            "wss://horsie.example.com/api/runtime/connect?register=local"
         );
     }
 
     #[test]
     fn server_to_endpoint_strips_trailing_slash() {
         assert_eq!(
-            server_to_endpoint("http://localhost:3789/", "local").unwrap(),
+            server_to_endpoint("http://localhost:3789/").unwrap(),
             "ws://localhost:3789/api/runtime/connect?register=local"
+        );
+    }
+
+    /// `register` is the vendor-kind discriminator, not the runtime's name:
+    /// the server only fires the local-daemon hook for the literal `local`,
+    /// and the runtime's identity travels via `RuntimeReady.runtime_id`.
+    #[test]
+    fn server_to_endpoint_always_registers_as_local() {
+        assert!(
+            server_to_endpoint("http://h:3789")
+                .unwrap()
+                .ends_with("?register=local")
         );
     }
 
     #[test]
     fn server_to_endpoint_rejects_non_http_scheme() {
-        assert!(server_to_endpoint("ws://localhost:3789", "local").is_err());
-        assert!(server_to_endpoint("localhost:3789", "local").is_err());
+        assert!(server_to_endpoint("ws://localhost:3789").is_err());
+        assert!(server_to_endpoint("localhost:3789").is_err());
     }
 
     #[test]

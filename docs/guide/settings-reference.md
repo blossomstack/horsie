@@ -29,9 +29,6 @@ file — is valid.
     // bin dir). Absent → auto-discover `node` from the environment.
     "hook_path": ["/usr/local/bin"]
   },
-  // Allow a local runtime daemon to register itself (see Runtime vendors).
-  // Default: false — connections to ?register=local are rejected with 403.
-  "local_runtime": true,
   "database": {
     // Where runtime-editable settings are stored. Default: a SQLite file at
     // <data_dir>/server/config.db. Only sqlite:// is supported today.

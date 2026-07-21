@@ -66,10 +66,10 @@ pub struct AppState {
     /// daemon) lands in, keyed by `runtime_id`. Shared with the vendors so a
     /// vendor's `provision()` finds the connection the HTTP route registered.
     pub runtime_registry: Arc<ConnectedRuntimeRegistry>,
-    /// Hook that registers a `?register=local` daemon as a vendor. `None` when
-    /// the `local_runtime` opt-in is off, which makes the route refuse such
-    /// registrations.
-    pub local_daemon_hook: Option<ConnectHook>,
+    /// Hook that registers a `?register=local` daemon as a vendor. Always
+    /// installed: user-launched runtimes are supported by default, whether
+    /// they dial from the same host or a remote machine.
+    pub local_daemon_hook: ConnectHook,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
@@ -240,7 +240,7 @@ mod tests {
             mcp,
             plugins,
             runtime_registry,
-            local_daemon_hook: None,
+            local_daemon_hook: Arc::new(|_label: String| {}),
             web_dir: None,
         }
     }
