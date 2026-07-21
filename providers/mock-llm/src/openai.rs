@@ -105,6 +105,22 @@ fn text_stream_chunks(id: &str, chunks: &[String]) -> Vec<(String, String)> {
     out
 }
 
+/// A reasoning-model turn: the reasoning trace streams first as
+/// `delta.reasoning_content` (DeepSeek/vLLM shape), then the answer content,
+/// then a `stop` finish. Mirrors how deepseek-reasoner interleaves the two.
+fn reasoning_chunks(id: &str, reasoning: &str, content: &str) -> Vec<(String, String)> {
+    let mut out = vec![
+        chunk(
+            id,
+            serde_json::json!({ "role": "assistant", "reasoning_content": reasoning }),
+            None,
+        ),
+        chunk(id, serde_json::json!({ "content": content }), None),
+    ];
+    out.extend(final_chunk(id, "stop", 5));
+    out
+}
+
 /// A tool call. Arguments arrive as a single delta here; real backends fragment
 /// them, and the provider accumulates either way.
 fn tool_call_chunks(
@@ -154,6 +170,9 @@ pub(crate) async fn handle_chat_completions(
         Some(MockResponse::Text { content }) => sse_from_pairs(text_chunks(&id, &content)),
         Some(MockResponse::Truncated { content }) => {
             sse_from_pairs(truncated_chunks(&id, &content))
+        }
+        Some(MockResponse::Reasoning { reasoning, content }) => {
+            sse_from_pairs(reasoning_chunks(&id, &reasoning, &content))
         }
         Some(MockResponse::TextStream { chunks }) => {
             sse_from_pairs(text_stream_chunks(&id, &chunks))

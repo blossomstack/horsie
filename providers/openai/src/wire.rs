@@ -102,8 +102,27 @@ pub struct DeltaToolCall {
 pub struct Delta {
     #[serde(default)]
     pub content: Option<String>,
+    /// Reasoning trace on reasoning models. DeepSeek (`deepseek-reasoner`) and
+    /// vLLM (started with a `--reasoning-parser`) stream it here, as a separate
+    /// channel that precedes `content`.
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+    /// OpenRouter streams the same trace under `reasoning` instead.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<DeltaToolCall>>,
+}
+
+impl Delta {
+    /// This delta's reasoning trace, under whichever field the backend uses:
+    /// `reasoning_content` (DeepSeek, vLLM) or `reasoning` (OpenRouter).
+    #[must_use]
+    pub fn reasoning_trace(&self) -> Option<&str> {
+        self.reasoning_content
+            .as_deref()
+            .or(self.reasoning.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -292,6 +311,20 @@ mod tests {
         }];
 
         assert!(to_wire_messages(&history).is_empty());
+    }
+
+    #[test]
+    fn reasoning_trace_prefers_reasoning_content_then_reasoning() {
+        // DeepSeek/vLLM use `reasoning_content`; OpenRouter uses `reasoning`.
+        let dcv: Delta =
+            serde_json::from_str(r#"{"reasoning_content":"a","reasoning":"b"}"#).unwrap();
+        assert_eq!(dcv.reasoning_trace(), Some("a"));
+
+        let orv: Delta = serde_json::from_str(r#"{"reasoning":"b"}"#).unwrap();
+        assert_eq!(orv.reasoning_trace(), Some("b"));
+
+        let none: Delta = serde_json::from_str(r#"{"content":"hi"}"#).unwrap();
+        assert_eq!(none.reasoning_trace(), None);
     }
 
     #[test]

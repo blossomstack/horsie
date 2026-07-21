@@ -45,6 +45,14 @@ pub enum MockResponse {
     Truncated {
         content: String,
     },
+    /// A reasoning-model turn: a reasoning trace, then the answer. On the OpenAI
+    /// wire the trace streams as `delta.reasoning_content` (DeepSeek/vLLM shape)
+    /// before the content; the Anthropic wire renders only the answer text
+    /// (reasoning on that wire is the `Thinking` variant).
+    Reasoning {
+        reasoning: String,
+        content: String,
+    },
 }
 
 pub(crate) struct QueueEntry {
@@ -298,6 +306,16 @@ impl MockLlmServer {
                 content: content.into(),
             }));
     }
+    /// Queue a reasoning-model turn: a reasoning trace, then the answer.
+    pub fn queue_reasoning(&self, reasoning: impl Into<String>, content: impl Into<String>) {
+        self.state
+            .queue
+            .lock()
+            .push(QueueEntry::immediate(MockResponse::Reasoning {
+                reasoning: reasoning.into(),
+                content: content.into(),
+            }));
+    }
     pub fn blocking_response(&self, text: impl Into<String>) -> BlockHandle {
         let gate = Arc::new(Notify::new());
         let reached = Arc::new(Notify::new());
@@ -421,6 +439,8 @@ async fn handle_messages(
                         thinking_sse(&msg_id, &text, &signature)
                     }
                     Some(MockResponse::Truncated { content }) => truncated_sse(&msg_id, &content),
+                    // Reasoning is an OpenAI-wire concept; here render just the answer.
+                    Some(MockResponse::Reasoning { content, .. }) => text_sse(&msg_id, &content),
                     // Error in stream mode: emit a StreamError-compatible SSE event so
                     // async-anthropic parses it as AnthropicError::StreamError. The
                     // error `type` is derived from `status` so tests can choose a
@@ -456,6 +476,9 @@ async fn handle_messages(
                         ResponseKind::Json(axum::Json(thinking_json(&text, &signature)))
                     }
                     Some(MockResponse::Truncated { content }) => {
+                        ResponseKind::Json(axum::Json(text_json(&content)))
+                    }
+                    Some(MockResponse::Reasoning { content, .. }) => {
                         ResponseKind::Json(axum::Json(text_json(&content)))
                     }
                     Some(MockResponse::Error { status, message }) => {
