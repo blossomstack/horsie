@@ -16,15 +16,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use serde::Deserialize;
 use std::sync::Arc;
-
-#[derive(Deserialize)]
-pub(crate) struct ChatRequest {
-    #[serde(default)]
-    #[allow(dead_code)]
-    stream: Option<bool>,
-}
 
 fn chunk(id: &str, delta: serde_json::Value, finish: Option<&str>) -> (String, String) {
     let mut choice = serde_json::json!({ "index": 0, "delta": delta });
@@ -150,8 +142,9 @@ fn tool_call_chunks(
 pub(crate) async fn handle_chat_completions(
     State(state): State<Arc<MockState>>,
     _headers: HeaderMap,
-    Json(_req): Json<ChatRequest>,
+    Json(req): Json<serde_json::Value>,
 ) -> ResponseKind {
+    state.capture(req);
     let entry = state.dequeue_entry();
 
     if let Some(e) = &entry {

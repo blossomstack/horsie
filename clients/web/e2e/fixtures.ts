@@ -25,6 +25,27 @@ export class MockLlm {
     if (!res.ok) throw new Error(`mock POST ${pathname} → ${res.status}`);
   }
 
+  /**
+   * Every request body the mock has received since the last `reset`, newest
+   * first. Tests assert on what reached the agent (e.g. the composed system
+   * prompt) via `capturedContains`.
+   */
+  async received(): Promise<unknown[]> {
+    const res = await fetch(`${this.url}/received`);
+    if (!res.ok) throw new Error(`mock GET /received → ${res.status}`);
+    return (await res.json()) as unknown[];
+  }
+
+  /**
+   * True if any captured request's JSON (system prompt included) contains
+   * `needle`. Wire-agnostic: matches whether the prompt rode in the Anthropic
+   * top-level `system` field or an OpenAI system message.
+   */
+  async capturedContains(needle: string): Promise<boolean> {
+    const bodies = await this.received();
+    return bodies.some((b) => JSON.stringify(b).includes(needle));
+  }
+
   /** Clear the queue + per-session state. Call in beforeEach. */
   reset(): Promise<void> {
     return this.post("/reset");
