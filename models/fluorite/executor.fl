@@ -3,6 +3,10 @@ package executor;
 
 use runtime.ToolCallRequest;
 use runtime.ToolResult;
+use runtime.ScanRequest;
+use runtime.ScanResponse;
+use runtime.SessionStartRequest;
+use runtime.SessionStartResponse;
 
 /// One named workspace root passed to a runtime.
 struct WorkspaceConfig { name: String, path: String }
@@ -66,6 +70,14 @@ struct ToolCallCmd { runtime_id: String, call: ToolCallRequest }
 struct CancelToolCallCmd { runtime_id: String, call_id: String }
 struct ToolResultEvent { runtime_id: String, call_id: String, result: ToolResult }
 
+// Workspace-context relay (AGENTS.md / skills / SessionStart hooks). The request
+// payloads are the runtime protocol's own — the executor forwards them verbatim
+// to the runtime link and wraps the response in the matching event.
+struct ScanWorkspaceCmd { runtime_id: String, request: ScanRequest }
+struct SessionStartCmd { runtime_id: String, request: SessionStartRequest }
+struct ScanResultEvent { runtime_id: String, response: ScanResponse }
+struct SessionStartResultEvent { runtime_id: String, response: SessionStartResponse }
+
 // --- Commands (server → executor) ---
 
 struct CreateRuntimeCmd { runtime_id: String, config: RuntimeConfig }
@@ -94,6 +106,8 @@ union ExecutorCommand {
     QueryRuntimes(QueryRuntimesCmd),
     ToolCall(ToolCallCmd),
     CancelToolCall(CancelToolCallCmd),
+    ScanWorkspace(ScanWorkspaceCmd),
+    SessionStart(SessionStartCmd),
 }
 
 /// Envelope for server → executor messages
@@ -117,6 +131,8 @@ union ExecutorEvent {
     RuntimesListed(RuntimesListedEvent),
     CommandFailed(CommandFailedEvent),
     ToolResult(ToolResultEvent),
+    ScanResult(ScanResultEvent),
+    SessionStartResult(SessionStartResultEvent),
 }
 
 /// Envelope for executor → server messages.
