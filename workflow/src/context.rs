@@ -1,5 +1,4 @@
 use crate::mcp_toolbox::CompositeToolbox;
-use crate::task_list::TaskListTool;
 use crate::workflow_actor::WorkflowNotification;
 use async_trait::async_trait;
 use horsie_agentcore::{EventSink, LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
@@ -152,8 +151,7 @@ impl ToolboxFactory for DefaultToolboxFactory {
         mcp: Vec<Arc<dyn Toolbox>>,
     ) -> Arc<dyn Toolbox> {
         let client = runtime_client.clone();
-        let runtime =
-            add_runtime_tools(ToolboxImpl::new(), runtime_client).add(TaskListTool::new());
+        let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client);
         // Compose the runtime tools with any server-side MCP toolboxes *before*
         // the allowlist, so `allowed_tools` gates MCP tools exactly like runtime
         // tools and the agent sees them as one flat tool set.
@@ -606,33 +604,6 @@ mod tests {
         assert!(names.contains(&"bash".to_string()));
         assert!(names.contains(&CONCLUDE_TOOL.to_string()));
         assert!(!names.contains(&"read_file".to_string()));
-        assert!(!names.contains(&crate::task_list::TASK_LIST_TOOL.to_string()));
-    }
-
-    #[test]
-    fn task_list_present_by_default_and_filterable() {
-        let client = RuntimeClient::new(MockTransport::ok(""));
-        let tb = DefaultToolboxFactory.for_agent(
-            &def(None, None, false),
-            client.clone(),
-            vec!["october".into()],
-            false,
-            Vec::new(),
-        );
-        let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
-        assert!(names.contains(&crate::task_list::TASK_LIST_TOOL.to_string()));
-
-        // Narrowing to a different tool via allowed_tools excludes it, same as any
-        // other runtime tool.
-        let tb = DefaultToolboxFactory.for_agent(
-            &def(Some(vec!["bash".into()]), None, false),
-            client,
-            vec!["october".into()],
-            false,
-            Vec::new(),
-        );
-        let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
-        assert!(!names.contains(&crate::task_list::TASK_LIST_TOOL.to_string()));
     }
 
     #[tokio::test]

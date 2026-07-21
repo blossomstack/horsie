@@ -112,6 +112,13 @@ pub enum AgentCommand {
     },
     /// Internal: a timer's sleep elapsed.
     TimerFired { id: crate::timers::TimerId },
+    /// Apply a `task_list` mutation (or just render `list`); durable like
+    /// timers. Replies with the rendered list, or an error message if the
+    /// action was rejected (unknown id, out-of-range position, ...).
+    TaskListOp {
+        action: crate::task_list::TaskListAction,
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// Coarse events that alter persisted agent state. Streaming observation events
@@ -150,6 +157,12 @@ pub enum AgentDomainEvent {
     },
     /// The agent parked itself awaiting its timers.
     Parked,
+    /// The task list changed (create/insert/update_status). Carries the full
+    /// resulting state, not a delta — mirrors `MessageComplete`/`ToolComplete`,
+    /// so replay never needs to re-derive or re-validate a past mutation.
+    TaskListChanged {
+        snapshot: crate::task_list::TaskListState,
+    },
 }
 
 /// The conversation history reconstructed by folding [`AgentDomainEvent`]s, plus
@@ -163,6 +176,10 @@ pub struct AgentState {
     /// True while the agent has parked itself awaiting a timer (no run in flight).
     #[serde(default)]
     pub parked: bool,
+    /// The agent's task list — durable so it survives an actor restart exactly
+    /// like timers do; see `crate::task_list`.
+    #[serde(default)]
+    pub task_list: crate::task_list::TaskListState,
 }
 
 /// Result of a background run, sent back to the actor as [`AgentCommand::RunFinished`].
@@ -232,6 +249,13 @@ impl AgentActor {
         } else {
             self.ctx.toolbox.clone()
         };
+        // `task_list` is always available, like `skill`/`inspect_workspace` --
+        // it's a working-memory aid every agent can reach for, not a permission
+        // that needs gating per agent.
+        let toolbox: Arc<dyn Toolbox> = Arc::new(TaskListToolbox {
+            inner: toolbox,
+            actor: self_ref.clone(),
+        });
         let inner_sink = self.ctx.event_sink.clone();
         let system_prompt = self.params.system_prompt.clone().unwrap_or_default();
         // An explicit optional handoff tool (e.g. the server crate's `ask_user`
@@ -586,6 +610,7 @@ impl EventSourcedActor for AgentActor {
                 None => state.timers.retain(|t| t.id != id),
             },
             AgentDomainEvent::Parked => state.parked = true,
+            AgentDomainEvent::TaskListChanged { snapshot } => state.task_list = snapshot,
             AgentDomainEvent::RunComplete { .. } | AgentDomainEvent::RunCancelled => {}
         }
         state
@@ -691,6 +716,22 @@ impl EventSourcedActor for AgentActor {
             }
             AgentCommand::TimerFired { id } => self.handle_timer_fired(id, state, ctx).await,
             AgentCommand::RunFinished(report) => self.handle_finished(*report, state, ctx).await,
+            AgentCommand::TaskListOp { action, reply } => {
+                let mut next = state.task_list.clone();
+                match next.apply(action) {
+                    Ok(()) => {
+                        let text = next.render();
+                        let _ = reply.send(Ok(text));
+                        CommandEffect::persist(vec![AgentDomainEvent::TaskListChanged {
+                            snapshot: next,
+                        }])
+                    }
+                    Err(msg) => {
+                        let _ = reply.send(Err(msg));
+                        CommandEffect::none()
+                    }
+                }
+            }
         }
     }
 
@@ -845,6 +886,44 @@ impl Toolbox for TimerToolbox {
             }
             _ => self.inner.execute(name, input).await,
         }
+    }
+}
+
+/// Wraps an agent's toolbox, adding the always-available `task_list` tool. It
+/// executes by `ask`ing the owning [`AgentActor`] (never forwarded to the
+/// sandboxed runtime), so its state is durable -- journaled and replayed
+/// exactly like timers (see `crate::task_list`).
+struct TaskListToolbox {
+    inner: Arc<dyn Toolbox>,
+    actor: ActorRef<AgentCommand>,
+}
+
+#[async_trait]
+impl Toolbox for TaskListToolbox {
+    fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
+        let mut specs = self.inner.specs();
+        specs.push(crate::task_list::task_list_tool_spec());
+        specs
+    }
+
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+    ) -> Result<Value, horsie_agentcore::ToolCallError> {
+        use horsie_agentcore::ToolCallError;
+        if name != crate::task_list::TASK_LIST_TOOL {
+            return self.inner.execute(name, input).await;
+        }
+        let action = crate::task_list::TaskListAction::from_input(&input)?;
+        let result = self
+            .actor
+            .ask(|reply| AgentCommand::TaskListOp { action, reply })
+            .await
+            .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
+        result
+            .map(Value::String)
+            .map_err(ToolCallError::InvalidInput)
     }
 }
 
@@ -1346,6 +1425,33 @@ mod tests {
             },
         );
         assert!(state.timers.is_empty());
+    }
+
+    #[test]
+    fn task_list_events_fold_into_state() {
+        let mut state = AgentActor::initial_state();
+        assert_eq!(state.task_list.render(), "No tasks.");
+
+        let mut snapshot = state.task_list.clone();
+        snapshot
+            .apply(crate::task_list::TaskListAction::Create {
+                tasks: vec!["a".to_string(), "b".to_string()],
+            })
+            .unwrap();
+        state = AgentActor::apply_event(state, AgentDomainEvent::TaskListChanged { snapshot });
+        assert!(state.task_list.render().contains("[ ] 1. a"));
+
+        // A later snapshot replaces the whole state -- folding is a plain
+        // assignment, not a merge.
+        let mut snapshot = state.task_list.clone();
+        snapshot
+            .apply(crate::task_list::TaskListAction::UpdateStatus {
+                ids: vec![1],
+                status: crate::task_list::TaskStatus::Completed,
+            })
+            .unwrap();
+        state = AgentActor::apply_event(state, AgentDomainEvent::TaskListChanged { snapshot });
+        assert!(state.task_list.render().contains("Tasks (1/2 done)"));
     }
 
     #[test]

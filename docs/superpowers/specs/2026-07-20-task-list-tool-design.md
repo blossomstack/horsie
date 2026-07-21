@@ -38,42 +38,55 @@ telling the agent when to reach for it.
 
 ## Decision
 
-**One new tool, `task_list`, implemented as a plain `Tool`** (not a
-standalone `Toolbox`), added into the same `ToolboxImpl` chain as the runtime
-tools in `DefaultToolboxFactory::for_agent`:
+> **Amendment (2026-07-21):** the first version of this tool held state in the
+> `Tool` instance itself (reset on an actor restart) on the reasoning that the
+> model would always see the last-known list from its journaled conversation
+> history anyway. The user asked for it to be persisted along with session
+> state instead — i.e. durable across a restart the same way timers are, not
+> just recoverable-in-spirit from message history. The sections below describe
+> the corrected, durable design; the superseded ephemeral version is kept out
+> of this doc entirely rather than left as dead narrative.
 
-```rust
-let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client)
-    .add(TaskListTool::new());
-```
+**`task_list` is durable agent state, journaled exactly like timers.**
+`TaskListState` (an ordered `Vec<TaskRecord>` + an id counter) lives on
+`AgentState` (`workflow/src/agent_actor.rs`) next to `messages` and `timers`.
+Every mutation (`create`/`insert`/`update_status`) persists one
+`AgentDomainEvent::TaskListChanged { snapshot }` event carrying the *whole*
+resulting state (not a delta — mirrors how `MessageComplete`/`ToolComplete`
+carry full content, not diffs), folded into `AgentState` by `apply_event` on
+recovery. This is the same mechanism `TimerArmed`/`TimerCancelled`/`TimerFired`
+already use, so a cold-restarted actor reconstructs the exact task list a live
+one would have, not just "the model can infer it from past messages."
 
-This makes it available to both workflow agents and interactive sessions
-uniformly, and — unlike `skill`/`inspect_workspace` — it flows through the
-existing `allowed_tools` allowlist exactly like a runtime tool. Rationale: a
-task list is a working-memory aid, not something every agent strictly needs
-to function (unlike workspace introspection), so a tightly-scoped workflow
-sub-agent should be able to opt out of it via `allowed_tools` the same way it
-opts out of `bash`.
+**The tool executes by `ask`ing the owning actor, never the sandboxed
+runtime** — the same pattern as `set_timer`/`list_timers`/`cancel_timer`
+(`TimerToolbox` in `agent_actor.rs`). A new `TaskListToolbox` wraps the
+agent's toolbox in `AgentActor::start_run`, adding the `task_list` spec and
+routing calls to a new `AgentCommand::TaskListOp { action, reply }`. The
+command handler clones `state.task_list`, calls `TaskListState::apply`
+(pure, data-only — no `ToolCallError`/JSON coupling, so it's cheap to unit
+test and to fold on recovery), and either persists `TaskListChanged` +
+replies with the rendered list, or replies with an error and persists
+nothing (an invalid mutation leaves no trace, matching how a rejected
+`cancel_timer` with an unknown id is simply a no-op).
 
-**State lives in the tool instance, not the actor.** `TaskListTool` owns
-`Mutex<TaskListState>` (id counter + ordered `Vec<Task>`), constructed fresh
-each time `for_agent` runs (once per live agent spawn — the same lifetime as
-the `RuntimeClient` handle the runtime tools already capture). This mirrors
-the precedent of `AgentToolbox` holding plain fields directly rather than
-threading new state through the event-sourced actor.
+**It's wrapped unconditionally, not gated by an `allow_task_list` flag or
+`allowed_tools`.** Unlike timers (opt-in per agent via `allow_timers`, since
+arming timers has real resource/scheduling cost), `task_list` is layered on
+every agent the same way `skill`/`inspect_workspace` always are — it's a
+working-memory aid with no cost to leaving on, so there's no reason to make
+it a per-agent toggle. This does mean it bypasses `allowed_tools` entirely,
+same as `skill`/`inspect_workspace`/timers already do; a tightly-scoped
+workflow sub-agent still gets it.
 
-This intentionally does **not** follow the timers precedent (`AgentDomainEvent::TimerArmed`,
-journaled and replayed via `apply_event`). Timers must survive a process
-restart because a timer that silently stops firing is a functional bug. A
-task list is a planning aid: every mutation's result is a rendered snapshot
-of the whole list, and that snapshot is *itself* journaled as ordinary
-`ToolComplete` message content (the agent's conversation history already
-records every past tool result). So on a warm session the state is exactly
-right, and on a cold restart the model still sees the last-known list in its
-context — the in-memory copy resets, but nothing the model already said
-becomes stale or contradicts what it can see. Threading task-list mutations
-through `AgentCommand`/`AgentDomainEvent` (as timers do) would double the
-size of this change for a durability guarantee this tool doesn't need.
+Why not the original ephemeral design (state on the `Tool` instance, no
+`AgentCommand`/`AgentDomainEvent` involvement)? It's simpler, but "the model
+can still see the last list in its journaled message history after a
+restart" isn't the same guarantee as "the state itself survived" — the very
+next mutation after a cold restart (e.g. `update_status` on an id from before
+the restart) would fail with "unknown task id" against an empty in-memory
+list, even though the model just saw that id in its own context. Journaling
+the state directly removes that gap.
 
 **Single tool, action-tagged input** (mirrors the `kind`-tagged `conclude`
 schema in `context.rs`), rather than four separate tools — keeps the tool
@@ -131,14 +144,19 @@ finishing it rather than batching updates to the end of the turn.
 
 ## Testing
 
-- Unit tests co-located in the new `workflow/src/task_list.rs` (per
-  `CLAUDE.md` test-co-location convention): each action's happy path, the
-  full-list-in-response behavior, and every validation error (unknown
+- Unit tests co-located in `workflow/src/task_list.rs` (per `CLAUDE.md`
+  test-co-location convention): each action's happy path against
+  `TaskListState::apply` directly (no JSON/tool plumbing needed for these),
+  the full-list-in-response behavior, and every validation error (unknown
   action, empty `tasks`, out-of-range `position`, empty `ids`, unknown `id`,
   missing `status`).
-- `workflow/src/context.rs`: extend the existing
-  `toolbox_includes_conclude_and_filters_runtime_tools`-style tests to assert
-  `task_list` is present by default and honors `allowed_tools` filtering like
-  a runtime tool.
+- `workflow/src/agent_actor.rs`: `task_list_events_fold_into_state` exercises
+  `apply_event` directly, mirroring the existing `timer_events_fold_into_state`
+  test.
+- `workflow/tests/workflow_e2e.rs`: `task_list_persists_across_journal_reconstruction`
+  drives a real agent through a mock LLM issuing `task_list` tool calls, then
+  folds the journal fresh (the same helper `agent_session_history_reconstructs_from_journal`
+  uses) and asserts the reconstructed state already has the mutation — the
+  actual durability guarantee, not just a unit-level fold.
 - Run the standard pre-PR gate: `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo fmt --check`, `cargo test --workspace`.

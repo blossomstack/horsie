@@ -22,7 +22,9 @@ pub use context::{
     WorkflowRuntimeContext, conclude_tool_spec,
 };
 pub use mcp_toolbox::{CompositeToolbox, McpToolbox};
-pub use task_list::TASK_LIST_TOOL;
+pub use task_list::{
+    TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, TaskStatus, task_list_tool_spec,
+};
 pub use timers::{
     CancelSelector, TimerId, TimerKind, TimerRecord, TimerView, now_unix_ms, timer_tool_specs,
 };
