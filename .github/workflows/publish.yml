@@ -28,8 +28,40 @@ env:
   RUST_TOOLCHAIN: "1.96.0"
 
 jobs:
+  # Fails fast (no build) if the pushed tag doesn't match every workspace
+  # crate's declared version — e.g. a `vX.Y.Z` tag pushed before bumping
+  # Cargo.toml. Left uncaught, this surfaces ~10 minutes later as a cryptic
+  # `cargo publish` compile error (a crate needing a symbol only present in a
+  # newer, unpublished sibling version) instead of a clear message here.
+  version-guard:
+    name: Verify tag matches crate versions
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Compare tag to workspace crate versions
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          mismatched=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg v "$tag_version" '.packages[] | select(.version != $v) | "\(.name) \(.version)"')
+          if [ -n "$mismatched" ]; then
+            echo "::error::tag v$tag_version does not match every workspace crate version. Bump Cargo.toml versions to $tag_version (or re-tag to match) before pushing:"
+            echo "$mismatched"
+            exit 1
+          fi
+          echo "all workspace crates at $tag_version, matches tag v$tag_version"
+
   publish:
     name: Publish to crates.io
+    needs: version-guard
     runs-on: ubuntu-latest
     permissions:
       id-token: write # mint the OIDC token exchanged for a temp crates.io token
@@ -89,6 +121,7 @@ jobs:
     # Only meaningful for version tags; manual dispatch reruns (e.g. after a
     # crates.io rate limit) on a branch ref skip this job.
     if: startsWith(github.ref, 'refs/tags/')
+    needs: version-guard
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write # create the release and upload assets

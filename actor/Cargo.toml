@@ -3,7 +3,7 @@ name = "horsie-actor"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "Actor primitives with durable journaling for horsie"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 
 [features]

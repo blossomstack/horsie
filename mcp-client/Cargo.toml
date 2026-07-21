@@ -3,7 +3,7 @@ name = "horsie-mcp-client"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "MCP (Model Context Protocol) client for horsie"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 
 [dependencies]

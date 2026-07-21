@@ -3,7 +3,7 @@ name = "horsie-runtime"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "Sandboxed per-job runtime child for horsie"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 
 [[bin]]
@@ -15,7 +15,7 @@ default = ["sandbox"]
 sandbox = ["dep:nono"]
 
 [dependencies]
-horsie-models = { version = "0.1.4", path = "../models" }
+horsie-models = { version = "0.1.6", path = "../models" }
 # In-process hackamore provisioning (replaces shelling out to the hackamore-agent binary).
 # Pinned by rev so the provisioning ABI is reproducible.
 hackamore-agent  = { version = "0.1.0", git = "https://github.com/blossomstack/hackamore", rev = "df526a5474e5a9e6296660365bc24f409ce3e66a" }
