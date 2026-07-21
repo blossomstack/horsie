@@ -116,7 +116,9 @@ impl ExecutorTransport for InMemExecutorTransport {
             ExecutorCommand::RestartRuntime(_)
             | ExecutorCommand::QueryRuntimes(_)
             | ExecutorCommand::ToolCall(_)
-            | ExecutorCommand::CancelToolCall(_) => {
+            | ExecutorCommand::CancelToolCall(_)
+            | ExecutorCommand::ScanWorkspace(_)
+            | ExecutorCommand::SessionStart(_) => {
                 let _ = tx
                     .send(ExecutorEvent::CommandFailed(CommandFailedEvent {
                         message: "command not supported by in-process executor".to_string(),

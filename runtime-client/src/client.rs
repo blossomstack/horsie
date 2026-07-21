@@ -80,7 +80,7 @@ impl RuntimeClient {
     }
 
     /// Run the shared plugin library's `SessionStart` hooks and return the injected
-    /// context (empty when there are none, or on relay transports that lack support).
+    /// context (empty when there are none).
     pub async fn run_session_start(&self) -> Result<String, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.inner

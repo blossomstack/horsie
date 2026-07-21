@@ -11,9 +11,12 @@ use horsie_models::executor::{
     CancelToolCallCmd, CommandFailedEvent, CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand,
     ExecutorEvent, ExecutorInboundMessage, ExecutorOutboundMessage, RegisteredEvent,
     RestartRuntimeCmd, RuntimeConfig, RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent,
-    ToolCallCmd, ToolResultEvent,
+    ScanResultEvent, ScanWorkspaceCmd, SessionStartCmd, SessionStartResultEvent, ToolCallCmd,
+    ToolResultEvent,
 };
-use horsie_models::runtime::{RuntimeOutboundMessage, ToolError, ToolResult};
+use horsie_models::runtime::{
+    RuntimeOutboundMessage, ScanResponse, SessionStartResponse, ToolError, ToolResult,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -426,6 +429,10 @@ async fn dispatch(
         }
         ExecutorCommand::ToolCall(cmd) => do_tool_call(cmd, connected_registry, sink).await,
         ExecutorCommand::CancelToolCall(cmd) => do_cancel_tool_call(cmd, connected_registry).await,
+        ExecutorCommand::ScanWorkspace(cmd) => {
+            do_scan_workspace(cmd, connected_registry, sink).await
+        }
+        ExecutorCommand::SessionStart(cmd) => do_session_start(cmd, connected_registry, sink).await,
     };
     if let Err(e) = result {
         let _ = send_outbound(
@@ -477,6 +484,106 @@ async fn do_tool_call(
                     call_id,
                     result,
                 }),
+            },
+        )
+        .await;
+    });
+    Ok(())
+}
+
+/// Server-mode workspace-scan relay: same shape as `do_tool_call` — forward the
+/// scan to the runtime's direct transport on a spawned task and wrap the
+/// response in `ScanResult`. A transport-level failure reports as
+/// `CommandFailed` (the runtime protocol's `ScanResponse` has no error channel).
+async fn do_scan_workspace(
+    cmd: &ScanWorkspaceCmd,
+    connected_registry: Option<&Arc<ConnectedRuntimeRegistry>>,
+    sink: &WsSink,
+) -> Result<(), RuntimeError> {
+    let reg = connected_registry
+        .ok_or_else(|| RuntimeError::Provider("no runtime listener configured".to_string()))?;
+    let transport = reg
+        .runtime_transport(&cmd.runtime_id)
+        .await
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("runtime '{}' not connected", cmd.runtime_id))
+        })?;
+    let request = cmd.request.clone();
+    let call_id = request.call_id.clone();
+    let runtime_id = cmd.runtime_id.clone();
+    let sink = sink.clone();
+    tokio::spawn(async move {
+        let event = match transport
+            .scan_workspace(
+                &call_id,
+                request.workspace,
+                request.instruction_candidates,
+                request.skills_glob,
+                request.include_shared,
+            )
+            .await
+        {
+            Ok((workspaces, shared_skills)) => ExecutorEvent::ScanResult(ScanResultEvent {
+                runtime_id,
+                response: ScanResponse {
+                    call_id: call_id.clone(),
+                    workspaces,
+                    shared_skills,
+                },
+            }),
+            Err(e) => ExecutorEvent::CommandFailed(CommandFailedEvent {
+                message: e.to_string(),
+            }),
+        };
+        let _ = send_outbound(
+            &sink,
+            ExecutorOutboundMessage {
+                request_id: call_id,
+                event,
+            },
+        )
+        .await;
+    });
+    Ok(())
+}
+
+/// Server-mode SessionStart relay: run the shared plugin library's hooks on the
+/// runtime and wrap the injected context in `SessionStartResult`. Like
+/// `do_scan_workspace`, transport failures surface as `CommandFailed`.
+async fn do_session_start(
+    cmd: &SessionStartCmd,
+    connected_registry: Option<&Arc<ConnectedRuntimeRegistry>>,
+    sink: &WsSink,
+) -> Result<(), RuntimeError> {
+    let reg = connected_registry
+        .ok_or_else(|| RuntimeError::Provider("no runtime listener configured".to_string()))?;
+    let transport = reg
+        .runtime_transport(&cmd.runtime_id)
+        .await
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("runtime '{}' not connected", cmd.runtime_id))
+        })?;
+    let call_id = cmd.request.call_id.clone();
+    let runtime_id = cmd.runtime_id.clone();
+    let sink = sink.clone();
+    tokio::spawn(async move {
+        let event = match transport.run_session_start(&call_id).await {
+            Ok(context) => ExecutorEvent::SessionStartResult(SessionStartResultEvent {
+                runtime_id,
+                response: SessionStartResponse {
+                    call_id: call_id.clone(),
+                    context,
+                },
+            }),
+            Err(e) => ExecutorEvent::CommandFailed(CommandFailedEvent {
+                message: e.to_string(),
+            }),
+        };
+        let _ = send_outbound(
+            &sink,
+            ExecutorOutboundMessage {
+                request_id: call_id,
+                event,
             },
         )
         .await;
@@ -706,6 +813,163 @@ mod tests {
         wait_registered(&registry, "rt-1").await;
 
         assert_eq!(seen.lock().unwrap().as_slice(), &["rt-1".to_string()]);
+        cancel.cancel();
+    }
+
+    /// A fake runtime that answers ScanWorkspace with an AGENTS.md instruction
+    /// and SessionStart with a bootstrap context.
+    async fn fake_context_runtime(addr: std::net::SocketAddr, runtime_id: &str) {
+        use horsie_models::runtime::{
+            RuntimeInboundMessage, ScannedFile, SessionStartResponse, WorkspaceScan,
+        };
+        let (mut sink, mut stream) = announce(addr, runtime_id).await;
+        while let Some(Ok(Message::Text(t))) = stream.next().await {
+            let resp = match serde_json::from_str::<RuntimeInboundMessage>(&t) {
+                Ok(RuntimeInboundMessage::ScanWorkspace(req)) => {
+                    assert_eq!(req.instruction_candidates, vec!["AGENTS.md".to_string()]);
+                    RuntimeOutboundMessage::ScanResult(ScanResponse {
+                        call_id: req.call_id,
+                        workspaces: vec![WorkspaceScan {
+                            name: "app".into(),
+                            path: "/ws/app".into(),
+                            is_git_repo: true,
+                            instructions: Some(ScannedFile {
+                                path: "AGENTS.md".into(),
+                                content: "ctx".into(),
+                            }),
+                            skills: vec![],
+                        }],
+                        shared_skills: vec![],
+                    })
+                }
+                Ok(RuntimeInboundMessage::SessionStart(req)) => {
+                    RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
+                        call_id: req.call_id,
+                        context: "boot".into(),
+                    })
+                }
+                _ => continue,
+            };
+            let _ = sink
+                .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
+                .await;
+        }
+    }
+
+    /// A server↔executor WS pair on loopback: the executor-side `sink` (what
+    /// `dispatch` writes replies to) and the server-side `replies` read half.
+    /// The remaining halves are fields purely to keep the link alive.
+    struct ServerLink {
+        sink: WsSink,
+        replies: futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        >,
+        _server_sink: futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+            Message,
+        >,
+        _client_stream: futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+    }
+
+    async fn server_link() -> ServerLink {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The client handshake only completes once the server accepts, so the
+        // connect must run concurrently with accept (not awaited before it).
+        let connect =
+            tokio::spawn(async move { connect_async(format!("ws://{addr}")).await.unwrap().0 });
+        let (tcp, _) = listener.accept().await.unwrap();
+        let ws_server = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let ws_client = connect.await.unwrap();
+        let (client_sink, client_stream) = ws_client.split();
+        let (server_sink, server_stream) = ws_server.split();
+        ServerLink {
+            sink: Arc::new(Mutex::new(client_sink)),
+            replies: server_stream,
+            _server_sink: server_sink,
+            _client_stream: client_stream,
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_and_session_start_relay_through_the_runtime_link() {
+        use horsie_models::runtime::{ScanRequest, SessionStartRequest};
+        let listener =
+            RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+                .await
+                .unwrap();
+        let addr = listener.tcp_addr().unwrap();
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let cancel = CancellationToken::new();
+        serve_runtime_connections(listener, registry.clone(), cancel.clone());
+        tokio::spawn(fake_context_runtime(addr, "rt-1"));
+        wait_registered(&registry, "rt-1").await;
+
+        let link = server_link().await;
+        let sink = link.sink.clone();
+        let mut srv_stream = link.replies;
+
+        let scan_cmd = ScanWorkspaceCmd {
+            runtime_id: "rt-1".into(),
+            request: ScanRequest {
+                call_id: "s1".into(),
+                workspace: None,
+                instruction_candidates: vec!["AGENTS.md".into()],
+                skills_glob: ".claude/skills/*/SKILL.md".into(),
+                include_shared: false,
+            },
+        };
+        do_scan_workspace(&scan_cmd, Some(&registry), &sink)
+            .await
+            .unwrap();
+
+        let session_cmd = SessionStartCmd {
+            runtime_id: "rt-1".into(),
+            request: SessionStartRequest {
+                call_id: "ss1".into(),
+            },
+        };
+        do_session_start(&session_cmd, Some(&registry), &sink)
+            .await
+            .unwrap();
+
+        let mut saw_scan = false;
+        let mut saw_session = false;
+        tokio::time::timeout(StdDuration::from_secs(10), async {
+            while !(saw_scan && saw_session) {
+                let Some(Ok(Message::Text(t))) = srv_stream.next().await else {
+                    panic!("server link closed before both replies arrived");
+                };
+                let msg: ExecutorOutboundMessage = serde_json::from_str(&t).unwrap();
+                match msg.event {
+                    ExecutorEvent::ScanResult(ev) => {
+                        assert_eq!(msg.request_id, "s1");
+                        assert_eq!(ev.runtime_id, "rt-1");
+                        assert_eq!(
+                            ev.response.workspaces[0]
+                                .instructions
+                                .as_ref()
+                                .unwrap()
+                                .content,
+                            "ctx"
+                        );
+                        saw_scan = true;
+                    }
+                    ExecutorEvent::SessionStartResult(ev) => {
+                        assert_eq!(msg.request_id, "ss1");
+                        assert_eq!(ev.response.context, "boot");
+                        saw_session = true;
+                    }
+                    other => panic!("unexpected event: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for the relayed replies");
         cancel.cancel();
     }
 }
