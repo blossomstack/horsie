@@ -1,6 +1,7 @@
 use crate::error::CliError;
 use horsie_agentcore::{LlmProvider, Secret};
 use horsie_anthropic::AnthropicProvider;
+use horsie_openai::OpenAiProvider;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,6 +77,18 @@ pub enum ProviderConfig {
     /// client is built without auth, for a local mock server or proxy via `base_url`.
     /// Prefer `api_key_env` — it keeps the secret out of the config file.
     Anthropic {
+        #[serde(default)]
+        api_key: Option<Secret>,
+        #[serde(default)]
+        api_key_env: Option<String>,
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    /// An OpenAI-compatible `/v1/chat/completions` provider — OpenAI itself, or
+    /// Ollama, vLLM, llama.cpp, OpenRouter, DeepSeek via `base_url`. Key
+    /// resolution matches `Anthropic`: inline `api_key`, else the env var named
+    /// by `api_key_env`, else unauthenticated (for a local server).
+    Openai {
         #[serde(default)]
         api_key: Option<Secret>,
         #[serde(default)]
@@ -383,46 +396,68 @@ pub fn build_registry_from(
                 mc.provider
             ))
         })?;
-        let provider: Arc<dyn LlmProvider> = match pc {
+        // Resolve the key once: inline first, then env var, else no auth. Both
+        // kinds share this — only the construction below differs.
+        let (api_key, api_key_env, base_url) = match pc {
             ProviderConfig::Anthropic {
                 api_key,
                 api_key_env,
                 base_url,
-            } => {
-                // Resolve the key: inline first, then env var, else no auth.
-                let resolved_key = match (api_key, api_key_env) {
-                    (Some(k), _) => {
-                        if k.is_empty() {
-                            return Err(CliError::Config(format!(
-                                "inline api_key for provider '{}' is empty",
-                                mc.provider
-                            )));
-                        }
-                        Some(k.clone())
-                    }
-                    (None, Some(var)) => {
-                        let key = std::env::var(var).map_err(|_| {
-                            CliError::Config(format!(
-                                "env var '{var}' for provider '{}' is not set",
-                                mc.provider
-                            ))
-                        })?;
-                        if key.is_empty() {
-                            return Err(CliError::Config(format!(
-                                "env var '{var}' for provider '{}' is empty",
-                                mc.provider
-                            )));
-                        }
-                        Some(Secret::from(key))
-                    }
-                    (None, None) => None,
-                };
+            }
+            | ProviderConfig::Openai {
+                api_key,
+                api_key_env,
+                base_url,
+            } => (api_key, api_key_env, base_url),
+        };
+        let resolved_key = match (api_key, api_key_env) {
+            (Some(k), _) => {
+                if k.is_empty() {
+                    return Err(CliError::Config(format!(
+                        "inline api_key for provider '{}' is empty",
+                        mc.provider
+                    )));
+                }
+                Some(k.clone())
+            }
+            (None, Some(var)) => {
+                let key = std::env::var(var).map_err(|_| {
+                    CliError::Config(format!(
+                        "env var '{var}' for provider '{}' is not set",
+                        mc.provider
+                    ))
+                })?;
+                if key.is_empty() {
+                    return Err(CliError::Config(format!(
+                        "env var '{var}' for provider '{}' is empty",
+                        mc.provider
+                    )));
+                }
+                Some(Secret::from(key))
+            }
+            (None, None) => None,
+        };
+
+        let provider: Arc<dyn LlmProvider> = match pc {
+            ProviderConfig::Anthropic { .. } => {
                 let mut p = match resolved_key {
                     Some(k) => AnthropicProvider::with_api_key(k)
                         .map_err(|e| CliError::Provider(e.to_string()))?,
                     None => {
                         AnthropicProvider::new().map_err(|e| CliError::Provider(e.to_string()))?
                     }
+                };
+                p = p.with_model(&mc.model_id).with_max_tokens(mc.max_tokens);
+                if let Some(u) = base_url {
+                    p = p.with_base_url(u);
+                }
+                Arc::new(p)
+            }
+            ProviderConfig::Openai { .. } => {
+                let mut p = match resolved_key {
+                    Some(k) => OpenAiProvider::with_api_key(k)
+                        .map_err(|e| CliError::Provider(e.to_string()))?,
+                    None => OpenAiProvider::new().map_err(|e| CliError::Provider(e.to_string()))?,
                 };
                 p = p.with_model(&mc.model_id).with_max_tokens(mc.max_tokens);
                 if let Some(u) = base_url {
@@ -454,6 +489,24 @@ mod tests {
         assert_eq!(cfg.models["sonnet"].model_id, "claude-sonnet-4-6");
         assert_eq!(cfg.storage.state_dir, PathBuf::from("/var/state"));
         assert_eq!(cfg.storage.data_dir, PathBuf::from("/var/data"));
+    }
+
+    #[test]
+    fn parses_openai_provider_and_builds_registry() {
+        // A local Ollama-style provider: type "openai", no key, base_url set.
+        let json = r#"{
+            "providers": { "local": { "type": "openai", "base_url": "http://127.0.0.1:11434" } },
+            "models": { "qwen": { "provider": "local", "model_id": "qwen2.5", "max_tokens": 4096 } },
+            "sandbox": { "capabilities_file": null },
+            "storage": { "state_dir": "/var/state", "data_dir": "/var/data" }
+        }"#;
+        let cfg: HorsieConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            cfg.providers["local"],
+            ProviderConfig::Openai { .. }
+        ));
+        let reg = build_registry_from(&cfg.providers, &cfg.models).unwrap();
+        assert!(reg.contains_key("qwen"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ package settings;
 struct ProviderView {
     /// Provider name — the key a model's `provider` references.
     name: String,
-    /// Provider kind, e.g. "anthropic" (the only kind today).
+    /// Provider kind: "anthropic" or "openai".
     kind: String,
     base_url: Option<String>,
     /// True when an inline `api_key` is stored.
@@ -111,6 +111,7 @@ struct SettingsView {
 /// A provider to persist. Replaces any provider of the same `name`.
 struct ProviderInput {
     name: String,
+    /// Provider kind: "anthropic" or "openai".
     kind: String,
     base_url: Option<String>,
     /// New inline key. Omit to keep the existing stored key; "" to clear.
