@@ -122,12 +122,19 @@ pub(crate) struct MockState {
     scenarios: Mutex<HashMap<String, Scenario>>,
     session_bindings: Mutex<HashMap<String, String>>,
     session_states: Mutex<HashMap<String, ScenarioState>>,
+    /// Every inbound request body (both wires), for tests that assert on what
+    /// reached the agent (e.g. the composed system prompt). Cleared by `/reset`.
+    captured: Mutex<Vec<serde_json::Value>>,
 }
 
 impl MockState {
     pub(crate) fn dequeue_entry(&self) -> Option<QueueEntry> {
         let mut q = self.queue.lock();
         (!q.is_empty()).then(|| q.remove(0))
+    }
+    /// Record an inbound request body so `GET /received` can return it.
+    pub(crate) fn capture(&self, body: serde_json::Value) {
+        self.captured.lock().push(body);
     }
 }
 
@@ -213,6 +220,7 @@ impl MockLlmServerBuilder {
             scenarios: Mutex::new(self.scenarios),
             session_bindings: Mutex::new(HashMap::new()),
             session_states: Mutex::new(HashMap::new()),
+            captured: Mutex::new(Vec::new()),
         });
         let app = Router::new()
             .route("/v1/messages", post(handle_messages))
@@ -221,6 +229,7 @@ impl MockLlmServerBuilder {
                 post(crate::openai::handle_chat_completions),
             )
             .route("/queue", post(handle_queue))
+            .route("/received", get(handle_received))
             .route("/reset", post(handle_reset))
             .route("/scenarios/load", post(handle_load_scenarios))
             .route("/scenarios", get(handle_list_scenarios))
@@ -356,12 +365,6 @@ impl MockLlmServer {
 
 // ── internal request/response types ──────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct MessagesRequest {
-    #[serde(default)]
-    stream: Option<bool>,
-}
-
 #[derive(Serialize)]
 struct StatusResponse {
     status: String,
@@ -395,8 +398,9 @@ impl axum::response::IntoResponse for ResponseKind {
 async fn handle_messages(
     State(state): State<Arc<MockState>>,
     headers: HeaderMap,
-    Json(req): Json<MessagesRequest>,
+    Json(req): Json<serde_json::Value>,
 ) -> ResponseKind {
+    state.capture(req.clone());
     let entry = if let Some(sid) = headers.get("X-Session-Id").and_then(|v| v.to_str().ok()) {
         let mut ss = state.session_states.lock();
         if let Some(scenario) = ss.get_mut(sid) {
@@ -418,7 +422,10 @@ async fn handle_messages(
     }
 
     let response = entry.map(|e| e.response);
-    let is_stream = req.stream.unwrap_or(false);
+    let is_stream = req
+        .get("stream")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
 
     match response {
         Some(MockResponse::TextStream { chunks }) => sse_from_pairs(text_stream_sse(&chunks)),
@@ -519,10 +526,19 @@ async fn handle_reset(State(state): State<Arc<MockState>>) -> Json<StatusRespons
     state.queue.lock().clear();
     state.session_states.lock().clear();
     state.session_bindings.lock().clear();
+    state.captured.lock().clear();
     Json(StatusResponse {
         status: "reset".into(),
         message: None,
     })
+}
+
+/// Return every captured request body, most-recent-first, so a test can assert
+/// on what reached the agent (e.g. the composed system prompt).
+async fn handle_received(State(state): State<Arc<MockState>>) -> Json<Vec<serde_json::Value>> {
+    let mut bodies = state.captured.lock().clone();
+    bodies.reverse();
+    Json(bodies)
 }
 
 async fn handle_load_scenarios(

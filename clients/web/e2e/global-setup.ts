@@ -55,6 +55,41 @@ export default async function globalSetup(): Promise<void> {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "horsie-e2e-"));
   const scratch = path.join(tmpDir, "scratch");
   fs.mkdirSync(scratch, { recursive: true });
+
+  // Workspace context the runtime's ScanWorkspace must surface into the agent's
+  // system prompt (group F): a project instruction file and one workspace skill.
+  fs.writeFileSync(
+    path.join(scratch, "AGENTS.md"),
+    "E2E_AGENTS_MARKER: follow the house rules for this workspace.\n",
+  );
+  const wsSkillDir = path.join(scratch, ".claude", "skills", "e2e-skill");
+  fs.mkdirSync(wsSkillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(wsSkillDir, "SKILL.md"),
+    "---\nname: e2e-skill\ndescription: E2E_SKILL_DESC exercise the workspace skill loader\n---\nDo the workspace thing.\n",
+  );
+
+  // Shared plugin library the runtime scans via --plugins-dir (group F): one
+  // plugin providing a shared skill and a SessionStart hook whose stdout becomes
+  // the agent's `# Session bootstrap` block.
+  const pluginsLib = path.join(tmpDir, "plugins-lib");
+  const sharedSkillDir = path.join(pluginsLib, "e2e-plugin", "skills", "e2e-shared-skill");
+  fs.mkdirSync(sharedSkillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sharedSkillDir, "SKILL.md"),
+    "---\nname: e2e-shared-skill\ndescription: E2E_SHARED_DESC exercise the shared skill loader\n---\nDo the shared thing.\n",
+  );
+  const hooksDir = path.join(pluginsLib, "e2e-plugin", "hooks");
+  fs.mkdirSync(hooksDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(hooksDir, "hooks.json"),
+    JSON.stringify({
+      hooks: {
+        SessionStart: [{ hooks: [{ type: "command", command: "echo E2E_BOOTSTRAP_MARKER" }] }],
+      },
+    }),
+  );
+
   const configPath = path.join(tmpDir, "config.json");
   fs.writeFileSync(
     configPath,
@@ -98,10 +133,20 @@ export default async function globalSetup(): Promise<void> {
       label: "server /api/health",
     });
 
-    log("seeding provider 'mock' + model 'mock-sonnet'");
+    log("seeding providers 'mock' (anthropic) + 'mock-openai' (openai) and their models");
     await putConfig(baseURL, {
-      providers: [{ name: "mock", kind: "anthropic", baseUrl: mockUrl, apiKey: "test-key" }],
-      models: [{ alias: "mock-sonnet", provider: "mock", modelId: "mock-model", maxTokens: 4096 }],
+      providers: [
+        { name: "mock", kind: "anthropic", baseUrl: mockUrl, apiKey: "test-key" },
+        // Same mock server, OpenAI wire — the provider appends /v1/chat/completions.
+        { name: "mock-openai", kind: "openai", baseUrl: mockUrl, apiKey: "test-key" },
+      ],
+      models: [
+        { alias: "mock-sonnet", provider: "mock", modelId: "mock-model", maxTokens: 4096 },
+        // Alias sorts AFTER "mock-sonnet" (models are ORDER BY alias) so the
+        // New Session modal's default (models[0]) stays the Anthropic wire —
+        // the OpenAI wire is opt-in per test via createSession({ model }).
+        { alias: "openai-mock", provider: "mock-openai", modelId: "mock-model", maxTokens: 4096 },
+      ],
     });
 
     log("starting horsie-runtime daemon (runtime-id 'e2e')");
@@ -114,6 +159,10 @@ export default async function globalSetup(): Promise<void> {
         "e2e",
         "--workspace",
         `main=${scratch}`,
+        // Shared plugin library scanned when a session has plugins enabled
+        // (the default), surfacing shared skills + SessionStart bootstrap.
+        "--plugins-dir",
+        pluginsLib,
       ],
       "runtime.log",
     );
