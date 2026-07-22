@@ -180,6 +180,30 @@ pub struct AgentState {
     /// like timers do; see `crate::task_list`.
     #[serde(default)]
     pub task_list: crate::task_list::TaskListState,
+    /// Cumulative token usage across every completed run — durable agent state,
+    /// folded from `RunComplete`. `u64` so a long session's re-sent-context input
+    /// total can't overflow the per-turn `u32` wire counters. Answers the
+    /// session's usage readout without replaying the whole journal.
+    #[serde(default)]
+    pub usage_total: UsageTotal,
+}
+
+/// Running token totals held in [`AgentState`]. Distinct from the per-turn wire
+/// [`Usage`] (`u32`): this accumulates across all turns, so it is `u64` and owns
+/// a `Default`, which the fluorite-generated `Usage` does not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotal {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl UsageTotal {
+    fn add(&mut self, usage: &Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(u64::from(usage.input_tokens));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(u64::from(usage.output_tokens));
+    }
 }
 
 /// Result of a background run, sent back to the actor as [`AgentCommand::RunFinished`].
@@ -611,7 +635,8 @@ impl EventSourcedActor for AgentActor {
             },
             AgentDomainEvent::Parked => state.parked = true,
             AgentDomainEvent::TaskListChanged { snapshot } => state.task_list = snapshot,
-            AgentDomainEvent::RunComplete { .. } | AgentDomainEvent::RunCancelled => {}
+            AgentDomainEvent::RunComplete { usage, .. } => state.usage_total.add(&usage),
+            AgentDomainEvent::RunCancelled => {}
         }
         state
     }
@@ -1452,6 +1477,26 @@ mod tests {
             .unwrap();
         state = AgentActor::apply_event(state, AgentDomainEvent::TaskListChanged { snapshot });
         assert!(state.task_list.render().contains("Tasks (1/2 done)"));
+    }
+
+    #[test]
+    fn run_complete_accumulates_usage_total() {
+        let mut state = AgentActor::initial_state();
+        assert_eq!(state.usage_total, UsageTotal::default());
+        for (input, output) in [(10u32, 5u32), (7, 3)] {
+            state = AgentActor::apply_event(
+                state,
+                AgentDomainEvent::RunComplete {
+                    usage: Usage {
+                        input_tokens: input,
+                        output_tokens: output,
+                    },
+                    iterations: 1,
+                },
+            );
+        }
+        assert_eq!(state.usage_total.input_tokens, 17);
+        assert_eq!(state.usage_total.output_tokens, 8);
     }
 
     #[test]
