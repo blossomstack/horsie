@@ -11,8 +11,11 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use horsie_actor::{EventSourcedActor, Journal};
 use horsie_agentcore::{AgentEvent, EventSink, EventSinkError};
-use horsie_models::session::{MessageEvent, SessionEvent, ToolOutputEvent, TurnCompletedEvent};
-use horsie_workflow::{AgentActor, AgentDomainEvent};
+use horsie_models::session::{
+    MessageEvent, SessionEvent, TaskItem, TaskListEvent, TaskStatus as WireTaskStatus,
+    ToolOutputEvent, TurnCompletedEvent,
+};
+use horsie_workflow::{AgentActor, AgentDomainEvent, TaskStatus as AgentTaskStatus};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -128,12 +131,32 @@ fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
                 usage,
             }))
         }
+        AgentDomainEvent::TaskListChanged { snapshot } => {
+            Some(SessionEvent::TaskListChanged(TaskListEvent {
+                tasks: snapshot
+                    .tasks()
+                    .iter()
+                    .map(|t| TaskItem {
+                        id: t.id,
+                        content: t.content.clone(),
+                        status: wire_task_status(t.status),
+                    })
+                    .collect(),
+            }))
+        }
         AgentDomainEvent::RunCancelled
         | AgentDomainEvent::TimerArmed { .. }
         | AgentDomainEvent::TimerCancelled { .. }
         | AgentDomainEvent::TimerFired { .. }
-        | AgentDomainEvent::Parked
-        | AgentDomainEvent::TaskListChanged { .. } => None,
+        | AgentDomainEvent::Parked => None,
+    }
+}
+
+fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
+    match status {
+        AgentTaskStatus::Pending => WireTaskStatus::Pending,
+        AgentTaskStatus::InProgress => WireTaskStatus::InProgress,
+        AgentTaskStatus::Completed => WireTaskStatus::Completed,
     }
 }
 
@@ -198,6 +221,41 @@ mod tests {
         let after = replay_session_events(&journal, sid, 1).await;
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].seq, 3);
+    }
+
+    #[tokio::test]
+    async fn task_list_changed_maps_to_wire_event() {
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let sid = Uuid::new_v4();
+        let pid = AgentActor::persistence_id_for(sid);
+        let mut snapshot = horsie_workflow::TaskListState::default();
+        snapshot
+            .apply(horsie_workflow::TaskListAction::Create {
+                tasks: vec!["a".into(), "b".into()],
+            })
+            .unwrap();
+        snapshot
+            .apply(horsie_workflow::TaskListAction::UpdateStatus {
+                ids: vec![1],
+                status: horsie_workflow::TaskStatus::Completed,
+            })
+            .unwrap();
+        let events =
+            vec![serde_json::to_vec(&AgentDomainEvent::TaskListChanged { snapshot }).unwrap()];
+        journal.persist(&pid, &events).await.unwrap();
+
+        let all = replay_session_events(&journal, sid, 0).await;
+        assert_eq!(all.len(), 1);
+        match &all[0].event {
+            SessionEvent::TaskListChanged(e) => {
+                assert_eq!(e.tasks.len(), 2);
+                assert_eq!(e.tasks[0].id, 1);
+                assert_eq!(e.tasks[0].content, "a");
+                assert_eq!(e.tasks[0].status, WireTaskStatus::Completed);
+                assert_eq!(e.tasks[1].status, WireTaskStatus::Pending);
+            }
+            other => panic!("expected TaskListChanged, got {other:?}"),
+        }
     }
 
     #[tokio::test]

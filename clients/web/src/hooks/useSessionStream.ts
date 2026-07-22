@@ -6,6 +6,7 @@ import {
   type ContentPart,
   type Message,
   type SessionEvent,
+  type TaskItem,
 } from "../api/types";
 
 // ---- View model handed to the UI -------------------------------------------
@@ -40,6 +41,8 @@ export interface SessionStream {
   pendingQuestion: string | null;
   streamError: string | null;
   connected: boolean;
+  /** The agent's `task_list` tool state; empty until the tool is first used. */
+  tasks: TaskItem[];
 }
 
 // ---- Normalized reducer state ----------------------------------------------
@@ -65,6 +68,7 @@ interface State {
   pendingQuestion: string | null;
   streamError: string | null;
   connected: boolean;
+  tasks: TaskItem[];
 }
 
 const INITIAL: State = {
@@ -80,6 +84,7 @@ const INITIAL: State = {
   pendingQuestion: null,
   streamError: null,
   connected: false,
+  tasks: [],
 };
 
 type Action =
@@ -239,6 +244,8 @@ function reducer(state: State, action: Action): State {
           return { ...state, streamError: ev.value.message };
         case "Delta":
           return { ...state, streaming: state.streaming + ev.value.text };
+        case "TaskListChanged":
+          return { ...state, tasks: ev.value.tasks };
         default:
           return state;
       }
@@ -355,6 +362,7 @@ export function useSessionStream(sessionId: string | undefined): {
       pendingQuestion: state.pendingQuestion,
       streamError: state.streamError,
       connected: state.connected,
+      tasks: state.tasks,
     };
   }, [state]);
 

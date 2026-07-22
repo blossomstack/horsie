@@ -49,6 +49,10 @@ Click **Create** to open the session.
   is cumulative usage, not a measure of how full the context window is.
 - **Repo chips** — the repositories checked out for this session, if any.
 - **Delete** — remove the session.
+- **Tasks panel** — when the agent tracks a multi-step plan, a collapsible panel
+  on the right shows the task list live as it's created and updated. It appears
+  only once the agent has used the tool, and can be collapsed to a small badge
+  showing the completed/total count.
 
 ### When the agent asks you a question
 
