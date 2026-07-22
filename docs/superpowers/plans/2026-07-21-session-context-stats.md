@@ -23,12 +23,12 @@
 
 **Files:**
 - Modify: `models/fluorite/agent.fl` (the `Usage` struct)
-- Modify: `models/src/lib.rs` (add a hand-written `Usage::new` constructor)
+- Modify: `models/src/lib.rs` (add a hand-written `Usage::without_cache` constructor)
 - Modify: `agentcore/src/agent.rs:253-263,318-319` (the per-run `total_usage` accumulator)
 - Test: `agentcore/src/agent.rs` (new test in the existing `mod tests`)
 
 **Interfaces:**
-- Produces: `Usage::new(input_tokens: u32, output_tokens: u32) -> Usage` (cache fields `None`) — every other task that needs a cache-less `Usage` uses this instead of a 4-field struct literal.
+- Produces: `Usage::without_cache(input_tokens: u32, output_tokens: u32) -> Usage` (cache fields `None`) — every other task that needs a cache-less `Usage` uses this instead of a 4-field struct literal.
 - Produces: `Usage { input_tokens, output_tokens, cache_creation_tokens: Option<u32>, cache_read_tokens: Option<u32> }` as the full field set — Tasks 2 and 4 construct this directly with real values.
 
 - [ ] **Step 1: Add the two fields to the schema**
@@ -100,7 +100,7 @@ Expected: FAIL — multiple "missing fields `cache_creation_tokens`, `cache_read
 Replace with:
 
 ```rust
-        let mut total_usage = Usage::new(0, 0);
+        let mut total_usage = Usage::without_cache(0, 0);
 ```
 
 `agentcore/src/agent.rs:318-319` currently reads:
@@ -222,9 +222,9 @@ git commit -m "agentcore: add cache-token fields to Usage, sum them across turn 
 - Modify: `workflow/src/agent_actor.rs:1276-1279` (one test fixture)
 
 **Interfaces:**
-- Consumes: `Usage::new(input_tokens, output_tokens)` from Task 1.
+- Consumes: `Usage::without_cache(input_tokens, output_tokens)` from Task 1.
 
-- [ ] **Step 1: Replace every remaining two-field `Usage { input_tokens: X, output_tokens: Y }` literal with `Usage::new(X, Y)`**
+- [ ] **Step 1: Replace every remaining two-field `Usage { input_tokens: X, output_tokens: Y }` literal with `Usage::without_cache(X, Y)`**
 
 Every site left uncompilable by Task 1 follows this exact shape:
 
@@ -236,7 +236,7 @@ usage: Usage {
 },
 
 // after
-usage: Usage::new(20, 10),
+usage: Usage::without_cache(20, 10),
 ```
 
 Apply this transform (same field values, just collapsed to the constructor call) at:
@@ -252,7 +252,7 @@ Apply this transform (same field values, just collapsed to the constructor call)
   ```
   to
   ```rust
-  usage: Usage::new(0, 0),
+  usage: Usage::without_cache(0, 0),
   ```
   (the comment explaining the missing `Default` impl no longer applies — delete it.)
 - `workflow/src/agent_actor.rs:1276-1279`
@@ -271,7 +271,7 @@ Expected: PASS (same pass count as before Task 1, plus the one new test from Tas
 
 ```bash
 git add agentcore/src/testkit.rs agentcore/src/agent.rs providers/openai/src/lib.rs workflow/src/agent_actor.rs
-git commit -m "agentcore,openai,workflow: migrate Usage literals to Usage::new"
+git commit -m "agentcore,openai,workflow: migrate Usage literals to Usage::without_cache"
 ```
 
 ---
@@ -1185,8 +1185,8 @@ pub struct SessionUsageFold {
 impl Default for SessionUsageFold {
     fn default() -> Self {
         Self {
-            current: Usage::new(0, 0),
-            total: Usage::new(0, 0),
+            current: Usage::without_cache(0, 0),
+            total: Usage::without_cache(0, 0),
             turn_count: 0,
         }
     }
