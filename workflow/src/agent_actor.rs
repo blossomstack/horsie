@@ -119,6 +119,35 @@ pub enum AgentCommand {
         action: crate::task_list::TaskListAction,
         reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
+    /// Read a window of conversation history from in-memory state — no journal
+    /// access, no run. Answers the server's paginated `/history` reads so a long
+    /// session can be viewed without replaying its whole transcript.
+    GetHistory {
+        query: HistoryQuery,
+        reply: tokio::sync::oneshot::Sender<AgentHistoryPage>,
+    },
+}
+
+/// A windowed history request over the agent's message log.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryQuery {
+    /// Return the `limit` messages immediately *before* this message id. `None`
+    /// requests the latest (tail) window — the initial view.
+    pub before: Option<String>,
+    /// Maximum messages to return.
+    pub limit: usize,
+}
+
+/// One page of conversation history. `tasks`/`usage` ride only on the tail
+/// window (`before = None`): the initial view seeds the task widget and usage
+/// readout, while scroll-back pages carry messages alone.
+#[derive(Debug, Clone)]
+pub struct AgentHistoryPage {
+    pub messages: Vec<Message>,
+    /// Whether older messages exist before the returned window.
+    pub has_more: bool,
+    pub tasks: Option<Vec<crate::task_list::TaskRecord>>,
+    pub usage: Option<UsageTotal>,
 }
 
 /// Coarse events that alter persisted agent state. Streaming observation events
@@ -205,6 +234,32 @@ impl UsageTotal {
         self.output_tokens = self
             .output_tokens
             .saturating_add(u64::from(usage.output_tokens));
+    }
+}
+
+impl AgentState {
+    /// Answer a windowed [`HistoryQuery`] from the in-memory message log. The
+    /// window is `[start, end)` of `messages`; `end` is just before `before`'s
+    /// message (or the log end for the tail), `start` is `limit` back from
+    /// `end`. `has_more` reports whether anything precedes `start`. Task list and
+    /// usage ride only on the tail window.
+    pub fn history_page(&self, query: &HistoryQuery) -> AgentHistoryPage {
+        let end = match &query.before {
+            None => self.messages.len(),
+            Some(id) => self
+                .messages
+                .iter()
+                .position(|m| &m.id == id)
+                .unwrap_or(self.messages.len()),
+        };
+        let start = end.saturating_sub(query.limit);
+        let is_tail = query.before.is_none();
+        AgentHistoryPage {
+            messages: self.messages[start..end].to_vec(),
+            has_more: start > 0,
+            tasks: is_tail.then(|| self.task_list.tasks().to_vec()),
+            usage: is_tail.then_some(self.usage_total),
+        }
     }
 }
 
@@ -796,6 +851,10 @@ impl EventSourcedActor for AgentActor {
                         CommandEffect::none()
                     }
                 }
+            }
+            AgentCommand::GetHistory { query, reply } => {
+                let _ = reply.send(state.history_page(&query));
+                CommandEffect::none()
             }
         }
     }
@@ -1517,6 +1576,71 @@ mod tests {
             .unwrap();
         state = AgentActor::apply_event(state, AgentDomainEvent::TaskListChanged { snapshot });
         assert!(state.task_list.render().contains("Tasks (1/2 done)"));
+    }
+
+    fn with_messages(ids: &[&str]) -> AgentState {
+        let mut state = AgentActor::initial_state();
+        for id in ids {
+            state = AgentActor::apply_event(
+                state,
+                AgentDomainEvent::MessageComplete {
+                    message: Message::user(*id, "x"),
+                },
+            );
+        }
+        state
+    }
+
+    fn page_ids(page: &AgentHistoryPage) -> Vec<String> {
+        page.messages.iter().map(|m| m.id.clone()).collect()
+    }
+
+    #[test]
+    fn history_tail_returns_last_limit_with_tasks_and_usage() {
+        let mut state = with_messages(&["a", "b", "c", "d"]);
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage {
+                    input_tokens: 4,
+                    output_tokens: 2,
+                },
+                iterations: 1,
+            },
+        );
+        let page = state.history_page(&HistoryQuery {
+            before: None,
+            limit: 2,
+        });
+        assert_eq!(page_ids(&page), ["c", "d"]);
+        assert!(page.has_more);
+        assert!(page.tasks.is_some());
+        assert_eq!(page.usage.unwrap().input_tokens, 4);
+    }
+
+    #[test]
+    fn history_before_cursor_pages_backward_without_tasks() {
+        let state = with_messages(&["a", "b", "c", "d"]);
+        let page = state.history_page(&HistoryQuery {
+            before: Some("c".into()),
+            limit: 2,
+        });
+        // Two messages immediately before "c": "a", "b".
+        assert_eq!(page_ids(&page), ["a", "b"]);
+        assert!(!page.has_more);
+        assert!(page.tasks.is_none());
+        assert!(page.usage.is_none());
+    }
+
+    #[test]
+    fn history_tail_shorter_than_limit_has_no_more() {
+        let state = with_messages(&["a", "b"]);
+        let page = state.history_page(&HistoryQuery {
+            before: None,
+            limit: 10,
+        });
+        assert_eq!(page_ids(&page), ["a", "b"]);
+        assert!(!page.has_more);
     }
 
     #[test]
