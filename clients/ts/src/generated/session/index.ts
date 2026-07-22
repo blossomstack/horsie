@@ -14,5 +14,6 @@ export * from './toolStartEvent';
 export * from './taskStatus';
 export * from './taskItem';
 export * from './taskListEvent';
+export * from './usageView';
 export * from './sessionEvent';
 export * from './globalSessionEvent';

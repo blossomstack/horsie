@@ -15,11 +15,14 @@ mod timers;
 mod workflow_actor;
 mod workspace;
 
-pub use agent_actor::{AgentActor, AgentCommand, AgentDomainEvent, AgentParams, AgentState};
+pub use agent_actor::{
+    AgentActor, AgentCommand, AgentDomainEvent, AgentHistoryPage, AgentParams, AgentState,
+    HistoryQuery, UsageTotal,
+};
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL,
-    DefaultToolboxFactory, INSPECT_WORKSPACE_TOOL, SKILL_TOOL, ToolboxFactory,
-    WorkflowRuntimeContext, conclude_tool_spec,
+    DefaultToolboxFactory, FixedRunResources, INSPECT_WORKSPACE_TOOL, PreparedRun, RunResources,
+    SKILL_TOOL, ToolboxFactory, WorkflowRuntimeContext, conclude_tool_spec,
 };
 pub use mcp_toolbox::{CompositeToolbox, McpToolbox};
 pub use task_list::{

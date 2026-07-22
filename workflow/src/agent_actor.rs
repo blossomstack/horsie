@@ -119,6 +119,35 @@ pub enum AgentCommand {
         action: crate::task_list::TaskListAction,
         reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
+    /// Read a window of conversation history from in-memory state — no journal
+    /// access, no run. Answers the server's paginated `/history` reads so a long
+    /// session can be viewed without replaying its whole transcript.
+    GetHistory {
+        query: HistoryQuery,
+        reply: tokio::sync::oneshot::Sender<AgentHistoryPage>,
+    },
+}
+
+/// A windowed history request over the agent's message log.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryQuery {
+    /// Return the `limit` messages immediately *before* this message id. `None`
+    /// requests the latest (tail) window — the initial view.
+    pub before: Option<String>,
+    /// Maximum messages to return.
+    pub limit: usize,
+}
+
+/// One page of conversation history. `tasks`/`usage` ride only on the tail
+/// window (`before = None`): the initial view seeds the task widget and usage
+/// readout, while scroll-back pages carry messages alone.
+#[derive(Debug, Clone)]
+pub struct AgentHistoryPage {
+    pub messages: Vec<Message>,
+    /// Whether older messages exist before the returned window.
+    pub has_more: bool,
+    pub tasks: Option<Vec<crate::task_list::TaskRecord>>,
+    pub usage: Option<UsageTotal>,
 }
 
 /// Coarse events that alter persisted agent state. Streaming observation events
@@ -180,6 +209,58 @@ pub struct AgentState {
     /// like timers do; see `crate::task_list`.
     #[serde(default)]
     pub task_list: crate::task_list::TaskListState,
+    /// Cumulative token usage across every completed run — durable agent state,
+    /// folded from `RunComplete`. `u64` so a long session's re-sent-context input
+    /// total can't overflow the per-turn `u32` wire counters. Answers the
+    /// session's usage readout without replaying the whole journal.
+    #[serde(default)]
+    pub usage_total: UsageTotal,
+}
+
+/// Running token totals held in [`AgentState`]. Distinct from the per-turn wire
+/// [`Usage`] (`u32`): this accumulates across all turns, so it is `u64` and owns
+/// a `Default`, which the fluorite-generated `Usage` does not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotal {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl UsageTotal {
+    fn add(&mut self, usage: &Usage) {
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(u64::from(usage.input_tokens));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(u64::from(usage.output_tokens));
+    }
+}
+
+impl AgentState {
+    /// Answer a windowed [`HistoryQuery`] from the in-memory message log. The
+    /// window is `[start, end)` of `messages`; `end` is just before `before`'s
+    /// message (or the log end for the tail), `start` is `limit` back from
+    /// `end`. `has_more` reports whether anything precedes `start`. Task list and
+    /// usage ride only on the tail window.
+    pub fn history_page(&self, query: &HistoryQuery) -> AgentHistoryPage {
+        let end = match &query.before {
+            None => self.messages.len(),
+            Some(id) => self
+                .messages
+                .iter()
+                .position(|m| &m.id == id)
+                .unwrap_or(self.messages.len()),
+        };
+        let start = end.saturating_sub(query.limit);
+        let is_tail = query.before.is_none();
+        AgentHistoryPage {
+            messages: self.messages[start..end].to_vec(),
+            has_more: start > 0,
+            tasks: is_tail.then(|| self.task_list.tasks().to_vec()),
+            usage: is_tail.then_some(self.usage_total),
+        }
+    }
 }
 
 /// Result of a background run, sent back to the actor as [`AgentCommand::RunFinished`].
@@ -204,6 +285,9 @@ enum RunOutcome {
         error: String,
         recoverable: bool,
     },
+    /// Resource preparation failed and the outcome was already delivered to the
+    /// parent on the run task; the actor only needs to clear its `running` flag.
+    AlreadyReported,
 }
 
 /// An agent run, modelled as an event-sourced actor. Each `Run`/`InjectToolResult`
@@ -238,26 +322,10 @@ impl AgentActor {
         self.running = Some(cancel.clone());
 
         let self_ref = ctx.self_ref();
-        let provider = self.ctx.provider.clone();
-        // Timer-capable agents run with the timer control tools layered on; these
-        // execute by `ask`ing this actor and are never sent to the sandboxed runtime.
-        let toolbox: Arc<dyn Toolbox> = if self.params.allow_timers {
-            Arc::new(TimerToolbox {
-                inner: self.ctx.toolbox.clone(),
-                actor: self_ref.clone(),
-            })
-        } else {
-            self.ctx.toolbox.clone()
-        };
-        // `task_list` is always available, like `skill`/`inspect_workspace` --
-        // it's a working-memory aid every agent can reach for, not a permission
-        // that needs gating per agent.
-        let toolbox: Arc<dyn Toolbox> = Arc::new(TaskListToolbox {
-            inner: toolbox,
-            actor: self_ref.clone(),
-        });
+        let run_resources = self.ctx.run_resources.clone();
+        let allow_timers = self.params.allow_timers;
         let inner_sink = self.ctx.event_sink.clone();
-        let system_prompt = self.params.system_prompt.clone().unwrap_or_default();
+        let configured_prompt = self.params.system_prompt.clone();
         // An explicit optional handoff tool (e.g. the server crate's `ask_user`
         // tool for interactive sessions) always wins over the workflow `conclude`
         // mechanism and is never forced.
@@ -267,8 +335,53 @@ impl AgentActor {
         };
         let max_iterations = self.params.max_iterations;
         let max_retries = self.params.max_retries;
+        let parent = self.ctx.parent.clone();
+        let session_id = self.ctx.session_id;
 
         tokio::spawn(async move {
+            // Ensure this run's resources on the spawned task (never the mailbox):
+            // rehydrate the runtime, reconnect MCP, scan the workspace. A failure
+            // here is a recoverable run failure -- report it and stop, exactly as a
+            // provider/tool error would.
+            let prepared = match run_resources.ensure().await {
+                Ok(p) => p,
+                Err(error) => {
+                    parent
+                        .deliver(AgentOutcome::Failed {
+                            session_id,
+                            error,
+                            recoverable: true,
+                        })
+                        .await;
+                    let _ = self_ref
+                        .tell(AgentCommand::RunFinished(Box::new(RunReport {
+                            outcome: RunOutcome::AlreadyReported,
+                        })))
+                        .await;
+                    return;
+                }
+            };
+            // Timer-capable agents run with the timer control tools layered on; these
+            // execute by `ask`ing this actor and are never sent to the sandboxed runtime.
+            let toolbox: Arc<dyn Toolbox> = if allow_timers {
+                Arc::new(TimerToolbox {
+                    inner: prepared.toolbox,
+                    actor: self_ref.clone(),
+                })
+            } else {
+                prepared.toolbox
+            };
+            // `task_list` is always available, like `skill`/`inspect_workspace` --
+            // it's a working-memory aid every agent can reach for, not a permission
+            // that needs gating per agent.
+            let toolbox: Arc<dyn Toolbox> = Arc::new(TaskListToolbox {
+                inner: toolbox,
+                actor: self_ref.clone(),
+            });
+            let system_prompt = prepared
+                .system_prompt
+                .or(configured_prompt)
+                .unwrap_or_default();
             // The sink persists each coarse event by `ask`ing this actor and awaiting
             // the durable write, so the LLM loop has end-to-end backpressure:
             // `emit().await` does not return until the event is journaled. Persistence
@@ -279,7 +392,7 @@ impl AgentActor {
                 actor: self_ref.clone(),
             });
             let outcome = run_with_retries(
-                provider,
+                prepared.provider,
                 toolbox,
                 sink,
                 system_prompt,
@@ -377,6 +490,12 @@ impl AgentActor {
                 // The partial conversation was already journaled incrementally, so the
                 // failed session stays inspectable and a recoverable failure can
                 // `resume`/`fork` from where it stopped.
+                CommandEffect::stop()
+            }
+            RunOutcome::AlreadyReported => {
+                // Resource preparation failed before the loop began; the failure was
+                // already delivered to the parent. Stop like any failed run so the
+                // session can retry on the next message.
                 CommandEffect::stop()
             }
         }
@@ -611,7 +730,8 @@ impl EventSourcedActor for AgentActor {
             },
             AgentDomainEvent::Parked => state.parked = true,
             AgentDomainEvent::TaskListChanged { snapshot } => state.task_list = snapshot,
-            AgentDomainEvent::RunComplete { .. } | AgentDomainEvent::RunCancelled => {}
+            AgentDomainEvent::RunComplete { usage, .. } => state.usage_total.add(&usage),
+            AgentDomainEvent::RunCancelled => {}
         }
         state
     }
@@ -731,6 +851,10 @@ impl EventSourcedActor for AgentActor {
                         CommandEffect::none()
                     }
                 }
+            }
+            AgentCommand::GetHistory { query, reply } => {
+                let _ = reply.send(state.history_page(&query));
+                CommandEffect::none()
             }
         }
     }
@@ -1452,6 +1576,91 @@ mod tests {
             .unwrap();
         state = AgentActor::apply_event(state, AgentDomainEvent::TaskListChanged { snapshot });
         assert!(state.task_list.render().contains("Tasks (1/2 done)"));
+    }
+
+    fn with_messages(ids: &[&str]) -> AgentState {
+        let mut state = AgentActor::initial_state();
+        for id in ids {
+            state = AgentActor::apply_event(
+                state,
+                AgentDomainEvent::MessageComplete {
+                    message: Message::user(*id, "x"),
+                },
+            );
+        }
+        state
+    }
+
+    fn page_ids(page: &AgentHistoryPage) -> Vec<String> {
+        page.messages.iter().map(|m| m.id.clone()).collect()
+    }
+
+    #[test]
+    fn history_tail_returns_last_limit_with_tasks_and_usage() {
+        let mut state = with_messages(&["a", "b", "c", "d"]);
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage {
+                    input_tokens: 4,
+                    output_tokens: 2,
+                },
+                iterations: 1,
+            },
+        );
+        let page = state.history_page(&HistoryQuery {
+            before: None,
+            limit: 2,
+        });
+        assert_eq!(page_ids(&page), ["c", "d"]);
+        assert!(page.has_more);
+        assert!(page.tasks.is_some());
+        assert_eq!(page.usage.unwrap().input_tokens, 4);
+    }
+
+    #[test]
+    fn history_before_cursor_pages_backward_without_tasks() {
+        let state = with_messages(&["a", "b", "c", "d"]);
+        let page = state.history_page(&HistoryQuery {
+            before: Some("c".into()),
+            limit: 2,
+        });
+        // Two messages immediately before "c": "a", "b".
+        assert_eq!(page_ids(&page), ["a", "b"]);
+        assert!(!page.has_more);
+        assert!(page.tasks.is_none());
+        assert!(page.usage.is_none());
+    }
+
+    #[test]
+    fn history_tail_shorter_than_limit_has_no_more() {
+        let state = with_messages(&["a", "b"]);
+        let page = state.history_page(&HistoryQuery {
+            before: None,
+            limit: 10,
+        });
+        assert_eq!(page_ids(&page), ["a", "b"]);
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn run_complete_accumulates_usage_total() {
+        let mut state = AgentActor::initial_state();
+        assert_eq!(state.usage_total, UsageTotal::default());
+        for (input, output) in [(10u32, 5u32), (7, 3)] {
+            state = AgentActor::apply_event(
+                state,
+                AgentDomainEvent::RunComplete {
+                    usage: Usage {
+                        input_tokens: input,
+                        output_tokens: output,
+                    },
+                    iterations: 1,
+                },
+            );
+        }
+        assert_eq!(state.usage_total.input_tokens, 17);
+        assert_eq!(state.usage_total.output_tokens, 8);
     }
 
     #[test]

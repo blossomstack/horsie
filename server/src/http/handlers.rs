@@ -11,17 +11,24 @@ use crate::sessions::spec::{
 };
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::session::{
-    AgentSettings as WireAgentSettings, SessionDetail, SessionStatusKind, SessionSummary,
+    AgentSettings as WireAgentSettings, SessionDetail, SessionStatusKind, SessionSummary, TaskItem,
+    TaskStatus as WireTaskStatus, UsageView,
 };
 use horsie_models::session_api::{
-    CreateSessionRequest, CreateSessionResponse, GetSessionResponse, ListSessionsResponse,
-    SendMessageRequest, SessionAck,
+    CreateSessionRequest, CreateSessionResponse, GetSessionResponse, HistoryPage,
+    ListSessionsResponse, SendMessageRequest, SessionAck,
 };
+use horsie_workflow::{AgentHistoryPage, HistoryQuery, TaskStatus as AgentTaskStatus};
+use serde::Deserialize;
 use uuid::Uuid;
+
+/// Default and maximum messages returned by one `/history` page.
+const HISTORY_DEFAULT_LIMIT: usize = 50;
+const HISTORY_MAX_LIMIT: usize = 200;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -193,6 +200,72 @@ pub async fn get_session(
             .collect(),
     };
     Ok(Json(GetSessionResponse { session: detail }))
+}
+
+/// Query params for `GET /api/sessions/:id/history`.
+#[derive(Deserialize)]
+pub struct HistoryParams {
+    /// Return the page of messages immediately before this message id; absent
+    /// requests the latest (tail) page.
+    before: Option<String>,
+    /// Max messages; defaults to [`HISTORY_DEFAULT_LIMIT`], capped at
+    /// [`HISTORY_MAX_LIMIT`].
+    limit: Option<usize>,
+}
+
+fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
+    match status {
+        AgentTaskStatus::Pending => WireTaskStatus::Pending,
+        AgentTaskStatus::InProgress => WireTaskStatus::InProgress,
+        AgentTaskStatus::Completed => WireTaskStatus::Completed,
+    }
+}
+
+fn to_wire_history(page: AgentHistoryPage) -> HistoryPage {
+    HistoryPage {
+        messages: page.messages,
+        has_more: page.has_more,
+        tasks: page.tasks.map(|tasks| {
+            tasks
+                .into_iter()
+                .map(|t| TaskItem {
+                    id: t.id,
+                    content: t.content,
+                    status: wire_task_status(t.status),
+                })
+                .collect()
+        }),
+        usage: page.usage.map(|u| UsageView {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+        }),
+    }
+}
+
+/// A window of a session's conversation history, from the agent's in-memory
+/// state (no journal replay in the server). The tail page (no `before`) also
+/// carries the current task list and cumulative usage.
+pub async fn get_history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HistoryParams>,
+) -> Result<impl IntoResponse, Api> {
+    let limit = params
+        .limit
+        .unwrap_or(HISTORY_DEFAULT_LIMIT)
+        .clamp(1, HISTORY_MAX_LIMIT);
+    let query = HistoryQuery {
+        before: params.before,
+        limit,
+    };
+    let page = ask(&state, |reply| SessionSupervisorCommand::History {
+        id: id.clone(),
+        query,
+        reply,
+    })
+    .await?
+    .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
+    Ok(Json(to_wire_history(page)))
 }
 
 pub async fn send_message(
