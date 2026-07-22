@@ -295,9 +295,11 @@ impl WorkflowActor {
             // Workflow-engine agents don't use MCP servers (a session concept).
             Vec::new(),
         );
+        // Workflow agents provision their runtime/toolbox once at spawn and keep
+        // them for the agent's life (including a recovery self-resume), so their
+        // per-run resources are fixed.
         let agent_ctx = AgentRuntimeContext {
-            provider,
-            toolbox,
+            context_provider: Arc::new(crate::FixedContextProvider { provider, toolbox }),
             event_sink: self.rt.event_sink.clone(),
             parent: Arc::new(WorkflowParent(ctx.self_ref())),
             session_id,
