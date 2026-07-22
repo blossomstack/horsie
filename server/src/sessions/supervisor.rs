@@ -58,6 +58,12 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: oneshot::Sender<Option<broadcast::Receiver<SessionFrame>>>,
     },
+    /// Read a window of a session's conversation history, or `None` if unknown.
+    History {
+        id: SessionId,
+        query: horsie_workflow::HistoryQuery,
+        reply: oneshot::Sender<Option<horsie_workflow::AgentHistoryPage>>,
+    },
     /// Tear down every live session's OS resources for a clean shutdown.
     Shutdown { reply: oneshot::Sender<()> },
     /// Internal: a session actor reports its status changed.
@@ -313,6 +319,23 @@ impl EventSourcedActor for SessionSupervisor {
                         let (tx, rx) = oneshot::channel();
                         let _ = child.tell(SessionCommand::Subscribe { reply: tx }).await;
                         // Forward the child's receiver once it answers, off the mailbox.
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::History { id, query, reply } => {
+                match self.children.get(&id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child.tell(SessionCommand::History { query, reply: tx }).await;
+                        // The child answers off its mailbox (a transient reader may
+                        // recover a journal); forward the page when it lands.
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
                         });

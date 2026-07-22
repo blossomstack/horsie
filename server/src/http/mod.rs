@@ -89,6 +89,7 @@ pub fn app(state: AppState) -> Router {
             get(handlers::get_session).delete(handlers::delete_session),
         )
         .route("/api/sessions/:id/messages", post(handlers::send_message))
+        .route("/api/sessions/:id/history", get(handlers::get_history))
         .route("/api/sessions/:id/stop", post(handlers::stop_session))
         .route("/api/sessions/:id/events", get(sse::session_events))
         .route("/api/events", get(sse::global_events))

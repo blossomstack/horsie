@@ -17,9 +17,9 @@ use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, Per
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
-    AgentActor, AgentCommand, AgentOutcome, AgentOutcomeSink, AgentParams, AgentRunDef,
-    AgentRuntimeContext, DefaultToolboxFactory, PreparedRun, RunResources, SharedContext,
-    ToolboxFactory, compose_system_prompt, scan_workspace,
+    AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
+    AgentRunDef, AgentRuntimeContext, DefaultToolboxFactory, HistoryQuery, PreparedRun,
+    RunResources, SharedContext, ToolboxFactory, compose_system_prompt, scan_workspace,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -52,6 +52,13 @@ pub enum SessionCommand {
     /// Hand back a live frame subscriber for the SSE stream.
     Subscribe {
         reply: oneshot::Sender<broadcast::Receiver<SessionFrame>>,
+    },
+    /// Read a window of conversation history. Answered from the agent's
+    /// in-memory state — the live agent if one is running, else a transient
+    /// read-only agent recovered just for this query (no runtime, no run).
+    History {
+        query: HistoryQuery,
+        reply: oneshot::Sender<AgentHistoryPage>,
     },
     /// Tear down OS resources for a clean server shutdown; no status persisted,
     /// so a `Running` session reconciles to `Interrupted` next start.
@@ -369,6 +376,58 @@ impl SessionActor {
         self.ensure_agent(ctx).await
     }
 
+    /// Answer a history query from the agent's in-memory state. If a live agent
+    /// is running (a turn in flight or just finished), ask it directly for the
+    /// freshest state. Otherwise spawn a transient read-only agent that recovers
+    /// its conversation from the journal, answer from it, and let it stop — no
+    /// runtime is touched, so viewing an idle session is cheap. The agent itself
+    /// reads its own journal (recovery), so encapsulation holds: the server
+    /// never touches the journal directly.
+    async fn read_history(
+        &self,
+        query: HistoryQuery,
+        ctx: &ActorContext<Self>,
+    ) -> AgentHistoryPage {
+        if let Some(agent) = &self.agent
+            && let Ok(page) = agent
+                .ask(|reply| AgentCommand::GetHistory {
+                    query: query.clone(),
+                    reply,
+                })
+                .await
+        {
+            return page;
+        }
+        // Transient reader: resources that error if a run is ever attempted
+        // (it never is here), a no-op event sink, and a parent that ignores
+        // outcomes. Dropped when this scope ends, stopping the actor. `interactive`
+        // is set so recovery does NOT self-resume the interrupted turn — a read
+        // must never attempt a run (which would fail `NoRunResources` and emit a
+        // spurious error).
+        let mut reader_params = AgentParams::from_def(&session_run_def(&self.spec.agent));
+        reader_params.interactive = true;
+        let reader = ctx.spawn(AgentActor::new(
+            AgentRuntimeContext {
+                run_resources: Arc::new(NoRunResources),
+                event_sink: Arc::new(SessionEventSink {
+                    frames: self.frames.clone(),
+                }),
+                parent: Arc::new(SessionParent(ctx.self_ref())),
+                session_id: self.id,
+            },
+            reader_params,
+        ));
+        reader
+            .ask(|reply| AgentCommand::GetHistory { query, reply })
+            .await
+            .unwrap_or(AgentHistoryPage {
+                messages: Vec::new(),
+                has_more: false,
+                tasks: None,
+                usage: None,
+            })
+    }
+
     /// Start a fresh turn with `text` and reply to the caller.
     async fn start_turn(
         &mut self,
@@ -552,6 +611,17 @@ fn session_run_def(settings: &AgentSettings) -> AgentRunDef {
     }
 }
 
+/// Resources for a transient read-only agent (history queries): it never runs,
+/// so `ensure` must never be called; it errors defensively if it ever is.
+struct NoRunResources;
+
+#[async_trait]
+impl RunResources for NoRunResources {
+    async fn ensure(&self) -> Result<PreparedRun, String> {
+        Err("read-only agent cannot run".to_string())
+    }
+}
+
 /// Per-run resource supplier for an interactive session's agent. Its `ensure`
 /// runs on the agent run's own task (never the session mailbox): it resolves the
 /// provider live, scans the workspace + runs SessionStart, connects the enabled
@@ -719,6 +789,11 @@ impl EventSourcedActor for SessionActor {
             }
             SessionCommand::Subscribe { reply } => {
                 let _ = reply.send(self.frames.subscribe());
+                CommandEffect::none()
+            }
+            SessionCommand::History { query, reply } => {
+                let page = self.read_history(query, ctx).await;
+                let _ = reply.send(page);
                 CommandEffect::none()
             }
             SessionCommand::Shutdown { reply } => {
