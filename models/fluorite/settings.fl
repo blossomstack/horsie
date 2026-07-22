@@ -24,6 +24,9 @@ struct ModelView {
     /// The provider's model identifier (e.g. "claude-sonnet-4-6").
     model_id: String,
     max_tokens: Option<u32>,
+    /// The model's total context window, in tokens. A built-in default is
+    /// applied for known model ids when a model is added with this omitted.
+    context_window: Option<u32>,
 }
 
 /// What a vendor can do with a session workspace. Announced by the vendor
@@ -124,6 +127,7 @@ struct ModelInput {
     provider: String,
     model_id: String,
     max_tokens: Option<u32>,
+    context_window: Option<u32>,
 }
 
 /// A configurable vendor to persist. Replaces any vendor of the same `name`.
