@@ -64,6 +64,12 @@ impl Default for TaskListState {
 }
 
 impl TaskListState {
+    /// The current tasks, in list order — read-only view for callers (e.g.
+    /// the session server) that project this state onto a wire event.
+    pub fn tasks(&self) -> &[TaskRecord] {
+        &self.tasks
+    }
+
     pub fn render(&self) -> String {
         if self.tasks.is_empty() {
             return "No tasks.".to_string();

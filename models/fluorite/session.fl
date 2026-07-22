@@ -67,6 +67,24 @@ struct ErrorEvent { message: String }
 struct DeltaEvent { text: String }
 struct ToolStartEvent { tool_call_id: String, name: String }
 
+/// Status of one entry in the agent's `task_list` tool state.
+enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// One entry in the agent's `task_list` tool state.
+struct TaskItem {
+    id: u32,
+    content: String,
+    status: TaskStatus,
+}
+
+/// The agent's `task_list` tool state, sent whole on every mutation
+/// (create/insert/update_status) — never a delta.
+struct TaskListEvent { tasks: Vec<TaskItem> }
+
 #[type_tag = "type"]
 union SessionEvent {
     Message(MessageEvent),
@@ -77,6 +95,7 @@ union SessionEvent {
     Error(ErrorEvent),
     Delta(DeltaEvent),
     ToolStart(ToolStartEvent),
+    TaskListChanged(TaskListEvent),
 }
 
 /// One frame on the global `/api/events` stream (live session-list updates).
