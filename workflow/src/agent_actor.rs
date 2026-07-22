@@ -1397,10 +1397,7 @@ mod tests {
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::RunComplete {
-                usage: Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                },
+                usage: Usage::without_cache(1, 1),
                 iterations: 1,
             },
         );

@@ -809,10 +809,7 @@ mod tests {
                 input: json!({"answer": 42}),
             })],
             stop_reason: StopReason::ToolUse,
-            usage: Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-            },
+            usage: Usage::without_cache(10, 5),
         }]);
         // The handoff tool must be advertised in the toolbox.
         let mut agent = Agent::builder(provider, MockToolbox::echo("handoff"))
@@ -873,10 +870,7 @@ mod tests {
                     input: json!({"wrong": true}),
                 })],
                 stop_reason: StopReason::ToolUse,
-                usage: Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                },
+                usage: Usage::without_cache(1, 1),
             },
             CompletionResponse {
                 parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -885,10 +879,7 @@ mod tests {
                     input: json!({"answer": 7}),
                 })],
                 stop_reason: StopReason::ToolUse,
-                usage: Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                },
+                usage: Usage::without_cache(1, 1),
             },
         ]);
         let mut agent = Agent::builder(provider, toolbox)
@@ -932,10 +923,7 @@ mod tests {
                 input: json!({"wrong": true}),
             })],
             stop_reason: StopReason::ToolUse,
-            usage: Usage {
-                input_tokens: 1,
-                output_tokens: 1,
-            },
+            usage: Usage::without_cache(1, 1),
         }]);
         let config = AgentConfig {
             handoff_max_retries: 1,
@@ -1017,10 +1005,7 @@ mod tests {
                 input: json!({}),
             })],
             stop_reason: StopReason::ToolUse,
-            usage: Usage {
-                input_tokens: 5,
-                output_tokens: 2,
-            },
+            usage: Usage::without_cache(5, 2),
         }]);
         let toolbox = MockToolbox::echo("loop_tool");
         let config = AgentConfig {
@@ -1056,10 +1041,7 @@ mod tests {
                 input: json!({"x": 1}),
             })],
             stop_reason: StopReason::ToolUse,
-            usage: Usage {
-                input_tokens: 5,
-                output_tokens: 2,
-            },
+            usage: Usage::without_cache(5, 2),
         }]);
         let toolbox = MockToolbox::echo("stuck_tool");
         let config = AgentConfig {
@@ -1095,10 +1077,7 @@ mod tests {
                 input: json!({}),
             })],
             stop_reason: StopReason::ToolUse,
-            usage: Usage {
-                input_tokens: 5,
-                output_tokens: 2,
-            },
+            usage: Usage::without_cache(5, 2),
         }]);
         let toolbox = MockToolbox::echo("some_tool");
         let mut agent = Agent::builder(provider, toolbox).build().unwrap();
@@ -1148,10 +1127,7 @@ mod tests {
                     input: json!({}),
                 })],
                 stop_reason: StopReason::ToolUse,
-                usage: Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                },
+                usage: Usage::without_cache(1, 1),
             },
         });
         let mut agent = Agent::builder(provider.clone(), MockToolbox::echo("finish"))
@@ -1208,10 +1184,7 @@ mod tests {
                     text: "done".into(),
                 })],
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                },
+                usage: Usage::without_cache(1, 1),
             },
         });
         let mut agent = Agent::builder(provider.clone(), Arc::new(EmptyToolbox))
@@ -1243,10 +1216,7 @@ mod tests {
                     text: "just chatting, no tool".into(),
                 })],
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                },
+                usage: Usage::without_cache(1, 1),
             },
         });
         let mut agent = Agent::builder(provider.clone(), MockToolbox::echo("finish"))
@@ -1303,10 +1273,7 @@ mod tests {
                 input: json!({"answer": 42}),
             })],
             stop_reason: StopReason::ToolUse,
-            usage: Usage {
-                input_tokens: 1,
-                output_tokens: 1,
-            },
+            usage: Usage::without_cache(1, 1),
         }]);
         let mut agent = Agent::builder(provider, MockToolbox::echo("finish"))
             .with_handoff_tool_optional("finish")
@@ -1414,20 +1381,14 @@ mod tests {
                     }),
                 ],
                 stop_reason: StopReason::ToolUse,
-                usage: Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                },
+                usage: Usage::without_cache(1, 1),
             },
             CompletionResponse {
                 parts: vec![ContentPart::Text(TextPart {
                     text: "done".into(),
                 })],
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                },
+                usage: Usage::without_cache(1, 1),
             },
         ]);
         let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1466,10 +1427,7 @@ mod tests {
                 text: "half an ans".into(),
             })],
             stop_reason: StopReason::MaxTokens,
-            usage: Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-            },
+            usage: Usage::without_cache(10, 5),
         }]);
         let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
             .build()

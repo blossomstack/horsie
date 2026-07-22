@@ -562,10 +562,7 @@ impl LlmProvider for AnthropicProvider {
         Ok(CompletionResponse {
             parts,
             stop_reason,
-            usage: Usage {
-                input_tokens,
-                output_tokens,
-            },
+            usage: Usage::without_cache(input_tokens, output_tokens),
         })
     }
 }

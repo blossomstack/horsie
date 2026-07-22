@@ -207,11 +207,7 @@ impl Default for StreamState {
             reasoning: String::new(),
             text: String::new(),
             tools: BTreeMap::new(),
-            // `Usage` has no `Default` impl in the models crate.
-            usage: Usage {
-                input_tokens: 0,
-                output_tokens: 0,
-            },
+            usage: Usage::without_cache(0, 0),
             reasoning_started: false,
             text_started: false,
             text_index: 0,
