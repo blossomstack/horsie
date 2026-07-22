@@ -333,7 +333,9 @@ impl EventSourcedActor for SessionSupervisor {
                 match self.children.get(&id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child.tell(SessionCommand::History { query, reply: tx }).await;
+                        let _ = child
+                            .tell(SessionCommand::History { query, reply: tx })
+                            .await;
                         // The child answers off its mailbox (a transient reader may
                         // recover a journal); forward the page when it lands.
                         tokio::spawn(async move {
