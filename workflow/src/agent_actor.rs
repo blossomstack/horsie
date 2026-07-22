@@ -199,7 +199,9 @@ pub struct UsageTotal {
 
 impl UsageTotal {
     fn add(&mut self, usage: &Usage) {
-        self.input_tokens = self.input_tokens.saturating_add(u64::from(usage.input_tokens));
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(u64::from(usage.input_tokens));
         self.output_tokens = self
             .output_tokens
             .saturating_add(u64::from(usage.output_tokens));
@@ -228,6 +230,9 @@ enum RunOutcome {
         error: String,
         recoverable: bool,
     },
+    /// Resource preparation failed and the outcome was already delivered to the
+    /// parent on the run task; the actor only needs to clear its `running` flag.
+    AlreadyReported,
 }
 
 /// An agent run, modelled as an event-sourced actor. Each `Run`/`InjectToolResult`
@@ -262,26 +267,10 @@ impl AgentActor {
         self.running = Some(cancel.clone());
 
         let self_ref = ctx.self_ref();
-        let provider = self.ctx.provider.clone();
-        // Timer-capable agents run with the timer control tools layered on; these
-        // execute by `ask`ing this actor and are never sent to the sandboxed runtime.
-        let toolbox: Arc<dyn Toolbox> = if self.params.allow_timers {
-            Arc::new(TimerToolbox {
-                inner: self.ctx.toolbox.clone(),
-                actor: self_ref.clone(),
-            })
-        } else {
-            self.ctx.toolbox.clone()
-        };
-        // `task_list` is always available, like `skill`/`inspect_workspace` --
-        // it's a working-memory aid every agent can reach for, not a permission
-        // that needs gating per agent.
-        let toolbox: Arc<dyn Toolbox> = Arc::new(TaskListToolbox {
-            inner: toolbox,
-            actor: self_ref.clone(),
-        });
+        let run_resources = self.ctx.run_resources.clone();
+        let allow_timers = self.params.allow_timers;
         let inner_sink = self.ctx.event_sink.clone();
-        let system_prompt = self.params.system_prompt.clone().unwrap_or_default();
+        let configured_prompt = self.params.system_prompt.clone();
         // An explicit optional handoff tool (e.g. the server crate's `ask_user`
         // tool for interactive sessions) always wins over the workflow `conclude`
         // mechanism and is never forced.
@@ -291,8 +280,53 @@ impl AgentActor {
         };
         let max_iterations = self.params.max_iterations;
         let max_retries = self.params.max_retries;
+        let parent = self.ctx.parent.clone();
+        let session_id = self.ctx.session_id;
 
         tokio::spawn(async move {
+            // Ensure this run's resources on the spawned task (never the mailbox):
+            // rehydrate the runtime, reconnect MCP, scan the workspace. A failure
+            // here is a recoverable run failure -- report it and stop, exactly as a
+            // provider/tool error would.
+            let prepared = match run_resources.ensure().await {
+                Ok(p) => p,
+                Err(error) => {
+                    parent
+                        .deliver(AgentOutcome::Failed {
+                            session_id,
+                            error,
+                            recoverable: true,
+                        })
+                        .await;
+                    let _ = self_ref
+                        .tell(AgentCommand::RunFinished(Box::new(RunReport {
+                            outcome: RunOutcome::AlreadyReported,
+                        })))
+                        .await;
+                    return;
+                }
+            };
+            // Timer-capable agents run with the timer control tools layered on; these
+            // execute by `ask`ing this actor and are never sent to the sandboxed runtime.
+            let toolbox: Arc<dyn Toolbox> = if allow_timers {
+                Arc::new(TimerToolbox {
+                    inner: prepared.toolbox,
+                    actor: self_ref.clone(),
+                })
+            } else {
+                prepared.toolbox
+            };
+            // `task_list` is always available, like `skill`/`inspect_workspace` --
+            // it's a working-memory aid every agent can reach for, not a permission
+            // that needs gating per agent.
+            let toolbox: Arc<dyn Toolbox> = Arc::new(TaskListToolbox {
+                inner: toolbox,
+                actor: self_ref.clone(),
+            });
+            let system_prompt = prepared
+                .system_prompt
+                .or(configured_prompt)
+                .unwrap_or_default();
             // The sink persists each coarse event by `ask`ing this actor and awaiting
             // the durable write, so the LLM loop has end-to-end backpressure:
             // `emit().await` does not return until the event is journaled. Persistence
@@ -303,7 +337,7 @@ impl AgentActor {
                 actor: self_ref.clone(),
             });
             let outcome = run_with_retries(
-                provider,
+                prepared.provider,
                 toolbox,
                 sink,
                 system_prompt,
@@ -401,6 +435,12 @@ impl AgentActor {
                 // The partial conversation was already journaled incrementally, so the
                 // failed session stays inspectable and a recoverable failure can
                 // `resume`/`fork` from where it stopped.
+                CommandEffect::stop()
+            }
+            RunOutcome::AlreadyReported => {
+                // Resource preparation failed before the loop began; the failure was
+                // already delivered to the parent. Stop like any failed run so the
+                // session can retry on the next message.
                 CommandEffect::stop()
             }
         }

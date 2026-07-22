@@ -8,17 +8,18 @@
 
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::SessionEventSink;
-use crate::sessions::spec::{ServerDeps, SessionSpec, SessionStatus};
+use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::{SessionFrame, UserMessageError};
 use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorRuntime};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
-use horsie_agentcore::Toolbox;
+use horsie_agentcore::{LlmProvider, Toolbox};
+use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentOutcome, AgentOutcomeSink, AgentParams, AgentRunDef,
-    AgentRuntimeContext, DefaultToolboxFactory, SharedContext, ToolboxFactory,
-    compose_system_prompt, scan_workspace,
+    AgentRuntimeContext, DefaultToolboxFactory, PreparedRun, RunResources, SharedContext,
+    ToolboxFactory, compose_system_prompt, scan_workspace,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -308,7 +309,10 @@ impl SessionActor {
     }
 
     /// Ensure a live agent child (recovering its conversation from the journal
-    /// on respawn). Mirrors the workflow's `spawn_agent`, in interactive mode.
+    /// on respawn). Spawning is deliberately cheap: the provider, toolbox, and
+    /// system prompt are resolved lazily per run by [`SessionRunResources`] on
+    /// the run's own task, so the workspace scan / MCP connect / SessionStart
+    /// hook that these used to require never block this mailbox.
     async fn ensure_agent(&mut self, ctx: &ActorContext<Self>) -> Result<(), String> {
         if self.agent.is_some() {
             return Ok(());
@@ -316,81 +320,40 @@ impl SessionActor {
         let Some(runtime) = &self.runtime else {
             return Err("no live runtime".to_string());
         };
-        let runtime_client = runtime.runtime_client.clone();
-        let settings = &self.spec.agent;
-        // Resolve the provider from the shared registry under a short-lived read
-        // guard (dropped before the awaits below), so live config edits take
-        // effect on the next turn.
+        // Resolve the provider here (cheap registry lookup) so an unregistered
+        // model fails the message fast rather than as an async run failure; the
+        // agent is respawned per turn, so this still picks up live config edits.
         let provider = {
             let reg = self
                 .deps
                 .provider_registry
                 .read()
                 .map_err(|_| "provider registry lock poisoned".to_string())?;
-            reg.get(&settings.model).cloned()
+            reg.get(&self.spec.agent.model).cloned()
         }
-        .ok_or_else(|| format!("no provider registered for model '{}'", settings.model))?;
-        // A session is not a workflow graph node -- it has no `name`/`model`/
-        // `transitions`, so it builds an `AgentRunDef` directly rather than a
-        // `WorkflowAgentDef`. `allow_ask_user` stays `false`: sessions get their
-        // own dedicated, always-available `ask_user` tool (below) instead of the
-        // workflow crate's `conclude`-based ask mechanism.
-        let def = AgentRunDef {
-            system_prompt: None,
-            output_schema: None,
-            allow_ask_user: false,
-            allow_timers: None,
-            max_iterations: settings.max_iterations,
-            max_retries: Some(settings.max_retries),
-            allowed_tools: settings.allowed_tools.clone(),
-        };
-        let use_plugins = settings.use_plugins.unwrap_or(true);
-        let (ws, shared_skills) = scan_workspace(&runtime_client, None, use_plugins).await;
-        let shared = if use_plugins {
-            let bootstrap = match runtime_client.run_session_start().await {
-                Ok(context) if !context.trim().is_empty() => Some(context),
-                Ok(_) | Err(_) => None,
-            };
-            Some(SharedContext {
-                skills: Arc::new(shared_skills),
-                bootstrap,
-            })
-        } else {
-            None
-        };
-        // Connect the session's enabled MCP servers and expose their tools next
-        // to the runtime tools (subject to the same allowlist). Done per spawn,
-        // like the workspace scan, so tools reflect the live servers each turn.
-        let mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
-            Vec::new()
-        } else if let Some(mcp_svc) = self.deps.mcp.as_ref() {
-            mcp_svc
-                .toolboxes_for(&settings.mcp_servers)
-                .await
-                .map_err(|e| format!("build MCP toolboxes: {e}"))?
-        } else {
-            tracing::warn!(
-                session = %self.id,
-                "session names MCP servers but no MCP service is configured; ignoring"
-            );
-            Vec::new()
-        };
-        let toolbox: Arc<dyn Toolbox> =
-            Arc::new(AskUserToolbox::new(DefaultToolboxFactory.for_agent(
-                &def,
-                runtime_client.clone(),
-                ws.names(),
-                use_plugins,
-                mcp,
-            )));
-        let mut params = AgentParams::from_def(&def);
+        .ok_or_else(|| {
+            format!(
+                "no provider registered for model '{}'",
+                self.spec.agent.model
+            )
+        })?;
+        // Capture the *current* runtime client: the agent is respawned per turn
+        // (dropped on conclude), and `ensure_runtime` runs before each respawn,
+        // so a fresh client is captured after any re-attach.
+        let run_resources = Arc::new(SessionRunResources {
+            runtime_client: runtime.runtime_client.clone(),
+            provider,
+            mcp: self.deps.mcp.clone(),
+            settings: self.spec.agent.clone(),
+            session_id: self.id,
+        });
+        let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
         params.interactive = true;
         params.optional_handoff_tool = Some(ASK_USER_TOOL.to_string());
-        params.system_prompt =
-            compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
+        // The system prompt is composed per run from a live workspace scan by
+        // `SessionRunResources`, not baked here.
         let agent_ctx = AgentRuntimeContext {
-            provider,
-            toolbox,
+            run_resources,
             event_sink: Arc::new(SessionEventSink {
                 frames: self.frames.clone(),
             }),
@@ -570,6 +533,89 @@ struct SessionParent(ActorRef<SessionCommand>);
 impl AgentOutcomeSink for SessionParent {
     async fn deliver(&self, outcome: AgentOutcome) {
         let _ = self.0.tell(SessionCommand::AgentOutcome(outcome)).await;
+    }
+}
+
+/// The interactive session's `AgentRunDef`. A session is not a workflow graph
+/// node -- no `name`/`model`/`transitions` -- so it builds a run def directly.
+/// `allow_ask_user` stays `false`: sessions get their own always-available
+/// `ask_user` tool instead of the workflow crate's `conclude`-based ask.
+fn session_run_def(settings: &AgentSettings) -> AgentRunDef {
+    AgentRunDef {
+        system_prompt: None,
+        output_schema: None,
+        allow_ask_user: false,
+        allow_timers: None,
+        max_iterations: settings.max_iterations,
+        max_retries: Some(settings.max_retries),
+        allowed_tools: settings.allowed_tools.clone(),
+    }
+}
+
+/// Per-run resource supplier for an interactive session's agent. Its `ensure`
+/// runs on the agent run's own task (never the session mailbox): it resolves the
+/// provider live, scans the workspace + runs SessionStart, connects the enabled
+/// MCP servers, and composes the system prompt -- the sandbox round-trips that
+/// used to block `ensure_agent` on the mailbox. Idempotent per run, so a live
+/// runtime/MCP makes it cheap.
+struct SessionRunResources {
+    runtime_client: RuntimeClient,
+    provider: Arc<dyn LlmProvider>,
+    mcp: Option<Arc<crate::mcp::McpService>>,
+    settings: AgentSettings,
+    session_id: Uuid,
+}
+
+#[async_trait]
+impl RunResources for SessionRunResources {
+    async fn ensure(&self) -> Result<PreparedRun, String> {
+        let settings = &self.settings;
+        let provider = self.provider.clone();
+        let def = session_run_def(settings);
+        let use_plugins = settings.use_plugins.unwrap_or(true);
+        let (ws, shared_skills) = scan_workspace(&self.runtime_client, None, use_plugins).await;
+        let shared = if use_plugins {
+            let bootstrap = match self.runtime_client.run_session_start().await {
+                Ok(context) if !context.trim().is_empty() => Some(context),
+                Ok(_) | Err(_) => None,
+            };
+            Some(SharedContext {
+                skills: Arc::new(shared_skills),
+                bootstrap,
+            })
+        } else {
+            None
+        };
+        // Connect the session's enabled MCP servers and expose their tools next
+        // to the runtime tools (subject to the same allowlist).
+        let mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
+            Vec::new()
+        } else if let Some(mcp_svc) = self.mcp.as_ref() {
+            mcp_svc
+                .toolboxes_for(&settings.mcp_servers)
+                .await
+                .map_err(|e| format!("build MCP toolboxes: {e}"))?
+        } else {
+            tracing::warn!(
+                session = %self.session_id,
+                "session names MCP servers but no MCP service is configured; ignoring"
+            );
+            Vec::new()
+        };
+        let toolbox: Arc<dyn Toolbox> =
+            Arc::new(AskUserToolbox::new(DefaultToolboxFactory.for_agent(
+                &def,
+                self.runtime_client.clone(),
+                ws.names(),
+                use_plugins,
+                mcp,
+            )));
+        let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
+        Ok(PreparedRun {
+            provider,
+            toolbox,
+            system_prompt,
+        })
     }
 }
 
