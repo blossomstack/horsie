@@ -74,6 +74,24 @@ pub struct StampedEvent {
 /// (cancellations, timer events) — so ids match journal positions exactly.
 /// Interactive agents never compact, so replaying from 0 with our own counter
 /// is exact.
+/// The current journal head (number of persisted entries) for a session's agent.
+/// Used by the SSE `live` mode to begin streaming *after* everything already in
+/// the journal, so a paginating client that backfills via `/history` does not
+/// also receive the whole transcript over SSE. Counts entries without decoding
+/// them.
+pub async fn journal_head_seq(journal: &Arc<dyn Journal>, session_id: Uuid) -> u64 {
+    let pid = AgentActor::persistence_id_for(session_id);
+    let mut seq = 0u64;
+    let mut stream = journal.replay(&pid, 0).await;
+    while let Some(item) = stream.next().await {
+        if item.is_err() {
+            break;
+        }
+        seq += 1;
+    }
+    seq
+}
+
 pub async fn replay_session_events(
     journal: &Arc<dyn Journal>,
     session_id: Uuid,

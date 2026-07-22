@@ -528,6 +528,84 @@ async fn create_message_sse_roundtrip() {
 }
 
 #[tokio::test]
+async fn history_endpoint_returns_windowed_messages() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("first reply");
+    mock.queue_response("second reply");
+    let tmp = tempfile::tempdir().unwrap();
+    let vendor = Arc::new(MockVendor::new());
+    let server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    // Two completed turns → user + assistant per turn = 4 messages. Poll the
+    // history until both turns have landed (status can read `Idle` between the
+    // 202 and the turn flipping to `Running`, so a bare `wait_status` races).
+    let history = |limit: u32, before: Option<String>| {
+        let client = client.clone();
+        let addr = server.addr;
+        let id = id.clone();
+        async move {
+            let mut url = format!("http://{addr}/api/sessions/{id}/history?limit={limit}");
+            if let Some(b) = before {
+                url.push_str(&format!("&before={b}"));
+            }
+            client
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let wait_for = |want: usize| {
+        let history = &history;
+        async move {
+            let mut waited = 0;
+            loop {
+                let all = history(100, None).await;
+                if all["messages"].as_array().unwrap().len() >= want {
+                    break;
+                }
+                assert!(waited < 100, "history never reached {want} messages");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                waited += 1;
+            }
+        }
+    };
+    // Serialize the turns: the second send would 409 while the first is Running,
+    // so wait for turn one's reply (2 messages) before sending turn two.
+    send_message(&client, &server.addr, &id, "one").await;
+    wait_for(2).await;
+    send_message(&client, &server.addr, &id, "two").await;
+    wait_for(4).await;
+
+    // Tail page with a small limit: newest messages + has_more.
+    let page = history(2, None).await;
+    let msgs = page["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2, "tail limit not honored: {page}");
+    assert_eq!(page["hasMore"], serde_json::json!(true));
+    // Tail page carries the usage readout (tasks may be null when unused).
+    assert!(page["usage"].is_object(), "tail usage missing: {page}");
+    // The newest assistant reply is in the tail window.
+    let joined = page.to_string();
+    assert!(joined.contains("second reply"), "tail missing latest: {page}");
+
+    // Scroll back before the oldest returned id → older messages, no tasks/usage.
+    let oldest_id = msgs[0]["id"].as_str().unwrap().to_string();
+    let older = history(2, Some(oldest_id)).await;
+    assert_eq!(older["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(older["hasMore"], serde_json::json!(false));
+    assert!(older["usage"].is_null(), "scroll-back must omit usage: {older}");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn stop_preserves_and_message_reattaches() {
     let mock = MockLlmServer::builder().build().await;
     mock.queue_response("first");
