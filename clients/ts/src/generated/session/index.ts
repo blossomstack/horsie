@@ -11,6 +11,7 @@ export * from './statusChangedEvent';
 export * from './errorEvent';
 export * from './deltaEvent';
 export * from './toolStartEvent';
+export * from './progressionEvent';
 export * from './taskStatus';
 export * from './taskItem';
 export * from './taskListEvent';

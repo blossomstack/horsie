@@ -17,7 +17,7 @@ use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use horsie_models::session::{
-    DeltaEvent, ErrorEvent, SessionEvent, StatusChangedEvent, ToolStartEvent,
+    DeltaEvent, ErrorEvent, ProgressionEvent, SessionEvent, StatusChangedEvent, ToolStartEvent,
 };
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -150,6 +150,22 @@ pub async fn session_events(
                 }
                 Ok(SessionFrame::Error { message }) => {
                     if let Some(ev) = live(&SessionEvent::Error(ErrorEvent { message }))
+                        && tx.send(Ok(ev)).await.is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(SessionFrame::Progression {
+                    stage,
+                    detail,
+                    at_ms,
+                }) => {
+                    let se = SessionEvent::Progressed(ProgressionEvent {
+                        stage,
+                        detail,
+                        at_ms,
+                    });
+                    if let Some(ev) = live(&se)
                         && tx.send(Ok(ev)).await.is_err()
                     {
                         return;

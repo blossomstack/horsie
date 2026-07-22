@@ -201,6 +201,25 @@ the `MockVendor`-style resource-actor progressions), integration tests in
 long-history windowing and progression audit, and the full
 `fmt`/`clippy`/`test`/`typecheck`/e2e gate to green before each PR.
 
+## Implementation status (2026-07-21)
+
+- **Agent resource decoupling** — done (#37): `RunResources`/`PreparedRun`,
+  `FixedRunResources` (workflow), `SessionRunResources` (session prep off the
+  mailbox), `usage_total` in `AgentState`.
+- **History pagination** — done (#38): `AgentActor::GetHistory`, `/history`
+  endpoint via a live-or-transient read-only agent, live-only SSE (`?live=1`),
+  frontend windowed load + scroll-back.
+- **Observable progressions** — first cut (this PR): resource-preparation stages
+  (`provisioning_runtime`, `scanning_workspace`, `connecting_tools`, `ready`)
+  broadcast **live** as `SessionEvent::Progressed` and shown in the composer
+  area while a turn spins up. Emitted directly onto the frame stream by
+  `ensure_runtime` (mailbox) and `SessionRunResources::ensure` (off-mailbox).
+- **Deferred** (next): journaling progressions for durable audit + the
+  two-stream (messages ⨁ progressions) history merge with per-stream cursors and
+  message/progression timestamps; extracting standalone `RuntimeActor`/`McpActor`
+  (the current cut keeps runtime/MCP lifecycle on the session but already moves
+  the heavy prep off the mailbox and surfaces its progress).
+
 ## Out of scope (deliberate)
 
 - Persisting resource-actor live state (their ephemerality is the point).

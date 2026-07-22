@@ -66,6 +66,11 @@ struct ErrorEvent { message: String }
 /// Streaming text delta — live only, never journaled, never carries an SSE id.
 struct DeltaEvent { text: String }
 struct ToolStartEvent { tool_call_id: String, name: String }
+/// A resource-preparation progression — shown live while a turn spins up and
+/// kept for audit. `stage` is a stable key (`provisioning_runtime`,
+/// `scanning_workspace`, `connecting_tools`, `ready`); `detail` is optional
+/// human text; `at_ms` is the unix-epoch millisecond it occurred.
+struct ProgressionEvent { stage: String, detail: Option<String>, at_ms: u64 }
 
 /// Status of one entry in the agent's `task_list` tool state.
 enum TaskStatus {
@@ -103,6 +108,7 @@ union SessionEvent {
     Delta(DeltaEvent),
     ToolStart(ToolStartEvent),
     TaskListChanged(TaskListEvent),
+    Progressed(ProgressionEvent),
 }
 
 /// One frame on the global `/api/events` stream (live session-list updates).

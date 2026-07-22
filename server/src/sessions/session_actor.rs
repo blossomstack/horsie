@@ -30,6 +30,24 @@ use uuid::Uuid;
 /// drops and catch up from the journal.
 const FRAME_BROADCAST_CAPACITY: usize = 256;
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Send a resource-preparation progression onto a session's live frame stream.
+/// A best-effort live signal (no subscribers → dropped); shown while a turn
+/// spins up.
+fn emit_progress(frames: &broadcast::Sender<SessionFrame>, stage: &str, detail: Option<String>) {
+    let _ = frames.send(SessionFrame::Progression {
+        stage: stage.to_string(),
+        detail,
+        at_ms: now_ms(),
+    });
+}
+
 /// The baseline system prompt given to every session agent: role, tool-usage
 /// norms, and environment guidance. Not user-overridable — layered under the
 /// `# Workspaces` / skills sections `compose_system_prompt` appends.
@@ -241,6 +259,8 @@ impl SessionActor {
         if self.runtime.is_some() {
             return Ok(());
         }
+        // The runtime is down: provisioning it is the slow, visible step.
+        emit_progress(&self.frames, "provisioning_runtime", None);
         let vendor = self.vendor()?;
         let mut rt_spec = self.write_runtime_spec()?;
         // Fresh, scoped token at every create AND attach — never persisted. It
@@ -353,6 +373,7 @@ impl SessionActor {
             mcp: self.deps.mcp.clone(),
             settings: self.spec.agent.clone(),
             session_id: self.id,
+            frames: self.frames.clone(),
         });
         let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
         params.interactive = true;
@@ -634,6 +655,8 @@ struct SessionRunResources {
     mcp: Option<Arc<crate::mcp::McpService>>,
     settings: AgentSettings,
     session_id: Uuid,
+    /// Live frame stream — `ensure` emits preparation progressions onto it.
+    frames: broadcast::Sender<SessionFrame>,
 }
 
 #[async_trait]
@@ -643,6 +666,7 @@ impl RunResources for SessionRunResources {
         let provider = self.provider.clone();
         let def = session_run_def(settings);
         let use_plugins = settings.use_plugins.unwrap_or(true);
+        emit_progress(&self.frames, "scanning_workspace", None);
         let (ws, shared_skills) = scan_workspace(&self.runtime_client, None, use_plugins).await;
         let shared = if use_plugins {
             let bootstrap = match self.runtime_client.run_session_start().await {
@@ -661,6 +685,7 @@ impl RunResources for SessionRunResources {
         let mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
             Vec::new()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
+            emit_progress(&self.frames, "connecting_tools", None);
             mcp_svc
                 .toolboxes_for(&settings.mcp_servers)
                 .await
@@ -681,6 +706,7 @@ impl RunResources for SessionRunResources {
                 mcp,
             )));
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
+        emit_progress(&self.frames, "ready", None);
         Ok(PreparedRun {
             provider,
             toolbox,

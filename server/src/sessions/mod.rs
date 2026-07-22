@@ -25,6 +25,13 @@ pub enum SessionFrame {
     Status { status: spec::SessionStatus },
     /// A turn failed (id-less; also recorded as `last_error`).
     Error { message: String },
+    /// A resource-preparation progression (id-less live signal; also journaled
+    /// by the session for audit).
+    Progression {
+        stage: String,
+        detail: Option<String>,
+        at_ms: u64,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -28,6 +28,18 @@ import {
 import { basename, compactNumber, sessionTitle } from "../lib/format";
 import { statusMeta } from "../lib/status";
 
+/** Friendly label for a resource-preparation progression stage. Unknown stages
+ * fall back to a de-slugged form so a new backend stage still reads sensibly. */
+function progressionLabel(stage: string): string {
+  const known: Record<string, string> = {
+    provisioning_runtime: "Starting runtime…",
+    scanning_workspace: "Scanning workspace…",
+    connecting_tools: "Connecting tools…",
+    ready: "Ready",
+  };
+  return known[stage] ?? `${stage.replace(/_/g, " ")}…`;
+}
+
 function Chip({
   icon,
   children,
@@ -274,6 +286,23 @@ export function SessionView() {
             >
               <CircleAlert size={16} className="mt-0.5 shrink-0" />
               <span>{sendError ?? stream.streamError}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Resource-preparation progression (live, while a turn spins up) */}
+        {stream.progression && (
+          <div className="mx-auto w-full max-w-3xl px-4">
+            <div
+              data-testid="session-progression"
+              data-stage={stream.progression.stage}
+              className="flex items-center gap-1.5 py-1 text-xs text-faint"
+            >
+              <Loader2 size={12} className="animate-spin text-accent" />
+              <span>
+                {progressionLabel(stream.progression.stage)}
+                {stream.progression.detail ? ` — ${stream.progression.detail}` : ""}
+              </span>
             </div>
           </div>
         )}

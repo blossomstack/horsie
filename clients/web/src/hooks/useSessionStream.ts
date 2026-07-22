@@ -51,6 +51,8 @@ export interface SessionStream {
   hasMoreBefore: boolean;
   /** A scroll-back page load is in flight. */
   loadingMore: boolean;
+  /** The current resource-preparation stage while a turn spins up, or null. */
+  progression: { stage: string; detail: string | null } | null;
 }
 
 // ---- Normalized reducer state ----------------------------------------------
@@ -79,6 +81,7 @@ interface State {
   tasks: TaskItem[];
   hasMoreBefore: boolean;
   loadingMore: boolean;
+  progression: { stage: string; detail: string | null } | null;
 }
 
 const INITIAL: State = {
@@ -97,6 +100,7 @@ const INITIAL: State = {
   tasks: [],
   hasMoreBefore: false,
   loadingMore: false,
+  progression: null,
 };
 
 type Action =
@@ -247,7 +251,16 @@ function reducer(state: State, action: Action): State {
       const ev = action.event;
       switch (ev.type) {
         case "Message":
-          return ingestMessage(state, ev.value.message);
+          // Real output began → the prep stage is done.
+          return { ...ingestMessage(state, ev.value.message), progression: null };
+        case "Progressed":
+          return {
+            ...state,
+            progression: {
+              stage: ev.value.stage,
+              detail: ev.value.detail ?? null,
+            },
+          };
         case "ToolResult": {
           const liveTools = { ...state.liveTools };
           if (liveTools[ev.value.toolCallId]) {
@@ -280,6 +293,7 @@ function reducer(state: State, action: Action): State {
           return {
             ...state,
             streaming: "",
+            progression: null,
             // A backfilled turn's usage is already in the seeded tail total.
             usage: action.fromBackfill
               ? state.usage
@@ -303,7 +317,11 @@ function reducer(state: State, action: Action): State {
         case "Error":
           return { ...state, streamError: ev.value.message };
         case "Delta":
-          return { ...state, streaming: state.streaming + ev.value.text };
+          return {
+            ...state,
+            streaming: state.streaming + ev.value.text,
+            progression: null,
+          };
         case "TaskListChanged":
           return { ...state, tasks: ev.value.tasks };
         default:
@@ -468,6 +486,7 @@ export function useSessionStream(sessionId: string | undefined): {
       tasks: state.tasks,
       hasMoreBefore: state.hasMoreBefore,
       loadingMore: state.loadingMore,
+      progression: state.progression,
     };
   }, [state]);
 

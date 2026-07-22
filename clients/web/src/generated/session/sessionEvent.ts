@@ -3,6 +3,7 @@ import { AskedEvent } from './askedEvent';
 import { DeltaEvent } from './deltaEvent';
 import { ErrorEvent } from './errorEvent';
 import { MessageEvent } from './messageEvent';
+import { ProgressionEvent } from './progressionEvent';
 import { StatusChangedEvent } from './statusChangedEvent';
 import { TaskListEvent } from './taskListEvent';
 import { ToolOutputEvent } from './toolOutputEvent';
@@ -17,4 +18,5 @@ export type SessionEvent =
   | { type: "Error"; value: ErrorEvent }
   | { type: "Delta"; value: DeltaEvent }
   | { type: "ToolStart"; value: ToolStartEvent }
-  | { type: "TaskListChanged"; value: TaskListEvent };
+  | { type: "TaskListChanged"; value: TaskListEvent }
+  | { type: "Progressed"; value: ProgressionEvent };

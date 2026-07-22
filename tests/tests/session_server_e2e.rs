@@ -528,6 +528,49 @@ async fn create_message_sse_roundtrip() {
 }
 
 #[tokio::test]
+async fn prep_progressions_stream_during_a_turn() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("done");
+    let tmp = tempfile::tempdir().unwrap();
+    let vendor = Arc::new(MockVendor::new());
+    let server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    // Subscribe before sending so the live (id-less) progression frames are seen.
+    let url = format!("http://{}/api/sessions/{id}/events", server.addr);
+    let client2 = client.clone();
+    let sse = tokio::spawn(async move {
+        collect_sse(&client2, &url, None, |evs| {
+            evs.iter().any(|e| e.kind == "TurnCompleted")
+        })
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    send_message(&client, &server.addr, &id, "hi").await;
+
+    let events = sse.await.unwrap();
+    // Preparation stages surface as `Progressed` events before the reply.
+    let stages: Vec<String> = events
+        .iter()
+        .filter(|e| e.kind == "Progressed")
+        .filter_map(|e| e.data["value"]["stage"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        stages.iter().any(|s| s == "scanning_workspace"),
+        "missing scanning_workspace progression: {stages:?}"
+    );
+    assert!(
+        stages.iter().any(|s| s == "ready"),
+        "missing ready progression: {stages:?}"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn history_endpoint_returns_windowed_messages() {
     let mock = MockLlmServer::builder().build().await;
     mock.queue_response("first reply");
