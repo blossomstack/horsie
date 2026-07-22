@@ -228,6 +228,7 @@ impl OpenAiProvider {
         if let Some(u) = &chunk.usage {
             state.usage.input_tokens = u.prompt_tokens;
             state.usage.output_tokens = u.completion_tokens;
+            state.usage.cache_read_tokens = u.cached_tokens();
         }
 
         let mut finish = None;
