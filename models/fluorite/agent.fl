@@ -53,6 +53,13 @@ struct Message {
 struct Usage {
     input_tokens: u32,
     output_tokens: u32,
+    /// Tokens written to a new prompt-cache entry this turn (Anthropic only;
+    /// billed at a premium). Absent when the provider reports no cache data.
+    cache_creation_tokens: Option<u32>,
+    /// Tokens served from an existing prompt-cache entry this turn
+    /// (Anthropic + OpenAI-compatible `cached_tokens`; billed at a discount).
+    /// Absent when the provider reports no cache data.
+    cache_read_tokens: Option<u32>,
 }
 
 /// New user message — starts a new turn

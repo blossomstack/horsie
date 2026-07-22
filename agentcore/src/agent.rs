@@ -202,6 +202,16 @@ fn tool_fingerprint(tool_calls: &[(String, String, Value)]) -> String {
         .join("|")
 }
 
+/// Sums two optional per-turn cache-token counts. Stays `None` only when
+/// *neither* side reported anything — a turn/provider that's silent about
+/// cache data shouldn't zero out a total another turn already contributed to.
+fn sum_optional(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    }
+}
+
 impl Agent {
     pub fn builder(provider: Arc<dyn LlmProvider>, toolbox: Arc<dyn Toolbox>) -> AgentBuilder {
         AgentBuilder::new(provider, toolbox)
@@ -250,10 +260,7 @@ impl Agent {
             .await?;
         self.history.push(input_msg);
 
-        let mut total_usage = Usage {
-            input_tokens: 0,
-            output_tokens: 0,
-        };
+        let mut total_usage = Usage::without_cache(0, 0);
         let mut iteration: u32 = 0;
         let mut recent_fingerprints: VecDeque<String> = VecDeque::new();
         let mut handoff_retries: u32 = 0;
@@ -317,6 +324,14 @@ impl Agent {
 
             total_usage.input_tokens += response.usage.input_tokens;
             total_usage.output_tokens += response.usage.output_tokens;
+            total_usage.cache_creation_tokens = sum_optional(
+                total_usage.cache_creation_tokens,
+                response.usage.cache_creation_tokens,
+            );
+            total_usage.cache_read_tokens = sum_optional(
+                total_usage.cache_read_tokens,
+                response.usage.cache_read_tokens,
+            );
 
             let assistant_msg = Message {
                 id: msg_id.clone(),
@@ -700,6 +715,62 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ToolComplete(_)))
         );
+    }
+
+    #[tokio::test]
+    async fn test_run_complete_usage_sums_cache_tokens_across_iterations() {
+        let provider = MockProvider::new(vec![
+            CompletionResponse {
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "tc1".into(),
+                    name: "search".into(),
+                    input: json!({}),
+                })],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                    cache_creation_tokens: Some(15),
+                    cache_read_tokens: None,
+                },
+            },
+            CompletionResponse {
+                parts: vec![ContentPart::Text(TextPart {
+                    text: "done".into(),
+                })],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 30,
+                    output_tokens: 8,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: Some(25),
+                },
+            },
+        ]);
+        let toolbox = MockToolbox::echo("search");
+        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "x"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let usage = sink
+            .events()
+            .into_iter()
+            .find_map(|e| match e {
+                AgentEvent::RunComplete(rc) => Some(rc.usage),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(usage.input_tokens, 50);
+        assert_eq!(usage.output_tokens, 18);
+        assert_eq!(usage.cache_creation_tokens, Some(15));
+        assert_eq!(usage.cache_read_tokens, Some(25));
     }
 
     #[tokio::test]
