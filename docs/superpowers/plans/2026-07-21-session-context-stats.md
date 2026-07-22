@@ -378,13 +378,12 @@ Change to:
                     }
 ```
 
-`:565-568` currently reads:
+`:565-568` (updated by Task 2, which discovered this site also broke compilation
+immediately after Task 1's schema change, before Task 3 could give it real
+cache values) currently reads:
 
 ```rust
-            usage: Usage {
-                input_tokens,
-                output_tokens,
-            },
+            usage: Usage::without_cache(input_tokens, output_tokens),
 ```
 
 Change to:
