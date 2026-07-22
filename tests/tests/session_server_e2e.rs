@@ -593,14 +593,20 @@ async fn history_endpoint_returns_windowed_messages() {
     assert!(page["usage"].is_object(), "tail usage missing: {page}");
     // The newest assistant reply is in the tail window.
     let joined = page.to_string();
-    assert!(joined.contains("second reply"), "tail missing latest: {page}");
+    assert!(
+        joined.contains("second reply"),
+        "tail missing latest: {page}"
+    );
 
     // Scroll back before the oldest returned id → older messages, no tasks/usage.
     let oldest_id = msgs[0]["id"].as_str().unwrap().to_string();
     let older = history(2, Some(oldest_id)).await;
     assert_eq!(older["messages"].as_array().unwrap().len(), 2);
     assert_eq!(older["hasMore"], serde_json::json!(false));
-    assert!(older["usage"].is_null(), "scroll-back must omit usage: {older}");
+    assert!(
+        older["usage"].is_null(),
+        "scroll-back must omit usage: {older}"
+    );
 
     server.shutdown().await;
 }

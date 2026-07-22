@@ -14,12 +14,12 @@ use crate::sessions::events::{journal_head_seq, replay_session_events};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use serde::Deserialize;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use horsie_models::session::{
     DeltaEvent, ErrorEvent, SessionEvent, StatusChangedEvent, ToolStartEvent,
 };
+use serde::Deserialize;
 use std::convert::Infallible;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
