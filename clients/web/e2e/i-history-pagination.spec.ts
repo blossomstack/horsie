@@ -76,7 +76,7 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
             page.request.get(`${appBase}/api/sessions/${id}`),
           ]);
           const count = ((await h.json()).messages as unknown[]).length;
-          const status = (await s.json()).status as string;
+          const status = (await s.json()).session.status as string;
           return `${count}:${status}`;
         },
         { timeout: 15_000 },
