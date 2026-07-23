@@ -4,6 +4,9 @@ package session_api;
 use session.AgentSettings;
 use session.SessionSummary;
 use session.SessionDetail;
+use session.TaskItem;
+use session.UsageView;
+use agent.Message;
 use capabilities.CapabilitySpec;
 
 /// One repository to provision into the session workspace.
@@ -30,6 +33,17 @@ struct CreateSessionRequest {
     /// Selected plugin-bundle names to provision for this session; absent →
     /// the server's default-enabled bundles. Non-empty implies plugins are on.
     plugins: Option<Vec<String>>,
+}
+
+/// One page of a session's conversation history, served from the agent's
+/// in-memory state (not a journal replay). `tasks`/`usage` ride only on the tail
+/// page (the initial `before`-less request); scroll-back pages carry messages
+/// alone. `has_more` reports whether older messages precede this window.
+struct HistoryPage {
+    messages: Vec<Message>,
+    has_more: bool,
+    tasks: Option<Vec<TaskItem>>,
+    usage: Option<UsageView>,
 }
 
 struct CreateSessionResponse { session: SessionSummary }

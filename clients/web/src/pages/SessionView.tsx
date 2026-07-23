@@ -28,6 +28,18 @@ import {
 import { basename, compactNumber, sessionTitle } from "../lib/format";
 import { statusMeta } from "../lib/status";
 
+/** Friendly label for a resource-preparation progression stage. Unknown stages
+ * fall back to a de-slugged form so a new backend stage still reads sensibly. */
+function progressionLabel(stage: string): string {
+  const known: Record<string, string> = {
+    provisioning_runtime: "Starting runtime…",
+    scanning_workspace: "Scanning workspace…",
+    connecting_tools: "Connecting tools…",
+    ready: "Ready",
+  };
+  return known[stage] ?? `${stage.replace(/_/g, " ")}…`;
+}
+
 function Chip({
   icon,
   children,
@@ -49,7 +61,8 @@ export function SessionView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: detail, isLoading } = useSession(id);
-  const { stream, addOptimisticUser, removeOptimisticUser } = useSessionStream(id);
+  const { stream, addOptimisticUser, removeOptimisticUser, loadMore } =
+    useSessionStream(id);
   const send = useSendMessage();
   const stop = useStopSession();
   const del = useDeleteSession();
@@ -58,21 +71,35 @@ export function SessionView() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // When a scroll-back page is loading, holds the scroll height captured just
+  // before the prepend so we can restore the viewport position after it lands.
+  const loadAnchor = useRef<number | null>(null);
 
   const status = stream.liveStatus ?? detail?.status ?? SessionStatusKind.Idle;
   const pendingQuestion = stream.pendingQuestion ?? detail?.pendingQuestion ?? null;
   const totalTokens = stream.usage.input + stream.usage.output;
 
-  // Stick-to-bottom auto scroll.
+  // Stick-to-bottom auto scroll; also trigger scroll-back near the top.
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+    if (el.scrollTop < 80 && stream.hasMoreBefore && !stream.loadingMore) {
+      loadAnchor.current = el.scrollHeight;
+      loadMore();
+    }
   };
   useLayoutEffect(() => {
-    if (stick.current && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    if (!el) return;
+    // A just-completed scroll-back prepend: keep the viewport where it was by
+    // pushing down by exactly the height the older messages added.
+    if (loadAnchor.current != null) {
+      el.scrollTop += el.scrollHeight - loadAnchor.current;
+      loadAnchor.current = null;
+      return;
     }
+    if (stick.current) el.scrollTop = el.scrollHeight;
   }, [stream.messages, stream.streaming, stream.orphanTools.length]);
 
   // Reset scroll intent when switching sessions.
@@ -197,6 +224,7 @@ export function SessionView() {
         <div
           ref={scrollRef}
           onScroll={onScroll}
+          data-testid="transcript-scroll"
           className="flex-1 overflow-y-auto"
         >
           {isLoading && stream.messages.length === 0 ? (
@@ -222,13 +250,30 @@ export function SessionView() {
               )}
             </div>
           ) : (
-            <Transcript
-              messages={stream.messages}
-              streaming={stream.streaming}
-              orphanTools={stream.orphanTools}
-              showLive={status === SessionStatusKind.Running}
-              showThinking={uiSettings.showThinking}
-            />
+            <>
+              {(stream.loadingMore || stream.hasMoreBefore) && (
+                <div
+                  className="flex items-center justify-center py-2 text-xs text-faint"
+                  data-testid="history-load-more"
+                >
+                  {stream.loadingMore ? (
+                    <>
+                      <Loader2 size={12} className="mr-1.5 animate-spin" />
+                      Loading earlier messages…
+                    </>
+                  ) : (
+                    <span>Scroll up for earlier messages</span>
+                  )}
+                </div>
+              )}
+              <Transcript
+                messages={stream.messages}
+                streaming={stream.streaming}
+                orphanTools={stream.orphanTools}
+                showLive={status === SessionStatusKind.Running}
+                showThinking={uiSettings.showThinking}
+              />
+            </>
           )}
         </div>
 
@@ -241,6 +286,23 @@ export function SessionView() {
             >
               <CircleAlert size={16} className="mt-0.5 shrink-0" />
               <span>{sendError ?? stream.streamError}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Resource-preparation progression (live, while a turn spins up) */}
+        {stream.progression && (
+          <div className="mx-auto w-full max-w-3xl px-4">
+            <div
+              data-testid="session-progression"
+              data-stage={stream.progression.stage}
+              className="flex items-center gap-1.5 py-1 text-xs text-faint"
+            >
+              <Loader2 size={12} className="animate-spin text-accent" />
+              <span>
+                {progressionLabel(stream.progression.stage)}
+                {stream.progression.detail ? ` — ${stream.progression.detail}` : ""}
+              </span>
             </div>
           </div>
         )}

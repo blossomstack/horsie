@@ -110,14 +110,65 @@ pub trait AgentOutcomeSink: Send + Sync {
     async fn deliver(&self, outcome: AgentOutcome);
 }
 
-/// Resources injected into an [`AgentActor`](crate::AgentActor) when a
-/// [`WorkflowActor`](crate::WorkflowActor) spawns it.
+/// The per-run contexts an agent run executes within — the provider it calls,
+/// the toolbox it acts through, and the system prompt that frames it. Produced
+/// fresh by [`ContextProvider::provide`] at the top of every run. The timer /
+/// `task_list` wrappers are layered on by the [`AgentActor`](crate::AgentActor)
+/// itself, not here.
+pub struct Contexts {
+    pub provider: Arc<dyn LlmProvider>,
+    /// The agent's permitted tools (runtime + MCP + `conclude`), already composed.
+    pub toolbox: Arc<dyn Toolbox>,
+    /// The composed system prompt, when the context layer owns it (interactive
+    /// sessions compose it from a live workspace scan). `None` means "use the
+    /// agent's configured prompt" — workflow agents carry a static prompt in
+    /// their params and return `None` here.
+    pub system_prompt: Option<String>,
+}
+
+/// Provides the per-run [`Contexts`] an [`AgentActor`](crate::AgentActor) needs.
+///
+/// `provide` is called on the run's *spawned task* — never an actor mailbox — at
+/// the top of every run path (fresh input, resume, timer wake). Implementations
+/// do their heavy, idempotent setup here (rehydrate a suspended runtime,
+/// reconnect a dropped MCP, scan the workspace); it must be cheap when
+/// everything is already live. Spawning an agent does *not* call `provide`, so an
+/// agent can be recovered purely to answer read queries without touching any
+/// runtime.
+#[async_trait]
+pub trait ContextProvider: Send + Sync {
+    async fn provide(&self) -> Result<Contexts, String>;
+}
+
+/// A [`ContextProvider`] that hands back the same contexts every time — built
+/// once and reused. Workflow agents use this: their runtime/toolbox are
+/// provisioned by the `WorkflowActor` at spawn and stay fixed for the agent's
+/// life, so `provide` is a trivial clone (and a recovery self-resume gets them
+/// back unchanged).
+pub struct FixedContextProvider {
+    pub provider: Arc<dyn LlmProvider>,
+    pub toolbox: Arc<dyn Toolbox>,
+}
+
+#[async_trait]
+impl ContextProvider for FixedContextProvider {
+    async fn provide(&self) -> Result<Contexts, String> {
+        Ok(Contexts {
+            provider: self.provider.clone(),
+            toolbox: self.toolbox.clone(),
+            system_prompt: None,
+        })
+    }
+}
+
+/// Resources injected into an [`AgentActor`](crate::AgentActor) at spawn. Holds
+/// only cheap, stable wiring — the volatile per-run contexts (provider, toolbox,
+/// prompt) are obtained lazily via [`ContextProvider::provide`], so spawning is
+/// free of any runtime/MCP/scan work.
 #[derive(Clone)]
 pub struct AgentRuntimeContext {
-    pub provider: Arc<dyn LlmProvider>,
-    /// Toolbox pre-filtered to the tools this agent is permitted to use, with the
-    /// `conclude` tool layered on when the agent has an output schema and/or may ask.
-    pub toolbox: Arc<dyn Toolbox>,
+    /// Per-run context supplier; see [`ContextProvider`].
+    pub context_provider: Arc<dyn ContextProvider>,
     pub event_sink: Arc<dyn EventSink>,
     /// Whoever spawned this agent; receives its terminal outcome.
     pub parent: Arc<dyn AgentOutcomeSink>,
