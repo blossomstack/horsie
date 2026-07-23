@@ -56,8 +56,12 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
 
   const id = await createSession(page, appBase);
 
-  // Seed the turns over the API (fast + deterministic); each must finish before
-  // the next (a second message 409s mid-turn), so poll history for the count.
+  // Seed the turns over the API (fast + deterministic); each must fully finish
+  // before the next (a second message 409s mid-turn). Gate on *both* the reply
+  // count reaching 2*i (proving turn i actually ran and produced its answer —
+  // which rules out reading the stale pre-Running Idle) and the status settling
+  // back to Idle (proving TurnCompleted persisted). Waiting on either alone
+  // races one of the two Idle↔Running transitions.
   for (let i = 1; i <= turns; i++) {
     const res = await page.request.post(
       `${appBase}/api/sessions/${id}/messages`,
@@ -67,14 +71,17 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
     await expect
       .poll(
         async () => {
-          const r = await page.request.get(
-            `${appBase}/api/sessions/${id}/history?limit=200`,
-          );
-          return ((await r.json()).messages as unknown[]).length;
+          const [h, s] = await Promise.all([
+            page.request.get(`${appBase}/api/sessions/${id}/history?limit=200`),
+            page.request.get(`${appBase}/api/sessions/${id}`),
+          ]);
+          const count = ((await h.json()).messages as unknown[]).length;
+          const status = (await s.json()).status as string;
+          return `${count}:${status}`;
         },
         { timeout: 15_000 },
       )
-      .toBe(2 * i);
+      .toBe(`${2 * i}:Idle`);
   }
 
   // Fresh load → tail window only: newest turn present, oldest absent. Assert
