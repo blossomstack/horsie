@@ -48,92 +48,79 @@ done right depends on them.
    are ready ("initialize if not initialized" — rehydrate a suspended runtime,
    reconnect a dropped MCP). Cheap when already live. The system prompt is
    *once per conversation*, not per run.
-5. **Observable + auditable prep.** Every resource progression is both streamed
-   live and journaled, so it appears during the wait and remains in history.
+5. **Observable prep (live).** Resource progressions are streamed live so they
+   appear during the wait. Journaling them for a durable audit is deliberately
+   *not* done now (see "Context providers" below) — it can be added later without
+   changing callers.
 6. **Agents own their state.** Messages, tasks, usage, and the system prompt
    belong to the agent — which generalizes to multiple agents per session
    later, each owning its own.
 
 ## Architecture
 
-### Actor tree
+### Context providers (plain code, not actors)
 
+The seam between an `AgentActor` and the volatile resources one run needs is a
+plain trait — **no resource actors, no audit journaling.** (An earlier draft
+modelled the runtime and MCP as non-journaling child actors reporting
+progressions to `SessionActor` for a durable audit. That was dropped: the audit
+data is not needed now, and plain code is simpler. The trait keeps the seam, so
+the actor/audit version remains a possible future change behind the same
+interface.)
+
+```rust
+/// The per-run contexts an agent run executes within.
+pub struct Contexts {
+    pub provider: Arc<dyn LlmProvider>,
+    pub toolbox: Arc<dyn Toolbox>,
+    pub system_prompt: Option<String>,
+}
+
+#[async_trait]
+pub trait ContextProvider: Send + Sync {
+    async fn provide(&self) -> Result<Contexts, String>;
+}
 ```
-SessionActor      event-sourced: session lifecycle + resource progressions
- │                (journaled = audit) + aggregated live resource state
- ├── AgentActor    event-sourced: conversation — messages, tasks, usage,
- │                 system prompt
- ├── RuntimeActor  non-journaling: owns the sandbox lifecycle + hands out
- │                 runtime_client (tool calls / scan / SessionStart run over it)
- └── McpActor      non-journaling: owns MCP connections
-     (+ future resource actors)
-```
 
-**What warrants an actor:** something that *owns maintained, independently-
-lifecycled live state*. The runtime qualifies (create/attach/suspend/resume/
-health; it can re-initialize mid-session on its own) and MCP qualifies
-(connections drop, reconnect, health-check). The **workspace scan /
-SessionStart does not** — it is a stateless one-shot that reads the sandbox
-once and produces a value (the system prompt → agent state), entirely
-dependent on the runtime. So it is *not* a separate actor: it is an operation
-performed over the `RuntimeActor`'s `runtime_client`, run off-mailbox as a step
-in the prep coordination. (Same reason live `skill`/`inspect_workspace`
-re-scans go straight over `runtime_client`, not through any scanner actor.)
-
-**Non-journaling actors** are `EventSourcedActor`s with `Event = ()` that only
-ever return `CommandEffect::none()` / reply effects (the framework already
-supports this — see the test actor at `actor/src/runtime.rs:541`; no new
-primitive needed). Their *live* state (a socket, a sandbox process handle) is
-intentionally ephemeral: on restart they recover to `initial_state()` and
-rebuild it — you journal the story, not the socket. The durable **audit** of
-their transitions lives in the `SessionActor` journal, not their own.
-
-### Resource actors + observable prep
-
-- Each resource actor owns its volatile state and does its heavy async work on
-  its **own spawned task**, off any shared mailbox.
-- Progressions come from **two** sources, both flowing to `SessionActor`:
-  resource actors emit *lifecycle* progressions (`Initializing`, `Ready`,
-  `Suspended`, `Reinitializing`, `Failed`), and the prep coordination emits
-  *operation* progressions ("scanning workspace → scanned", "building toolbox")
-  for the steps that are not a resource's own lifecycle. Not every progression
-  is a resource-lifecycle transition, and this keeps the scan where it belongs
-  (an operation, not an actor).
-- `SessionActor`, per progression message: (a) journals a progression event
-  (audit), (b) rebroadcasts it to the SSE frame stream (live), (c) updates its
-  aggregated resource-state view. All three are quick — no IO on this mailbox.
-- **Per-run prep** is an async coordination on a spawned task that walks the
-  dependency graph: ensure `RuntimeActor` ready (→ obtain `runtime_client`) →
-  ensure `McpActor` ready → build the toolbox → (first turn only) scan the
-  workspace + SessionStart over `runtime_client` to compose the system prompt.
-  Resource *ensures* are idempotent commands to the resource actors (an
-  already-live resource replies immediately); the scan and toolbox build are
-  operations the coordination performs directly. Complex dependencies are just
-  this ordering.
-- **Extensibility:** a new resource type is a new resource actor plus a node in
-  the prep coordination. The agent depends only on the *prepared run* handed to
-  it; what that prep is composed of is open-ended and owned by the session
-  layer.
+- **`ContextProvider::provide`** is called on the run's *spawned task* — never an
+  actor mailbox — at the top of every run path (fresh input, resume, timer
+  wake). It does the heavy, idempotent setup: rehydrate a suspended runtime,
+  reconnect a dropped MCP, scan the workspace + SessionStart, compose the system
+  prompt, build the toolbox. Cheap when everything is already live.
+- **Implementations:**
+  - `FixedContextProvider` (workflow) — runtime/toolbox provisioned once at
+    spawn and reused; `provide` is a trivial clone, so a recovery self-resume
+    gets them back unchanged.
+  - `SessionContextProvider` (session) — resolves the provider live, scans the
+    workspace, connects the enabled MCP servers, composes the system prompt; the
+    sandbox round-trips that used to block the `SessionActor` mailbox now run on
+    the run task.
+  - `NoContextProvider` (session, read-only) — a transient history-reading agent
+    that must never run; `provide` errors defensively.
+- **Observable prep (live only).** `SessionContextProvider::provide` emits
+  coarse progression stages (`scanning_workspace`, `connecting_tools`, `ready`)
+  and `ensure_runtime` emits `provisioning_runtime`, straight onto the session's
+  live frame broadcast (`SessionFrame::Progression`). Best-effort: no
+  subscribers → dropped. Not journaled.
+- **Extensibility.** A new resource is just more work inside a `ContextProvider`
+  impl (or a new impl). The agent depends only on the `Contexts` handed to it;
+  what composed them is owned by the session layer.
 
 ### Agent resource-decoupling
 
-- `AgentActor` holds **no** provider/toolbox as identity. Its context is
-  `event_sink`, `parent`, `session_id`, and a prep handle. Spawning it does
-  **zero** resource work — which is what makes read-only queries cheap.
-- Every run path (fresh `Run`, resume, timer wake) obtains prepared resources
-  for that run via the off-mailbox prep, then runs the loop (already spawned
-  today). No path runs off stale baked resources.
-- **System prompt → agent state.** Computed once at the first run (empty
-  history) via the scanner, folded into `AgentState` (new
-  `SystemPromptSet` event), reused forever after. Live workspace freshness is
-  still served mid-run by the existing `skill` / `inspect_workspace` tools.
-- **Usage → agent state.** Add `usage_total: Usage` to `AgentState`; fold
-  `RunComplete` into it (currently a no-op arm).
-- **No self-resume off baked resources.** `on_recovery_complete` does only
-  resource-free work (re-arm timers). The *driver* decides to resume: a session
-  resumes on the next user `Run`; a workflow agent resumes because its driver
-  re-drives with freshly prepared resources. Same rule for both — the earlier
-  "session vs workflow asymmetry" was incidental, not fundamental.
+- `AgentActor` holds **no** provider/toolbox as identity. Its context
+  (`AgentRuntimeContext`) is `event_sink`, `parent`, `session_id`, and a
+  `context_provider` handle. Spawning it does **zero** resource work — which is
+  what makes read-only history queries cheap.
+- Every run path (fresh `Run`, resume, timer wake) obtains its `Contexts` via
+  `context_provider.provide()` on the run's spawned task, then runs the loop. No
+  path runs off stale baked resources.
+- **Usage → agent state.** `usage_total: UsageTotal` on `AgentState`; fold
+  `RunComplete` into it (previously a no-op arm).
+- **System prompt.** Composed per run by `SessionContextProvider` from a live
+  workspace scan (workflow agents carry a static prompt in their params). Live
+  workspace freshness is still served mid-run by the `skill` /
+  `inspect_workspace` tools.
 
 ### Read path (history)
 
@@ -176,13 +163,13 @@ GET /api/sessions/:id/history?include=both|agent&before=<cursor>&limit=N
 
 ## Phasing (one PR per phase, each green independently)
 
-1. **Resource actors + observable prep + agent decoupling.** Non-journaling
-   resource actors doing off-mailbox work + reporting progressions;
-   `SessionActor` journals/streams/aggregates them; agent driven per-run with
-   prepared resources; system-prompt-as-state; `usage_total`-as-state; no
-   self-resume off baked resources. Touches the `workflow` crate. No new
-   user-facing surface beyond the (additive) live progression events; covered
-   by existing workflow + session tests plus new ones.
+1. **Context providers + observable prep + agent decoupling.** A plain
+   `ContextProvider` trait producing per-run `Contexts` off-mailbox
+   (`FixedContextProvider` for workflow, `SessionContextProvider` for sessions);
+   live progression stages streamed from the session provider;
+   `usage_total`-as-state. Touches the `workflow` crate. No new user-facing
+   surface beyond the (additive) live progression events; covered by existing
+   workflow + session tests plus new ones.
 2. **History read-model.** `GetHistory` on `AgentActor` (cursors, tasks,
    usage); progression-history on `SessionActor`; timestamps added to the
    relevant wire events.
@@ -196,33 +183,35 @@ GET /api/sessions/:id/history?include=both|agent&before=<cursor>&limit=N
 ## Testing / gate
 
 Standard per phase: co-located Rust unit tests (state folds, command handlers,
-the `MockVendor`-style resource-actor progressions), integration tests in
+`ContextProvider` progressions over a `MockVendor`), integration tests in
 `tests/` (prep off-mailbox; recovery; history queries), Playwright e2e for the
-long-history windowing and progression audit, and the full
+long-history windowing and live progressions, and the full
 `fmt`/`clippy`/`test`/`typecheck`/e2e gate to green before each PR.
 
 ## Implementation status (2026-07-21)
 
-- **Agent resource decoupling** — done (#37): `RunResources`/`PreparedRun`,
-  `FixedRunResources` (workflow), `SessionRunResources` (session prep off the
-  mailbox), `usage_total` in `AgentState`.
+- **Agent context decoupling** — done (#37): `ContextProvider`/`Contexts`,
+  `FixedContextProvider` (workflow), `SessionContextProvider` (session prep off
+  the mailbox), `NoContextProvider` (read-only), `usage_total` in `AgentState`.
+  Plain code — resources are *not* modelled as actors (see "Context providers").
 - **History pagination** — done (#38): `AgentActor::GetHistory`, `/history`
   endpoint via a live-or-transient read-only agent, live-only SSE (`?live=1`),
   frontend windowed load + scroll-back.
-- **Observable progressions** — first cut (this PR): resource-preparation stages
+- **Observable progressions** — first cut (#39): resource-preparation stages
   (`provisioning_runtime`, `scanning_workspace`, `connecting_tools`, `ready`)
   broadcast **live** as `SessionEvent::Progressed` and shown in the composer
   area while a turn spins up. Emitted directly onto the frame stream by
-  `ensure_runtime` (mailbox) and `SessionRunResources::ensure` (off-mailbox).
-- **Deferred** (next): journaling progressions for durable audit + the
-  two-stream (messages ⨁ progressions) history merge with per-stream cursors and
-  message/progression timestamps; extracting standalone `RuntimeActor`/`McpActor`
-  (the current cut keeps runtime/MCP lifecycle on the session but already moves
-  the heavy prep off the mailbox and surfaces its progress).
+  `ensure_runtime` (mailbox) and `SessionContextProvider::provide` (off-mailbox).
+- **Deferred** (next): the two-stream (messages ⨁ progressions) history merge
+  with per-stream cursors and message/progression timestamps. Explicitly *not*
+  planned unless a need appears: journaling progressions for a durable audit and
+  modelling runtime/MCP as actors — the plain `ContextProvider` seam can absorb
+  either later without changing callers.
 
 ## Out of scope (deliberate)
 
-- Persisting resource-actor live state (their ephemerality is the point).
+- Modelling runtime/MCP as actors and journaling their progressions for a
+  durable audit (dropped; the plain `ContextProvider` seam can absorb it later).
 - Strict cross-journal chronological ordering on the backend (UI merges).
 - Snapshot-compaction of the agent journal (principle 2 keeps that a future,
   caller-transparent change).

@@ -110,48 +110,50 @@ pub trait AgentOutcomeSink: Send + Sync {
     async fn deliver(&self, outcome: AgentOutcome);
 }
 
-/// The resources one agent run needs, produced fresh by [`RunResources::ensure`]
-/// at the top of every run. The timer / `task_list` wrappers are layered on by
-/// the [`AgentActor`](crate::AgentActor) itself, not here.
-pub struct PreparedRun {
+/// The per-run contexts an agent run executes within — the provider it calls,
+/// the toolbox it acts through, and the system prompt that frames it. Produced
+/// fresh by [`ContextProvider::provide`] at the top of every run. The timer /
+/// `task_list` wrappers are layered on by the [`AgentActor`](crate::AgentActor)
+/// itself, not here.
+pub struct Contexts {
     pub provider: Arc<dyn LlmProvider>,
     /// The agent's permitted tools (runtime + MCP + `conclude`), already composed.
     pub toolbox: Arc<dyn Toolbox>,
-    /// The composed system prompt, when the resource layer owns it (interactive
+    /// The composed system prompt, when the context layer owns it (interactive
     /// sessions compose it from a live workspace scan). `None` means "use the
     /// agent's configured prompt" — workflow agents carry a static prompt in
     /// their params and return `None` here.
     pub system_prompt: Option<String>,
 }
 
-/// Supplies the per-run resources an [`AgentActor`](crate::AgentActor) needs.
+/// Provides the per-run [`Contexts`] an [`AgentActor`](crate::AgentActor) needs.
 ///
-/// `ensure` is called on the run's *spawned task* — never an actor mailbox — at
+/// `provide` is called on the run's *spawned task* — never an actor mailbox — at
 /// the top of every run path (fresh input, resume, timer wake). Implementations
 /// do their heavy, idempotent setup here (rehydrate a suspended runtime,
 /// reconnect a dropped MCP, scan the workspace); it must be cheap when
-/// everything is already live. Spawning an agent does *not* call `ensure`, so an
+/// everything is already live. Spawning an agent does *not* call `provide`, so an
 /// agent can be recovered purely to answer read queries without touching any
 /// runtime.
 #[async_trait]
-pub trait RunResources: Send + Sync {
-    async fn ensure(&self) -> Result<PreparedRun, String>;
+pub trait ContextProvider: Send + Sync {
+    async fn provide(&self) -> Result<Contexts, String>;
 }
 
-/// A [`RunResources`] that hands back the same resources every time — built once
-/// and reused. Workflow agents use this: their runtime/toolbox are provisioned
-/// by the `WorkflowActor` at spawn and stay fixed for the agent's life, so
-/// `ensure` is a trivial clone (and a recovery self-resume gets them back
-/// unchanged). Preserves the pre-`RunResources` behavior exactly.
-pub struct FixedRunResources {
+/// A [`ContextProvider`] that hands back the same contexts every time — built
+/// once and reused. Workflow agents use this: their runtime/toolbox are
+/// provisioned by the `WorkflowActor` at spawn and stay fixed for the agent's
+/// life, so `provide` is a trivial clone (and a recovery self-resume gets them
+/// back unchanged).
+pub struct FixedContextProvider {
     pub provider: Arc<dyn LlmProvider>,
     pub toolbox: Arc<dyn Toolbox>,
 }
 
 #[async_trait]
-impl RunResources for FixedRunResources {
-    async fn ensure(&self) -> Result<PreparedRun, String> {
-        Ok(PreparedRun {
+impl ContextProvider for FixedContextProvider {
+    async fn provide(&self) -> Result<Contexts, String> {
+        Ok(Contexts {
             provider: self.provider.clone(),
             toolbox: self.toolbox.clone(),
             system_prompt: None,
@@ -160,13 +162,13 @@ impl RunResources for FixedRunResources {
 }
 
 /// Resources injected into an [`AgentActor`](crate::AgentActor) at spawn. Holds
-/// only cheap, stable wiring — the volatile per-run resources (provider,
-/// toolbox, prompt) are obtained lazily via [`RunResources::ensure`], so
-/// spawning is free of any runtime/MCP/scan work.
+/// only cheap, stable wiring — the volatile per-run contexts (provider, toolbox,
+/// prompt) are obtained lazily via [`ContextProvider::provide`], so spawning is
+/// free of any runtime/MCP/scan work.
 #[derive(Clone)]
 pub struct AgentRuntimeContext {
-    /// Per-run resource supplier; see [`RunResources`].
-    pub run_resources: Arc<dyn RunResources>,
+    /// Per-run context supplier; see [`ContextProvider`].
+    pub context_provider: Arc<dyn ContextProvider>,
     pub event_sink: Arc<dyn EventSink>,
     /// Whoever spawned this agent; receives its terminal outcome.
     pub parent: Arc<dyn AgentOutcomeSink>,

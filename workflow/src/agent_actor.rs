@@ -285,7 +285,7 @@ enum RunOutcome {
         error: String,
         recoverable: bool,
     },
-    /// Resource preparation failed and the outcome was already delivered to the
+    /// Context preparation failed and the outcome was already delivered to the
     /// parent on the run task; the actor only needs to clear its `running` flag.
     AlreadyReported,
 }
@@ -322,7 +322,7 @@ impl AgentActor {
         self.running = Some(cancel.clone());
 
         let self_ref = ctx.self_ref();
-        let run_resources = self.ctx.run_resources.clone();
+        let context_provider = self.ctx.context_provider.clone();
         let allow_timers = self.params.allow_timers;
         let inner_sink = self.ctx.event_sink.clone();
         let configured_prompt = self.params.system_prompt.clone();
@@ -339,12 +339,12 @@ impl AgentActor {
         let session_id = self.ctx.session_id;
 
         tokio::spawn(async move {
-            // Ensure this run's resources on the spawned task (never the mailbox):
+            // Provide this run's contexts on the spawned task (never the mailbox):
             // rehydrate the runtime, reconnect MCP, scan the workspace. A failure
             // here is a recoverable run failure -- report it and stop, exactly as a
             // provider/tool error would.
-            let prepared = match run_resources.ensure().await {
-                Ok(p) => p,
+            let contexts = match context_provider.provide().await {
+                Ok(c) => c,
                 Err(error) => {
                     parent
                         .deliver(AgentOutcome::Failed {
@@ -365,11 +365,11 @@ impl AgentActor {
             // execute by `ask`ing this actor and are never sent to the sandboxed runtime.
             let toolbox: Arc<dyn Toolbox> = if allow_timers {
                 Arc::new(TimerToolbox {
-                    inner: prepared.toolbox,
+                    inner: contexts.toolbox,
                     actor: self_ref.clone(),
                 })
             } else {
-                prepared.toolbox
+                contexts.toolbox
             };
             // `task_list` is always available, like `skill`/`inspect_workspace` --
             // it's a working-memory aid every agent can reach for, not a permission
@@ -378,7 +378,7 @@ impl AgentActor {
                 inner: toolbox,
                 actor: self_ref.clone(),
             });
-            let system_prompt = prepared
+            let system_prompt = contexts
                 .system_prompt
                 .or(configured_prompt)
                 .unwrap_or_default();
@@ -392,7 +392,7 @@ impl AgentActor {
                 actor: self_ref.clone(),
             });
             let outcome = run_with_retries(
-                prepared.provider,
+                contexts.provider,
                 toolbox,
                 sink,
                 system_prompt,
@@ -493,7 +493,7 @@ impl AgentActor {
                 CommandEffect::stop()
             }
             RunOutcome::AlreadyReported => {
-                // Resource preparation failed before the loop began; the failure was
+                // Context preparation failed before the loop began; the failure was
                 // already delivered to the parent. Stop like any failed run so the
                 // session can retry on the next message.
                 CommandEffect::stop()

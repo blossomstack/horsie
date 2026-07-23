@@ -18,8 +18,8 @@ use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
-    AgentRunDef, AgentRuntimeContext, DefaultToolboxFactory, HistoryQuery, PreparedRun,
-    RunResources, SharedContext, ToolboxFactory, compose_system_prompt, scan_workspace,
+    AgentRunDef, AgentRuntimeContext, ContextProvider, Contexts, DefaultToolboxFactory,
+    HistoryQuery, SharedContext, ToolboxFactory, compose_system_prompt, scan_workspace,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -337,7 +337,7 @@ impl SessionActor {
 
     /// Ensure a live agent child (recovering its conversation from the journal
     /// on respawn). Spawning is deliberately cheap: the provider, toolbox, and
-    /// system prompt are resolved lazily per run by [`SessionRunResources`] on
+    /// system prompt are resolved lazily per run by [`SessionContextProvider`] on
     /// the run's own task, so the workspace scan / MCP connect / SessionStart
     /// hook that these used to require never block this mailbox.
     async fn ensure_agent(&mut self, ctx: &ActorContext<Self>) -> Result<(), String> {
@@ -367,7 +367,7 @@ impl SessionActor {
         // Capture the *current* runtime client: the agent is respawned per turn
         // (dropped on conclude), and `ensure_runtime` runs before each respawn,
         // so a fresh client is captured after any re-attach.
-        let run_resources = Arc::new(SessionRunResources {
+        let context_provider = Arc::new(SessionContextProvider {
             runtime_client: runtime.runtime_client.clone(),
             provider,
             mcp: self.deps.mcp.clone(),
@@ -379,9 +379,9 @@ impl SessionActor {
         params.interactive = true;
         params.optional_handoff_tool = Some(ASK_USER_TOOL.to_string());
         // The system prompt is composed per run from a live workspace scan by
-        // `SessionRunResources`, not baked here.
+        // `SessionContextProvider`, not baked here.
         let agent_ctx = AgentRuntimeContext {
-            run_resources,
+            context_provider,
             event_sink: Arc::new(SessionEventSink {
                 frames: self.frames.clone(),
             }),
@@ -423,13 +423,13 @@ impl SessionActor {
         // (it never is here), a no-op event sink, and a parent that ignores
         // outcomes. Dropped when this scope ends, stopping the actor. `interactive`
         // is set so recovery does NOT self-resume the interrupted turn — a read
-        // must never attempt a run (which would fail `NoRunResources` and emit a
-        // spurious error).
+        // must never attempt a run (which would fail `NoContextProvider` and emit
+        // a spurious error).
         let mut reader_params = AgentParams::from_def(&session_run_def(&self.spec.agent));
         reader_params.interactive = true;
         let reader = ctx.spawn(AgentActor::new(
             AgentRuntimeContext {
-                run_resources: Arc::new(NoRunResources),
+                context_provider: Arc::new(NoContextProvider),
                 event_sink: Arc::new(SessionEventSink {
                     frames: self.frames.clone(),
                 }),
@@ -632,24 +632,24 @@ fn session_run_def(settings: &AgentSettings) -> AgentRunDef {
     }
 }
 
-/// Resources for a transient read-only agent (history queries): it never runs,
-/// so `ensure` must never be called; it errors defensively if it ever is.
-struct NoRunResources;
+/// Context provider for a transient read-only agent (history queries): it never
+/// runs, so `provide` must never be called; it errors defensively if it ever is.
+struct NoContextProvider;
 
 #[async_trait]
-impl RunResources for NoRunResources {
-    async fn ensure(&self) -> Result<PreparedRun, String> {
+impl ContextProvider for NoContextProvider {
+    async fn provide(&self) -> Result<Contexts, String> {
         Err("read-only agent cannot run".to_string())
     }
 }
 
-/// Per-run resource supplier for an interactive session's agent. Its `ensure`
+/// Per-run context provider for an interactive session's agent. Its `provide`
 /// runs on the agent run's own task (never the session mailbox): it resolves the
 /// provider live, scans the workspace + runs SessionStart, connects the enabled
 /// MCP servers, and composes the system prompt -- the sandbox round-trips that
 /// used to block `ensure_agent` on the mailbox. Idempotent per run, so a live
 /// runtime/MCP makes it cheap.
-struct SessionRunResources {
+struct SessionContextProvider {
     runtime_client: RuntimeClient,
     provider: Arc<dyn LlmProvider>,
     mcp: Option<Arc<crate::mcp::McpService>>,
@@ -660,8 +660,8 @@ struct SessionRunResources {
 }
 
 #[async_trait]
-impl RunResources for SessionRunResources {
-    async fn ensure(&self) -> Result<PreparedRun, String> {
+impl ContextProvider for SessionContextProvider {
+    async fn provide(&self) -> Result<Contexts, String> {
         let settings = &self.settings;
         let provider = self.provider.clone();
         let def = session_run_def(settings);
@@ -707,7 +707,7 @@ impl RunResources for SessionRunResources {
             )));
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
         emit_progress(&self.frames, "ready", None);
-        Ok(PreparedRun {
+        Ok(Contexts {
             provider,
             toolbox,
             system_prompt,
