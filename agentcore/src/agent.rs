@@ -315,11 +315,18 @@ impl Agent {
                 }))
                 .await?;
 
-            let response = self
-                .provider
-                .complete(request, &msg_id, events)
-                .await
-                .map_err(AgentError::Provider)?;
+            // Cancellation aborts the in-flight completion instead of waiting it
+            // out: dropping the provider future tears down the underlying HTTP
+            // request/stream, so a stopped turn stops burning tokens now rather
+            // than at the next loop checkpoint. Nothing is persisted for an
+            // aborted call — only a fully-assembled `MessageComplete` ever is.
+            let response = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(AgentError::Cancelled),
+                result = self.provider.complete(request, &msg_id, events) => {
+                    result.map_err(AgentError::Provider)?
+                }
+            };
 
             events
                 .emit(AgentEvent::MessageStop(MessageStopEvent {
@@ -559,7 +566,16 @@ impl Agent {
                     })
                 });
 
-            let results = futures_util::future::join_all(executions).await;
+            // Cancellation stops *waiting* for the batch (dropping the in-flight
+            // tool futures) rather than blocking a stop behind a long-running
+            // command. No tool results are recorded for an abandoned batch, so
+            // the turn's now-dangling `tool_use` calls are repaired by the
+            // caller's resume sanitization before the next run.
+            let results = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(AgentError::Cancelled),
+                results = futures_util::future::join_all(executions) => results,
+            };
             for result in results {
                 self.history.push(result?);
             }
@@ -584,7 +600,7 @@ mod tests {
         tool::{EmptyToolbox, ToolSpec, Toolbox},
     };
     use async_trait::async_trait;
-    use horsie_models::agent::{ContentPart, TextPart, ToolCallPart, Usage};
+    use horsie_models::agent::{ContentPart, TextPart, ThinkingPart, ToolCallPart, Usage};
     use horsie_models::events::AgentEvent;
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
@@ -1098,6 +1114,157 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AgentError::Cancelled));
+    }
+
+    /// A provider whose `complete` announces itself and then never resolves, so a
+    /// test can cancel while a call is genuinely in flight.
+    struct HangingProvider {
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for HangingProvider {
+        fn model_id(&self) -> &str {
+            "hanging"
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn EventSink,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            let _ = self.entered.send(());
+            std::future::pending().await
+        }
+    }
+
+    /// A toolbox whose `execute` announces itself and then never resolves — a
+    /// stand-in for a long-running command (a slow build, a big test suite).
+    struct HangingToolbox {
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl Toolbox for HangingToolbox {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec {
+                name: "slow_tool".to_string(),
+                description: "never finishes".to_string(),
+                input_schema: json!({ "type": "object" }),
+            }]
+        }
+        async fn execute(&self, _name: &str, _input: Value) -> Result<Value, ToolCallError> {
+            let _ = self.entered.send(());
+            std::future::pending().await
+        }
+    }
+
+    /// Cancelling mid-completion must abort the in-flight provider call rather
+    /// than wait it out, so a stopped turn stops burning tokens immediately.
+    #[tokio::test]
+    async fn cancel_aborts_an_in_flight_provider_call() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut agent = Agent::builder(
+            Arc::new(HangingProvider { entered: tx }),
+            Arc::new(EmptyToolbox),
+        )
+        .build()
+        .unwrap();
+        let sink = CollectingEventSink::new();
+        let token = CancellationToken::new();
+
+        // `join!` drives the run and the canceller concurrently: cancel fires only
+        // once the provider call has actually been entered, so this exercises the
+        // real mid-flight abort with no sleep-guessed timing.
+        let run = agent.run(
+            AgentInput::user_message("msg-1", "go"),
+            &sink,
+            token.clone(),
+        );
+        let canceller = async {
+            rx.recv().await.expect("the provider call was entered");
+            token.cancel();
+        };
+        let (result, ()) = tokio::join!(run, canceller);
+
+        assert!(matches!(result.unwrap_err(), AgentError::Cancelled));
+        // An aborted call never yields a complete assistant message, so nothing
+        // partial can reach the caller's journal.
+        assert!(
+            sink.message_complete_ids().is_empty(),
+            "aborted completion must not produce a MessageComplete"
+        );
+    }
+
+    /// Cancelling while tools are running must abandon the batch rather than block
+    /// the stop behind a long command; no tool results are recorded.
+    #[tokio::test]
+    async fn cancel_abandons_an_in_flight_tool_batch() {
+        // Thinking + a tool call in one assistant message: the shape a real
+        // reasoning turn takes, so the assertions below pin down exactly which
+        // parts of an interrupted turn survive.
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![
+                ContentPart::Thinking(ThinkingPart {
+                    text: "let me check...".into(),
+                    signature: None,
+                }),
+                ContentPart::ToolCall(ToolCallPart {
+                    id: "c1".into(),
+                    name: "slow_tool".into(),
+                    input: json!({}),
+                }),
+            ],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::without_cache(5, 2),
+        }]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut agent = Agent::builder(provider, Arc::new(HangingToolbox { entered: tx }))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let token = CancellationToken::new();
+
+        let run = agent.run(
+            AgentInput::user_message("msg-1", "go"),
+            &sink,
+            token.clone(),
+        );
+        let canceller = async {
+            rx.recv().await.expect("the tool call was entered");
+            token.cancel();
+        };
+        let (result, ()) = tokio::join!(run, canceller);
+
+        assert!(matches!(result.unwrap_err(), AgentError::Cancelled));
+        assert!(
+            !sink
+                .events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolComplete(_))),
+            "an abandoned tool batch must not record results"
+        );
+        // The assistant message *requesting* the tools (thinking included)
+        // completed before the batch began, so it is recorded in full — leaving a
+        // dangling `tool_use` that the caller's resume sanitization repairs on the
+        // next turn. Nothing partial is ever recorded: a message is journaled
+        // whole or not at all.
+        let completed = sink
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::MessageComplete(mc) => Some(mc.message),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1);
+        assert!(
+            completed[0]
+                .parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::Thinking(_))),
+            "the interrupted turn's thinking is preserved with its message"
+        );
     }
 
     /// Records the `tool_choice` of the first provider call.

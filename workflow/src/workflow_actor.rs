@@ -741,7 +741,7 @@ impl EventSourcedActor for WorkflowActor {
             WorkflowCommand::Start { input } => self.on_start(input, ctx).await,
             WorkflowCommand::Cancel => {
                 if let Some(child) = &self.current_child {
-                    let _ = child.tell(AgentCommand::Cancel).await;
+                    let _ = child.tell(AgentCommand::Cancel { ack: None }).await;
                 }
                 self.notify(WorkflowNotification::Suspended);
                 CommandEffect::persist(vec![WorkflowDomainEvent::WorkflowSuspended {
