@@ -2,7 +2,6 @@ import {
   CircleAlert,
   Cpu,
   FolderGit2,
-  Gauge,
   Loader2,
   Server,
   Square,
@@ -13,6 +12,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError } from "../api/client";
 import { SessionStatusKind } from "../api/types";
 import { Composer } from "../components/Composer";
+import { ContextStatsPanel } from "../components/ContextStatsPanel";
 import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
@@ -23,9 +23,10 @@ import {
   useDeleteSession,
   useSendMessage,
   useSession,
+  useSessionUsage,
   useStopSession,
 } from "../hooks/useSessions";
-import { basename, compactNumber, sessionTitle } from "../lib/format";
+import { basename, sessionTitle } from "../lib/format";
 import { statusMeta } from "../lib/status";
 
 /** Friendly label for a resource-preparation progression stage. Unknown stages
@@ -63,6 +64,7 @@ export function SessionView() {
   const { data: detail, isLoading } = useSession(id);
   const { stream, addOptimisticUser, removeOptimisticUser, loadMore } =
     useSessionStream(id);
+  const { data: usageStats } = useSessionUsage(id);
   const send = useSendMessage();
   const stop = useStopSession();
   const del = useDeleteSession();
@@ -183,14 +185,7 @@ export function SessionView() {
                   {basename(r)}
                 </Chip>
               ))}
-              {totalTokens > 0 && (
-                <Chip
-                  icon={<Gauge size={12} />}
-                  title={`${stream.usage.input} in · ${stream.usage.output} out`}
-                >
-                  {compactNumber(totalTokens)} tok
-                </Chip>
-              )}
+              <ContextStatsPanel stats={usageStats} totalTokens={totalTokens} />
             </div>
           </div>
 

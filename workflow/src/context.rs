@@ -1,3 +1,4 @@
+use crate::agent_actor::UsageTotal;
 use crate::mcp_toolbox::CompositeToolbox;
 use crate::workflow_actor::WorkflowNotification;
 use async_trait::async_trait;
@@ -98,6 +99,15 @@ pub enum AgentOutcome {
         session_id: Uuid,
         error: String,
         recoverable: bool,
+    },
+    /// A run completed successfully, carrying this agent's freshly-updated
+    /// cumulative usage. Delivered alongside `Concluded`/`Asked` (never
+    /// `Failed`/`Parked`, which have no completed run's usage to report), so
+    /// a parent hosting multiple agents can maintain its own durable
+    /// session-level usage total without waking an idle agent to ask for it.
+    UsageRecorded {
+        session_id: Uuid,
+        usage_total: UsageTotal,
     },
 }
 

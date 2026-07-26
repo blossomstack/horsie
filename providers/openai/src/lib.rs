@@ -207,11 +207,7 @@ impl Default for StreamState {
             reasoning: String::new(),
             text: String::new(),
             tools: BTreeMap::new(),
-            // `Usage` has no `Default` impl in the models crate.
-            usage: Usage {
-                input_tokens: 0,
-                output_tokens: 0,
-            },
+            usage: Usage::without_cache(0, 0),
             reasoning_started: false,
             text_started: false,
             text_index: 0,
@@ -232,6 +228,7 @@ impl OpenAiProvider {
         if let Some(u) = &chunk.usage {
             state.usage.input_tokens = u.prompt_tokens;
             state.usage.output_tokens = u.completion_tokens;
+            state.usage.cache_read_tokens = u.cached_tokens();
         }
 
         let mut finish = None;

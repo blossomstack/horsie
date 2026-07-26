@@ -16,4 +16,8 @@ export interface ModelView {
    */
   modelId: string;
   maxTokens?: number;
+  /**
+   * The model&#x27;s total context window, in tokens. A built-in default is
+   */
+  contextWindow?: number;
 }

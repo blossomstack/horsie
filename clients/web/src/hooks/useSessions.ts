@@ -17,6 +17,7 @@ import { deriveTitle } from "../lib/format";
 export const qk = {
   sessions: ["sessions"] as const,
   session: (id: string) => ["session", id] as const,
+  sessionUsage: (id: string) => ["session-usage", id] as const,
 };
 
 export function useSessionList() {
@@ -34,6 +35,18 @@ export function useSession(id: string | undefined) {
     queryFn: () => api.sessions.get(id as string),
     enabled: !!id,
     select: (r: GetSessionResponse) => r.session,
+  });
+}
+
+/** Session-level aggregated usage + the main agent's context-window state.
+ * Kept fresh by SSE-driven invalidation on `StatusChanged` (see
+ * `useSessionStream`), not polling. */
+export function useSessionUsage(id: string | undefined) {
+  return useQuery({
+    queryKey: id ? qk.sessionUsage(id) : ["session-usage", "none"],
+    queryFn: () => api.sessions.usage(id as string),
+    enabled: !!id,
+    select: (r) => r.usage,
   });
 }
 

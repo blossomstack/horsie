@@ -16,5 +16,7 @@ export * from './taskStatus';
 export * from './taskItem';
 export * from './taskListEvent';
 export * from './usageView';
+export * from './agentUsageView';
+export * from './sessionUsageStats';
 export * from './sessionEvent';
 export * from './globalSessionEvent';

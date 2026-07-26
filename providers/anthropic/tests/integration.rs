@@ -87,6 +87,25 @@ async fn test_text_response() {
     assert!(evts.iter().any(|e| matches!(e, AgentEvent::TextChunk(_))));
 }
 
+#[tokio::test]
+async fn test_text_response_has_no_cache_tokens_when_wire_omits_them() {
+    let mock = MockLlmServer::builder()
+        .response("Hello world")
+        .build()
+        .await;
+    let p = provider_at(&mock.url());
+    let msgs = user_messages("hi");
+    let (sink, _events) = collect_sink();
+    let resp = p
+        .complete(no_tools_request(&msgs), "msg-1", &sink)
+        .await
+        .unwrap();
+    // `MockLlmServer`'s fixed message_start frame never sets cache fields —
+    // they must surface as `None`, not `Some(0)`.
+    assert_eq!(resp.usage.cache_creation_tokens, None);
+    assert_eq!(resp.usage.cache_read_tokens, None);
+}
+
 // ── tool call ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]

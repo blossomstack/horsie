@@ -38,10 +38,7 @@ impl MockProvider {
                 text: text.to_string(),
             })],
             stop_reason: StopReason::EndTurn,
-            usage: Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-            },
+            usage: Usage::without_cache(10, 5),
         }])
     }
 
@@ -54,20 +51,14 @@ impl MockProvider {
                     input,
                 })],
                 stop_reason: StopReason::ToolUse,
-                usage: Usage {
-                    input_tokens: 20,
-                    output_tokens: 10,
-                },
+                usage: Usage::without_cache(20, 10),
             },
             CompletionResponse {
                 parts: vec![ContentPart::Text(TextPart {
                     text: reply.to_string(),
                 })],
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
-                    input_tokens: 30,
-                    output_tokens: 8,
-                },
+                usage: Usage::without_cache(30, 8),
             },
         ])
     }

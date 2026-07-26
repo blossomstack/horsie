@@ -134,11 +134,29 @@ pub struct Choice {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct WireUsage {
     #[serde(default)]
     pub prompt_tokens: u32,
     #[serde(default)]
     pub completion_tokens: u32,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+impl WireUsage {
+    /// Tokens served from the backend's prompt cache, when it reports them.
+    /// OpenAI proper always includes `prompt_tokens_details`; Ollama/vLLM/
+    /// llama.cpp typically omit it entirely — both cases are `None` here,
+    /// not `Some(0)`.
+    pub fn cached_tokens(&self) -> Option<u32> {
+        self.prompt_tokens_details.as_ref()?.cached_tokens
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -221,6 +239,26 @@ pub fn to_wire_messages(history: &[Message]) -> Vec<ChatMessage> {
 mod tests {
     use super::*;
     use horsie_models::agent::{TextPart, ThinkingPart, ToolCallPart, ToolResultPart};
+
+    #[test]
+    fn wire_usage_parses_cached_tokens_when_present() {
+        let json = r#"{
+            "prompt_tokens": 2006,
+            "completion_tokens": 300,
+            "prompt_tokens_details": { "cached_tokens": 1920 }
+        }"#;
+        let u: WireUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(u.prompt_tokens, 2006);
+        assert_eq!(u.completion_tokens, 300);
+        assert_eq!(u.cached_tokens(), Some(1920));
+    }
+
+    #[test]
+    fn wire_usage_cached_tokens_absent_when_backend_omits_the_field() {
+        let json = r#"{"prompt_tokens": 10, "completion_tokens": 5}"#;
+        let u: WireUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(u.cached_tokens(), None);
+    }
 
     #[test]
     fn tool_results_become_their_own_tool_role_messages() {

@@ -5,4 +5,6 @@
 export interface UsageView {
   inputTokens: number;
   outputTokens: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
 }

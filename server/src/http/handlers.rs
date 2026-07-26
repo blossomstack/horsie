@@ -5,6 +5,7 @@ use crate::http::AppState;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
 use crate::sessions::events::fold_session_state;
+use crate::sessions::session_actor::SessionUsageStats;
 use crate::sessions::spec::{
     AgentSettings, ProvisionStepSpec, SessionSpec, SessionStatus, WorkspaceDef, status_kind,
     status_reason,
@@ -15,12 +16,13 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::session::{
-    AgentSettings as WireAgentSettings, SessionDetail, SessionStatusKind, SessionSummary, TaskItem,
+    AgentSettings as WireAgentSettings, AgentUsageView, SessionDetail, SessionStatusKind,
+    SessionSummary, SessionUsageStats as WireSessionUsageStats, TaskItem,
     TaskStatus as WireTaskStatus, UsageView,
 };
 use horsie_models::session_api::{
-    CreateSessionRequest, CreateSessionResponse, GetSessionResponse, HistoryPage,
-    ListSessionsResponse, SendMessageRequest, SessionAck,
+    CreateSessionRequest, CreateSessionResponse, GetSessionResponse, GetSessionUsageResponse,
+    HistoryPage, ListSessionsResponse, SendMessageRequest, SessionAck,
 };
 use horsie_workflow::{AgentHistoryPage, HistoryQuery, TaskStatus as AgentTaskStatus};
 use serde::Deserialize;
@@ -235,10 +237,35 @@ fn to_wire_history(page: AgentHistoryPage) -> HistoryPage {
                 })
                 .collect()
         }),
-        usage: page.usage.map(|u| UsageView {
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
-        }),
+        usage: page.usage.map(to_wire_usage),
+    }
+}
+
+fn to_wire_usage(u: horsie_workflow::UsageTotal) -> UsageView {
+    UsageView {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        cache_creation_tokens: u.cache_creation_tokens,
+        cache_read_tokens: u.cache_read_tokens,
+    }
+}
+
+/// Maps the session actor's aggregated usage onto its wire shape, attaching
+/// `context_window` from the model config — the one piece that isn't agent
+/// state, since an agent doesn't know about configured models.
+fn to_wire_usage_stats(
+    stats: SessionUsageStats,
+    context_window: Option<u32>,
+) -> WireSessionUsageStats {
+    WireSessionUsageStats {
+        session_total: to_wire_usage(stats.session_total),
+        main_agent: AgentUsageView {
+            model: stats.main_agent.model,
+            usage_total: to_wire_usage(stats.main_agent.snapshot.usage_total),
+            last_turn_usage: stats.main_agent.snapshot.last_turn_usage,
+            context_tokens: stats.main_agent.snapshot.context_tokens,
+            context_window,
+        },
     }
 }
 
@@ -266,6 +293,30 @@ pub async fn get_history(
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
     Ok(Json(to_wire_history(page)))
+}
+
+/// A session's aggregated usage (summed across every agent it hosts — today
+/// just the one) plus the primary agent's own usage and context-size
+/// snapshot, for the header's context-window display.
+pub async fn get_session_usage(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, Api> {
+    let stats = ask(&state, |reply| SessionSupervisorCommand::UsageStats {
+        id: id.clone(),
+        reply,
+    })
+    .await?
+    .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
+    let view = state.config_store.view().await.map_err(Api::internal)?;
+    let context_window = view
+        .models
+        .iter()
+        .find(|m| m.alias == stats.main_agent.model)
+        .and_then(|m| m.context_window);
+    Ok(Json(GetSessionUsageResponse {
+        usage: to_wire_usage_stats(stats, context_window),
+    }))
 }
 
 pub async fn send_message(

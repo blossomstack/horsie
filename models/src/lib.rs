@@ -1,6 +1,25 @@
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod agent {
     include!(concat!(env!("OUT_DIR"), "/agent/mod.rs"));
+
+    impl Usage {
+        /// A `Usage` with no cache data reported — the common case for test
+        /// fixtures and any call site that doesn't yet know about caching.
+        ///
+        /// Named `without_cache` rather than `new`: fluorite's codegen already
+        /// derives an all-fields `Usage::new(input_tokens, output_tokens,
+        /// cache_creation_tokens, cache_read_tokens)` via `derive_new::new` on
+        /// every generated struct, so a hand-written 2-arg `new` here would be
+        /// a duplicate inherent-method definition (E0592).
+        pub fn without_cache(input_tokens: u32, output_tokens: u32) -> Self {
+            Self {
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+            }
+        }
+    }
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]

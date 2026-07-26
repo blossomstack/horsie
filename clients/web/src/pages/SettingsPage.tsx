@@ -59,6 +59,7 @@ type ModelDraft = {
   provider: string;
   modelId: string;
   maxTokens: string; // "" = unset
+  contextWindow: string; // "" = unset (server applies a built-in default)
 };
 
 type VelosDraft = {
@@ -92,6 +93,7 @@ const toModelDrafts = (v: SettingsView): ModelDraft[] =>
     provider: m.provider,
     modelId: m.modelId,
     maxTokens: m.maxTokens != null ? String(m.maxTokens) : "",
+    contextWindow: m.contextWindow != null ? String(m.contextWindow) : "",
   }));
 
 const num = (n: number | undefined): string => (n != null ? String(n) : "");
@@ -191,6 +193,9 @@ export function SettingsPage() {
     for (const m of models)
       if (m.maxTokens.trim() && !/^\d+$/.test(m.maxTokens.trim()))
         return setLocalError(`Max tokens for "${m.alias}" must be a number.`);
+    for (const m of models)
+      if (m.contextWindow.trim() && !/^\d+$/.test(m.contextWindow.trim()))
+        return setLocalError(`Context window for "${m.alias}" must be a number.`);
     if (velos.some((v) => !v.name.trim()))
       return setLocalError("Every velos vendor needs a name.");
     if (!uniq(velos.map((v) => v.name.trim())))
@@ -224,6 +229,7 @@ export function SettingsPage() {
       provider: m.provider,
       modelId: m.modelId.trim(),
       maxTokens: m.maxTokens.trim() ? Number(m.maxTokens.trim()) : undefined,
+      contextWindow: m.contextWindow.trim() ? Number(m.contextWindow.trim()) : undefined,
     }));
     const vendorInputs: VendorInput[] = velos.map((v) => ({
       name: v.name.trim(),
@@ -384,7 +390,13 @@ export function SettingsPage() {
                 onAdd={() => {
                   setModels((ms) => [
                     ...ms,
-                    { alias: "", provider: providerNames[0] ?? "", modelId: "", maxTokens: "" },
+                    {
+                      alias: "",
+                      provider: providerNames[0] ?? "",
+                      modelId: "",
+                      maxTokens: "",
+                      contextWindow: "",
+                    },
                   ]);
                   touch();
                 }}
@@ -839,6 +851,12 @@ function ModelRow({
           value={draft.maxTokens}
           onChange={(v) => set({ maxTokens: v })}
           placeholder="8192"
+        />
+        <TextField
+          label="Context window (optional)"
+          value={draft.contextWindow}
+          onChange={(v) => set({ contextWindow: v })}
+          placeholder="200000"
         />
       </div>
     </RowShell>

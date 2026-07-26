@@ -7,4 +7,5 @@ export interface ModelInput {
   provider: string;
   modelId: string;
   maxTokens?: number;
+  contextWindow?: number;
 }

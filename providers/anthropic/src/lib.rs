@@ -344,6 +344,8 @@ impl LlmProvider for AnthropicProvider {
         let mut stop_reason = StopReason::EndTurn;
         let mut input_tokens: u32 = 0;
         let mut output_tokens: u32 = 0;
+        let mut cache_creation_tokens: Option<u32> = None;
+        let mut cache_read_tokens: Option<u32> = None;
         let mut last_error: Option<LlmError> = None;
 
         'retry: for attempt in 0..=MAX_STREAM_RETRIES {
@@ -361,6 +363,8 @@ impl LlmProvider for AnthropicProvider {
                 stop_reason = StopReason::EndTurn;
                 input_tokens = 0;
                 output_tokens = 0;
+                cache_creation_tokens = None;
+                cache_read_tokens = None;
             }
 
             let mut stream = self
@@ -395,6 +399,8 @@ impl LlmProvider for AnthropicProvider {
                     MessagesStreamEvent::MessageStart { message, usage: _ } => {
                         if let Some(u) = &message.usage {
                             input_tokens = u.input_tokens.unwrap_or(0);
+                            cache_creation_tokens = u.cache_creation_input_tokens;
+                            cache_read_tokens = u.cache_read_input_tokens;
                         }
                         None
                     }
@@ -563,8 +569,16 @@ impl LlmProvider for AnthropicProvider {
             parts,
             stop_reason,
             usage: Usage {
-                input_tokens,
+                // Anthropic's `input_tokens` excludes cache-read/cache-creation
+                // tokens (they ride in separate fields on the wire) — add them
+                // back in so `Usage.input_tokens` means "full prompt size" the
+                // same way it already does on the OpenAI wire.
+                input_tokens: input_tokens
+                    + cache_creation_tokens.unwrap_or(0)
+                    + cache_read_tokens.unwrap_or(0),
                 output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
             },
         })
     }

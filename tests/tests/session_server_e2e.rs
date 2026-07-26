@@ -655,6 +655,87 @@ async fn history_endpoint_returns_windowed_messages() {
 }
 
 #[tokio::test]
+async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("first reply");
+    mock.queue_response("second reply");
+    let tmp = tempfile::tempdir().unwrap();
+    let vendor = Arc::new(MockVendor::new());
+    let client = reqwest::Client::new();
+
+    let server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    let usage = |addr: SocketAddr, id: String| {
+        let client = client.clone();
+        async move {
+            client
+                .get(format!("http://{addr}/api/sessions/{id}/usage"))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Fresh session: zeroed usage, no completed turns yet.
+    let zero = usage(server.addr, id.clone()).await;
+    assert_eq!(zero["usage"]["sessionTotal"]["inputTokens"], 0);
+    assert_eq!(zero["usage"]["mainAgent"]["usageTotal"]["inputTokens"], 0);
+    assert_eq!(zero["usage"]["mainAgent"]["model"], "mock");
+
+    // Turn one, then poll until its usage has landed (the 202 races the
+    // actual completion).
+    send_message(&client, &server.addr, &id, "one").await;
+    let after_one = loop {
+        let v = usage(server.addr, id.clone()).await;
+        if v["usage"]["sessionTotal"]["inputTokens"].as_u64().unwrap() > 0 {
+            break v;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    let after_one_input = after_one["usage"]["sessionTotal"]["inputTokens"]
+        .as_u64()
+        .unwrap();
+
+    // Turn two accumulates on top of turn one — the session-level total and
+    // the (only) agent's own total must agree, since there's just one agent.
+    send_message(&client, &server.addr, &id, "two").await;
+    let after_two = loop {
+        let v = usage(server.addr, id.clone()).await;
+        let total = v["usage"]["sessionTotal"]["inputTokens"].as_u64().unwrap();
+        if total > after_one_input {
+            break v;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    assert_eq!(
+        after_two["usage"]["sessionTotal"], after_two["usage"]["mainAgent"]["usageTotal"],
+        "one agent: session total must equal its own total: {after_two}"
+    );
+
+    // Crash + restart on the same journal, with no message sent yet on the new
+    // incarnation: the session-level total must already be durable (it was
+    // pushed and journaled by SessionActor as each turn completed), readable
+    // with zero agent journal replay -- the new incarnation's agent hasn't
+    // even been asked anything yet at this point.
+    server.shutdown().await;
+    let server2 = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+    let after_restart = usage(server2.addr, id.clone()).await;
+    assert_eq!(
+        after_restart["usage"]["sessionTotal"], after_two["usage"]["sessionTotal"],
+        "session-level usage total must survive a restart unchanged: {after_restart}"
+    );
+
+    server2.shutdown().await;
+}
+
+#[tokio::test]
 async fn stop_preserves_and_message_reattaches() {
     let mock = MockLlmServer::builder().build().await;
     mock.queue_response("first");

@@ -15,37 +15,43 @@ use uuid::Uuid;
 pub(crate) struct WorkflowParent(pub ActorRef<WorkflowCommand>);
 
 /// Pure outcome → command mapping (kept separate so it is unit-testable).
-pub(crate) fn map_outcome(outcome: AgentOutcome) -> WorkflowCommand {
+/// `None` for outcomes a workflow has no command for — `UsageRecorded` backs
+/// the session server's own durable usage aggregation and has no workflow
+/// analog (a workflow doesn't track cumulative usage today).
+pub(crate) fn map_outcome(outcome: AgentOutcome) -> Option<WorkflowCommand> {
     match outcome {
         AgentOutcome::Concluded { session_id, output } => {
-            WorkflowCommand::AgentConcluded { session_id, output }
+            Some(WorkflowCommand::AgentConcluded { session_id, output })
         }
         AgentOutcome::Asked {
             session_id,
             tool_call_id,
             question,
-        } => WorkflowCommand::AgentAsked {
+        } => Some(WorkflowCommand::AgentAsked {
             session_id,
             tool_call_id,
             question,
-        },
-        AgentOutcome::Parked { session_id } => WorkflowCommand::AgentParked { session_id },
+        }),
+        AgentOutcome::Parked { session_id } => Some(WorkflowCommand::AgentParked { session_id }),
         AgentOutcome::Failed {
             session_id,
             error,
             recoverable,
-        } => WorkflowCommand::AgentFailed {
+        } => Some(WorkflowCommand::AgentFailed {
             session_id,
             error,
             recoverable,
-        },
+        }),
+        AgentOutcome::UsageRecorded { .. } => None,
     }
 }
 
 #[async_trait]
 impl AgentOutcomeSink for WorkflowParent {
     async fn deliver(&self, outcome: AgentOutcome) {
-        let _ = self.0.tell(map_outcome(outcome)).await;
+        if let Some(cmd) = map_outcome(outcome) {
+            let _ = self.0.tell(cmd).await;
+        }
     }
 }
 
@@ -840,6 +846,7 @@ impl EventSourcedActor for WorkflowActor {
 )]
 mod tests {
     use super::*;
+    use crate::agent_actor::UsageTotal;
     use serde_json::json;
 
     fn sess() -> Uuid {
@@ -853,7 +860,8 @@ mod tests {
             session_id,
             error: "boom".into(),
             recoverable: true,
-        });
+        })
+        .expect("Failed maps to a command");
         match cmd {
             WorkflowCommand::AgentFailed {
                 session_id: s,
@@ -876,7 +884,8 @@ mod tests {
             session_id,
             tool_call_id: Some("tc".into()),
             question: "q?".into(),
-        });
+        })
+        .expect("Asked maps to a command");
         match cmd {
             WorkflowCommand::AgentAsked {
                 tool_call_id,
@@ -894,6 +903,18 @@ mod tests {
             | WorkflowCommand::AgentParked { .. }
             | WorkflowCommand::AgentFailed { .. } => panic!("wrong mapping"),
         }
+    }
+
+    #[test]
+    fn workflow_parent_has_no_command_for_usage_recorded() {
+        // A workflow doesn't track cumulative usage — only the session server
+        // does, via its own `AgentOutcomeSink` — so this outcome maps to no
+        // command rather than requiring a dummy `WorkflowCommand` variant.
+        let cmd = map_outcome(AgentOutcome::UsageRecorded {
+            session_id: Uuid::new_v4(),
+            usage_total: UsageTotal::default(),
+        });
+        assert!(cmd.is_none());
     }
 
     #[test]

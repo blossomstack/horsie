@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { api } from "../api/client";
 import {
@@ -9,6 +10,7 @@ import {
   type SessionEvent,
   type TaskItem,
 } from "../api/types";
+import { qk } from "./useSessions";
 
 /** Messages per history page (initial tail and each scroll-back load). */
 const HISTORY_LIMIT = 50;
@@ -349,6 +351,7 @@ export function useSessionStream(sessionId: string | undefined): {
   loadMore: () => void;
 } {
   const [state, dispatch] = useReducer(reducer, INITIAL);
+  const queryClient = useQueryClient();
   const esRef = useRef<EventSource | null>(null);
   // Earliest loaded message id — the cursor for the next scroll-back page.
   const earliestRef = useRef<string | null>(null);
@@ -365,6 +368,19 @@ export function useSessionStream(sessionId: string | undefined): {
     let seeded = false;
     const buffer: SessionEvent[] = [];
 
+    // Refetch usage on a status change rather than `TurnCompleted`: the
+    // server journals/broadcasts `TurnCompleted` from inside the agent's own
+    // run — before the session actor has processed the durable usage push
+    // that `handle_finished` sends *after* that (`UsageRecorded` then
+    // `Concluded`/`Asked`, delivered to the same mailbox in that order).
+    // `StatusChanged` only fires once `Concluded`/`Asked`/`Failed` runs, so by
+    // then the session's own usage total is guaranteed to have landed.
+    const maybeInvalidateUsage = (event: SessionEvent) => {
+      if (event.type === "StatusChanged") {
+        void queryClient.invalidateQueries({ queryKey: qk.sessionUsage(sessionId) });
+      }
+    };
+
     // Live-only SSE: events before the tail seed are buffered, then replayed.
     const es = new EventSource(api.sessionEventsUrl(sessionId, { live: true }));
     esRef.current = es;
@@ -372,8 +388,10 @@ export function useSessionStream(sessionId: string | undefined): {
     es.onmessage = (e: MessageEvent<string>) => {
       try {
         const event = JSON.parse(e.data) as SessionEvent;
-        if (seeded) dispatch({ kind: "event", event });
-        else buffer.push(event);
+        if (seeded) {
+          dispatch({ kind: "event", event });
+          maybeInvalidateUsage(event);
+        } else buffer.push(event);
       } catch (err) {
         console.error("failed to parse session event", err, e.data);
       }
@@ -387,15 +405,20 @@ export function useSessionStream(sessionId: string | undefined): {
         if (cancelled) return;
         dispatch({ kind: "history", page, prepend: false });
         seeded = true;
-        for (const event of buffer)
+        for (const event of buffer) {
           dispatch({ kind: "event", event, fromBackfill: true });
+          maybeInvalidateUsage(event);
+        }
         buffer.length = 0;
       })
       .catch(() => {
         if (cancelled) return;
         // Let live events flow even if the initial fetch failed.
         seeded = true;
-        for (const event of buffer) dispatch({ kind: "event", event });
+        for (const event of buffer) {
+          dispatch({ kind: "event", event });
+          maybeInvalidateUsage(event);
+        }
         buffer.length = 0;
       });
 
@@ -404,7 +427,7 @@ export function useSessionStream(sessionId: string | undefined): {
       es.close();
       esRef.current = null;
     };
-  }, [sessionId]);
+  }, [sessionId, queryClient]);
 
   const loadMore = useCallback(() => {
     const before = earliestRef.current;

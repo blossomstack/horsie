@@ -6,6 +6,7 @@ use session.SessionSummary;
 use session.SessionDetail;
 use session.TaskItem;
 use session.UsageView;
+use session.SessionUsageStats;
 use agent.Message;
 use capabilities.CapabilitySpec;
 
@@ -45,6 +46,8 @@ struct HistoryPage {
     tasks: Option<Vec<TaskItem>>,
     usage: Option<UsageView>,
 }
+
+struct GetSessionUsageResponse { usage: SessionUsageStats }
 
 struct CreateSessionResponse { session: SessionSummary }
 struct ListSessionsResponse { sessions: Vec<SessionSummary> }

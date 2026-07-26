@@ -392,13 +392,17 @@ impl ConfigStore for DbConfigStore {
                 if !seen.insert(alias.to_string()) {
                     return Err(format!("duplicate model '{alias}'"));
                 }
+                let context_window = m
+                    .context_window
+                    .or_else(|| default_context_window(m.model_id.trim()));
                 sqlx::query(
-                    "INSERT INTO models (alias, provider, model_id, max_tokens) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO models (alias, provider, model_id, max_tokens, context_window) VALUES (?, ?, ?, ?, ?)",
                 )
                 .bind(alias)
                 .bind(&m.provider)
                 .bind(m.model_id.trim())
                 .bind(m.max_tokens.map(i64::from))
+                .bind(context_window.map(i64::from))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -545,6 +549,7 @@ struct ModelRow {
     provider: String,
     model_id: String,
     max_tokens: Option<i64>,
+    context_window: Option<i64>,
 }
 
 struct VendorRow {
@@ -592,6 +597,25 @@ fn default_memory_mib() -> u64 {
 }
 fn default_connect_timeout_secs() -> u64 {
     60
+}
+
+/// A built-in context-window guess for well-known model ids, applied only
+/// when a model is persisted with `context_window` omitted — the stored
+/// value (once set) is always authoritative, this never overrides it.
+/// Matched by substring against `model_id`; extend as new families ship.
+fn default_context_window(model_id: &str) -> Option<u32> {
+    const TABLE: &[(&str, u32)] = &[
+        ("claude-", 200_000),
+        ("gpt-4o", 128_000),
+        ("gpt-4.1", 1_000_000),
+        ("o1", 200_000),
+        ("o3", 200_000),
+        ("deepseek", 128_000),
+    ];
+    TABLE
+        .iter()
+        .find(|(needle, _)| model_id.contains(needle))
+        .map(|(_, window)| *window)
 }
 
 // ── building providers + vendors ─────────────────────────────────────────────
@@ -891,6 +915,7 @@ fn model_view(r: &ModelRow) -> ModelView {
         provider: r.provider.clone(),
         model_id: r.model_id.clone(),
         max_tokens: r.max_tokens.and_then(|v| u32::try_from(v).ok()),
+        context_window: r.context_window.and_then(|v| u32::try_from(v).ok()),
     }
 }
 
@@ -959,10 +984,11 @@ async fn read_models<'e, E>(ex: E) -> Result<Vec<ModelRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let rows =
-        sqlx::query("SELECT alias, provider, model_id, max_tokens FROM models ORDER BY alias")
-            .fetch_all(ex)
-            .await?;
+    let rows = sqlx::query(
+        "SELECT alias, provider, model_id, max_tokens, context_window FROM models ORDER BY alias",
+    )
+    .fetch_all(ex)
+    .await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ModelRow {
@@ -970,6 +996,7 @@ where
             provider: r.try_get("provider")?,
             model_id: r.try_get("model_id")?,
             max_tokens: r.try_get("max_tokens")?,
+            context_window: r.try_get("context_window")?,
         });
     }
     Ok(out)
@@ -1054,6 +1081,7 @@ mod tests {
             provider: provider.into(),
             model_id: "id".into(),
             max_tokens: None,
+            context_window: None,
         }
     }
 
@@ -1074,6 +1102,45 @@ mod tests {
         assert_eq!(view.models.len(), 1);
         assert!(view.providers[0].has_inline_key);
         assert!(o.registry.read().unwrap().contains_key("m"));
+    }
+
+    #[tokio::test]
+    async fn context_window_defaults_for_known_models_and_stays_editable() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("p", Some("sk-inline"))]),
+                models: Some(vec![
+                    ModelInput {
+                        alias: "sonnet".into(),
+                        provider: "p".into(),
+                        model_id: "claude-sonnet-4-6".into(),
+                        max_tokens: None,
+                        context_window: None,
+                    },
+                    ModelInput {
+                        alias: "custom".into(),
+                        provider: "p".into(),
+                        model_id: "some-unknown-model".into(),
+                        max_tokens: None,
+                        context_window: Some(42_000),
+                    },
+                ]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+        let sonnet = view.models.iter().find(|m| m.alias == "sonnet").unwrap();
+        assert_eq!(sonnet.context_window, Some(200_000));
+        let custom = view.models.iter().find(|m| m.alias == "custom").unwrap();
+        assert_eq!(
+            custom.context_window,
+            Some(42_000),
+            "an explicit value must never be overridden by the default table"
+        );
     }
 
     #[tokio::test]

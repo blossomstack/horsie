@@ -3,6 +3,7 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
+  GetSessionUsageResponse,
   HistoryPage,
   GitHubAppConfigInput,
   GitHubAppConfigView,
@@ -118,6 +119,11 @@ export const api = {
         method: "POST",
         body: "{}",
       }),
+
+    /** Session-level aggregated usage plus the main agent's own usage and
+     * context-size snapshot. */
+    usage: (id: string): Promise<GetSessionUsageResponse> =>
+      request(`/sessions/${encodeURIComponent(id)}/usage`),
   },
 
   config: {
