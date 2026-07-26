@@ -1,18 +1,11 @@
-import {
-  CircleAlert,
-  Cpu,
-  FolderGit2,
-  Loader2,
-  Server,
-  Square,
-  Trash2,
-} from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { CircleAlert, Loader2, Square, Trash2 } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError } from "../api/client";
 import { SessionStatusKind } from "../api/types";
 import { Composer } from "../components/Composer";
 import { ContextStatsPanel } from "../components/ContextStatsPanel";
+import { SessionConfigBar } from "../components/SessionConfigBar";
 import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
@@ -26,7 +19,7 @@ import {
   useSessionUsage,
   useStopSession,
 } from "../hooks/useSessions";
-import { basename, sessionTitle } from "../lib/format";
+import { sessionTitle } from "../lib/format";
 import { statusMeta } from "../lib/status";
 
 /** Friendly label for a resource-preparation progression stage. Unknown stages
@@ -39,23 +32,6 @@ function progressionLabel(stage: string): string {
     ready: "Ready",
   };
   return known[stage] ?? `${stage.replace(/_/g, " ")}…`;
-}
-
-function Chip({
-  icon,
-  children,
-  title,
-}: {
-  icon: ReactNode;
-  children: ReactNode;
-  title?: string;
-}) {
-  return (
-    <span className="chip" title={title}>
-      {icon}
-      {children}
-    </span>
-  );
 }
 
 export function SessionView() {
@@ -170,21 +146,6 @@ export function SessionView() {
               <StatusBadge status={status} />
             </div>
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-              {detail?.model && (
-                <Chip icon={<Cpu size={12} />} title="Model">
-                  {detail.model}
-                </Chip>
-              )}
-              {detail?.vendor && (
-                <Chip icon={<Server size={12} />} title="Runtime vendor">
-                  {detail.vendor}
-                </Chip>
-              )}
-              {detail?.repos?.map((r) => (
-                <Chip key={r} icon={<FolderGit2 size={12} />} title={r}>
-                  {basename(r)}
-                </Chip>
-              ))}
               <ContextStatsPanel stats={usageStats} totalTokens={totalTokens} />
             </div>
           </div>
@@ -301,6 +262,8 @@ export function SessionView() {
             </div>
           </div>
         )}
+
+        {detail && <SessionConfigBar mode="locked" detail={detail} />}
 
         {/* Composer */}
         <Composer
