@@ -143,12 +143,12 @@ fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
             output,
             is_error,
         })),
-        AgentDomainEvent::RunComplete { usage, iterations } => {
-            Some(SessionEvent::TurnCompleted(TurnCompletedEvent {
-                iterations,
-                usage,
-            }))
-        }
+        AgentDomainEvent::RunComplete {
+            usage, iterations, ..
+        } => Some(SessionEvent::TurnCompleted(TurnCompletedEvent {
+            iterations,
+            usage,
+        })),
         AgentDomainEvent::TaskListChanged { snapshot } => {
             Some(SessionEvent::TaskListChanged(TaskListEvent {
                 tasks: snapshot

@@ -17,7 +17,7 @@ mod workspace;
 
 pub use agent_actor::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentHistoryPage, AgentParams, AgentState,
-    HistoryQuery, UsageTotal,
+    AgentUsageSnapshot, HistoryQuery, UsageTotal,
 };
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL,

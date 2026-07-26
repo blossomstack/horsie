@@ -18,10 +18,12 @@ use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
-    AgentRunDef, AgentRuntimeContext, ContextProvider, Contexts, DefaultToolboxFactory,
-    HistoryQuery, SharedContext, ToolboxFactory, compose_system_prompt, scan_workspace,
+    AgentRunDef, AgentRuntimeContext, AgentUsageSnapshot, ContextProvider, Contexts,
+    DefaultToolboxFactory, HistoryQuery, SharedContext, ToolboxFactory, UsageTotal,
+    compose_system_prompt, scan_workspace,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
@@ -29,6 +31,10 @@ use uuid::Uuid;
 /// Capacity of a session's live frame broadcast. Slow subscribers see `lagged`
 /// drops and catch up from the journal.
 const FRAME_BROADCAST_CAPACITY: usize = 256;
+
+/// The agent id a session's single hosted agent reports usage under. A fixed
+/// label rather than a generated one until a session can host more than one.
+const MAIN_AGENT_ID: &str = "main";
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -78,6 +84,13 @@ pub enum SessionCommand {
         query: HistoryQuery,
         reply: oneshot::Sender<AgentHistoryPage>,
     },
+    /// Read this session's aggregated usage (session-level total, summed
+    /// across every agent it hosts) plus the primary agent's own usage and
+    /// context-size snapshot. Same live-agent-or-transient-reader answering
+    /// as `History`.
+    UsageStats {
+        reply: oneshot::Sender<SessionUsageStats>,
+    },
     /// Tear down OS resources for a clean server shutdown; no status persisted,
     /// so a `Running` session reconciles to `Interrupted` next start.
     Shutdown { reply: oneshot::Sender<()> },
@@ -109,6 +122,15 @@ pub enum SessionDomainEvent {
     },
     Stopped,
     Deleted,
+    /// One agent's cumulative usage, freshly updated after a completed run.
+    /// Persisted here (not just left on the agent's own state) so the
+    /// session-level usage total is durable and never requires waking an
+    /// idle agent to recompute — only the reporting agent's entry changes,
+    /// `agent_id` distinguishes it once a session can host more than one.
+    UsageRecorded {
+        agent_id: String,
+        usage_total: UsageTotal,
+    },
 }
 
 /// Persisted session state — purely a function of the event log. `status` is
@@ -120,6 +142,31 @@ pub struct SessionState {
     pub pending_ask: Option<String>,
     pub pending_question: Option<String>,
     pub last_error: Option<String>,
+    /// Each hosted agent's latest known cumulative usage, keyed by agent id
+    /// ("main" today — the only agent a session hosts). Durable: updated by
+    /// `UsageRecorded` whenever that agent completes a run, so the
+    /// session-level total never requires waking an idle agent to recompute.
+    #[serde(default)]
+    pub agent_usage: HashMap<String, UsageTotal>,
+}
+
+/// One agent's own usage/context-size snapshot, labeled with the model it
+/// ran. Session-level usage aggregates across these (today just the one);
+/// context-size never does — it stays meaningfully per-agent.
+#[derive(Debug, Clone)]
+pub struct AgentUsageEntry {
+    pub model: String,
+    pub snapshot: AgentUsageSnapshot,
+}
+
+/// A session's aggregated usage, answering `SessionCommand::UsageStats`.
+/// `session_total` sums every hosted agent's `usage_total` (today, one
+/// agent); `main_agent` is the primary agent's own usage plus its
+/// context-size snapshot, for the UI's context-window display.
+#[derive(Debug, Clone)]
+pub struct SessionUsageStats {
+    pub session_total: UsageTotal,
+    pub main_agent: AgentUsageEntry,
 }
 
 /// Whether a wake provisions fresh or revives preserved state.
@@ -449,6 +496,64 @@ impl SessionActor {
             })
     }
 
+    /// Read this session's aggregated usage. Usage *totals* (session-level and
+    /// per-agent) come from this session's own durable `agent_usage` — pushed
+    /// by `UsageRecorded` whenever an agent completes a run — never a live
+    /// ask, so summing across however many agents a session hosts never
+    /// requires waking an idle one. `context_tokens`/`last_turn_usage` are
+    /// the exception: context size is meaningfully live-only, so those still
+    /// ask the live main agent (or a transient reader if idle), exactly like
+    /// `read_history`.
+    async fn read_usage(
+        &self,
+        state: &SessionState,
+        ctx: &ActorContext<Self>,
+    ) -> SessionUsageStats {
+        let snapshot = if let Some(agent) = &self.agent
+            && let Ok(snapshot) = agent.ask(|reply| AgentCommand::GetUsage { reply }).await
+        {
+            snapshot
+        } else {
+            let mut reader_params = AgentParams::from_def(&session_run_def(&self.spec.agent));
+            reader_params.interactive = true;
+            let reader = ctx.spawn(AgentActor::new(
+                AgentRuntimeContext {
+                    context_provider: Arc::new(NoContextProvider),
+                    event_sink: Arc::new(SessionEventSink {
+                        frames: self.frames.clone(),
+                    }),
+                    parent: Arc::new(SessionParent(ctx.self_ref())),
+                    session_id: self.id,
+                },
+                reader_params,
+            ));
+            reader
+                .ask(|reply| AgentCommand::GetUsage { reply })
+                .await
+                .unwrap_or_default()
+        };
+        let main_usage_total = state
+            .agent_usage
+            .get(MAIN_AGENT_ID)
+            .copied()
+            .unwrap_or_default();
+        let session_total = state
+            .agent_usage
+            .values()
+            .fold(UsageTotal::default(), |acc, u| acc.combine(u));
+        SessionUsageStats {
+            session_total,
+            main_agent: AgentUsageEntry {
+                model: self.spec.agent.model.clone(),
+                snapshot: AgentUsageSnapshot {
+                    usage_total: main_usage_total,
+                    last_turn_usage: snapshot.last_turn_usage,
+                    context_tokens: snapshot.context_tokens,
+                },
+            },
+        }
+    }
+
     /// Start a fresh turn with `text` and reply to the caller.
     async fn start_turn(
         &mut self,
@@ -590,6 +695,12 @@ impl SessionActor {
                 });
                 self.report(SessionStatus::Idle).await;
                 CommandEffect::persist(vec![SessionDomainEvent::TurnFailed { error }])
+            }
+            AgentOutcome::UsageRecorded { usage_total, .. } => {
+                CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
+                    agent_id: MAIN_AGENT_ID.to_string(),
+                    usage_total,
+                }])
             }
         }
     }
@@ -769,6 +880,12 @@ impl EventSourcedActor for SessionActor {
             }
             SessionDomainEvent::Stopped => state.status = Some(SessionStatus::Stopped),
             SessionDomainEvent::Deleted => {}
+            SessionDomainEvent::UsageRecorded {
+                agent_id,
+                usage_total,
+            } => {
+                state.agent_usage.insert(agent_id, usage_total);
+            }
         }
         state
     }
@@ -820,6 +937,11 @@ impl EventSourcedActor for SessionActor {
             SessionCommand::History { query, reply } => {
                 let page = self.read_history(query, ctx).await;
                 let _ = reply.send(page);
+                CommandEffect::none()
+            }
+            SessionCommand::UsageStats { reply } => {
+                let stats = self.read_usage(state, ctx).await;
+                let _ = reply.send(stats);
                 CommandEffect::none()
             }
             SessionCommand::Shutdown { reply } => {

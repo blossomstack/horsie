@@ -2,7 +2,7 @@
 //! [`SessionActor`] child per live session. The registry is rebuilt by
 //! replaying this actor's own journal — never by scanning disk.
 
-use crate::sessions::session_actor::{SessionActor, SessionCommand};
+use crate::sessions::session_actor::{SessionActor, SessionCommand, SessionUsageStats};
 use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
 };
@@ -63,6 +63,11 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         query: horsie_workflow::HistoryQuery,
         reply: oneshot::Sender<Option<horsie_workflow::AgentHistoryPage>>,
+    },
+    /// Read a session's aggregated usage, or `None` if unknown.
+    UsageStats {
+        id: SessionId,
+        reply: oneshot::Sender<Option<SessionUsageStats>>,
     },
     /// Tear down every live session's OS resources for a clean shutdown.
     Shutdown { reply: oneshot::Sender<()> },
@@ -338,6 +343,21 @@ impl EventSourcedActor for SessionSupervisor {
                             .await;
                         // The child answers off its mailbox (a transient reader may
                         // recover a journal); forward the page when it lands.
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::UsageStats { id, reply } => {
+                match self.children.get(&id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child.tell(SessionCommand::UsageStats { reply: tx }).await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
                         });

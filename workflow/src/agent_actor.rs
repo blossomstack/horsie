@@ -509,6 +509,12 @@ impl AgentActor {
             RunOutcome::Completed { text } => {
                 // No conclude tool: treat the final text as the output.
                 parent
+                    .deliver(AgentOutcome::UsageRecorded {
+                        session_id,
+                        usage_total: state.usage_total,
+                    })
+                    .await;
+                parent
                     .deliver(AgentOutcome::Concluded {
                         session_id,
                         output: Value::String(text),
@@ -520,6 +526,12 @@ impl AgentActor {
                 match self.interpret(data, tool_call_id) {
                     Conclusion::Output(output) => {
                         parent
+                            .deliver(AgentOutcome::UsageRecorded {
+                                session_id,
+                                usage_total: state.usage_total,
+                            })
+                            .await;
+                        parent
                             .deliver(AgentOutcome::Concluded { session_id, output })
                             .await;
                         CommandEffect::stop()
@@ -528,6 +540,12 @@ impl AgentActor {
                         tool_call_id,
                         question,
                     } => {
+                        parent
+                            .deliver(AgentOutcome::UsageRecorded {
+                                session_id,
+                                usage_total: state.usage_total,
+                            })
+                            .await;
                         parent
                             .deliver(AgentOutcome::Asked {
                                 session_id,
