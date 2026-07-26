@@ -36,6 +36,12 @@ const FRAME_BROADCAST_CAPACITY: usize = 256;
 /// label rather than a generated one until a session can host more than one.
 const MAIN_AGENT_ID: &str = "main";
 
+/// How long [`SessionActor::halt`] waits for a cancelled run to finish before
+/// giving up on it. Generous relative to how long prompt cancellation actually
+/// takes (milliseconds), but short enough that a wedged run can never hold the
+/// session mailbox — and with it the Stop button — hostage.
+const HALT_CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -753,10 +759,25 @@ impl SessionActor {
     /// (if any) eventually delivers is tagged with the *old* generation, so
     /// `on_agent_outcome` recognizes it as stale even if no replacement agent
     /// has been spawned yet.
+    /// Waits (bounded by [`HALT_CANCEL_TIMEOUT`]) for the cancelled run to
+    /// actually finish, so a replacement agent is not spawned onto the same
+    /// journal while the old one can still append to it. Cancellation is prompt
+    /// — an in-flight LLM call or tool batch is aborted, not waited out — so
+    /// this normally returns in milliseconds; the timeout is a backstop for a
+    /// wedged run, after which the generation fence still keeps any straggler
+    /// outcome from taking effect.
     async fn halt(&mut self) {
         self.generation += 1;
         if let Some(agent) = &self.agent {
-            let _ = agent.tell(AgentCommand::Cancel).await;
+            let (tx, rx) = oneshot::channel();
+            let _ = agent.tell(AgentCommand::Cancel { ack: Some(tx) }).await;
+            if tokio::time::timeout(HALT_CANCEL_TIMEOUT, rx).await.is_err() {
+                tracing::warn!(
+                    session = %self.id,
+                    "cancelled run did not finish within {HALT_CANCEL_TIMEOUT:?}; \
+                     proceeding (stale outcomes are fenced by generation)"
+                );
+            }
         }
         if let Some(runtime) = self.runtime.take() {
             runtime.handle.stop().await;
@@ -1404,7 +1425,7 @@ mod tests {
 
     use horsie_agentcore::{
         CompletionRequest, CompletionResponse, ContentPart, EventSink, LlmError, StopReason,
-        TextPart, ThinkingPart, Usage,
+        TextPart, Usage,
     };
 
     /// A test [`LlmProvider`] whose `complete` blocks until the test releases
@@ -1499,43 +1520,29 @@ mod tests {
         }
     }
 
-    /// Polls `UsageStats` until `session_total.input_tokens` reaches `at_least`,
-    /// proving a given `AgentOutcome` batch (usage is always recorded, even for
-    /// a stale/dropped outcome) has actually been processed by the session's
-    /// mailbox — a positive, non-flaky alternative to sleeping and hoping.
-    async fn wait_for_recorded_input_tokens(actor: &ActorRef<SessionCommand>, at_least: u64) {
-        for _ in 0..200 {
-            let stats = actor
-                .ask(|reply| SessionCommand::UsageStats { reply })
-                .await
-                .unwrap();
-            if stats.session_total.input_tokens >= at_least {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    /// A stale usage figure, distinct from any `text_response` usage so the
+    /// assertions below can tell it apart.
+    fn stale_usage() -> UsageTotal {
+        UsageTotal {
+            input_tokens: 99,
+            output_tokens: 7,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
         }
-        panic!("timed out waiting for {at_least} recorded input tokens");
     }
 
-    #[tokio::test]
-    async fn stale_concluded_outcome_after_stop_and_resend_is_dropped() {
-        // Turn 1 ends with plain text (with a thinking part, standing in for
-        // both a "thinking" turn and an ordinary text reply) — no tool call,
-        // so `agentcore::Agent::run` returns it straight from the loop with no
-        // cancellation recheck after the call returns.
-        let mut stale = text_response("stale answer");
-        stale.parts.insert(
-            0,
-            ContentPart::Thinking(ThinkingPart {
-                text: "musing...".into(),
-                signature: None,
-            }),
-        );
-        let fresh = text_response("fresh answer");
-        let (provider, mut entered) = BlockingProvider::new(vec![stale, fresh]);
-        let mut h = harness_with_provider(MockVendor::new(), provider);
+    /// The generation the session's *first* agent runs under: `generation`
+    /// starts at 0 and is bumped to 1 by that agent's spawn. Once Stop and a
+    /// resend have moved the session on, an outcome still tagged with it is by
+    /// definition stale.
+    const FIRST_TURN_GENERATION: u64 = 1;
 
-        // Turn 1: send, then wait for its LLM call to actually be in flight.
+    /// Drives a session to "turn 1 stopped mid-flight, turn 2 live", returning
+    /// the harness and the release handle for turn 2's blocked LLM call.
+    async fn stopped_then_resent(
+        h: &mut Harness,
+        entered: &mut tokio::sync::mpsc::UnboundedReceiver<oneshot::Sender<()>>,
+    ) -> oneshot::Sender<()> {
         h.actor
             .ask(|reply| SessionCommand::UserMessage {
                 text: "hi".into(),
@@ -1545,18 +1552,15 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Running);
-        let release1 = entered.recv().await.expect("turn 1's call entered");
+        let _turn1 = entered.recv().await.expect("turn 1's call entered");
 
-        // Stop while that call is still blocked "in flight".
         h.actor
             .ask(|reply| SessionCommand::Stop { reply })
             .await
             .unwrap();
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Stopped);
 
-        // Resend immediately, exactly as the user did: must start a fresh turn,
-        // not be silently swallowed.
-        let res2 = h
+        let resent = h
             .actor
             .ask(|reply| SessionCommand::UserMessage {
                 text: "again".into(),
@@ -1564,56 +1568,186 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(res2.is_ok(), "resend must be accepted: {res2:?}");
+        assert!(resent.is_ok(), "resend must be accepted: {resent:?}");
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Running);
-        let release2 = entered.recv().await.expect("turn 2's call entered");
+        entered.recv().await.expect("turn 2's call entered")
+    }
 
-        // Let the *stale* turn 1 call return. Its usage is still recorded
-        // (tokens were genuinely spent)...
-        let _ = release1.send(());
-        wait_for_recorded_input_tokens(&h.actor, 10).await;
-        // ...but by the time that's observable, its `Concluded` (enqueued
-        // immediately after `UsageRecorded` by the same delivery) has also
-        // been processed — and must not have touched status at all.
-        assert!(
-            h.statuses.try_recv().is_err(),
-            "stale outcome from the stopped turn must not change status"
-        );
+    // The generation fence. Prompt cancellation (see the two tests below) aborts
+    // an in-flight call at Stop, which narrows the stale-outcome window but
+    // cannot close it: an outcome delivered just before Stop is handled is
+    // already sitting in the session's mailbox, and no amount of cancellation
+    // recalls it. These tests inject exactly that -- an outcome tagged with the
+    // superseded turn's generation -- and assert it cannot disturb the live turn.
 
-        // Turn 2 is still genuinely live and unaffected: let it finish normally.
-        let _ = release2.send(());
-        assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Idle);
+    #[tokio::test]
+    async fn stale_concluded_outcome_is_dropped() {
+        let (provider, mut entered) =
+            BlockingProvider::new(vec![text_response("turn one"), text_response("turn two")]);
+        let mut h = harness_with_provider(MockVendor::new(), provider);
+        let release2 = stopped_then_resent(&mut h, &mut entered).await;
 
-        // Turn 2's own usage is recorded too, confirming it ran to a real,
-        // unclobbered completion (each freshly-spawned agent's `usage_total`
-        // is its own run's cumulative, not additive across respawns, so this
-        // overwrites rather than adds to the stale entry checked above).
+        // Turn 1's outcome lands late. Usage is applied regardless of generation
+        // (the tokens were really spent); the terminal transition is not.
+        h.actor
+            .tell(SessionCommand::AgentOutcome(
+                AgentOutcome::UsageRecorded {
+                    session_id: h.id,
+                    usage_total: stale_usage(),
+                },
+                FIRST_TURN_GENERATION,
+            ))
+            .await
+            .unwrap();
+        h.actor
+            .tell(SessionCommand::AgentOutcome(
+                AgentOutcome::Concluded {
+                    session_id: h.id,
+                    output: serde_json::Value::String("stale answer".into()),
+                },
+                FIRST_TURN_GENERATION,
+            ))
+            .await
+            .unwrap();
+
+        // One mailbox, FIFO: this `ask` is answered only after both `tell`s above
+        // have been handled, so it is an exact barrier -- no polling, no sleeping.
         let stats = h
             .actor
             .ask(|reply| SessionCommand::UsageStats { reply })
             .await
             .unwrap();
-        assert_eq!(stats.session_total.input_tokens, 10);
-        assert_eq!(stats.session_total.output_tokens, 5);
+        assert_eq!(
+            stats.session_total.input_tokens,
+            stale_usage().input_tokens,
+            "a stale turn's usage must still be recorded"
+        );
+        assert!(
+            h.statuses.try_recv().is_err(),
+            "a stale Concluded must not change status"
+        );
+
+        // The live turn was never clobbered: it still completes on its own.
+        let _ = release2.send(());
+        assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Idle);
     }
 
     #[tokio::test]
-    async fn stale_asked_outcome_after_stop_and_resend_is_dropped() {
-        // Turn 1 ends by calling the `ask_user` handoff tool -- a structurally
-        // different early-return path in `agentcore::Agent::run` (the handoff
-        // branch, not the plain-text branch) that also never rechecks
-        // cancellation before returning.
-        let stale = CompletionResponse {
-            parts: vec![ContentPart::ToolCall(horsie_agentcore::ToolCallPart {
-                id: "stale-tc".into(),
-                name: ASK_USER_TOOL.to_string(),
-                input: serde_json::json!({"question": "stale question?"}),
-            })],
-            stop_reason: StopReason::ToolUse,
-            usage: Usage::without_cache(8, 4),
-        };
-        let fresh = text_response("fresh answer");
-        let (provider, mut entered) = BlockingProvider::new(vec![stale, fresh]);
+    async fn stale_asked_outcome_is_dropped() {
+        let (provider, mut entered) =
+            BlockingProvider::new(vec![text_response("turn one"), text_response("turn two")]);
+        let mut h = harness_with_provider(MockVendor::new(), provider);
+        let release2 = stopped_then_resent(&mut h, &mut entered).await;
+
+        // An `ask_user` handoff from the superseded turn: applying it would strand
+        // the session in AwaitingInput with a `pending_ask` naming a tool call the
+        // live turn never issued -- the state that used to wedge the session.
+        h.actor
+            .tell(SessionCommand::AgentOutcome(
+                AgentOutcome::Asked {
+                    session_id: h.id,
+                    tool_call_id: Some("stale-tc".into()),
+                    question: "stale question?".into(),
+                },
+                FIRST_TURN_GENERATION,
+            ))
+            .await
+            .unwrap();
+
+        let _ = h
+            .actor
+            .ask(|reply| SessionCommand::UsageStats { reply })
+            .await
+            .unwrap();
+        assert!(
+            h.statuses.try_recv().is_err(),
+            "a stale Asked must not change status or set pending_ask"
+        );
+
+        let _ = release2.send(());
+        assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Idle);
+    }
+
+    /// Sets a flag when dropped, marking the moment an in-flight call is torn
+    /// down.
+    struct TeardownFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for TeardownFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A provider whose call hangs until cancelled and records its own teardown,
+    /// so a test can assert Stop returned *after* the run actually unwound.
+    struct TeardownRecordingProvider {
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+        torn_down: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for TeardownRecordingProvider {
+        fn model_id(&self) -> &str {
+            "teardown-recording"
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn EventSink,
+        ) -> Result<CompletionResponse, LlmError> {
+            let _flag = TeardownFlag(self.torn_down.clone());
+            let _ = self.entered.send(());
+            std::future::pending().await
+        }
+    }
+
+    /// Stop must not report `Stopped` until the cancelled run has actually
+    /// unwound — otherwise a replacement agent could be spawned onto the same
+    /// journal while the old run can still append to it.
+    #[tokio::test]
+    async fn stop_waits_for_the_cancelled_run_to_unwind() {
+        let (tx, mut entered) = tokio::sync::mpsc::unbounded_channel();
+        let torn_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut h = harness_with_provider(
+            MockVendor::new(),
+            Arc::new(TeardownRecordingProvider {
+                entered: tx,
+                torn_down: Arc::clone(&torn_down),
+            }),
+        );
+
+        h.actor
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "hi".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Running);
+        entered.recv().await.expect("the LLM call is in flight");
+
+        h.actor
+            .ask(|reply| SessionCommand::Stop { reply })
+            .await
+            .unwrap();
+
+        // Asserted with no intervening await: the guarantee is that `halt` already
+        // waited for the run, not that teardown happens to win a race afterwards.
+        assert!(
+            torn_down.load(std::sync::atomic::Ordering::SeqCst),
+            "Stop must wait for the cancelled run to unwind"
+        );
+        assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Stopped);
+    }
+
+    /// Stop must abort the in-flight LLM call rather than let it run to
+    /// completion in the background, and must not report `Stopped` until the
+    /// cancelled run has actually finished.
+    #[tokio::test]
+    async fn stop_aborts_the_in_flight_call_and_waits_for_the_run_to_finish() {
+        let (provider, mut entered) = BlockingProvider::new(vec![text_response("never sent")]);
         let mut h = harness_with_provider(MockVendor::new(), provider);
 
         h.actor
@@ -1625,7 +1759,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Running);
-        let release1 = entered.recv().await.expect("turn 1's call entered");
+        let release = entered.recv().await.expect("the LLM call is in flight");
 
         h.actor
             .ask(|reply| SessionCommand::Stop { reply })
@@ -1633,29 +1767,60 @@ mod tests {
             .unwrap();
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Stopped);
 
-        let res2 = h
-            .actor
+        // The call was aborted, not waited out: dropping the provider future
+        // dropped the receiver this sender is paired with. (Before prompt
+        // cancellation this send would succeed — the call was still parked in
+        // the background, burning tokens.)
+        assert!(
+            release.send(()).is_err(),
+            "Stop must abort the in-flight provider call"
+        );
+    }
+
+    /// Stopping while the agent is paused on an `ask_user` question must return
+    /// promptly: there is no run in flight, so the cancel ack fires immediately
+    /// rather than waiting out `HALT_CANCEL_TIMEOUT`.
+    #[tokio::test]
+    async fn stop_while_awaiting_user_input_returns_promptly() {
+        let ask = CompletionResponse {
+            parts: vec![ContentPart::ToolCall(horsie_agentcore::ToolCallPart {
+                id: "ask-1".into(),
+                name: ASK_USER_TOOL.to_string(),
+                input: serde_json::json!({"question": "which one?"}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::without_cache(6, 3),
+        };
+        let (provider, mut entered) = BlockingProvider::new(vec![ask]);
+        let mut h = harness_with_provider(MockVendor::new(), provider);
+
+        h.actor
             .ask(|reply| SessionCommand::UserMessage {
-                text: "again".into(),
+                text: "hi".into(),
                 reply,
             })
             .await
+            .unwrap()
             .unwrap();
-        assert!(res2.is_ok(), "resend must be accepted: {res2:?}");
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Running);
-        let release2 = entered.recv().await.expect("turn 2's call entered");
-
-        let _ = release1.send(());
-        wait_for_recorded_input_tokens(&h.actor, 8).await;
-        // The stale `Asked` must not resurrect the session into AwaitingInput
-        // with a dangling `pending_ask` pointing at a tool call the new turn
-        // never issued.
-        assert!(
-            h.statuses.try_recv().is_err(),
-            "stale Asked outcome must not change status or set pending_ask"
+        let _ = entered
+            .recv()
+            .await
+            .expect("the LLM call is in flight")
+            .send(());
+        assert_eq!(
+            h.statuses.recv().await.unwrap(),
+            SessionStatus::AwaitingInput
         );
 
-        let _ = release2.send(());
-        assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Idle);
+        // Well inside HALT_CANCEL_TIMEOUT: a paused agent has no run to wind
+        // down, so Stop must not block on one.
+        let stopped = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            h.actor.ask(|reply| SessionCommand::Stop { reply }),
+        )
+        .await;
+        assert!(stopped.is_ok(), "Stop must not block on a paused agent");
+        assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Stopped);
     }
 }

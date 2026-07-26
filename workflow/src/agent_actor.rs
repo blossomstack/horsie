@@ -80,8 +80,14 @@ pub enum AgentCommand {
         tool_call_id: String,
         content: String,
     },
-    /// Cancel an in-flight run.
-    Cancel,
+    /// Cancel an in-flight run. `ack`, if given, fires once the run has actually
+    /// terminated — immediately when none is in flight — so a caller that must
+    /// know this incarnation will write nothing more (e.g. a session about to
+    /// spawn a replacement agent on the same journal) can wait for it rather
+    /// than racing it.
+    Cancel {
+        ack: Option<tokio::sync::oneshot::Sender<()>>,
+    },
     /// Internal: coarse events captured mid-run. `ack` lets the emitting loop await
     /// the durable write before continuing, so persistence applies backpressure on
     /// the agent loop, and reports the write outcome so a journal failure aborts the
@@ -381,6 +387,11 @@ pub struct AgentActor {
     running: Option<CancellationToken>,
     /// A timer fired while a run was in flight; consume it when the run parks.
     pending_wake: bool,
+    /// Callers waiting to hear that the in-flight run has terminated (see
+    /// [`AgentCommand::Cancel`]). Drained the moment `RunFinished` is handled —
+    /// the run task sends that as its very last act, so every journal write it
+    /// could make has already happened by then.
+    cancel_acks: Vec<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl AgentActor {
@@ -390,6 +401,7 @@ impl AgentActor {
             params,
             running: None,
             pending_wake: false,
+            cancel_acks: Vec::new(),
         }
     }
 
@@ -506,6 +518,14 @@ impl AgentActor {
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<AgentDomainEvent> {
         self.running = None;
+        // Answered before any parent delivery below: a canceller is likely
+        // blocking its own mailbox waiting on this, and those deliveries `tell`
+        // into that same mailbox — replying first keeps the two from deadlocking.
+        // The run task has already finished (this message is its last act), so
+        // "it will write nothing more" is true now.
+        for ack in self.cancel_acks.drain(..) {
+            let _ = ack.send(());
+        }
         let session_id = self.ctx.session_id;
         let parent = self.ctx.parent.clone();
 
@@ -886,9 +906,20 @@ impl EventSourcedActor for AgentActor {
             AgentCommand::PersistProgress { events, ack } => {
                 CommandEffect::persist(events).and_ack(ack)
             }
-            AgentCommand::Cancel => {
-                if let Some(token) = &self.running {
-                    token.cancel();
+            AgentCommand::Cancel { ack } => {
+                match (&self.running, ack) {
+                    (Some(token), ack) => {
+                        token.cancel();
+                        // Answered when the run reports back, not now: the point of
+                        // the ack is "the run is over", and it is still winding down.
+                        self.cancel_acks.extend(ack);
+                    }
+                    // Nothing in flight (idle, or paused on a pending ask): the
+                    // caller's guarantee already holds.
+                    (None, Some(ack)) => {
+                        let _ = ack.send(());
+                    }
+                    (None, None) => {}
                 }
                 CommandEffect::none()
             }
