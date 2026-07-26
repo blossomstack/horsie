@@ -1,13 +1,17 @@
-import { useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { api } from "../api/client";
 import {
   Role,
   SessionStatusKind,
   type ContentPart,
+  type HistoryPage,
   type Message,
   type SessionEvent,
   type TaskItem,
 } from "../api/types";
+
+/** Messages per history page (initial tail and each scroll-back load). */
+const HISTORY_LIMIT = 50;
 
 // ---- View model handed to the UI -------------------------------------------
 
@@ -43,6 +47,10 @@ export interface SessionStream {
   connected: boolean;
   /** The agent's `task_list` tool state; empty until the tool is first used. */
   tasks: TaskItem[];
+  /** Older messages exist before the currently-loaded window. */
+  hasMoreBefore: boolean;
+  /** A scroll-back page load is in flight. */
+  loadingMore: boolean;
 }
 
 // ---- Normalized reducer state ----------------------------------------------
@@ -69,6 +77,8 @@ interface State {
   streamError: string | null;
   connected: boolean;
   tasks: TaskItem[];
+  hasMoreBefore: boolean;
+  loadingMore: boolean;
 }
 
 const INITIAL: State = {
@@ -85,6 +95,8 @@ const INITIAL: State = {
   streamError: null,
   connected: false,
   tasks: [],
+  hasMoreBefore: false,
+  loadingMore: false,
 };
 
 type Action =
@@ -92,7 +104,11 @@ type Action =
   | { kind: "connected"; value: boolean }
   | { kind: "optimistic"; id: string; text: string }
   | { kind: "remove-optimistic"; id: string }
-  | { kind: "event"; event: SessionEvent };
+  | { kind: "loading-more"; value: boolean }
+  | { kind: "history"; page: HistoryPage; prepend: boolean }
+  // `fromBackfill` marks a live event replayed from the pre-seed buffer: its
+  // turn's usage is already in the seeded tail total, so it must not re-add.
+  | { kind: "event"; event: SessionEvent; fromBackfill?: boolean };
 
 function textOf(parts: ContentPart[]): string {
   return parts
@@ -119,12 +135,14 @@ function toolCallsOf(parts: ContentPart[]) {
     .map((p) => ({ id: p.value.id, name: p.value.name, input: p.value.input }));
 }
 
-function ingestMessage(state: State, msg: Message): State {
-  // Tool-role messages carry only ToolResult parts; fold them into the result
-  // map so they render inside the originating assistant's tool-call card.
+/** Fold one message's non-order state (byId, tool results) into the maps. */
+function storeMessage(
+  msg: Message,
+  byId: Record<string, StoredMessage>,
+  toolResults: Record<string, { output: string; isError: boolean }>,
+  liveTools: Record<string, { name: string; running: boolean }>,
+): void {
   if (msg.role === Role.Tool) {
-    const toolResults = { ...state.toolResults };
-    const liveTools = { ...state.liveTools };
     for (const part of msg.parts) {
       if (part.type === "ToolResult") {
         toolResults[part.value.toolCallId] = {
@@ -139,29 +157,55 @@ function ingestMessage(state: State, msg: Message): State {
         }
       }
     }
-    return { ...state, toolResults, liveTools };
+    return;
   }
-
-  const role = msg.role === Role.Assistant ? "Assistant" : "User";
-  const stored: StoredMessage = {
+  byId[msg.id] = {
     id: msg.id,
-    role,
+    role: msg.role === Role.Assistant ? "Assistant" : "User",
     text: textOf(msg.parts),
     thinking: thinkingOf(msg.parts),
     toolCalls: toolCallsOf(msg.parts),
   };
+}
 
-  const exists = state.byId[msg.id] !== undefined;
+/** Apply a batch of history messages, appending or prepending fresh ids in the
+ * batch's own (chronological) order and deduping against what's loaded. */
+function applyHistory(state: State, messages: Message[], prepend: boolean): State {
+  const byId = { ...state.byId };
+  const toolResults = { ...state.toolResults };
+  const liveTools = { ...state.liveTools };
+  const seen = new Set(state.order);
+  const fresh: string[] = [];
+  for (const msg of messages) {
+    storeMessage(msg, byId, toolResults, liveTools);
+    if (msg.role !== Role.Tool && !seen.has(msg.id)) {
+      seen.add(msg.id);
+      fresh.push(msg.id);
+    }
+  }
+  const order = prepend
+    ? [...fresh, ...state.order]
+    : [...state.order, ...fresh];
+  return { ...state, byId, toolResults, liveTools, order };
+}
+
+function ingestMessage(state: State, msg: Message): State {
+  const byId = { ...state.byId };
+  const toolResults = { ...state.toolResults };
+  const liveTools = { ...state.liveTools };
+  const exists = state.byId[msg.id] !== undefined || msg.role === Role.Tool;
+  storeMessage(msg, byId, toolResults, liveTools);
+
   const next: State = {
     ...state,
-    byId: { ...state.byId, [msg.id]: stored },
-    order: exists ? state.order : [...state.order, msg.id],
+    byId,
+    toolResults,
+    liveTools,
+    order:
+      msg.role === Role.Tool || exists ? state.order : [...state.order, msg.id],
   };
-
-  // A finalized assistant message supersedes the live streaming buffer.
-  if (role === "Assistant") next.streaming = "";
-  // A real user message confirms the oldest optimistic echo.
-  if (role === "User" && state.optimistic.length > 0) {
+  if (msg.role === Role.Assistant) next.streaming = "";
+  if (msg.role === Role.User && state.optimistic.length > 0) {
     next.optimistic = state.optimistic.slice(1);
   }
   return next;
@@ -173,19 +217,32 @@ function reducer(state: State, action: Action): State {
       return INITIAL;
     case "connected":
       return { ...state, connected: action.value };
+    case "loading-more":
+      return { ...state, loadingMore: action.value };
     case "optimistic":
       return {
         ...state,
-        optimistic: [
-          ...state.optimistic,
-          { id: action.id, text: action.text },
-        ],
+        optimistic: [...state.optimistic, { id: action.id, text: action.text }],
       };
     case "remove-optimistic":
       return {
         ...state,
         optimistic: state.optimistic.filter((o) => o.id !== action.id),
       };
+    case "history": {
+      const { page, prepend } = action;
+      let next = applyHistory(state, page.messages, prepend);
+      next = { ...next, hasMoreBefore: page.hasMore, loadingMore: false };
+      // Tasks + usage ride only the tail page: seed them absolutely.
+      if (page.tasks) next.tasks = page.tasks;
+      if (page.usage) {
+        next.usage = {
+          input: Number(page.usage.inputTokens),
+          output: Number(page.usage.outputTokens),
+        };
+      }
+      return next;
+    }
     case "event": {
       const ev = action.event;
       switch (ev.type) {
@@ -223,10 +280,13 @@ function reducer(state: State, action: Action): State {
           return {
             ...state,
             streaming: "",
-            usage: {
-              input: state.usage.input + ev.value.usage.inputTokens,
-              output: state.usage.output + ev.value.usage.outputTokens,
-            },
+            // A backfilled turn's usage is already in the seeded tail total.
+            usage: action.fromBackfill
+              ? state.usage
+              : {
+                  input: state.usage.input + ev.value.usage.inputTokens,
+                  output: state.usage.output + ev.value.usage.outputTokens,
+                },
           };
         case "Asked":
           return { ...state, pendingQuestion: ev.value.question };
@@ -258,41 +318,84 @@ function reducer(state: State, action: Action): State {
 let optimisticSeq = 0;
 
 /**
- * Subscribes to a session's SSE stream and folds durable history + live frames
- * into a render-ready transcript. EventSource replays journalled events on
- * connect and auto-resumes with `Last-Event-ID` on reconnect, so the fold is
- * dedup-safe by message id.
+ * Loads a session's transcript as a *window* of the latest messages via
+ * `GET /history` (task list + usage ride the tail page), then subscribes to a
+ * live-only SSE stream for new events. Scroll-back pages are pulled on demand
+ * with `loadMore`. Live events that arrive before the tail is seeded are
+ * buffered and replayed after, so ordering stays correct without a gap.
  */
 export function useSessionStream(sessionId: string | undefined): {
   stream: SessionStream;
   addOptimisticUser: (text: string) => string;
   removeOptimisticUser: (id: string) => void;
+  loadMore: () => void;
 } {
   const [state, dispatch] = useReducer(reducer, INITIAL);
   const esRef = useRef<EventSource | null>(null);
+  // Earliest loaded message id — the cursor for the next scroll-back page.
+  const earliestRef = useRef<string | null>(null);
+  earliestRef.current = state.order[0] ?? null;
+  const canLoadMore = state.hasMoreBefore && !state.loadingMore;
+  const canLoadMoreRef = useRef(canLoadMore);
+  canLoadMoreRef.current = canLoadMore;
 
   useEffect(() => {
     dispatch({ kind: "reset" });
     if (!sessionId) return;
 
-    const es = new EventSource(api.sessionEventsUrl(sessionId));
-    esRef.current = es;
+    let cancelled = false;
+    let seeded = false;
+    const buffer: SessionEvent[] = [];
 
+    // Live-only SSE: events before the tail seed are buffered, then replayed.
+    const es = new EventSource(api.sessionEventsUrl(sessionId, { live: true }));
+    esRef.current = es;
     es.onopen = () => dispatch({ kind: "connected", value: true });
     es.onmessage = (e: MessageEvent<string>) => {
       try {
         const event = JSON.parse(e.data) as SessionEvent;
-        dispatch({ kind: "event", event });
+        if (seeded) dispatch({ kind: "event", event });
+        else buffer.push(event);
       } catch (err) {
         console.error("failed to parse session event", err, e.data);
       }
     };
     es.onerror = () => dispatch({ kind: "connected", value: false });
 
+    // Seed the latest window, then flush anything buffered during the fetch.
+    api.sessions
+      .history(sessionId, { limit: HISTORY_LIMIT })
+      .then((page) => {
+        if (cancelled) return;
+        dispatch({ kind: "history", page, prepend: false });
+        seeded = true;
+        for (const event of buffer)
+          dispatch({ kind: "event", event, fromBackfill: true });
+        buffer.length = 0;
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Let live events flow even if the initial fetch failed.
+        seeded = true;
+        for (const event of buffer) dispatch({ kind: "event", event });
+        buffer.length = 0;
+      });
+
     return () => {
+      cancelled = true;
       es.close();
       esRef.current = null;
     };
+  }, [sessionId]);
+
+  const loadMore = useCallback(() => {
+    const before = earliestRef.current;
+    if (!sessionId || !before || !canLoadMoreRef.current) return;
+    dispatch({ kind: "loading-more", value: true });
+    api.sessions
+      .history(sessionId, { before, limit: HISTORY_LIMIT })
+      .then((page) => dispatch({ kind: "history", page, prepend: true }))
+      .catch(() => dispatch({ kind: "loading-more", value: false }));
   }, [sessionId]);
 
   const addOptimisticUser = (text: string) => {
@@ -363,8 +466,10 @@ export function useSessionStream(sessionId: string | undefined): {
       streamError: state.streamError,
       connected: state.connected,
       tasks: state.tasks,
+      hasMoreBefore: state.hasMoreBefore,
+      loadingMore: state.loadingMore,
     };
   }, [state]);
 
-  return { stream, addOptimisticUser, removeOptimisticUser };
+  return { stream, addOptimisticUser, removeOptimisticUser, loadMore };
 }

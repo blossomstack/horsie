@@ -3,6 +3,7 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
+  HistoryPage,
   GitHubAppConfigInput,
   GitHubAppConfigView,
   GitHubBranchList,
@@ -83,6 +84,22 @@ export const api = {
 
     get: (id: string): Promise<GetSessionResponse> =>
       request(`/sessions/${encodeURIComponent(id)}`),
+
+    /** A window of conversation history from the agent's in-memory state.
+     * No `before` requests the latest (tail) page, which also carries the
+     * current task list + cumulative usage. */
+    history: (
+      id: string,
+      opts: { before?: string; limit?: number } = {},
+    ): Promise<HistoryPage> => {
+      const q = new URLSearchParams();
+      if (opts.before) q.set("before", opts.before);
+      if (opts.limit) q.set("limit", String(opts.limit));
+      const qs = q.toString();
+      return request(
+        `/sessions/${encodeURIComponent(id)}/history${qs ? `?${qs}` : ""}`,
+      );
+    },
 
     create: (body: CreateSessionRequest): Promise<CreateSessionResponse> =>
       request("/sessions", { method: "POST", body: JSON.stringify(body) }),
@@ -199,9 +216,11 @@ export const api = {
       }),
   },
 
-  /** SSE URL for a single session's durable + live event stream. */
-  sessionEventsUrl: (id: string): string =>
-    `${BASE}/sessions/${encodeURIComponent(id)}/events`,
+  /** SSE URL for a single session's event stream. `live` streams only events
+   * after connect (skipping journal replay) — the paginating client backfills
+   * history via `sessions.history` and uses this for live updates. */
+  sessionEventsUrl: (id: string, opts: { live?: boolean } = {}): string =>
+    `${BASE}/sessions/${encodeURIComponent(id)}/events${opts.live ? "?live=1" : ""}`,
 
   /** SSE URL for the global session-status feed. */
   globalEventsUrl: (): string => `${BASE}/events`,

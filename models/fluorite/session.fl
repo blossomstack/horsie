@@ -85,6 +85,13 @@ struct TaskItem {
 /// (create/insert/update_status) — never a delta.
 struct TaskListEvent { tasks: Vec<TaskItem> }
 
+/// Cumulative token usage across a session's completed turns. `u64` (not the
+/// per-turn `Usage`'s `u32`) because it sums re-sent context over many turns.
+struct UsageView {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
 #[type_tag = "type"]
 union SessionEvent {
     Message(MessageEvent),

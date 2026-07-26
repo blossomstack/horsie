@@ -61,9 +61,11 @@ transcript; type your answer to let the run continue.
 
 ## Reconnecting
 
-Sessions survive disconnects and server restarts. Reopen a session and its full
-history replays instantly, then live updates resume. You don't need to keep the
-tab open for work to continue — the run happens on the server.
+Sessions survive disconnects and server restarts. Reopen a session and its most
+recent messages load instantly; **scroll up to load older messages on demand**
+(long transcripts aren't all fetched at once). Live updates resume on top. You
+don't need to keep the tab open for work to continue — the run happens on the
+server, and reopening an idle session to read it doesn't wake its runtime.
 
 ## Stopping vs. deleting
 
