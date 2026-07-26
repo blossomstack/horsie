@@ -125,12 +125,10 @@ pub async fn serve(cfg: HorsieConfig) -> Result<(), CliError> {
     // Resolve the shared plugin library once: only when the dir holds ≥1 plugin. The
     // hook interpreter dirs (config override else discovered `node`) are resolved only
     // when there is a library to run hooks for.
-    let plugins_dir = crate::plugins::plugins_dir_if_populated(&cfg.storage.plugins_dir);
-    let hook_path = if plugins_dir.is_some() {
-        crate::plugins::resolve_hook_path(cfg.runtime.hook_path.clone())
-    } else {
-        Vec::new()
-    };
+    let (plugins_dir, hook_path) = crate::plugins::library_for_runtime(
+        &cfg.storage.plugins_dir,
+        cfg.runtime.hook_path.clone(),
+    );
 
     let sock = socket_path(&state_dir);
     // Remove a stale socket so bind() succeeds after an unclean shutdown.
