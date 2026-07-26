@@ -4,33 +4,38 @@
 import { expect, type Page } from "@playwright/test";
 
 /**
- * Open the New Session modal, create a session (default model + the single
- * active `e2e` vendor), wait for the transcript route, and return the id.
+ * Start a new-chat draft: navigate to `/`, wait for the draft config bar, and
+ * optionally pick a model. Creates NOTHING server-side — the session is created
+ * by the first `sendMessage`.
  */
 export async function createSession(
   page: Page,
   appBase: string,
-  opts: { name?: string; model?: string } = {},
-): Promise<string> {
+  opts: { model?: string } = {},
+): Promise<void> {
   await page.goto(appBase);
-  await page.getByTestId("new-session-button").click();
-  await expect(page.getByTestId("model-select")).toBeVisible();
-  if (opts.name) await page.getByTestId("session-name-input").fill(opts.name);
-  // Option `value` is the model alias; the default is the first-listed model.
-  if (opts.model) await page.getByTestId("model-select").selectOption(opts.model);
-  // Auto-waits for the button to be enabled (models loaded, not submitting).
-  await page.getByTestId("create-session-submit").click();
-  await page.waitForURL(/\/sessions\/[0-9a-f-]+$/);
-  const id = new URL(page.url()).pathname.split("/").pop();
-  if (!id) throw new Error("no session id in URL after create");
-  return id;
+  await expect(page.getByTestId("config-model")).toBeVisible();
+  if (opts.model) {
+    await page.getByTestId("config-model").click();
+    await page
+      .locator(`[data-testid="model-option"][data-value="${opts.model}"]`)
+      .click();
+  }
 }
 
-/** Type a message into the composer and send it (Enter). */
-export async function sendMessage(page: Page, text: string): Promise<void> {
+/**
+ * Type a message and send it (Enter). On a draft (`/`) this creates the session
+ * and waits for the `/sessions/:id` route. Returns the session id.
+ */
+export async function sendMessage(page: Page, text: string): Promise<string> {
+  const onDraft = new URL(page.url()).pathname === "/";
   const input = page.getByTestId("composer-input");
   await input.fill(text);
   await input.press("Enter");
+  if (onDraft) await page.waitForURL(/\/sessions\/[0-9a-f-]+$/);
+  const id = new URL(page.url()).pathname.split("/").pop();
+  if (!id) throw new Error("no session id in URL after send");
+  return id;
 }
 
 /** Assert the session status badge shows the given SessionStatusKind value. */

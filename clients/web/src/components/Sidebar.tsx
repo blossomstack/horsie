@@ -5,7 +5,6 @@ import type { SessionSummary } from "../api/types";
 import { relativeTime, sessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 import { useSessionList } from "../hooks/useSessions";
-import { NewSessionModal } from "./NewSessionModal";
 import { StatusDot } from "./StatusBadge";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -39,7 +38,6 @@ function SessionRow({ s }: { s: SessionSummary }) {
 
 export function Sidebar() {
   const { data: sessions, isLoading, isError } = useSessionList();
-  const [modal, setModal] = useState(false);
   const [query, setQuery] = useState("");
   const navigate = useNavigate();
 
@@ -71,7 +69,7 @@ export function Sidebar() {
         </span>
         <button
           className="btn-primary ml-auto !px-2.5 !py-1.5 text-xs"
-          onClick={() => setModal(true)}
+          onClick={() => navigate("/")}
           data-testid="new-session-button"
         >
           <Plus size={15} />
@@ -157,12 +155,6 @@ export function Sidebar() {
           <ThemeToggle />
         </div>
       </div>
-
-      <NewSessionModal
-        open={modal}
-        onOpenChange={setModal}
-        onCreated={(id) => navigate(`/sessions/${id}`)}
-      />
     </aside>
   );
 }

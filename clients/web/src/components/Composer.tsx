@@ -8,12 +8,14 @@ export function Composer({
   status,
   pendingQuestion,
   busy,
+  blockedReason = null,
   onSend,
   onStop,
 }: {
   status: SessionStatusKind;
   pendingQuestion: string | null;
   busy: boolean;
+  blockedReason?: string | null;
   onSend: (text: string) => void;
   onStop: () => void;
 }) {
@@ -22,6 +24,7 @@ export function Composer({
   const meta = statusMeta(status);
   const running = status === SessionStatusKind.Running;
   const awaiting = status === SessionStatusKind.AwaitingInput;
+  const blocked = blockedReason != null;
 
   // Auto-grow the textarea up to a cap.
   useEffect(() => {
@@ -33,7 +36,7 @@ export function Composer({
 
   const submit = () => {
     const trimmed = text.trim();
-    if (!trimmed || !meta.canSend || busy) return;
+    if (!trimmed || !meta.canSend || busy || blocked) return;
     onSend(trimmed);
     setText("");
   };
@@ -100,8 +103,8 @@ export function Composer({
           <button
             className="btn-primary shrink-0 !px-3"
             onClick={submit}
-            disabled={!text.trim() || !meta.canSend || busy}
-            title="Send"
+            disabled={!text.trim() || !meta.canSend || busy || blocked}
+            title={blockedReason ?? "Send"}
             aria-label="Send message"
             data-testid="composer-send"
           >
@@ -109,6 +112,15 @@ export function Composer({
           </button>
         )}
       </div>
+
+      {blocked && (
+        <p
+          className="mt-1.5 px-2 text-xs text-faint"
+          data-testid="composer-blocked-hint"
+        >
+          {blockedReason}
+        </p>
+      )}
     </div>
   );
 }

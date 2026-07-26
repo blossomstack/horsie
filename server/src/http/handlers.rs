@@ -200,6 +200,9 @@ pub async fn get_session(
                     .map(|(_, v)| v.clone())
             })
             .collect(),
+        plugins: rec.spec.plugins.clone(),
+        mcp_servers: rec.spec.agent.mcp_servers.clone(),
+        use_plugins: rec.spec.agent.use_plugins.unwrap_or(false),
     };
     Ok(Json(GetSessionResponse { session: detail }))
 }
