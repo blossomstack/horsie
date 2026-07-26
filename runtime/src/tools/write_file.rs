@@ -7,12 +7,18 @@ pub async fn exec(working_dir: &Path, input: WriteFileInput) -> ToolResult {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        std::fs::write(&path, &input.content).map_err(|e| e.to_string())
+        let lines = input.content.lines().count();
+        let bytes = input.content.len();
+        std::fs::write(&path, &input.content).map_err(|e| e.to_string())?;
+        Ok::<String, String>(format!(
+            "Wrote {lines} lines ({bytes} bytes) to '{}'.",
+            input.path
+        ))
     })
     .await
     {
-        Ok(Ok(())) => ToolResult::Ok(ToolOutput {
-            stdout: "File written.".into(),
+        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput {
+            stdout,
             stderr: String::new(),
             exit_code: 0,
         }),
@@ -33,6 +39,28 @@ pub async fn exec(working_dir: &Path, input: WriteFileInput) -> ToolResult {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn confirmation_reports_counts() {
+        let dir = TempDir::new().unwrap();
+        let result = exec(
+            dir.path(),
+            WriteFileInput {
+                path: "out.txt".into(),
+                content: "a\nb\nc\n".into(),
+                workspace: None,
+            },
+        )
+        .await;
+        match result {
+            ToolResult::Ok(o) => {
+                assert!(o.stdout.contains("3 lines"), "{}", o.stdout);
+                assert!(o.stdout.contains("6 bytes"), "{}", o.stdout);
+                assert!(o.stdout.contains("out.txt"), "{}", o.stdout);
+            }
+            ToolResult::Err(e) => panic!("{}", e.reason),
+        }
+    }
 
     #[tokio::test]
     async fn write_creates_file() {
