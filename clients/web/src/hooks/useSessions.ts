@@ -157,28 +157,3 @@ export function useSendMessage() {
     onMutate: ({ id, text }) => applyOptimisticTitle(client, id, text),
   });
 }
-
-/** Create a session and send its first message in one shot, returning the new
- * id. Used by the new-chat draft flow — nothing is created server-side until
- * this runs, so resource allocation is deferred to the first message. */
-export function useStartSession() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: async ({
-      body,
-      text,
-    }: {
-      body: CreateSessionRequest;
-      text: string;
-    }) => {
-      const res = await api.sessions.create(body);
-      const id = res.session.id;
-      await api.sessions.send(id, text);
-      return id;
-    },
-    onSuccess: (id, { text }) => {
-      applyOptimisticTitle(client, id, text);
-      client.invalidateQueries({ queryKey: qk.sessions });
-    },
-  });
-}

@@ -7,19 +7,27 @@ import { Composer } from "../components/Composer";
 import { EmptyState } from "../components/EmptyState";
 import { SessionConfigBar } from "../components/SessionConfigBar";
 import { useSessionDraft } from "../hooks/useSessionDraft";
-import { useStartSession } from "../hooks/useSessions";
+import { useCreateSession } from "../hooks/useSessions";
+import type { PendingFirstMessageState } from "./SessionView";
 
 export function NewSessionView() {
   const draft = useSessionDraft();
-  const start = useStartSession();
+  const create = useCreateSession();
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
 
   const handleSend = async (text: string) => {
     setError(null);
     try {
-      const id = await start.mutateAsync({ body: draft.buildRequest(), text });
-      navigate(`/sessions/${id}`);
+      const res = await create.mutateAsync(draft.buildRequest());
+      // Navigate first so SessionView fully mounts (its own session fetch +
+      // live SSE connect) before the first message is sent — sending it here
+      // instead raced the server's async provisioning under CI's slower
+      // scheduling, sometimes leaving the turn stuck. SessionView picks this
+      // up on mount via router state and sends it through the normal
+      // useSendMessage path, same as every later message.
+      const state: PendingFirstMessageState = { pendingFirstMessage: text };
+      navigate(`/sessions/${res.session.id}`, { state });
     } catch (e) {
       setError(
         e instanceof ApiRequestError ? e.message : "Failed to start session.",
@@ -51,7 +59,7 @@ export function NewSessionView() {
       <Composer
         status={SessionStatusKind.Idle}
         pendingQuestion={null}
-        busy={start.isPending}
+        busy={create.isPending}
         blockedReason={draft.blockedReason}
         onSend={handleSend}
         onStop={() => {}}

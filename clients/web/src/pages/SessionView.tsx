@@ -1,6 +1,6 @@
 import { CircleAlert, Loader2, Square, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError } from "../api/client";
 import { SessionStatusKind } from "../api/types";
 import { Composer } from "../components/Composer";
@@ -34,9 +34,16 @@ function progressionLabel(stage: string): string {
   return known[stage] ?? `${stage.replace(/_/g, " ")}…`;
 }
 
+/** Router state carrying the first message through the navigation from a new
+ * chat draft — see `NewSessionView`. */
+export interface PendingFirstMessageState {
+  pendingFirstMessage: string;
+}
+
 export function SessionView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { data: detail, isLoading } = useSession(id);
   const { stream, addOptimisticUser, removeOptimisticUser, loadMore } =
     useSessionStream(id);
@@ -52,6 +59,43 @@ export function SessionView() {
   // When a scroll-back page is loading, holds the scroll height captured just
   // before the prepend so we can restore the viewport position after it lands.
   const loadAnchor = useRef<number | null>(null);
+  const sentPendingRef = useRef(false);
+
+  const handleSend = async (sessionId: string, text: string) => {
+    setSendError(null);
+    // Echo the message immediately — a live session's SSE push for this same
+    // message can arrive before this request resolves, so the echo must exist
+    // *before* the request goes out or the real message beats it and the
+    // echo is left stuck as an unmatched duplicate.
+    const optimisticId = addOptimisticUser(text);
+    try {
+      await send.mutateAsync({ id: sessionId, text });
+    } catch (e) {
+      removeOptimisticUser(optimisticId);
+      setSendError(
+        e instanceof ApiRequestError ? e.message : "Failed to send message.",
+      );
+    }
+  };
+
+  // A new chat's first message is sent here, once this view's own session
+  // fetch has resolved — not from NewSessionView immediately after create.
+  // Two reasons: it gives the server's async provisioning the same
+  // wall-clock slack a full page mount gives it under any load, local or CI;
+  // and it guarantees `qk.session(id)`'s query cache already exists before
+  // `useSendMessage`'s optimistic title update runs, since that update is a
+  // no-op against a not-yet-populated cache entry (same guard pattern as
+  // `applyGlobalEvent`).
+  useEffect(() => {
+    if (!id || isLoading || sentPendingRef.current) return;
+    const pending = (location.state as PendingFirstMessageState | null)
+      ?.pendingFirstMessage;
+    if (!pending) return;
+    sentPendingRef.current = true;
+    handleSend(id, pending);
+    navigate(location.pathname, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, isLoading]);
 
   const status = stream.liveStatus ?? detail?.status ?? SessionStatusKind.Idle;
   const pendingQuestion = stream.pendingQuestion ?? detail?.pendingQuestion ?? null;
@@ -87,23 +131,6 @@ export function SessionView() {
   }, [id]);
 
   if (!id) return null;
-
-  const handleSend = async (text: string) => {
-    setSendError(null);
-    // Echo the message immediately — a live session's SSE push for this same
-    // message can arrive before this request resolves, so the echo must exist
-    // *before* the request goes out or the real message beats it and the
-    // echo is left stuck as an unmatched duplicate.
-    const optimisticId = addOptimisticUser(text);
-    try {
-      await send.mutateAsync({ id, text });
-    } catch (e) {
-      removeOptimisticUser(optimisticId);
-      setSendError(
-        e instanceof ApiRequestError ? e.message : "Failed to send message.",
-      );
-    }
-  };
 
   const handleStop = async () => {
     try {
@@ -270,7 +297,7 @@ export function SessionView() {
           status={status}
           pendingQuestion={pendingQuestion}
           busy={send.isPending}
-          onSend={handleSend}
+          onSend={(text) => handleSend(id, text)}
           onStop={handleStop}
         />
       </div>
