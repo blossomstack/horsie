@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { NewSessionView } from "./pages/NewSessionView";
 import { SessionsLayout } from "./pages/SessionsLayout";
 import { SessionView } from "./pages/SessionView";
 import { SettingsPage } from "./pages/SettingsPage";
 import { SkillsPage } from "./pages/SkillsPage";
-import { Welcome } from "./pages/Welcome";
 
 const client = new QueryClient({
   defaultOptions: {
@@ -22,7 +22,7 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<SessionsLayout />}>
-            <Route index element={<Welcome />} />
+            <Route index element={<NewSessionView />} />
             <Route path="sessions/:id" element={<SessionView />} />
             <Route path="settings" element={<SettingsPage />} />
             <Route path="skills" element={<SkillsPage />} />
