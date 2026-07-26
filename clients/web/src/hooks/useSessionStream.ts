@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { api } from "../api/client";
 import {
@@ -9,6 +10,7 @@ import {
   type SessionEvent,
   type TaskItem,
 } from "../api/types";
+import { qk } from "./useSessions";
 
 /** Messages per history page (initial tail and each scroll-back load). */
 const HISTORY_LIMIT = 50;
@@ -349,6 +351,7 @@ export function useSessionStream(sessionId: string | undefined): {
   loadMore: () => void;
 } {
   const [state, dispatch] = useReducer(reducer, INITIAL);
+  const queryClient = useQueryClient();
   const esRef = useRef<EventSource | null>(null);
   // Earliest loaded message id — the cursor for the next scroll-back page.
   const earliestRef = useRef<string | null>(null);
@@ -365,6 +368,14 @@ export function useSessionStream(sessionId: string | undefined): {
     let seeded = false;
     const buffer: SessionEvent[] = [];
 
+    // A completed turn is the only moment the session's/main agent's usage
+    // can have changed — refetch the usage query then, rather than polling.
+    const maybeInvalidateUsage = (event: SessionEvent) => {
+      if (event.type === "TurnCompleted") {
+        void queryClient.invalidateQueries({ queryKey: qk.sessionUsage(sessionId) });
+      }
+    };
+
     // Live-only SSE: events before the tail seed are buffered, then replayed.
     const es = new EventSource(api.sessionEventsUrl(sessionId, { live: true }));
     esRef.current = es;
@@ -372,8 +383,10 @@ export function useSessionStream(sessionId: string | undefined): {
     es.onmessage = (e: MessageEvent<string>) => {
       try {
         const event = JSON.parse(e.data) as SessionEvent;
-        if (seeded) dispatch({ kind: "event", event });
-        else buffer.push(event);
+        if (seeded) {
+          dispatch({ kind: "event", event });
+          maybeInvalidateUsage(event);
+        } else buffer.push(event);
       } catch (err) {
         console.error("failed to parse session event", err, e.data);
       }
@@ -387,15 +400,20 @@ export function useSessionStream(sessionId: string | undefined): {
         if (cancelled) return;
         dispatch({ kind: "history", page, prepend: false });
         seeded = true;
-        for (const event of buffer)
+        for (const event of buffer) {
           dispatch({ kind: "event", event, fromBackfill: true });
+          maybeInvalidateUsage(event);
+        }
         buffer.length = 0;
       })
       .catch(() => {
         if (cancelled) return;
         // Let live events flow even if the initial fetch failed.
         seeded = true;
-        for (const event of buffer) dispatch({ kind: "event", event });
+        for (const event of buffer) {
+          dispatch({ kind: "event", event });
+          maybeInvalidateUsage(event);
+        }
         buffer.length = 0;
       });
 
@@ -404,7 +422,7 @@ export function useSessionStream(sessionId: string | undefined): {
       es.close();
       esRef.current = null;
     };
-  }, [sessionId]);
+  }, [sessionId, queryClient]);
 
   const loadMore = useCallback(() => {
     const before = earliestRef.current;
