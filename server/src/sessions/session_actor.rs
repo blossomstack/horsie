@@ -127,6 +127,10 @@ pub enum SessionDomainEvent {
     /// session-level usage total is durable and never requires waking an
     /// idle agent to recompute — only the reporting agent's entry changes,
     /// `agent_id` distinguishes it once a session can host more than one.
+    /// `usage_total` is the agent's full cumulative figure, not a delta, so a
+    /// crash between the agent journaling `RunComplete` and this event
+    /// persisting only under-reports until the *next* completed run, which
+    /// overwrites with a fresh cumulative total and heals it — not a leak.
     UsageRecorded {
         agent_id: String,
         usage_total: UsageTotal,

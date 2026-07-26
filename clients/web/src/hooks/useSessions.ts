@@ -39,7 +39,7 @@ export function useSession(id: string | undefined) {
 }
 
 /** Session-level aggregated usage + the main agent's context-window state.
- * Kept fresh by SSE-driven invalidation on `TurnCompleted` (see
+ * Kept fresh by SSE-driven invalidation on `StatusChanged` (see
  * `useSessionStream`), not polling. */
 export function useSessionUsage(id: string | undefined) {
   return useQuery({

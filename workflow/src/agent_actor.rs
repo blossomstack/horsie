@@ -281,7 +281,11 @@ impl UsageTotal {
 fn add_optional(total: Option<u64>, delta: Option<u32>) -> Option<u64> {
     match (total, delta) {
         (None, None) => None,
-        (total, delta) => Some(total.unwrap_or(0) + u64::from(delta.unwrap_or(0))),
+        (total, delta) => Some(
+            total
+                .unwrap_or(0)
+                .saturating_add(u64::from(delta.unwrap_or(0))),
+        ),
     }
 }
 
@@ -290,7 +294,7 @@ fn add_optional(total: Option<u64>, delta: Option<u32>) -> Option<u64> {
 fn combine_optional(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
         (None, None) => None,
-        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+        (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
     }
 }
 
