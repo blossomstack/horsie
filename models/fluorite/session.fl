@@ -49,6 +49,12 @@ struct SessionDetail {
     vendor: String,
     /// Clone URLs of the session's provisioned repos (empty when none).
     repos: Vec<String>,
+    /// Selected skill-bundle names (empty when none).
+    plugins: Vec<String>,
+    /// Enabled MCP server names (empty when none).
+    mcp_servers: Vec<String>,
+    /// Whether the runtime's plugin/skill machinery is enabled for this session.
+    use_plugins: bool,
 }
 
 // --- SSE event payloads ---

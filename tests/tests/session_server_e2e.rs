@@ -955,6 +955,45 @@ async fn repos_session_creates_and_reports_repos() {
 }
 
 #[tokio::test]
+async fn session_detail_echoes_full_config() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let vendor = Arc::new(MockVendor::new());
+    let server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "agent": {"model": "mock", "usePlugins": true, "mcpServers": ["gh"]},
+        "vendor": "mock"
+    });
+    let res = client
+        .post(format!("http://{}/api/sessions", server.addr))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201);
+    let id = res.json::<serde_json::Value>().await.unwrap()["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{}/api/sessions/{id}", server.addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["session"]["usePlugins"], serde_json::json!(true));
+    assert_eq!(detail["session"]["mcpServers"], serde_json::json!(["gh"]));
+    assert_eq!(detail["session"]["plugins"], serde_json::json!([]));
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn turn_in_flight_conflicts() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();

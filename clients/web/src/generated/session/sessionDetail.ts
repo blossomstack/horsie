@@ -16,4 +16,16 @@ export interface SessionDetail {
    * Clone URLs of the session&#x27;s provisioned repos (empty when none).
    */
   repos: string[];
+  /**
+   * Selected skill-bundle names (empty when none).
+   */
+  plugins: string[];
+  /**
+   * Enabled MCP server names (empty when none).
+   */
+  mcpServers: string[];
+  /**
+   * Whether the runtime&#x27;s plugin/skill machinery is enabled for this session.
+   */
+  usePlugins: boolean;
 }
