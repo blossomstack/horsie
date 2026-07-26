@@ -7,7 +7,7 @@ vendor** is a source of runtimes. The server ships two, differing mainly in
 
 | Vendor | Where it runs | Who manages it | Repos & skill bundles | Best for |
 | --- | --- | --- | --- | --- |
-| **local** | **Your own machine** — a daemon you run, dialing back to the server | You | ✗ not supported | Working against code already on your machine |
+| **local** | **Your own machine** — a daemon you run, dialing back to the server | You | ✗ repos/bundles; ✓ skills from a CLI-installed library | Working against code already on your machine |
 | **velos** | Managed, ephemeral containers the server provisions for you | The server | ✓ supported | Running against GitHub repos; isolation per session |
 
 > **Out of the box there is no active runtime.** A session can be created, but it
@@ -52,8 +52,11 @@ Keep the process running; sessions use it while it's connected. Once it dials in
 it appears as an active vendor in the UI.
 
 **What the local vendor does *not* do:** it can't check out GitHub repos or
-install skill/plugin bundles, and it works in the fixed directory you gave it
-(there's no per-session provisioning). Session **stop** and **delete** don't tear
+install server-managed skill bundles per session, and it works in the fixed
+directory you gave it (there's no per-session provisioning). It *can* load
+skills from a plugin library you install on the machine with
+`horsie plugin install` — see
+[Skills & plugins](skills-and-plugins.md#skills-on-your-own-machine-host-library). Session **stop** and **delete** don't tear
 anything down — your daemon keeps running and is shared across sessions. If you
 need per-session repos or bundles, use velos.
 

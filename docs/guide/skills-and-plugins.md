@@ -6,7 +6,9 @@ then select which ones a session loads.
 
 Bundles are provisioned into the sandbox at session start, so they need a
 **provisioning runtime** — the **velos** vendor. The local runtime doesn't
-install bundles. See [Runtime vendors](runtime-vendors.md).
+install server bundles, but it can load skills from a plugin library on its own
+machine — see [Skills on your own machine](#skills-on-your-own-machine-host-library).
+See [Runtime vendors](runtime-vendors.md).
 
 ## Install a bundle
 
@@ -40,8 +42,30 @@ These options appear only when the session's runtime supports provisioning
 (velos). At session start, the runtime fetches the selected bundles and makes
 their skills available to the agent.
 
+## Skills on your own machine (host library)
+
+If you run the **local** vendor (`horsie connect`), the runtime loads skills
+from a plugin library on that machine instead of server bundles:
+
+1. Install plugins with the CLI: `horsie plugin install <git-url>`
+   (`horsie plugin list` / `update` / `remove` manage the library).
+2. Start `horsie connect` as usual — it passes the library to the runtime
+   automatically. The confirmation line shows `plugins: N installed from …`.
+
+Every session on that runtime then sees the library's skills, and plugin
+`SessionStart` hooks run on your machine when a session starts. Installs and
+updates are picked up on the next session scan — no reconnect needed.
+
+This is all-or-none: the whole library applies to every session on the runtime,
+independently of the server's bundle library (the Skills page remains
+velos-only).
+
+> Hooks execute with the runtime's privileges on your machine — only install
+> plugins you trust.
+
 ## Notes
 
 - Bundles come from **git** — there's no upload; point the installer at a repo.
-- The **local** runtime does not provision bundles, so the Skills options are
-  hidden for sessions using it. Use velos to run sessions with skill bundles.
+- The **local** runtime does not provision server bundles, so the Skills
+  options are hidden for sessions using it — but it loads the CLI-installed
+  host library (above). Use velos for per-session bundle selection.
