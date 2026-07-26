@@ -66,6 +66,22 @@ pub fn resolve_hook_path(configured: Option<Vec<PathBuf>>) -> Vec<PathBuf> {
     which_dir("node").into_iter().collect()
 }
 
+/// Resolve the shared plugin library for a spawned runtime: the plugins root iff
+/// it holds ≥1 plugin, plus the hook interpreter dirs — resolved only when there
+/// is a library to run hooks for. Shared by the daemon and `horsie connect`.
+pub fn library_for_runtime(
+    plugins_dir: &Path,
+    hook_path: Option<Vec<PathBuf>>,
+) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let dir = plugins_dir_if_populated(plugins_dir);
+    let hooks = if dir.is_some() {
+        resolve_hook_path(hook_path)
+    } else {
+        Vec::new()
+    };
+    (dir, hooks)
+}
+
 /// The directory containing `bin` on the current `PATH`, via `command -v`.
 fn which_dir(bin: &str) -> Option<PathBuf> {
     let out = Command::new("sh")
@@ -264,6 +280,26 @@ mod tests {
             "superpowers"
         );
         assert_eq!(name_from_url("git@github.com:x/y.git"), "y");
+    }
+
+    #[test]
+    fn library_for_runtime_empty_dir_yields_nothing() {
+        let dir = TempDir::new().unwrap();
+        let (plugins, hooks) =
+            library_for_runtime(dir.path(), Some(vec![PathBuf::from("/opt/node/bin")]));
+        assert!(plugins.is_none());
+        // No library → hook path not resolved, even with an override configured.
+        assert!(hooks.is_empty());
+    }
+
+    #[test]
+    fn library_for_runtime_populated_resolves_hooks() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("sp")).unwrap();
+        let (plugins, hooks) =
+            library_for_runtime(dir.path(), Some(vec![PathBuf::from("/opt/node/bin")]));
+        assert_eq!(plugins, Some(dir.path().to_path_buf()));
+        assert_eq!(hooks, vec![PathBuf::from("/opt/node/bin")]);
     }
 
     #[test]
