@@ -54,15 +54,35 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
   const turns = 26;
   for (let i = 1; i <= turns; i++) await mock.queueText(`answer ${i}`);
 
-  const id = await createSession(page, appBase);
+  await createSession(page, appBase);
+  // Turn 1 through the UI creates the session and yields its id; it consumes
+  // the first queued mock reply (`answer 1`). The UI navigates as soon as the
+  // message is accepted (202), not once the turn completes, so wait for the
+  // same count:status settle the API-driven turns below wait for — otherwise
+  // question 2 can 409 against a still-Running turn 1.
+  const id = await sendMessage(page, "question 1");
+  await expect
+    .poll(
+      async () => {
+        const [h, s] = await Promise.all([
+          page.request.get(`${appBase}/api/sessions/${id}/history?limit=200`),
+          page.request.get(`${appBase}/api/sessions/${id}`),
+        ]);
+        const count = ((await h.json()).messages as unknown[]).length;
+        const status = (await s.json()).session.status as string;
+        return `${count}:${status}`;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe("2:Idle");
 
-  // Seed the turns over the API (fast + deterministic); each must fully finish
-  // before the next (a second message 409s mid-turn). Gate on *both* the reply
-  // count reaching 2*i (proving turn i actually ran and produced its answer —
-  // which rules out reading the stale pre-Running Idle) and the status settling
-  // back to Idle (proving TurnCompleted persisted). Waiting on either alone
-  // races one of the two Idle↔Running transitions.
-  for (let i = 1; i <= turns; i++) {
+  // Seed the remaining turns over the API (fast + deterministic); each must
+  // fully finish before the next (a second message 409s mid-turn). Gate on
+  // *both* the reply count reaching 2*i (proving turn i actually ran and
+  // produced its answer — which rules out reading the stale pre-Running Idle)
+  // and the status settling back to Idle (proving TurnCompleted persisted).
+  // Waiting on either alone races one of the two Idle↔Running transitions.
+  for (let i = 2; i <= turns; i++) {
     const res = await page.request.post(
       `${appBase}/api/sessions/${id}/messages`,
       { data: { text: `question ${i}` } },

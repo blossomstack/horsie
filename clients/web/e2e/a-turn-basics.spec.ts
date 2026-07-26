@@ -8,16 +8,31 @@ test.beforeEach(async ({ mock }) => {
   await mock.reset();
 });
 
-test("A1: create a session on the local runtime vendor", async ({ page, appBase }) => {
-  const id = await createSession(page, appBase, { name: "A1 session" });
+test("A1: draft creates a session on the local runtime vendor via first message", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.queueText("ok");
+  await createSession(page, appBase);
+  // Draft toolbar is present and editable before anything is created.
+  await expect(page.getByTestId("session-config-bar")).toHaveAttribute(
+    "data-mode",
+    "draft",
+  );
+
+  const id = await sendMessage(page, "first message");
 
   await expectStatus(page, "Idle");
-  // The session is listed in the sidebar…
   await expect(
-    page.locator('[data-testid="session-row"]', { hasText: "A1 session" }),
+    page.locator('[data-testid="session-row"]', { hasText: "first message" }),
   ).toBeVisible();
-  // …and ran on the real local runtime vendor (header chip).
-  await expect(page.getByText("e2e", { exact: true })).toBeVisible();
+  // The locked config bar shows the real local vendor.
+  await expect(page.getByTestId("session-config-bar")).toHaveAttribute(
+    "data-mode",
+    "locked",
+  );
+  await expect(page.getByTestId("config-runtime")).toContainText("e2e");
   expect(id).toMatch(/[0-9a-f-]{8,}/);
 });
 

@@ -29,8 +29,10 @@ test("D1: stop a running turn, then reattach with a new message", async ({
   await expectStatus(page, "Idle");
 });
 
-test("D2: delete a session removes it and navigates away", async ({ page, appBase }) => {
-  const id = await createSession(page, appBase, { name: "to delete" });
+test("D2: delete a session removes it and navigates away", async ({ page, appBase, mock }) => {
+  await mock.queueText("ok");
+  await createSession(page, appBase);
+  const id = await sendMessage(page, "to delete");
 
   page.on("dialog", (d) => d.accept()); // auto-accept the native confirm()
   await page.getByTestId("session-delete").click();
@@ -47,12 +49,12 @@ test("D3: two sessions keep separate transcripts and switch in the sidebar", asy
   mock,
 }) => {
   await mock.queueText("Reply in session ONE.");
-  const id1 = await createSession(page, appBase, { name: "session one" });
-  await sendMessage(page, "hello one");
+  await createSession(page, appBase);
+  const id1 = await sendMessage(page, "hello one");
   await expect(page.getByTestId("assistant-text")).toContainText("Reply in session ONE.");
 
   await mock.queueText("Reply in session TWO.");
-  await createSession(page, appBase, { name: "session two" });
+  await createSession(page, appBase);
   await sendMessage(page, "hello two");
   await expect(page.getByTestId("assistant-text")).toContainText("Reply in session TWO.");
 

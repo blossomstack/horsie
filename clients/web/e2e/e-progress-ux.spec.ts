@@ -112,17 +112,19 @@ test("E5: a turn that ends on a trailing thinking step shows the mixed summary",
   await mock.queueToolCall("bash", { command: "echo done" });
   await mock.queueThinking("That should be enough.");
   await createSession(page, appBase);
-
-  // Reveal thinking so this run has 2 visible items and actually collapses
-  // into a group (a single visible item would render bare — see WorkGroup).
-  await page.getByTestId("settings-menu-button").click();
-  await page.locator('[data-testid="setting-toggle"][data-key="showThinking"]').click();
-
   await sendMessage(page, "do one thing and wrap up");
 
   // The turn ends on the thinking step (no tool calls left to make) — no
   // visible text at all, just the finished work-group summary.
   await expectStatus(page, "Idle");
   await expect(page.getByTestId("assistant-text")).toHaveCount(0);
+
+  // Reveal thinking so this already-completed run's group re-renders with 2
+  // items (a single visible item would render bare — see WorkGroup). The
+  // settings menu only exists once a session exists, so this happens after
+  // send, same as E1.
+  await page.getByTestId("settings-menu-button").click();
+  await page.locator('[data-testid="setting-toggle"][data-key="showThinking"]').click();
+
   await expect(page.getByTestId("work-group-summary")).toHaveText("Thought and ran 1 tool");
 });
