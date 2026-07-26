@@ -1598,10 +1598,7 @@ mod tests {
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::RunComplete {
-                usage: Usage {
-                    input_tokens: 4,
-                    output_tokens: 2,
-                },
+                usage: Usage::without_cache(4, 2),
                 iterations: 1,
             },
         );
@@ -1648,10 +1645,7 @@ mod tests {
             state = AgentActor::apply_event(
                 state,
                 AgentDomainEvent::RunComplete {
-                    usage: Usage {
-                        input_tokens: input,
-                        output_tokens: output,
-                    },
+                    usage: Usage::without_cache(input, output),
                     iterations: 1,
                 },
             );
