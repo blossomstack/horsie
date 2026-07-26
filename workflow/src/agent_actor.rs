@@ -126,6 +126,12 @@ pub enum AgentCommand {
         query: HistoryQuery,
         reply: tokio::sync::oneshot::Sender<AgentHistoryPage>,
     },
+    /// Read this agent's own usage + context-size snapshot — no messages or
+    /// tasks, cheaper than `GetHistory` when only the numbers are needed.
+    /// Backs the session-level usage aggregation.
+    GetUsage {
+        reply: tokio::sync::oneshot::Sender<AgentUsageSnapshot>,
+    },
 }
 
 /// A windowed history request over the agent's message log.
@@ -168,6 +174,9 @@ pub enum AgentDomainEvent {
     RunComplete {
         usage: Usage,
         iterations: u32,
+        /// The last provider call's prompt size alone (not summed across
+        /// iterations like `usage`) — what's actually in context now.
+        context_tokens: u32,
     },
     RunCancelled,
     /// A timer was armed.
@@ -215,6 +224,16 @@ pub struct AgentState {
     /// session's usage readout without replaying the whole journal.
     #[serde(default)]
     pub usage_total: UsageTotal,
+    /// The most recently completed run's own usage — a per-run cost figure,
+    /// summed across that run's tool-loop iterations but never across runs.
+    /// `None` before this agent's first completed run.
+    #[serde(default)]
+    pub last_turn_usage: Option<Usage>,
+    /// The most recently completed run's *last* provider call's prompt size
+    /// alone (never summed) — what's actually loaded in this agent's context
+    /// right now.
+    #[serde(default)]
+    pub context_tokens: u32,
 }
 
 /// Running token totals held in [`AgentState`]. Distinct from the per-turn wire
@@ -224,6 +243,8 @@ pub struct AgentState {
 pub struct UsageTotal {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_creation_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
 }
 
 impl UsageTotal {
@@ -234,7 +255,53 @@ impl UsageTotal {
         self.output_tokens = self
             .output_tokens
             .saturating_add(u64::from(usage.output_tokens));
+        self.cache_creation_tokens =
+            add_optional(self.cache_creation_tokens, usage.cache_creation_tokens);
+        self.cache_read_tokens = add_optional(self.cache_read_tokens, usage.cache_read_tokens);
     }
+
+    /// Combines two agents' cumulative totals into a session-level aggregate.
+    /// Only ever sums usage — never a context-size figure, which stays
+    /// meaningfully per-agent (see `AgentUsageSnapshot::context_tokens`).
+    pub fn combine(&self, other: &UsageTotal) -> UsageTotal {
+        UsageTotal {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            cache_creation_tokens: combine_optional(
+                self.cache_creation_tokens,
+                other.cache_creation_tokens,
+            ),
+            cache_read_tokens: combine_optional(self.cache_read_tokens, other.cache_read_tokens),
+        }
+    }
+}
+
+/// Sums an accumulating `u64` cache total with a per-turn `u32` delta. Stays
+/// `None` only when neither side has ever reported cache data.
+fn add_optional(total: Option<u64>, delta: Option<u32>) -> Option<u64> {
+    match (total, delta) {
+        (None, None) => None,
+        (total, delta) => Some(total.unwrap_or(0) + u64::from(delta.unwrap_or(0))),
+    }
+}
+
+/// Sums two agents' `u64` cache totals. Stays `None` only when neither agent
+/// has ever reported cache data.
+fn combine_optional(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    }
+}
+
+/// One agent's own usage + context-size snapshot, with no message/task
+/// payload — cheaper than [`AgentHistoryPage`] when only the numbers are
+/// needed. Backs the session-level usage aggregation.
+#[derive(Debug, Clone, Default)]
+pub struct AgentUsageSnapshot {
+    pub usage_total: UsageTotal,
+    pub last_turn_usage: Option<Usage>,
+    pub context_tokens: u32,
 }
 
 impl AgentState {
@@ -259,6 +326,17 @@ impl AgentState {
             has_more: start > 0,
             tasks: is_tail.then(|| self.task_list.tasks().to_vec()),
             usage: is_tail.then_some(self.usage_total),
+        }
+    }
+
+    /// This agent's own usage + context-size snapshot — always the full,
+    /// current picture (unlike `history_page`, there is no tail/scroll-back
+    /// distinction here).
+    pub fn usage_snapshot(&self) -> AgentUsageSnapshot {
+        AgentUsageSnapshot {
+            usage_total: self.usage_total,
+            last_turn_usage: self.last_turn_usage.clone(),
+            context_tokens: self.context_tokens,
         }
     }
 }
@@ -730,7 +808,15 @@ impl EventSourcedActor for AgentActor {
             },
             AgentDomainEvent::Parked => state.parked = true,
             AgentDomainEvent::TaskListChanged { snapshot } => state.task_list = snapshot,
-            AgentDomainEvent::RunComplete { usage, .. } => state.usage_total.add(&usage),
+            AgentDomainEvent::RunComplete {
+                usage,
+                context_tokens,
+                ..
+            } => {
+                state.usage_total.add(&usage);
+                state.context_tokens = context_tokens;
+                state.last_turn_usage = Some(usage);
+            }
             AgentDomainEvent::RunCancelled => {}
         }
         state
@@ -854,6 +940,10 @@ impl EventSourcedActor for AgentActor {
             }
             AgentCommand::GetHistory { query, reply } => {
                 let _ = reply.send(state.history_page(&query));
+                CommandEffect::none()
+            }
+            AgentCommand::GetUsage { reply } => {
+                let _ = reply.send(state.usage_snapshot());
                 CommandEffect::none()
             }
         }
@@ -1143,6 +1233,7 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
         AgentEvent::RunComplete(ev) => Some(AgentDomainEvent::RunComplete {
             usage: ev.usage.clone(),
             iterations: ev.iterations,
+            context_tokens: ev.context_tokens,
         }),
         AgentEvent::InputMessage(_)
         | AgentEvent::MessageStart(_)
@@ -1399,6 +1490,7 @@ mod tests {
             AgentDomainEvent::RunComplete {
                 usage: Usage::without_cache(1, 1),
                 iterations: 1,
+                context_tokens: 1,
             },
         );
 
@@ -1600,6 +1692,7 @@ mod tests {
             AgentDomainEvent::RunComplete {
                 usage: Usage::without_cache(4, 2),
                 iterations: 1,
+                context_tokens: 4,
             },
         );
         let page = state.history_page(&HistoryQuery {
@@ -1647,11 +1740,85 @@ mod tests {
                 AgentDomainEvent::RunComplete {
                     usage: Usage::without_cache(input, output),
                     iterations: 1,
+                    context_tokens: input,
                 },
             );
         }
         assert_eq!(state.usage_total.input_tokens, 17);
         assert_eq!(state.usage_total.output_tokens, 8);
+    }
+
+    #[test]
+    fn run_complete_tracks_last_turn_and_context_tokens_separately_from_total() {
+        let mut state = AgentActor::initial_state();
+        assert_eq!(state.last_turn_usage, None);
+        assert_eq!(state.context_tokens, 0);
+
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                    cache_creation_tokens: Some(15),
+                    cache_read_tokens: None,
+                },
+                iterations: 2,
+                context_tokens: 12,
+            },
+        );
+        // A multi-iteration turn: `usage` is the summed cost, `context_tokens`
+        // is only the last call's prompt size — the two must stay distinct.
+        assert_eq!(state.last_turn_usage.as_ref().unwrap().input_tokens, 20);
+        assert_eq!(state.context_tokens, 12);
+        assert_eq!(state.usage_total.cache_creation_tokens, Some(15));
+        assert_eq!(state.usage_total.cache_read_tokens, None);
+
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage {
+                    input_tokens: 30,
+                    output_tokens: 8,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: Some(25),
+                },
+                iterations: 1,
+                context_tokens: 30,
+            },
+        );
+        // `last_turn_usage`/`context_tokens` are overwritten, not accumulated;
+        // `usage_total`'s cache fields sum even though only one side reported
+        // each field on any given turn.
+        assert_eq!(state.last_turn_usage.as_ref().unwrap().input_tokens, 30);
+        assert_eq!(state.context_tokens, 30);
+        assert_eq!(state.usage_total.input_tokens, 50);
+        assert_eq!(state.usage_total.cache_creation_tokens, Some(15));
+        assert_eq!(state.usage_total.cache_read_tokens, Some(25));
+    }
+
+    #[test]
+    fn usage_total_combine_sums_two_agents_treating_no_cache_data_as_none() {
+        let a = UsageTotal {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_tokens: Some(3),
+            cache_read_tokens: None,
+        };
+        let b = UsageTotal {
+            input_tokens: 20,
+            output_tokens: 8,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+        };
+        let combined = a.combine(&b);
+        assert_eq!(combined.input_tokens, 30);
+        assert_eq!(combined.output_tokens, 13);
+        assert_eq!(combined.cache_creation_tokens, Some(3));
+        assert_eq!(
+            combined.cache_read_tokens, None,
+            "neither agent ever reported cache reads"
+        );
     }
 
     #[test]

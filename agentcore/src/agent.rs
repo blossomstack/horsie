@@ -261,6 +261,11 @@ impl Agent {
         self.history.push(input_msg);
 
         let mut total_usage = Usage::without_cache(0, 0);
+        // The *last* call's prompt size alone — overwritten (not summed) each
+        // iteration, unlike `total_usage`. Represents what's actually loaded in
+        // the model's context once the run ends. Every path that reads this runs
+        // after at least one loop iteration has set it.
+        let mut context_tokens: u32;
         let mut iteration: u32 = 0;
         let mut recent_fingerprints: VecDeque<String> = VecDeque::new();
         let mut handoff_retries: u32 = 0;
@@ -332,6 +337,7 @@ impl Agent {
                 total_usage.cache_read_tokens,
                 response.usage.cache_read_tokens,
             );
+            context_tokens = response.usage.input_tokens;
 
             let assistant_msg = Message {
                 id: msg_id.clone(),
@@ -395,6 +401,7 @@ impl Agent {
                         message_id: run_id.clone(),
                         usage: total_usage.clone(),
                         iterations: iteration,
+                        context_tokens,
                     }))
                     .await?;
                 return Ok(AgentOutput {
@@ -423,6 +430,7 @@ impl Agent {
                                 message_id: run_id.clone(),
                                 usage: total_usage.clone(),
                                 iterations: iteration,
+                                context_tokens,
                             }))
                             .await?;
                         return Ok(AgentOutput {

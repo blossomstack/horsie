@@ -51,6 +51,13 @@ struct Message {
 
 /// Token usage for a model turn
 struct Usage {
+    /// The full size of the prompt sent to the model, normalized so this
+    /// means the same thing on every wire: it INCLUDES any cache-read/
+    /// cache-creation tokens (Anthropic's own wire reports those separately
+    /// from its "input" count, so the Anthropic provider adds them back in
+    /// here — OpenAI's `prompt_tokens` already includes `cached_tokens`, so
+    /// no adjustment is needed there). The cache fields below are a cost
+    /// breakdown of this total, not additional tokens on top of it.
     input_tokens: u32,
     output_tokens: u32,
     /// Tokens written to a new prompt-cache entry this turn (Anthropic only;

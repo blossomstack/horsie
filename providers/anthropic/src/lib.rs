@@ -569,7 +569,13 @@ impl LlmProvider for AnthropicProvider {
             parts,
             stop_reason,
             usage: Usage {
-                input_tokens,
+                // Anthropic's `input_tokens` excludes cache-read/cache-creation
+                // tokens (they ride in separate fields on the wire) — add them
+                // back in so `Usage.input_tokens` means "full prompt size" the
+                // same way it already does on the OpenAI wire.
+                input_tokens: input_tokens
+                    + cache_creation_tokens.unwrap_or(0)
+                    + cache_read_tokens.unwrap_or(0),
                 output_tokens,
                 cache_creation_tokens,
                 cache_read_tokens,
