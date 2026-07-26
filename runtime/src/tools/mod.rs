@@ -5,6 +5,7 @@ pub mod grep;
 pub mod list_files;
 pub mod read_file;
 pub mod replace_lines;
+pub(crate) mod snippet;
 pub mod write_file;
 
 use crate::workspace::WorkspaceRegistry;
