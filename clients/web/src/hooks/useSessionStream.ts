@@ -368,10 +368,15 @@ export function useSessionStream(sessionId: string | undefined): {
     let seeded = false;
     const buffer: SessionEvent[] = [];
 
-    // A completed turn is the only moment the session's/main agent's usage
-    // can have changed — refetch the usage query then, rather than polling.
+    // Refetch usage on a status change rather than `TurnCompleted`: the
+    // server journals/broadcasts `TurnCompleted` from inside the agent's own
+    // run — before the session actor has processed the durable usage push
+    // that `handle_finished` sends *after* that (`UsageRecorded` then
+    // `Concluded`/`Asked`, delivered to the same mailbox in that order).
+    // `StatusChanged` only fires once `Concluded`/`Asked`/`Failed` runs, so by
+    // then the session's own usage total is guaranteed to have landed.
     const maybeInvalidateUsage = (event: SessionEvent) => {
-      if (event.type === "TurnCompleted") {
+      if (event.type === "StatusChanged") {
         void queryClient.invalidateQueries({ queryKey: qk.sessionUsage(sessionId) });
       }
     };
