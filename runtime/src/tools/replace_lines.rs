@@ -5,6 +5,7 @@ pub async fn exec(working_dir: &Path, input: ReplaceLinesInput) -> ToolResult {
     let path = working_dir.join(&input.path);
     match tokio::task::spawn_blocking(move || {
         let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let trailing_newline = content.ends_with('\n');
         let mut lines: Vec<&str> = content.lines().collect();
         let start = (input.start_line as usize)
             .saturating_sub(1)
@@ -14,10 +15,18 @@ pub async fn exec(working_dir: &Path, input: ReplaceLinesInput) -> ToolResult {
         let end = (input.end_line as usize).min(lines.len()).max(start);
         let replacement_lines: Vec<&str> = input.replacement.lines().collect();
         lines.splice(start..end, replacement_lines);
-        std::fs::write(&path, lines.join("\n")).map_err(|e| e.to_string())?;
+        let mut new_content = lines.join("\n");
+        if trailing_newline {
+            new_content.push('\n');
+        }
+        std::fs::write(&path, &new_content).map_err(|e| e.to_string())?;
+        let (s, e) = super::snippet::changed_range(&content, &new_content);
         Ok::<String, String>(format!(
-            "Replaced lines {}-{} in '{}'.",
-            input.start_line, input.end_line, input.path
+            "Replaced lines {}-{} in '{}'.\n\n{}",
+            input.start_line,
+            input.end_line,
+            input.path,
+            super::snippet::numbered_window(&new_content, s, e),
         ))
     })
     .await
@@ -44,6 +53,33 @@ pub async fn exec(working_dir: &Path, input: ReplaceLinesInput) -> ToolResult {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn success_includes_numbered_snippet() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\nd\ne\nf\ng\n").unwrap();
+        let result = exec(
+            dir.path(),
+            ReplaceLinesInput {
+                path: "f.txt".into(),
+                start_line: 3,
+                end_line: 4,
+                replacement: "X\nY".into(),
+                workspace: None,
+            },
+        )
+        .await;
+        match result {
+            ToolResult::Ok(o) => {
+                assert!(o.stdout.contains("Replaced lines 3-4"), "{}", o.stdout);
+                assert!(o.stdout.contains("3→ X"), "{}", o.stdout);
+                assert!(o.stdout.contains("4→ Y"), "{}", o.stdout);
+                assert!(o.stdout.contains("1→ a"), "context above: {}", o.stdout);
+                assert!(o.stdout.contains("7→ g"), "context below: {}", o.stdout);
+            }
+            ToolResult::Err(e) => panic!("{}", e.reason),
+        }
+    }
 
     #[tokio::test]
     async fn replaces_line_range() {
