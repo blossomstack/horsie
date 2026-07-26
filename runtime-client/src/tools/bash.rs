@@ -20,7 +20,9 @@ impl Tool for BashTool {
         ToolSpec {
             name: "bash".to_string(),
             description: "Execute a bash command in the runtime's working directory. \
-                Optionally set 'timeout_secs' to bound how long the command may run."
+                Optionally set 'timeout_secs' to bound how long the command may run. \
+                Pipelines run with pipefail: the command fails if any stage fails. \
+                On timeout, output captured so far is returned with the error."
                 .to_string(),
             input_schema: crate::tools::with_workspace(json!({
                 "type": "object",
