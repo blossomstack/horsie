@@ -560,6 +560,11 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 .bin
                 .clone()
                 .unwrap_or_else(daemon::default_runtime_bin);
+            let (plugins_dir, hook_path) = horsie::plugins::library_for_runtime(
+                &cfg.storage.plugins_dir,
+                cfg.runtime.hook_path.clone(),
+            );
+            let plugins = plugins_dir.map(|dir| connect::PluginLibrary { dir, hook_path });
             connect::run(
                 &runtime_bin,
                 &server,
@@ -567,6 +572,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 &runtime_id,
                 background,
                 &cfg.storage.state_dir,
+                plugins,
             )
         }
     }
