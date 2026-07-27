@@ -320,3 +320,59 @@ The work splits into four independently landable PRs:
    conformance fault cases, and the CI job.
 
 Order matters only for 1 before 3; 2 and 4 are independent.
+
+## Shipped (2026-07-27)
+
+Twelve red tests, all discoverable with `rg 'ignore = "red:'` and runnable with
+`cargo test --workspace --all-features -- --ignored`:
+
+| Where | Count | #61 item |
+|---|---|---|
+| `actor/tests/journal_conformance.rs` | 5 | 9 |
+| `actor/tests/journal_corruption.rs` | 1 | 13 |
+| `tests/tests/provider_conformance.rs` | 4 | 1a, 1b, 5a, 6 |
+| `tests/tests/session_server_e2e.rs` | 2 | 2, 23 |
+
+Each fails on its own assertion, in seconds rather than by timeout. Sample
+reproductions, verbatim from the run:
+
+- item 1a — `Anthropic: a truncated stream must fail the turn, got Ok(...)`
+- item 1b — `a tool call whose input JSON does not parse must not be dispatched, but the toolbox saw ["echo"]`
+- item 2 — `vendor saw no new create/attach between turns: ["create:244fd1d8…"]`
+- item 6 — `a 400 must keep its status, got Err(Network(Custom { … "context length exceeded" }))`
+- item 23 — `Stop must propagate a cancel to the runtime; the sandbox never heard about it (invocations seen: 1)`
+
+`openai_reports_a_400_as_an_api_error_with_its_status` ships **green** as a
+deliberate control: it proves the item-6 assertion is satisfiable and that
+Anthropic's failure is a real difference between the wires, not a broken test.
+
+### Deviations from this design, discovered while implementing
+
+1. **No `horsie-testkit` crate.** `runtime-client` already depends on
+   `horsie-agentcore`, so `Script<T>` lives in `agentcore::testkit`.
+2. **`Script::then_repeating` needs a factory.** `Result<CompletionResponse, LlmError>`
+   is not `Clone`, so the steady value is a `Box<dyn Fn() -> T>`.
+3. **`TransportProbe` was added.** `MockVendor::with_transport` builds a fresh
+   transport per runtime, so a test can never hold the instance the session uses.
+   Without a probe sharing the recording buffers, item 23 is unassertable.
+4. **Journal conformance uses plain helpers + two modules**, not `macro_rules!`.
+5. **`MockProvider::new` became strict**, and three `agentcore` tests that had been
+   relying on cycling — `test_max_iterations_exceeded`, `test_stuck_detection`,
+   `test_handoff_validation_fails_after_max_retries` — now say so explicitly via a
+   new `MockProvider::always(...)`. They are legitimate steady states; the point is
+   that they are now visible rather than implicit.
+6. **`AbortBody` deferred.** It needs `ResponseKind::Sse`'s `Infallible` relaxed to
+   a fallible error type, and the clean-early-end shape already reproduces item 1.
+
+### Not delivered — a natural second plan
+
+Every double these need already ships; only the tests are missing. All three were
+blocked on `AgentActor` construction details not verified while planning.
+
+- **Item 5b** (`provide()` is not cancellable) — needs `MockTransport::gated_prep`
+  wired through a session e2e.
+- **Item 21** (retry rebuilds history from the wrong place) — needs
+  `MockProvider::requests()` asserted against a live `AgentActor` with
+  `max_retries > 0`.
+- **Item 22** (a journal write failure inside `complete()` is retried against the
+  LLM) — needs `FaultyJournal` wired into an `AgentActor`'s `PersistSink`.

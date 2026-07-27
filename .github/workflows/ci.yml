@@ -49,6 +49,16 @@ jobs:
       - name: Tests
         run: cargo test --locked --workspace --all-features
 
+      # The #61 red catalogue: known-broken behaviours that now have real tests.
+      # Failing here is the EXPECTED state, so this job never blocks a merge. Its
+      # only purpose is to surface a red test that has quietly gone *green* — a
+      # finding fixed as a side effect, which should then be closed deliberately
+      # rather than left ignored and rotting. Run locally with:
+      #   cargo test --workspace --all-features -- --ignored
+      - name: Red catalogue (#61)
+        continue-on-error: true
+        run: cargo test --locked --workspace --all-features -- --ignored
+
   cargo-deny:
     name: Supply chain (cargo-deny)
     runs-on: ubuntu-latest
