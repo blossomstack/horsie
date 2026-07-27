@@ -56,7 +56,7 @@ A fresh server has nothing configured, so a brand-new session can be created but
 cannot run a turn yet. Do these in order:
 
 1. **[Run the server](getting-started.md)** and open the UI.
-2. **Add a model provider and a model** (Settings → Providers, Models). Nothing
+2. **Add a model provider and a model** (Settings → Models). Nothing
    works without at least one model.
 3. **Make a runtime available** (a local daemon or a velos vendor) so sessions
    have somewhere to run tools. → [Runtime vendors](runtime-vendors.md)

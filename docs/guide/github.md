@@ -20,7 +20,7 @@ repositories (or org) you want sessions to access.
 
 ## 2. Connect it in Settings
 
-Open **Settings → GitHub** and fill in:
+Open **Settings → Integrations → GitHub** and fill in:
 
 - **Client ID**
 - **Client secret**
@@ -50,7 +50,7 @@ session's runtime vendor supports provisioning.
 
 ## GitHub tools (MCP) — optional
 
-Once GitHub is connected, Settings → GitHub also offers a **GitHub tools (MCP)**
+Once GitHub is connected, Settings → Integrations → GitHub also offers a **GitHub tools (MCP)**
 toggle. Enabling it adds a `github` MCP server that reuses your existing GitHub
 connection for auth — no separate credentials — so agents can use GitHub tools
 (issues, PRs, etc.) in addition to a plain checkout. Enable it per session like
