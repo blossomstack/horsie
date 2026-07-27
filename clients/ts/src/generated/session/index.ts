@@ -6,6 +6,7 @@ export * from './sessionDetail';
 export * from './messageEvent';
 export * from './toolOutputEvent';
 export * from './turnCompletedEvent';
+export * from './usageUpdatedEvent';
 export * from './askedEvent';
 export * from './statusChangedEvent';
 export * from './errorEvent';

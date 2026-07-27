@@ -291,18 +291,26 @@ function reducer(state: State, action: Action): State {
               [ev.value.toolCallId]: { name: ev.value.name, running: true },
             },
           };
-        case "TurnCompleted":
+        // Usage accrues per provider call, not per turn: a tool loop can run for
+        // a long time between `TurnCompleted`s, and the readout should track it.
+        // `TurnCompleted` reports the same tokens again as a run total, so only
+        // one of the two may add.
+        case "UsageUpdated":
           return {
             ...state,
-            streaming: "",
-            progression: null,
-            // A backfilled turn's usage is already in the seeded tail total.
+            // A backfilled call's usage is already in the seeded tail total.
             usage: action.fromBackfill
               ? state.usage
               : {
                   input: state.usage.input + ev.value.usage.inputTokens,
                   output: state.usage.output + ev.value.usage.outputTokens,
                 },
+          };
+        case "TurnCompleted":
+          return {
+            ...state,
+            streaming: "",
+            progression: null,
           };
         case "Asked":
           return { ...state, pendingQuestion: ev.value.question };
@@ -368,15 +376,18 @@ export function useSessionStream(sessionId: string | undefined): {
     let seeded = false;
     const buffer: SessionEvent[] = [];
 
-    // Refetch usage on a status change rather than `TurnCompleted`: the
-    // server journals/broadcasts `TurnCompleted` from inside the agent's own
-    // run — before the session actor has processed the durable usage push
-    // that `handle_finished` sends *after* that (`UsageRecorded` then
+    // `UsageUpdated` keeps the panel current *during* a run: it is journaled as
+    // each provider call returns, and the agent's own `usage_total` is folded
+    // from that same event, so a refetch on it always sees the new figure.
+    // `StatusChanged` covers turn boundaries. Deliberately not `TurnCompleted`:
+    // the server journals/broadcasts it from inside the agent's own run —
+    // before the session actor has processed the durable usage push that
+    // `handle_finished` sends *after* that (`UsageRecorded` then
     // `Concluded`/`Asked`, delivered to the same mailbox in that order).
     // `StatusChanged` only fires once `Concluded`/`Asked`/`Failed` runs, so by
-    // then the session's own usage total is guaranteed to have landed.
+    // then the session's own usage total is guaranteed to have landed too.
     const maybeInvalidateUsage = (event: SessionEvent) => {
-      if (event.type === "StatusChanged") {
+      if (event.type === "StatusChanged" || event.type === "UsageUpdated") {
         void queryClient.invalidateQueries({ queryKey: qk.sessionUsage(sessionId) });
       }
     };

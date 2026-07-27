@@ -305,7 +305,8 @@ pub fn render_event(event: &AgentEvent) -> Option<String> {
         | AgentEvent::ThinkingSignatureChunk(_)
         | AgentEvent::ToolCallInputDelta(_)
         | AgentEvent::ContentBlockStop(_)
-        | AgentEvent::ToolExecuting(_) => None,
+        | AgentEvent::ToolExecuting(_)
+        | AgentEvent::UsageUpdate(_) => None,
     }
 }
 

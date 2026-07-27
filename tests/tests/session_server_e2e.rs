@@ -751,6 +751,173 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     server2.shutdown().await;
 }
 
+/// Reproduction for the "totals overwritten per turn" report: a long-running
+/// session whose turns each run a tool loop (two provider calls, not one), read
+/// across a server restart. Every turn's usage must *add* to the running totals,
+/// and `lastTurnUsage` must stay a per-turn figure that diverges from them.
+#[tokio::test]
+async fn usage_accumulates_over_many_tool_calling_turns() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let vendor = Arc::new(MockVendor::new());
+    let client = reqwest::Client::new();
+
+    let mut server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    let usage = |addr: SocketAddr, id: String| {
+        let client = client.clone();
+        async move {
+            client
+                .get(format!("http://{addr}/api/sessions/{id}/usage"))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let input_of = |v: &serde_json::Value, path: &str| -> u64 {
+        v["usage"][path]["inputTokens"].as_u64().unwrap()
+    };
+
+    let mut per_turn = 0u64;
+    for turn in 1..=4u32 {
+        // Restart the server before turn 3: that turn's agent is a fresh
+        // incarnation recovering the whole journal — the case where a reset
+        // `usage_total` would silently restart the count.
+        if turn == 3 {
+            server.shutdown().await;
+            server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+        }
+        // Each turn is a two-iteration tool loop: tool call, then final text.
+        mock.queue_tool_call("bash", serde_json::json!({ "command": "echo hi" }));
+        mock.queue_response(format!("reply {turn}"));
+        send_message(&client, &server.addr, &id, &format!("turn {turn}")).await;
+        // Wait for the turn to actually end before reading: usage now lands per
+        // provider call, so "the total went up" no longer means "the turn is
+        // over" — it fires on the turn's *first* call.
+        wait_status(&client, &server.addr, &id, "Idle").await;
+        let after = usage(server.addr, id.clone()).await;
+
+        let total = input_of(&after, "sessionTotal");
+        let last = after["usage"]["mainAgent"]["lastTurnUsage"]["inputTokens"]
+            .as_u64()
+            .unwrap();
+        if turn == 1 {
+            per_turn = total;
+        }
+        assert_eq!(
+            last, per_turn,
+            "turn {turn}: lastTurnUsage must stay per-turn, not cumulative: {after}"
+        );
+        assert_eq!(
+            total,
+            per_turn * u64::from(turn),
+            "turn {turn}: totals must accumulate, not be overwritten: {after}"
+        );
+        assert_eq!(
+            after["usage"]["sessionTotal"], after["usage"]["mainAgent"]["usageTotal"],
+            "one agent: session total must equal its own total: {after}"
+        );
+    }
+
+    server.shutdown().await;
+}
+
+/// Usage must be visible *during* a run and must survive a run that never
+/// finishes. A tool loop can run for hours between turn boundaries, and a
+/// stopped turn still burned every token it burned.
+#[tokio::test]
+async fn usage_lands_mid_run_and_a_stopped_turn_still_counts() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let vendor = Arc::new(MockVendor::new());
+    let client = reqwest::Client::new();
+    let server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    let usage = |id: String| {
+        let client = client.clone();
+        let addr = server.addr;
+        async move {
+            client
+                .get(format!("http://{addr}/api/sessions/{id}/usage"))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let total_in = |v: &serde_json::Value| -> u64 {
+        v["usage"]["sessionTotal"]["inputTokens"].as_u64().unwrap()
+    };
+
+    // A turn that makes one provider call (paid for), runs a tool, and then
+    // blocks forever on its second call — i.e. a run in flight, mid-loop.
+    mock.queue_tool_call("bash", serde_json::json!({ "command": "echo hi" }));
+    let block = mock.blocking_response("never delivered");
+    send_message(&client, &server.addr, &id, "work for a long time").await;
+    block.wait_until_received().await;
+    wait_status(&client, &server.addr, &id, "Running").await;
+
+    // The first call's tokens are already spent, already durable, and must
+    // already be readable — the run has not completed and may never.
+    let mid_run = loop {
+        let v = usage(id.clone()).await;
+        if total_in(&v) > 0 {
+            break v;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let mid_run_total = total_in(&mid_run);
+    assert_eq!(
+        mid_run["usage"]["sessionTotal"], mid_run["usage"]["mainAgent"]["usageTotal"],
+        "one agent: the in-flight total must agree with its own: {mid_run}"
+    );
+
+    // Stop the turn: it never reaches a RunComplete, so its tokens only survive
+    // if they were accounted for as they were spent.
+    let res = client
+        .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    block.release();
+    wait_status(&client, &server.addr, &id, "Stopped").await;
+
+    let after_stop = usage(id.clone()).await;
+    assert_eq!(
+        total_in(&after_stop),
+        mid_run_total,
+        "a stopped turn must not discard the tokens it already spent: {after_stop}"
+    );
+
+    // A following turn adds on top rather than replacing.
+    mock.queue_response("done");
+    assert_eq!(
+        send_message(&client, &server.addr, &id, "carry on")
+            .await
+            .as_u16(),
+        202
+    );
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    let after_next = usage(id.clone()).await;
+    assert!(
+        total_in(&after_next) > mid_run_total,
+        "the next turn must accumulate on the stopped turn's spend: {after_next}"
+    );
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn stop_preserves_and_message_reattaches() {
     let mock = MockLlmServer::builder().build().await;

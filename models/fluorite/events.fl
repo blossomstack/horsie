@@ -32,9 +32,20 @@ struct ContentBlockStopEvent       { message_id: String, index: u32 }
 struct ToolExecutingEvent { message_id: String, tool_call_id: String }
 struct ToolCompleteEvent  { message_id: String, tool_call_id: String, output: String, is_error: bool }
 
+/// One provider call's own usage, emitted as soon as that call returns —
+/// message_id is the assistant message it paid for. A run's tokens are spent
+/// iteration by iteration, so they are reported that way: a long tool loop's
+/// cost is visible (and durable) while the run is still going, and a run that
+/// never reaches `RunComplete` (cancelled, provider error, truncated, out of
+/// iterations) still accounts for what it already burned.
+/// `context_tokens` is this call's prompt size alone.
+struct UsageUpdateEvent { message_id: String, usage: Usage, context_tokens: u32 }
+
 /// Run lifecycle — message_id is a UUID for this run invocation.
 /// `usage` sums every provider call this run made (tool-loop iterations
-/// included) — a cost figure, not a context-size one. `context_tokens` is the
+/// included) — a cost figure, not a context-size one. It is the authoritative
+/// total for the run and equals the sum of the run's `UsageUpdateEvent`s.
+/// `context_tokens` is the
 /// *last* call's prompt size alone (provider-normalized to include any cache
 /// tokens) — what's actually loaded in the model's context once the run ends.
 struct RunCompleteEvent { message_id: String, usage: Usage, iterations: u32, context_tokens: u32 }
@@ -43,7 +54,7 @@ struct RunCompleteEvent { message_id: String, usage: Usage, iterations: u32, con
 ///
 /// Flow per assistant turn:
 ///   InputMessage (once, at the start of run)
-///   MessageStart → ( block )* → MessageStop → MessageComplete
+///   MessageStart → ( block )* → MessageStop → MessageComplete → UsageUpdate
 ///     where each block is one of:
 ///       TextBlockStart     → TextChunk*                              → ContentBlockStop
 ///       ThinkingBlockStart → (ThinkingChunk | ThinkingSignatureChunk)* → ContentBlockStop
@@ -66,5 +77,6 @@ union AgentEvent {
     ContentBlockStop(ContentBlockStopEvent),
     ToolExecuting(ToolExecutingEvent),
     ToolComplete(ToolCompleteEvent),
+    UsageUpdate(UsageUpdateEvent),
     RunComplete(RunCompleteEvent),
 }

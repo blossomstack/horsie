@@ -177,6 +177,15 @@ pub enum AgentDomainEvent {
         output: String,
         is_error: bool,
     },
+    /// One provider call's own usage, journaled as soon as that call returns.
+    /// A run's cost lands incrementally rather than all at once, so an
+    /// in-flight tool loop's spend is already durable and a run that never
+    /// reaches `RunComplete` still accounts for what it burned.
+    UsageDelta {
+        usage: Usage,
+        /// This call's prompt size alone.
+        context_tokens: u32,
+    },
     RunComplete {
         usage: Usage,
         iterations: u32,
@@ -224,17 +233,28 @@ pub struct AgentState {
     /// like timers do; see `crate::task_list`.
     #[serde(default)]
     pub task_list: crate::task_list::TaskListState,
-    /// Cumulative token usage across every completed run — durable agent state,
-    /// folded from `RunComplete`. `u64` so a long session's re-sent-context input
-    /// total can't overflow the per-turn `u32` wire counters. Answers the
-    /// session's usage readout without replaying the whole journal.
+    /// Cumulative token usage across every provider call this agent has ever
+    /// made — durable agent state, folded from `UsageDelta` as each call
+    /// returns and reconciled by `RunComplete`. `u64` so a long session's
+    /// re-sent-context input total can't overflow the per-turn `u32` wire
+    /// counters. Answers the session's usage readout without replaying the
+    /// whole journal.
     #[serde(default)]
     pub usage_total: UsageTotal,
-    /// The most recently completed run's own usage — a per-run cost figure,
+    /// The current (or most recent) run's own usage — a per-run cost figure,
     /// summed across that run's tool-loop iterations but never across runs.
-    /// `None` before this agent's first completed run.
+    /// Grows as the run goes, so a long tool loop's spend is visible before it
+    /// ends. `None` before this agent's first provider call.
     #[serde(default)]
     pub last_turn_usage: Option<Usage>,
+    /// How much of `usage_total` the current run has provisionally contributed
+    /// and not yet had reconciled — the sum of this run's `UsageDelta`s, zeroed
+    /// at each run start and again once `RunComplete` swaps it out for the
+    /// run's authoritative total. Journals written before `UsageDelta` existed
+    /// carry no deltas at all, so this stays zero throughout and `RunComplete`
+    /// folds them to exactly the same totals as it always did.
+    #[serde(default)]
+    pub current_run_usage: UsageTotal,
     /// The most recently completed run's *last* provider call's prompt size
     /// alone (never summed) — what's actually loaded in this agent's context
     /// right now.
@@ -266,6 +286,49 @@ impl UsageTotal {
         self.cache_read_tokens = add_optional(self.cache_read_tokens, usage.cache_read_tokens);
     }
 
+    /// Removes a previously-added sub-total — used to swap a run's provisional
+    /// per-call sum for the authoritative figure `RunComplete` reports.
+    fn subtract(&mut self, other: &UsageTotal) {
+        self.input_tokens = self.input_tokens.saturating_sub(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_sub(other.output_tokens);
+        self.cache_creation_tokens =
+            sub_optional(self.cache_creation_tokens, other.cache_creation_tokens);
+        self.cache_read_tokens = sub_optional(self.cache_read_tokens, other.cache_read_tokens);
+    }
+
+    /// This total as a per-run wire [`Usage`]. Saturates rather than wrapping:
+    /// a single run overflowing `u32` is not a thing worth crashing over.
+    fn to_usage(self) -> Usage {
+        Usage {
+            input_tokens: u32::try_from(self.input_tokens).unwrap_or(u32::MAX),
+            output_tokens: u32::try_from(self.output_tokens).unwrap_or(u32::MAX),
+            cache_creation_tokens: self
+                .cache_creation_tokens
+                .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+            cache_read_tokens: self
+                .cache_read_tokens
+                .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        }
+    }
+
+    /// The larger of two views of the *same* agent's cumulative usage, field by
+    /// field — not a sum (see [`combine`](Self::combine) for that). Both a live
+    /// agent's own fold and the copy pushed to its parent count the same tokens
+    /// from zero, so whichever is ahead is simply the more current one, and
+    /// taking the max means neither a lagging push nor a lost agent journal can
+    /// walk a total backwards.
+    pub fn at_least(&self, other: &UsageTotal) -> UsageTotal {
+        UsageTotal {
+            input_tokens: self.input_tokens.max(other.input_tokens),
+            output_tokens: self.output_tokens.max(other.output_tokens),
+            cache_creation_tokens: max_optional(
+                self.cache_creation_tokens,
+                other.cache_creation_tokens,
+            ),
+            cache_read_tokens: max_optional(self.cache_read_tokens, other.cache_read_tokens),
+        }
+    }
+
     /// Combines two agents' cumulative totals into a session-level aggregate.
     /// Only ever sums usage — never a context-size figure, which stays
     /// meaningfully per-agent (see `AgentUsageSnapshot::context_tokens`).
@@ -292,6 +355,24 @@ fn add_optional(total: Option<u64>, delta: Option<u32>) -> Option<u64> {
                 .unwrap_or(0)
                 .saturating_add(u64::from(delta.unwrap_or(0))),
         ),
+    }
+}
+
+/// Removes a sub-total's cache figure from a running one. A total that has
+/// never seen cache data stays `None` — there is nothing to take away from it.
+fn sub_optional(total: Option<u64>, part: Option<u64>) -> Option<u64> {
+    match (total, part) {
+        (None, _) => None,
+        (Some(t), part) => Some(t.saturating_sub(part.unwrap_or(0))),
+    }
+}
+
+/// The larger of two views of one agent's cache total. Stays `None` only when
+/// neither view has ever seen cache data.
+fn max_optional(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0).max(b.unwrap_or(0))),
     }
 }
 
@@ -529,15 +610,20 @@ impl AgentActor {
         let session_id = self.ctx.session_id;
         let parent = self.ctx.parent.clone();
 
+        // Push usage before branching on *how* the run ended: the tokens were
+        // spent either way, and a cancelled/failed/parked run must account for
+        // them exactly like a concluded one. `usage_total` is cumulative, so the
+        // parent overwriting its copy with it is idempotent.
+        parent
+            .deliver(AgentOutcome::UsageRecorded {
+                session_id,
+                usage_total: state.usage_total,
+            })
+            .await;
+
         match report.outcome {
             RunOutcome::Completed { text } => {
                 // No conclude tool: treat the final text as the output.
-                parent
-                    .deliver(AgentOutcome::UsageRecorded {
-                        session_id,
-                        usage_total: state.usage_total,
-                    })
-                    .await;
                 parent
                     .deliver(AgentOutcome::Concluded {
                         session_id,
@@ -550,12 +636,6 @@ impl AgentActor {
                 match self.interpret(data, tool_call_id) {
                     Conclusion::Output(output) => {
                         parent
-                            .deliver(AgentOutcome::UsageRecorded {
-                                session_id,
-                                usage_total: state.usage_total,
-                            })
-                            .await;
-                        parent
                             .deliver(AgentOutcome::Concluded { session_id, output })
                             .await;
                         CommandEffect::stop()
@@ -564,12 +644,6 @@ impl AgentActor {
                         tool_call_id,
                         question,
                     } => {
-                        parent
-                            .deliver(AgentOutcome::UsageRecorded {
-                                session_id,
-                                usage_total: state.usage_total,
-                            })
-                            .await;
                         parent
                             .deliver(AgentOutcome::Asked {
                                 session_id,
@@ -822,6 +896,10 @@ impl EventSourcedActor for AgentActor {
             AgentDomainEvent::InputMessage { message } => {
                 // A new turn began — the agent is no longer parked.
                 state.parked = false;
+                // Every run starts by persisting its input (`Run`,
+                // `InjectToolResult`, a timer wake), so this is the one place
+                // that marks a run boundary for per-run usage.
+                state.current_run_usage = UsageTotal::default();
                 state.messages.push(message);
             }
             AgentDomainEvent::MessageComplete { message } => state.messages.push(message),
@@ -850,12 +928,32 @@ impl EventSourcedActor for AgentActor {
             },
             AgentDomainEvent::Parked => state.parked = true,
             AgentDomainEvent::TaskListChanged { snapshot } => state.task_list = snapshot,
+            AgentDomainEvent::UsageDelta {
+                usage,
+                context_tokens,
+            } => {
+                state.usage_total.add(&usage);
+                state.current_run_usage.add(&usage);
+                state.context_tokens = context_tokens;
+                state.last_turn_usage = Some(state.current_run_usage.to_usage());
+            }
             AgentDomainEvent::RunComplete {
                 usage,
                 context_tokens,
                 ..
             } => {
+                // `usage` is the run's authoritative total. Swap out whatever
+                // this run's deltas provisionally contributed for it: a no-op
+                // when they agree, and on a pre-`UsageDelta` journal (no deltas,
+                // so nothing to swap out) this adds the whole run exactly as the
+                // old fold did.
+                state.usage_total.subtract(&state.current_run_usage);
                 state.usage_total.add(&usage);
+                // Nothing provisional is outstanding once the run is reconciled.
+                // Zero rather than `usage`: a legacy journal can hold two
+                // `RunComplete`s with no delta between them, and the second must
+                // not subtract the first run's total back out.
+                state.current_run_usage = UsageTotal::default();
                 state.context_tokens = context_tokens;
                 state.last_turn_usage = Some(usage);
             }
@@ -1283,6 +1381,10 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
             output: ev.output.clone(),
             is_error: ev.is_error,
         }),
+        AgentEvent::UsageUpdate(ev) => Some(AgentDomainEvent::UsageDelta {
+            usage: ev.usage.clone(),
+            context_tokens: ev.context_tokens,
+        }),
         AgentEvent::RunComplete(ev) => Some(AgentDomainEvent::RunComplete {
             usage: ev.usage.clone(),
             iterations: ev.iterations,
@@ -1365,6 +1467,7 @@ fn find_tool_call_id(events: &[AgentEvent], tool_name: &str) -> Option<String> {
         | AgentEvent::ContentBlockStop(_)
         | AgentEvent::ToolExecuting(_)
         | AgentEvent::ToolComplete(_)
+        | AgentEvent::UsageUpdate(_)
         | AgentEvent::RunComplete(_) => None,
     })
 }
@@ -1783,6 +1886,9 @@ mod tests {
         assert!(!page.has_more);
     }
 
+    /// The pre-`UsageDelta` journal shape: runs that only ever wrote
+    /// `RunComplete`. Folding must still total them exactly as it always did,
+    /// or every session recorded before this event existed loses its history.
     #[test]
     fn run_complete_accumulates_usage_total() {
         let mut state = AgentActor::initial_state();
@@ -1848,6 +1954,188 @@ mod tests {
         assert_eq!(state.usage_total.input_tokens, 50);
         assert_eq!(state.usage_total.cache_creation_tokens, Some(15));
         assert_eq!(state.usage_total.cache_read_tokens, Some(25));
+    }
+
+    fn input_event() -> AgentDomainEvent {
+        AgentDomainEvent::InputMessage {
+            message: Message::user(new_message_id(), "go"),
+        }
+    }
+
+    fn usage_delta(input: u32, output: u32) -> AgentDomainEvent {
+        AgentDomainEvent::UsageDelta {
+            usage: Usage::without_cache(input, output),
+            context_tokens: input,
+        }
+    }
+
+    /// The point of the whole exercise: a run's cost is visible while the run is
+    /// still going, instead of banked until it ends.
+    #[test]
+    fn usage_deltas_accumulate_while_a_run_is_still_going() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(state, input_event());
+        for (input, output) in [(100u32, 10u32), (250, 20), (400, 5)] {
+            state = AgentActor::apply_event(state, usage_delta(input, output));
+        }
+        assert_eq!(state.usage_total.input_tokens, 750);
+        assert_eq!(state.usage_total.output_tokens, 35);
+        // `last_turn_usage` is the run's cost *so far*, not just the last call's.
+        assert_eq!(state.last_turn_usage.as_ref().unwrap().input_tokens, 750);
+        // `context_tokens` is the latest call's prompt size alone.
+        assert_eq!(state.context_tokens, 400);
+    }
+
+    /// `RunComplete` reports the same tokens the deltas already did. Counting
+    /// both would double a long tool loop's entire cost.
+    #[test]
+    fn run_complete_swaps_out_the_provisional_deltas_it_restates() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(state, input_event());
+        state = AgentActor::apply_event(state, usage_delta(100, 10));
+        state = AgentActor::apply_event(state, usage_delta(250, 20));
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage::without_cache(350, 30),
+                iterations: 2,
+                context_tokens: 250,
+            },
+        );
+        assert_eq!(
+            state.usage_total.input_tokens, 350,
+            "counted once, not twice"
+        );
+        assert_eq!(state.usage_total.output_tokens, 30);
+        assert_eq!(state.last_turn_usage.as_ref().unwrap().input_tokens, 350);
+
+        // A second run starts from zero again rather than re-restating the first.
+        state = AgentActor::apply_event(state, input_event());
+        state = AgentActor::apply_event(state, usage_delta(40, 4));
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage::without_cache(40, 4),
+                iterations: 1,
+                context_tokens: 40,
+            },
+        );
+        assert_eq!(state.usage_total.input_tokens, 390);
+        assert_eq!(state.last_turn_usage.as_ref().unwrap().input_tokens, 40);
+    }
+
+    /// Cancel, provider error, truncation and the iteration cap all end a run
+    /// without a `RunComplete`. The tokens were still spent.
+    #[test]
+    fn a_run_that_never_completes_still_keeps_the_tokens_it_spent() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(state, input_event());
+        state = AgentActor::apply_event(state, usage_delta(500, 40));
+        state = AgentActor::apply_event(state, usage_delta(600, 30));
+        state = AgentActor::apply_event(state, AgentDomainEvent::RunCancelled);
+        assert_eq!(state.usage_total.input_tokens, 1100);
+
+        // The next run adds to that rather than replacing it, and its own
+        // `RunComplete` restates only its own deltas.
+        state = AgentActor::apply_event(state, input_event());
+        state = AgentActor::apply_event(state, usage_delta(50, 5));
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage::without_cache(50, 5),
+                iterations: 1,
+                context_tokens: 50,
+            },
+        );
+        assert_eq!(state.usage_total.input_tokens, 1150);
+        assert_eq!(state.usage_total.output_tokens, 75);
+        assert_eq!(
+            state.last_turn_usage.as_ref().unwrap().input_tokens,
+            50,
+            "the cancelled run's spend stays in the total but not in the per-run figure"
+        );
+    }
+
+    /// A journal that mixes both shapes — old `RunComplete`-only runs recorded
+    /// before `UsageDelta` existed, then new ones — folds to the sum of both.
+    #[test]
+    fn mixed_legacy_and_delta_runs_fold_to_the_same_total() {
+        let mut state = AgentActor::initial_state();
+        // Legacy run: input + RunComplete, no deltas at all.
+        state = AgentActor::apply_event(state, input_event());
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage::without_cache(1000, 100),
+                iterations: 3,
+                context_tokens: 900,
+            },
+        );
+        assert_eq!(state.usage_total.input_tokens, 1000);
+        // New-shape run on the same journal.
+        state = AgentActor::apply_event(state, input_event());
+        state = AgentActor::apply_event(state, usage_delta(200, 20));
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage::without_cache(200, 20),
+                iterations: 1,
+                context_tokens: 200,
+            },
+        );
+        assert_eq!(state.usage_total.input_tokens, 1200);
+        assert_eq!(state.usage_total.output_tokens, 120);
+    }
+
+    #[test]
+    fn usage_total_subtract_leaves_never_reported_cache_fields_none() {
+        let mut total = UsageTotal {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: Some(10),
+            cache_read_tokens: None,
+        };
+        total.subtract(&UsageTotal {
+            input_tokens: 40,
+            output_tokens: 20,
+            cache_creation_tokens: Some(4),
+            cache_read_tokens: Some(7),
+        });
+        assert_eq!(total.input_tokens, 60);
+        assert_eq!(total.output_tokens, 30);
+        assert_eq!(total.cache_creation_tokens, Some(6));
+        assert_eq!(
+            total.cache_read_tokens, None,
+            "nothing to take away from a total that never saw cache reads"
+        );
+    }
+
+    /// `at_least` reconciles two views of *one* agent, so it must never sum
+    /// them the way `combine` sums two different agents.
+    #[test]
+    fn usage_total_at_least_takes_the_further_along_view_field_by_field() {
+        let live = UsageTotal {
+            input_tokens: 900,
+            output_tokens: 10,
+            cache_creation_tokens: None,
+            cache_read_tokens: Some(4),
+        };
+        let durable = UsageTotal {
+            input_tokens: 800,
+            output_tokens: 12,
+            cache_creation_tokens: Some(3),
+            cache_read_tokens: None,
+        };
+        let merged = live.at_least(&durable);
+        assert_eq!(merged.input_tokens, 900, "not 1700");
+        assert_eq!(merged.output_tokens, 12);
+        assert_eq!(merged.cache_creation_tokens, Some(3));
+        assert_eq!(merged.cache_read_tokens, Some(4));
+        assert_eq!(
+            UsageTotal::default().at_least(&UsageTotal::default()),
+            UsageTotal::default(),
+            "two blank views stay blank, cache fields included"
+        );
     }
 
     #[test]

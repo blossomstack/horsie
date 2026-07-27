@@ -529,23 +529,25 @@ impl SessionActor {
             })
     }
 
-    /// Read this session's aggregated usage. Usage *totals* (session-level and
-    /// per-agent) come from this session's own durable `agent_usage` — pushed
-    /// by `UsageRecorded` whenever an agent completes a run — never a live
-    /// ask, so summing across however many agents a session hosts never
-    /// requires waking an idle one. `context_tokens`/`last_turn_usage` are
-    /// the exception: context size is meaningfully live-only, so those still
-    /// ask the live main agent (or a transient reader if idle), exactly like
-    /// `read_history`.
+    /// Read this session's aggregated usage. The durable `agent_usage` —
+    /// pushed by `UsageRecorded` as each agent finishes a run — is what makes
+    /// summing across however many agents a session hosts free: no idle agent
+    /// ever has to be woken for it. The main agent is the one exception, and
+    /// only because we are already asking it for `context_tokens` /
+    /// `last_turn_usage` (context size is meaningfully live-only): its own
+    /// `usage_total` folds every provider call as that call lands, so during a
+    /// long tool loop it is hours fresher than the copy pushed at run end.
+    /// Both are cumulative-from-zero over the same journal, so the snapshot
+    /// simply supersedes the main agent's durable entry.
     async fn read_usage(
         &self,
         state: &SessionState,
         ctx: &ActorContext<Self>,
     ) -> SessionUsageStats {
-        let snapshot = if let Some(agent) = &self.agent
+        let snapshot: Option<AgentUsageSnapshot> = if let Some(agent) = &self.agent
             && let Ok(snapshot) = agent.ask(|reply| AgentCommand::GetUsage { reply }).await
         {
-            snapshot
+            Some(snapshot)
         } else {
             let mut reader_params = AgentParams::from_def(&session_run_def(&self.spec.agent));
             reader_params.interactive = true;
@@ -566,26 +568,31 @@ impl SessionActor {
             reader
                 .ask(|reply| AgentCommand::GetUsage { reply })
                 .await
-                .unwrap_or_default()
+                .ok()
         };
-        let main_usage_total = state
+        // The durable copy stays the floor rather than being discarded: it is
+        // never *fresher* than the agent's own fold, but it is what survives if
+        // the agent can't be asked at all, and it is where a superseded
+        // generation's late `UsageRecorded` lands.
+        let durable_main = state
             .agent_usage
             .get(MAIN_AGENT_ID)
             .copied()
             .unwrap_or_default();
+        let mut snapshot = snapshot.unwrap_or_default();
+        snapshot.usage_total = snapshot.usage_total.at_least(&durable_main);
+        let main_usage_total = snapshot.usage_total;
         let session_total = state
             .agent_usage
-            .values()
-            .fold(UsageTotal::default(), |acc, u| acc.combine(u));
+            .iter()
+            .filter(|(id, _)| id.as_str() != MAIN_AGENT_ID)
+            .map(|(_, u)| u)
+            .fold(main_usage_total, |acc, u| acc.combine(u));
         SessionUsageStats {
             session_total,
             main_agent: AgentUsageEntry {
                 model: self.spec.agent.model.clone(),
-                snapshot: AgentUsageSnapshot {
-                    usage_total: main_usage_total,
-                    last_turn_usage: snapshot.last_turn_usage,
-                    context_tokens: snapshot.context_tokens,
-                },
+                snapshot,
             },
         }
     }

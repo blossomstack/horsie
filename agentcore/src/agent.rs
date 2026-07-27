@@ -10,7 +10,7 @@ use horsie_models::agent::{
 };
 use horsie_models::events::{
     AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
-    RunCompleteEvent, ToolCompleteEvent, ToolExecutingEvent,
+    RunCompleteEvent, ToolCompleteEvent, ToolExecutingEvent, UsageUpdateEvent,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -353,8 +353,21 @@ impl Agent {
             };
             events
                 .emit(AgentEvent::MessageComplete(MessageCompleteEvent {
-                    message_id: msg_id,
+                    message_id: msg_id.clone(),
                     message: assistant_msg.clone(),
+                }))
+                .await?;
+            // Report this call's cost right away rather than banking it until
+            // `RunComplete`: a tool loop can run for hours and can end without ever
+            // reaching `RunComplete` (cancel, provider error, truncation, iteration
+            // cap), and tokens already spent must be accounted for either way.
+            // Emitted after `MessageComplete` so a durable listener never records a
+            // charge for a message it hasn't recorded yet.
+            events
+                .emit(AgentEvent::UsageUpdate(UsageUpdateEvent {
+                    message_id: msg_id,
+                    usage: response.usage.clone(),
+                    context_tokens,
                 }))
                 .await?;
             self.history.push(assistant_msg);
@@ -739,6 +752,119 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ToolComplete(_)))
         );
+    }
+
+    /// Each provider call reports its own cost as it returns, and those reports
+    /// add up to exactly what `RunComplete` restates at the end — so a listener
+    /// can follow a tool loop's spend live without double-counting it.
+    #[tokio::test]
+    async fn usage_update_is_emitted_per_provider_call_and_sums_to_the_run_total() {
+        let provider = MockProvider::new(vec![
+            CompletionResponse {
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "tc1".into(),
+                    name: "search".into(),
+                    input: json!({}),
+                })],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::without_cache(20, 10),
+            },
+            CompletionResponse {
+                parts: vec![ContentPart::Text(TextPart {
+                    text: "done".into(),
+                })],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::without_cache(30, 8),
+            },
+        ]);
+        let mut agent = Agent::builder(provider, MockToolbox::echo("search"))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "x"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let events = sink.events();
+        let updates: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::UsageUpdate(u) => Some(u.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 2, "one per provider call, not one per run");
+        assert_eq!(updates[0].usage.input_tokens, 20);
+        assert_eq!(updates[0].context_tokens, 20);
+        assert_eq!(updates[1].usage.input_tokens, 30);
+
+        let run_total = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::RunComplete(rc) => Some(rc.usage.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let summed: u32 = updates.iter().map(|u| u.usage.input_tokens).sum();
+        assert_eq!(summed, run_total.input_tokens);
+        let summed_out: u32 = updates.iter().map(|u| u.usage.output_tokens).sum();
+        assert_eq!(summed_out, run_total.output_tokens);
+    }
+
+    /// A cancelled run never reaches `RunComplete`, so it used to report no
+    /// usage at all — however many tokens it had already burned.
+    #[tokio::test]
+    async fn a_cancelled_run_still_reports_the_usage_it_already_spent() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: "tc1".into(),
+                name: "slow_tool".into(),
+                input: json!({}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::without_cache(4321, 99),
+        }]);
+        let mut agent = Agent::builder(provider, Arc::new(HangingToolbox { entered: tx }))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let token = CancellationToken::new();
+
+        // Cancel once the tool call is running — i.e. after the provider call it
+        // paid for has already returned.
+        let run = agent.run(
+            AgentInput::user_message("msg-1", "go"),
+            &sink,
+            token.clone(),
+        );
+        let canceller = async {
+            rx.recv().await.expect("the tool started");
+            token.cancel();
+        };
+        let (result, ()) = tokio::join!(run, canceller);
+        assert!(matches!(result.unwrap_err(), AgentError::Cancelled));
+
+        let events = sink.events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::RunComplete(_))),
+            "a cancelled run has no RunComplete to carry usage"
+        );
+        let spent: u32 = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::UsageUpdate(u) => Some(u.usage.input_tokens),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(spent, 4321, "the tokens the cancelled run burned");
     }
 
     #[tokio::test]

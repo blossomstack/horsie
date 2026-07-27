@@ -72,6 +72,7 @@ fn event_kinds(events: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::ContentBlockStop(_) => "ContentBlockStop",
             AgentEvent::ToolExecuting(_) => "ToolExecuting",
             AgentEvent::ToolComplete(_) => "ToolComplete",
+            AgentEvent::UsageUpdate(_) => "UsageUpdate",
             AgentEvent::RunComplete(_) => "RunComplete",
         })
         .collect()
@@ -144,7 +145,8 @@ async fn test_simple_text_completion() {
 }
 
 /// Event sequence for a single-turn text response must be exactly:
-/// InputMessage → MessageStart → TextChunk(s) → MessageStop → MessageComplete → RunComplete
+/// InputMessage → MessageStart → TextChunk(s) → MessageStop → MessageComplete →
+/// UsageUpdate → RunComplete
 #[tokio::test]
 async fn test_text_turn_event_sequence() {
     let mock = MockLlmServer::builder().response("done").build().await;

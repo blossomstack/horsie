@@ -9,10 +9,12 @@ import { TaskListEvent } from './taskListEvent';
 import { ToolOutputEvent } from './toolOutputEvent';
 import { ToolStartEvent } from './toolStartEvent';
 import { TurnCompletedEvent } from './turnCompletedEvent';
+import { UsageUpdatedEvent } from './usageUpdatedEvent';
 export type SessionEvent =
   | { type: "Message"; value: MessageEvent }
   | { type: "ToolResult"; value: ToolOutputEvent }
   | { type: "TurnCompleted"; value: TurnCompletedEvent }
+  | { type: "UsageUpdated"; value: UsageUpdatedEvent }
   | { type: "Asked"; value: AskedEvent }
   | { type: "StatusChanged"; value: StatusChangedEvent }
   | { type: "Error"; value: ErrorEvent }

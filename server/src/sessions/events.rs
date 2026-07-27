@@ -13,7 +13,7 @@ use horsie_actor::{EventSourcedActor, Journal};
 use horsie_agentcore::{AgentEvent, EventSink, EventSinkError};
 use horsie_models::session::{
     MessageEvent, SessionEvent, TaskItem, TaskListEvent, TaskStatus as WireTaskStatus,
-    ToolOutputEvent, TurnCompletedEvent,
+    ToolOutputEvent, TurnCompletedEvent, UsageUpdatedEvent,
 };
 use horsie_workflow::{AgentActor, AgentDomainEvent, TaskStatus as AgentTaskStatus};
 use std::sync::Arc;
@@ -43,6 +43,7 @@ impl EventSink for SessionEventSink {
             AgentEvent::InputMessage(_)
             | AgentEvent::MessageComplete(_)
             | AgentEvent::ToolComplete(_)
+            | AgentEvent::UsageUpdate(_)
             | AgentEvent::RunComplete(_) => Some(SessionFrame::Journaled),
             AgentEvent::MessageStart(_)
             | AgentEvent::MessageStop(_)
@@ -142,6 +143,13 @@ fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
             tool_call_id,
             output,
             is_error,
+        })),
+        AgentDomainEvent::UsageDelta {
+            usage,
+            context_tokens,
+        } => Some(SessionEvent::UsageUpdated(UsageUpdatedEvent {
+            usage,
+            context_tokens,
         })),
         AgentDomainEvent::RunComplete {
             usage, iterations, ..

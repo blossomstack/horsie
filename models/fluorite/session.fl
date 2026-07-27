@@ -69,6 +69,10 @@ struct SessionDetail {
 struct MessageEvent { message: Message }
 struct ToolOutputEvent { tool_call_id: String, output: String, is_error: bool }
 struct TurnCompletedEvent { iterations: u32, usage: Usage }
+/// One provider call's cost, journaled as the call returns. Lets a client keep
+/// a running turn's usage readout current instead of waiting for the turn to
+/// end — a tool loop can run for a long time between `TurnCompleted`s.
+struct UsageUpdatedEvent { usage: Usage, context_tokens: u32 }
 struct AskedEvent { question: String }
 /// Live status transition. Sent without an SSE id (the session detail endpoint
 /// is the durable source for status).
@@ -141,6 +145,7 @@ union SessionEvent {
     Message(MessageEvent),
     ToolResult(ToolOutputEvent),
     TurnCompleted(TurnCompletedEvent),
+    UsageUpdated(UsageUpdatedEvent),
     Asked(AskedEvent),
     StatusChanged(StatusChangedEvent),
     Error(ErrorEvent),
