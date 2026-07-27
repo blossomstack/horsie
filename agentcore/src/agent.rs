@@ -940,7 +940,7 @@ mod tests {
             MockToolbox::new(vec![spec], Arc::new(|_, input| Ok(input)))
         };
         // Always returns invalid input.
-        let provider = MockProvider::new(vec![CompletionResponse {
+        let provider = MockProvider::always(CompletionResponse {
             parts: vec![ContentPart::ToolCall(ToolCallPart {
                 id: "h".into(),
                 name: "finish".into(),
@@ -948,7 +948,7 @@ mod tests {
             })],
             stop_reason: StopReason::ToolUse,
             usage: Usage::without_cache(1, 1),
-        }]);
+        });
         let config = AgentConfig {
             handoff_max_retries: 1,
             ..AgentConfig::default()
@@ -1022,7 +1022,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_iterations_exceeded() {
-        let provider = MockProvider::new(vec![CompletionResponse {
+        let provider = MockProvider::always(CompletionResponse {
             parts: vec![ContentPart::ToolCall(ToolCallPart {
                 id: "t1".into(),
                 name: "loop_tool".into(),
@@ -1030,7 +1030,7 @@ mod tests {
             })],
             stop_reason: StopReason::ToolUse,
             usage: Usage::without_cache(5, 2),
-        }]);
+        });
         let toolbox = MockToolbox::echo("loop_tool");
         let config = AgentConfig {
             max_iterations: 3,
@@ -1058,7 +1058,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stuck_detection() {
-        let provider = MockProvider::new(vec![CompletionResponse {
+        let provider = MockProvider::always(CompletionResponse {
             parts: vec![ContentPart::ToolCall(ToolCallPart {
                 id: "s1".into(),
                 name: "stuck_tool".into(),
@@ -1066,7 +1066,7 @@ mod tests {
             })],
             stop_reason: StopReason::ToolUse,
             usage: Usage::without_cache(5, 2),
-        }]);
+        });
         let toolbox = MockToolbox::echo("stuck_tool");
         let config = AgentConfig {
             max_iterations: 20,

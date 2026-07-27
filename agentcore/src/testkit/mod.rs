@@ -15,55 +15,144 @@ use crate::{
     tool::{ToolSpec, Toolbox},
 };
 use async_trait::async_trait;
-use horsie_models::agent::{ContentPart, TextPart, ToolCallPart, Usage};
+use horsie_models::agent::{ContentPart, Message, Role, TextPart, ToolCallPart, Usage};
 use horsie_models::events::AgentEvent;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// An `LlmProvider` that replays a fixed list of responses, cycling when the
-/// list is exhausted.
+/// A summary of one `CompletionRequest`, captured because the request itself is
+/// borrowed and cannot be stored. Enough to assert *what the model was asked* —
+/// which is the only way to catch a retry that rebuilds history from the wrong
+/// place (#61 item 21).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestSummary {
+    pub message_count: usize,
+    pub roles: Vec<Role>,
+    pub tool_call_ids: Vec<String>,
+    pub tool_result_ids: Vec<String>,
+}
+
+impl RequestSummary {
+    fn of(messages: &[Message]) -> Self {
+        let mut tool_call_ids = Vec::new();
+        let mut tool_result_ids = Vec::new();
+        for message in messages {
+            for part in &message.parts {
+                match part {
+                    ContentPart::ToolCall(c) => tool_call_ids.push(c.id.clone()),
+                    ContentPart::ToolResult(r) => tool_result_ids.push(r.tool_call_id.clone()),
+                    ContentPart::Text(_) | ContentPart::Thinking(_) => {}
+                }
+            }
+        }
+        Self {
+            message_count: messages.len(),
+            roles: messages.iter().map(|m| m.role.clone()).collect(),
+            tool_call_ids,
+            tool_result_ids,
+        }
+    }
+}
+
+/// An `LlmProvider` that replays a [`Script`] of programmed outcomes and records
+/// what it was asked.
 pub struct MockProvider {
-    responses: Vec<CompletionResponse>,
-    call_index: Mutex<usize>,
+    script: Script<Result<CompletionResponse, LlmError>>,
+    requests: Mutex<Vec<RequestSummary>>,
 }
 
 impl MockProvider {
-    pub fn new(responses: Vec<CompletionResponse>) -> Arc<Self> {
+    /// Replay `script`. When it runs out, every further call returns
+    /// `LlmError::ApiError { status: 500 }` naming the exhausted script — a loud,
+    /// attributable failure rather than a silent repeat.
+    pub fn scripted(script: Script<Result<CompletionResponse, LlmError>>) -> Arc<Self> {
         Arc::new(Self {
-            responses,
-            call_index: Mutex::new(0),
+            script,
+            requests: Mutex::new(Vec::new()),
         })
     }
 
+    /// Replay `responses` in order, erroring once they run out.
+    ///
+    /// Strict on purpose: the previous implementation cycled, so a test that
+    /// over-ran its script silently received a repeated response instead of
+    /// failing — the mechanism that hides iteration-count bugs (#61 R6).
+    pub fn new(responses: Vec<CompletionResponse>) -> Arc<Self> {
+        Self::scripted(Script::of(responses.into_iter().map(Ok)).labelled("MockProvider::new"))
+    }
+
+    /// Return `response` to every call — a steady state, said out loud.
+    ///
+    /// For loop-control tests (max iterations, stuck detection, handoff retries)
+    /// that need the model to keep answering the same way.
+    pub fn always(response: CompletionResponse) -> Arc<Self> {
+        Self::scripted(Script::of([]).then_repeating_with(move || Ok(response.clone())))
+    }
+
+    /// Fail every call with an error carrying `err`'s status and message.
+    pub fn failing(err: LlmError) -> Arc<Self> {
+        let message = err.to_string();
+        let status = match err {
+            LlmError::ApiError { status, .. } => status,
+            LlmError::RateLimit { .. } => 429,
+            LlmError::Overloaded => 529,
+            LlmError::Network(_) | LlmError::EventSink(_) => 502,
+        };
+        Self::scripted(Script::of([]).then_repeating_with(move || {
+            Err(LlmError::ApiError {
+                status,
+                message: message.clone(),
+            })
+        }))
+    }
+
+    /// A provider that answers `text` on every call.
     pub fn text(text: &str) -> Arc<Self> {
-        Self::new(vec![CompletionResponse {
+        let response = CompletionResponse {
             parts: vec![ContentPart::Text(TextPart {
                 text: text.to_string(),
             })],
             stop_reason: StopReason::EndTurn,
             usage: Usage::without_cache(10, 5),
-        }])
+        };
+        Self::scripted(Script::of([]).then_repeating_with(move || Ok(response.clone())))
     }
 
+    /// One tool call, then `reply` on every later call.
     pub fn tool_then_text(tool_id: &str, tool_name: &str, input: Value, reply: &str) -> Arc<Self> {
-        Self::new(vec![
-            CompletionResponse {
-                parts: vec![ContentPart::ToolCall(ToolCallPart {
-                    id: tool_id.to_string(),
-                    name: tool_name.to_string(),
-                    input,
-                })],
-                stop_reason: StopReason::ToolUse,
-                usage: Usage::without_cache(20, 10),
-            },
-            CompletionResponse {
-                parts: vec![ContentPart::Text(TextPart {
-                    text: reply.to_string(),
-                })],
-                stop_reason: StopReason::EndTurn,
-                usage: Usage::without_cache(30, 8),
-            },
-        ])
+        let first = CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: tool_id.to_string(),
+                name: tool_name.to_string(),
+                input,
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::without_cache(20, 10),
+        };
+        let steady = CompletionResponse {
+            parts: vec![ContentPart::Text(TextPart {
+                text: reply.to_string(),
+            })],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::without_cache(30, 8),
+        };
+        Self::scripted(Script::of([Ok(first)]).then_repeating_with(move || Ok(steady.clone())))
+    }
+
+    /// How many completions have been requested.
+    pub fn calls(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    /// A summary of every request, in order.
+    pub fn requests(&self) -> Vec<RequestSummary> {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -75,17 +164,21 @@ impl LlmProvider for MockProvider {
 
     async fn complete(
         &self,
-        _request: CompletionRequest<'_>,
+        request: CompletionRequest<'_>,
         _message_id: &str,
         _events: &dyn EventSink,
     ) -> Result<CompletionResponse, LlmError> {
-        let mut idx = self
-            .call_index
+        self.requests
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let response = self.responses[*idx % self.responses.len()].clone();
-        *idx += 1;
-        Ok(response)
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(RequestSummary::of(request.messages));
+        match self.script.next_step() {
+            Ok(outcome) => outcome,
+            Err(exhausted) => Err(LlmError::ApiError {
+                status: 500,
+                message: exhausted.to_string(),
+            }),
+        }
     }
 }
 
@@ -178,5 +271,132 @@ impl EventSink for CollectingEventSink {
             .unwrap_or_else(PoisonError::into_inner)
             .push(event);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::provider::ToolChoice;
+    use horsie_models::agent::{ToolCallPart as TcPart, ToolResultPart};
+
+    fn user_msg(id: &str, text: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role: Role::User,
+            parts: vec![ContentPart::Text(TextPart {
+                text: text.to_string(),
+            })],
+        }
+    }
+
+    async fn call(
+        provider: &MockProvider,
+        messages: &[Message],
+    ) -> Result<CompletionResponse, LlmError> {
+        let sink = CollectingEventSink::new();
+        provider
+            .complete(
+                CompletionRequest {
+                    messages,
+                    system: None,
+                    tools: vec![],
+                    tool_choice: ToolChoice::Auto,
+                    max_tokens: None,
+                },
+                "msg-1",
+                &sink as &dyn EventSink,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn scripted_provider_yields_then_errors_on_exhaustion() {
+        let p = MockProvider::scripted(Script::of([
+            Ok(CompletionResponse {
+                parts: vec![ContentPart::Text(TextPart { text: "one".into() })],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::without_cache(1, 1),
+            }),
+            Err(LlmError::Overloaded),
+        ]));
+        let msgs = vec![user_msg("m1", "hi")];
+
+        assert!(call(&p, &msgs).await.is_ok());
+        assert!(matches!(call(&p, &msgs).await, Err(LlmError::Overloaded)));
+        // Third call: the script is spent. A cycling double would silently repeat.
+        assert!(matches!(
+            call(&p, &msgs).await,
+            Err(LlmError::ApiError { status: 500, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn failing_provider_always_errors() {
+        let p = MockProvider::failing(LlmError::ApiError {
+            status: 400,
+            message: "context length exceeded".into(),
+        });
+        let msgs = vec![user_msg("m1", "hi")];
+        for _ in 0..3 {
+            assert!(matches!(
+                call(&p, &msgs).await,
+                Err(LlmError::ApiError { status: 400, .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn records_what_each_call_was_asked() {
+        let p = MockProvider::text("ok");
+        let first = vec![user_msg("m1", "hi")];
+        let second = vec![
+            user_msg("m1", "hi"),
+            Message {
+                id: "m2".into(),
+                role: Role::Assistant,
+                parts: vec![ContentPart::ToolCall(TcPart {
+                    id: "call-1".into(),
+                    name: "echo".into(),
+                    input: json!({}),
+                })],
+            },
+            Message {
+                id: "m3".into(),
+                role: Role::Tool,
+                parts: vec![ContentPart::ToolResult(ToolResultPart {
+                    tool_call_id: "call-1".into(),
+                    output: "done".into(),
+                    is_error: false,
+                })],
+            },
+        ];
+
+        let _ = call(&p, &first).await;
+        let _ = call(&p, &second).await;
+
+        let seen = p.requests();
+        assert_eq!(p.calls(), 2);
+        assert_eq!(seen[0].message_count, 1);
+        assert_eq!(seen[0].roles, vec![Role::User]);
+        assert_eq!(seen[1].message_count, 3);
+        assert_eq!(seen[1].tool_call_ids, vec!["call-1".to_string()]);
+        assert_eq!(seen[1].tool_result_ids, vec!["call-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn existing_constructors_still_repeat() {
+        // `text()` is used by tests that call it more than once; it must not become
+        // strict, or migrating the suite becomes a rewrite.
+        let p = MockProvider::text("hello");
+        let msgs = vec![user_msg("m1", "hi")];
+        assert!(call(&p, &msgs).await.is_ok());
+        assert!(call(&p, &msgs).await.is_ok());
     }
 }
