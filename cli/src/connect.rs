@@ -4,7 +4,8 @@
 
 use crate::error::CliError;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use tokio::process::Command;
 
 /// Translate a `--server` URL (`http(s)://host[:port]`) into the
 /// `ws(s)://.../api/runtime/connect?register=local` endpoint
@@ -107,7 +108,7 @@ pub struct PluginLibrary {
 /// errors surface directly and the parent blocks until it exits or is
 /// interrupted. `background` detaches it instead, with output redirected to
 /// `<state_dir>/connect.log`.
-pub fn run(
+pub async fn run(
     runtime_bin: &Path,
     server: &str,
     workspaces: &[String],
@@ -156,14 +157,65 @@ pub fn run(
         let child = cmd.spawn().map_err(|e| spawn_error(runtime_bin, &e))?;
         println!(
             "running in background (pid {}, log at {})",
-            child.id(),
+            child.id().unwrap_or(0),
             log_path.display()
         );
         Ok(0)
     } else {
-        let status = cmd.status().map_err(|e| spawn_error(runtime_bin, &e))?;
-        Ok(status.code().unwrap_or(1))
+        let mut child = cmd.spawn().map_err(|e| spawn_error(runtime_bin, &e))?;
+        let exit_code = match install_signal_handler() {
+            Ok(signal) => {
+                tokio::select! {
+                    status = child.wait() => status
+                        .map(|s| s.code().unwrap_or(1))
+                        .map_err(|e| CliError::Io(e.to_string()))?,
+                    _ = signal => {
+                        if let Err(e) = child.kill().await {
+                            eprintln!("failed to kill runtime child: {e}");
+                        }
+                        let status = child
+                            .wait()
+                            .await
+                            .map_err(|e| CliError::Io(e.to_string()))?;
+                        status.code().unwrap_or(1)
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: could not install signal handlers ({e}); \
+                     runtime child will not be cleaned up on SIGINT/SIGTERM"
+                );
+                child
+                    .wait()
+                    .await
+                    .map(|s| s.code().unwrap_or(1))
+                    .map_err(|e| CliError::Io(e.to_string()))?
+            }
+        };
+        Ok(exit_code)
     }
+}
+
+#[cfg(unix)]
+fn install_signal_handler() -> Result<impl std::future::Future<Output = ()> + Send, String> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut sigint = signal(SignalKind::interrupt()).map_err(|e| format!("SIGINT: {e}"))?;
+    let mut sigterm = signal(SignalKind::terminate()).map_err(|e| format!("SIGTERM: {e}"))?;
+    Ok(async move {
+        tokio::select! {
+            _ = sigint.recv() => {}
+            _ = sigterm.recv() => {}
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn install_signal_handler() -> Result<impl std::future::Future<Output = ()> + Send, String> {
+    let ctrl_c = tokio::signal::ctrl_c().map_err(|e| format!("ctrl-c: {e}"))?;
+    Ok(async move {
+        let _ = ctrl_c.await;
+    })
 }
 
 fn spawn_error(runtime_bin: &Path, e: &std::io::Error) -> CliError {
