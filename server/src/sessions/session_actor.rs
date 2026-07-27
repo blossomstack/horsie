@@ -1183,7 +1183,9 @@ mod tests {
         let settings = settings_with_spaces(&[]);
         let base: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
 
-        let (toolbox, index) = build_memory_layer(base, Some(svc), &settings).await.unwrap();
+        let (toolbox, index) = build_memory_layer(base, Some(svc), &settings)
+            .await
+            .unwrap();
         assert!(index.is_empty());
         assert!(toolbox.specs().is_empty());
     }
@@ -1202,7 +1204,9 @@ mod tests {
         let settings = settings_with_spaces(&["default"]);
         let base: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
 
-        let (toolbox, index) = build_memory_layer(base, Some(svc), &settings).await.unwrap();
+        let (toolbox, index) = build_memory_layer(base, Some(svc), &settings)
+            .await
+            .unwrap();
         assert!(index.contains("- default/alpha — a durable fact"));
         let names: Vec<String> = toolbox.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"memory_create".to_string()));

@@ -60,12 +60,12 @@ impl MemoryService {
         }
         let now = now_secs();
         let mut current = name.to_string();
-        if let Some(new_name) = input.name {
-            if new_name != current {
-                validate_slug(&new_name)?;
-                self.store.rename_space(&current, &new_name, &now).await?;
-                current = new_name;
-            }
+        if let Some(new_name) = input.name
+            && new_name != current
+        {
+            validate_slug(&new_name)?;
+            self.store.rename_space(&current, &new_name, &now).await?;
+            current = new_name;
         }
         if let Some(description) = input.description {
             self.store

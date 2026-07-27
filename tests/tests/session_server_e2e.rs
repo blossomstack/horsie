@@ -88,6 +88,7 @@ async fn start_server(
         github_tokens: None,
         mcp: None,
         plugins: None,
+        memory: None,
     };
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
     let (gtx, _) = tokio::sync::broadcast::channel(256);
@@ -124,6 +125,9 @@ async fn start_server(
         horsie_server::mcp::McpStore::new(opened.pool.clone()),
         github.clone(),
     ));
+    let memory = Arc::new(horsie_server::memory::MemoryService::new(
+        horsie_server::memory::MemoryStore::new(opened.pool.clone()),
+    ));
     let state = AppState {
         supervisor: supervisor.clone(),
         journal,
@@ -136,6 +140,7 @@ async fn start_server(
         github,
         mcp,
         plugins,
+        memory,
         runtime_registry: Arc::new(ConnectedRuntimeRegistry::new()),
         local_daemon_hook: Arc::new(|_label: String| {}),
         web_dir: None,
@@ -236,6 +241,7 @@ async fn start_server_with_shared_local(
         github_tokens: None,
         mcp: None,
         plugins: None,
+        memory: None,
     };
     let (gtx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
@@ -252,6 +258,9 @@ async fn start_server_with_shared_local(
         horsie_server::mcp::McpStore::new(opened.pool.clone()),
         github.clone(),
     ));
+    let memory = Arc::new(horsie_server::memory::MemoryService::new(
+        horsie_server::memory::MemoryStore::new(opened.pool.clone()),
+    ));
     let state = AppState {
         supervisor: supervisor.clone(),
         journal,
@@ -264,6 +273,7 @@ async fn start_server_with_shared_local(
         github,
         mcp,
         plugins,
+        memory,
         runtime_registry,
         local_daemon_hook,
         web_dir: None,

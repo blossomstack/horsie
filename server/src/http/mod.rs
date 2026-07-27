@@ -588,7 +588,11 @@ mod tests {
         let app = app(test_state(&tmp).await);
 
         // The migration seeds exactly one space.
-        let res = app.clone().oneshot(get("/api/memory-spaces")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(get("/api/memory-spaces"))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let spaces: Vec<MemorySpaceView> = read_json(res).await;
         assert_eq!(spaces.len(), 1);
@@ -622,7 +626,11 @@ mod tests {
             .unwrap();
         let listed: Vec<MemoryView> = read_json(res).await;
         assert_eq!(listed.len(), 1);
-        let res = app.clone().oneshot(get("/api/memory-spaces")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(get("/api/memory-spaces"))
+            .await
+            .unwrap();
         let spaces: Vec<MemorySpaceView> = read_json(res).await;
         assert_eq!(spaces[0].memory_count, 1);
 
@@ -655,7 +663,11 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
         // A missing memory is a 404.
-        let res = app.clone().oneshot(get("/api/memories/99999")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(get("/api/memories/99999"))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         // Deleting the space takes its memories with it.
