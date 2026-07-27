@@ -10,6 +10,9 @@ use async_trait::async_trait;
 use horsie_runtime_client::{MockTransport, RuntimeClient};
 use std::sync::{Arc, Mutex};
 
+/// Builds the transport handed to each runtime, keyed by runtime id.
+type TransportFactory = Arc<dyn Fn(&str) -> MockTransport + Send + Sync>;
+
 #[derive(Clone)]
 pub struct MockVendor {
     signals: Arc<Mutex<Vec<String>>>,
@@ -18,6 +21,8 @@ pub struct MockVendor {
     last_spec: Arc<Mutex<Option<RuntimeSpec>>>,
     fail_attach: Arc<Mutex<u32>>,
     fail_create: bool,
+    /// Defaults to an always-succeeding transport.
+    transport: TransportFactory,
 }
 
 impl Default for MockVendor {
@@ -33,7 +38,26 @@ impl MockVendor {
             last_spec: Arc::new(Mutex::new(None)),
             fail_attach: Arc::new(Mutex::new(0)),
             fail_create: false,
+            transport: Arc::new(|_id| MockTransport::ok("")),
         }
+    }
+
+    /// Supply the transport backing every runtime this vendor hands out. The
+    /// runtime id is passed so `create` and `attach` can differ — e.g. a doomed
+    /// runtime that recovers on re-attach.
+    #[must_use]
+    pub fn with_transport(
+        mut self,
+        make: impl Fn(&str) -> MockTransport + Send + Sync + 'static,
+    ) -> Self {
+        self.transport = Arc::new(make);
+        self
+    }
+
+    /// Every runtime answers `n` tool calls, then reports `Disconnected` forever.
+    #[must_use]
+    pub fn disconnect_runtime_after(self, n: usize) -> Self {
+        self.with_transport(move |_id| MockTransport::disconnect_after(n))
     }
 
     /// The spec passed to the most recent `create` or `attach` call.
@@ -84,7 +108,7 @@ impl MockVendor {
 
     fn runtime(&self, runtime_id: &str) -> VendorRuntime {
         VendorRuntime {
-            runtime_client: RuntimeClient::new(MockTransport::ok("")),
+            runtime_client: RuntimeClient::new((self.transport)(runtime_id)),
             handle: Arc::new(MockHandle {
                 signals: self.signals.clone(),
                 runtime_id: runtime_id.to_string(),
@@ -204,6 +228,33 @@ mod tests {
         let rt = v.create("s2", &test_spec()).await.unwrap();
         rt.handle.stop().await;
         assert_eq!(v.signals(), vec!["create:s2", "stop:s2"]);
+    }
+
+    fn echo_call() -> horsie_models::runtime::ToolCall {
+        horsie_models::runtime::ToolCall::Bash(horsie_models::runtime::BashInput {
+            command: "echo hi".into(),
+            timeout_secs: None,
+            workspace: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn with_transport_supplies_the_runtime_client() {
+        let v = MockVendor::new().with_transport(|_id| MockTransport::disconnect_after(0));
+        let rt = v.create("s1", &test_spec()).await.unwrap();
+        let err = rt.runtime_client.invoke(echo_call()).await.unwrap_err();
+        assert!(
+            matches!(err, horsie_runtime_client::RuntimeCallError::Transport(_)),
+            "a disconnected transport must surface as a transport error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_runtime_after_is_sugar_over_with_transport() {
+        let v = MockVendor::new().disconnect_runtime_after(1);
+        let rt = v.create("s2", &test_spec()).await.unwrap();
+        assert!(rt.runtime_client.invoke(echo_call()).await.is_ok());
+        assert!(rt.runtime_client.invoke(echo_call()).await.is_err());
     }
 
     #[tokio::test]
