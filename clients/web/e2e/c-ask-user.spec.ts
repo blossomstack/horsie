@@ -135,3 +135,59 @@ test("C3: an open question with no choices takes a typed answer", async ({
   await expectStatus(page, "Idle");
   expect(await answersSent(mock)).toEqual(["Ferdinand"]);
 });
+
+test("C4: a multi-select ask sends every ticked choice", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.queueToolCall("ask_user", {
+    question: "Which languages should I target?",
+    choices: ["rust", "typescript", "python"],
+    multiple: true,
+  });
+  await mock.queueText("Targeting both.");
+  await createSession(page, appBase);
+
+  await sendMessage(page, "pick languages");
+  await expect(page.getByTestId("ask-user-card")).toBeVisible();
+
+  const rust = page.locator('[data-testid="ask-user-choice"][data-value="rust"]');
+  const ts = page.locator('[data-testid="ask-user-choice"][data-value="typescript"]');
+
+  // Multi-select accumulates rather than replacing.
+  await rust.click();
+  await ts.click();
+  await expect(rust).toHaveAttribute("data-selected", "true");
+  await expect(ts).toHaveAttribute("data-selected", "true");
+
+  await page.getByTestId("ask-user-send").click();
+
+  await expect(page.getByTestId("assistant-text")).toContainText("Targeting both.");
+  expect(await answersSent(mock)).toEqual(["rust, typescript"]);
+  await expect(page.getByTestId("ask-user-answer")).toHaveText("rust, typescript");
+});
+
+test("C5: a choice and a typed note are sent together", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.queueToolCall("ask_user", {
+    question: "Which color do you prefer?",
+    choices: ["red", "blue"],
+  });
+  await mock.queueText("Understood.");
+  await createSession(page, appBase);
+
+  await sendMessage(page, "pick a color for me");
+  await expect(page.getByTestId("ask-user-card")).toBeVisible();
+
+  await page.locator('[data-testid="ask-user-choice"][data-value="blue"]').click();
+  await page.getByTestId("ask-user-text").fill("but only for the header");
+  await page.getByTestId("ask-user-send").click();
+
+  await expect(page.getByTestId("assistant-text")).toContainText("Understood.");
+  // Picks first, blank line, then the note — see `composeAnswer`.
+  expect(await answersSent(mock)).toEqual(["blue\n\nbut only for the header"]);
+});
