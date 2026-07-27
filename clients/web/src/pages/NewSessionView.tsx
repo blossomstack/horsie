@@ -58,7 +58,6 @@ export function NewSessionView() {
       <SessionConfigBar mode="draft" draft={draft} />
       <Composer
         status={SessionStatusKind.Idle}
-        pendingQuestion={null}
         busy={create.isPending}
         blockedReason={draft.blockedReason}
         onSend={handleSend}
