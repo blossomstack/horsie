@@ -61,6 +61,21 @@ struct Envelope<'a> {
     event: &'a SessionEvent,
 }
 
+/// Live-only frames the server sends without an SSE id: deltas, tool starts,
+/// status changes, errors, and progression. Everything else (Message,
+/// ToolResult, TurnCompleted, TaskListChanged, Asked) is journaled and
+/// id-stamped.
+fn is_ephemeral(event: &SessionEvent) -> bool {
+    matches!(
+        event,
+        SessionEvent::Delta(_)
+            | SessionEvent::ToolStart(_)
+            | SessionEvent::StatusChanged(_)
+            | SessionEvent::Error(_)
+            | SessionEvent::Progressed(_)
+    )
+}
+
 /// Appends filtered session events to the output file, tracking the resume
 /// cursor (last durable journal sequence seen, written or not).
 struct SessionSink {
@@ -89,27 +104,37 @@ impl SessionSink {
     /// log-and-skip posture); the cursor still advances past durable ids so a
     /// reconnect never replays a skipped event.
     fn handle(&mut self, sse_id: &str, data: &str) -> Result<bool, CliError> {
-        let seq: Option<u64> = if sse_id.is_empty() {
+        let id: Option<u64> = if sse_id.is_empty() {
             None
         } else {
             match sse_id.parse() {
                 Ok(s) => Some(s),
                 Err(_) => {
-                    eprintln!("warning: non-numeric SSE id '{sse_id}'; treating as ephemeral");
+                    eprintln!("warning: non-numeric SSE id '{sse_id}'; ignoring it");
                     None
                 }
             }
         };
-        if let Some(s) = seq {
-            self.cursor = Some(s);
-        }
         let event: SessionEvent = match serde_json::from_str(data) {
             Ok(e) => e,
             Err(e) => {
+                // Can't tell durable from ephemeral; trust the id and skip
+                // ahead so a reconnect doesn't replay the corrupt event.
+                if let Some(s) = id {
+                    self.cursor = Some(s);
+                }
                 eprintln!("warning: skipping unparseable event: {e}");
                 return Ok(false);
             }
         };
+        // Ephemeral frames are sent live-only without an `id:` field, but per
+        // the SSE spec the client reports the stream's *last* id for them.
+        // Null the stamp and leave the cursor alone — only durable (journaled)
+        // events carry a meaningful sequence.
+        let seq = if is_ephemeral(&event) { None } else { id };
+        if let Some(s) = seq {
+            self.cursor = Some(s);
+        }
         if !self.mode.allows(&event) {
             return Ok(false);
         }
@@ -149,6 +174,10 @@ pub async fn tail(
         server.trim_end_matches('/')
     );
     let mut backoff = Duration::from_secs(1);
+    // One pinned Ctrl-C future for the whole tail: a fresh `ctrl_c()` only
+    // fires on signals received *after* its creation, so re-creating it per
+    // select iteration (or having none alive during backoff) loses signals.
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
     // Outer loop: one iteration per (re)connection. Inner loop: consume the
     // stream; `break` reconnects, `return` exits (Ctrl-C, unknown session).
     loop {
@@ -160,7 +189,7 @@ pub async fn tail(
             EventSource::new(req).map_err(|e| CliError::Server(format!("connect {url}: {e}")))?;
         loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
+                _ = &mut ctrl_c => {
                     es.close();
                     sink.flush()?;
                     return Ok(());
@@ -187,7 +216,14 @@ pub async fn tail(
         }
         es.close();
         eprintln!("disconnected; retrying in {}s", backoff.as_secs());
-        tokio::time::sleep(backoff).await;
+        // Ctrl-C must interrupt the backoff too, not just the stream.
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                sink.flush()?;
+                return Ok(());
+            }
+            _ = tokio::time::sleep(backoff) => {}
+        }
         backoff = (backoff * 2).min(BACKOFF_CAP);
     }
 }
@@ -377,6 +413,24 @@ mod tests {
         // Cursor advanced past the skipped durable event, so a reconnect does
         // not replay it.
         assert_eq!(s.cursor(), Some(10));
+    }
+
+    #[test]
+    fn ephemeral_event_with_inherited_sse_id_is_nulled_and_does_not_move_cursor() {
+        // Per the SSE spec, an event without `id:` inherits the stream's last
+        // id; the server sends Deltas id-less, so reqwest-eventsource reports
+        // the previous durable seq (here "12", ahead of the cursor at 9).
+        // The envelope must still record null and the cursor must not move.
+        let (mut s, _dir, path) = sink(EventsMode::All, Some(9));
+        let data = serde_json::to_string(&SessionEvent::Delta(DeltaEvent {
+            text: "chunk".into(),
+        }))
+        .unwrap();
+        assert!(s.handle("12", &data).unwrap());
+        s.flush().unwrap();
+        let got = lines(&path);
+        assert_eq!(got[0]["seq"], serde_json::Value::Null);
+        assert_eq!(s.cursor(), Some(9));
     }
 
     #[test]

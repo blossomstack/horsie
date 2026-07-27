@@ -63,6 +63,19 @@ Each line is a self-describing envelope so resume works in both modes:
 - The envelope is used in `messages` mode too, keeping both modes' files
   interchangeable and resumable.
 
+SSE id inheritance (found in E2E): per the SSE spec, an event without an
+`id:` field inherits the stream's *last* id, and `reqwest-eventsource`
+implements this. The server sends ephemeral frames id-less, so the client
+must decide by event type: the live-only variants (`Delta`, `ToolStart`,
+`StatusChanged`, `Error`, `Progressed`) are always stamped `"seq": null` and
+never move the resume cursor; journaled variants (`Message`, `ToolResult`,
+`TurnCompleted`, `TaskListChanged`, `Asked`) carry their real sequence.
+
+Ctrl-C: the tail holds a single pinned `ctrl_c()` future across both the
+stream loop and the backoff sleep — a fresh `ctrl_c()` only fires for
+signals received after its creation, so re-creating it per loop iteration
+loses Ctrl-C presses that land during reconnect backoff.
+
 Known limitation: in `--events all` mode, a few id-less ephemeral events at a
 reconnect boundary may be duplicated. Durable (journaled) events never are.
 
