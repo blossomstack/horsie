@@ -10,6 +10,7 @@ use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::SessionEventSink;
 use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::supervisor::SessionSupervisorCommand;
+use crate::sessions::title_tool::normalize_session_title;
 use crate::sessions::{SessionFrame, UserMessageError};
 use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorRuntime};
 use async_trait::async_trait;
@@ -106,6 +107,11 @@ pub enum SessionCommand {
     AgentOutcome(AgentOutcome, u64),
     /// Internal: post-recovery reconciliation (`Running` → `Interrupted`).
     ReconcileInterrupted,
+    /// Set the session title from the built-in title tool.
+    SetSessionTitle {
+        title: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// Events recording a session's lifecycle. Persisted.
@@ -189,7 +195,7 @@ enum WakeMode {
 
 /// Longest auto-derived session title, in characters (display metadata only —
 /// mirrors how chat products title a conversation from its first message).
-const TITLE_MAX_CHARS: usize = 60;
+const TITLE_MAX_CHARS: usize = crate::sessions::title_tool::SESSION_TITLE_MAX_CHARS;
 
 /// A short title derived from a user's first message, or `None` if it has no
 /// usable text (e.g. all whitespace).
@@ -1104,6 +1110,14 @@ impl EventSourcedActor for SessionActor {
                     CommandEffect::none()
                 }
             }
+            SessionCommand::SetSessionTitle { title, reply } => {
+                let result = match normalize_session_title(&title) {
+                    Ok(title) => self.rename_session(title).await,
+                    Err(error) => Err(error.to_string()),
+                };
+                let _ = reply.send(result);
+                CommandEffect::none()
+            }
         }
     }
 
@@ -1428,6 +1442,73 @@ mod tests {
             h.published_titles.recv().await.unwrap(),
             "fix the login redirect"
         );
+    }
+
+    #[tokio::test]
+    async fn set_session_title_replaces_a_creation_name() {
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let mut spec = spec_fixture("mock");
+        spec.name = Some("Creation name".into());
+        let mut h = harness_custom(
+            journal,
+            MockVendor::new(),
+            Uuid::new_v4(),
+            spec,
+            None,
+        );
+
+        let first = h
+            .actor
+            .ask(|reply| SessionCommand::SetSessionTitle {
+                title: "  Better model title  ".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, "Better model title");
+        assert_eq!(h.names.recv().await.unwrap(), "Better model title");
+        assert_eq!(
+            h.published_titles.recv().await.unwrap(),
+            "Better model title"
+        );
+
+        let latest = h
+            .actor
+            .ask(|reply| SessionCommand::SetSessionTitle {
+                title: "Latest title wins".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest, "Latest title wins");
+        assert_eq!(h.names.recv().await.unwrap(), "Latest title wins");
+        assert_eq!(
+            h.published_titles.recv().await.unwrap(),
+            "Latest title wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_session_title_rejects_invalid_titles_without_renaming() {
+        let mut h = harness_on(Arc::new(InMemoryJournal::new()), MockVendor::new());
+
+        let too_long = "é".repeat(61);
+        for title in ["   ", "one\ntwo", too_long.as_str()] {
+            let error = h
+                .actor
+                .ask(|reply| SessionCommand::SetSessionTitle {
+                    title: title.to_string(),
+                    reply,
+                })
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert!(!error.is_empty());
+            assert!(h.names.try_recv().is_err());
+            assert!(h.published_titles.try_recv().is_err());
+        }
     }
 
     #[tokio::test]
