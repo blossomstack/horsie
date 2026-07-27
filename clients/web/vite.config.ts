@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -9,6 +9,10 @@ const HORSIE_SERVER = process.env.HORSIE_SERVER ?? "http://127.0.0.1:3789";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.{ts,tsx}"],
+  },
   server: {
     port: 5299,
     proxy: {

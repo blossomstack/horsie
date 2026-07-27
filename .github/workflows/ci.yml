@@ -88,6 +88,25 @@ jobs:
       - name: Fail on uncommitted drift
         run: git diff --exit-code clients/ts/src/generated
 
+  web-unit:
+    name: Web unit tests (Vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install web dependencies
+        working-directory: clients/web
+        run: bun install --frozen-lockfile
+
+      - name: Run unit tests
+        working-directory: clients/web
+        run: bun run test:unit
+
   web-e2e:
     name: Web e2e (Playwright)
     runs-on: ubuntu-latest
