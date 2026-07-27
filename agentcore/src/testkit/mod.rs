@@ -5,6 +5,9 @@
 //! provider conformance suite, workflow, server) when they enable
 //! `horsie-agentcore/test-util`.
 
+pub mod script;
+pub use script::{Script, ScriptExhausted};
+
 use crate::{
     error::{LlmError, ToolCallError},
     events::{EventSink, EventSinkError},
