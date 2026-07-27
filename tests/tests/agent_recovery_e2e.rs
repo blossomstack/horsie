@@ -229,3 +229,95 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
         unmatched_tool_uses(&body)
     );
 }
+
+/// A second `Run` taken while a run is already in flight must be refused, not
+/// started. `start_run` overwrites `self.running` with a fresh cancel token, so
+/// accepting one orphans the first run's token and leaves two background loops
+/// persisting interleaved events into a single `agent/<id>` journal.
+///
+/// This is the last line of defence: the server no longer reaches it (a session
+/// conflicts a mid-turn message at the `SessionActor`), but `WorkflowActor` also
+/// issues these commands, and nothing in the type system prevents a third caller.
+#[tokio::test]
+async fn a_second_run_while_one_is_in_flight_is_refused() {
+    let mock = MockLlmServer::builder().build().await;
+    // Turn 1 hangs inside the provider until the test releases it, so the second
+    // command lands with `self.running` still `Some`.
+    let block = mock.blocking_response("turn one");
+
+    let session_id = uuid::Uuid::new_v4();
+    let journal = Arc::new(InMemoryJournal::new());
+    let (tx, mut outcomes) = tokio::sync::mpsc::channel(8);
+    let ctx = AgentRuntimeContext {
+        context_provider: Arc::new(FixedContextProvider {
+            provider: provider_at(&mock.url()),
+            toolbox: Arc::new(ReadFileToolbox),
+        }),
+        event_sink: Arc::new(NoopSink),
+        parent: Arc::new(OutcomeChannel(tx)),
+        session_id,
+    };
+    let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+        system_prompt: None,
+        output_schema: None,
+        allow_ask_user: false,
+        allow_timers: None,
+        max_iterations: None,
+        max_retries: None,
+        allowed_tools: None,
+    });
+    params.interactive = true;
+
+    let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
+    agent
+        .tell(AgentCommand::Run {
+            input: "first".into(),
+        })
+        .await
+        .unwrap();
+    block.wait_until_received().await;
+
+    // The racing second command, delivered while turn 1 is provably in flight.
+    agent
+        .tell(AgentCommand::Run {
+            input: "second".into(),
+        })
+        .await
+        .unwrap();
+
+    block.release();
+    tokio::time::timeout(Duration::from_secs(5), outcomes.recv())
+        .await
+        .expect("timed out waiting for turn one")
+        .expect("outcome channel closed");
+
+    // The durable record is the assertion that matters: a refused command
+    // persists nothing, so "second" must never have entered the history. If it
+    // did, a second run took it — and the two runs share this journal.
+    let inputs = input_messages(&journal, session_id).await;
+    assert_eq!(
+        inputs,
+        vec!["first".to_string()],
+        "the refused command must not reach the journal"
+    );
+}
+
+/// The text of every `InputMessage` in an agent's journal, in order.
+async fn input_messages(journal: &Arc<InMemoryJournal>, session_id: uuid::Uuid) -> Vec<String> {
+    use futures_util::StreamExt;
+    let pid = AgentActor::persistence_id_for(session_id);
+    let mut out = Vec::new();
+    let mut stream = journal.replay(&pid, 0).await;
+    while let Some(Ok(bytes)) = stream.next().await {
+        if let Ok(AgentDomainEvent::InputMessage { message }) =
+            serde_json::from_slice::<AgentDomainEvent>(&bytes)
+        {
+            for part in &message.parts {
+                if let ContentPart::Text(t) = part {
+                    out.push(t.text.clone());
+                }
+            }
+        }
+    }
+    out
+}

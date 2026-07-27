@@ -631,9 +631,20 @@ impl SessionActor {
                 let _ = reply.send(Err(UserMessageError::TurnInFlight));
                 CommandEffect::none()
             }
-            // Answer a pending ask. Idempotent-resume: stay AwaitingInput until
-            // the agent's own outcome persists the next state (a crash between
-            // the inject and the agent's durable input would otherwise wedge).
+            // Answer a pending ask. The injected answer resumes the turn, so the
+            // session is Running again — exactly as if the user had sent a new
+            // message. Leaving it AwaitingInput kept the composer enabled and the
+            // Stop button hidden for the whole resumed turn, and let a follow-up
+            // re-enter this branch: a second `InjectToolResult` for the *same*
+            // tool call id, and a second concurrent run on one agent and one
+            // journal. `TurnStarted` clears `pending_ask`, so the re-entry is
+            // gone and the follow-up conflicts like any other mid-turn message.
+            //
+            // The cost is a narrow crash window: a crash between this persist and
+            // the agent's own durable input loses the answer text (recovery
+            // reconciles Running -> Interrupted, and `sanitize_for_resume` repairs
+            // the dangling tool call). Losing one retypeable message beats a
+            // duplicated tool result, which bricks every later turn.
             Some(SessionStatus::AwaitingInput) if state.pending_ask.is_some() => {
                 let tool_call_id = state.pending_ask.clone().unwrap_or_default();
                 match self.wake(ctx, WakeMode::Attach).await {
@@ -647,7 +658,8 @@ impl SessionActor {
                                 .await;
                         }
                         let _ = reply.send(Ok(()));
-                        CommandEffect::none()
+                        self.report(SessionStatus::Running).await;
+                        CommandEffect::persist(vec![SessionDomainEvent::TurnStarted])
                     }
                     Err(e) => {
                         let _ = reply.send(Err(UserMessageError::RecoveryFailed(e.clone())));
@@ -1942,5 +1954,119 @@ mod tests {
         .await;
         assert!(stopped.is_ok(), "Stop must not block on a paused agent");
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Stopped);
+    }
+
+    /// Awaits the next reported status, failing rather than hanging when the
+    /// expected transition never comes.
+    async fn next_status(h: &mut Harness) -> SessionStatus {
+        tokio::time::timeout(std::time::Duration::from_secs(5), h.statuses.recv())
+            .await
+            .expect("timed out waiting for a status transition")
+            .expect("status channel closed")
+    }
+
+    /// An `ask_user` response whose tool call the tests below answer.
+    fn ask_response() -> CompletionResponse {
+        CompletionResponse {
+            parts: vec![ContentPart::ToolCall(horsie_agentcore::ToolCallPart {
+                id: "ask-1".into(),
+                name: ASK_USER_TOOL.to_string(),
+                input: serde_json::json!({"question": "which one?"}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::without_cache(6, 3),
+        }
+    }
+
+    /// Drives a session to `AwaitingInput` on tool call `ask-1`.
+    async fn driven_to_awaiting_input(
+        h: &mut Harness,
+        entered: &mut tokio::sync::mpsc::UnboundedReceiver<oneshot::Sender<()>>,
+    ) {
+        h.actor
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "hi".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next_status(h).await, SessionStatus::Running);
+        let _ = entered
+            .recv()
+            .await
+            .expect("the LLM call is in flight")
+            .send(());
+        assert_eq!(next_status(h).await, SessionStatus::AwaitingInput);
+    }
+
+    /// Answering a pending ask resumes the turn, so the session must go back to
+    /// `Running`. Staying `AwaitingInput` leaves the composer enabled and the
+    /// Stop button hidden for the whole resumed turn.
+    #[tokio::test]
+    async fn answering_an_ask_reports_running() {
+        let (provider, mut entered) =
+            BlockingProvider::new(vec![ask_response(), text_response("done")]);
+        let mut h = harness_with_provider(MockVendor::new(), provider);
+        driven_to_awaiting_input(&mut h, &mut entered).await;
+
+        h.actor
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "the first one".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next_status(&mut h).await, SessionStatus::Running);
+
+        let _ = entered
+            .recv()
+            .await
+            .expect("the resumed turn's call is in flight")
+            .send(());
+        assert_eq!(next_status(&mut h).await, SessionStatus::Idle);
+    }
+
+    /// A follow-up sent while the ask-resumed turn is still running must be
+    /// rejected. Accepting it injects a second tool result for the *same*
+    /// `tool_call_id` and starts a second run against one agent and one journal.
+    #[tokio::test]
+    async fn follow_up_during_an_ask_resumed_turn_conflicts() {
+        let (provider, mut entered) =
+            BlockingProvider::new(vec![ask_response(), text_response("done")]);
+        let mut h = harness_with_provider(MockVendor::new(), provider);
+        driven_to_awaiting_input(&mut h, &mut entered).await;
+
+        h.actor
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "the first one".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next_status(&mut h).await, SessionStatus::Running);
+        // Hold the resumed turn's call open so the follow-up races it.
+        let release = entered
+            .recv()
+            .await
+            .expect("the resumed turn's call is in flight");
+
+        let follow_up = h
+            .actor
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "actually, wait".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(follow_up, Err(UserMessageError::TurnInFlight)),
+            "a follow-up during the resumed turn must conflict, got {follow_up:?}"
+        );
+
+        let _ = release.send(());
+        assert_eq!(next_status(&mut h).await, SessionStatus::Idle);
     }
 }

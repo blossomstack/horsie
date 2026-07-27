@@ -871,6 +871,23 @@ impl EventSourcedActor for AgentActor {
         ctx: &mut ActorContext<Self>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
+            // A run is already in flight. `start_run` would overwrite
+            // `self.running` with a fresh cancel token, orphaning the live run's
+            // token and leaving two background loops persisting interleaved
+            // events into one `agent/<id>` journal — for `InjectToolResult`,
+            // two `tool_result`s for the same `tool_call_id`, which makes the
+            // provider 400 on every later turn. Callers are expected to gate
+            // this themselves (the server conflicts mid-turn messages); refusing
+            // here keeps a caller that doesn't from corrupting the journal.
+            AgentCommand::Run { .. } | AgentCommand::InjectToolResult { .. }
+                if self.running.is_some() =>
+            {
+                tracing::warn!(
+                    session_id = %self.ctx.session_id,
+                    "refusing a run command while a run is in flight"
+                );
+                CommandEffect::none()
+            }
             AgentCommand::Run { input } => {
                 let agent_input = AgentInput::user_message(new_message_id(), input);
                 // Persist the input message here (not via the streaming sink), so a
