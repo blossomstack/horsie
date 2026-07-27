@@ -229,8 +229,10 @@ fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
 }
 
 fn to_wire_history(page: AgentHistoryPage) -> HistoryPage {
+    let mut messages = page.messages;
+    crate::wire_redact::strip_thinking_signatures(&mut messages);
     HistoryPage {
-        messages: page.messages,
+        messages,
         has_more: page.has_more,
         tasks: page.tasks.map(|tasks| {
             tasks

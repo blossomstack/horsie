@@ -130,8 +130,9 @@ pub async fn replay_session_events(
 /// Map one journaled agent event onto its wire shape (`None` = not surfaced).
 fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
     match event {
-        AgentDomainEvent::InputMessage { message }
-        | AgentDomainEvent::MessageComplete { message } => {
+        AgentDomainEvent::InputMessage { mut message }
+        | AgentDomainEvent::MessageComplete { mut message } => {
+            crate::wire_redact::strip_message_signature(&mut message);
             Some(SessionEvent::Message(MessageEvent { message }))
         }
         AgentDomainEvent::ToolComplete {
@@ -293,5 +294,31 @@ mod tests {
         let state = fold_session_state(&journal, sid).await;
         assert_eq!(state.pending_question.as_deref(), Some("which one?"));
         assert_eq!(state.pending_ask.as_deref(), Some("tc"));
+    }
+
+    #[test]
+    fn wire_event_strips_thinking_signature() {
+        use horsie_models::agent::{ContentPart, Message, Role, ThinkingPart};
+
+        let message = Message {
+            id: "m1".into(),
+            role: Role::Assistant,
+            parts: vec![ContentPart::Thinking(ThinkingPart {
+                text: "reasoning".into(),
+                signature: Some("opaque-blob".into()),
+            })],
+        };
+        let wired = wire_event(AgentDomainEvent::MessageComplete { message })
+            .expect("MessageComplete should surface");
+        match wired {
+            SessionEvent::Message(m) => match &m.message.parts[0] {
+                ContentPart::Thinking(th) => {
+                    assert_eq!(th.signature, None);
+                    assert_eq!(th.text, "reasoning");
+                }
+                other => panic!("expected Thinking, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
     }
 }
