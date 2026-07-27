@@ -6,6 +6,11 @@ description = "Client for the horsie runtime"
 version = "0.1.6"
 edition = "2024"
 
+[features]
+# Exposes `testkit` (MockTransport and its fault modes). Pulls in agentcore's
+# testkit for `Script`.
+test-util = ["horsie-agentcore/test-util"]
+
 [dependencies]
 horsie-models = { version = "0.1.6", path = "../models" }
 horsie-agentcore = { version = "0.1.6", path = "../agentcore" }

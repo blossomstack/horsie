@@ -23,6 +23,7 @@ uuid           = { workspace = true }
 eval           = { workspace = true }
 
 [dev-dependencies]
+horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
 horsie-mock-llm = { path = "../providers/mock-llm" }
 horsie-anthropic = { path = "../providers/anthropic" }
 futures-util = { workspace = true }

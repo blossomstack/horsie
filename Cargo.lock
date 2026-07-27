@@ -2081,6 +2081,7 @@ dependencies = [
  "horsie-mock-llm",
  "horsie-models",
  "horsie-openai",
+ "horsie-runtime-client",
  "horsie-server",
  "horsie-workflow",
  "reqwest 0.12.28",
