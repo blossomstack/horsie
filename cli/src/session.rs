@@ -2,11 +2,14 @@
 //! JSONL file, with idempotent resume via the journal sequence cursor.
 
 use crate::error::CliError;
+use futures_util::StreamExt;
 use horsie_models::session::SessionEvent;
+use reqwest_eventsource::{Event, EventSource};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Which session events land in the JSONL file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -117,6 +120,75 @@ impl SessionSink {
         // events the user already considers archived.
         self.flush()?;
         Ok(true)
+    }
+}
+
+/// Reconnect backoff cap: starts at 1s, doubles per failed connection.
+const BACKOFF_CAP: Duration = Duration::from_secs(30);
+
+/// Stream a session's events into `output` until Ctrl-C. Backfill, live
+/// tail, and reconnect are one mechanism: the server replays the journal
+/// after the `Last-Event-ID` cursor, then bridges to the live broadcast.
+pub async fn tail(
+    server: &str,
+    session_id: &str,
+    output: &Path,
+    mode: EventsMode,
+) -> Result<(), CliError> {
+    let path = output_path(output, session_id);
+    let cursor = scan_last_seq(&path)?;
+    let mut sink = SessionSink::new(open_append(&path)?, cursor, mode);
+    eprintln!(
+        "tailing session {session_id} → {} (Ctrl-C to stop)",
+        path.display()
+    );
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/api/sessions/{session_id}/events",
+        server.trim_end_matches('/')
+    );
+    let mut backoff = Duration::from_secs(1);
+    // Outer loop: one iteration per (re)connection. Inner loop: consume the
+    // stream; `break` reconnects, `return` exits (Ctrl-C, unknown session).
+    loop {
+        let mut req = client.get(&url);
+        if let Some(seq) = sink.cursor() {
+            req = req.header("Last-Event-ID", seq.to_string());
+        }
+        let mut es = EventSource::new(req)
+            .map_err(|e| CliError::Server(format!("connect {url}: {e}")))?;
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    es.close();
+                    sink.flush()?;
+                    return Ok(());
+                }
+                ev = es.next() => match ev {
+                    None => break,
+                    Some(Ok(Event::Open)) => backoff = Duration::from_secs(1),
+                    Some(Ok(Event::Message(m))) => {
+                        sink.handle(&m.id, &m.data)?;
+                    }
+                    Some(Err(reqwest_eventsource::Error::InvalidStatusCode(status, _)))
+                        if status == reqwest::StatusCode::NOT_FOUND =>
+                    {
+                        es.close();
+                        return Err(CliError::Server(format!("no such session: {session_id}")));
+                    }
+                    Some(Err(reqwest_eventsource::Error::StreamEnded)) => break,
+                    Some(Err(e)) => {
+                        eprintln!("warning: stream error: {e}; reconnecting");
+                        break;
+                    }
+                }
+            }
+        }
+        es.close();
+        eprintln!("disconnected; retrying in {}s", backoff.as_secs());
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(BACKOFF_CAP);
     }
 }
 

@@ -12,4 +12,6 @@ pub enum CliError {
     Provider(String),
     #[error("executor error: {0}")]
     Executor(String),
+    #[error("session server error: {0}")]
+    Server(String),
 }
