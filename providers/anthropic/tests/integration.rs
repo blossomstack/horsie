@@ -226,7 +226,7 @@ async fn test_thinking_block_and_signature() {
         .thinking("I should analyse carefully.", "sig-abc-123")
         .build()
         .await;
-    let p = provider_at(&mock.url());
+    let p = provider_at(&mock.url()).with_keep_thinking_signature(true);
     let msgs = user_messages("think");
     let (sink, events) = collect_sink();
     let resp = p
@@ -251,6 +251,37 @@ async fn test_thinking_block_and_signature() {
         evts.iter()
             .any(|e| matches!(e, AgentEvent::ThinkingChunk(_)))
     );
+}
+
+/// The default: thinking text is captured, the signature blob is not. Most
+/// Anthropic-compatible endpoints never validate signatures on replay, and no
+/// client reads them, so retention is opt-in per provider.
+#[tokio::test]
+async fn test_thinking_signature_dropped_by_default() {
+    let mock = MockLlmServer::builder()
+        .thinking("I should analyse carefully.", "sig-abc-123")
+        .build()
+        .await;
+    let p = provider_at(&mock.url());
+    let msgs = user_messages("think");
+    let (sink, _events) = collect_sink();
+    let resp = p
+        .complete(no_tools_request(&msgs), "msg-1", &sink)
+        .await
+        .unwrap();
+    let th = resp
+        .parts
+        .iter()
+        .find_map(|p| {
+            if let ContentPart::Thinking(t) = p {
+                Some(t)
+            } else {
+                None
+            }
+        })
+        .expect("expected Thinking part");
+    assert_eq!(th.text, "I should analyse carefully.");
+    assert_eq!(th.signature, None);
 }
 
 // ── with tools in request ─────────────────────────────────────────────────────

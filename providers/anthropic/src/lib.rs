@@ -80,6 +80,8 @@ pub struct AnthropicProvider {
     base_url: Option<String>,
     session_id: Option<String>,
     thinking_budget: Option<u32>,
+    /// Retain provider thinking-block signatures captured from this endpoint.
+    keep_thinking_signature: bool,
     max_tokens: Option<u32>,
     retry_base_secs: u64,
 }
@@ -127,6 +129,7 @@ impl AnthropicProvider {
             base_url,
             session_id: None,
             thinking_budget: None,
+            keep_thinking_signature: false,
             max_tokens: None,
             retry_base_secs: BACKOFF_BASE_SECS,
         })
@@ -143,6 +146,7 @@ impl AnthropicProvider {
             base_url,
             session_id: None,
             thinking_budget: None,
+            keep_thinking_signature: false,
             max_tokens: None,
             retry_base_secs: BACKOFF_BASE_SECS,
         })
@@ -180,6 +184,20 @@ impl AnthropicProvider {
         self
     }
 
+    /// Retain provider thinking-block signatures on captured thinking parts.
+    ///
+    /// Genuine Anthropic validates these on replay, so real Anthropic providers
+    /// must enable this. Anthropic-compatible endpoints do not: verified
+    /// 2026-07-27 against `https://api.kimi.com/coding/` (model `k3`), where
+    /// omitted, empty, altered, and wholly removed signatures were all accepted
+    /// with 200 — including inside tool-use loops. Default off, because the
+    /// blobs run 4-13 KB each and no client reads them.
+    #[must_use]
+    pub fn with_keep_thinking_signature(mut self, keep: bool) -> Self {
+        self.keep_thinking_signature = keep;
+        self
+    }
+
     #[must_use]
     pub fn with_retry_delay_secs(mut self, secs: u64) -> Self {
         self.retry_base_secs = secs;
@@ -204,6 +222,22 @@ impl AnthropicProvider {
                 MessageRole::User
             }
         }
+    }
+
+    /// Build the thinking part for one assembled block, honoring the
+    /// signature-retention policy. `None` when the block carried no text.
+    fn thinking_part(text: &str, signature: &str, keep_signature: bool) -> Option<ContentPart> {
+        if text.is_empty() {
+            return None;
+        }
+        Some(ContentPart::Thinking(ThinkingPart {
+            text: text.to_string(),
+            signature: if keep_signature && !signature.is_empty() {
+                Some(signature.to_string())
+            } else {
+                None
+            },
+        }))
     }
 
     fn parts_to_api_content(parts: &[ContentPart]) -> async_llm::types::MessageContentList {
@@ -552,16 +586,10 @@ impl LlmProvider for AnthropicProvider {
                     input,
                 }));
             } else if let Some((thinking, signature)) = thinking_blocks.get(&idx)
-                && !thinking.is_empty()
+                && let Some(part) =
+                    Self::thinking_part(thinking, signature, self.keep_thinking_signature)
             {
-                parts.push(ContentPart::Thinking(ThinkingPart {
-                    text: thinking.clone(),
-                    signature: if signature.is_empty() {
-                        None
-                    } else {
-                        Some(signature.clone())
-                    },
-                }));
+                parts.push(part);
             }
         }
 
@@ -675,5 +703,60 @@ mod tests {
                 env::set_var("ANTHROPIC_BASE_URL", v);
             }
         }
+    }
+
+    #[test]
+    fn thinking_part_keeps_signature_when_enabled() {
+        let part = AnthropicProvider::thinking_part("reasoning", "sig-blob", true)
+            .expect("non-empty thinking yields a part");
+        match part {
+            ContentPart::Thinking(th) => {
+                assert_eq!(th.text, "reasoning");
+                assert_eq!(th.signature.as_deref(), Some("sig-blob"));
+            }
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thinking_part_drops_signature_when_disabled() {
+        let part = AnthropicProvider::thinking_part("reasoning", "sig-blob", false)
+            .expect("non-empty thinking yields a part");
+        match part {
+            ContentPart::Thinking(th) => {
+                assert_eq!(th.text, "reasoning");
+                assert_eq!(th.signature, None);
+            }
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thinking_part_normalizes_empty_signature_to_none() {
+        let part = AnthropicProvider::thinking_part("reasoning", "", true)
+            .expect("non-empty thinking yields a part");
+        match part {
+            ContentPart::Thinking(th) => assert_eq!(th.signature, None),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thinking_part_skips_empty_thinking() {
+        assert!(AnthropicProvider::thinking_part("", "sig-blob", true).is_none());
+    }
+
+    #[test]
+    fn keep_thinking_signature_defaults_off() {
+        let p = AnthropicProvider::new().expect("provider builds without a key");
+        assert!(!p.keep_thinking_signature);
+    }
+
+    #[test]
+    fn with_keep_thinking_signature_enables_retention() {
+        let p = AnthropicProvider::new()
+            .expect("provider builds without a key")
+            .with_keep_thinking_signature(true);
+        assert!(p.keep_thinking_signature);
     }
 }
