@@ -44,8 +44,11 @@ pub struct WorkspaceInfo {
 }
 
 impl WorkspaceContext {
+    /// True when the scan contributes nothing to the system prompt. `platform`
+    /// counts: it renders a `# Environment` section on its own, so a context
+    /// with no workspace roots is not necessarily empty.
     pub fn is_empty(&self) -> bool {
-        self.workspaces.is_empty()
+        self.workspaces.is_empty() && self.platform.is_none()
     }
     /// Names of all scanned workspaces, in scan order.
     pub fn names(&self) -> Vec<String> {

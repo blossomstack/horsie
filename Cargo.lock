@@ -1655,6 +1655,7 @@ dependencies = [
  "hackamore-agent",
  "horsie-executor",
  "horsie-models",
+ "libc",
  "nono",
  "regex",
  "reqwest 0.12.28",
