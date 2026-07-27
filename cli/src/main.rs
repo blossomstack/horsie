@@ -14,6 +14,7 @@ use horsie::config::HorsieConfig;
 use horsie::connect;
 use horsie::daemon;
 use horsie::error::CliError;
+use horsie::session::{self, EventsMode};
 use horsie::validate::validate;
 use horsie_models::capabilities::CapabilitySpec;
 use horsie_models::daemon::SubmitRequest;
@@ -57,6 +58,11 @@ enum Command {
         #[command(subcommand)]
         action: PluginAction,
     },
+    /// Commands against a session server (`horsie-server`).
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
     /// Dial a session server as this machine's runtime — wraps the standalone
     /// `horsie-runtime --endpoint ...` flow so installing `horsie` is enough.
     Connect {
@@ -76,6 +82,26 @@ enum Command {
         background: bool,
         #[arg(long)]
         config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionAction {
+    /// Stream a session's messages to a local JSONL file until Ctrl-C.
+    /// Resumes after the last recorded event when the output file exists.
+    Tail {
+        /// Session UUID on the server.
+        session_id: String,
+        /// Output file, or an existing directory to write
+        /// `<session-id>.jsonl` into.
+        #[arg(long)]
+        output: PathBuf,
+        /// Session server base URL.
+        #[arg(long, default_value = "http://127.0.0.1:3789")]
+        server: String,
+        /// Which events to write.
+        #[arg(long, value_enum, default_value = "messages")]
+        events: EventsMode,
     },
 }
 
@@ -544,6 +570,17 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 let dir = resolve_plugins_dir(config.as_deref())?;
                 horsie::plugins::remove(&dir, &name)?;
                 println!("removed plugin '{name}'");
+                Ok(0)
+            }
+        },
+        Command::Session { action } => match action {
+            SessionAction::Tail {
+                session_id,
+                output,
+                server,
+                events,
+            } => {
+                session::tail(&server, &session_id, &output, events).await?;
                 Ok(0)
             }
         },

@@ -31,6 +31,9 @@ thiserror       = { workspace = true }
 async-trait     = { workspace = true }
 tracing         = { workspace = true }
 eval            = { workspace = true }
+reqwest           = { workspace = true, features = ["stream"] }
+reqwest-eventsource = { workspace = true }
+futures-util      = { workspace = true }
 
 [dev-dependencies]
 horsie-mock-llm = { path = "../providers/mock-llm" }

@@ -5,4 +5,5 @@ pub mod connect;
 pub mod daemon;
 pub mod error;
 pub mod plugins;
+pub mod session;
 pub mod validate;
