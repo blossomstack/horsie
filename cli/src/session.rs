@@ -4,7 +4,7 @@
 use crate::error::CliError;
 use horsie_models::session::SessionEvent;
 use std::fs::{File, OpenOptions};
-use std::io::BufWriter;
+use std::io::{BufRead, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
 /// Which session events land in the JSONL file.
@@ -47,6 +47,34 @@ fn open_append(path: &Path) -> Result<BufWriter<File>, CliError> {
         .open(path)
         .map_err(|e| CliError::Io(format!("open {}: {e}", path.display())))?;
     Ok(BufWriter::new(file))
+}
+
+/// Probe for resume: only `seq` matters. Deliberately NOT the full
+/// `SessionEvent` — a line from an older/newer schema still yields its cursor.
+#[derive(serde::Deserialize)]
+struct SeqProbe {
+    seq: Option<u64>,
+}
+
+/// Last journal sequence written to `path`, scanning forward with a buffered
+/// reader (no whole-file load, no partial-line edge cases). Absent file →
+/// `Ok(None)` (fresh tail from the beginning of the journal).
+fn scan_last_seq(path: &Path) -> Result<Option<u64>, CliError> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(CliError::Io(format!("read {}: {e}", path.display()))),
+    };
+    let mut last = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|e| CliError::Io(format!("read {}: {e}", path.display())))?;
+        if let Ok(probe) = serde_json::from_str::<SeqProbe>(&line)
+            && probe.seq.is_some()
+        {
+            last = probe.seq;
+        }
+    }
+    Ok(last)
 }
 
 #[cfg(test)]
@@ -101,6 +129,44 @@ mod tests {
         }
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "one\ntwo\n");
+    }
+
+    #[test]
+    fn scan_last_seq_missing_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            scan_last_seq(&dir.path().join("nope.jsonl")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn scan_last_seq_empty_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(scan_last_seq(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn scan_last_seq_returns_the_last_sequenced_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        // A null-seq line after the last sequenced one must not win.
+        std::fs::write(
+            &path,
+            "{\"seq\":1,\"event\":{}}\n{\"seq\":null,\"event\":{}}\n{\"seq\":41,\"event\":{}}\n{\"seq\":null,\"event\":{}}\n",
+        )
+        .unwrap();
+        assert_eq!(scan_last_seq(&path).unwrap(), Some(41));
+    }
+
+    #[test]
+    fn scan_last_seq_skips_corrupt_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        std::fs::write(&path, "{\"seq\":7,\"event\":{}}\nnot-json\n").unwrap();
+        assert_eq!(scan_last_seq(&path).unwrap(), Some(7));
     }
 
     #[test]
