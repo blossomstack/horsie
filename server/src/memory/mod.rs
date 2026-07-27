@@ -6,8 +6,12 @@
 //! Mirrors the `plugins` module's store/service split and shares the config
 //! store's SqlitePool.
 
+mod prompt;
+mod service;
 mod store;
 
+pub use prompt::render_index;
+pub use service::MemoryService;
 pub use store::{MemoryRow, MemorySpaceRow, MemoryStore};
 
 /// Cap on a memory's one-line description. The index ships every description

@@ -1,0 +1,53 @@
+/// Wire contracts for agent-managed long-term memories. A memory space is a
+/// named namespace holding a flat set of memories; sessions select spaces at
+/// creation and the agent manages their contents with the memory_* tools.
+package memory;
+
+/// A memory space as shown in the web UI.
+struct MemorySpaceView {
+    name: String,
+    description: String,
+    /// How many memories the space holds.
+    memory_count: u32,
+}
+
+/// Create a memory space. `name` must be a slug: lowercase letters, digits,
+/// '.', '_' and '-', starting with a letter or digit.
+struct MemorySpaceCreateInput {
+    name: String,
+    description: Option<String>,
+}
+
+/// Rename a space and/or change its description. Omitted fields are unchanged.
+/// Renaming carries the space's memories across.
+struct MemorySpaceUpdateInput {
+    name: Option<String>,
+    description: Option<String>,
+}
+
+/// One memory, body included. Addressed by the agent as `<space>/<name>`.
+struct MemoryView {
+    id: u64,
+    space: String,
+    name: String,
+    /// One line, shown in the agent's prompt index.
+    description: String,
+    /// Markdown body, loaded on demand.
+    content: String,
+    /// Unix epoch seconds.
+    created_at: String,
+    updated_at: String,
+}
+
+struct MemoryCreateInput {
+    space: String,
+    name: String,
+    description: String,
+    content: String,
+}
+
+/// Omitted fields are left unchanged; supplied ones are replaced wholesale.
+struct MemoryUpdateInput {
+    description: Option<String>,
+    content: Option<String>,
+}

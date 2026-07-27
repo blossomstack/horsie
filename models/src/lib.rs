@@ -86,6 +86,11 @@ pub mod mcp {
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod memory {
+    include!(concat!(env!("OUT_DIR"), "/memory/mod.rs"));
+}
+
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod plugins {
     include!(concat!(env!("OUT_DIR"), "/plugins/mod.rs"));
 }
