@@ -1,5 +1,5 @@
 import { Loader2, Plus, Save, Trash2 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { ApiRequestError } from "../api/client";
 import type { ModelCard } from "../api/types";
 import {
@@ -8,6 +8,7 @@ import {
   useDeleteModelCard,
   useUpdateModelCard,
 } from "../hooks/useModelCards";
+import { RowLabel } from "./settings/fields";
 
 /** Admin: operator-facing management surfaces. Model cards is the first
  * section; future admin settings add another `<section>` below. */
@@ -62,14 +63,6 @@ function ModelCardsSection() {
         {cards?.map((c) => <ModelCardRow key={c.modelId} card={c} />)}
       </div>
     </section>
-  );
-}
-
-function RowLabel({ children }: { children: ReactNode }) {
-  return (
-    <span className="mb-1 block text-[11px] font-semibold text-muted">
-      {children}
-    </span>
   );
 }
 

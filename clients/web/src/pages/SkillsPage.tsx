@@ -6,7 +6,7 @@ import {
   Trash2,
   Webhook,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { ApiRequestError } from "../api/client";
 import type { PluginView } from "../api/types";
 import { cn } from "../lib/cn";
@@ -17,6 +17,7 @@ import {
   useSetPluginDefault,
   useUpdatePlugin,
 } from "../hooks/usePlugins";
+import { TextField } from "./settings/fields";
 
 export function SkillsPage() {
   const { data: bundles, isLoading, isError } = usePlugins();
@@ -220,38 +221,6 @@ function BundleRow({ bundle }: { bundle: PluginView }) {
         </div>
       </div>
     </div>
-  );
-}
-
-function RowLabel({ children }: { children: ReactNode }) {
-  return (
-    <span className="mb-1 block text-[11px] font-semibold text-muted">
-      {children}
-    </span>
-  );
-}
-
-function TextField({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <label className="block">
-      <RowLabel>{label}</RowLabel>
-      <input
-        className="input font-mono"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-      />
-    </label>
   );
 }
 
