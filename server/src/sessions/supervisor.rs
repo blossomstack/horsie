@@ -151,26 +151,22 @@ impl SessionSupervisor {
     }
 
     fn publish(&self, id: &str, status: &SessionStatus) {
-        let _ = self
-            .global_tx
-            .send(GlobalSessionEvent::StatusChanged(
-                GlobalSessionStatusEvent {
-                    session_id: id.to_string(),
-                    status: status_kind(status),
-                    reason: status_reason(status),
-                },
-            ));
+        let _ = self.global_tx.send(GlobalSessionEvent::StatusChanged(
+            GlobalSessionStatusEvent {
+                session_id: id.to_string(),
+                status: status_kind(status),
+                reason: status_reason(status),
+            },
+        ));
     }
 
     fn publish_title(&self, id: &str, name: &str) {
         let _ = self
             .global_tx
-            .send(GlobalSessionEvent::TitleChanged(
-                GlobalSessionTitleEvent {
-                    session_id: id.to_string(),
-                    name: name.to_string(),
-                },
-            ));
+            .send(GlobalSessionEvent::TitleChanged(GlobalSessionTitleEvent {
+                session_id: id.to_string(),
+                name: name.to_string(),
+            }));
     }
 
     /// A child's mailbox closed outside the normal lifecycle — its own journal
@@ -419,11 +415,8 @@ impl EventSourcedActor for SessionSupervisor {
                 }])
             }
             SessionSupervisorCommand::RenameSession { id, name, reply } => {
-                CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed {
-                    id,
-                    name,
-                }])
-                .and_ack(reply)
+                CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed { id, name }])
+                    .and_ack(reply)
             }
             SessionSupervisorCommand::PublishSessionTitle { id, name } => {
                 // A rename command that was superseded while its publish request
@@ -622,10 +615,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            rec.spec.name.as_deref(),
-            Some("Investigate login failure")
-        );
+        assert_eq!(rec.spec.name.as_deref(), Some("Investigate login failure"));
     }
 
     #[tokio::test]

@@ -113,9 +113,7 @@ impl Toolbox for SessionTitleToolbox {
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
             .map_err(ToolCallError::ExecutionFailed)?;
-        Ok(Value::String(format!(
-            "Session title set to \"{title}\"."
-        )))
+        Ok(Value::String(format!("Session title set to \"{title}\".")))
     }
 }
 
@@ -130,8 +128,7 @@ mod tests {
     use super::*;
     use crate::sessions::session_actor::SessionCommand;
     use horsie_actor::{
-        ActorContext, CommandEffect, EventSourcedActor, InMemoryJournal, PersistenceId,
-        spawn_root,
+        ActorContext, CommandEffect, EventSourcedActor, InMemoryJournal, PersistenceId, spawn_root,
     };
     use horsie_agentcore::{EmptyToolbox, ToolCallError, Toolbox};
     use serde::{Deserialize, Serialize};
@@ -146,7 +143,10 @@ mod tests {
 
     #[test]
     fn normalize_title_rejects_empty_multiline_and_too_long() {
-        assert_eq!(normalize_session_title("   "), Err(SessionTitleError::Empty));
+        assert_eq!(
+            normalize_session_title("   "),
+            Err(SessionTitleError::Empty)
+        );
         assert_eq!(
             normalize_session_title("one\ntwo"),
             Err(SessionTitleError::Multiline)
@@ -195,9 +195,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             result,
-            serde_json::Value::String(
-                "Session title set to \"Improve session titles\".".into()
-            )
+            serde_json::Value::String("Session title set to \"Improve session titles\".".into())
         );
     }
 
@@ -239,9 +237,8 @@ mod tests {
             _ctx: &mut ActorContext<Self>,
         ) -> CommandEffect<()> {
             if let SessionCommand::SetSessionTitle { title, reply } = cmd {
-                let _ = reply.send(
-                    normalize_session_title(&title).map_err(|error| error.to_string()),
-                );
+                let _ =
+                    reply.send(normalize_session_title(&title).map_err(|error| error.to_string()));
             }
             CommandEffect::none()
         }

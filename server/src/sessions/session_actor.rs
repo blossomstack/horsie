@@ -1464,13 +1464,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let mut spec = spec_fixture("mock");
         spec.name = Some("Creation name".into());
-        let mut h = harness_custom(
-            journal,
-            MockVendor::new(),
-            Uuid::new_v4(),
-            spec,
-            None,
-        );
+        let mut h = harness_custom(journal, MockVendor::new(), Uuid::new_v4(), spec, None);
 
         let first = h
             .actor
