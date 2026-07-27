@@ -769,7 +769,11 @@ mod tests {
             max_tokens: None,
         };
         store
-            .seed_if_missing(&[input("gpt-4o"), input("gpt-4.1"), input("claude-sonnet-4-6")])
+            .seed_if_missing(&[
+                input("gpt-4o"),
+                input("gpt-4.1"),
+                input("claude-sonnet-4-6"),
+            ])
             .await
             .unwrap();
 
@@ -796,43 +800,74 @@ mod tests {
         let app = app(test_state(&tmp).await);
 
         // Empty catalog (test_state does not seed).
-        let res = app.clone().oneshot(get("/api/admin/model-cards")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(get("/api/admin/model-cards"))
+            .await
+            .unwrap();
         let list: Vec<ModelCard> = read_json(res).await;
         assert!(list.is_empty());
 
         // Create.
         let body = serde_json::json!({"modelId": "m1", "name": "Model One", "contextWindow": 8192});
-        let res = app.clone().oneshot(post_json("/api/admin/model-cards", &body)).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/admin/model-cards", &body))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let card: ModelCard = read_json(res).await;
         assert_eq!(card.model_id, "m1");
         assert_eq!(card.max_tokens, None);
 
         // Duplicate → 409.
-        let res = app.clone().oneshot(post_json("/api/admin/model-cards", &body)).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/admin/model-cards", &body))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::CONFLICT);
 
         // Invalid → 422.
         let bad = serde_json::json!({"modelId": "", "name": "x"});
-        let res = app.clone().oneshot(post_json("/api/admin/model-cards", &bad)).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/admin/model-cards", &bad))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
         // Update.
         let upd = serde_json::json!({"name": "Model 1 Renamed", "maxTokens": 2048});
-        let res = app.clone().oneshot(put_json("/api/admin/model-cards/m1", &upd)).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/admin/model-cards/m1", &upd))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let card: ModelCard = read_json(res).await;
         assert_eq!(card.name, "Model 1 Renamed");
         assert_eq!(card.max_tokens, Some(2048));
 
         // Update of unknown → 404.
-        let res = app.clone().oneshot(put_json("/api/admin/model-cards/ghost", &upd)).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/admin/model-cards/ghost", &upd))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         // Delete → 204; second delete → 404.
-        let res = app.clone().oneshot(delete("/api/admin/model-cards/m1")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(delete("/api/admin/model-cards/m1"))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        let res = app.oneshot(delete("/api/admin/model-cards/m1")).await.unwrap();
+        let res = app
+            .oneshot(delete("/api/admin/model-cards/m1"))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -26,7 +26,12 @@ pub(crate) fn map_card_err(e: ModelCardError) -> Api {
 /// public search so admin-only fields can be added later without touching
 /// the public contract).
 pub async fn list_cards(State(state): State<AppState>) -> Result<Json<Vec<ModelCard>>, Api> {
-    state.model_cards.list().await.map(Json).map_err(map_card_err)
+    state
+        .model_cards
+        .list()
+        .await
+        .map(Json)
+        .map_err(map_card_err)
 }
 
 /// `POST /api/admin/model-cards` — create a card; 409 on duplicate `model_id`.
