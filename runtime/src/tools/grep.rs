@@ -124,8 +124,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // 400 files x ~90-byte match rows ≈ 36 KB — past the 20 KB budget.
         for i in 0..400 {
-            std::fs::write(dir.path().join(format!("f{i}.txt")), format!("hit {:>50}\n", i))
-                .unwrap();
+            std::fs::write(
+                dir.path().join(format!("f{i}.txt")),
+                format!("hit {:>50}\n", i),
+            )
+            .unwrap();
         }
         let result = exec(
             dir.path(),

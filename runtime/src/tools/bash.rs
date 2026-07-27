@@ -44,19 +44,22 @@ pub async fn exec(working_dir: &Path, input: BashInput) -> ToolResult {
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
     let drain = |buf: &Arc<Mutex<Vec<u8>>>| {
-        String::from_utf8_lossy(&buf.lock().expect("buffer poisoned")).into_owned()
+        // A poisoned buffer still holds valid bytes; keep them.
+        let guard = buf.lock().unwrap_or_else(|e| e.into_inner());
+        String::from_utf8_lossy(&guard).into_owned()
     };
     let mut readers = Vec::new();
-    {
-        let mut pipe = child.stdout.take().expect("stdout is piped");
-        let buf = Arc::clone(&stdout_buf);
-        readers.push(tokio::spawn(async move {
-            drain_into(&mut pipe, &buf).await;
-        }));
-    }
-    {
-        let mut pipe = child.stderr.take().expect("stderr is piped");
-        let buf = Arc::clone(&stderr_buf);
+    let (Some(out_pipe), Some(err_pipe)) = (child.stdout.take(), child.stderr.take()) else {
+        return ToolResult::Err(ToolError {
+            reason: "failed to capture child output pipes".into(),
+        });
+    };
+    // ChildStdout/ChildStderr are distinct types; box them to treat uniformly.
+    let pipes: [(Box<dyn tokio::io::AsyncRead + Unpin + Send>, _); 2] = [
+        (Box::new(out_pipe), Arc::clone(&stdout_buf)),
+        (Box::new(err_pipe), Arc::clone(&stderr_buf)),
+    ];
+    for (mut pipe, buf) in pipes {
         readers.push(tokio::spawn(async move {
             drain_into(&mut pipe, &buf).await;
         }));
@@ -104,7 +107,10 @@ where
         if n == 0 {
             break;
         }
-        buf.lock().expect("buffer poisoned").extend_from_slice(&chunk[..n]);
+        // A poisoned buffer still holds valid bytes; keep appending.
+        buf.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(&chunk[..n]);
     }
 }
 

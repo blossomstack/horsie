@@ -21,7 +21,12 @@ pub async fn exec(working_dir: &Path, input: FindAndReplaceInput) -> ToolResult 
             None => content.matches(&input.find).count(),
         };
         if count == 0 {
-            return Err(no_match_error(&input.path, &content, &input.find, use_regex));
+            return Err(no_match_error(
+                &input.path,
+                &content,
+                &input.find,
+                use_regex,
+            ));
         }
         if !replace_all && count > 1 {
             return Err(format!(
@@ -167,7 +172,11 @@ mod tests {
         match result {
             ToolResult::Ok(o) => panic!("expected error, got {}", o.stdout),
             ToolResult::Err(e) => {
-                assert!(e.reason.contains("lines 1-2 match ignoring"), "{}", e.reason);
+                assert!(
+                    e.reason.contains("lines 1-2 match ignoring"),
+                    "{}",
+                    e.reason
+                );
                 assert!(e.reason.contains("2→     let x = 1;"), "{}", e.reason);
             }
         }
@@ -183,7 +192,11 @@ mod tests {
         match result {
             ToolResult::Ok(o) => panic!("expected error, got {}", o.stdout),
             ToolResult::Err(e) => {
-                assert!(e.reason.contains("2 regions match ignoring"), "{}", e.reason);
+                assert!(
+                    e.reason.contains("2 regions match ignoring"),
+                    "{}",
+                    e.reason
+                );
             }
         }
     }
