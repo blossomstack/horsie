@@ -21,7 +21,9 @@ fn ask_user_spec() -> ToolSpec {
         name: ASK_USER_TOOL.to_string(),
         description: "Pause and ask the user a clarifying question before continuing, when \
             their intent is ambiguous or a decision needs their input. Optional -- for an \
-            ordinary reply, just answer normally instead of calling this."
+            ordinary reply, just answer normally instead of calling this. Omit `choices` for \
+            an open question; supply `choices` to suggest answers, and set `multiple` when \
+            several may be picked at once."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -34,7 +36,15 @@ fn ask_user_spec() -> ToolSpec {
                 "choices": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional suggested answers."
+                    "description": "Optional suggested answers. The user can always reply in \
+                        their own words instead, so treat these as suggestions and expect an \
+                        answer that is not in the list."
+                },
+                "multiple": {
+                    "type": "boolean",
+                    "description": "Set true when the user may pick any number of the \
+                        choices; omit or set false when exactly one applies. Has no effect \
+                        without `choices`."
                 }
             }
         }),
@@ -103,6 +113,42 @@ mod tests {
         let tb = AskUserToolbox::new(Arc::new(EmptyToolbox));
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec![ASK_USER_TOOL.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn spec_offers_multi_select_and_advertises_the_free_text_fallback() {
+        let tb = AskUserToolbox::new(Arc::new(EmptyToolbox));
+        let spec = tb
+            .specs()
+            .into_iter()
+            .find(|s| s.name == ASK_USER_TOOL)
+            .expect("ask_user is offered");
+        let props = spec
+            .input_schema
+            .get("properties")
+            .expect("schema has properties");
+
+        assert_eq!(
+            props.get("multiple").and_then(|m| m.get("type")),
+            Some(&json!("boolean")),
+            "multi-select must be expressible"
+        );
+        // `question` stays the only required field: choices and multiple are both
+        // optional, so a plain free-text question is still one field.
+        assert_eq!(
+            spec.input_schema.get("required"),
+            Some(&json!(["question"]))
+        );
+
+        let choices_doc = props
+            .get("choices")
+            .and_then(|c| c.get("description"))
+            .and_then(Value::as_str)
+            .expect("choices is documented");
+        assert!(
+            choices_doc.contains("own words"),
+            "the model must be told choices are suggestions, not a constraint: {choices_doc}"
+        );
     }
 
     #[tokio::test]
