@@ -1,23 +1,23 @@
 import { Loader2, Plus, Save, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { ApiRequestError } from "../api/client";
-import type { ModelCard } from "../api/types";
+import { ApiRequestError } from "../../api/client";
+import type { ModelCard } from "../../api/types";
 import {
   useAdminModelCards,
   useCreateModelCard,
   useDeleteModelCard,
   useUpdateModelCard,
-} from "../hooks/useModelCards";
-import { RowLabel } from "./settings/fields";
+} from "../../hooks/useModelCards";
+import { RowLabel } from "../settings/fields";
+import { SettingsHeader } from "../settings/SettingsHeader";
 
-/** Admin: operator-facing management surfaces. Model cards is the first
- * section; future admin settings add another `<section>` below. */
-export function AdminPage() {
+export function ModelCardsPage() {
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center border-b px-6 py-3">
-        <h1 className="text-sm font-semibold text-text">Admin</h1>
-      </header>
+    <div className="flex h-full flex-col overflow-hidden">
+      <SettingsHeader
+        title="Model cards"
+        desc="Well-known models and their token limits, offered as autocomplete in Settings."
+      />
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
           <ModelCardsSection />

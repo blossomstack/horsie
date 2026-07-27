@@ -9,7 +9,8 @@ import { RuntimesSettings } from "./pages/settings/RuntimesSettings";
 import { IntegrationsSettings } from "./pages/settings/IntegrationsSettings";
 import { MemorySettings } from "./pages/settings/MemorySettings";
 import { SkillsSettings } from "./pages/settings/SkillsSettings";
-import { AdminPage } from "./pages/AdminPage";
+import { AdminLayout } from "./pages/admin/AdminLayout";
+import { ModelCardsPage } from "./pages/admin/ModelCardsPage";
 
 const client = new QueryClient({
   defaultOptions: {
@@ -46,7 +47,10 @@ export default function App() {
               path="memory"
               element={<Navigate to="/settings/memory" replace />}
             />
-            <Route path="admin" element={<AdminPage />} />
+            <Route path="admin" element={<AdminLayout />}>
+              <Route index element={<Navigate to="model-cards" replace />} />
+              <Route path="model-cards" element={<ModelCardsPage />} />
+            </Route>
           </Route>
         </Routes>
       </BrowserRouter>
