@@ -51,13 +51,15 @@ sessions).
 Each line is a self-describing envelope so resume works in both modes:
 
 ```json
-{"seq": 42, "event": {"type": "Message", "message": { ... }}}
+{"seq": 42, "event": {"type": "Message", "value": {"message": { ... }}}}
 ```
 
 - `seq`: the SSE event id (agent-journal sequence number). Ephemeral events
   (Delta, ToolStart, StatusChanged, Error, Progressed) carry no SSE id →
   `"seq": null`.
-- `event`: the `horsie_models::session::SessionEvent` payload, verbatim.
+- `event`: the `horsie_models::session::SessionEvent` payload, verbatim. The
+  fluorite union serializes with serde's `tag = "type", content = "value"`,
+  hence the `value` wrapper.
 - The envelope is used in `messages` mode too, keeping both modes' files
   interchangeable and resumable.
 
