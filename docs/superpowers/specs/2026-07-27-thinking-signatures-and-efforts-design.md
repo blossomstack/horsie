@@ -180,8 +180,8 @@ seeds the documented value; the configured model row overrides it.
 ALTER TABLE model_cards ADD COLUMN thinking_efforts        TEXT;  -- JSON array, ordered
 ALTER TABLE model_cards ADD COLUMN default_thinking_effort TEXT;
 ALTER TABLE model_cards ADD COLUMN thinking_dialect        TEXT;
-ALTER TABLE models      ADD COLUMN thinking_efforts        TEXT;  -- prefilled from card, editable
-ALTER TABLE models      ADD COLUMN thinking_effort         TEXT;  -- active default
+ALTER TABLE models      ADD COLUMN thinking_efforts        TEXT;  -- menu offered to sessions
+ALTER TABLE models      ADD COLUMN thinking_effort         TEXT;  -- DEFAULT only; sessions override
 ALTER TABLE models      ADD COLUMN thinking_dialect        TEXT;  -- prefilled from card, editable
 ALTER TABLE providers   ADD COLUMN keep_thinking_signature INTEGER NOT NULL DEFAULT 0;
 ```
@@ -194,15 +194,50 @@ creation, exactly as `context_window`/`max_tokens` work today.
 
 #### Flow
 
+Thinking level is chosen **per session, at session creation**. The model config
+contributes the menu and the default; it is not the effective value.
+
 1. Card seeds `thinking_efforts` + `default_thinking_effort` + `thinking_dialect`.
 2. Settings model form prefills from the card on `model_id` match; operator may
-   narrow the list or override the dialect.
-3. Session picks one value from the configured model's list (new optional field
-   on `AgentSettings`, `models/fluorite/session.fl:21-33`); unset falls back to
-   the model's `thinking_effort`.
+   narrow the offered list or override the dialect.
+3. **Session creation selects one value** from the configured model's
+   `thinking_efforts`. Unset falls back to the model's `thinking_effort`, which
+   falls back to the card default, which falls back to "send no thinking
+   control".
 4. `CompletionRequest` (`agentcore/src/provider.rs:5-11`) gains an optional
    effort field — it currently has no channel for one.
 5. The provider adapter translates canonical value + dialect into wire fields.
+
+#### Session surface
+
+The effort is fixed for the session's lifetime. Both Kimi and Anthropic warn
+that changing effort mid-conversation invalidates the prompt cache, so it is a
+creation-time choice, not a per-turn one.
+
+Wire and storage:
+
+- `AgentSettings` (`models/fluorite/session.fl:21-33`) gains
+  `thinking_effort: Option<String>`.
+- Its storage twin (`server/src/sessions/spec.rs:32-48`) gains the same field
+  with `#[serde(default)]`, so pre-existing journal rows deserialize unchanged —
+  the same pattern `mcp_servers` and `memory_spaces` already use.
+- The create-session mapping (`server/src/http/handlers.rs:60-70`) carries it
+  through and validates it against the resolved model's `thinking_efforts`,
+  rejecting a value the model does not offer rather than passing it to the
+  provider.
+
+Web client:
+
+- `SessionConfigBar.tsx` gains a thinking-level control alongside the existing
+  runtime / model / repos / skills / MCP / memory controls. It is populated from
+  the selected model's `thinking_efforts` and **reacts to model changes** — the
+  menu and the default both belong to the model, so switching model must
+  re-derive them and drop a now-invalid selection.
+- A model whose `thinking_efforts` is empty renders no control.
+- `SessionDraft` + `buildRequest` (`clients/web/src/hooks/useSessionDraft.ts:22-41`)
+  gain the field. Drafts persist to localStorage, so a restored draft naming an
+  effort the model no longer offers must fall back to the default rather than
+  submitting an invalid value.
 
 #### async-llm change
 
@@ -306,8 +341,18 @@ official parameter reference**; thinking control there is unverified.
 - Unit: `keep_thinking_signature=false` yields `signature: None` at ingest, and
   the replay path omits the field rather than sending `""`.
 - Unit: history and SSE serializers drop `signature` even when present in state.
+- Unit: session-creation resolution order — explicit session value wins over
+  the model default, which wins over the card default, which falls back to
+  sending no thinking control.
+- Unit: session creation rejects an effort the resolved model does not offer.
 - Migration: 0010 applies to a populated DB; existing rows get NULL efforts and
   behave as "provider default" (no behaviour change).
+- Storage: a pre-existing session journal row without `thinking_effort`
+  deserializes and replays unchanged.
+- e2e: selecting a thinking level at session creation reaches the provider
+  request; switching model in the config bar re-derives the menu and clears an
+  invalid selection; a restored localStorage draft with a stale effort falls
+  back to the default.
 - Seed: idempotent re-run leaves no duplicates and corrects changed values.
 - e2e: existing mock-LLM thinking tests still pass with signatures stripped.
 
@@ -319,8 +364,8 @@ official parameter reference**; thinking control there is unverified.
   non-streaming vs 4,340 stored by horsie), suggesting the `signature_delta`
   accumulator at `providers/anthropic/src/lib.rs:469-480` may truncate. Moot
   once signatures are dropped; worth its own issue.
-- Per-session effort override in the web UI. The schema supports it; the UI
-  work is deferred.
+- Changing thinking level on an existing session. Creation-time only, because
+  switching effort mid-conversation invalidates the prompt cache.
 - Pricing columns on model cards.
 
 ## Open questions
