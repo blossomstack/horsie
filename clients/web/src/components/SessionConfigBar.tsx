@@ -1,9 +1,10 @@
-import { Boxes, Cpu, FolderGit2, Plug, Server } from "lucide-react";
+import { Boxes, Brain, Cpu, FolderGit2, Plug, Server } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import type { SessionDetail } from "../api/types";
 import { useGithubRepos } from "../hooks/useGithub";
 import { useMcpServers } from "../hooks/useMcp";
+import { useMemorySpaces } from "../hooks/useMemory";
 import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
 import type { SessionDraft } from "../hooks/useSessionDraft";
@@ -57,6 +58,7 @@ function DraftControls({ draft }: { draft: SessionDraft }) {
   const { data: settings } = useSettings();
   const { data: bundles } = usePlugins();
   const { data: mcpServers } = useMcpServers();
+  const { data: memorySpaces } = useMemorySpaces();
   const models = settings?.models ?? [];
   const activeVendors = (settings?.vendors ?? []).filter((v) => v.active);
   const enabledMcp = (mcpServers ?? []).filter((s) => s.enabled);
@@ -240,6 +242,56 @@ function DraftControls({ draft }: { draft: SessionDraft }) {
         </>
       )}
 
+      {/* Memory — not gated on `provisions`: the server owns the data, so this
+          works on vendors that can't provision a workspace too. */}
+      <PopoverMenu
+        testId="config-memory"
+        icon={<Brain size={13} />}
+        label={
+          draft.memorySpaces.size
+            ? `${draft.memorySpaces.size} memory`
+            : "Memory"
+        }
+        width="w-72"
+      >
+        {() =>
+          (memorySpaces ?? []).length === 0 ? (
+            <Link
+              to="/memory"
+              className="block px-2 py-1.5 text-sm text-muted hover:text-text"
+            >
+              Create a memory space first
+            </Link>
+          ) : (
+            <div className="space-y-0.5">
+              {(memorySpaces ?? []).map((sp) => {
+                const checked = draft.memorySpaces.has(sp.name);
+                return (
+                  <label
+                    key={sp.name}
+                    className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-surface-2"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => {
+                        const next = new Set(draft.memorySpaces);
+                        if (checked) next.delete(sp.name);
+                        else next.add(sp.name);
+                        draft.setMemorySpaces(next);
+                      }}
+                    />
+                    <span className="min-w-0 flex-1 truncate font-mono">
+                      {sp.name}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )
+        }
+      </PopoverMenu>
+
       {/* Model — right-aligned; editable now, structured to unlock on existing
           sessions later. */}
       <div className="ml-auto">
@@ -310,6 +362,11 @@ function LockedControls({ detail }: { detail: SessionDetail }) {
             </LockedChip>
           )}
         </>
+      )}
+      {detail.memorySpaces.length > 0 && (
+        <LockedChip icon={<Brain size={13} />} testId="config-memory">
+          {detail.memorySpaces.join(", ")}
+        </LockedChip>
       )}
       <div className="ml-auto">
         <LockedChip icon={<Cpu size={13} />} testId="config-model">
