@@ -20,6 +20,7 @@ type ProviderDraft = {
   baseUrl: string;
   apiKeyInput: string; // "" = leave the stored key unchanged
   hasInlineKey: boolean;
+  keepThinkingSignature: boolean;
 };
 
 type ModelDraft = {
@@ -37,6 +38,7 @@ const toProviderDrafts = (v: SettingsView): ProviderDraft[] =>
     baseUrl: p.baseUrl ?? "",
     apiKeyInput: "",
     hasInlineKey: p.hasInlineKey,
+    keepThinkingSignature: p.keepThinkingSignature,
   }));
 
 const toModelDrafts = (v: SettingsView): ModelDraft[] =>
@@ -102,6 +104,7 @@ export function ModelsSettings() {
       kind: p.kind,
       baseUrl: p.baseUrl.trim() || undefined,
       apiKey: p.apiKeyInput === "" ? undefined : p.apiKeyInput,
+      keepThinkingSignature: p.keepThinkingSignature,
     }));
     const modelInputs: ModelInput[] = models.map((m) => ({
       alias: m.alias.trim(),
@@ -173,6 +176,7 @@ export function ModelsSettings() {
                       name: "",
                       kind: "anthropic",
                       baseUrl: "",
+                      keepThinkingSignature: false,
                       apiKeyInput: "",
                       hasInlineKey: false,
                     },
@@ -281,6 +285,24 @@ function ProviderRow({
           onChange={(v) => set({ apiKeyInput: v })}
           placeholder={draft.hasInlineKey ? "•••• stored — blank keeps it" : "not set"}
         />
+        {draft.kind === "anthropic" && (
+          <label className="col-span-2 flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={draft.keepThinkingSignature}
+              onChange={(e) => set({ keepThinkingSignature: e.target.checked })}
+            />
+            <span>
+              Keep thinking signatures
+              <span className="block text-xs opacity-70">
+                Required for api.anthropic.com, which validates them on replay. Leave off for
+                Anthropic-compatible endpoints — the blobs are several KB per thinking block and
+                nothing reads them.
+              </span>
+            </span>
+          </label>
+        )}
       </div>
     </RowShell>
   );

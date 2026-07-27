@@ -363,12 +363,13 @@ impl ConfigStore for DbConfigStore {
                 }
                 let api_key = resolve_secret(&p.api_key, keep.get(name).copied());
                 sqlx::query(
-                    "INSERT INTO providers (name, kind, base_url, api_key) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO providers (name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?)",
                 )
                 .bind(name)
                 .bind(&p.kind)
                 .bind(trimmed(&p.base_url))
                 .bind(api_key)
+                .bind(i64::from(p.keep_thinking_signature.unwrap_or(false)))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -542,6 +543,7 @@ struct ProviderRow {
     kind: String,
     base_url: Option<String>,
     api_key: Option<String>,
+    keep_thinking_signature: bool,
 }
 
 struct ModelRow {
@@ -640,6 +642,7 @@ fn build_registry(providers: &[ProviderRow], models: &[ModelRow]) -> Result<Regi
                 p.api_key.as_deref(),
                 &m.model_id,
                 max_tokens,
+                p.keep_thinking_signature,
             )?,
             "openai" => build_openai(
                 p.base_url.as_deref(),
@@ -664,6 +667,7 @@ fn build_anthropic(
     api_key: Option<&str>,
     model_id: &str,
     max_tokens: Option<u32>,
+    keep_thinking_signature: bool,
 ) -> Result<Arc<dyn LlmProvider>, String> {
     let key: Option<Secret> = match api_key {
         Some(k) if !k.is_empty() => Some(Secret::from(k)),
@@ -674,7 +678,10 @@ fn build_anthropic(
         Some(k) => AnthropicProvider::with_api_key(k).map_err(|e| e.to_string())?,
         None => AnthropicProvider::new().map_err(|e| e.to_string())?,
     };
-    p = p.with_model(model_id).with_max_tokens(max_tokens);
+    p = p
+        .with_model(model_id)
+        .with_max_tokens(max_tokens)
+        .with_keep_thinking_signature(keep_thinking_signature);
     if let Some(u) = base_url {
         p = p.with_base_url(u);
     }
@@ -906,6 +913,7 @@ fn provider_view(r: &ProviderRow) -> ProviderView {
         kind: r.kind.clone(),
         base_url: r.base_url.clone(),
         has_inline_key: r.api_key.as_deref().is_some_and(|s| !s.is_empty()),
+        keep_thinking_signature: r.keep_thinking_signature,
     }
 }
 
@@ -965,9 +973,11 @@ async fn read_providers<'e, E>(ex: E) -> Result<Vec<ProviderRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let rows = sqlx::query("SELECT name, kind, base_url, api_key FROM providers ORDER BY name")
-        .fetch_all(ex)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT name, kind, base_url, api_key, keep_thinking_signature FROM providers ORDER BY name",
+    )
+    .fetch_all(ex)
+    .await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ProviderRow {
@@ -975,6 +985,7 @@ where
             kind: r.try_get("kind")?,
             base_url: r.try_get("base_url")?,
             api_key: r.try_get("api_key")?,
+            keep_thinking_signature: r.try_get::<i64, _>("keep_thinking_signature")? != 0,
         });
     }
     Ok(out)
@@ -1072,6 +1083,7 @@ mod tests {
             kind: "anthropic".into(),
             base_url: Some("http://localhost:1".into()),
             api_key: key.map(str::to_string),
+            keep_thinking_signature: None,
         }
     }
 
@@ -1207,6 +1219,7 @@ mod tests {
             kind: kind.into(),
             base_url: Some("http://localhost:1".into()),
             api_key: Some("k".into()),
+            keep_thinking_signature: None,
         }
     }
 
@@ -1599,5 +1612,39 @@ mod tests {
         let o = open(dir.path()).await;
         let err = o.store.test_vendor("ghost").await.unwrap_err();
         assert!(err.contains("ghost"), "error names the vendor: {err}");
+    }
+
+    #[tokio::test]
+    async fn keep_thinking_signature_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+
+        // Defaults off for a fresh provider.
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("kimi", Some("sk-test"))]),
+                models: Some(vec![model("m", "kimi")]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect("update succeeds");
+        assert!(!view.providers[0].keep_thinking_signature);
+
+        // Opting in persists and reads back.
+        let mut p = provider("real-anthropic", Some("sk-test"));
+        p.keep_thinking_signature = Some(true);
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![p]),
+                models: Some(vec![model("m", "real-anthropic")]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect("update succeeds");
+        assert!(view.providers[0].keep_thinking_signature);
     }
 }

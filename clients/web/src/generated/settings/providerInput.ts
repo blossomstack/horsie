@@ -13,4 +13,8 @@ export interface ProviderInput {
    * New inline key. Omit to keep the existing stored key; &quot;&quot; to clear.
    */
   apiKey?: string;
+  /**
+   * Retain thinking-block signatures from this provider. Omit for the
+   */
+  keepThinkingSignature?: boolean;
 }

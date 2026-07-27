@@ -13,6 +13,10 @@ struct ProviderView {
     base_url: Option<String>,
     /// True when an inline `api_key` is stored.
     has_inline_key: bool,
+    /// Retain thinking-block signatures from this provider. Required for
+    /// genuine Anthropic (it validates them on replay); off for
+    /// Anthropic-compatible endpoints, which do not.
+    keep_thinking_signature: bool,
 }
 
 /// One configured model alias.
@@ -119,6 +123,9 @@ struct ProviderInput {
     base_url: Option<String>,
     /// New inline key. Omit to keep the existing stored key; "" to clear.
     api_key: Option<String>,
+    /// Retain thinking-block signatures from this provider. Omit for the
+    /// default (off) — required for genuine Anthropic, which validates them.
+    keep_thinking_signature: Option<bool>,
 }
 
 /// A model alias to persist.

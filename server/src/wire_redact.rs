@@ -26,6 +26,12 @@ pub fn strip_message_signature(message: &mut Message) {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::*;
     use horsie_models::agent::{Role, TextPart, ThinkingPart};
