@@ -29,6 +29,8 @@ impl SharedContext {
 #[derive(Clone, Default)]
 pub struct WorkspaceContext {
     pub workspaces: Vec<WorkspaceInfo>,
+    /// Runtime OS/arch from the scan (all workspaces share one runtime).
+    pub platform: Option<String>,
 }
 
 /// One scanned workspace root.
@@ -42,8 +44,11 @@ pub struct WorkspaceInfo {
 }
 
 impl WorkspaceContext {
+    /// True when the scan contributes nothing to the system prompt. `platform`
+    /// counts: it renders a `# Environment` section on its own, so a context
+    /// with no workspace roots is not necessarily empty.
     pub fn is_empty(&self) -> bool {
-        self.workspaces.is_empty()
+        self.workspaces.is_empty() && self.platform.is_none()
     }
     /// Names of all scanned workspaces, in scan order.
     pub fn names(&self) -> Vec<String> {
@@ -154,8 +159,10 @@ fn interpret_shared(raw: Vec<PluginSkill>) -> SkillSet {
 }
 
 fn interpret(raw: Vec<WorkspaceScan>) -> WorkspaceContext {
+    let platform = raw.iter().find_map(|w| w.platform.clone());
     WorkspaceContext {
         workspaces: raw.into_iter().map(interpret_one).collect(),
+        platform,
     }
 }
 
@@ -267,6 +274,9 @@ pub fn compose_system_prompt(
     {
         sections.push(p.trim().to_string());
     }
+    if let Some(p) = &ws.platform {
+        sections.push(environment_section(p));
+    }
     if !ws.workspaces.is_empty() {
         let mut block = String::from(
             "# Workspaces\nFilesystem, bash, and skill tools take a `workspace` argument naming one of these (omit it only when there is exactly one).",
@@ -306,6 +316,21 @@ pub fn compose_system_prompt(
         None
     } else {
         Some(sections.join("\n\n"))
+    }
+}
+
+/// The `# Environment` section: one line telling the model which OS userland
+/// its bash/filesystem tools run on, so it doesn't probe by failing (BSD-vs-GNU
+/// differences have burned whole turns).
+fn environment_section(platform: &str) -> String {
+    let os = platform.split('-').next().unwrap_or(platform);
+    match os {
+        "macos" => "# Environment\nOS: macOS — BSD userland: no GNU `timeout` or \
+            `cat -A`; `sed -i` requires an explicit backup argument (`sed -i ''`); \
+            GNU coreutils, if installed, are g-prefixed (`gtimeout`, `gsed`)."
+            .to_string(),
+        "linux" => "# Environment\nOS: Linux — GNU coreutils available.".to_string(),
+        other => format!("# Environment\nOS: {other}."),
     }
 }
 
@@ -432,6 +457,7 @@ mod tests {
             is_git_repo: false,
             instructions: instructions.map(|c| file("AGENTS.md", c)),
             skills,
+            platform: None,
         }
     }
 
@@ -544,6 +570,17 @@ mod tests {
             compose_system_prompt(Some("just role"), &ctx, None).as_deref(),
             Some("just role")
         );
+    }
+
+    #[test]
+    fn environment_section_renders_platform() {
+        let ctx = WorkspaceContext {
+            workspaces: vec![],
+            platform: Some("macos-aarch64".to_string()),
+        };
+        let prompt = compose_system_prompt(Some("You are a coder."), &ctx, None).unwrap();
+        assert!(prompt.contains("# Environment"), "{prompt}");
+        assert!(prompt.contains("BSD userland"), "{prompt}");
     }
 
     fn plugin_skill(name: &str, rel_dir: &str, desc: &str) -> PluginSkill {

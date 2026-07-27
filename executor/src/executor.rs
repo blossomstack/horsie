@@ -838,6 +838,7 @@ mod tests {
                                 content: "ctx".into(),
                             }),
                             skills: vec![],
+                            platform: None,
                         }],
                         shared_skills: vec![],
                     })

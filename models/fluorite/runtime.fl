@@ -54,6 +54,9 @@ struct WorkspaceScan {
     is_git_repo: bool,
     instructions: Option<ScannedFile>,
     skills: Vec<ScannedFile>,
+    /// Runtime OS/arch (`<os>-<arch>`, e.g. "macos-aarch64"); optional so an
+    /// older runtime binary still deserializes against a newer server.
+    platform: Option<String>,
 }
 
 /// A skill discovered in the shared plugin library. `rel_dir` is the skill's

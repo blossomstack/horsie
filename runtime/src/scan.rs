@@ -52,6 +52,11 @@ pub fn exec(registry: &WorkspaceRegistry, req: ScanRequest) -> Vec<WorkspaceScan
                 is_git_repo: is_git_repo(dir),
                 instructions,
                 skills,
+                platform: Some(format!(
+                    "{}-{}",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                )),
             }
         })
         .collect()

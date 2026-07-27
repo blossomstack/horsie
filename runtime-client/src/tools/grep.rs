@@ -18,7 +18,12 @@ impl Tool for GrepTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "grep".to_string(),
-            description: "Search file contents with a regex pattern.".to_string(),
+            description: "Search file contents with a regex pattern. \
+                Matching lines are truncated at 500 chars and the whole result at ~20 KB; \
+                results also stop at 'max_results' (default 1000). Whichever limit ends \
+                the search is named in a footer — narrow with 'path', 'file_pattern', \
+                or a tighter 'pattern'."
+                .to_string(),
             input_schema: crate::tools::with_workspace(json!({
                 "type": "object",
                 "properties": {

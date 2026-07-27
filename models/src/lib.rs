@@ -615,6 +615,7 @@ mod tests {
                     path: ".claude/skills/x/SKILL.md".into(),
                     content: "b".into(),
                 }],
+                platform: None,
             }],
         });
         let json = serde_json::to_string(&msg).unwrap();

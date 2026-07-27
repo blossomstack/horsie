@@ -43,6 +43,7 @@ fn scan_payload() -> WorkspaceScan {
                 "---\nname: git-bisect\ndescription: Find the bad commit\n---\nRun git bisect."
                     .into(),
         }],
+        platform: None,
     }
 }
 
