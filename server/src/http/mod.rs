@@ -1,11 +1,13 @@
 //! The session server's HTTP surface: REST handlers + SSE streams over the
 //! `SessionSupervisor`. All request/response bodies are fluorite wire types.
 
+mod admin;
 mod config;
 pub mod error;
 mod github;
 mod handlers;
 mod mcp;
+mod model_cards;
 mod plugins;
 mod runtime_connect;
 mod sse;
@@ -53,6 +55,9 @@ pub struct AppState {
     /// default vendor). Also the source of the default vendor a create request
     /// falls back to when it omits one.
     pub config_store: Arc<dyn ConfigStore>,
+    /// The model-card catalog (reference data, not runtime config): public
+    /// prefix search + admin CRUD. Shares the settings-DB pool.
+    pub model_cards: Arc<crate::config::model_cards::ModelCardStore>,
     /// Deployment-global GitHub connection: App config, OAuth credentials, repo
     /// listing, and the scoped-token minter used at session provisioning.
     pub github: Arc<crate::github::GithubService>,
@@ -99,6 +104,15 @@ pub fn app(state: AppState) -> Router {
             get(config::get_config).put(config::update_config),
         )
         .route("/api/config/vendors/:name/test", post(config::test_vendor))
+        .route("/api/model-cards", get(model_cards::list))
+        .route(
+            "/api/admin/model-cards",
+            get(admin::list_cards).post(admin::create_card),
+        )
+        .route(
+            "/api/admin/model-cards/:model_id",
+            put(admin::update_card).delete(admin::delete_card),
+        )
         .route("/api/github/status", get(github::status))
         .route("/api/github/auth", get(github::auth))
         .route("/api/github/callback", get(github::callback))
@@ -218,6 +232,9 @@ mod tests {
             crate::mcp::McpStore::new(opened.pool.clone()),
             github.clone(),
         ));
+        let model_cards = Arc::new(crate::config::model_cards::ModelCardStore::new(
+            opened.pool.clone(),
+        ));
         let deps = ServerDeps {
             provider_registry: opened.registry,
             vendors: Arc::new(std::sync::RwLock::new(vendors)),
@@ -238,6 +255,7 @@ mod tests {
             plugins_dir: None,
             hook_path: vec![],
             config_store: opened.store,
+            model_cards,
             github,
             mcp,
             plugins,
@@ -734,5 +752,87 @@ mod tests {
         assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
         let loc = res.headers().get("location").unwrap().to_str().unwrap();
         assert!(loc.starts_with("/settings?mcp_error="), "{loc}");
+    }
+
+    #[tokio::test]
+    async fn model_cards_public_prefix_search() {
+        use horsie_models::model_cards::{ModelCard, ModelCardInput};
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let store = state.model_cards.clone();
+        let app = app(state);
+
+        let input = |id: &str| ModelCardInput {
+            model_id: id.into(),
+            name: id.into(),
+            context_window: Some(1000),
+            max_tokens: None,
+        };
+        store
+            .seed_if_missing(&[input("gpt-4o"), input("gpt-4.1"), input("claude-sonnet-4-6")])
+            .await
+            .unwrap();
+
+        let res = app.clone().oneshot(get("/api/model-cards")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let all: Vec<ModelCard> = read_json(res).await;
+        assert_eq!(all.len(), 3);
+
+        let res = app
+            .oneshot(get("/api/model-cards?prefix=gpt-4"))
+            .await
+            .unwrap();
+        let hits: Vec<ModelCard> = read_json(res).await;
+        assert_eq!(
+            hits.iter().map(|c| c.model_id.as_str()).collect::<Vec<_>>(),
+            ["gpt-4.1", "gpt-4o"]
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_model_cards_crud_over_http() {
+        use horsie_models::model_cards::ModelCard;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        // Empty catalog (test_state does not seed).
+        let res = app.clone().oneshot(get("/api/admin/model-cards")).await.unwrap();
+        let list: Vec<ModelCard> = read_json(res).await;
+        assert!(list.is_empty());
+
+        // Create.
+        let body = serde_json::json!({"modelId": "m1", "name": "Model One", "contextWindow": 8192});
+        let res = app.clone().oneshot(post_json("/api/admin/model-cards", &body)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let card: ModelCard = read_json(res).await;
+        assert_eq!(card.model_id, "m1");
+        assert_eq!(card.max_tokens, None);
+
+        // Duplicate → 409.
+        let res = app.clone().oneshot(post_json("/api/admin/model-cards", &body)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+
+        // Invalid → 422.
+        let bad = serde_json::json!({"modelId": "", "name": "x"});
+        let res = app.clone().oneshot(post_json("/api/admin/model-cards", &bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Update.
+        let upd = serde_json::json!({"name": "Model 1 Renamed", "maxTokens": 2048});
+        let res = app.clone().oneshot(put_json("/api/admin/model-cards/m1", &upd)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let card: ModelCard = read_json(res).await;
+        assert_eq!(card.name, "Model 1 Renamed");
+        assert_eq!(card.max_tokens, Some(2048));
+
+        // Update of unknown → 404.
+        let res = app.clone().oneshot(put_json("/api/admin/model-cards/ghost", &upd)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // Delete → 204; second delete → 404.
+        let res = app.clone().oneshot(delete("/api/admin/model-cards/m1")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = app.oneshot(delete("/api/admin/model-cards/m1")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }

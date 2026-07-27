@@ -195,6 +195,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         plugins_dir,
         hook_path,
         config_store: opened.store,
+        model_cards,
         github,
         mcp,
         plugins,
