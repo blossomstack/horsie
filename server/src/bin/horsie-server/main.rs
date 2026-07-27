@@ -23,7 +23,7 @@ use config::{BootConfig, BootError};
 use horsie_actor::{FileJournal, Journal, spawn_root};
 use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
 use horsie_models::settings::ServerInfo;
-use horsie_server::config::{DbConfigStore, StoreDeps};
+use horsie_server::config::{DbConfigStore, StoreDeps, model_cards};
 use horsie_server::http::{AppState, CapsFinalize, app};
 use horsie_server::plugins::{ArtifactStore, PluginService, PluginStore};
 use horsie_server::sessions::spec::ServerDeps;
@@ -49,6 +49,11 @@ struct Cli {
     /// separate dev server or CORS setup is needed.
     #[arg(long)]
     web: Option<PathBuf>,
+    /// JSON file of extra model cards to seed at startup (insert-if-missing;
+    /// bundled defaults are always seeded). Also read from
+    /// $HORSIE_MODEL_CARDS_SEED.
+    #[arg(long)]
+    model_cards_seed: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -115,6 +120,31 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     )
     .await
     .map_err(BootError::Config)?;
+
+    // Seed the model-card catalog: bundled defaults plus an optional operator
+    // file. Seed-file parse/read errors are fatal (operator input should fail
+    // loud); DB errors only warn — the admin API stays usable to fix state.
+    // Insert-if-missing semantics mean admin edits survive every restart.
+    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(opened.pool.clone()));
+    let seed_path = cli
+        .model_cards_seed
+        .clone()
+        .or_else(|| std::env::var_os("HORSIE_MODEL_CARDS_SEED").map(PathBuf::from));
+    let seeding = (|| -> Result<Vec<horsie_models::model_cards::ModelCardInput>, BootError> {
+        let mut seeds = model_cards::bundled_seed().map_err(BootError::Config)?;
+        if let Some(path) = seed_path {
+            seeds.extend(model_cards::load_seed_file(&path).map_err(BootError::Config)?);
+        }
+        Ok(seeds)
+    })();
+    match seeding {
+        Ok(seeds) => {
+            if let Err(e) = model_cards.seed_if_missing(&seeds).await {
+                eprintln!("warning: seeding model cards failed: {e:?}");
+            }
+        }
+        Err(e) => return Err(e),
+    }
 
     // The shared local-runtime vendor registers each daemon that dials
     // `/api/runtime/connect?register=local` as a vendor. It owns no listener —

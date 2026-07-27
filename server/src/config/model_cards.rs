@@ -218,6 +218,37 @@ impl ModelCardStore {
     }
 }
 
+/// The compiled-in default catalog, seeded at every startup (insert-if-missing).
+const BUNDLED_SEED_JSON: &str = include_str!("model_cards_seed.json");
+
+/// Parse the bundled seed. An error here is a build-time bug — the JSON is
+/// compiled into the binary.
+pub fn bundled_seed() -> Result<Vec<ModelCardInput>, String> {
+    parse_seed(BUNDLED_SEED_JSON).map_err(|e| format!("bundled model-cards seed is invalid: {e}"))
+}
+
+/// Read + parse an operator-supplied seed file (`--model-cards-seed`).
+pub fn load_seed_file(path: &std::path::Path) -> Result<Vec<ModelCardInput>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("read model-cards seed {}: {e}", path.display()))?;
+    parse_seed(&text).map_err(|e| format!("parse model-cards seed {}: {e}", path.display()))
+}
+
+fn parse_seed(json: &str) -> Result<Vec<ModelCardInput>, String> {
+    let cards: Vec<ModelCardInput> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    for c in &cards {
+        validate(&c.model_id, &c.name, c.context_window, c.max_tokens).map_err(|e| match e {
+            ModelCardError::Invalid(m) => m,
+            other @ (ModelCardError::Duplicate(_)
+            | ModelCardError::NotFound(_)
+            | ModelCardError::Db(_)) => {
+                format!("{other:?}")
+            }
+        })?;
+    }
+    Ok(cards)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -407,5 +438,46 @@ mod tests {
         let a = store.get("a").await.unwrap().unwrap();
         assert_eq!(a.name, "A-edited");
         assert_eq!(a.context_window, Some(999));
+    }
+
+    #[test]
+    fn bundled_seed_parses_and_is_valid() {
+        let cards = bundled_seed().unwrap();
+        assert!(cards.len() >= 7);
+        assert!(cards.iter().any(|c| c.model_id == "claude-sonnet-4-6"));
+    }
+
+    #[tokio::test]
+    async fn operator_seed_file_merges_with_same_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path()).await;
+        store
+            .seed_if_missing(&bundled_seed().unwrap())
+            .await
+            .unwrap();
+
+        let path = dir.path().join("extra.json");
+        std::fs::write(
+            &path,
+            r#"[{"modelId":"my-local-model","name":"Local","contextWindow":32000,"maxTokens":2048}]"#,
+        )
+        .unwrap();
+        let extra = load_seed_file(&path).unwrap();
+        assert_eq!(store.seed_if_missing(&extra).await.unwrap(), 1);
+        assert!(store.get("my-local-model").await.unwrap().is_some());
+        // Bundled cards are still there and untouched.
+        assert!(store.get("claude-sonnet-4-6").await.unwrap().is_some());
+    }
+
+    #[test]
+    fn invalid_operator_seed_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, "not json").unwrap();
+        assert!(load_seed_file(&path).is_err());
+        assert!(load_seed_file(&dir.path().join("missing.json")).is_err());
+        let invalid = dir.path().join("invalid.json");
+        std::fs::write(&invalid, r#"[{"modelId":"","name":"x"}]"#).unwrap();
+        assert!(load_seed_file(&invalid).is_err());
     }
 }
