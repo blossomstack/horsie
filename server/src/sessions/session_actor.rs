@@ -10,7 +10,7 @@ use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::SessionEventSink;
 use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::supervisor::SessionSupervisorCommand;
-use crate::sessions::title_tool::normalize_session_title;
+use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
 use crate::sessions::{SessionFrame, UserMessageError};
 use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorRuntime};
 use async_trait::async_trait;
@@ -476,6 +476,7 @@ impl SessionActor {
             memory: self.deps.memory.clone(),
             settings: self.spec.agent.clone(),
             session_id: self.id,
+            session: ctx.self_ref(),
             frames: self.frames.clone(),
         });
         let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
@@ -904,6 +905,8 @@ struct SessionContextProvider {
     memory: Option<Arc<crate::memory::MemoryService>>,
     settings: AgentSettings,
     session_id: Uuid,
+    /// The owning session's mailbox — routes the server-owned title tool.
+    session: ActorRef<SessionCommand>,
     /// Live frame stream — `ensure` emits preparation progressions onto it.
     frames: broadcast::Sender<SessionFrame>,
 }
@@ -955,9 +958,13 @@ impl ContextProvider for SessionContextProvider {
         );
         let (with_memory, memory_index) =
             build_memory_layer(base, self.memory.clone(), settings).await?;
-        // `AskUserToolbox` stays outermost: `ask_user` is terminal and the run
-        // looks it up by name via `params.optional_handoff_tool`.
-        let toolbox: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_memory));
+        // `AskUserToolbox` wraps the composed tools: `ask_user` is terminal and
+        // the run looks it up by name via `params.optional_handoff_tool`.
+        let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_memory));
+        // `SessionTitleToolbox` is outermost: it delegates every other name, so
+        // the handoff lookup above still reaches `ask_user`.
+        let toolbox: Arc<dyn Toolbox> =
+            Arc::new(SessionTitleToolbox::new(inner, self.session.clone()));
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
         let system_prompt = match (system_prompt, memory_index.is_empty()) {
             (Some(p), false) => Some(format!("{p}\n\n{memory_index}")),
@@ -1442,6 +1449,14 @@ mod tests {
             h.published_titles.recv().await.unwrap(),
             "fix the login redirect"
         );
+    }
+
+    #[test]
+    fn system_prompt_instructs_the_agent_to_title_the_session() {
+        assert!(SESSION_AGENT_PROMPT.contains("## Session title"));
+        assert!(SESSION_AGENT_PROMPT.contains("set_session_title"));
+        assert!(SESSION_AGENT_PROMPT.contains("first turn"));
+        assert!(SESSION_AGENT_PROMPT.contains("latest successful call wins"));
     }
 
     #[tokio::test]
