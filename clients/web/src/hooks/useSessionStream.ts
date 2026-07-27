@@ -49,7 +49,6 @@ export interface SessionStream {
    * "the state differs from last render". */
   statusSeq: number;
   statusReason: string | null;
-  pendingQuestion: string | null;
   streamError: string | null;
   connected: boolean;
   /** The agent's `task_list` tool state; empty until the tool is first used. */
@@ -83,7 +82,6 @@ interface State {
   liveStatus: SessionStatusKind | null;
   statusSeq: number;
   statusReason: string | null;
-  pendingQuestion: string | null;
   streamError: string | null;
   connected: boolean;
   tasks: TaskItem[];
@@ -103,7 +101,6 @@ const INITIAL: State = {
   liveStatus: null,
   statusSeq: 0,
   statusReason: null,
-  pendingQuestion: null,
   streamError: null,
   connected: false,
   tasks: [],
@@ -311,18 +308,12 @@ function reducer(state: State, action: Action): State {
                   output: state.usage.output + ev.value.usage.outputTokens,
                 },
           };
-        case "Asked":
-          return { ...state, pendingQuestion: ev.value.question };
         case "StatusChanged":
           return {
             ...state,
             liveStatus: ev.value.status,
             statusSeq: state.statusSeq + 1,
             statusReason: ev.value.reason ?? null,
-            pendingQuestion:
-              ev.value.status === SessionStatusKind.AwaitingInput
-                ? state.pendingQuestion
-                : null,
           };
         case "Error":
           return { ...state, streamError: ev.value.message };
@@ -512,7 +503,6 @@ export function useSessionStream(sessionId: string | undefined): {
       liveStatus: state.liveStatus,
       statusSeq: state.statusSeq,
       statusReason: state.statusReason,
-      pendingQuestion: state.pendingQuestion,
       streamError: state.streamError,
       connected: state.connected,
       tasks: state.tasks,
