@@ -156,8 +156,8 @@ pub async fn tail(
         if let Some(seq) = sink.cursor() {
             req = req.header("Last-Event-ID", seq.to_string());
         }
-        let mut es = EventSource::new(req)
-            .map_err(|e| CliError::Server(format!("connect {url}: {e}")))?;
+        let mut es =
+            EventSource::new(req).map_err(|e| CliError::Server(format!("connect {url}: {e}")))?;
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
@@ -277,10 +277,7 @@ mod tests {
     #[test]
     fn scan_last_seq_missing_file_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            scan_last_seq(&dir.path().join("nope.jsonl")).unwrap(),
-            None
-        );
+        assert_eq!(scan_last_seq(&dir.path().join("nope.jsonl")).unwrap(), None);
     }
 
     #[test]
