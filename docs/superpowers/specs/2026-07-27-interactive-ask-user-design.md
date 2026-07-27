@@ -165,17 +165,21 @@ which stays `AwaitingInput` for its whole duration — is uncancellable today.
 `clients/web/e2e/c-ask-user.spec.ts` is rewritten around the new card:
 
 - **C1** single-select: click a choice, then Send → the exact label reaches the
-  model (assert via the mock's request capture), turn resumes, card shows the
-  answer. Also assert that clicking a choice alone submits nothing.
-- **C2** multi-select: tick two boxes, Send → `"a, b"` reaches the model.
-- **C3** free text with choices offered: type an answer not in the list → verbatim
-  text reaches the model. Selecting a choice *and* typing sends both, joined.
-- **C4** no choices: card offers a text input only; the composer is disabled while
-  the ask is pending.
-- **C5** durability: after answering, reload the page and assert the answer still
+  model, turn resumes, card shows the answer. Also asserts that clicking a choice
+  submits nothing on its own, that selection is exclusive, and that the composer
+  is disabled while the ask is pending.
+- **C2** durability: after answering, reload the page and assert the answer still
   renders in the card (fails today).
+- **C3** open question (no choices): the card offers a text input only.
+- **C4** multi-select: tick two boxes, Send → `"a, b"` reaches the model.
+- **C5** combined: a picked choice plus a typed note are sent together.
 - **C6** latch: after submitting, the composer stays disabled and Stop is offered
-  until the turn concludes.
+  until the turn reports back.
+
+Assertions about what reached the model read the `tool_result` blocks out of the
+mock's captured requests rather than substring-matching the whole body: a choice
+label also appears in the echoed `ask_user` call's `choices`, so a substring
+match would pass whichever choice was picked.
 
 Rust: a unit test in `ask_tool.rs` asserting the spec exposes `multiple` and
 documents the free-text fallback.
