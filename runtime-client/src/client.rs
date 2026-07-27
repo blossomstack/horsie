@@ -99,7 +99,7 @@ impl RuntimeClient {
 )]
 mod tests {
     use super::*;
-    use crate::transport::MockTransport;
+    use crate::testkit::MockTransport;
     use horsie_models::runtime::BashInput;
 
     #[tokio::test]

@@ -64,7 +64,7 @@ impl Tool for BashTool {
 )]
 mod tests {
     use super::*;
-    use crate::transport::MockTransport;
+    use crate::testkit::MockTransport;
     use horsie_models::runtime::ToolOutput;
 
     #[tokio::test]

@@ -8,7 +8,7 @@ publish = false # internal application crate, never published to crates.io
 [features]
 # Exposes `vendor::mock::MockVendor` to external test crates. Off by default, so
 # a production build of horsie-server never contains a mock runtime vendor.
-test-util = []
+test-util = ["horsie-runtime-client/test-util"]
 
 [dependencies]
 horsie-models          = { path = "../models" }
