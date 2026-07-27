@@ -65,6 +65,7 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         max_iterations: w.max_iterations,
         max_retries: w.max_retries.unwrap_or(0),
         mcp_servers: w.mcp_servers.unwrap_or_default(),
+        memory_spaces: w.memory_spaces.unwrap_or_default(),
     }
 }
 
@@ -202,6 +203,7 @@ pub async fn get_session(
             .collect(),
         plugins: rec.spec.plugins.clone(),
         mcp_servers: rec.spec.agent.mcp_servers.clone(),
+        memory_spaces: rec.spec.agent.memory_spaces.clone(),
         use_plugins: rec.spec.agent.use_plugins.unwrap_or(false),
     };
     Ok(Json(GetSessionResponse { session: detail }))

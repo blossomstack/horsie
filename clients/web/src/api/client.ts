@@ -16,6 +16,12 @@ import type {
   McpServerInput,
   McpServerList,
   McpServerView,
+  MemoryCreateInput,
+  MemorySpaceCreateInput,
+  MemorySpaceUpdateInput,
+  MemorySpaceView,
+  MemoryUpdateInput,
+  MemoryView,
   ModelCard,
   ModelCardInput,
   ModelCardUpdate,
@@ -226,6 +232,45 @@ export const api = {
 
     remove: (name: string): Promise<void> =>
       request(`/plugins/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  },
+
+  memory: {
+    /** All memory spaces, each with its memory count. */
+    listSpaces: (): Promise<MemorySpaceView[]> => request("/memory-spaces"),
+
+    createSpace: (body: MemorySpaceCreateInput): Promise<MemorySpaceView> =>
+      request("/memory-spaces", { method: "POST", body: JSON.stringify(body) }),
+
+    /** Rename and/or re-describe; renaming carries the space's memories. */
+    updateSpace: (
+      name: string,
+      body: MemorySpaceUpdateInput,
+    ): Promise<MemorySpaceView> =>
+      request(`/memory-spaces/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    /** Delete a space and every memory in it. */
+    deleteSpace: (name: string): Promise<void> =>
+      request(`/memory-spaces/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      }),
+
+    /** Memories, optionally limited to one space. */
+    list: (space?: string): Promise<MemoryView[]> =>
+      request(
+        space ? `/memories?space=${encodeURIComponent(space)}` : "/memories",
+      ),
+
+    create: (body: MemoryCreateInput): Promise<MemoryView> =>
+      request("/memories", { method: "POST", body: JSON.stringify(body) }),
+
+    update: (id: number, body: MemoryUpdateInput): Promise<MemoryView> =>
+      request(`/memories/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+
+    remove: (id: number): Promise<void> =>
+      request(`/memories/${id}`, { method: "DELETE" }),
   },
 
   mcp: {

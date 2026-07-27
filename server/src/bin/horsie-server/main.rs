@@ -171,6 +171,9 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         ArtifactStore::new(data_dir.join("plugins")),
         artifact_secret(),
     ));
+    let memory = Arc::new(horsie_server::memory::MemoryService::new(
+        horsie_server::memory::MemoryStore::new(opened.pool.clone()),
+    ));
 
     let deps = ServerDeps {
         provider_registry: opened.registry,
@@ -179,6 +182,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         github_tokens: Some(github.clone()),
         mcp: Some(mcp.clone()),
         plugins: Some(plugins.clone() as Arc<dyn horsie_server::plugins::PluginProvisioner>),
+        memory: Some(memory.clone()),
     };
     let (global_tx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(
@@ -199,6 +203,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         github,
         mcp,
         plugins,
+        memory,
         runtime_registry,
         local_daemon_hook,
         web_dir: cli.web,

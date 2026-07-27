@@ -12,4 +12,8 @@ export interface AgentSettings {
    * Names of enabled MCP servers this session may call, namespaced
    */
   mcpServers?: string[];
+  /**
+   * Memory spaces this session may read and write; absent → none, and the
+   */
+  memorySpaces?: string[];
 }

@@ -452,6 +452,7 @@ mod tests {
                 max_iterations: None,
                 max_retries: 0,
                 mcp_servers: vec![],
+                memory_spaces: vec![],
             },
             workspaces: vec![],
             provision: vec![],
@@ -477,6 +478,7 @@ mod tests {
             github_tokens: None,
             mcp: None,
             plugins: None,
+            memory: None,
         }
     }
 

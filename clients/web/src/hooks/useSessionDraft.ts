@@ -16,6 +16,9 @@ export interface SessionDraft {
   setSkills: (s: Set<string>) => void;
   mcp: Set<string>;
   setMcp: (s: Set<string>) => void;
+  /** Memory spaces the session may read and write. */
+  memorySpaces: Set<string>;
+  setMemorySpaces: (s: Set<string>) => void;
   provisions: boolean;
   githubConnected: boolean;
   canSend: boolean;
@@ -38,6 +41,7 @@ export function useSessionDraft(): SessionDraft {
   const [repos, setRepos] = useState<Map<string, string>>(new Map());
   const [skills, setSkills] = useState<Set<string>>(new Set());
   const [mcp, setMcp] = useState<Set<string>>(new Set());
+  const [memorySpaces, setMemorySpaces] = useState<Set<string>>(new Set());
   const [skillsSeeded, setSkillsSeeded] = useState(false);
 
   // Seed model/vendor from server config, and keep them on a still-existing
@@ -82,6 +86,9 @@ export function useSessionDraft(): SessionDraft {
         model: model.trim(),
         usePlugins: provisions ? true : undefined,
         mcpServers: provisions && mcp.size ? Array.from(mcp) : undefined,
+        // Not gated on `provisions`: memories are served by the server itself,
+        // so they work on every vendor, including ones that can't provision.
+        memorySpaces: memorySpaces.size ? Array.from(memorySpaces) : undefined,
       },
       vendor: vendor.trim() || undefined,
       repos: repoList.length ? repoList : undefined,
@@ -100,6 +107,8 @@ export function useSessionDraft(): SessionDraft {
     setSkills,
     mcp,
     setMcp,
+    memorySpaces,
+    setMemorySpaces,
     provisions,
     githubConnected,
     canSend: blockedReason === null,

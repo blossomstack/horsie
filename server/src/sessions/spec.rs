@@ -40,6 +40,11 @@ pub struct AgentSettings {
     /// journal rows deserialize.
     #[serde(default)]
     pub mcp_servers: Vec<String>,
+    /// Memory spaces this session may read and write. Empty → the memory tools
+    /// are not offered and no index is injected. `#[serde(default)]` so
+    /// pre-memory journal rows deserialize.
+    #[serde(default)]
+    pub memory_spaces: Vec<String>,
 }
 
 /// One session workspace as persisted: just a name — the directory is always
@@ -145,6 +150,11 @@ pub struct ServerDeps {
     /// Resolves selected plugin bundles to fetchable refs and mints capability
     /// tokens at provisioning; `None` when no plugin library is wired.
     pub plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
+    /// Reads and writes the agent's long-term memories, and renders the index
+    /// injected into the system prompt; `None` when no memory service is wired
+    /// (tests). A session that names spaces with no service configured gets no
+    /// memory tools.
+    pub memory: Option<Arc<crate::memory::MemoryService>>,
 }
 
 #[cfg(test)]
