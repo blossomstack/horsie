@@ -154,6 +154,9 @@ pub(crate) async fn handle_chat_completions(
         if let Some(g) = &e.gate {
             g.notified().await;
         }
+        if let Some(d) = e.delay {
+            tokio::time::sleep(d).await;
+        }
     }
 
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
@@ -178,6 +181,29 @@ pub(crate) async fn handle_chat_completions(
             id: tid,
             input,
         }) => sse_from_pairs(tool_call_chunks(&id, &tid, &name, &input)),
+        // No OpenAI equivalent — render as an empty assistant turn.
+        Some(MockResponse::CutStream { chunks, after }) => {
+            let mut pairs = text_stream_chunks(&id, &chunks);
+            pairs.truncate(after.min(pairs.len()));
+            sse_from_pairs(pairs)
+        }
+        Some(MockResponse::CutToolCallStream {
+            name,
+            id: tid,
+            partial_input_json,
+        }) => sse_from_pairs(vec![chunk(
+            &id,
+            serde_json::json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": tid,
+                    "type": "function",
+                    "function": { "name": name, "arguments": partial_input_json }
+                }]
+            }),
+            None,
+        )]),
         // No OpenAI equivalent — render as an empty assistant turn.
         Some(MockResponse::Thinking { .. }) => sse_from_pairs(text_chunks(&id, "")),
         Some(MockResponse::Error { status, message }) => {
@@ -247,6 +273,52 @@ mod tests {
         server.queue_error(429, "slow down");
 
         assert_eq!(post_stream(&server).await.status().as_u16(), 429);
+    }
+
+    #[tokio::test]
+    async fn queued_delay_defers_the_response() {
+        let server = MockLlmServer::builder().build().await;
+        server.queue_delayed("slow", std::time::Duration::from_millis(300));
+
+        let started = tokio::time::Instant::now();
+        let body = post_stream(&server).await.text().await.unwrap();
+
+        assert!(body.contains("slow"), "body was: {body}");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(250),
+            "the response arrived too soon: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn cut_stream_omits_the_terminal_frame() {
+        let server = MockLlmServer::builder().build().await;
+        server.queue_cut_stream(["hel", "lo"], 1);
+
+        let body = post_stream(&server).await.text().await.unwrap();
+
+        assert!(body.contains("hel"), "body was: {body}");
+        assert!(
+            !body.contains("[DONE]"),
+            "a cut stream must not carry its terminator: {body}"
+        );
+        assert!(
+            !body.contains("\"finish_reason\":\"stop\""),
+            "a cut stream must not carry a finish_reason: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cut_tool_call_stream_sends_partial_arguments_and_stops() {
+        let server = MockLlmServer::builder().build().await;
+        server.queue_cut_tool_call("bash", "call_1", "{\"command\": \"ec");
+
+        let body = post_stream(&server).await.text().await.unwrap();
+
+        assert!(body.contains("bash"), "body was: {body}");
+        assert!(body.contains("ec"), "body was: {body}");
+        assert!(!body.contains("[DONE]"), "body was: {body}");
     }
 
     #[tokio::test]

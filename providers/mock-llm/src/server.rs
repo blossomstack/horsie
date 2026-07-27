@@ -53,12 +53,28 @@ pub enum MockResponse {
         reasoning: String,
         content: String,
     },
+    /// A stream that ends after `after` events without its terminal frame — the
+    /// connection dropped mid-response. Reproduces #61 item 1.
+    CutStream {
+        chunks: Vec<String>,
+        after: usize,
+    },
+    /// A tool call whose arguments are cut off mid-JSON, with no terminal frame.
+    /// `partial_input_json` is emitted verbatim and is expected not to parse.
+    CutToolCallStream {
+        name: String,
+        id: String,
+        partial_input_json: String,
+    },
 }
 
 pub(crate) struct QueueEntry {
     pub(crate) response: MockResponse,
     pub(crate) reached: Option<Arc<Notify>>,
     pub(crate) gate: Option<Arc<Notify>>,
+    /// Held for this long before answering — a slow peer. With no client-side
+    /// timeout this is indistinguishable from a hang (#61 item 5).
+    pub(crate) delay: Option<std::time::Duration>,
 }
 
 impl QueueEntry {
@@ -67,6 +83,7 @@ impl QueueEntry {
             response,
             reached: None,
             gate: None,
+            delay: None,
         }
     }
 }
@@ -315,6 +332,51 @@ impl MockLlmServer {
                 content: content.into(),
             }));
     }
+    /// Queue a text response the server holds for `delay` before answering.
+    pub fn queue_delayed(&self, text: impl Into<String>, delay: std::time::Duration) {
+        self.state.queue.lock().push(QueueEntry {
+            response: MockResponse::Text {
+                content: text.into(),
+            },
+            reached: None,
+            gate: None,
+            delay: Some(delay),
+        });
+    }
+
+    /// Queue a text stream cut off after `after` SSE events, with no terminal
+    /// frame — a connection dropped mid-response.
+    pub fn queue_cut_stream(
+        &self,
+        chunks: impl IntoIterator<Item = impl Into<String>>,
+        after: usize,
+    ) {
+        self.state
+            .queue
+            .lock()
+            .push(QueueEntry::immediate(MockResponse::CutStream {
+                chunks: chunks.into_iter().map(Into::into).collect(),
+                after,
+            }));
+    }
+
+    /// Queue a tool call whose arguments are cut off mid-JSON.
+    pub fn queue_cut_tool_call(
+        &self,
+        name: impl Into<String>,
+        id: impl Into<String>,
+        partial_input_json: impl Into<String>,
+    ) {
+        self.state
+            .queue
+            .lock()
+            .push(QueueEntry::immediate(MockResponse::CutToolCallStream {
+                name: name.into(),
+                id: id.into(),
+                partial_input_json: partial_input_json.into(),
+            }));
+    }
+
     /// Queue a reasoning-model turn: a reasoning trace, then the answer.
     pub fn queue_reasoning(&self, reasoning: impl Into<String>, content: impl Into<String>) {
         self.state
@@ -334,6 +396,7 @@ impl MockLlmServer {
             },
             reached: Some(Arc::clone(&reached)),
             gate: Some(Arc::clone(&gate)),
+            delay: None,
         });
         BlockHandle { gate, reached }
     }
@@ -419,6 +482,9 @@ async fn handle_messages(
         if let Some(g) = &e.gate {
             g.notified().await;
         }
+        if let Some(d) = e.delay {
+            tokio::time::sleep(d).await;
+        }
     }
 
     let response = entry.map(|e| e.response);
@@ -432,6 +498,16 @@ async fn handle_messages(
         Some(MockResponse::ToolCallStream { name, id, input }) => {
             sse_from_pairs(tool_call_stream_sse(&name, &id, &input))
         }
+        Some(MockResponse::CutStream { chunks, after }) => {
+            let mut pairs = text_stream_sse(&chunks);
+            pairs.truncate(after.min(pairs.len()));
+            sse_from_pairs(pairs)
+        }
+        Some(MockResponse::CutToolCallStream {
+            name,
+            id,
+            partial_input_json,
+        }) => sse_from_pairs(cut_tool_call_stream_sse(&name, &id, &partial_input_json)),
         other => {
             let resp = other;
             if is_stream {
@@ -466,7 +542,12 @@ async fn handle_messages(
                         )]
                     }
                     None => text_sse(&msg_id, "No mock response queued"),
-                    Some(MockResponse::TextStream { .. } | MockResponse::ToolCallStream { .. }) => {
+                    Some(
+                        MockResponse::TextStream { .. }
+                        | MockResponse::ToolCallStream { .. }
+                        | MockResponse::CutStream { .. }
+                        | MockResponse::CutToolCallStream { .. },
+                    ) => {
                         unreachable!()
                     }
                 };
@@ -494,7 +575,12 @@ async fn handle_messages(
                         ResponseKind::HttpError(code, axum::Json(error_json(&message)))
                     }
                     None => ResponseKind::Json(axum::Json(text_json("No mock response queued"))),
-                    Some(MockResponse::TextStream { .. } | MockResponse::ToolCallStream { .. }) => {
+                    Some(
+                        MockResponse::TextStream { .. }
+                        | MockResponse::ToolCallStream { .. }
+                        | MockResponse::CutStream { .. }
+                        | MockResponse::CutToolCallStream { .. },
+                    ) => {
                         unreachable!()
                     }
                 }
@@ -749,6 +835,26 @@ fn text_stream_sse(chunks: &[String]) -> Vec<(String, String)> {
         serde_json::json!({"type":"message_stop"}).to_string(),
     ));
     events
+}
+
+/// A tool_use block whose `input_json_delta` is truncated mid-JSON, with no
+/// `content_block_stop`, no `message_delta` and no `message_stop`.
+fn cut_tool_call_stream_sse(name: &str, id: &str, partial: &str) -> Vec<(String, String)> {
+    let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
+    vec![
+        (
+            "message_start".into(),
+            serde_json::json!({"type":"message_start","message":{"id":msg_id,"type":"message","role":"assistant","content":[],"model":"mock-model","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}).to_string(),
+        ),
+        (
+            "content_block_start".into(),
+            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":id,"name":name,"input":{}}}).to_string(),
+        ),
+        (
+            "content_block_delta".into(),
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":partial}}).to_string(),
+        ),
+    ]
 }
 
 fn tool_call_stream_sse(name: &str, id: &str, input: &serde_json::Value) -> Vec<(String, String)> {
