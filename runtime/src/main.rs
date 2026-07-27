@@ -17,9 +17,17 @@ use horsie_models::runtime::{
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{WebSocketStream, client_async, connect_async, tungstenite::Message};
+
+/// Default retry policy for the initial server connection. A long-lived
+/// `horsie connect` daemon should tolerate transient server restarts, so we
+/// retry for ~13 minutes total before giving up.
+const CONNECT_RETRIES: usize = 30;
+const CONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
+const CONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Parser)]
 struct Cli {
@@ -156,27 +164,82 @@ async fn run(cli: Cli, endpoint: Endpoint) {
     );
 
     match endpoint {
-        Endpoint::Ws(url) => match connect_async(&url).await {
-            Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id, steps).await,
-            Err(e) => {
-                eprintln!("failed to connect to {url}: {e}");
-                std::process::exit(1);
-            }
-        },
-        Endpoint::Unix(path) => match tokio::net::UnixStream::connect(&path).await {
-            Ok(stream) => match client_async("ws://localhost/", stream).await {
-                Ok((ws, _)) => run_loop(ws, registry, cli.runtime_id, steps).await,
+        Endpoint::Ws(url) => {
+            let ws = match retry(
+                &format!("connect to {url}"),
+                || connect_async(url.clone()),
+                CONNECT_RETRIES,
+                CONNECT_BASE_DELAY,
+                CONNECT_MAX_DELAY,
+            )
+            .await
+            {
+                Ok((ws, _)) => ws,
                 Err(e) => {
-                    eprintln!("ws handshake failed on unix socket: {e}");
+                    eprintln!("failed to connect to {url}: {e}");
                     std::process::exit(1);
                 }
-            },
-            Err(e) => {
-                eprintln!("failed to connect to unix socket {}: {e}", path.display());
-                std::process::exit(1);
-            }
-        },
+            };
+            run_loop(ws, registry, cli.runtime_id, steps).await;
+        }
+        Endpoint::Unix(path) => {
+            let ws = match retry(
+                &format!("connect to unix socket {}", path.display()),
+                || async {
+                    let stream = tokio::net::UnixStream::connect(&path)
+                        .await
+                        .map_err(|e| format!("connect failed: {e}"))?;
+                    client_async("ws://localhost/", stream)
+                        .await
+                        .map_err(|e| format!("handshake failed: {e}"))
+                },
+                CONNECT_RETRIES,
+                CONNECT_BASE_DELAY,
+                CONNECT_MAX_DELAY,
+            )
+            .await
+            {
+                Ok((ws, _)) => ws,
+                Err(e) => {
+                    eprintln!("failed to connect to unix socket {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            };
+            run_loop(ws, registry, cli.runtime_id, steps).await;
+        }
     }
+}
+
+/// Retry an async operation with capped exponential backoff. Logs each failed
+/// attempt to stderr so a foreground `horsie connect` is not silent while the
+/// server is unreachable.
+async fn retry<F, Fut, T, E>(
+    label: &str,
+    operation: F,
+    max_attempts: usize,
+    base_delay: Duration,
+    max_delay: Duration,
+) -> Result<T, E>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let mut delay = base_delay;
+    for attempt in 1..=max_attempts {
+        match operation().await {
+            Ok(t) => return Ok(t),
+            Err(e) if attempt == max_attempts => return Err(e),
+            Err(e) => {
+                eprintln!(
+                    "{label} attempt {attempt}/{max_attempts} failed: {e}; retrying in {delay:?}"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(max_delay);
+            }
+        }
+    }
+    unreachable!("loop returns inside its branches")
 }
 
 /// The runtime message loop, generic over the underlying socket so TCP and unix
@@ -375,6 +438,49 @@ async fn run_loop<S>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn retry_succeeds_after_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let attempts = AtomicUsize::new(0);
+        let result = retry(
+            "test",
+            || async {
+                let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if n < 3 {
+                    Err(format!("attempt {n}"))
+                } else {
+                    Ok("success")
+                }
+            },
+            5,
+            Duration::from_millis(1),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert_eq!(result, Ok("success"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_exhausts_attempts_and_returns_last_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let attempts = AtomicUsize::new(0);
+        let result: Result<&str, String> = retry(
+            "test",
+            || async {
+                let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                Err(format!("attempt {n}"))
+            },
+            3,
+            Duration::from_millis(1),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert_eq!(result, Err("attempt 3".to_string()));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
 
     #[test]
     fn parse_endpoint_ws() {

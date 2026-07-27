@@ -574,6 +574,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 &cfg.storage.state_dir,
                 plugins,
             )
+            .await
         }
     }
 }
