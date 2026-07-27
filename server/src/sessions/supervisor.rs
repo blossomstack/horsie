@@ -9,7 +9,9 @@ use crate::sessions::spec::{
 use crate::sessions::{SessionFrame, UserMessageError};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
-use horsie_models::session::GlobalSessionEvent;
+use horsie_models::session::{
+    GlobalSessionEvent, GlobalSessionStatusEvent, GlobalSessionTitleEvent,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tokio::sync::{broadcast, oneshot};
@@ -76,8 +78,15 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         status: SessionStatus,
     },
-    /// Internal: a session actor derived a title from its first message.
-    SessionNamed { id: SessionId, name: String },
+    /// Internal: a session actor requests a durable rename. Replies only after
+    /// the SessionNamed event is journaled.
+    RenameSession {
+        id: SessionId,
+        name: String,
+        reply: oneshot::Sender<Result<(), horsie_actor::JournalError>>,
+    },
+    /// Internal: publish an already-journaled title to the global live feed.
+    PublishSessionTitle { id: SessionId, name: String },
 }
 
 /// Events recording the session registry. Persisted.
@@ -142,11 +151,22 @@ impl SessionSupervisor {
     }
 
     fn publish(&self, id: &str, status: &SessionStatus) {
-        let _ = self.global_tx.send(GlobalSessionEvent {
-            session_id: id.to_string(),
-            status: status_kind(status),
-            reason: status_reason(status),
-        });
+        let _ = self.global_tx.send(GlobalSessionEvent::StatusChanged(
+            GlobalSessionStatusEvent {
+                session_id: id.to_string(),
+                status: status_kind(status),
+                reason: status_reason(status),
+            },
+        ));
+    }
+
+    fn publish_title(&self, id: &str, name: &str) {
+        let _ = self
+            .global_tx
+            .send(GlobalSessionEvent::TitleChanged(GlobalSessionTitleEvent {
+                session_id: id.to_string(),
+                name: name.to_string(),
+            }));
     }
 
     /// A child's mailbox closed outside the normal lifecycle — its own journal
@@ -394,8 +414,21 @@ impl EventSourcedActor for SessionSupervisor {
                     status,
                 }])
             }
-            SessionSupervisorCommand::SessionNamed { id, name } => {
+            SessionSupervisorCommand::RenameSession { id, name, reply } => {
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed { id, name }])
+                    .and_ack(reply)
+            }
+            SessionSupervisorCommand::PublishSessionTitle { id, name } => {
+                // A rename command that was superseded while its publish request
+                // was queued must not broadcast a stale title.
+                let current = state
+                    .sessions
+                    .get(&id)
+                    .and_then(|rec| rec.spec.name.as_deref());
+                if current == Some(name.as_str()) {
+                    self.publish_title(&id, &name);
+                }
+                CommandEffect::none()
             }
         }
     }
@@ -512,6 +545,129 @@ mod tests {
         assert!(s.sessions.is_empty());
     }
 
+    #[test]
+    fn session_named_event_folds_the_latest_title() {
+        let state = SessionSupervisor::apply_event(
+            SessionSupervisorState::default(),
+            SessionSupervisorEvent::SessionCreated {
+                id: "s1".into(),
+                spec: SessionSpec {
+                    name: None,
+                    ..spec_fixture()
+                },
+                created_at: 7,
+            },
+        );
+        let state = SessionSupervisor::apply_event(
+            state,
+            SessionSupervisorEvent::SessionNamed {
+                id: "s1".into(),
+                name: "First title".into(),
+            },
+        );
+        let state = SessionSupervisor::apply_event(
+            state,
+            SessionSupervisorEvent::SessionNamed {
+                id: "s1".into(),
+                name: "Latest title".into(),
+            },
+        );
+        assert_eq!(
+            state.sessions.get("s1").unwrap().spec.name.as_deref(),
+            Some("Latest title")
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_session_replies_after_journaling_the_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let (gtx, _grx) = broadcast::channel(16);
+        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp), gtx), journal);
+
+        let id = sup
+            .ask(|reply| SessionSupervisorCommand::Create {
+                spec: SessionSpec {
+                    name: None,
+                    ..spec_fixture()
+                },
+                created_at: 1,
+                reply,
+            })
+            .await
+            .unwrap();
+
+        let persisted = sup
+            .ask(|reply| SessionSupervisorCommand::RenameSession {
+                id: id.clone(),
+                name: "Investigate login failure".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(persisted.is_ok());
+
+        let rec = sup
+            .ask(|reply| SessionSupervisorCommand::Get {
+                id: id.clone(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.spec.name.as_deref(), Some("Investigate login failure"));
+    }
+
+    #[tokio::test]
+    async fn publish_session_title_emits_a_dedicated_title_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let (gtx, mut grx) = broadcast::channel(16);
+        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp), gtx), journal);
+
+        let id = sup
+            .ask(|reply| SessionSupervisorCommand::Create {
+                spec: SessionSpec {
+                    name: None,
+                    ..spec_fixture()
+                },
+                created_at: 1,
+                reply,
+            })
+            .await
+            .unwrap();
+        sup.ask(|reply| SessionSupervisorCommand::RenameSession {
+            id: id.clone(),
+            name: "Investigate login failure".into(),
+            reply,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        sup.tell(SessionSupervisorCommand::PublishSessionTitle {
+            id: id.clone(),
+            name: "Investigate login failure".into(),
+        })
+        .await
+        .unwrap();
+
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), grx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match frame {
+                horsie_models::session::GlobalSessionEvent::TitleChanged(event) => {
+                    assert_eq!(event.session_id, id);
+                    assert_eq!(event.name, "Investigate login failure");
+                    break;
+                }
+                horsie_models::session::GlobalSessionEvent::StatusChanged(_) => {}
+            }
+        }
+    }
+
     #[tokio::test]
     async fn create_list_get_delete_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
@@ -545,9 +701,15 @@ mod tests {
         assert!(rec.is_some());
 
         // Creation published a Provisioning frame on the global stream.
-        let frame = grx.recv().await.unwrap();
-        assert_eq!(frame.session_id, id);
-        assert_eq!(frame.status, SessionStatusKind::Provisioning);
+        match grx.recv().await.unwrap() {
+            horsie_models::session::GlobalSessionEvent::StatusChanged(frame) => {
+                assert_eq!(frame.session_id, id);
+                assert_eq!(frame.status, SessionStatusKind::Provisioning);
+            }
+            horsie_models::session::GlobalSessionEvent::TitleChanged(_) => {
+                panic!("creation must not publish a title frame")
+            }
+        }
 
         let res = sup
             .ask(|reply| SessionSupervisorCommand::Delete {

@@ -10,6 +10,7 @@ pub mod events;
 pub mod session_actor;
 pub mod spec;
 pub mod supervisor;
+pub mod title_tool;
 
 /// Live broadcast frames for one session's SSE stream.
 #[derive(Debug, Clone)]

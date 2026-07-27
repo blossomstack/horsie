@@ -50,7 +50,10 @@ export function useSessionUsage(id: string | undefined) {
   });
 }
 
-function applyGlobalEvent(client: QueryClient, ev: GlobalSessionEvent) {
+function applyGlobalStatus(
+  client: QueryClient,
+  ev: Extract<GlobalSessionEvent, { type: "StatusChanged" }>["value"],
+) {
   let matched = false;
   client.setQueryData<ListSessionsResponse>(qk.sessions, (prev) => {
     if (!prev) return prev;
@@ -79,10 +82,52 @@ function applyGlobalEvent(client: QueryClient, ev: GlobalSessionEvent) {
   );
 }
 
+function applyGlobalTitle(
+  client: QueryClient,
+  ev: Extract<GlobalSessionEvent, { type: "TitleChanged" }>["value"],
+) {
+  let matched = false;
+  client.setQueryData<ListSessionsResponse>(qk.sessions, (prev) => {
+    if (!prev) return prev;
+    const sessions = prev.sessions.map((s) => {
+      if (s.id !== ev.sessionId) return s;
+      matched = true;
+      return { ...s, name: ev.name };
+    });
+    return { sessions };
+  });
+  // A title change for a session we don't know about yet → refetch the list.
+  if (!matched) client.invalidateQueries({ queryKey: qk.sessions });
+
+  client.setQueryData<GetSessionResponse>(
+    qk.session(ev.sessionId),
+    (prev) =>
+      prev
+        ? {
+            session: {
+              ...prev.session,
+              name: ev.name,
+            },
+          }
+        : prev,
+  );
+}
+
+function applyGlobalEvent(client: QueryClient, ev: GlobalSessionEvent) {
+  switch (ev.type) {
+    case "StatusChanged":
+      applyGlobalStatus(client, ev.value);
+      return;
+    case "TitleChanged":
+      applyGlobalTitle(client, ev.value);
+      return;
+  }
+}
+
 /**
  * Opens the single global SSE feed and keeps the session-list (and any open
- * detail) query caches live as statuses change server-side. Mount once, high
- * in the tree.
+ * detail) query caches live as session status or title changes server-side.
+ * Mount once, high in the tree.
  */
 export function useGlobalSessionFeed() {
   const client = useQueryClient();

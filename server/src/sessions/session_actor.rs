@@ -10,6 +10,7 @@ use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::SessionEventSink;
 use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::supervisor::SessionSupervisorCommand;
+use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
 use crate::sessions::{SessionFrame, UserMessageError};
 use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorRuntime};
 use async_trait::async_trait;
@@ -106,6 +107,11 @@ pub enum SessionCommand {
     AgentOutcome(AgentOutcome, u64),
     /// Internal: post-recovery reconciliation (`Running` → `Interrupted`).
     ReconcileInterrupted,
+    /// Set the session title from the built-in title tool.
+    SetSessionTitle {
+        title: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// Events recording a session's lifecycle. Persisted.
@@ -189,7 +195,7 @@ enum WakeMode {
 
 /// Longest auto-derived session title, in characters (display metadata only —
 /// mirrors how chat products title a conversation from its first message).
-const TITLE_MAX_CHARS: usize = 60;
+const TITLE_MAX_CHARS: usize = crate::sessions::title_tool::SESSION_TITLE_MAX_CHARS;
 
 /// A short title derived from a user's first message, or `None` if it has no
 /// usable text (e.g. all whitespace).
@@ -261,6 +267,33 @@ impl SessionActor {
                 status,
             })
             .await;
+    }
+
+    /// Persist a session title through the supervisor, then update local state
+    /// and publish the already-durable title. Live publication is best-effort;
+    /// the journal remains the source of truth.
+    async fn rename_session(&mut self, title: String) -> Result<String, String> {
+        let id = self.id.to_string();
+        let persisted = self
+            .parent
+            .ask(|reply| SessionSupervisorCommand::RenameSession {
+                id: id.clone(),
+                name: title.clone(),
+                reply,
+            })
+            .await
+            .map_err(|e| format!("session supervisor unavailable: {e}"))?;
+        persisted.map_err(|e| format!("persist session title: {e}"))?;
+
+        self.spec.name = Some(title.clone());
+        let _ = self
+            .parent
+            .tell(SessionSupervisorCommand::PublishSessionTitle {
+                id,
+                name: title.clone(),
+            })
+            .await;
+        Ok(title)
     }
 
     fn vendor(&self) -> Result<Arc<dyn RuntimeVendor>, String> {
@@ -443,6 +476,7 @@ impl SessionActor {
             memory: self.deps.memory.clone(),
             settings: self.spec.agent.clone(),
             session_id: self.id,
+            session: ctx.self_ref(),
             frames: self.frames.clone(),
         });
         let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
@@ -612,18 +646,13 @@ impl SessionActor {
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
         // An unnamed session is titled from its first message, once — like
-        // other chat products. A caller-supplied name at creation always wins.
+        // other chat products. A caller-supplied name at creation starts as
+        // the title, but can still be replaced later by set_session_title.
         if self.spec.name.is_none()
             && let Some(title) = derive_title(&text)
+            && let Err(error) = self.rename_session(title).await
         {
-            self.spec.name = Some(title.clone());
-            let _ = self
-                .parent
-                .tell(SessionSupervisorCommand::SessionNamed {
-                    id: self.id.to_string(),
-                    name: title,
-                })
-                .await;
+            tracing::warn!(session = %self.id, error, "failed to persist fallback session title");
         }
 
         match state.status.clone() {
@@ -876,6 +905,8 @@ struct SessionContextProvider {
     memory: Option<Arc<crate::memory::MemoryService>>,
     settings: AgentSettings,
     session_id: Uuid,
+    /// The owning session's mailbox — routes the server-owned title tool.
+    session: ActorRef<SessionCommand>,
     /// Live frame stream — `ensure` emits preparation progressions onto it.
     frames: broadcast::Sender<SessionFrame>,
 }
@@ -927,9 +958,13 @@ impl ContextProvider for SessionContextProvider {
         );
         let (with_memory, memory_index) =
             build_memory_layer(base, self.memory.clone(), settings).await?;
-        // `AskUserToolbox` stays outermost: `ask_user` is terminal and the run
-        // looks it up by name via `params.optional_handoff_tool`.
-        let toolbox: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_memory));
+        // `AskUserToolbox` wraps the composed tools: `ask_user` is terminal and
+        // the run looks it up by name via `params.optional_handoff_tool`.
+        let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_memory));
+        // `SessionTitleToolbox` is outermost: it delegates every other name, so
+        // the handoff lookup above still reaches `ask_user`.
+        let toolbox: Arc<dyn Toolbox> =
+            Arc::new(SessionTitleToolbox::new(inner, self.session.clone()));
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
         let system_prompt = match (system_prompt, memory_index.is_empty()) {
             (Some(p), false) => Some(format!("{p}\n\n{memory_index}")),
@@ -1082,6 +1117,14 @@ impl EventSourcedActor for SessionActor {
                     CommandEffect::none()
                 }
             }
+            SessionCommand::SetSessionTitle { title, reply } => {
+                let result = match normalize_session_title(&title) {
+                    Ok(title) => self.rename_session(title).await,
+                    Err(error) => Err(error.to_string()),
+                };
+                let _ = reply.send(result);
+                CommandEffect::none()
+            }
         }
     }
 
@@ -1112,9 +1155,12 @@ mod tests {
     use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use std::collections::HashMap;
 
-    /// A trivial supervisor stand-in that forwards status reports to a channel.
+    /// A trivial supervisor stand-in that records status, rename, and publish
+    /// commands on channels.
     struct NullSupervisor {
         statuses: tokio::sync::mpsc::UnboundedSender<SessionStatus>,
+        names: tokio::sync::mpsc::UnboundedSender<String>,
+        published_titles: tokio::sync::mpsc::UnboundedSender<String>,
     }
 
     #[derive(Serialize, Deserialize, Default)]
@@ -1141,8 +1187,18 @@ mod tests {
             cmd: SessionSupervisorCommand,
             _ctx: &mut ActorContext<Self>,
         ) -> CommandEffect<()> {
-            if let SessionSupervisorCommand::SessionStatusChanged { status, .. } = cmd {
-                let _ = self.statuses.send(status);
+            match cmd {
+                SessionSupervisorCommand::SessionStatusChanged { status, .. } => {
+                    let _ = self.statuses.send(status);
+                }
+                SessionSupervisorCommand::RenameSession { name, reply, .. } => {
+                    let _ = self.names.send(name);
+                    let _ = reply.send(Ok(()));
+                }
+                SessionSupervisorCommand::PublishSessionTitle { name, .. } => {
+                    let _ = self.published_titles.send(name);
+                }
+                _ => {}
             }
             CommandEffect::none()
         }
@@ -1252,6 +1308,8 @@ mod tests {
         actor: ActorRef<SessionCommand>,
         vendor: Arc<MockVendor>,
         statuses: tokio::sync::mpsc::UnboundedReceiver<SessionStatus>,
+        names: tokio::sync::mpsc::UnboundedReceiver<String>,
+        published_titles: tokio::sync::mpsc::UnboundedReceiver<String>,
         id: Uuid,
         _tmp: tempfile::TempDir,
     }
@@ -1284,13 +1342,24 @@ mod tests {
             plugins: None,
             memory: None,
         };
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let parent = spawn_root(NullSupervisor { statuses: tx }, journal.clone());
+        let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (names_tx, names_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (titles_tx, titles_rx) = tokio::sync::mpsc::unbounded_channel();
+        let parent = spawn_root(
+            NullSupervisor {
+                statuses: status_tx,
+                names: names_tx,
+                published_titles: titles_tx,
+            },
+            journal.clone(),
+        );
         let actor = spawn_root(SessionActor::new(id, spec, deps, parent), journal);
         Harness {
             actor,
             vendor,
-            statuses: rx,
+            statuses: status_rx,
+            names: names_rx,
+            published_titles: titles_rx,
             id,
             _tmp: tmp,
         }
@@ -1357,6 +1426,98 @@ mod tests {
         let title = derive_title(&long).unwrap();
         assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1); // +1 for the ellipsis
         assert!(title.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn first_user_message_still_derives_a_fallback_title() {
+        let mut h = harness_on(Arc::new(InMemoryJournal::new()), MockVendor::new());
+
+        let result = h
+            .actor
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "  fix the login redirect  \nwith details".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+
+        // The test harness has no provider registered, so the turn itself fails
+        // after the title is named. This assertion is about the fallback title.
+        assert!(matches!(result, Err(UserMessageError::RecoveryFailed(_))));
+        assert_eq!(h.names.recv().await.unwrap(), "fix the login redirect");
+        assert_eq!(
+            h.published_titles.recv().await.unwrap(),
+            "fix the login redirect"
+        );
+    }
+
+    #[test]
+    fn system_prompt_instructs_the_agent_to_title_the_session() {
+        assert!(SESSION_AGENT_PROMPT.contains("## Session title"));
+        assert!(SESSION_AGENT_PROMPT.contains("set_session_title"));
+        assert!(SESSION_AGENT_PROMPT.contains("first turn"));
+        assert!(SESSION_AGENT_PROMPT.contains("latest successful call wins"));
+    }
+
+    #[tokio::test]
+    async fn set_session_title_replaces_a_creation_name() {
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let mut spec = spec_fixture("mock");
+        spec.name = Some("Creation name".into());
+        let mut h = harness_custom(journal, MockVendor::new(), Uuid::new_v4(), spec, None);
+
+        let first = h
+            .actor
+            .ask(|reply| SessionCommand::SetSessionTitle {
+                title: "  Better model title  ".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, "Better model title");
+        assert_eq!(h.names.recv().await.unwrap(), "Better model title");
+        assert_eq!(
+            h.published_titles.recv().await.unwrap(),
+            "Better model title"
+        );
+
+        let latest = h
+            .actor
+            .ask(|reply| SessionCommand::SetSessionTitle {
+                title: "Latest title wins".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest, "Latest title wins");
+        assert_eq!(h.names.recv().await.unwrap(), "Latest title wins");
+        assert_eq!(
+            h.published_titles.recv().await.unwrap(),
+            "Latest title wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_session_title_rejects_invalid_titles_without_renaming() {
+        let mut h = harness_on(Arc::new(InMemoryJournal::new()), MockVendor::new());
+
+        let too_long = "é".repeat(61);
+        for title in ["   ", "one\ntwo", too_long.as_str()] {
+            let error = h
+                .actor
+                .ask(|reply| SessionCommand::SetSessionTitle {
+                    title: title.to_string(),
+                    reply,
+                })
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert!(!error.is_empty());
+            assert!(h.names.try_recv().is_err());
+            assert!(h.published_titles.try_recv().is_err());
+        }
     }
 
     #[tokio::test]
@@ -1615,9 +1776,18 @@ mod tests {
             plugins: None,
             memory: None,
         };
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (names_tx, names_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (titles_tx, titles_rx) = tokio::sync::mpsc::unbounded_channel();
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let parent = spawn_root(NullSupervisor { statuses: tx }, journal.clone());
+        let parent = spawn_root(
+            NullSupervisor {
+                statuses: status_tx,
+                names: names_tx,
+                published_titles: titles_tx,
+            },
+            journal.clone(),
+        );
         let id = Uuid::new_v4();
         let actor = spawn_root(
             SessionActor::new(id, spec_fixture("mock"), deps, parent),
@@ -1626,7 +1796,9 @@ mod tests {
         Harness {
             actor,
             vendor,
-            statuses: rx,
+            statuses: status_rx,
+            names: names_rx,
+            published_titles: titles_rx,
             id,
             _tmp: tmp,
         }
