@@ -55,6 +55,10 @@ export function SessionView() {
   const del = useDeleteSession();
   const { values: uiSettings } = useUiSettings();
   const [sendError, setSendError] = useState<string | null>(null);
+  const [answering, setAnswering] = useState(false);
+  // The `statusSeq` observed when the answer went out; the latch releases on
+  // the next frame after it.
+  const answerSeq = useRef<number | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -87,14 +91,40 @@ export function SessionView() {
   const handleAnswer = async (text: string) => {
     if (!id) return;
     setSendError(null);
+    // Answering leaves the session in AwaitingInput for the whole resumed turn
+    // (horsie#61 item 3), so status alone can't tell the composer to stand down
+    // and a second message would inject a duplicate tool_result — bricking the
+    // session with a provider 400. Latch locally until the turn reports back.
+    setAnswering(true);
+    answerSeq.current = stream.statusSeq;
     try {
       await send.mutateAsync({ id, text });
     } catch (e) {
+      answerSeq.current = null;
+      setAnswering(false);
       setSendError(
         e instanceof ApiRequestError ? e.message : "Failed to send your answer.",
       );
     }
   };
+
+  // Release the answer latch on the next status report — the turn concluded, or
+  // the agent asked again (AwaitingInput → AwaitingInput, which `report` still
+  // emits a frame for).
+  useEffect(() => {
+    if (answerSeq.current !== null && stream.statusSeq !== answerSeq.current) {
+      answerSeq.current = null;
+      setAnswering(false);
+    }
+  }, [stream.statusSeq]);
+
+  // A stream error ends the turn without a status frame.
+  useEffect(() => {
+    if (stream.streamError) {
+      answerSeq.current = null;
+      setAnswering(false);
+    }
+  }, [stream.streamError]);
 
   const focusPendingAsk = () => {
     document
@@ -190,7 +220,7 @@ export function SessionView() {
 
   return (
     <AskAnswerProvider
-      value={{ pendingId: pendingAskId, submitting: false, submit: handleAnswer }}
+      value={{ pendingId: pendingAskId, submitting: answering, submit: handleAnswer }}
     >
       <div className="flex h-full">
         <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -330,7 +360,8 @@ export function SessionView() {
           <Composer
             status={status}
             busy={send.isPending}
-            askLocked={pendingAskId !== null}
+            askLocked={pendingAskId !== null || answering}
+            showStop={answering}
             onSend={(text) => handleSend(id, text)}
             onStop={handleStop}
             onFocusAsk={focusPendingAsk}

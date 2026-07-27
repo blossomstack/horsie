@@ -191,3 +191,35 @@ test("C5: a choice and a typed note are sent together", async ({
   // Picks first, blank line, then the note — see `composeAnswer`.
   expect(await answersSent(mock)).toEqual(["blue\n\nbut only for the header"]);
 });
+
+test("C6: answering latches the composer shut and offers Stop until the turn reports back", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.queueToolCall("ask_user", {
+    question: "Which color do you prefer?",
+    choices: ["red", "blue"],
+  });
+  // The resumed turn runs a slow tool, so the latched window is observable.
+  await mock.queueToolCall("bash", { command: "sleep 3" });
+  await mock.queueText("Done with blue.");
+  await createSession(page, appBase);
+
+  await sendMessage(page, "pick a color for me");
+  await expect(page.getByTestId("ask-user-card")).toBeVisible();
+  await page.locator('[data-testid="ask-user-choice"][data-value="blue"]').click();
+  await page.getByTestId("ask-user-send").click();
+
+  // Answered, but the turn it resumed is still going: the session stays in
+  // AwaitingInput the whole time, so without the latch the composer would
+  // happily send a second message and inject a duplicate tool_result.
+  await expect(page.getByTestId("composer-input")).toBeDisabled();
+  await expect(page.getByTestId("composer-stop")).toBeVisible();
+
+  // The next status report releases it.
+  await expect(page.getByTestId("assistant-text")).toContainText("Done with blue.");
+  await expectStatus(page, "Idle");
+  await expect(page.getByTestId("composer-input")).toBeEnabled();
+  await expect(page.getByTestId("composer-stop")).toHaveCount(0);
+});
