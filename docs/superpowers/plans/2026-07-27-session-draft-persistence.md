@@ -443,7 +443,7 @@ describe("usePersistentState", () => {
         deserialize: (raw) => (Array.isArray(raw) ? new Set(raw as string[]) : undefined),
       }),
     );
-    expect([...again.current[0]].sort()).toEqual(["a", "b"]);
+    expect([...again.result.current[0]].sort()).toEqual(["a", "b"]);
   });
 });
 ```

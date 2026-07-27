@@ -1,6 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CreateSessionRequest, RepoConfig } from "../api/types";
+import {
+  DRAFT_STORAGE_KEY,
+  emptyDraft,
+  filterMcpServers,
+  filterMemorySpaces,
+  filterSkills,
+  loadDraftPayload,
+  parseDraftPayload,
+  reconcileModelVendor,
+  type DraftPayload,
+} from "./draftPersistence";
 import { useGithubStatus } from "./useGithub";
+import { useMemorySpaces } from "./useMemory";
+import { useMcpServers } from "./useMcp";
+import { usePersistentState } from "./usePersistentState";
 import { usePlugins } from "./usePlugins";
 import { useSettings } from "./useSettings";
 
@@ -30,85 +44,114 @@ export function useSessionDraft(): SessionDraft {
   const { data: settings } = useSettings();
   const { data: ghStatus } = useGithubStatus();
   const { data: bundles } = usePlugins();
+  const { data: mcpServers } = useMcpServers();
+  const { data: memorySpaces } = useMemorySpaces();
   const models = settings?.models ?? [];
   const activeVendors = useMemo(
     () => (settings?.vendors ?? []).filter((v) => v.active),
     [settings],
   );
 
-  const [vendor, setVendor] = useState("");
-  const [model, setModel] = useState("");
-  const [repos, setRepos] = useState<Map<string, string>>(new Map());
-  const [skills, setSkills] = useState<Set<string>>(new Set());
-  const [mcp, setMcp] = useState<Set<string>>(new Set());
-  const [memorySpaces, setMemorySpaces] = useState<Set<string>>(new Set());
-  const [skillsSeeded, setSkillsSeeded] = useState(false);
+  // Load-once snapshot: `undefined` means this browser has no usable stored
+  // draft (first visit, corrupt payload, unknown version) — the signal that
+  // decides whether default-enabled bundles get seeded below.
+  const [storedAtMount] = useState(() => loadDraftPayload());
+  const [draft, setDraft] = usePersistentState<DraftPayload>(
+    DRAFT_STORAGE_KEY,
+    storedAtMount ?? emptyDraft(),
+    { deserialize: parseDraftPayload },
+  );
 
-  // Seed model/vendor from server config, and keep them on a still-existing
-  // choice if config changes.
+  // Keep model/vendor on still-existing choices as server config changes.
   useEffect(() => {
     if (!settings) return;
-    if (!models.some((m) => m.alias === model)) setModel(models[0]?.alias ?? "");
-    if (!activeVendors.some((v) => v.name === vendor))
-      setVendor(settings.defaultVendor);
-  }, [settings, models, activeVendors, model, vendor]);
+    const next = reconcileModelVendor(
+      draft,
+      models.map((m) => m.alias),
+      activeVendors.map((v) => v.name),
+      settings.defaultVendor,
+    );
+    if (next !== draft) setDraft(next);
+  }, [settings, models, activeVendors, draft]);
 
-  // Pre-select the server's default-enabled bundles once.
+  // First visit only: pre-select the server's default-enabled bundles. A
+  // stored draft (even one equal to the defaults, even with empty skills)
+  // suppresses seeding — the user's last choice wins.
+  const [skillsSeeded, setSkillsSeeded] = useState(storedAtMount !== undefined);
   useEffect(() => {
     if (skillsSeeded || !bundles) return;
-    setSkills(new Set(bundles.filter((b) => b.enabledDefault).map((b) => b.name)));
+    setDraft({
+      ...draft,
+      skills: bundles.filter((b) => b.enabledDefault).map((b) => b.name),
+    });
     setSkillsSeeded(true);
-  }, [bundles, skillsSeeded]);
+  }, [bundles, skillsSeeded, draft]);
+
+  // A restored draft may name bundles/servers/spaces that no longer exist —
+  // drop those once the authoritative lists arrive (one pass, silently).
+  const [staleFiltered, setStaleFiltered] = useState(false);
+  useEffect(() => {
+    if (staleFiltered || !bundles || !mcpServers || !memorySpaces) return;
+    const next = filterMemorySpaces(
+      filterMcpServers(
+        filterSkills(draft, new Set(bundles.map((b) => b.name))),
+        new Set(mcpServers.filter((s) => s.enabled).map((s) => s.name)),
+      ),
+      new Set(memorySpaces.map((sp) => sp.name)),
+    );
+    if (next !== draft) setDraft(next);
+    setStaleFiltered(true);
+  }, [staleFiltered, bundles, mcpServers, memorySpaces, draft]);
 
   const selectedVendor = activeVendors.find(
-    (v) => v.name === (vendor || settings?.defaultVendor),
+    (v) => v.name === (draft.vendor || settings?.defaultVendor),
   );
   const provisions = !!selectedVendor?.capabilities?.supportsProvisioning;
   const githubConnected = !!ghStatus?.connected;
 
   const blockedReason = useMemo(() => {
-    if (!model.trim()) return "Select a model to start.";
-    if (!vendor.trim()) return "Select a runtime to start.";
+    if (!draft.model.trim()) return "Select a model to start.";
+    if (!draft.vendor.trim()) return "Select a runtime to start.";
     if (provisions && !githubConnected)
       return "Connect GitHub to use this runtime.";
     return null;
-  }, [model, vendor, provisions, githubConnected]);
+  }, [draft.model, draft.vendor, provisions, githubConnected]);
 
   const buildRequest = (): CreateSessionRequest => {
     const repoList: RepoConfig[] = provisions
-      ? Array.from(repos.entries()).map(([fullName, ref]) => ({
+      ? Object.entries(draft.repos).map(([fullName, ref]) => ({
           url: `https://github.com/${fullName}`,
           gitRef: ref.trim() || undefined,
         }))
       : [];
     return {
       agent: {
-        model: model.trim(),
+        model: draft.model.trim(),
         usePlugins: provisions ? true : undefined,
-        mcpServers: provisions && mcp.size ? Array.from(mcp) : undefined,
+        mcpServers: provisions && draft.mcp.length ? draft.mcp : undefined,
         // Not gated on `provisions`: memories are served by the server itself,
         // so they work on every vendor, including ones that can't provision.
-        memorySpaces: memorySpaces.size ? Array.from(memorySpaces) : undefined,
+        memorySpaces: draft.memorySpaces.length ? draft.memorySpaces : undefined,
       },
-      vendor: vendor.trim() || undefined,
+      vendor: draft.vendor.trim() || undefined,
       repos: repoList.length ? repoList : undefined,
-      plugins: provisions && skills.size ? Array.from(skills) : undefined,
+      plugins: provisions && draft.skills.length ? draft.skills : undefined,
     };
   };
 
   return {
-    vendor,
-    setVendor,
-    model,
-    setModel,
-    repos,
-    setRepos,
-    skills,
-    setSkills,
-    mcp,
-    setMcp,
-    memorySpaces,
-    setMemorySpaces,
+    vendor: draft.vendor,
+    setVendor: (vendor) => setDraft({ ...draft, vendor }),
+    model: draft.model,
+    setModel: (model) => setDraft({ ...draft, model }),
+    repos: new Map(Object.entries(draft.repos)),
+    setRepos: (repos) => setDraft({ ...draft, repos: Object.fromEntries(repos) }),
+    skills: new Set(draft.skills),
+    setSkills: (skills) => setDraft({ ...draft, skills: [...skills] }),
+    mcp: new Set(draft.mcp),
+    setMcp: (mcp) => setDraft({ ...draft, mcp: [...mcp] }),
+    memorySpaces: new Set(draft.memorySpaces),
+    setMemorySpaces: (memorySpaces) => setDraft({ ...draft, memorySpaces: [...memorySpaces] }),
     provisions,
     githubConnected,
     canSend: blockedReason === null,
