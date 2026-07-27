@@ -1,10 +1,9 @@
 
-import { SessionStatusKind } from './sessionStatusKind';
+import { GlobalSessionStatusEvent } from './globalSessionStatusEvent';
+import { GlobalSessionTitleEvent } from './globalSessionTitleEvent';
 /**
  * One frame on the global `/api/events` stream (live session-list updates).
  */
-export interface GlobalSessionEvent {
-  sessionId: string;
-  status: SessionStatusKind;
-  reason?: string;
-}
+export type GlobalSessionEvent =
+  | { type: "StatusChanged"; value: GlobalSessionStatusEvent }
+  | { type: "TitleChanged"; value: GlobalSessionTitleEvent };

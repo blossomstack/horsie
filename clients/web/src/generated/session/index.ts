@@ -19,4 +19,6 @@ export * from './usageView';
 export * from './agentUsageView';
 export * from './sessionUsageStats';
 export * from './sessionEvent';
+export * from './globalSessionStatusEvent';
+export * from './globalSessionTitleEvent';
 export * from './globalSessionEvent';
