@@ -263,6 +263,33 @@ impl SessionActor {
             .await;
     }
 
+    /// Persist a session title through the supervisor, then update local state
+    /// and publish the already-durable title. Live publication is best-effort;
+    /// the journal remains the source of truth.
+    async fn rename_session(&mut self, title: String) -> Result<String, String> {
+        let id = self.id.to_string();
+        let persisted = self
+            .parent
+            .ask(|reply| SessionSupervisorCommand::RenameSession {
+                id: id.clone(),
+                name: title.clone(),
+                reply,
+            })
+            .await
+            .map_err(|e| format!("session supervisor unavailable: {e}"))?;
+        persisted.map_err(|e| format!("persist session title: {e}"))?;
+
+        self.spec.name = Some(title.clone());
+        let _ = self
+            .parent
+            .tell(SessionSupervisorCommand::PublishSessionTitle {
+                id,
+                name: title.clone(),
+            })
+            .await;
+        Ok(title)
+    }
+
     fn vendor(&self) -> Result<Arc<dyn RuntimeVendor>, String> {
         let vendors = self
             .deps
@@ -612,18 +639,13 @@ impl SessionActor {
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
         // An unnamed session is titled from its first message, once — like
-        // other chat products. A caller-supplied name at creation always wins.
+        // other chat products. A caller-supplied name at creation starts as
+        // the title, but can still be replaced later by set_session_title.
         if self.spec.name.is_none()
             && let Some(title) = derive_title(&text)
+            && let Err(error) = self.rename_session(title).await
         {
-            self.spec.name = Some(title.clone());
-            let _ = self
-                .parent
-                .tell(SessionSupervisorCommand::SessionNamed {
-                    id: self.id.to_string(),
-                    name: title,
-                })
-                .await;
+            tracing::warn!(session = %self.id, error, "failed to persist fallback session title");
         }
 
         match state.status.clone() {
@@ -1112,9 +1134,12 @@ mod tests {
     use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use std::collections::HashMap;
 
-    /// A trivial supervisor stand-in that forwards status reports to a channel.
+    /// A trivial supervisor stand-in that records status, rename, and publish
+    /// commands on channels.
     struct NullSupervisor {
         statuses: tokio::sync::mpsc::UnboundedSender<SessionStatus>,
+        names: tokio::sync::mpsc::UnboundedSender<String>,
+        published_titles: tokio::sync::mpsc::UnboundedSender<String>,
     }
 
     #[derive(Serialize, Deserialize, Default)]
@@ -1141,8 +1166,18 @@ mod tests {
             cmd: SessionSupervisorCommand,
             _ctx: &mut ActorContext<Self>,
         ) -> CommandEffect<()> {
-            if let SessionSupervisorCommand::SessionStatusChanged { status, .. } = cmd {
-                let _ = self.statuses.send(status);
+            match cmd {
+                SessionSupervisorCommand::SessionStatusChanged { status, .. } => {
+                    let _ = self.statuses.send(status);
+                }
+                SessionSupervisorCommand::RenameSession { name, reply, .. } => {
+                    let _ = self.names.send(name);
+                    let _ = reply.send(Ok(()));
+                }
+                SessionSupervisorCommand::PublishSessionTitle { name, .. } => {
+                    let _ = self.published_titles.send(name);
+                }
+                _ => {}
             }
             CommandEffect::none()
         }
@@ -1252,6 +1287,8 @@ mod tests {
         actor: ActorRef<SessionCommand>,
         vendor: Arc<MockVendor>,
         statuses: tokio::sync::mpsc::UnboundedReceiver<SessionStatus>,
+        names: tokio::sync::mpsc::UnboundedReceiver<String>,
+        published_titles: tokio::sync::mpsc::UnboundedReceiver<String>,
         id: Uuid,
         _tmp: tempfile::TempDir,
     }
@@ -1284,13 +1321,24 @@ mod tests {
             plugins: None,
             memory: None,
         };
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let parent = spawn_root(NullSupervisor { statuses: tx }, journal.clone());
+        let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (names_tx, names_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (titles_tx, titles_rx) = tokio::sync::mpsc::unbounded_channel();
+        let parent = spawn_root(
+            NullSupervisor {
+                statuses: status_tx,
+                names: names_tx,
+                published_titles: titles_tx,
+            },
+            journal.clone(),
+        );
         let actor = spawn_root(SessionActor::new(id, spec, deps, parent), journal);
         Harness {
             actor,
             vendor,
-            statuses: rx,
+            statuses: status_rx,
+            names: names_rx,
+            published_titles: titles_rx,
             id,
             _tmp: tmp,
         }
@@ -1357,6 +1405,29 @@ mod tests {
         let title = derive_title(&long).unwrap();
         assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1); // +1 for the ellipsis
         assert!(title.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn first_user_message_still_derives_a_fallback_title() {
+        let mut h = harness_on(Arc::new(InMemoryJournal::new()), MockVendor::new());
+
+        let result = h
+            .actor
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "  fix the login redirect  \nwith details".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+
+        // The test harness has no provider registered, so the turn itself fails
+        // after the title is named. This assertion is about the fallback title.
+        assert!(matches!(result, Err(UserMessageError::RecoveryFailed(_))));
+        assert_eq!(h.names.recv().await.unwrap(), "fix the login redirect");
+        assert_eq!(
+            h.published_titles.recv().await.unwrap(),
+            "fix the login redirect"
+        );
     }
 
     #[tokio::test]
@@ -1615,9 +1686,18 @@ mod tests {
             plugins: None,
             memory: None,
         };
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (names_tx, names_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (titles_tx, titles_rx) = tokio::sync::mpsc::unbounded_channel();
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let parent = spawn_root(NullSupervisor { statuses: tx }, journal.clone());
+        let parent = spawn_root(
+            NullSupervisor {
+                statuses: status_tx,
+                names: names_tx,
+                published_titles: titles_tx,
+            },
+            journal.clone(),
+        );
         let id = Uuid::new_v4();
         let actor = spawn_root(
             SessionActor::new(id, spec_fixture("mock"), deps, parent),
@@ -1626,7 +1706,9 @@ mod tests {
         Harness {
             actor,
             vendor,
-            statuses: rx,
+            statuses: status_rx,
+            names: names_rx,
+            published_titles: titles_rx,
             id,
             _tmp: tmp,
         }

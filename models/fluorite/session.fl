@@ -150,9 +150,22 @@ union SessionEvent {
     Progressed(ProgressionEvent),
 }
 
-/// One frame on the global `/api/events` stream (live session-list updates).
-struct GlobalSessionEvent {
+/// A status frame on the global `/api/events` stream.
+struct GlobalSessionStatusEvent {
     session_id: String,
     status: SessionStatusKind,
     reason: Option<String>,
+}
+
+/// A title frame on the global `/api/events` stream.
+struct GlobalSessionTitleEvent {
+    session_id: String,
+    name: String,
+}
+
+/// One frame on the global `/api/events` stream (live session-list updates).
+#[type_tag = "type"]
+union GlobalSessionEvent {
+    StatusChanged(GlobalSessionStatusEvent),
+    TitleChanged(GlobalSessionTitleEvent),
 }
