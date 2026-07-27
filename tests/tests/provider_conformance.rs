@@ -258,3 +258,224 @@ async fn conformance_rate_limit_is_classified() {
         );
     }
 }
+
+// ── fault cases (#61) ────────────────────────────────────────────────────────
+
+/// #61 item 1a: a stream that ends without its terminal event is currently
+/// returned as `Ok(CompletionResponse { stop_reason: EndTurn })` — an empty or
+/// truncated assistant answer, journaled and shown to the user as success.
+/// OpenAI: `Err(StreamEnded) => break` (`providers/openai/src/lib.rs:392`).
+/// Anthropic: the `while let` exits with `last_error: None` (`:510`).
+#[tokio::test]
+#[ignore = "red: #61 item 1 — a cut stream is reported as a successful turn"]
+async fn a_cut_stream_is_an_error_not_an_empty_success() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for &kind in KINDS {
+            let server = spawn_mock().await;
+            // message_start + content_block_start + one delta, then nothing.
+            server.queue_cut_stream(["par", "tial"], 3);
+            let provider = build_provider(kind, &base_url_for(kind, &server));
+
+            let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+                .build()
+                .unwrap();
+            let sink = CollectingEventSink::new();
+            let result = agent
+                .run(
+                    AgentInput::user_message("msg-1", "hi"),
+                    &sink,
+                    CancellationToken::new(),
+                )
+                .await;
+
+            assert!(
+                result.is_err(),
+                "{kind:?}: a truncated stream must fail the turn, got {:?}",
+                result.map(|o| std::mem::discriminant(&o.result))
+            );
+        }
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// #61 item 1b: a half-streamed tool call is dispatched anyway with fabricated
+/// input — OpenAI substitutes `json!({})` or `Value::Null`
+/// (`providers/openai/src/lib.rs:442-453`), Anthropic an empty object
+/// (`providers/anthropic/src/lib.rs:537-548`). The tool then fails with a
+/// confusing `InvalidInput` instead of the run failing with a provider error.
+#[tokio::test]
+#[ignore = "red: #61 item 1 — a tool call with unparseable input is dispatched with fabricated arguments"]
+async fn a_tool_call_with_unparseable_input_is_never_dispatched() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for &kind in KINDS {
+            let server = spawn_mock().await;
+            server.queue_cut_tool_call("echo", "call_1", "{\"value\": 4");
+            let provider = build_provider(kind, &base_url_for(kind, &server));
+
+            let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let seen = calls.clone();
+            let toolbox = MockToolbox::new(
+                vec![horsie_agentcore::ToolSpec {
+                    name: "echo".into(),
+                    description: "echo".into(),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                }],
+                Arc::new(move |name: &str, input: serde_json::Value| {
+                    seen.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(name.to_string());
+                    Ok(input)
+                }),
+            );
+
+            let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+            let sink = CollectingEventSink::new();
+            let _ = agent
+                .run(
+                    AgentInput::user_message("msg-1", "hi"),
+                    &sink,
+                    CancellationToken::new(),
+                )
+                .await;
+
+            let dispatched = calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert!(
+                dispatched.is_empty(),
+                "{kind:?}: a tool call whose input JSON does not parse must not be \
+                 dispatched, but the toolbox saw {dispatched:?}"
+            );
+        }
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// #61 item 5a: neither provider sets `.timeout()`, `.connect_timeout()` or
+/// `.read_timeout()` (`providers/anthropic/src/lib.rs:93-101`,
+/// `providers/openai/src/lib.rs:74-76`), and reqwest's default is unlimited.
+/// Every other HTTP client in the repo does set one, so this is an oversight
+/// rather than a decision.
+#[tokio::test]
+#[ignore = "red: #61 item 5 — no HTTP timeout on either provider; a slow peer waits forever"]
+async fn a_slow_provider_gives_up_rather_than_waiting_forever() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        for &kind in KINDS {
+            let server = spawn_mock().await;
+            server.queue_delayed("eventually", std::time::Duration::from_secs(30));
+            let provider = build_provider(kind, &base_url_for(kind, &server));
+
+            let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+                .build()
+                .unwrap();
+            let sink = CollectingEventSink::new();
+            // The provider is expected to bound its own wait. If it does not, this
+            // inner timeout fires and the assertion below names the reason.
+            let settled = tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                agent.run(
+                    AgentInput::user_message("msg-1", "hi"),
+                    &sink,
+                    CancellationToken::new(),
+                ),
+            )
+            .await;
+
+            assert!(
+                settled.is_ok(),
+                "{kind:?}: the provider must give up on a stalled peer, but it was \
+                 still waiting after 4s with no deadline of its own"
+            );
+        }
+    })
+    .await
+    .expect("test timed out");
+}
+
+fn user_history() -> Vec<horsie_agentcore::Message> {
+    vec![horsie_agentcore::Message {
+        id: "m1".into(),
+        role: horsie_agentcore::Role::User,
+        parts: vec![horsie_agentcore::ContentPart::Text(
+            horsie_agentcore::TextPart { text: "hi".into() },
+        )],
+    }]
+}
+
+fn request_for(messages: &[horsie_agentcore::Message]) -> horsie_agentcore::CompletionRequest<'_> {
+    horsie_agentcore::CompletionRequest {
+        messages,
+        system: None,
+        tools: vec![],
+        tool_choice: horsie_agentcore::ToolChoice::Auto,
+        max_tokens: None,
+    }
+}
+
+/// #61 item 6: Anthropic maps `BadRequest` to `LlmError::Network`
+/// (`providers/anthropic/src/lib.rs:58-60`), discarding the status, so a permanent
+/// 400 — context-length exceeded, a malformed tool `input_schema`, an unanswered
+/// `tool_use` — is reported to the user as a transient network error with
+/// `recoverable: true`. The OpenAI provider already classifies by status, and its
+/// own comment calls the Anthropic approach out as the anti-pattern.
+///
+/// These two call the provider directly rather than through `Agent`, because the
+/// assertion is about `LlmError`'s variant, which `Agent` wraps.
+#[tokio::test]
+#[ignore = "red: #61 item 6 — Anthropic classifies 400 as a network error"]
+async fn anthropic_reports_a_400_as_an_api_error_with_its_status() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let server = spawn_mock().await;
+        server.queue_error(400, "context length exceeded");
+        let provider = build_provider(
+            ProviderKind::Anthropic,
+            &base_url_for(ProviderKind::Anthropic, &server),
+        );
+        let sink = CollectingEventSink::new();
+        let messages = user_history();
+
+        let result = provider
+            .complete(request_for(&messages), "msg-1", &sink)
+            .await;
+
+        assert!(
+            matches!(result, Err(LlmError::ApiError { status: 400, .. })),
+            "a 400 must keep its status, got {:?}",
+            result.map(|_| ())
+        );
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// The green control for the test above: the same assertion already holds on the
+/// OpenAI wire, which proves it is satisfiable and that Anthropic's failure is a
+/// real difference rather than a broken test.
+#[tokio::test]
+async fn openai_reports_a_400_as_an_api_error_with_its_status() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let server = spawn_mock().await;
+        server.queue_error(400, "context length exceeded");
+        let provider = build_provider(
+            ProviderKind::Openai,
+            &base_url_for(ProviderKind::Openai, &server),
+        );
+        let sink = CollectingEventSink::new();
+        let messages = user_history();
+
+        let result = provider
+            .complete(request_for(&messages), "msg-1", &sink)
+            .await;
+
+        assert!(
+            matches!(result, Err(LlmError::ApiError { status: 400, .. })),
+            "a 400 must keep its status, got {:?}",
+            result.map(|_| ())
+        );
+    })
+    .await
+    .expect("test timed out");
+}
