@@ -25,6 +25,10 @@ export interface SessionDetail {
    */
   mcpServers: string[];
   /**
+   * Selected memory space names (empty when none).
+   */
+  memorySpaces: string[];
+  /**
    * Whether the runtime&#x27;s plugin/skill machinery is enabled for this session.
    */
   usePlugins: boolean;

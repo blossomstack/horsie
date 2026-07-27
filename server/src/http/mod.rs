@@ -250,6 +250,7 @@ mod tests {
             github_tokens: None,
             mcp: Some(mcp.clone()),
             plugins: None,
+            memory: Some(memory.clone()),
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = broadcast::channel(64);

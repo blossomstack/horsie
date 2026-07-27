@@ -440,6 +440,7 @@ impl SessionActor {
             runtime_client: runtime.runtime_client.clone(),
             provider,
             mcp: self.deps.mcp.clone(),
+            memory: self.deps.memory.clone(),
             settings: self.spec.agent.clone(),
             session_id: self.id,
             frames: self.frames.clone(),
@@ -820,6 +821,37 @@ fn session_run_def(settings: &AgentSettings) -> AgentRunDef {
     }
 }
 
+/// Layer the memory tools onto `base` and render the prompt index, for a
+/// session's selected spaces. Factored out of `provide()` so both halves of the
+/// decision are testable without standing up a session.
+///
+/// Returns `(base, "")` unchanged when the session selected no spaces, or when
+/// it named spaces but no memory service is wired -- the tools and the index are
+/// offered together or not at all, so the agent is never told about memories it
+/// has no way to read.
+async fn build_memory_layer(
+    base: Arc<dyn Toolbox>,
+    memory: Option<Arc<crate::memory::MemoryService>>,
+    settings: &AgentSettings,
+) -> Result<(Arc<dyn Toolbox>, String), String> {
+    let spaces = &settings.memory_spaces;
+    if spaces.is_empty() {
+        return Ok((base, String::new()));
+    }
+    let Some(service) = memory else {
+        tracing::warn!("session names memory spaces but no memory service is configured; ignoring");
+        return Ok((base, String::new()));
+    };
+    let rows = service.memories_in(spaces).await?;
+    let index = crate::memory::render_index(&rows, spaces);
+    let toolbox: Arc<dyn Toolbox> = Arc::new(crate::memory::MemoryToolbox::new(
+        base,
+        service,
+        spaces.clone(),
+    ));
+    Ok((toolbox, index))
+}
+
 /// Context provider for a transient read-only agent (history queries): it never
 /// runs, so `provide` must never be called; it errors defensively if it ever is.
 struct NoContextProvider;
@@ -841,6 +873,7 @@ struct SessionContextProvider {
     runtime_client: RuntimeClient,
     provider: Arc<dyn LlmProvider>,
     mcp: Option<Arc<crate::mcp::McpService>>,
+    memory: Option<Arc<crate::memory::MemoryService>>,
     settings: AgentSettings,
     session_id: Uuid,
     /// Live frame stream — `ensure` emits preparation progressions onto it.
@@ -885,15 +918,25 @@ impl ContextProvider for SessionContextProvider {
             );
             Vec::new()
         };
-        let toolbox: Arc<dyn Toolbox> =
-            Arc::new(AskUserToolbox::new(DefaultToolboxFactory.for_agent(
-                &def,
-                self.runtime_client.clone(),
-                ws.names(),
-                use_plugins,
-                mcp,
-            )));
+        let base: Arc<dyn Toolbox> = DefaultToolboxFactory.for_agent(
+            &def,
+            self.runtime_client.clone(),
+            ws.names(),
+            use_plugins,
+            mcp,
+        );
+        let (with_memory, memory_index) =
+            build_memory_layer(base, self.memory.clone(), settings).await?;
+        // `AskUserToolbox` stays outermost: `ask_user` is terminal and the run
+        // looks it up by name via `params.optional_handoff_tool`.
+        let toolbox: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_memory));
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
+        let system_prompt = match (system_prompt, memory_index.is_empty()) {
+            (Some(p), false) => Some(format!("{p}\n\n{memory_index}")),
+            (Some(p), true) => Some(p),
+            (None, false) => Some(memory_index),
+            (None, true) => None,
+        };
         emit_progress(&self.frames, "ready", None);
         Ok(Contexts {
             provider,
@@ -1105,6 +1148,76 @@ mod tests {
         }
     }
 
+    async fn test_memory_service() -> (Arc<crate::memory::MemoryService>, tempfile::TempDir) {
+        use std::str::FromStr;
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}/t.db", tmp.path().display());
+        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        (
+            Arc::new(crate::memory::MemoryService::new(
+                crate::memory::MemoryStore::new(pool),
+            )),
+            tmp,
+        )
+    }
+
+    fn settings_with_spaces(spaces: &[&str]) -> AgentSettings {
+        AgentSettings {
+            model: "mock".into(),
+            allowed_tools: None,
+            use_plugins: None,
+            max_iterations: None,
+            max_retries: 0,
+            mcp_servers: Vec::new(),
+            memory_spaces: spaces.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_index_and_tools_are_absent_when_no_space_is_selected() {
+        let (svc, _tmp) = test_memory_service().await;
+        let settings = settings_with_spaces(&[]);
+        let base: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
+
+        let (toolbox, index) = build_memory_layer(base, Some(svc), &settings).await.unwrap();
+        assert!(index.is_empty());
+        assert!(toolbox.specs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_index_and_tools_appear_when_a_space_is_selected() {
+        let (svc, _tmp) = test_memory_service().await;
+        svc.create_memory(horsie_models::memory::MemoryCreateInput {
+            space: "default".into(),
+            name: "alpha".into(),
+            description: "a durable fact".into(),
+            content: "body".into(),
+        })
+        .await
+        .unwrap();
+        let settings = settings_with_spaces(&["default"]);
+        let base: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
+
+        let (toolbox, index) = build_memory_layer(base, Some(svc), &settings).await.unwrap();
+        assert!(index.contains("- default/alpha — a durable fact"));
+        let names: Vec<String> = toolbox.specs().into_iter().map(|s| s.name).collect();
+        assert!(names.contains(&"memory_create".to_string()));
+    }
+
+    #[tokio::test]
+    async fn spaces_selected_with_no_service_wired_degrade_to_nothing() {
+        let settings = settings_with_spaces(&["default"]);
+        let base: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
+
+        let (toolbox, index) = build_memory_layer(base, None, &settings).await.unwrap();
+        assert!(index.is_empty());
+        assert!(toolbox.specs().is_empty());
+    }
+
     fn spec_fixture(vendor: &str) -> SessionSpec {
         SessionSpec {
             name: None,
@@ -1115,6 +1228,7 @@ mod tests {
                 max_iterations: None,
                 max_retries: 0,
                 mcp_servers: vec![],
+                memory_spaces: vec![],
             },
             workspaces: vec![],
             provision: vec![],
@@ -1164,6 +1278,7 @@ mod tests {
             github_tokens,
             mcp: None,
             plugins: None,
+            memory: None,
         };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let parent = spawn_root(NullSupervisor { statuses: tx }, journal.clone());
@@ -1494,6 +1609,7 @@ mod tests {
             github_tokens: None,
             mcp: None,
             plugins: None,
+            memory: None,
         };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());

@@ -27,6 +27,9 @@ struct AgentSettings {
     /// Names of enabled MCP servers this session may call, namespaced
     /// `mcp__<name>__<tool>`; absent → none.
     mcp_servers: Option<Vec<String>>,
+    /// Memory spaces this session may read and write; absent → none, and the
+    /// memory_* tools are not offered.
+    memory_spaces: Option<Vec<String>>,
 }
 
 struct SessionSummary {
@@ -53,6 +56,8 @@ struct SessionDetail {
     plugins: Vec<String>,
     /// Enabled MCP server names (empty when none).
     mcp_servers: Vec<String>,
+    /// Selected memory space names (empty when none).
+    memory_spaces: Vec<String>,
     /// Whether the runtime's plugin/skill machinery is enabled for this session.
     use_plugins: bool,
 }

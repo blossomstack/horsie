@@ -152,6 +152,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         github_tokens: Some(github.clone()),
         mcp: Some(mcp.clone()),
         plugins: Some(plugins.clone() as Arc<dyn horsie_server::plugins::PluginProvisioner>),
+        memory: Some(memory.clone()),
     };
     let (global_tx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(
