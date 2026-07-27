@@ -6,7 +6,7 @@ Their tools show up to the agent as `mcp__<server-name>__<tool>`.
 
 ## Add a server
 
-Open **Settings → MCP servers** and add a row:
+Open **Settings → Integrations → MCP servers** and add a row:
 
 - **Name** — an id for the server (fixed once saved; it's how the server is
   referenced everywhere).
@@ -44,7 +44,7 @@ Click **Remove** on the row in Settings.
 
 ## The `github` server
 
-The `github` MCP server is special: it's managed from **Settings → GitHub** (the
+The `github` MCP server is special: it's managed from **Settings → Integrations → GitHub** (the
 **GitHub tools (MCP)** toggle), not from the MCP servers list, because it reuses
 your GitHub App connection for authentication. See [GitHub](github.md). It's still
 enabled per session like any other MCP server.

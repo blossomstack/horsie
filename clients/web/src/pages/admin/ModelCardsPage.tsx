@@ -1,22 +1,23 @@
 import { Loader2, Plus, Save, Trash2 } from "lucide-react";
-import { useState, type ReactNode } from "react";
-import { ApiRequestError } from "../api/client";
-import type { ModelCard } from "../api/types";
+import { useState } from "react";
+import { ApiRequestError } from "../../api/client";
+import type { ModelCard } from "../../api/types";
 import {
   useAdminModelCards,
   useCreateModelCard,
   useDeleteModelCard,
   useUpdateModelCard,
-} from "../hooks/useModelCards";
+} from "../../hooks/useModelCards";
+import { RowLabel } from "../settings/fields";
+import { SettingsHeader } from "../settings/SettingsHeader";
 
-/** Admin: operator-facing management surfaces. Model cards is the first
- * section; future admin settings add another `<section>` below. */
-export function AdminPage() {
+export function ModelCardsPage() {
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center border-b px-6 py-3">
-        <h1 className="text-sm font-semibold text-text">Admin</h1>
-      </header>
+    <div className="flex h-full flex-col overflow-hidden">
+      <SettingsHeader
+        title="Model cards"
+        desc="Well-known models and their token limits. Settings → Models autocompletes model ids from these and prefills empty limit fields; editing a card never changes an already-configured model."
+      />
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
           <ModelCardsSection />
@@ -32,14 +33,7 @@ function ModelCardsSection() {
   return (
     <section className="card p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold text-text">Model cards</h2>
-          <p className="mt-0.5 text-xs text-faint">
-            Well-known models and their token limits. The Settings model form
-            autocompletes model ids from these and prefills empty limit
-            fields — editing a card never changes already-configured models.
-          </p>
-        </div>
+        <h2 className="text-sm font-semibold text-text">Catalog</h2>
         <button
           className="btn-outline shrink-0 !px-2.5 !py-1.5 text-xs"
           onClick={() => setAdding(true)}
@@ -62,14 +56,6 @@ function ModelCardsSection() {
         {cards?.map((c) => <ModelCardRow key={c.modelId} card={c} />)}
       </div>
     </section>
-  );
-}
-
-function RowLabel({ children }: { children: ReactNode }) {
-  return (
-    <span className="mb-1 block text-[11px] font-semibold text-muted">
-      {children}
-    </span>
   );
 }
 

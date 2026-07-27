@@ -1,6 +1,4 @@
 import {
-  Boxes,
-  Brain,
   MessageSquarePlus,
   Plus,
   Search,
@@ -140,34 +138,6 @@ export function Sidebar() {
           >
             <Settings size={14} />
             Settings
-          </NavLink>
-          <NavLink
-            to="/skills"
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-1.5 rounded-[var(--radius)] px-2 py-1.5 text-xs font-medium transition-colors",
-                isActive
-                  ? "bg-surface-3 text-text"
-                  : "text-muted hover:bg-surface-2 hover:text-text",
-              )
-            }
-          >
-            <Boxes size={14} />
-            Skills
-          </NavLink>
-          <NavLink
-            to="/memory"
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-1.5 rounded-[var(--radius)] px-2 py-1.5 text-xs font-medium transition-colors",
-                isActive
-                  ? "bg-surface-3 text-text"
-                  : "text-muted hover:bg-surface-2 hover:text-text",
-              )
-            }
-          >
-            <Brain size={14} />
-            Memory
           </NavLink>
           <NavLink
             to="/admin"

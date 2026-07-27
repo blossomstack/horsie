@@ -71,7 +71,7 @@ repositories and install skill/plugin bundles into the sandbox.
 You configure velos once (below); after that, sessions get a runtime with nothing
 to launch or babysit.
 
-**Configure it in the UI** — Settings → **Velos remote runtimes** → add a vendor:
+**Configure it in the UI** — Settings → **Runtimes** → **Velos remote runtimes** → add a vendor:
 
 | Field | Meaning |
 | --- | --- |
@@ -101,7 +101,7 @@ durable transcript lives on the server and reconnects automatically.
 
 ## Choosing a vendor per session
 
-- **Default vendor** — Settings → **Default vendor** picks which vendor new
+- **Default vendor** — Settings → **Runtimes** → **Default vendor** picks which vendor new
   sessions use. Only *active* vendors (a connected local daemon, or a reachable
   velos vendor) are selectable. If unset, it falls back to `local`.
 - **Per session** — the New Session dialog shows a **Runtime vendor** dropdown

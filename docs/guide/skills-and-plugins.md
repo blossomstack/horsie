@@ -12,7 +12,7 @@ See [Runtime vendors](runtime-vendors.md).
 
 ## Install a bundle
 
-Open the **Skills** page (from the sidebar footer):
+Open **Settings → Skills**:
 
 1. Enter a **Git URL** for the bundle repository, and an optional **ref**
    (branch/tag/commit).

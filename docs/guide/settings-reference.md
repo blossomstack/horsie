@@ -60,20 +60,27 @@ database and are managed from the UI.
 
 ## Settings database (managed in the UI)
 
-Open **Settings**. Sections, top to bottom:
+Open **Settings**. The left nav lists one page per group of settings:
 
-| Section | What you configure |
-| --- | --- |
-| **Providers** | Model providers: name, **kind** (Anthropic or OpenAI-compatible), optional base URL, inline API key. See [Provider kinds](#provider-kinds). |
-| **Models** | Models you can pick per session: alias, provider, model id, optional max tokens. |
-| **Default vendor** | Which runtime vendor new sessions use (only *active* vendors are selectable). Falls back to `local`. |
-| **Velos remote runtimes** | Remote runtime vendors: name, server URL, image, advertise address, token, and advanced compute settings. Includes a per-row **Test connection**. See [Runtime vendors](runtime-vendors.md). |
-| **GitHub** | GitHub App config + connection; the GitHub-tools-(MCP) toggle. See [GitHub](github.md). |
-| **MCP servers** | Remote MCP servers: name, URL, auth. See [MCP servers](mcp-servers.md). |
-| **Server** *(read-only)* | Config file path, database, state dir, data dir, plugins dir, version. |
+| Page | Sections | What you configure |
+| --- | --- | --- |
+| **Models** | Providers | Model providers: name, **kind** (Anthropic or OpenAI-compatible), optional base URL, inline API key. See [Provider kinds](#provider-kinds). |
+| | Models | Models you can pick per session: alias, provider, model id, optional max tokens. |
+| **Runtimes** | Default vendor | Which runtime vendor new sessions use (only *active* vendors are selectable). Falls back to `local`. |
+| | Velos remote runtimes | Remote runtime vendors: name, server URL, image, advertise address, token, and advanced compute settings. Includes a per-row **Test connection**. See [Runtime vendors](runtime-vendors.md). |
+| **Skills** | — | Skill/plugin bundles. See [Skills & plugins](skills-and-plugins.md). |
+| **Memory** | — | Memory spaces and the notes the agent has saved in them. |
+| **Integrations** | GitHub | GitHub App config + connection; the GitHub-tools-(MCP) toggle. See [GitHub](github.md). |
+| | MCP servers | Remote MCP servers: name, URL, auth. See [MCP servers](mcp-servers.md). |
+| | Server *(read-only)* | Config file path, database, state dir, data dir, plugins dir, version. |
 
-**Skill/plugin bundles** are managed on the separate **Skills** page. See
-[Skills & plugins](skills-and-plugins.md).
+**Models** and **Runtimes** batch their edits behind a **Save changes** button —
+leaving either page with unsaved edits asks for confirmation first. Every other
+page saves each row as you go.
+
+Operator-facing settings live under **Admin**, which has the same layout. Its
+only page today is **Model cards**: the catalog of well-known models and token
+limits that the Models page autocompletes from.
 
 ### Provider kinds
 

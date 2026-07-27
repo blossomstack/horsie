@@ -8,7 +8,7 @@ test.describe("model cards", () => {
     page,
     appBase,
   }) => {
-    await page.goto(`${appBase}/admin`);
+    await page.goto(`${appBase}/admin/model-cards`);
 
     // Bundled seed is present (the real server seeds at startup). The row
     // renders the id as an input value, not text, so assert on the row.
@@ -54,7 +54,7 @@ test.describe("model cards", () => {
     page,
     appBase,
   }) => {
-    await page.goto(`${appBase}/settings`);
+    await page.goto(`${appBase}/settings/models`);
     await page.getByRole("button", { name: "Add model" }).click();
 
     // The new row is appended last (global-setup already seeded one model).
