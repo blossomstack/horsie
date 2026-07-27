@@ -39,6 +39,11 @@ fn validate(
     if name.trim().is_empty() {
         return Err(ModelCardError::Invalid("name cannot be empty".into()));
     }
+    if model_id != model_id.trim() || name != name.trim() {
+        return Err(ModelCardError::Invalid(
+            "model_id and name must not have leading or trailing whitespace".into(),
+        ));
+    }
     if context_window == Some(0) || max_tokens == Some(0) {
         return Err(ModelCardError::Invalid(
             "context_window and max_tokens must be positive".into(),
@@ -353,6 +358,34 @@ mod tests {
                 .unwrap_err(),
             ModelCardError::Invalid(_),
         ));
+    }
+
+    #[tokio::test]
+    async fn untrimmed_ids_and_names_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path()).await;
+        assert!(matches!(
+            store
+                .insert(&input(" gpt-4o", "GPT-4o", None, None))
+                .await
+                .unwrap_err(),
+            ModelCardError::Invalid(_),
+        ));
+        assert!(matches!(
+            store
+                .insert(&input("gpt-4o", "GPT-4o ", None, None))
+                .await
+                .unwrap_err(),
+            ModelCardError::Invalid(_),
+        ));
+        assert!(matches!(
+            store
+                .seed_if_missing(&[input("a ", "A", None, None)])
+                .await
+                .unwrap_err(),
+            ModelCardError::Invalid(_),
+        ));
+        assert!(store.list().await.unwrap().is_empty());
     }
 
     #[tokio::test]
