@@ -9,10 +9,12 @@
 mod prompt;
 mod service;
 mod store;
+mod toolbox;
 
 pub use prompt::render_index;
 pub use service::MemoryService;
 pub use store::{MemoryRow, MemorySpaceRow, MemoryStore};
+pub use toolbox::MemoryToolbox;
 
 /// Cap on a memory's one-line description. The index ships every description
 /// in the system prompt on every turn, so this bounds the fixed per-turn cost.
