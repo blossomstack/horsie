@@ -108,7 +108,9 @@ Migration `0008` seeds exactly one space, `default`. The seeded row is an ordina
 - Storage: `server/src/sessions/spec.rs`, `AgentSettings.memory_spaces: Vec<String>` with `#[serde(default)]`. The default is mandatory — `SessionSpec` is journaled and old rows must still deserialize.
 - Translation: `settings_from_wire` in `server/src/http/handlers.rs`.
 
-`ServerDeps` and `AppState` each gain `memory: Option<Arc<MemoryService>>`, following how `mcp` and `plugins` are already optional. Both test fixtures — `server/src/http/mod.rs` `test_state` and `server/src/sessions/supervisor.rs` `test_deps` — pass `None`.
+`ServerDeps` gains `memory: Option<Arc<MemoryService>>`, following how its `mcp` and `plugins` fields are already optional so `test_deps` can pass `None`. `AppState` gains a non-optional `memory: Arc<MemoryService>`, following how its `mcp` and `plugins` fields are non-optional and constructed against the real pool in `test_state`. The two fixtures to update are `server/src/sessions/supervisor.rs` `test_deps` and `server/src/http/mod.rs` `test_state`.
+
+`SessionDetail` (`models/fluorite/session.fl`) is a flat projection, not an embedded `AgentSettings`, so it needs its own `memory_spaces: Vec<String>` field alongside the existing `plugins` and `mcp_servers`, populated in the `detail` mapper in `server/src/http/handlers.rs`. Without it the config toolbar cannot render the locked chips post-create.
 
 Space selection is **immutable after session creation**, consistent with how plugins and MCP selections are rendered as `LockedChip`s post-create in `SessionConfigBar`.
 
@@ -166,7 +168,7 @@ Routes are kept flat to avoid the axum `matchit` conflict between a path paramet
 
 Handlers stay thin, in a new `server/src/http/memory.rs`, following `server/src/http/plugins.rs`: `State(state)`, `Path`, `Json` of a fluorite type, returning `Result<Json<View>, Api>` and mapping service `String` errors onto `Api::not_found` / `Api::unprocessable` / `Api::internal`.
 
-Wire types go in a new `models/fluorite/memory.fl`, with a module include in `models/src/lib.rs`. The file must also be added to the explicit `-i` lists in `clients/web/package.json`, `clients/ts/package.json`, and `make ts-types` in the `Makefile` — those lists are enumerated, not globbed.
+Wire types go in a new `models/fluorite/memory.fl`. `models/build.rs` globs the `fluorite/` directory, so Rust codegen picks it up automatically; only the module include in `models/src/lib.rs` is needed on the Rust side. For TypeScript, the file must be added to the explicit `-i` list in `clients/web/package.json`, which is enumerated rather than globbed. It does **not** go in `clients/ts/package.json`: that list covers only the session protocol (`agent`, `capabilities`, `session`, `session_api`, `settings`), and management-surface schemas like `mcp.fl` and `plugins.fl` are already excluded from it.
 
 Web UI, following the `SkillsPage.tsx` shape:
 
