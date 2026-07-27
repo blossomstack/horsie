@@ -17,6 +17,7 @@ import { api, ApiRequestError } from "../api/client";
 import type {
   McpServerInput,
   McpServerView,
+  ModelCard,
   ModelInput,
   ProviderInput,
   SettingsView,
@@ -37,6 +38,7 @@ import {
   useTestMcpServer,
   useUpsertMcpServer,
 } from "../hooks/useMcp";
+import { useModelCardSearch } from "../hooks/useModelCards";
 import { useSettings, useTestVendor, useUpdateSettings } from "../hooks/useSettings";
 
 /** The remote GitHub MCP endpoint reused via the GitHub App connection. */
@@ -805,6 +807,88 @@ function ProviderRow({
   );
 }
 
+/** The model-id input with card-backed autocomplete: typing queries the
+ * catalog by prefix; picking a suggestion sets the id and prefills the
+ * limit fields that are still empty. Prefill is a one-time copy — every
+ * field stays editable, and no link to the card is kept. */
+function ModelIdField({
+  draft,
+  set,
+}: {
+  draft: ModelDraft;
+  set: (patch: Partial<ModelDraft>) => void;
+}) {
+  const [focused, setFocused] = useState(false);
+  const [debounced, setDebounced] = useState(draft.modelId);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(draft.modelId), 200);
+    return () => clearTimeout(t);
+  }, [draft.modelId]);
+  const query = debounced.trim();
+  const { data: suggestions } = useModelCardSearch(query, focused && query.length > 0);
+  const show = focused && query.length > 0 && (suggestions?.length ?? 0) > 0;
+
+  const pick = (card: ModelCard) => {
+    set({
+      modelId: card.modelId,
+      maxTokens:
+        draft.maxTokens === "" && card.maxTokens != null
+          ? String(card.maxTokens)
+          : draft.maxTokens,
+      contextWindow:
+        draft.contextWindow === "" && card.contextWindow != null
+          ? String(card.contextWindow)
+          : draft.contextWindow,
+    });
+    setFocused(false);
+  };
+
+  return (
+    <label className="relative block">
+      <RowLabel>Model id</RowLabel>
+      <input
+        className="input font-mono"
+        value={draft.modelId}
+        onChange={(e) => set({ modelId: e.target.value })}
+        onFocus={() => setFocused(true)}
+        // Delay so an onMouseDown on a suggestion fires before the list hides.
+        onBlur={() => setTimeout(() => setFocused(false), 150)}
+        placeholder="claude-sonnet-4-6"
+        data-testid="model-id-input"
+      />
+      {show && (
+        <ul
+          className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-[var(--radius)] border shadow-lg"
+          style={{ background: "var(--surface)" }}
+          data-testid="model-card-suggestions"
+        >
+          {suggestions!.map((c) => (
+            <li key={c.modelId}>
+              <button
+                type="button"
+                className="flex w-full items-baseline justify-between gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-surface-2"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(c);
+                }}
+                data-testid={`model-card-suggestion-${c.modelId}`}
+              >
+                <span className="font-mono text-text">{c.modelId}</span>
+                <span className="truncate text-faint">
+                  {c.name}
+                  {c.contextWindow != null
+                    ? ` · ${c.contextWindow.toLocaleString()} ctx`
+                    : ""}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </label>
+  );
+}
+
 function ModelRow({
   draft,
   providerNames,
@@ -840,12 +924,7 @@ function ModelRow({
             ))}
           </select>
         </label>
-        <TextField
-          label="Model id"
-          value={draft.modelId}
-          onChange={(v) => set({ modelId: v })}
-          placeholder="claude-sonnet-4-6"
-        />
+        <ModelIdField draft={draft} set={set} />
         <TextField
           label="Max tokens (optional)"
           value={draft.maxTokens}
