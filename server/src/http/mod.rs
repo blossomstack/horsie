@@ -6,6 +6,7 @@ pub mod error;
 mod github;
 mod handlers;
 mod mcp;
+mod memory;
 mod plugins;
 mod runtime_connect;
 mod sse;
@@ -62,6 +63,9 @@ pub struct AppState {
     /// DB-managed plugin-bundle library: install/list/update/delete and the
     /// token-guarded artifact endpoint runtimes fetch bundles from.
     pub plugins: Arc<crate::plugins::PluginService>,
+    /// Agent-managed long-term memories: CRUD for the web UI. The agent reaches
+    /// the same data through its `MemoryToolbox`, not over HTTP.
+    pub memory: Arc<crate::memory::MemoryService>,
     /// Server-wide registry every runtime dial-back (velos container or local
     /// daemon) lands in, keyed by `runtime_id`. Shared with the vendors so a
     /// vendor's `provision()` finds the connection the HTTP route registered.
@@ -130,6 +134,24 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/plugins/:name/update", post(plugins::update))
         .route("/api/plugin-artifacts/:file", get(plugins::get_artifact))
+        .route(
+            "/api/memory-spaces",
+            get(memory::list_spaces).post(memory::create_space),
+        )
+        .route(
+            "/api/memory-spaces/:name",
+            put(memory::update_space).delete(memory::delete_space),
+        )
+        .route(
+            "/api/memories",
+            get(memory::list_memories).post(memory::create_memory),
+        )
+        .route(
+            "/api/memories/:id",
+            get(memory::get_memory)
+                .put(memory::update_memory)
+                .delete(memory::delete_memory),
+        )
         .route(
             "/api/runtime/connect",
             get(runtime_connect::runtime_connect),
@@ -218,6 +240,9 @@ mod tests {
             crate::mcp::McpStore::new(opened.pool.clone()),
             github.clone(),
         ));
+        let memory = Arc::new(crate::memory::MemoryService::new(
+            crate::memory::MemoryStore::new(opened.pool.clone()),
+        ));
         let deps = ServerDeps {
             provider_registry: opened.registry,
             vendors: Arc::new(std::sync::RwLock::new(vendors)),
@@ -241,6 +266,7 @@ mod tests {
             github,
             mcp,
             plugins,
+            memory,
             runtime_registry,
             local_daemon_hook: Arc::new(|_label: String| {}),
             web_dir: None,
@@ -552,6 +578,95 @@ mod tests {
         let app = app(test_state(&tmp).await);
         let res = app.oneshot(delete("/api/github/disconnect")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn memory_spaces_and_memories_crud_over_http() {
+        use horsie_models::memory::{MemorySpaceView, MemoryView};
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        // The migration seeds exactly one space.
+        let res = app.clone().oneshot(get("/api/memory-spaces")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let spaces: Vec<MemorySpaceView> = read_json(res).await;
+        assert_eq!(spaces.len(), 1);
+        assert_eq!(spaces[0].name, "default");
+        assert_eq!(spaces[0].memory_count, 0);
+
+        // Create a memory in it.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/memories",
+                &serde_json::json!({
+                    "space": "default",
+                    "name": "alpha",
+                    "description": "a durable fact",
+                    "content": "the body"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let created: MemoryView = read_json(res).await;
+        let id = created.id;
+        assert_eq!(created.space, "default");
+
+        // It shows up in the listing, and the space's count follows.
+        let res = app
+            .clone()
+            .oneshot(get("/api/memories?space=default"))
+            .await
+            .unwrap();
+        let listed: Vec<MemoryView> = read_json(res).await;
+        assert_eq!(listed.len(), 1);
+        let res = app.clone().oneshot(get("/api/memory-spaces")).await.unwrap();
+        let spaces: Vec<MemorySpaceView> = read_json(res).await;
+        assert_eq!(spaces[0].memory_count, 1);
+
+        // Update only the content.
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                &format!("/api/memories/{id}"),
+                &serde_json::json!({ "content": "new body" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let updated: MemoryView = read_json(res).await;
+        assert_eq!(updated.content, "new body");
+        assert_eq!(updated.description, "a durable fact");
+
+        // A bad slug is a 422, not a 500.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/memories",
+                &serde_json::json!({
+                    "space": "default", "name": "Bad Name",
+                    "description": "d", "content": "c"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // A missing memory is a 404.
+        let res = app.clone().oneshot(get("/api/memories/99999")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // Deleting the space takes its memories with it.
+        let res = app
+            .clone()
+            .oneshot(delete("/api/memory-spaces/default"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = app.oneshot(get("/api/memories")).await.unwrap();
+        let all: Vec<MemoryView> = read_json(res).await;
+        assert!(all.is_empty());
     }
 
     #[tokio::test]
