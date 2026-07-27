@@ -7,19 +7,20 @@ import {
   Webhook,
 } from "lucide-react";
 import { useState } from "react";
-import { ApiRequestError } from "../api/client";
-import type { PluginView } from "../api/types";
-import { cn } from "../lib/cn";
+import { ApiRequestError } from "../../api/client";
+import type { PluginView } from "../../api/types";
+import { cn } from "../../lib/cn";
 import {
   useInstallPlugin,
   usePlugins,
   useRemovePlugin,
   useSetPluginDefault,
   useUpdatePlugin,
-} from "../hooks/usePlugins";
-import { TextField } from "./settings/fields";
+} from "../../hooks/usePlugins";
+import { TextField } from "./fields";
+import { SettingsHeader } from "./SettingsHeader";
 
-export function SkillsPage() {
+export function SkillsSettings() {
   const { data: bundles, isLoading, isError } = usePlugins();
   const install = useInstallPlugin();
 
@@ -50,15 +51,10 @@ export function SkillsPage() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <header className="flex items-center gap-3 border-b px-6 py-3.5">
-        <div>
-          <h1 className="text-[15px] font-semibold text-text">Skills</h1>
-          <p className="text-xs text-faint">
-            Shareable skill bundles installed from git repos — pick them per
-            session.
-          </p>
-        </div>
-      </header>
+      <SettingsHeader
+        title="Skills"
+        desc="Shareable skill bundles installed from git repos — pick them per session."
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">

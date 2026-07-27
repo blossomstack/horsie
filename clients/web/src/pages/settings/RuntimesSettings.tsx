@@ -10,6 +10,7 @@ import { cn } from "../../lib/cn";
 import { useSettings, useTestVendor, useUpdateSettings } from "../../hooks/useSettings";
 import { RowShell, Section, TextField } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
+import { usePublishDirty } from "./dirty";
 
 type VelosDraft = {
   name: string;
@@ -68,6 +69,7 @@ export function RuntimesSettings() {
   const [defaultVendor, setDefaultVendor] = useState("");
   const [dirty, setDirty] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  usePublishDirty(dirty);
   const [velosTests, setVelosTests] = useState<
     Record<string, { pending: boolean; result: VendorTestResult | null }>
   >({});

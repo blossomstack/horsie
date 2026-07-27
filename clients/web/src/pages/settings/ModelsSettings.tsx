@@ -10,6 +10,7 @@ import { useModelCardSearch } from "../../hooks/useModelCards";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { RowLabel, RowShell, Section, TextField } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
+import { usePublishDirty } from "./dirty";
 
 type ProviderKind = "anthropic" | "openai";
 
@@ -60,6 +61,7 @@ export function ModelsSettings() {
   const [models, setModels] = useState<ModelDraft[]>([]);
   const [dirty, setDirty] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  usePublishDirty(dirty);
 
   // (Re)seed the form from the server view on load and after a successful save.
   useEffect(() => {

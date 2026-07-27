@@ -1,13 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { NewSessionView } from "./pages/NewSessionView";
 import { SessionsLayout } from "./pages/SessionsLayout";
 import { SessionView } from "./pages/SessionView";
+import { SettingsLayout } from "./pages/settings/SettingsLayout";
 import { ModelsSettings } from "./pages/settings/ModelsSettings";
 import { RuntimesSettings } from "./pages/settings/RuntimesSettings";
 import { IntegrationsSettings } from "./pages/settings/IntegrationsSettings";
-import { MemoryPage } from "./pages/MemoryPage";
-import { SkillsPage } from "./pages/SkillsPage";
+import { MemorySettings } from "./pages/settings/MemorySettings";
+import { SkillsSettings } from "./pages/settings/SkillsSettings";
 import { AdminPage } from "./pages/AdminPage";
 
 const client = new QueryClient({
@@ -28,14 +29,23 @@ export default function App() {
           <Route path="/" element={<SessionsLayout />}>
             <Route index element={<NewSessionView />} />
             <Route path="sessions/:id" element={<SessionView />} />
-            <Route path="settings" element={<ModelsSettings />} />
-            <Route path="settings/runtimes" element={<RuntimesSettings />} />
+            <Route path="settings" element={<SettingsLayout />}>
+              <Route index element={<Navigate to="models" replace />} />
+              <Route path="models" element={<ModelsSettings />} />
+              <Route path="runtimes" element={<RuntimesSettings />} />
+              <Route path="skills" element={<SkillsSettings />} />
+              <Route path="memory" element={<MemorySettings />} />
+              <Route path="integrations" element={<IntegrationsSettings />} />
+            </Route>
+            {/* Pre-redesign paths, kept so old bookmarks keep working. */}
             <Route
-              path="settings/integrations"
-              element={<IntegrationsSettings />}
+              path="skills"
+              element={<Navigate to="/settings/skills" replace />}
             />
-            <Route path="skills" element={<SkillsPage />} />
-            <Route path="memory" element={<MemoryPage />} />
+            <Route
+              path="memory"
+              element={<Navigate to="/settings/memory" replace />}
+            />
             <Route path="admin" element={<AdminPage />} />
           </Route>
         </Routes>

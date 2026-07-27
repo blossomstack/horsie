@@ -1,8 +1,9 @@
 import { Brain, FolderPlus, Loader2, Plus, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { ApiRequestError } from "../api/client";
-import type { MemorySpaceView, MemoryView } from "../api/types";
-import { cn } from "../lib/cn";
+import { ApiRequestError } from "../../api/client";
+import type { MemorySpaceView, MemoryView } from "../../api/types";
+import { cn } from "../../lib/cn";
+import { SettingsHeader } from "./SettingsHeader";
 import {
   useCreateMemory,
   useCreateSpace,
@@ -11,14 +12,14 @@ import {
   useMemories,
   useMemorySpaces,
   useUpdateMemory,
-} from "../hooks/useMemory";
+} from "../../hooks/useMemory";
 
 /**
  * Manage the agent's long-term memories: spaces on the left, the selected
  * space's memories on the right. The agent writes here through its `memory_*`
  * tools; this page is where a human curates what it wrote.
  */
-export function MemoryPage() {
+export function MemorySettings() {
   const spaces = useMemorySpaces();
   const [picked, setPicked] = useState<string | null>(null);
   // Fall back to the first space until the user picks one, so the page is
@@ -46,15 +47,10 @@ export function MemoryPage() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <header className="flex items-center gap-3 border-b px-6 py-3.5">
-        <div>
-          <h1 className="text-[15px] font-semibold text-text">Memory</h1>
-          <p className="text-xs text-faint">
-            Durable notes the agent saves and reads back — grouped into spaces
-            you pick per session.
-          </p>
-        </div>
-      </header>
+      <SettingsHeader
+        title="Memory"
+        desc="Durable notes the agent saves and reads back — grouped into spaces you pick per session."
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
