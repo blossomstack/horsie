@@ -1,8 +1,5 @@
 import type { RenderedMessage, RenderedToolCall } from "../hooks/useSessionStream";
-
-/** The server's dedicated "ask the user" tool for sessions — kept in sync
- * with the same constant in ToolCallCard.tsx. */
-const ASK_USER_TOOL = "ask_user";
+import { ASK_USER_TOOL } from "./askUser";
 
 export type WorkItem =
   | { kind: "thinking"; text: string }

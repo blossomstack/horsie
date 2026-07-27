@@ -43,8 +43,12 @@ export interface SessionStream {
   orphanTools: RenderedToolCall[];
   usage: { input: number; output: number };
   liveStatus: SessionStatusKind | null;
+  /** Incremented on every `StatusChanged` frame — including one that reports
+   * the *same* status. The server reports without deduping, so this is how a
+   * consumer observes "the session said something about its state" rather than
+   * "the state differs from last render". */
+  statusSeq: number;
   statusReason: string | null;
-  pendingQuestion: string | null;
   streamError: string | null;
   connected: boolean;
   /** The agent's `task_list` tool state; empty until the tool is first used. */
@@ -76,8 +80,8 @@ interface State {
   streaming: string;
   usage: { input: number; output: number };
   liveStatus: SessionStatusKind | null;
+  statusSeq: number;
   statusReason: string | null;
-  pendingQuestion: string | null;
   streamError: string | null;
   connected: boolean;
   tasks: TaskItem[];
@@ -95,8 +99,8 @@ const INITIAL: State = {
   streaming: "",
   usage: { input: 0, output: 0 },
   liveStatus: null,
+  statusSeq: 0,
   statusReason: null,
-  pendingQuestion: null,
   streamError: null,
   connected: false,
   tasks: [],
@@ -304,17 +308,12 @@ function reducer(state: State, action: Action): State {
                   output: state.usage.output + ev.value.usage.outputTokens,
                 },
           };
-        case "Asked":
-          return { ...state, pendingQuestion: ev.value.question };
         case "StatusChanged":
           return {
             ...state,
             liveStatus: ev.value.status,
+            statusSeq: state.statusSeq + 1,
             statusReason: ev.value.reason ?? null,
-            pendingQuestion:
-              ev.value.status === SessionStatusKind.AwaitingInput
-                ? state.pendingQuestion
-                : null,
           };
         case "Error":
           return { ...state, streamError: ev.value.message };
@@ -502,8 +501,8 @@ export function useSessionStream(sessionId: string | undefined): {
       orphanTools,
       usage: state.usage,
       liveStatus: state.liveStatus,
+      statusSeq: state.statusSeq,
       statusReason: state.statusReason,
-      pendingQuestion: state.pendingQuestion,
       streamError: state.streamError,
       connected: state.connected,
       tasks: state.tasks,

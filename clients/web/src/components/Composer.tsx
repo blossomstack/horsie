@@ -1,4 +1,4 @@
-import { ArrowUp, HelpCircle, Square } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { SessionStatusKind } from "../api/types";
 import { cn } from "../lib/cn";
@@ -6,18 +6,27 @@ import { statusMeta } from "../lib/status";
 
 export function Composer({
   status,
-  pendingQuestion,
   busy,
   blockedReason = null,
+  askLocked = false,
+  showStop = false,
   onSend,
   onStop,
+  onFocusAsk,
 }: {
   status: SessionStatusKind;
-  pendingQuestion: string | null;
   busy: boolean;
   blockedReason?: string | null;
+  /** A question in the transcript is awaiting an answer (or one is in flight).
+   * The ask card owns the input, so the composer stands down — two live input
+   * surfaces would make it ambiguous which one a Send submits. */
+  askLocked?: boolean;
+  /** Show Stop even when the status isn't `Running`: a turn resumed from an ask
+   * stays `AwaitingInput` for its whole duration. */
+  showStop?: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
+  onFocusAsk?: () => void;
 }) {
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -25,6 +34,7 @@ export function Composer({
   const running = status === SessionStatusKind.Running;
   const awaiting = status === SessionStatusKind.AwaitingInput;
   const blocked = blockedReason != null;
+  const stoppable = running || showStop;
 
   // Auto-grow the textarea up to a cap.
   useEffect(() => {
@@ -36,7 +46,7 @@ export function Composer({
 
   const submit = () => {
     const trimmed = text.trim();
-    if (!trimmed || !meta.canSend || busy || blocked) return;
+    if (!trimmed || !meta.canSend || busy || blocked || askLocked) return;
     onSend(trimmed);
     setText("");
   };
@@ -50,19 +60,6 @@ export function Composer({
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-4">
-      {awaiting && pendingQuestion && (
-        <div
-          data-testid="ask-question-banner"
-          className="mb-2 flex items-start gap-2 rounded-[var(--radius)] border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-text"
-        >
-          <HelpCircle size={16} className="mt-0.5 shrink-0 text-warning" />
-          <div>
-            <span className="font-medium text-warning">Agent is asking:</span>{" "}
-            {pendingQuestion}
-          </div>
-        </div>
-      )}
-
       <div
         className={cn(
           "flex items-end gap-2 rounded-[var(--radius-lg)] border p-2 transition",
@@ -78,17 +75,19 @@ export function Composer({
           onKeyDown={onKeyDown}
           data-testid="composer-input"
           placeholder={
-            meta.canSend
-              ? awaiting
-                ? "Answer the agent…"
-                : "Send a message…  (Enter to send, Shift+Enter for newline)"
-              : meta.hint
+            askLocked
+              ? "Answer the question above"
+              : meta.canSend
+                ? awaiting
+                  ? "Answer the agent…"
+                  : "Send a message…  (Enter to send, Shift+Enter for newline)"
+                : meta.hint
           }
-          disabled={!meta.canSend && !running}
+          disabled={askLocked || (!meta.canSend && !running)}
           className="max-h-[200px] flex-1 resize-none bg-transparent px-2 py-1.5 text-[0.9375rem] text-text placeholder:text-faint outline-none disabled:opacity-60"
         />
 
-        {running ? (
+        {stoppable ? (
           <button
             className="btn-outline shrink-0"
             onClick={onStop}
@@ -103,7 +102,7 @@ export function Composer({
           <button
             className="btn-primary shrink-0 !px-3"
             onClick={submit}
-            disabled={!text.trim() || !meta.canSend || busy || blocked}
+            disabled={!text.trim() || !meta.canSend || busy || blocked || askLocked}
             title={blockedReason ?? "Send"}
             aria-label="Send message"
             data-testid="composer-send"
@@ -112,6 +111,17 @@ export function Composer({
           </button>
         )}
       </div>
+
+      {askLocked && (
+        <button
+          type="button"
+          onClick={onFocusAsk}
+          data-testid="composer-ask-hint"
+          className="mt-1.5 px-2 text-xs text-faint hover:text-muted"
+        >
+          Answer the question above
+        </button>
+      )}
 
       {blocked && (
         <p

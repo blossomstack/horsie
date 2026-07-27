@@ -1,8 +1,9 @@
 import { CircleAlert, Loader2, Square, Trash2 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError } from "../api/client";
 import { SessionStatusKind } from "../api/types";
+import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
 import { ContextStatsPanel } from "../components/ContextStatsPanel";
 import { SessionConfigBar } from "../components/SessionConfigBar";
@@ -19,6 +20,7 @@ import {
   useSessionUsage,
   useStopSession,
 } from "../hooks/useSessions";
+import { findPendingAsk } from "../lib/askUser";
 import { sessionTitle } from "../lib/format";
 import { statusMeta } from "../lib/status";
 
@@ -53,6 +55,10 @@ export function SessionView() {
   const del = useDeleteSession();
   const { values: uiSettings } = useUiSettings();
   const [sendError, setSendError] = useState<string | null>(null);
+  const [answering, setAnswering] = useState(false);
+  // The `statusSeq` observed when the answer went out; the latch releases on
+  // the next frame after it.
+  const answerSeq = useRef<number | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -78,6 +84,54 @@ export function SessionView() {
     }
   };
 
+  // An answer to a pending ask. Deliberately without an optimistic echo: an
+  // answer is persisted as a tool result, never as a user message, so an echo
+  // would linger unreconciled forever (and vanish on reload). The card renders
+  // the durable answer instead.
+  const handleAnswer = async (text: string) => {
+    if (!id) return;
+    setSendError(null);
+    // Answering leaves the session in AwaitingInput for the whole resumed turn
+    // (horsie#61 item 3), so status alone can't tell the composer to stand down
+    // and a second message would inject a duplicate tool_result — bricking the
+    // session with a provider 400. Latch locally until the turn reports back.
+    setAnswering(true);
+    answerSeq.current = stream.statusSeq;
+    try {
+      await send.mutateAsync({ id, text });
+    } catch (e) {
+      answerSeq.current = null;
+      setAnswering(false);
+      setSendError(
+        e instanceof ApiRequestError ? e.message : "Failed to send your answer.",
+      );
+    }
+  };
+
+  // Release the answer latch on the next status report — the turn concluded, or
+  // the agent asked again (AwaitingInput → AwaitingInput, which `report` still
+  // emits a frame for).
+  useEffect(() => {
+    if (answerSeq.current !== null && stream.statusSeq !== answerSeq.current) {
+      answerSeq.current = null;
+      setAnswering(false);
+    }
+  }, [stream.statusSeq]);
+
+  // A stream error ends the turn without a status frame.
+  useEffect(() => {
+    if (stream.streamError) {
+      answerSeq.current = null;
+      setAnswering(false);
+    }
+  }, [stream.streamError]);
+
+  const focusPendingAsk = () => {
+    document
+      .querySelector('[data-testid="ask-user-card"][data-pending="true"]')
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
   // A new chat's first message is sent here, once this view's own session
   // fetch has resolved — not from NewSessionView immediately after create.
   // Two reasons: it gives the server's async provisioning the same
@@ -98,8 +152,15 @@ export function SessionView() {
   }, [id, isLoading]);
 
   const status = stream.liveStatus ?? detail?.status ?? SessionStatusKind.Idle;
-  const pendingQuestion = stream.pendingQuestion ?? detail?.pendingQuestion ?? null;
   const totalTokens = stream.usage.input + stream.usage.output;
+
+  const pendingAskId = useMemo(
+    () =>
+      status === SessionStatusKind.AwaitingInput
+        ? findPendingAsk(stream.messages)
+        : null,
+    [status, stream.messages],
+  );
 
   // Stick-to-bottom auto scroll; also trigger scroll-back near the top.
   const onScroll = () => {
@@ -158,151 +219,157 @@ export function SessionView() {
     status !== SessionStatusKind.Running;
 
   return (
-    <div className="flex h-full">
-      <div className="flex h-full min-w-0 flex-1 flex-col">
-        {/* Header */}
-        <header
-          className="flex items-center gap-3 border-b px-5 py-3"
-          style={{ background: "var(--surface)" }}
-        >
-          <div className="min-w-0">
-            <div className="flex items-center gap-2.5">
-              <h1 data-testid="session-title" className="truncate text-sm font-semibold text-text">
-                {title}
-              </h1>
-              <StatusBadge status={status} />
+    <AskAnswerProvider
+      value={{ pendingId: pendingAskId, submitting: answering, submit: handleAnswer }}
+    >
+      <div className="flex h-full">
+        <div className="flex h-full min-w-0 flex-1 flex-col">
+          {/* Header */}
+          <header
+            className="flex items-center gap-3 border-b px-5 py-3"
+            style={{ background: "var(--surface)" }}
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-2.5">
+                <h1 data-testid="session-title" className="truncate text-sm font-semibold text-text">
+                  {title}
+                </h1>
+                <StatusBadge status={status} />
+              </div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <ContextStatsPanel stats={usageStats} totalTokens={totalTokens} />
+              </div>
             </div>
-            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-              <ContextStatsPanel stats={usageStats} totalTokens={totalTokens} />
-            </div>
-          </div>
 
-          <div className="ml-auto flex items-center gap-1">
-            <SettingsMenu />
-            {stoppable && (
-              <button
-                className="btn-ghost !px-2.5 text-xs"
-                onClick={handleStop}
-                disabled={stop.isPending}
-                title="Stop the session (preserves the runtime)"
-                data-testid="session-stop"
-              >
-                <Square size={14} />
-                Stop
-              </button>
-            )}
-            <button
-              className="btn-icon hover:!text-error"
-              onClick={handleDelete}
-              disabled={del.isPending}
-              title="Delete session"
-              data-testid="session-delete"
-            >
-              <Trash2 size={17} />
-            </button>
-          </div>
-        </header>
-
-        {/* Transcript */}
-        <div
-          ref={scrollRef}
-          onScroll={onScroll}
-          data-testid="transcript-scroll"
-          className="flex-1 overflow-y-auto"
-        >
-          {isLoading && stream.messages.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-sm text-faint">
-              <Loader2 size={18} className="mr-2 animate-spin" />
-              Loading transcript…
-            </div>
-          ) : stream.messages.length === 0 &&
-            stream.streaming.length === 0 &&
-            status !== SessionStatusKind.Running ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
-              <p className="text-sm font-medium text-muted">
-                {statusMeta(status).hint}
-              </p>
-              {stream.statusReason ?? detail?.lastError ? (
-                <p className="max-w-md text-xs text-error">
-                  {stream.statusReason ?? detail?.lastError}
-                </p>
-              ) : (
-                <p className="text-xs text-faint">
-                  Send a message below to start the conversation.
-                </p>
-              )}
-            </div>
-          ) : (
-            <>
-              {(stream.loadingMore || stream.hasMoreBefore) && (
-                <div
-                  className="flex items-center justify-center py-2 text-xs text-faint"
-                  data-testid="history-load-more"
+            <div className="ml-auto flex items-center gap-1">
+              <SettingsMenu />
+              {stoppable && (
+                <button
+                  className="btn-ghost !px-2.5 text-xs"
+                  onClick={handleStop}
+                  disabled={stop.isPending}
+                  title="Stop the session (preserves the runtime)"
+                  data-testid="session-stop"
                 >
-                  {stream.loadingMore ? (
-                    <>
-                      <Loader2 size={12} className="mr-1.5 animate-spin" />
-                      Loading earlier messages…
-                    </>
-                  ) : (
-                    <span>Scroll up for earlier messages</span>
-                  )}
-                </div>
+                  <Square size={14} />
+                  Stop
+                </button>
               )}
-              <Transcript
-                messages={stream.messages}
-                streaming={stream.streaming}
-                orphanTools={stream.orphanTools}
-                showLive={status === SessionStatusKind.Running}
-                showThinking={uiSettings.showThinking}
-              />
-            </>
+              <button
+                className="btn-icon hover:!text-error"
+                onClick={handleDelete}
+                disabled={del.isPending}
+                title="Delete session"
+                data-testid="session-delete"
+              >
+                <Trash2 size={17} />
+              </button>
+            </div>
+          </header>
+
+          {/* Transcript */}
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            data-testid="transcript-scroll"
+            className="flex-1 overflow-y-auto"
+          >
+            {isLoading && stream.messages.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-faint">
+                <Loader2 size={18} className="mr-2 animate-spin" />
+                Loading transcript…
+              </div>
+            ) : stream.messages.length === 0 &&
+              stream.streaming.length === 0 &&
+              status !== SessionStatusKind.Running ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+                <p className="text-sm font-medium text-muted">
+                  {statusMeta(status).hint}
+                </p>
+                {stream.statusReason ?? detail?.lastError ? (
+                  <p className="max-w-md text-xs text-error">
+                    {stream.statusReason ?? detail?.lastError}
+                  </p>
+                ) : (
+                  <p className="text-xs text-faint">
+                    Send a message below to start the conversation.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <>
+                {(stream.loadingMore || stream.hasMoreBefore) && (
+                  <div
+                    className="flex items-center justify-center py-2 text-xs text-faint"
+                    data-testid="history-load-more"
+                  >
+                    {stream.loadingMore ? (
+                      <>
+                        <Loader2 size={12} className="mr-1.5 animate-spin" />
+                        Loading earlier messages…
+                      </>
+                    ) : (
+                      <span>Scroll up for earlier messages</span>
+                    )}
+                  </div>
+                )}
+                <Transcript
+                  messages={stream.messages}
+                  streaming={stream.streaming}
+                  orphanTools={stream.orphanTools}
+                  showLive={status === SessionStatusKind.Running}
+                  showThinking={uiSettings.showThinking}
+                />
+              </>
+            )}
+          </div>
+
+          {/* Errors */}
+          {(sendError || stream.streamError) && (
+            <div className="mx-auto w-full max-w-3xl px-4">
+              <div
+                data-testid="session-error"
+                className="flex items-start gap-2 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error"
+              >
+                <CircleAlert size={16} className="mt-0.5 shrink-0" />
+                <span>{sendError ?? stream.streamError}</span>
+              </div>
+            </div>
           )}
+
+          {/* Resource-preparation progression (live, while a turn spins up) */}
+          {stream.progression && (
+            <div className="mx-auto w-full max-w-3xl px-4">
+              <div
+                data-testid="session-progression"
+                data-stage={stream.progression.stage}
+                className="flex items-center gap-1.5 py-1 text-xs text-faint"
+              >
+                <Loader2 size={12} className="animate-spin text-accent" />
+                <span>
+                  {progressionLabel(stream.progression.stage)}
+                  {stream.progression.detail ? ` — ${stream.progression.detail}` : ""}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {detail && <SessionConfigBar mode="locked" detail={detail} />}
+
+          {/* Composer */}
+          <Composer
+            status={status}
+            busy={send.isPending}
+            askLocked={pendingAskId !== null || answering}
+            showStop={answering}
+            onSend={(text) => handleSend(id, text)}
+            onStop={handleStop}
+            onFocusAsk={focusPendingAsk}
+          />
         </div>
 
-        {/* Errors */}
-        {(sendError || stream.streamError) && (
-          <div className="mx-auto w-full max-w-3xl px-4">
-            <div
-              data-testid="session-error"
-              className="flex items-start gap-2 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error"
-            >
-              <CircleAlert size={16} className="mt-0.5 shrink-0" />
-              <span>{sendError ?? stream.streamError}</span>
-            </div>
-          </div>
-        )}
-
-        {/* Resource-preparation progression (live, while a turn spins up) */}
-        {stream.progression && (
-          <div className="mx-auto w-full max-w-3xl px-4">
-            <div
-              data-testid="session-progression"
-              data-stage={stream.progression.stage}
-              className="flex items-center gap-1.5 py-1 text-xs text-faint"
-            >
-              <Loader2 size={12} className="animate-spin text-accent" />
-              <span>
-                {progressionLabel(stream.progression.stage)}
-                {stream.progression.detail ? ` — ${stream.progression.detail}` : ""}
-              </span>
-            </div>
-          </div>
-        )}
-
-        {detail && <SessionConfigBar mode="locked" detail={detail} />}
-
-        {/* Composer */}
-        <Composer
-          status={status}
-          pendingQuestion={pendingQuestion}
-          busy={send.isPending}
-          onSend={(text) => handleSend(id, text)}
-          onStop={handleStop}
-        />
+        <TaskListPanel tasks={stream.tasks} />
       </div>
-
-      <TaskListPanel tasks={stream.tasks} />
-    </div>
+    </AskAnswerProvider>
   );
 }

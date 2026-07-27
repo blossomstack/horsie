@@ -892,14 +892,14 @@ impl EventSourcedActor for AgentActor {
                 tool_call_id,
                 content,
             } => {
-                let agent_input = AgentInput::tool_result(tool_call_id, content, false);
+                let agent_input = AgentInput::tool_result(tool_call_id.clone(), content, false);
                 let input_event = AgentDomainEvent::InputMessage {
                     message: agent_input.to_message(),
                 };
                 self.start_run(
                     agent_input,
                     ctx,
-                    sanitize_for_resume(state.messages.clone()),
+                    sanitize_answering(state.messages.clone(), &tool_call_id),
                 );
                 CommandEffect::persist(vec![input_event])
             }
@@ -1321,7 +1321,20 @@ const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded";
 /// assistant message, joining any run of real results already following it —
 /// never appended to the end of a history that has moved on to later turns.
 fn sanitize_for_resume(messages: Vec<Message>) -> Vec<Message> {
-    let answered: std::collections::HashSet<String> = messages
+    sanitize_dangling(messages, None)
+}
+
+/// `sanitize_for_resume` for the resume-from-ask path, where `answering` is the
+/// tool call this very command is injecting a result for (e.g. `ask_user`).
+/// That call is about to be answered for real, so it is not dangling: repairing
+/// it too would put *two* results on one `tool_use_id` — the duplicate shape
+/// stricter providers reject outright, and pure noise for the ones that don't.
+fn sanitize_answering(messages: Vec<Message>, answering: &str) -> Vec<Message> {
+    sanitize_dangling(messages, Some(answering))
+}
+
+fn sanitize_dangling(messages: Vec<Message>, answering: Option<&str>) -> Vec<Message> {
+    let mut answered: std::collections::HashSet<String> = messages
         .iter()
         .flat_map(|m| m.parts.iter())
         .filter_map(|p| match p {
@@ -1329,6 +1342,9 @@ fn sanitize_for_resume(messages: Vec<Message>) -> Vec<Message> {
             ContentPart::Text(_) | ContentPart::ToolCall(_) | ContentPart::Thinking(_) => None,
         })
         .collect();
+    if let Some(id) = answering {
+        answered.insert(id.to_string());
+    }
 
     // Insertion index → the call ids needing a synthetic result there.
     let mut repairs: std::collections::BTreeMap<usize, Vec<String>> =
@@ -1651,6 +1667,32 @@ mod tests {
             }
             other => panic!("expected tool result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn answering_a_pending_ask_does_not_also_repair_it() {
+        // The shape every ask_user answer resumes from: the call is dangling
+        // *because* the user's answer is the result, arriving as this run's
+        // input. Repairing it here would put a synthetic "interrupted" result
+        // and the real answer on one tool_use_id.
+        let history = vec![
+            Message::user("m1", "pick a color"),
+            Message {
+                id: "m2".into(),
+                role: Role::Assistant,
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "ask1".into(),
+                    name: "ask_user".into(),
+                    input: serde_json::json!({ "question": "which?" }),
+                })],
+            },
+        ];
+
+        let fixed = sanitize_answering(history.clone(), "ask1");
+        assert_eq!(fixed.len(), history.len(), "nothing is repaired: {fixed:?}");
+
+        // Without the exclusion it *is* repaired — the bug this guards.
+        assert_eq!(sanitize_for_resume(history).len(), 3);
     }
 
     /// Every `tool_use` id in `messages` that has no matching `tool_result`
