@@ -585,6 +585,7 @@ mod tests {
                 path: ".claude/skills/git-bisect/SKILL.md".into(),
                 content: content.into(),
             }],
+            platform: None,
         }
     }
 

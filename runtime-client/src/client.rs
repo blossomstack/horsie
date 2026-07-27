@@ -142,6 +142,7 @@ mod tests {
                 content: "hi".into(),
             }),
             skills: vec![],
+            platform: None,
         };
         let client = RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan]));
         let (out, shared) = client
