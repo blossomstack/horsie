@@ -947,7 +947,7 @@ fn is_host_port(s: &str) -> bool {
 
 // ── connection + row reads ───────────────────────────────────────────────────
 
-async fn open_pool(url: &str) -> Result<SqlitePool, String> {
+pub(crate) async fn open_pool(url: &str) -> Result<SqlitePool, String> {
     let opts = SqliteConnectOptions::from_str(url)
         .map_err(|e| format!("invalid database url '{url}': {e}"))?
         .create_if_missing(true);

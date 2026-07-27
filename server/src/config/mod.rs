@@ -6,6 +6,8 @@
 
 mod store;
 
+pub mod model_cards;
+
 use async_trait::async_trait;
 use horsie_models::settings::{SettingsUpdate, SettingsView, VendorTestResult};
 
