@@ -122,19 +122,28 @@ Applied once the relevant server data loads:
 
 ## Testing
 
-The web client has no unit-test runner today (Playwright e2e only, under
-`clients/web/e2e`); introducing one is out of scope. To keep logic verifiable
-via e2e, serialization and reconciliation are implemented as small pure
-functions that `useSessionDraft` wires together.
+This feature introduces a unit-test runner to `clients/web` (it has none
+today): **Vitest** + `@testing-library/react` (for `renderHook`) + `jsdom`
+(provides `localStorage`). New `test:unit` script; a fast `web-unit` CI job
+runs alongside the existing `web-e2e` job. Test files live next to the code
+they cover (e.g. `src/hooks/draftPersistence.test.ts`).
 
-E2E coverage (Playwright, in a new `m-draft-persistence.spec.ts` under
-`clients/web/e2e`):
+Serialization and reconciliation are implemented as pure functions
+(`src/hooks/draftPersistence.ts`) that `useSessionDraft` wires together, so
+most behavior is unit-tested without a browser.
 
-- Change selections in the config bar (runtime, model, skills, MCP, memory),
-  reload the page → all selections restored.
-- Stored draft with an empty skills selection → stays empty after reload
-  (seeding does not re-add `enabledDefault` bundles).
-- No stored draft (fresh `localStorage`) → current first-visit behavior:
-  default vendor, first model, `enabledDefault` bundles pre-selected.
-- Stored draft referencing a since-removed model/vendor → falls back to
-  defaults without errors.
+Unit tests:
+
+- `usePersistentState`: hydration, write-through, corrupt JSON fallback,
+  custom serializers.
+- Payload serialize/deserialize: `Map`/`Set` round-trip, wrong version →
+  `undefined`, corrupt JSON → `undefined`.
+- Reconciliation: stale model/vendor reset to defaults; stale skill/MCP/memory
+  entries filtered; stored draft (even one equal to the defaults) suppresses
+  `enabledDefault` seeding; stored empty skills selection stays empty;
+  first visit (no stored draft) seeds from `enabledDefault`.
+
+E2E (Playwright, new `m-draft-persistence.spec.ts` under `clients/web/e2e`) —
+one test for the part only a browser proves:
+
+- Change selections in the config bar, reload the page → selections restored.
