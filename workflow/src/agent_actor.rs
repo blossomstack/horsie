@@ -1303,10 +1303,24 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
     }
 }
 
-/// Make a recovered history well-formed for the provider: every `tool_use` in the
-/// last assistant message must have a matching `tool_result`. Any missing one (an
-/// interrupted tool call) gets a synthetic error result so the model can retry.
-fn sanitize_for_resume(mut messages: Vec<Message>) -> Vec<Message> {
+/// What a synthetic result says stands in for a tool call that never finished.
+const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded";
+
+/// Make a recovered history well-formed for the provider: every `tool_use`, in
+/// *any* assistant message, must have a matching `tool_result`. Any missing one
+/// (a tool call interrupted by Stop or a crash) gets a synthetic error result so
+/// the model can retry.
+///
+/// Repairing only the last assistant message is not enough. A Stop mid-turn
+/// journals the assistant's tool call with no outcome (#45); once later turns
+/// push that message off the end, a history rebuilt from the journal carries an
+/// unanswered `tool_use` mid-history and the provider rejects *every* subsequent
+/// turn with a 400 — the session is bricked until the journal is repaired.
+///
+/// Each repair is placed where the wire expects the result: directly after its
+/// assistant message, joining any run of real results already following it —
+/// never appended to the end of a history that has moved on to later turns.
+fn sanitize_for_resume(messages: Vec<Message>) -> Vec<Message> {
     let answered: std::collections::HashSet<String> = messages
         .iter()
         .flat_map(|m| m.parts.iter())
@@ -1315,31 +1329,58 @@ fn sanitize_for_resume(mut messages: Vec<Message>) -> Vec<Message> {
             ContentPart::Text(_) | ContentPart::ToolCall(_) | ContentPart::Thinking(_) => None,
         })
         .collect();
-    let dangling: Vec<String> = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == Role::Assistant)
-        .map(|m| {
-            m.parts
-                .iter()
-                .filter_map(|p| match p {
-                    ContentPart::ToolCall(tc) if !answered.contains(&tc.id) => Some(tc.id.clone()),
-                    ContentPart::ToolCall(_)
-                    | ContentPart::Text(_)
-                    | ContentPart::ToolResult(_)
-                    | ContentPart::Thinking(_) => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    for id in dangling {
-        messages.push(Message::tool_result(
-            id,
-            "interrupted by shutdown, not completed",
-            true,
-        ));
+
+    // Insertion index → the call ids needing a synthetic result there.
+    let mut repairs: std::collections::BTreeMap<usize, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (i, m) in messages.iter().enumerate() {
+        if m.role != Role::Assistant {
+            continue;
+        }
+        let dangling: Vec<String> = m
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::ToolCall(tc) if !answered.contains(&tc.id) => Some(tc.id.clone()),
+                ContentPart::ToolCall(_)
+                | ContentPart::Text(_)
+                | ContentPart::ToolResult(_)
+                | ContentPart::Thinking(_) => None,
+            })
+            .collect();
+        if dangling.is_empty() {
+            continue;
+        }
+        // Past the results this turn *did* record, so a partially-answered
+        // parallel batch stays one contiguous run.
+        let mut at = i + 1;
+        while messages.get(at).is_some_and(|next| next.role == Role::Tool) {
+            at += 1;
+        }
+        repairs.entry(at).or_default().extend(dangling);
     }
-    messages
+    if repairs.is_empty() {
+        return messages;
+    }
+
+    let mut out =
+        Vec::with_capacity(messages.len() + repairs.values().map(Vec::len).sum::<usize>());
+    for (i, m) in messages.into_iter().enumerate() {
+        if let Some(ids) = repairs.remove(&i) {
+            out.extend(synthetic_results(ids));
+        }
+        out.push(m);
+    }
+    // Calls left dangling by the final assistant message land past the end.
+    for (_, ids) in repairs {
+        out.extend(synthetic_results(ids));
+    }
+    out
+}
+
+fn synthetic_results(ids: Vec<String>) -> impl Iterator<Item = Message> {
+    ids.into_iter()
+        .map(|id| Message::tool_result(id, INTERRUPTED_RESULT, true))
 }
 
 /// Find the tool-call id of the handoff tool by scanning captured assistant messages.
@@ -1610,6 +1651,124 @@ mod tests {
             }
             other => panic!("expected tool result, got {other:?}"),
         }
+    }
+
+    /// Every `tool_use` id in `messages` that has no matching `tool_result`
+    /// anywhere — what the provider rejects a request for.
+    fn unmatched_tool_uses(messages: &[Message]) -> Vec<String> {
+        let answered: std::collections::HashSet<&str> = messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                ContentPart::ToolResult(r) => Some(r.tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                ContentPart::ToolCall(tc) if !answered.contains(tc.id.as_str()) => {
+                    Some(tc.id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assistant_call(id: &str, call_id: &str) -> Message {
+        Message {
+            id: id.into(),
+            role: Role::Assistant,
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: call_id.into(),
+                name: "read_file".into(),
+                input: serde_json::json!({}),
+            })],
+        }
+    }
+
+    /// The session-bricking case: a Stop left a dangling call mid-history, and
+    /// later turns pushed it off the end. Sanitizing only the last assistant
+    /// message leaves it unrepaired, and the provider 400s on every later turn.
+    #[test]
+    fn sanitize_repairs_dangling_tool_calls_before_the_last_assistant_message() {
+        let history = vec![
+            user_msg("read it"),
+            assistant_call("a1", "stopped"), // Stop landed here: no result ever journaled
+            user_msg("never mind, do this instead"),
+            assistant_call("a2", "tc2"),
+            Message::tool_result("tc2", "ok", false),
+            Message {
+                id: "a3".into(),
+                role: Role::Assistant,
+                parts: vec![ContentPart::Text(TextPart {
+                    text: "done".into(),
+                })],
+            },
+        ];
+        let fixed = sanitize_for_resume(history);
+        assert!(
+            unmatched_tool_uses(&fixed).is_empty(),
+            "dangling calls left in rebuilt history: {:?}",
+            unmatched_tool_uses(&fixed)
+        );
+    }
+
+    /// The repair must land where the wire expects a result — right after the
+    /// assistant message that made the call — not appended to the end of a
+    /// history that has moved on to later turns.
+    #[test]
+    fn sanitize_places_synthetic_result_next_to_its_assistant_message() {
+        let history = vec![
+            user_msg("read it"),
+            assistant_call("a1", "stopped"),
+            user_msg("never mind"),
+            assistant_call("a2", "tc2"),
+            Message::tool_result("tc2", "ok", false),
+        ];
+        let fixed = sanitize_for_resume(history);
+        match &fixed[2].parts[0] {
+            ContentPart::ToolResult(r) => {
+                assert_eq!(r.tool_call_id, "stopped");
+                assert!(r.is_error);
+            }
+            other => panic!("expected the synthetic result at index 2, got {other:?}"),
+        }
+        assert_eq!(fixed[2].role, Role::Tool);
+    }
+
+    /// A partially-answered parallel batch: the synthetic result joins the run
+    /// of real results, still ahead of the next user turn.
+    #[test]
+    fn sanitize_appends_to_an_existing_run_of_tool_results() {
+        let history = vec![
+            user_msg("do both"),
+            Message {
+                id: "a1".into(),
+                role: Role::Assistant,
+                parts: vec![
+                    ContentPart::ToolCall(ToolCallPart {
+                        id: "tc1".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({}),
+                    }),
+                    ContentPart::ToolCall(ToolCallPart {
+                        id: "tc2".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({}),
+                    }),
+                ],
+            },
+            Message::tool_result("tc1", "ok", false),
+            user_msg("stop, do something else"),
+        ];
+        let fixed = sanitize_for_resume(history);
+        match &fixed[3].parts[0] {
+            ContentPart::ToolResult(r) => assert_eq!(r.tool_call_id, "tc2"),
+            other => panic!("expected tc2's result after tc1's, got {other:?}"),
+        }
+        assert_eq!(fixed.last().unwrap().role, Role::User);
     }
 
     #[test]
