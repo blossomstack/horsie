@@ -5,6 +5,7 @@ import {
   Plus,
   Search,
   Settings,
+  ShieldCheck,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
@@ -167,6 +168,20 @@ export function Sidebar() {
           >
             <Brain size={14} />
             Memory
+          </NavLink>
+          <NavLink
+            to="/admin"
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-1.5 rounded-[var(--radius)] px-2 py-1.5 text-xs font-medium transition-colors",
+                isActive
+                  ? "bg-surface-3 text-text"
+                  : "text-muted hover:bg-surface-2 hover:text-text",
+              )
+            }
+          >
+            <ShieldCheck size={14} />
+            Admin
           </NavLink>
         </div>
         <div className="flex items-center gap-1">

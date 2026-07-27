@@ -6,6 +6,7 @@ import { SessionView } from "./pages/SessionView";
 import { SettingsPage } from "./pages/SettingsPage";
 import { MemoryPage } from "./pages/MemoryPage";
 import { SkillsPage } from "./pages/SkillsPage";
+import { AdminPage } from "./pages/AdminPage";
 
 const client = new QueryClient({
   defaultOptions: {
@@ -28,6 +29,7 @@ export default function App() {
             <Route path="settings" element={<SettingsPage />} />
             <Route path="skills" element={<SkillsPage />} />
             <Route path="memory" element={<MemoryPage />} />
+            <Route path="admin" element={<AdminPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

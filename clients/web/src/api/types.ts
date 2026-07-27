@@ -5,6 +5,7 @@ export * from "../generated/capabilities";
 export * from "../generated/github";
 export * from "../generated/mcp";
 export * from "../generated/memory";
+export * from "../generated/model_cards";
 export * from "../generated/plugins";
 export * from "../generated/session";
 export * from "../generated/session_api";

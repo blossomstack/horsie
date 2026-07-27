@@ -22,6 +22,9 @@ import type {
   MemorySpaceView,
   MemoryUpdateInput,
   MemoryView,
+  ModelCard,
+  ModelCardInput,
+  ModelCardUpdate,
   PluginDefaultInput,
   PluginInstallInput,
   PluginView,
@@ -146,6 +149,38 @@ export const api = {
         method: "POST",
         body: "{}",
       }),
+  },
+
+  modelCards: {
+    /** Public: cards whose modelId starts with `prefix` (all when ""). */
+    search: (prefix = ""): Promise<ModelCard[]> =>
+      request(
+        `/model-cards${prefix ? `?prefix=${encodeURIComponent(prefix)}` : ""}`,
+      ),
+  },
+
+  admin: {
+    modelCards: {
+      list: (): Promise<ModelCard[]> => request("/admin/model-cards"),
+
+      create: (body: ModelCardInput): Promise<ModelCard> =>
+        request("/admin/model-cards", {
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
+
+      /** Update name/limits; `modelId` is immutable. */
+      update: (modelId: string, body: ModelCardUpdate): Promise<ModelCard> =>
+        request(`/admin/model-cards/${encodeURIComponent(modelId)}`, {
+          method: "PUT",
+          body: JSON.stringify(body),
+        }),
+
+      remove: (modelId: string): Promise<void> =>
+        request(`/admin/model-cards/${encodeURIComponent(modelId)}`, {
+          method: "DELETE",
+        }),
+    },
   },
 
   github: {

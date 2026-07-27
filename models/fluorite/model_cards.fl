@@ -1,0 +1,35 @@
+/// Wire types for the model-card catalog: reference records of well-known
+/// models (official model id + token limits). Managed via
+/// /api/admin/model-cards and searched via /api/model-cards. Cards are
+/// prefill templates for the Settings model form — never linked to
+/// configured models.
+package model_cards;
+
+/// A stored model card.
+struct ModelCard {
+    /// Official provider model id — the card's identity (e.g. "claude-sonnet-4-6").
+    model_id: String,
+    /// Display label (e.g. "Claude Sonnet 4.6").
+    name: String,
+    /// Total context window in tokens.
+    context_window: Option<u32>,
+    /// Generation cap in tokens.
+    max_tokens: Option<u32>,
+    created_at: String,
+    updated_at: String,
+}
+
+/// Create input for a model card.
+struct ModelCardInput {
+    model_id: String,
+    name: String,
+    context_window: Option<u32>,
+    max_tokens: Option<u32>,
+}
+
+/// Update input — `model_id` is immutable (rename = delete + create).
+struct ModelCardUpdate {
+    name: String,
+    context_window: Option<u32>,
+    max_tokens: Option<u32>,
+}

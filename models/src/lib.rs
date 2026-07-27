@@ -76,6 +76,11 @@ pub mod settings {
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod model_cards {
+    include!(concat!(env!("OUT_DIR"), "/model_cards/mod.rs"));
+}
+
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod github {
     include!(concat!(env!("OUT_DIR"), "/github/mod.rs"));
 }

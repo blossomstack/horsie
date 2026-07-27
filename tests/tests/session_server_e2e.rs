@@ -137,6 +137,9 @@ async fn start_server(
         plugins_dir: None,
         hook_path: vec![],
         config_store: opened.store,
+        model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
+            opened.pool.clone(),
+        )),
         github,
         mcp,
         plugins,
@@ -270,6 +273,9 @@ async fn start_server_with_shared_local(
         plugins_dir: None,
         hook_path: vec![],
         config_store: opened.store,
+        model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
+            opened.pool.clone(),
+        )),
         github,
         mcp,
         plugins,
