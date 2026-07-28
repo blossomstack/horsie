@@ -1165,7 +1165,6 @@ async fn a_disconnected_runtime_is_released_so_the_next_turn_recovers() {
 /// mid-`bash` leaves the command running to completion inside the sandbox,
 /// holding resources, with its output discarded.
 #[tokio::test]
-#[ignore = "red: #61 item 23 — Stop never reaches the sandbox; cancels() stays empty"]
 async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let mock = MockLlmServer::builder().build().await;

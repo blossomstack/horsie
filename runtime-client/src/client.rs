@@ -2,8 +2,9 @@ use crate::transport::{RuntimeTransport, TransportError};
 use horsie_models::runtime::{
     PluginSkill, ToolCall, ToolError, ToolOutput, ToolResult, WorkspaceScan,
 };
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -36,6 +37,14 @@ pub struct RuntimeClient {
     /// across clones so the flag set on the agent's clone is visible to the
     /// session's.
     connected: Arc<AtomicBool>,
+    /// Wire ids of calls currently awaiting a reply.
+    ///
+    /// `invoke` mints its own id rather than reusing the model's `tool_call_id`,
+    /// so nothing outside this client could name an in-flight call to cancel it —
+    /// which is why `cancel` had no caller and stopping a turn left the sandbox
+    /// running the command to completion (#61 item 23). Shared across clones so a
+    /// holder that did not issue the call can still stop it.
+    in_flight: Arc<Mutex<HashSet<String>>>,
 }
 
 impl RuntimeClient {
@@ -43,6 +52,7 @@ impl RuntimeClient {
         Self {
             inner: Arc::new(transport),
             connected: Arc::new(AtomicBool::new(true)),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -53,6 +63,7 @@ impl RuntimeClient {
         Self {
             inner: transport,
             connected: Arc::new(AtomicBool::new(true)),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -74,7 +85,10 @@ impl RuntimeClient {
 
     pub async fn invoke(&self, call: ToolCall) -> Result<ToolOutput, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
-        match self.inner.invoke(&call_id, call).await {
+        self.track(&call_id);
+        let outcome = self.inner.invoke(&call_id, call).await;
+        self.untrack(&call_id);
+        match outcome {
             Ok(ToolResult::Ok(output)) => Ok(output),
             Ok(ToolResult::Err(ToolError { reason })) => Err(RuntimeCallError::ToolFailed(reason)),
             Err(e) => {
@@ -87,6 +101,49 @@ impl RuntimeClient {
     pub async fn cancel(&self, call_id: &str) {
         if let Err(e) = self.inner.cancel(call_id).await {
             self.note_transport_error(&e);
+        }
+    }
+
+    fn track(&self, call_id: &str) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(call_id.to_string());
+    }
+
+    fn untrack(&self, call_id: &str) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(call_id);
+    }
+
+    /// How many calls are awaiting a reply. Test observability for the tracking
+    /// that makes [`Self::cancel_in_flight`] possible.
+    #[must_use]
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    /// Tell the runtime to abandon every call still awaiting a reply.
+    ///
+    /// Dropping a tool future abandons it *locally* only: without this the sandbox
+    /// keeps running the command to completion, holding resources, with its output
+    /// discarded. Best-effort and non-blocking on failure — the caller is already
+    /// tearing the turn down.
+    pub async fn cancel_in_flight(&self) {
+        let ids: Vec<String> = {
+            let guard = self
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard.iter().cloned().collect()
+        };
+        for id in &ids {
+            self.cancel(id).await;
         }
     }
 
@@ -142,6 +199,44 @@ mod tests {
             timeout_secs: None,
             workspace: None,
         })
+    }
+
+    #[tokio::test]
+    async fn cancel_in_flight_reaches_every_pending_call() {
+        // The gate holds two invokes open so both are genuinely in flight when the
+        // cancel arrives — the shape a Stop mid-batch produces.
+        let gate = crate::testkit::BlockHandle::new();
+        let c = RuntimeClient::new(crate::testkit::MockTransport::gated_invoke(&gate));
+        let probe = c.clone();
+        let calls = tokio::spawn(async move {
+            tokio::join!(probe.invoke(probe_call()), probe.invoke(probe_call()))
+        });
+        // Let both reach the transport and register as in flight.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        c.cancel_in_flight().await;
+        gate.release();
+        let _ = calls.await;
+
+        // Two distinct wire ids cancelled, neither of them the model's tool_call_id
+        // (which `invoke` never sees).
+        assert_eq!(
+            c.in_flight_count(),
+            0,
+            "tracking must clear once calls settle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settled_call_is_no_longer_tracked() {
+        let c = RuntimeClient::new(crate::testkit::MockTransport::ok(""));
+        assert_eq!(c.in_flight_count(), 0);
+        assert!(c.invoke(probe_call()).await.is_ok());
+        assert_eq!(
+            c.in_flight_count(),
+            0,
+            "a completed call must not linger as cancellable"
+        );
     }
 
     #[tokio::test]
