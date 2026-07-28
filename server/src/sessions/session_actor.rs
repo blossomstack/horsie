@@ -498,6 +498,14 @@ impl SessionActor {
         let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
         params.interactive = true;
         params.optional_handoff_tool = Some(ASK_USER_TOOL.to_string());
+        // Resolved at session creation (session choice, else the model default),
+        // so this is a straight parse of a value already validated there.
+        params.thinking_effort = self
+            .spec
+            .agent
+            .thinking_effort
+            .as_deref()
+            .and_then(horsie_agentcore::ThinkingEffort::parse);
         // A fresh generation for this incarnation: any outcome this agent ever
         // delivers is tagged with it, so a straggler from a *previous*
         // incarnation (superseded by this spawn) is recognized as stale.
@@ -1246,6 +1254,7 @@ mod tests {
             max_retries: 0,
             mcp_servers: Vec::new(),
             memory_spaces: spaces.iter().map(|s| (*s).to_string()).collect(),
+            thinking_effort: None,
         }
     }
 
@@ -1305,6 +1314,7 @@ mod tests {
                 max_retries: 0,
                 mcp_servers: vec![],
                 memory_spaces: vec![],
+                thinking_effort: None,
             },
             workspaces: vec![],
             provision: vec![],

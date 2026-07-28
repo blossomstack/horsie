@@ -30,6 +30,9 @@ struct AgentSettings {
     /// Memory spaces this session may read and write; absent → none, and the
     /// memory_* tools are not offered.
     memory_spaces: Option<Vec<String>>,
+    /// Canonical thinking effort for this session, chosen from the model's
+    /// offered list. Absent → the model's configured default.
+    thinking_effort: Option<String>,
 }
 
 struct SessionSummary {

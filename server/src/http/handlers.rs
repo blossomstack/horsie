@@ -66,6 +66,7 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         max_retries: w.max_retries.unwrap_or(0),
         mcp_servers: w.mcp_servers.unwrap_or_default(),
         memory_spaces: w.memory_spaces.unwrap_or_default(),
+        thinking_effort: w.thinking_effort,
     }
 }
 
@@ -121,6 +122,43 @@ pub async fn create_session(
     let mut agent = settings_from_wire(req.agent);
     if !plugins.is_empty() {
         agent.use_plugins = Some(true);
+    }
+    // Resolve the effective thinking effort once, here: session choice wins,
+    // else the model's configured default, else nothing. Effort is fixed for a
+    // session's lifetime (changing it mid-conversation invalidates the prompt
+    // cache), so freezing it at creation is deliberate. A requested value must
+    // be canonical AND offered by the model — otherwise it reaches the provider
+    // as an opaque 400.
+    {
+        let model_row = state
+            .config_store
+            .view()
+            .await
+            .map_err(Api::internal)?
+            .models
+            .into_iter()
+            .find(|m| m.alias == agent.model);
+        match agent.thinking_effort.as_deref() {
+            Some(requested) => {
+                let effort =
+                    horsie_agentcore::ThinkingEffort::parse(requested).ok_or_else(|| {
+                        Api::unprocessable(format!("unknown thinking effort '{requested}'"))
+                    })?;
+                let offered = model_row
+                    .as_ref()
+                    .and_then(|m| m.thinking_efforts.clone())
+                    .unwrap_or_default();
+                if !offered.iter().any(|e| e == effort.as_str()) {
+                    return Err(Api::unprocessable(format!(
+                        "model '{}' does not offer thinking effort '{requested}'",
+                        agent.model
+                    )));
+                }
+            }
+            None => {
+                agent.thinking_effort = model_row.and_then(|m| m.thinking_effort);
+            }
+        }
     }
     let spec = SessionSpec {
         name: req.name,
@@ -229,8 +267,10 @@ fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
 }
 
 fn to_wire_history(page: AgentHistoryPage) -> HistoryPage {
+    let mut messages = page.messages;
+    crate::wire_redact::strip_thinking_signatures(&mut messages);
     HistoryPage {
-        messages: page.messages,
+        messages,
         has_more: page.has_more,
         tasks: page.tasks.map(|tasks| {
             tasks

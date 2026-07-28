@@ -20,4 +20,16 @@ export interface ModelView {
    * The model&#x27;s total context window, in tokens. A built-in default is
    */
   contextWindow?: number;
+  /**
+   * Canonical thinking-effort values this model offers, in ascending order.
+   */
+  thinkingEfforts?: string[];
+  /**
+   * Default applied when a session does not choose one.
+   */
+  thinkingEffort?: string;
+  /**
+   * Wire encoding for this model&#x27;s thinking control.
+   */
+  thinkingDialect?: string;
 }

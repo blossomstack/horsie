@@ -15,6 +15,12 @@ struct ModelCard {
     context_window: Option<u32>,
     /// Generation cap in tokens.
     max_tokens: Option<u32>,
+    /// Canonical thinking-effort values this model supports, ascending.
+    thinking_efforts: Option<Vec<String>>,
+    /// The provider's default effort, when documented.
+    default_thinking_effort: Option<String>,
+    /// Wire encoding for this model's thinking control.
+    thinking_dialect: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -25,6 +31,12 @@ struct ModelCardInput {
     name: String,
     context_window: Option<u32>,
     max_tokens: Option<u32>,
+    /// Canonical thinking-effort values this model supports, ascending.
+    thinking_efforts: Option<Vec<String>>,
+    /// The provider's default effort, when documented.
+    default_thinking_effort: Option<String>,
+    /// Wire encoding for this model's thinking control.
+    thinking_dialect: Option<String>,
 }
 
 /// Update input — `model_id` is immutable (rename = delete + create).
@@ -32,4 +44,10 @@ struct ModelCardUpdate {
     name: String,
     context_window: Option<u32>,
     max_tokens: Option<u32>,
+    /// Canonical thinking-effort values this model supports, ascending.
+    thinking_efforts: Option<Vec<String>>,
+    /// The provider's default effort, when documented.
+    default_thinking_effort: Option<String>,
+    /// Wire encoding for this model's thinking control.
+    thinking_dialect: Option<String>,
 }

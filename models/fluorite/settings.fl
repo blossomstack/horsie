@@ -13,6 +13,10 @@ struct ProviderView {
     base_url: Option<String>,
     /// True when an inline `api_key` is stored.
     has_inline_key: bool,
+    /// Retain thinking-block signatures from this provider. Required for
+    /// genuine Anthropic (it validates them on replay); off for
+    /// Anthropic-compatible endpoints, which do not.
+    keep_thinking_signature: bool,
 }
 
 /// One configured model alias.
@@ -27,6 +31,13 @@ struct ModelView {
     /// The model's total context window, in tokens. A built-in default is
     /// applied for known model ids when a model is added with this omitted.
     context_window: Option<u32>,
+    /// Canonical thinking-effort values this model offers, in ascending order.
+    /// Absent → the model exposes no thinking control.
+    thinking_efforts: Option<Vec<String>>,
+    /// Default applied when a session does not choose one.
+    thinking_effort: Option<String>,
+    /// Wire encoding for this model's thinking control.
+    thinking_dialect: Option<String>,
 }
 
 /// What a vendor can do with a session workspace. Announced by the vendor
@@ -119,6 +130,9 @@ struct ProviderInput {
     base_url: Option<String>,
     /// New inline key. Omit to keep the existing stored key; "" to clear.
     api_key: Option<String>,
+    /// Retain thinking-block signatures from this provider. Omit for the
+    /// default (off) — required for genuine Anthropic, which validates them.
+    keep_thinking_signature: Option<bool>,
 }
 
 /// A model alias to persist.
@@ -128,6 +142,9 @@ struct ModelInput {
     model_id: String,
     max_tokens: Option<u32>,
     context_window: Option<u32>,
+    thinking_efforts: Option<Vec<String>>,
+    thinking_effort: Option<String>,
+    thinking_dialect: Option<String>,
 }
 
 /// A configurable vendor to persist. Replaces any vendor of the same `name`.

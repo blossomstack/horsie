@@ -8,4 +8,7 @@ export interface ModelInput {
   modelId: string;
   maxTokens?: number;
   contextWindow?: number;
+  thinkingEfforts?: string[];
+  thinkingEffort?: string;
+  thinkingDialect?: string;
 }

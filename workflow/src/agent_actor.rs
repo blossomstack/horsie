@@ -25,6 +25,9 @@ pub struct AgentParams {
     pub allow_timers: bool,
     pub max_iterations: Option<u32>,
     pub max_retries: u32,
+    /// Canonical thinking effort for this agent's runs, already resolved from
+    /// the session's choice and the model's default. `None` sends no control.
+    pub thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
     /// Interactive (session) mode: recovery never injects a synthetic continue —
     /// the next user message is the continuation — and the event log is never
     /// snapshot-compacted (SSE cursors are journal sequence numbers and must
@@ -48,6 +51,7 @@ impl AgentParams {
             allow_timers: def.allow_timers.unwrap_or(false),
             max_iterations: def.max_iterations,
             max_retries: def.max_retries.unwrap_or(0),
+            thinking_effort: None,
             interactive: false,
             optional_handoff_tool: None,
         }
@@ -428,6 +432,7 @@ impl AgentActor {
             None => (self.params.handoff_tool(), true),
         };
         let max_iterations = self.params.max_iterations;
+        let thinking_effort = self.params.thinking_effort;
         let max_retries = self.params.max_retries;
         let parent = self.ctx.parent.clone();
         let session_id = self.ctx.session_id;
@@ -494,6 +499,7 @@ impl AgentActor {
                 force_handoff_choice,
                 max_iterations,
                 max_retries,
+                thinking_effort,
                 history,
                 input,
                 cancel,
@@ -1436,6 +1442,7 @@ async fn run_with_retries(
     force_handoff_choice: bool,
     max_iterations: Option<u32>,
     max_retries: u32,
+    thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
     history: Vec<Message>,
     input: AgentInput,
     cancel: CancellationToken,
@@ -1447,6 +1454,7 @@ async fn run_with_retries(
         let capture = CapturingSink::new(sink.clone());
         let config = AgentConfig {
             max_iterations: max_iterations.unwrap_or_else(|| AgentConfig::default().max_iterations),
+            thinking_effort,
             ..AgentConfig::default()
         };
         let mut builder = Agent::builder(provider.clone(), toolbox.clone())

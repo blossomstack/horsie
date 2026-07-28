@@ -15,7 +15,7 @@ use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
 use crate::velos::{VelosClient, VelosError};
 use crate::vendor::{RuntimeVendor, VelosMutableSettings, VelosVendor, VelosVendorSettings};
 use async_trait::async_trait;
-use horsie_agentcore::{LlmProvider, Secret};
+use horsie_agentcore::{LlmProvider, Secret, ThinkingDialect, ThinkingEffort};
 use horsie_anthropic::AnthropicProvider;
 use horsie_executor::ConnectedRuntimeRegistry;
 use horsie_models::settings::{
@@ -363,12 +363,13 @@ impl ConfigStore for DbConfigStore {
                 }
                 let api_key = resolve_secret(&p.api_key, keep.get(name).copied());
                 sqlx::query(
-                    "INSERT INTO providers (name, kind, base_url, api_key) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO providers (name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?)",
                 )
                 .bind(name)
                 .bind(&p.kind)
                 .bind(trimmed(&p.base_url))
                 .bind(api_key)
+                .bind(i64::from(p.keep_thinking_signature.unwrap_or(false)))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -395,14 +396,39 @@ impl ConfigStore for DbConfigStore {
                 let context_window = m
                     .context_window
                     .or_else(|| default_context_window(m.model_id.trim()));
+                if let Some(d) = m.thinking_dialect.as_deref()
+                    && ThinkingDialect::parse(d).is_none()
+                {
+                    return Err(format!(
+                        "model '{alias}' has unknown thinking dialect '{d}'"
+                    ));
+                }
+                let offered: Vec<String> = m.thinking_efforts.clone().unwrap_or_default();
+                for e in &offered {
+                    if ThinkingEffort::parse(e).is_none() {
+                        return Err(format!(
+                            "model '{alias}' offers unknown thinking effort '{e}'"
+                        ));
+                    }
+                }
+                if let Some(def) = m.thinking_effort.as_deref()
+                    && !offered.iter().any(|e| e == def)
+                {
+                    return Err(format!(
+                        "model '{alias}' default thinking effort '{def}' is not among its offered efforts"
+                    ));
+                }
                 sqlx::query(
-                    "INSERT INTO models (alias, provider, model_id, max_tokens, context_window) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO models (alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(alias)
                 .bind(&m.provider)
                 .bind(m.model_id.trim())
                 .bind(m.max_tokens.map(i64::from))
                 .bind(context_window.map(i64::from))
+                .bind(encode_efforts(m.thinking_efforts.as_ref()))
+                .bind(m.thinking_effort.clone())
+                .bind(m.thinking_dialect.clone())
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -542,6 +568,7 @@ struct ProviderRow {
     kind: String,
     base_url: Option<String>,
     api_key: Option<String>,
+    keep_thinking_signature: bool,
 }
 
 struct ModelRow {
@@ -550,6 +577,9 @@ struct ModelRow {
     model_id: String,
     max_tokens: Option<i64>,
     context_window: Option<i64>,
+    thinking_efforts: Option<String>,
+    thinking_effort: Option<String>,
+    thinking_dialect: Option<String>,
 }
 
 struct VendorRow {
@@ -634,18 +664,26 @@ fn build_registry(providers: &[ProviderRow], models: &[ModelRow]) -> Result<Regi
             )
         })?;
         let max_tokens = m.max_tokens.and_then(|v| u32::try_from(v).ok());
+        let dialect = m
+            .thinking_dialect
+            .as_deref()
+            .and_then(ThinkingDialect::parse)
+            .unwrap_or(ThinkingDialect::NoControl);
         let built = match p.kind.as_str() {
             "anthropic" => build_anthropic(
                 p.base_url.as_deref(),
                 p.api_key.as_deref(),
                 &m.model_id,
                 max_tokens,
+                p.keep_thinking_signature,
+                dialect,
             )?,
             "openai" => build_openai(
                 p.base_url.as_deref(),
                 p.api_key.as_deref(),
                 &m.model_id,
                 max_tokens,
+                dialect,
             )?,
             other => {
                 return Err(format!(
@@ -664,6 +702,8 @@ fn build_anthropic(
     api_key: Option<&str>,
     model_id: &str,
     max_tokens: Option<u32>,
+    keep_thinking_signature: bool,
+    thinking_dialect: ThinkingDialect,
 ) -> Result<Arc<dyn LlmProvider>, String> {
     let key: Option<Secret> = match api_key {
         Some(k) if !k.is_empty() => Some(Secret::from(k)),
@@ -674,7 +714,11 @@ fn build_anthropic(
         Some(k) => AnthropicProvider::with_api_key(k).map_err(|e| e.to_string())?,
         None => AnthropicProvider::new().map_err(|e| e.to_string())?,
     };
-    p = p.with_model(model_id).with_max_tokens(max_tokens);
+    p = p
+        .with_model(model_id)
+        .with_max_tokens(max_tokens)
+        .with_keep_thinking_signature(keep_thinking_signature)
+        .with_thinking_dialect(thinking_dialect);
     if let Some(u) = base_url {
         p = p.with_base_url(u);
     }
@@ -686,6 +730,7 @@ fn build_openai(
     api_key: Option<&str>,
     model_id: &str,
     max_tokens: Option<u32>,
+    thinking_dialect: ThinkingDialect,
 ) -> Result<Arc<dyn LlmProvider>, String> {
     let key: Option<Secret> = match api_key {
         Some(k) if !k.is_empty() => Some(Secret::from(k)),
@@ -696,7 +741,10 @@ fn build_openai(
         Some(k) => OpenAiProvider::with_api_key(k).map_err(|e| e.to_string())?,
         None => OpenAiProvider::new().map_err(|e| e.to_string())?,
     };
-    p = p.with_model(model_id).with_max_tokens(max_tokens);
+    p = p
+        .with_model(model_id)
+        .with_max_tokens(max_tokens)
+        .with_thinking_dialect(thinking_dialect);
     if let Some(u) = base_url {
         p = p.with_base_url(u);
     }
@@ -906,6 +954,7 @@ fn provider_view(r: &ProviderRow) -> ProviderView {
         kind: r.kind.clone(),
         base_url: r.base_url.clone(),
         has_inline_key: r.api_key.as_deref().is_some_and(|s| !s.is_empty()),
+        keep_thinking_signature: r.keep_thinking_signature,
     }
 }
 
@@ -916,7 +965,20 @@ fn model_view(r: &ModelRow) -> ModelView {
         model_id: r.model_id.clone(),
         max_tokens: r.max_tokens.and_then(|v| u32::try_from(v).ok()),
         context_window: r.context_window.and_then(|v| u32::try_from(v).ok()),
+        thinking_efforts: decode_efforts(r.thinking_efforts.as_deref()),
+        thinking_effort: r.thinking_effort.clone(),
+        thinking_dialect: r.thinking_dialect.clone(),
     }
+}
+
+/// Efforts are stored as a JSON array in a TEXT column; a malformed value is
+/// treated as absent rather than failing the whole settings read.
+pub(crate) fn decode_efforts(raw: Option<&str>) -> Option<Vec<String>> {
+    raw.and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+}
+
+pub(crate) fn encode_efforts(list: Option<&Vec<String>>) -> Option<String> {
+    list.and_then(|v| serde_json::to_string(v).ok())
 }
 
 fn velos_view(vc: &VelosConfig) -> VelosView {
@@ -965,9 +1027,11 @@ async fn read_providers<'e, E>(ex: E) -> Result<Vec<ProviderRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let rows = sqlx::query("SELECT name, kind, base_url, api_key FROM providers ORDER BY name")
-        .fetch_all(ex)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT name, kind, base_url, api_key, keep_thinking_signature FROM providers ORDER BY name",
+    )
+    .fetch_all(ex)
+    .await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ProviderRow {
@@ -975,6 +1039,7 @@ where
             kind: r.try_get("kind")?,
             base_url: r.try_get("base_url")?,
             api_key: r.try_get("api_key")?,
+            keep_thinking_signature: r.try_get::<i64, _>("keep_thinking_signature")? != 0,
         });
     }
     Ok(out)
@@ -985,7 +1050,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     let rows = sqlx::query(
-        "SELECT alias, provider, model_id, max_tokens, context_window FROM models ORDER BY alias",
+        "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect FROM models ORDER BY alias",
     )
     .fetch_all(ex)
     .await?;
@@ -997,6 +1062,9 @@ where
             model_id: r.try_get("model_id")?,
             max_tokens: r.try_get("max_tokens")?,
             context_window: r.try_get("context_window")?,
+            thinking_efforts: r.try_get("thinking_efforts")?,
+            thinking_effort: r.try_get("thinking_effort")?,
+            thinking_dialect: r.try_get("thinking_dialect")?,
         });
     }
     Ok(out)
@@ -1072,6 +1140,7 @@ mod tests {
             kind: "anthropic".into(),
             base_url: Some("http://localhost:1".into()),
             api_key: key.map(str::to_string),
+            keep_thinking_signature: None,
         }
     }
 
@@ -1082,6 +1151,9 @@ mod tests {
             model_id: "id".into(),
             max_tokens: None,
             context_window: None,
+            thinking_efforts: None,
+            thinking_effort: None,
+            thinking_dialect: None,
         }
     }
 
@@ -1119,6 +1191,9 @@ mod tests {
                         model_id: "claude-sonnet-4-6".into(),
                         max_tokens: None,
                         context_window: None,
+                        thinking_efforts: None,
+                        thinking_effort: None,
+                        thinking_dialect: None,
                     },
                     ModelInput {
                         alias: "custom".into(),
@@ -1126,6 +1201,9 @@ mod tests {
                         model_id: "some-unknown-model".into(),
                         max_tokens: None,
                         context_window: Some(42_000),
+                        thinking_efforts: None,
+                        thinking_effort: None,
+                        thinking_dialect: None,
                     },
                 ]),
                 vendors: None,
@@ -1207,6 +1285,7 @@ mod tests {
             kind: kind.into(),
             base_url: Some("http://localhost:1".into()),
             api_key: Some("k".into()),
+            keep_thinking_signature: None,
         }
     }
 
@@ -1599,5 +1678,128 @@ mod tests {
         let o = open(dir.path()).await;
         let err = o.store.test_vendor("ghost").await.unwrap_err();
         assert!(err.contains("ghost"), "error names the vendor: {err}");
+    }
+
+    #[tokio::test]
+    async fn keep_thinking_signature_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+
+        // Defaults off for a fresh provider.
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("kimi", Some("sk-test"))]),
+                models: Some(vec![model("m", "kimi")]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect("update succeeds");
+        assert!(!view.providers[0].keep_thinking_signature);
+
+        // Opting in persists and reads back.
+        let mut p = provider("real-anthropic", Some("sk-test"));
+        p.keep_thinking_signature = Some(true);
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![p]),
+                models: Some(vec![model("m", "real-anthropic")]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect("update succeeds");
+        assert!(view.providers[0].keep_thinking_signature);
+    }
+
+    #[tokio::test]
+    async fn model_thinking_config_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let mut m = model("m", "p");
+        m.thinking_efforts = Some(vec!["none".into(), "low".into(), "high".into()]);
+        m.thinking_effort = Some("high".into());
+        m.thinking_dialect = Some("anthropic_effort".into());
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("p", Some("sk-test"))]),
+                models: Some(vec![m]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect("update succeeds");
+        let got = &view.models[0];
+        assert_eq!(
+            got.thinking_efforts.clone().unwrap(),
+            vec!["none".to_string(), "low".to_string(), "high".to_string()]
+        );
+        assert_eq!(got.thinking_effort.as_deref(), Some("high"));
+        assert_eq!(got.thinking_dialect.as_deref(), Some("anthropic_effort"));
+    }
+
+    #[tokio::test]
+    async fn model_thinking_config_defaults_to_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("p", Some("sk-test"))]),
+                models: Some(vec![model("m", "p")]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect("update succeeds");
+        assert_eq!(view.models[0].thinking_efforts, None);
+        assert_eq!(view.models[0].thinking_effort, None);
+        assert_eq!(view.models[0].thinking_dialect, None);
+    }
+
+    #[tokio::test]
+    async fn model_rejects_effort_outside_its_menu() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let mut m = model("m", "p");
+        m.thinking_efforts = Some(vec!["low".into()]);
+        m.thinking_effort = Some("max".into());
+        m.thinking_dialect = Some("anthropic_effort".into());
+        let err = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("p", Some("sk-test"))]),
+                models: Some(vec![m]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect_err("default effort must be one the model offers");
+        assert!(
+            err.contains("max"),
+            "error should name the bad value: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_rejects_unknown_dialect() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = open(dir.path()).await;
+        let mut m = model("m", "p");
+        m.thinking_dialect = Some("telepathy".into());
+        let err = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("p", Some("sk-test"))]),
+                models: Some(vec![m]),
+                vendors: None,
+                default_vendor: None,
+            })
+            .await
+            .expect_err("unknown dialect must be rejected");
+        assert!(err.contains("telepathy"), "error should name it: {err}");
     }
 }

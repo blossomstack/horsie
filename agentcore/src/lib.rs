@@ -5,6 +5,7 @@ mod provider;
 mod secret;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testkit;
+mod thinking;
 mod tool;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig};
@@ -12,6 +13,7 @@ pub use error::{AgentBuildError, AgentError, LlmError, ToolCallError};
 pub use events::{EventSink, EventSinkError};
 pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, StopReason, ToolChoice};
 pub use secret::Secret;
+pub use thinking::{ThinkingDialect, ThinkingEffort};
 pub use tool::{EmptyToolbox, Tool, ToolSpec, Toolbox, ToolboxImpl};
 
 pub use horsie_models::agent::{

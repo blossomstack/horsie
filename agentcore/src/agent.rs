@@ -24,6 +24,8 @@ pub struct AgentConfig {
     pub stuck_threshold: usize,
     pub nudge_threshold: usize,
     pub max_tokens: Option<u32>,
+    /// Canonical thinking effort for this run; `None` sends no control.
+    pub thinking_effort: Option<crate::thinking::ThinkingEffort>,
     /// How many times the model may be nudged to re-issue a malformed handoff call
     /// (called alongside other tools, or with input that fails schema validation)
     /// before the run fails.
@@ -37,6 +39,7 @@ impl Default for AgentConfig {
             stuck_threshold: 5,
             nudge_threshold: 3,
             max_tokens: None,
+            thinking_effort: None,
             handoff_max_retries: 2,
         }
     }
@@ -305,6 +308,7 @@ impl Agent {
                 tools,
                 tool_choice: tool_choice.clone(),
                 max_tokens: self.config.max_tokens,
+                thinking_effort: self.config.thinking_effort,
             };
 
             let msg_id = Uuid::new_v4().to_string();
