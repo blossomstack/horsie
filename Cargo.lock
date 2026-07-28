@@ -177,7 +177,7 @@ dependencies = [
 [[package]]
 name = "async-llm"
 version = "0.7.0"
-source = "git+https://github.com/blossomstack/async-llm.git?rev=221a88fafaa9818feac8d5288629c72510a570e1#221a88fafaa9818feac8d5288629c72510a570e1"
+source = "git+https://github.com/blossomstack/async-llm.git?rev=b499ec1c87921f415381e0813f79e8255459b45d#b499ec1c87921f415381e0813f79e8255459b45d"
 dependencies = [
  "backoff",
  "derive_builder",

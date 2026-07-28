@@ -34,7 +34,7 @@ tokio-stream      = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = "0.26"
 futures-util      = "0.3"
 uuid              = { version = "1", features = ["v4", "serde"] }
-async-llm         = { version = "0.7.0", git = "https://github.com/blossomstack/async-llm.git", rev = "221a88fafaa9818feac8d5288629c72510a570e1" }
+async-llm         = { version = "0.7.0", git = "https://github.com/blossomstack/async-llm.git", rev = "b499ec1c87921f415381e0813f79e8255459b45d" }
 axum              = { version = "0.7", features = ["macros"] }
 tower-http        = { version = "0.5", features = ["fs"] }
 parking_lot       = "0.12"
