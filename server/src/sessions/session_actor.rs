@@ -70,6 +70,14 @@ const SESSION_AGENT_PROMPT: &str = include_str!("system_prompt.md");
 pub enum SessionCommand {
     /// Provision the runtime after creation (sent once by the supervisor).
     Provision,
+    /// The session's current runtime client, if it has one.
+    ///
+    /// Asked by `SessionContextProvider` when a run starts, so the agent always
+    /// uses the runtime the session holds *now* rather than one captured when the
+    /// agent was spawned.
+    CurrentRuntime {
+        reply: oneshot::Sender<Option<RuntimeClient>>,
+    },
     /// A user message: answer a pending ask, or start a turn — attaching or
     /// re-provisioning whatever is missing first.
     UserMessage {
@@ -471,9 +479,7 @@ impl SessionActor {
         if self.agent.is_some() {
             return Ok(());
         }
-        let Some(runtime) = &self.runtime else {
-            return Err("no live runtime".to_string());
-        };
+
         // Resolve the provider here (cheap registry lookup) so an unregistered
         // model fails the message fast rather than as an async run failure; the
         // agent is respawned per turn, so this still picks up live config edits.
@@ -495,7 +501,6 @@ impl SessionActor {
         // (dropped on conclude), and `ensure_runtime` runs before each respawn,
         // so a fresh client is captured after any re-attach.
         let context_provider = Arc::new(SessionContextProvider {
-            runtime_client: runtime.runtime_client.clone(),
             provider,
             mcp: self.deps.mcp.clone(),
             memory: self.deps.memory.clone(),
@@ -541,18 +546,32 @@ impl SessionActor {
         self.ensure_agent(ctx).await
     }
 
-    /// Answer a history query from the agent's in-memory state. If a live agent
-    /// is running (a turn in flight or just finished), ask it directly for the
-    /// freshest state. Otherwise spawn a transient read-only agent that recovers
-    /// its conversation from the journal, answer from it, and let it stop — no
-    /// runtime is touched, so viewing an idle session is cheap. The agent itself
-    /// reads its own journal (recovery), so encapsulation holds: the server
-    /// never touches the journal directly.
+    /// Answer a history query by asking the session's agent — the actor that owns
+    /// the conversation.
+    ///
+    /// If the agent is not currently spawned, spawn *it* (the session's one agent,
+    /// kept in `self.agent` and reused by the next turn) rather than a throwaway
+    /// copy. This used to spawn a transient read-only agent per call with a fake
+    /// context provider; that actor was never stopped, so every page view leaked
+    /// one, each pinning a full recovered transcript (#61 item 4).
+    ///
+    /// Spawning touches **no runtime**: the runtime client is resolved per run by
+    /// `SessionContextProvider`, so viewing an idle session stays cheap and never
+    /// provisions or attaches a sandbox.
     async fn read_history(
-        &self,
+        &mut self,
         query: HistoryQuery,
         ctx: &ActorContext<Self>,
     ) -> AgentHistoryPage {
+        if let Err(error) = self.ensure_agent(ctx).await {
+            tracing::error!(session = %self.id, error, "failed to reach the session agent");
+            return AgentHistoryPage {
+                messages: Vec::new(),
+                has_more: false,
+                tasks: None,
+                usage: None,
+            };
+        }
         if let Some(agent) = &self.agent
             && let Ok(page) = agent
                 .ask(|reply| AgentCommand::GetHistory {
@@ -563,37 +582,12 @@ impl SessionActor {
         {
             return page;
         }
-        // Transient reader: resources that error if a run is ever attempted
-        // (it never is here), a no-op event sink, and a parent that ignores
-        // outcomes. Dropped when this scope ends, stopping the actor. `interactive`
-        // is set so recovery does NOT self-resume the interrupted turn — a read
-        // must never attempt a run (which would fail `NoContextProvider` and emit
-        // a spurious error).
-        let mut reader_params = AgentParams::from_def(&session_run_def(&self.spec.agent));
-        reader_params.interactive = true;
-        let reader = ctx.spawn(AgentActor::new(
-            AgentRuntimeContext {
-                context_provider: Arc::new(NoContextProvider),
-                event_sink: Arc::new(SessionEventSink {
-                    frames: self.frames.clone(),
-                }),
-                parent: Arc::new(SessionParent {
-                    target: ctx.self_ref(),
-                    generation: self.generation,
-                }),
-                session_id: self.id,
-            },
-            reader_params,
-        ));
-        reader
-            .ask(|reply| AgentCommand::GetHistory { query, reply })
-            .await
-            .unwrap_or(AgentHistoryPage {
-                messages: Vec::new(),
-                has_more: false,
-                tasks: None,
-                usage: None,
-            })
+        AgentHistoryPage {
+            messages: Vec::new(),
+            has_more: false,
+            tasks: None,
+            usage: None,
+        }
     }
 
     /// Read this session's aggregated usage. Usage *totals* (session-level and
@@ -605,35 +599,19 @@ impl SessionActor {
     /// ask the live main agent (or a transient reader if idle), exactly like
     /// `read_history`.
     async fn read_usage(
-        &self,
+        &mut self,
         state: &SessionState,
         ctx: &ActorContext<Self>,
     ) -> SessionUsageStats {
+        if let Err(error) = self.ensure_agent(ctx).await {
+            tracing::error!(session = %self.id, error, "failed to reach the session agent");
+        }
         let snapshot = if let Some(agent) = &self.agent
             && let Ok(snapshot) = agent.ask(|reply| AgentCommand::GetUsage { reply }).await
         {
             snapshot
         } else {
-            let mut reader_params = AgentParams::from_def(&session_run_def(&self.spec.agent));
-            reader_params.interactive = true;
-            let reader = ctx.spawn(AgentActor::new(
-                AgentRuntimeContext {
-                    context_provider: Arc::new(NoContextProvider),
-                    event_sink: Arc::new(SessionEventSink {
-                        frames: self.frames.clone(),
-                    }),
-                    parent: Arc::new(SessionParent {
-                        target: ctx.self_ref(),
-                        generation: self.generation,
-                    }),
-                    session_id: self.id,
-                },
-                reader_params,
-            ));
-            reader
-                .ask(|reply| AgentCommand::GetUsage { reply })
-                .await
-                .unwrap_or_default()
+            AgentUsageSnapshot::default()
         };
         let main_usage_total = state
             .agent_usage
@@ -929,17 +907,6 @@ async fn build_memory_layer(
     Ok((toolbox, index))
 }
 
-/// Context provider for a transient read-only agent (history queries): it never
-/// runs, so `provide` must never be called; it errors defensively if it ever is.
-struct NoContextProvider;
-
-#[async_trait]
-impl ContextProvider for NoContextProvider {
-    async fn provide(&self) -> Result<Contexts, String> {
-        Err("read-only agent cannot run".to_string())
-    }
-}
-
 /// Per-run context provider for an interactive session's agent. Its `provide`
 /// runs on the agent run's own task (never the session mailbox): it resolves the
 /// provider live, scans the workspace + runs SessionStart, connects the enabled
@@ -947,13 +914,18 @@ impl ContextProvider for NoContextProvider {
 /// used to block `ensure_agent` on the mailbox. Idempotent per run, so a live
 /// runtime/MCP makes it cheap.
 struct SessionContextProvider {
-    runtime_client: RuntimeClient,
     provider: Arc<dyn LlmProvider>,
     mcp: Option<Arc<crate::mcp::McpService>>,
     memory: Option<Arc<crate::memory::MemoryService>>,
     settings: AgentSettings,
     session_id: Uuid,
-    /// The owning session's mailbox — routes the server-owned title tool.
+    /// The owning session's mailbox — routes the server-owned title tool, and
+    /// supplies the *current* runtime client at run time.
+    ///
+    /// Deliberately not a captured `RuntimeClient`: capturing one at construction
+    /// is what forced the agent to be respawned per turn to pick up a re-attach,
+    /// which in turn meant no agent existed between turns — so reads had no actor
+    /// to ask and invented a throwaway one (#61 item 4).
     session: ActorRef<SessionCommand>,
     /// Live frame stream — `ensure` emits preparation progressions onto it.
     frames: broadcast::Sender<SessionFrame>,
@@ -962,14 +934,22 @@ struct SessionContextProvider {
 #[async_trait]
 impl ContextProvider for SessionContextProvider {
     async fn provide(&self) -> Result<Contexts, String> {
+        // Resolved per run, not per spawn: the session owns the runtime and may
+        // have re-attached since this agent was created.
+        let runtime_client = self
+            .session
+            .ask(|reply| SessionCommand::CurrentRuntime { reply })
+            .await
+            .map_err(|_| "session actor is gone".to_string())?
+            .ok_or_else(|| "no live runtime for this session".to_string())?;
         let settings = &self.settings;
         let provider = self.provider.clone();
         let def = session_run_def(settings);
         let use_plugins = settings.use_plugins.unwrap_or(true);
         emit_progress(&self.frames, "scanning_workspace", None);
-        let (ws, shared_skills) = scan_workspace(&self.runtime_client, None, use_plugins).await;
+        let (ws, shared_skills) = scan_workspace(&runtime_client, None, use_plugins).await;
         let shared = if use_plugins {
-            let bootstrap = match self.runtime_client.run_session_start().await {
+            let bootstrap = match runtime_client.run_session_start().await {
                 Ok(context) if !context.trim().is_empty() => Some(context),
                 Ok(_) | Err(_) => None,
             };
@@ -999,7 +979,7 @@ impl ContextProvider for SessionContextProvider {
         };
         let base: Arc<dyn Toolbox> = DefaultToolboxFactory.for_agent(
             &def,
-            self.runtime_client.clone(),
+            runtime_client.clone(),
             ws.names(),
             use_plugins,
             mcp,
@@ -1137,6 +1117,10 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(());
                 // No status report: the supervisor removes the registry row.
                 CommandEffect::persist_and_stop(vec![SessionDomainEvent::Deleted])
+            }
+            SessionCommand::CurrentRuntime { reply } => {
+                let _ = reply.send(self.runtime.as_ref().map(|r| r.runtime_client.clone()));
+                CommandEffect::none()
             }
             SessionCommand::Subscribe { reply } => {
                 let _ = reply.send(self.frames.subscribe());

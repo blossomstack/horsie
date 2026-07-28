@@ -9,9 +9,40 @@ use tokio::sync::mpsc;
 /// Mailbox capacity for every spawned actor.
 const MAILBOX_CAPACITY: usize = 64;
 
+/// How an [`ActorRef`] holds its mailbox.
+///
+/// External references are strong and keep the actor alive. A reference an actor
+/// holds to *itself* is weak, so it does not count towards its own liveness —
+/// otherwise the mailbox can never close and the actor can only ever terminate by
+/// explicitly stopping (#61 item 4).
+enum Mailbox<C> {
+    Strong(mpsc::Sender<C>),
+    /// Held by `ActorContext::self_ref` and anything derived from it.
+    Weak(mpsc::WeakSender<C>),
+}
+
+impl<C> Clone for Mailbox<C> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Strong(tx) => Self::Strong(tx.clone()),
+            Self::Weak(tx) => Self::Weak(tx.clone()),
+        }
+    }
+}
+
+impl<C> Mailbox<C> {
+    /// A usable sender, or `None` once the actor has gone.
+    fn sender(&self) -> Option<mpsc::Sender<C>> {
+        match self {
+            Self::Strong(tx) => Some(tx.clone()),
+            Self::Weak(tx) => tx.upgrade(),
+        }
+    }
+}
+
 /// A cheap, cloneable handle for sending commands to an actor.
 pub struct ActorRef<C> {
-    tx: mpsc::Sender<C>,
+    tx: Mailbox<C>,
 }
 
 // Manual `Clone` — a `Sender<C>` clones regardless of whether `C: Clone`.
@@ -28,6 +59,8 @@ impl<C: Send + 'static> ActorRef<C> {
     /// Fails only if the actor has stopped.
     pub async fn tell(&self, cmd: C) -> Result<(), TellError> {
         self.tx
+            .sender()
+            .ok_or(TellError::MailboxClosed)?
             .send(cmd)
             .await
             .map_err(|_| TellError::MailboxClosed)
@@ -59,14 +92,21 @@ struct RuntimeInner {
 /// and reach the journal directly when an actor needs it (e.g. fork).
 pub struct ActorContext<A: EventSourcedActor> {
     inner: Arc<RuntimeInner>,
-    self_tx: mpsc::Sender<A::Command>,
+    /// Deliberately weak: an actor holding a strong reference to its own mailbox
+    /// keeps that mailbox open forever, so `rx.recv()` never returns `None` and the
+    /// actor outlives every external reference to it (#61 item 4).
+    self_tx: mpsc::WeakSender<A::Command>,
 }
 
 impl<A: EventSourcedActor> ActorContext<A> {
     /// A reference to this actor's own mailbox.
+    ///
+    /// Weak: it does not keep the actor alive. Once every external reference has
+    /// dropped, sends through it fail with [`TellError::MailboxClosed`] — the same
+    /// error callers already handle for a stopped actor.
     pub fn self_ref(&self) -> ActorRef<A::Command> {
         ActorRef {
-            tx: self.self_tx.clone(),
+            tx: Mailbox::Weak(self.self_tx.clone()),
         }
     }
 
@@ -96,10 +136,12 @@ fn spawn_inner<A: EventSourcedActor>(actor: A, inner: Arc<RuntimeInner>) -> Acto
     let (tx, rx) = mpsc::channel(MAILBOX_CAPACITY);
     let ctx = ActorContext::<A> {
         inner,
-        self_tx: tx.clone(),
+        self_tx: tx.downgrade(),
     };
     tokio::spawn(run_actor(actor, rx, ctx));
-    ActorRef { tx }
+    ActorRef {
+        tx: Mailbox::Strong(tx),
+    }
 }
 
 /// Rebuild an actor's state from its latest snapshot plus subsequent events.
@@ -467,6 +509,86 @@ mod tests {
         );
         // snapshot (4) + replayed post-snapshot event (1) == 5.
         assert_eq!(report_rx.await.unwrap(), 5);
+    }
+
+    /// #61 item 4: an actor must stop when its last external `ActorRef` drops.
+    ///
+    /// `ActorContext` holds a clone of the actor's own mailbox `Sender`, so
+    /// `rx.recv()` can never return `None` and an actor terminates *only* via
+    /// `CommandEffect::stop()`. `read_history` / `read_usage` spawn a throwaway
+    /// `AgentActor` per call with the comment "Dropped when this scope ends,
+    /// stopping the actor" — it isn't, so every session page view leaks two actor
+    /// tasks, each of which first full-replays the journal and then pins the whole
+    /// recovered conversation for the process lifetime.
+    #[tokio::test]
+    async fn actor_stops_when_its_last_external_ref_drops() {
+        let journal = Arc::new(InMemoryJournal::new());
+        // A counter that reports on drop, so the test can observe termination
+        // without reaching into the runtime.
+        struct DropSignal(Option<oneshot::Sender<()>>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        struct Watched {
+            id: String,
+            _signal: DropSignal,
+        }
+
+        #[async_trait]
+        impl EventSourcedActor for Watched {
+            type Command = CounterCmd;
+            type Event = CounterEvent;
+            type State = CounterState;
+
+            fn persistence_id(&self) -> PersistenceId {
+                PersistenceId::new("watched", self.id.clone())
+            }
+            fn initial_state() -> CounterState {
+                CounterState::default()
+            }
+            fn apply_event(mut state: CounterState, event: CounterEvent) -> CounterState {
+                match event {
+                    CounterEvent::Incremented(n) => state.value += n,
+                }
+                state
+            }
+            async fn handle_command(
+                &mut self,
+                _state: &CounterState,
+                cmd: CounterCmd,
+                _ctx: &mut ActorContext<Self>,
+            ) -> CommandEffect<CounterEvent> {
+                match cmd {
+                    CounterCmd::Stop => CommandEffect::stop(),
+                    _ => CommandEffect::none(),
+                }
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let actor = spawn_root(
+            Watched {
+                id: "leaky".into(),
+                _signal: DropSignal(Some(dropped_tx)),
+            },
+            journal,
+        );
+        // Make sure it is running before dropping the handle.
+        actor.tell(CounterCmd::Inc(1)).await.unwrap();
+        drop(actor);
+
+        tokio::time::timeout(Duration::from_secs(5), dropped_rx)
+            .await
+            .expect(
+                "dropping the last ActorRef must close the mailbox and end the actor; \
+                 it stayed alive, pinning its recovered state",
+            )
+            .expect("the actor must be dropped, not forgotten");
     }
 
     #[tokio::test]

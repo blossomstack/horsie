@@ -1282,3 +1282,65 @@ async fn answering_an_ask_marks_the_session_running_and_rejects_a_concurrent_mes
     .await
     .expect("test timed out");
 }
+
+/// #61 item 4: reading a session's history must go through the session's own
+/// agent — the actor that owns the conversation — and must not touch the runtime.
+///
+/// This used to spawn a *throwaway* `AgentActor` per read, with a fake context
+/// provider, which was never stopped: every page view leaked one, each pinning a
+/// full recovered transcript. Asking the real agent removes the leak; the
+/// runtime-free part is what keeps viewing an idle session cheap, and it holds
+/// because `SessionContextProvider` resolves the runtime client per *run*.
+#[tokio::test]
+async fn reading_history_asks_the_agent_and_never_provisions_a_runtime() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mock = MockLlmServer::builder().build().await;
+        mock.queue_response("first answer");
+        let tmp = tempfile::tempdir().unwrap();
+        let vendor = Arc::new(MockVendor::new());
+        let server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+        let client = reqwest::Client::new();
+        let id = create_session(&client, &server.addr).await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+
+        // One real turn, then Stop so the runtime is released and the agent is gone.
+        send_message(&client, &server.addr, &id, "hello").await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+        client
+            .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        wait_status(&client, &server.addr, &id, "Stopped").await;
+
+        let before = vendor.signals();
+        // Several reads, as a few page views would do.
+        for _ in 0..3 {
+            let res = client
+                .get(format!(
+                    "http://{}/api/sessions/{id}/history?limit=50",
+                    server.addr
+                ))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status().as_u16(), 200);
+            let body: serde_json::Value = res.json().await.unwrap();
+            assert!(
+                !body["messages"].as_array().unwrap().is_empty(),
+                "the read must return the recovered conversation"
+            );
+        }
+
+        assert_eq!(
+            vendor.signals(),
+            before,
+            "reading history must not create or attach a runtime"
+        );
+
+        server.shutdown().await;
+    })
+    .await
+    .expect("test timed out");
+}
