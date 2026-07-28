@@ -823,6 +823,15 @@ impl SessionActor {
     async fn halt(&mut self) {
         self.generation += 1;
         if let Some(agent) = &self.agent {
+            // Tell the sandbox to abandon whatever it is running before waiting on
+            // the agent. Dropping a tool future abandons it locally only, so
+            // without this a Stop mid-`bash` left the command running to
+            // completion inside the runtime, holding resources, with its output
+            // discarded (#61 item 23). Doing it first also means the in-flight
+            // call is already cancelled while we wait out `HALT_CANCEL_TIMEOUT`.
+            if let Some(runtime) = &self.runtime {
+                runtime.runtime_client.cancel_in_flight().await;
+            }
             let (tx, rx) = oneshot::channel();
             let _ = agent.tell(AgentCommand::Cancel { ack: Some(tx) }).await;
             if tokio::time::timeout(HALT_CANCEL_TIMEOUT, rx).await.is_err() {
