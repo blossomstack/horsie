@@ -14,10 +14,21 @@ export interface DraftPayload {
   skills: string[];
   mcp: string[];
   memorySpaces: string[];
+  /** Canonical thinking effort; "" = use the model's configured default. */
+  thinkingEffort: string;
 }
 
 export function emptyDraft(): DraftPayload {
-  return { v: 1, vendor: "", model: "", repos: {}, skills: [], mcp: [], memorySpaces: [] };
+  return {
+    v: 1,
+    vendor: "",
+    model: "",
+    repos: {},
+    skills: [],
+    mcp: [],
+    memorySpaces: [],
+    thinkingEffort: "",
+  };
 }
 
 function isStringArray(x: unknown): x is string[] {
@@ -54,6 +65,8 @@ export function parseDraftPayload(raw: unknown): DraftPayload | undefined {
     skills: p.skills,
     mcp: p.mcp,
     memorySpaces: p.memorySpaces,
+    // Added after v1 shipped; older stored drafts simply have no value.
+    thinkingEffort: typeof p.thinkingEffort === "string" ? p.thinkingEffort : "",
   };
 }
 

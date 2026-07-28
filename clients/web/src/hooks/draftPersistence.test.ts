@@ -19,6 +19,7 @@ const sample: DraftPayload = {
   skills: ["bundle-a"],
   mcp: ["mcp-x"],
   memorySpaces: ["horsie"],
+  thinkingEffort: "high",
 };
 
 beforeEach(() => localStorage.clear());
@@ -124,6 +125,7 @@ describe("emptyDraft", () => {
       skills: [],
       mcp: [],
       memorySpaces: [],
+      thinkingEffort: "",
     });
   });
 });

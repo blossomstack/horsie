@@ -543,4 +543,91 @@ mod tests {
         std::fs::write(&invalid, r#"[{"modelId":"","name":"x"}]"#).unwrap();
         assert!(load_seed_file(&invalid).is_err());
     }
+
+    #[tokio::test]
+    async fn bundled_seed_carries_thinking_metadata() {
+        let cards = bundled_seed().expect("bundled seed parses");
+
+        let opus = cards
+            .iter()
+            .find(|c| c.model_id == "claude-opus-4-8")
+            .expect("catalog includes claude-opus-4-8");
+        assert_eq!(opus.context_window, Some(1_000_000));
+        assert_eq!(opus.max_tokens, Some(128_000));
+        assert_eq!(opus.thinking_dialect.as_deref(), Some("anthropic_effort"));
+        assert_eq!(opus.default_thinking_effort.as_deref(), Some("high"));
+        let efforts = opus.thinking_efforts.as_ref().expect("efforts listed");
+        assert!(efforts.contains(&"xhigh".to_string()));
+        assert!(efforts.contains(&"none".to_string()));
+
+        // Fable 5 cannot disable thinking — offering `none` would produce a 400.
+        let fable = cards
+            .iter()
+            .find(|c| c.model_id == "claude-fable-5")
+            .expect("catalog includes claude-fable-5");
+        assert_eq!(
+            fable.thinking_dialect.as_deref(),
+            Some("anthropic_always_on")
+        );
+        assert!(
+            !fable
+                .thinking_efforts
+                .as_ref()
+                .expect("efforts listed")
+                .contains(&"none".to_string()),
+            "Fable 5 must not offer `none`"
+        );
+
+        // xhigh arrived with Opus 4.7.
+        let o46 = cards
+            .iter()
+            .find(|c| c.model_id == "claude-opus-4-6")
+            .expect("catalog includes claude-opus-4-6");
+        assert!(
+            !o46.thinking_efforts
+                .as_ref()
+                .expect("efforts listed")
+                .contains(&"xhigh".to_string()),
+            "xhigh arrived with Opus 4.7"
+        );
+    }
+
+    #[tokio::test]
+    async fn bundled_seed_efforts_and_dialects_are_canonical() {
+        for c in bundled_seed().expect("bundled seed parses") {
+            if let Some(d) = c.thinking_dialect.as_deref() {
+                assert!(
+                    horsie_agentcore::ThinkingDialect::parse(d).is_some(),
+                    "{}: unknown dialect {d}",
+                    c.model_id
+                );
+            }
+            let efforts = c.thinking_efforts.clone().unwrap_or_default();
+            for e in &efforts {
+                assert!(
+                    horsie_agentcore::ThinkingEffort::parse(e).is_some(),
+                    "{}: unknown effort {e}",
+                    c.model_id
+                );
+            }
+            if let Some(def) = c.default_thinking_effort.as_deref() {
+                assert!(
+                    efforts.iter().any(|e| e == def),
+                    "{}: default {def} not among offered efforts",
+                    c.model_id
+                );
+            }
+            if let Some(d) = c.thinking_dialect.as_deref() {
+                let dialect = horsie_agentcore::ThinkingDialect::parse(d).expect("checked above");
+                for e in &efforts {
+                    let effort = horsie_agentcore::ThinkingEffort::parse(e).expect("checked above");
+                    assert!(
+                        dialect.supports(effort),
+                        "{}: dialect {d} cannot express effort {e}",
+                        c.model_id
+                    );
+                }
+            }
+        }
+    }
 }

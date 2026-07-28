@@ -33,6 +33,13 @@ export interface SessionDraft {
   /** Memory spaces the session may read and write. */
   memorySpaces: Set<string>;
   setMemorySpaces: (s: Set<string>) => void;
+  /** Canonical thinking effort; "" = the model's configured default. */
+  thinkingEffort: string;
+  setThinkingEffort: (e: string) => void;
+  /** Efforts the selected model offers; empty → no control is shown. */
+  thinkingEfforts: string[];
+  /** The selected model's default effort, for labelling the fallback option. */
+  modelDefaultThinkingEffort: string;
   provisions: boolean;
   githubConnected: boolean;
   canSend: boolean;
@@ -117,6 +124,15 @@ export function useSessionDraft(): SessionDraft {
     return null;
   }, [draft.model, draft.vendor, provisions, githubConnected]);
 
+  // The menu belongs to the model, so a persisted draft can name an effort the
+  // currently-selected model no longer offers. Treat that as "use the default"
+  // rather than submitting a value the server would reject with a 422.
+  const selectedModel = models.find((m) => m.alias === draft.model);
+  const thinkingEfforts = selectedModel?.thinkingEfforts ?? [];
+  const effectiveThinkingEffort = thinkingEfforts.includes(draft.thinkingEffort)
+    ? draft.thinkingEffort
+    : "";
+
   const buildRequest = (): CreateSessionRequest => {
     const repoList: RepoConfig[] = provisions
       ? Object.entries(draft.repos).map(([fullName, ref]) => ({
@@ -132,6 +148,7 @@ export function useSessionDraft(): SessionDraft {
         // Not gated on `provisions`: memories are served by the server itself,
         // so they work on every vendor, including ones that can't provision.
         memorySpaces: draft.memorySpaces.length ? draft.memorySpaces : undefined,
+        thinkingEffort: effectiveThinkingEffort || undefined,
       },
       vendor: draft.vendor.trim() || undefined,
       repos: repoList.length ? repoList : undefined,
@@ -152,6 +169,10 @@ export function useSessionDraft(): SessionDraft {
     setMcp: (mcp) => setDraft({ ...draft, mcp: [...mcp] }),
     memorySpaces: new Set(draft.memorySpaces),
     setMemorySpaces: (memorySpaces) => setDraft({ ...draft, memorySpaces: [...memorySpaces] }),
+    thinkingEffort: effectiveThinkingEffort,
+    setThinkingEffort: (thinkingEffort) => setDraft({ ...draft, thinkingEffort }),
+    thinkingEfforts,
+    modelDefaultThinkingEffort: selectedModel?.thinkingEffort ?? "",
     provisions,
     githubConnected,
     canSend: blockedReason === null,

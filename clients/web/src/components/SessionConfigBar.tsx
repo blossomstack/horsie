@@ -1,4 +1,4 @@
-import { Boxes, Brain, Cpu, FolderGit2, Plug, Server } from "lucide-react";
+import { Boxes, Brain, Cpu, FolderGit2, Lightbulb, Plug, Server } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import type { SessionDetail } from "../api/types";
@@ -291,6 +291,50 @@ function DraftControls({ draft }: { draft: SessionDraft }) {
           )
         }
       </PopoverMenu>
+
+      {/* Thinking effort — only for models that offer a menu. The value is
+          fixed for the session's lifetime: switching effort mid-conversation
+          invalidates the provider's prompt cache. */}
+      {draft.thinkingEfforts.length > 0 && (
+        <PopoverMenu
+          testId="config-thinking"
+          icon={<Lightbulb size={13} />}
+          label={draft.thinkingEffort || "Thinking"}
+          width="w-52"
+        >
+          {() => (
+            <div className="space-y-0.5">
+              <label className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-surface-2">
+                <input
+                  type="radio"
+                  name="thinking-effort"
+                  checked={draft.thinkingEffort === ""}
+                  onChange={() => draft.setThinkingEffort("")}
+                />
+                <span className="min-w-0 flex-1 truncate">
+                  {draft.modelDefaultThinkingEffort
+                    ? `default (${draft.modelDefaultThinkingEffort})`
+                    : "default"}
+                </span>
+              </label>
+              {draft.thinkingEfforts.map((e) => (
+                <label
+                  key={e}
+                  className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-surface-2"
+                >
+                  <input
+                    type="radio"
+                    name="thinking-effort"
+                    checked={draft.thinkingEffort === e}
+                    onChange={() => draft.setThinkingEffort(e)}
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono">{e}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </PopoverMenu>
+      )}
 
       {/* Model — right-aligned; editable now, structured to unlock on existing
           sessions later. */}

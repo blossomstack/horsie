@@ -96,7 +96,8 @@ function storeDraft(draft: Partial<DraftPayload>) {
     mcp: [],
     memorySpaces: [],
     ...draft,
-  };
+      thinkingEffort: "",
+};
   localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(full));
 }
 

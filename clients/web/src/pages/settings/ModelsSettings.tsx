@@ -14,6 +14,18 @@ import { usePublishDirty } from "./dirty";
 
 type ProviderKind = "anthropic" | "openai";
 
+const EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const DIALECTS = [
+  "",
+  "anthropic_effort",
+  "anthropic_always_on",
+  "anthropic_budget",
+  "openai_effort",
+  "zai_thinking",
+  "kimi_thinking",
+  "none",
+] as const;
+
 type ProviderDraft = {
   name: string;
   kind: ProviderKind;
@@ -29,6 +41,9 @@ type ModelDraft = {
   modelId: string;
   maxTokens: string; // "" = unset
   contextWindow: string; // "" = unset (server applies a built-in default)
+  thinkingEfforts: string[];
+  thinkingEffort: string; // "" = no default
+  thinkingDialect: string; // "" = no thinking control
 };
 
 const toProviderDrafts = (v: SettingsView): ProviderDraft[] =>
@@ -48,6 +63,9 @@ const toModelDrafts = (v: SettingsView): ModelDraft[] =>
     modelId: m.modelId,
     maxTokens: m.maxTokens != null ? String(m.maxTokens) : "",
     contextWindow: m.contextWindow != null ? String(m.contextWindow) : "",
+    thinkingEfforts: m.thinkingEfforts ?? [],
+    thinkingEffort: m.thinkingEffort ?? "",
+    thinkingDialect: m.thinkingDialect ?? "",
   }));
 
 /**
@@ -111,6 +129,9 @@ export function ModelsSettings() {
       provider: m.provider,
       modelId: m.modelId.trim(),
       maxTokens: m.maxTokens.trim() ? Number(m.maxTokens.trim()) : undefined,
+      thinkingEfforts: m.thinkingEfforts.length ? m.thinkingEfforts : undefined,
+      thinkingEffort: m.thinkingEffort || undefined,
+      thinkingDialect: m.thinkingDialect || undefined,
       contextWindow: m.contextWindow.trim()
         ? Number(m.contextWindow.trim())
         : undefined,
@@ -214,6 +235,9 @@ export function ModelsSettings() {
                       modelId: "",
                       maxTokens: "",
                       contextWindow: "",
+                      thinkingEfforts: [],
+                      thinkingEffort: "",
+                      thinkingDialect: "",
                     },
                   ]);
                   touch();
@@ -340,6 +364,18 @@ function ModelIdField({
         draft.contextWindow === "" && card.contextWindow != null
           ? String(card.contextWindow)
           : draft.contextWindow,
+      thinkingEfforts:
+        draft.thinkingEfforts.length === 0 && card.thinkingEfforts != null
+          ? card.thinkingEfforts
+          : draft.thinkingEfforts,
+      thinkingEffort:
+        draft.thinkingEffort === "" && card.defaultThinkingEffort != null
+          ? card.defaultThinkingEffort
+          : draft.thinkingEffort,
+      thinkingDialect:
+        draft.thinkingDialect === "" && card.thinkingDialect != null
+          ? card.thinkingDialect
+          : draft.thinkingDialect,
     });
     setFocused(false);
   };
@@ -438,6 +474,64 @@ function ModelRow({
           onChange={(v) => set({ contextWindow: v })}
           placeholder="200000"
         />
+        <div className="col-span-2 border-t pt-3">
+          <RowLabel>Thinking efforts this model offers</RowLabel>
+          <div className="flex flex-wrap gap-3">
+            {EFFORTS.map((e) => (
+              <label key={e} className="flex items-center gap-1 text-sm">
+                <input
+                  type="checkbox"
+                  checked={draft.thinkingEfforts.includes(e)}
+                  onChange={(ev) => {
+                    const next = ev.target.checked
+                      ? [...draft.thinkingEfforts, e]
+                      : draft.thinkingEfforts.filter((x) => x !== e);
+                    const ordered = EFFORTS.filter((x) => next.includes(x)) as string[];
+                    set({
+                      thinkingEfforts: ordered,
+                      // a default that is no longer offered would be rejected on save
+                      thinkingEffort: ordered.includes(draft.thinkingEffort)
+                        ? draft.thinkingEffort
+                        : "",
+                    });
+                  }}
+                />
+                {e}
+              </label>
+            ))}
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-3">
+            <label className="block">
+              <RowLabel>Default effort</RowLabel>
+              <select
+                className="input font-mono"
+                value={draft.thinkingEffort}
+                onChange={(ev) => set({ thinkingEffort: ev.target.value })}
+              >
+                <option value="">(none)</option>
+                {draft.thinkingEfforts.map((e) => (
+                  <option key={e} value={e}>
+                    {e}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <RowLabel>Wire dialect</RowLabel>
+              <select
+                className="input font-mono"
+                value={draft.thinkingDialect}
+                onChange={(ev) => set({ thinkingDialect: ev.target.value })}
+              >
+                {DIALECTS.map((d) => (
+                  <option key={d} value={d}>
+                    {d === "" ? "(none)" : d}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
       </div>
     </RowShell>
   );
