@@ -33,6 +33,25 @@ pub fn env_base_url() -> Option<String> {
     env::var("OPENAI_BASE_URL").ok().filter(|s| !s.is_empty())
 }
 
+/// Parse a streamed tool call's accumulated argument JSON.
+///
+/// An empty string means "no arguments" — backends send that for zero-parameter
+/// tools — and becomes `{}`. Anything else that fails to parse is a malformed
+/// response, and is reported as such rather than silently replaced.
+fn parse_tool_input(raw: &str, tool: &str) -> Result<serde_json::Value, LlmError> {
+    if raw.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(raw).map_err(|e| LlmError::ApiError {
+        status: 502,
+        message: format!(
+            "tool call '{tool}' had unparseable input JSON ({e}); \
+             {} byte(s) received, likely a truncated stream",
+            raw.len()
+        ),
+    })
+}
+
 fn io_err(msg: impl std::fmt::Display) -> LlmError {
     LlmError::Network(Box::new(std::io::Error::other(msg.to_string())))
 }
@@ -385,6 +404,11 @@ impl LlmProvider for OpenAiProvider {
 
             let mut state = StreamState::default();
             let mut stop_reason = StopReason::EndTurn;
+            // Did the backend actually end the turn? A stream that just stops —
+            // the connection dropped mid-response — must not be mistaken for a
+            // completed turn (#61 item 1). `[DONE]` closes the stream and a
+            // `finish_reason` closes the choice; either is a genuine terminal.
+            let mut saw_terminal = false;
             let mut es = EventSource::new(req).map_err(io_err)?;
 
             while let Some(ev) = es.next().await {
@@ -392,6 +416,7 @@ impl LlmProvider for OpenAiProvider {
                     Ok(Event::Open) => {}
                     Ok(Event::Message(m)) => {
                         if m.data.trim() == "[DONE]" {
+                            saw_terminal = true;
                             break;
                         }
                         let Ok(chunk) = serde_json::from_str::<ChatChunk>(&m.data) else {
@@ -401,8 +426,11 @@ impl LlmProvider for OpenAiProvider {
                             Self::absorb_chunk(&chunk, &mut state, message_id, events).await?
                         {
                             stop_reason = f;
+                            saw_terminal = true;
                         }
                     }
+                    // Not a clean end: the terminal frame decides. `saw_terminal`
+                    // is checked below, so a stream that stopped early errors.
                     Err(reqwest_eventsource::Error::StreamEnded) => break,
                     Err(reqwest_eventsource::Error::InvalidStatusCode(status, resp)) => {
                         let code = status.as_u16();
@@ -426,6 +454,25 @@ impl LlmProvider for OpenAiProvider {
             }
 
             es.close();
+
+            // A stream that ended without its terminal frame is a dropped
+            // connection, not an answer. Returning what arrived would journal a
+            // truncated (or empty) assistant turn and present it to the user as
+            // success (#61 item 1).
+            if !saw_terminal {
+                let err = last_error.take().unwrap_or_else(|| {
+                    io_err(
+                        "stream ended without a terminal frame (connection dropped mid-response)",
+                    )
+                });
+                // Same rule the status path uses: only retry when the caller has
+                // not already seen partial content.
+                if is_retryable(&err) && !state.emitted_anything {
+                    last_error = Some(err);
+                    continue 'retry;
+                }
+                return Err(err);
+            }
 
             let mut parts: Vec<ContentPart> = Vec::new();
             // Thinking first: it precedes text on the wire and is block 0.
@@ -454,11 +501,11 @@ impl LlmProvider for OpenAiProvider {
                 }));
             }
             for acc in state.tools.into_values() {
-                let input = if acc.args.trim().is_empty() {
-                    serde_json::json!({})
-                } else {
-                    serde_json::from_str(&acc.args).unwrap_or(serde_json::Value::Null)
-                };
+                // An unparseable input is never substituted with `{}` or `null`:
+                // dispatching a tool with fabricated arguments turns a provider
+                // failure into a confusing tool failure, and can run the tool with
+                // arguments the model never chose (#61 item 1).
+                let input = parse_tool_input(&acc.args, &acc.name)?;
                 parts.push(ContentPart::ToolCall(ToolCallPart {
                     id: acc.id,
                     name: acc.name,
