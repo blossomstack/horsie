@@ -2,17 +2,17 @@ use async_llm::{
     Client,
     types::{
         CacheControl, ContentBlockDelta, CreateMessagesRequestBuilder, MessageBuilder,
-        MessageContent, MessageRole, MessagesStreamEvent, Text, Thinking, ThinkingConfig,
-        ToolResult, ToolUse,
+        MessageContent, MessageRole, MessagesStreamEvent, OutputConfig, Text, Thinking,
+        ThinkingConfig, ToolResult, ToolUse,
     },
 };
 use async_trait::async_trait;
 use horsie_agentcore::{
     AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
     EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent, TextChunkEvent,
-    TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingPart,
-    ThinkingSignatureChunkEvent, ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent,
-    ToolChoice, Usage,
+    TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingDialect, ThinkingEffort,
+    ThinkingPart, ThinkingSignatureChunkEvent, ToolCallInputDeltaEvent, ToolCallPart,
+    ToolCallStartEvent, ToolChoice, Usage,
 };
 use std::{collections::HashMap, env, time::Duration};
 use tokio_stream::StreamExt;
@@ -80,6 +80,8 @@ pub struct AnthropicProvider {
     base_url: Option<String>,
     session_id: Option<String>,
     thinking_budget: Option<u32>,
+    /// Wire encoding for this model's thinking control.
+    thinking_dialect: ThinkingDialect,
     /// Retain provider thinking-block signatures captured from this endpoint.
     keep_thinking_signature: bool,
     max_tokens: Option<u32>,
@@ -129,6 +131,7 @@ impl AnthropicProvider {
             base_url,
             session_id: None,
             thinking_budget: None,
+            thinking_dialect: ThinkingDialect::NoControl,
             keep_thinking_signature: false,
             max_tokens: None,
             retry_base_secs: BACKOFF_BASE_SECS,
@@ -146,6 +149,7 @@ impl AnthropicProvider {
             base_url,
             session_id: None,
             thinking_budget: None,
+            thinking_dialect: ThinkingDialect::NoControl,
             keep_thinking_signature: false,
             max_tokens: None,
             retry_base_secs: BACKOFF_BASE_SECS,
@@ -181,6 +185,13 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_thinking(mut self, budget_tokens: u32) -> Self {
         self.thinking_budget = Some(budget_tokens);
+        self
+    }
+
+    /// Set the wire encoding used for this model's thinking control.
+    #[must_use]
+    pub fn with_thinking_dialect(mut self, dialect: ThinkingDialect) -> Self {
+        self.thinking_dialect = dialect;
         self
     }
 
@@ -224,6 +235,54 @@ impl AnthropicProvider {
         }
     }
 
+    /// Translate a canonical effort into this model's wire fields. Returns the
+    /// `thinking` config and the `output_config`, either of which may be absent.
+    fn encode_thinking(
+        dialect: ThinkingDialect,
+        effort: Option<ThinkingEffort>,
+        budget_tokens: Option<u32>,
+    ) -> (Option<ThinkingConfig>, Option<OutputConfig>) {
+        let Some(effort) = effort else {
+            return (None, None);
+        };
+        let as_effort = || {
+            Some(OutputConfig {
+                effort: Some(effort.as_str().to_string()),
+            })
+        };
+        match dialect {
+            ThinkingDialect::AnthropicEffort => {
+                if effort.is_none_effort() {
+                    (Some(ThinkingConfig::Disabled), None)
+                } else {
+                    (None, as_effort())
+                }
+            }
+            // Fable 5 rejects an explicit disable; `supports()` blocks `none` at
+            // config time, so only effort values reach here.
+            ThinkingDialect::AnthropicAlwaysOn => (None, as_effort()),
+            ThinkingDialect::AnthropicBudget => {
+                if effort.is_none_effort() {
+                    (Some(ThinkingConfig::Disabled), None)
+                } else {
+                    (
+                        budget_tokens
+                            .map(|budget_tokens| ThinkingConfig::Enabled { budget_tokens }),
+                        None,
+                    )
+                }
+            }
+            ThinkingDialect::ZaiThinking | ThinkingDialect::KimiThinking => {
+                if effort.is_none_effort() {
+                    (Some(ThinkingConfig::Disabled), None)
+                } else {
+                    (None, None)
+                }
+            }
+            ThinkingDialect::OpenAiEffort | ThinkingDialect::NoControl => (None, None),
+        }
+    }
+
     /// Build the thinking part for one assembled block, honoring the
     /// signature-retention policy. `None` when the block carried no text.
     fn thinking_part(text: &str, signature: &str, keep_signature: bool) -> Option<ContentPart> {
@@ -263,7 +322,7 @@ impl AnthropicProvider {
                 }),
                 ContentPart::Thinking(th) => MessageContent::Thinking(Thinking {
                     thinking: th.text.clone(),
-                    signature: th.signature.clone().unwrap_or_default(),
+                    signature: th.signature.clone(),
                     ..Default::default()
                 }),
             })
@@ -364,10 +423,16 @@ impl LlmProvider for AnthropicProvider {
                 }
             }
         }
-        if let Some(budget) = self.thinking_budget {
-            builder.thinking(ThinkingConfig::Enabled {
-                budget_tokens: budget,
-            });
+        let (thinking_cfg, output_config) = Self::encode_thinking(
+            self.thinking_dialect,
+            request.thinking_effort,
+            self.thinking_budget,
+        );
+        if let Some(t) = thinking_cfg {
+            builder.thinking(t);
+        }
+        if let Some(oc) = output_config {
+            builder.output_config(oc);
         }
         let api_request = builder.build().map_err(io_err)?;
 
@@ -679,7 +744,7 @@ mod tests {
         let list = AnthropicProvider::parts_to_api_content(&parts);
         assert_eq!(list.len(), 1);
         assert!(
-            matches!(&list[0], MessageContent::Thinking(t) if t.thinking == "think" && t.signature == "sig123")
+            matches!(&list[0], MessageContent::Thinking(t) if t.thinking == "think" && t.signature.as_deref() == Some("sig123"))
         );
     }
 
@@ -758,5 +823,94 @@ mod tests {
             .expect("provider builds without a key")
             .with_keep_thinking_signature(true);
         assert!(p.keep_thinking_signature);
+    }
+
+    #[test]
+    fn parts_to_api_content_omits_absent_thinking_signature() {
+        let parts = vec![ContentPart::Thinking(ThinkingPart {
+            text: "reasoning".into(),
+            signature: None,
+        })];
+        let list = AnthropicProvider::parts_to_api_content(&parts);
+        let json = serde_json::to_value(&list[0]).expect("serializes");
+        assert!(
+            json.get("signature").is_none(),
+            "an absent signature must not be sent as an empty string: {json}"
+        );
+    }
+
+    fn effort(v: &str) -> ThinkingEffort {
+        ThinkingEffort::parse(v).expect("canonical effort")
+    }
+
+    #[test]
+    fn anthropic_effort_dialect_sets_output_config() {
+        let (thinking, output) = AnthropicProvider::encode_thinking(
+            ThinkingDialect::AnthropicEffort,
+            Some(effort("high")),
+            None,
+        );
+        assert_eq!(output.expect("set").effort.as_deref(), Some("high"));
+        assert!(thinking.is_none());
+    }
+
+    #[test]
+    fn anthropic_effort_dialect_maps_none_to_disabled() {
+        let (thinking, output) = AnthropicProvider::encode_thinking(
+            ThinkingDialect::AnthropicEffort,
+            Some(effort("none")),
+            None,
+        );
+        assert!(matches!(thinking, Some(ThinkingConfig::Disabled)));
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn always_on_dialect_never_disables() {
+        let (thinking, output) = AnthropicProvider::encode_thinking(
+            ThinkingDialect::AnthropicAlwaysOn,
+            Some(effort("max")),
+            None,
+        );
+        assert!(thinking.is_none(), "thinking must be omitted entirely");
+        assert_eq!(output.expect("set").effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn budget_dialect_uses_budget_tokens() {
+        let (thinking, output) = AnthropicProvider::encode_thinking(
+            ThinkingDialect::AnthropicBudget,
+            Some(effort("high")),
+            Some(4096),
+        );
+        assert!(matches!(
+            thinking,
+            Some(ThinkingConfig::Enabled {
+                budget_tokens: 4096
+            })
+        ));
+        assert!(
+            output.is_none(),
+            "budget-era models reject output_config.effort"
+        );
+    }
+
+    #[test]
+    fn no_control_dialect_sends_nothing() {
+        let (thinking, output) = AnthropicProvider::encode_thinking(
+            ThinkingDialect::NoControl,
+            Some(effort("high")),
+            None,
+        );
+        assert!(thinking.is_none());
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn absent_effort_sends_nothing() {
+        let (thinking, output) =
+            AnthropicProvider::encode_thinking(ThinkingDialect::AnthropicEffort, None, None);
+        assert!(thinking.is_none());
+        assert!(output.is_none());
     }
 }

@@ -8,6 +8,8 @@ pub struct CompletionRequest<'a> {
     pub tools: Vec<ToolSpec>,
     pub tool_choice: ToolChoice,
     pub max_tokens: Option<u32>,
+    /// Canonical thinking effort for this session; `None` sends no control.
+    pub thinking_effort: Option<crate::thinking::ThinkingEffort>,
 }
 
 #[derive(Debug, Clone)]

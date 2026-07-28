@@ -15,8 +15,8 @@ use futures_util::StreamExt;
 use horsie_agentcore::{
     AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
     EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent, TextChunkEvent,
-    TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingPart, ToolCallInputDeltaEvent,
-    ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
+    TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingDialect, ThinkingPart,
+    ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
 };
 use reqwest_eventsource::{Event, EventSource};
 use std::{collections::BTreeMap, env, time::Duration};
@@ -65,6 +65,8 @@ pub struct OpenAiProvider {
     api_key: Option<Secret>,
     base_url: String,
     max_tokens: Option<u32>,
+    /// Wire encoding for this model's thinking control.
+    thinking_dialect: ThinkingDialect,
     retry_base_secs: u64,
 }
 
@@ -78,6 +80,7 @@ impl OpenAiProvider {
             api_key,
             base_url: env_base_url().unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             max_tokens: None,
+            thinking_dialect: ThinkingDialect::NoControl,
             retry_base_secs: BACKOFF_BASE_SECS,
         })
     }
@@ -169,7 +172,18 @@ impl OpenAiProvider {
                 .or(Some(DEFAULT_MAX_TOKENS)),
             tools,
             tool_choice,
+            reasoning_effort: match (self.thinking_dialect, request.thinking_effort) {
+                (ThinkingDialect::OpenAiEffort, Some(e)) => Some(e.as_str().to_string()),
+                _ => None,
+            },
         }
+    }
+
+    /// Set the wire encoding used for this model's thinking control.
+    #[must_use]
+    pub fn with_thinking_dialect(mut self, dialect: ThinkingDialect) -> Self {
+        self.thinking_dialect = dialect;
+        self
     }
 }
 
@@ -525,6 +539,7 @@ mod tests {
             tools: vec![],
             tool_choice: ToolChoice::Auto,
             max_tokens: Some(64),
+            thinking_effort: None,
         }
     }
 
@@ -667,5 +682,37 @@ mod tests {
             matches!(err, LlmError::ApiError { status: 400, .. }),
             "expected ApiError 400, got {err:?}",
         );
+    }
+
+    #[test]
+    fn reasoning_effort_set_for_openai_effort_dialect() {
+        let p = OpenAiProvider::new()
+            .expect("builds")
+            .with_thinking_dialect(horsie_agentcore::ThinkingDialect::OpenAiEffort);
+        let msgs: Vec<horsie_models::agent::Message> = vec![];
+        let req = CompletionRequest {
+            messages: &msgs,
+            system: None,
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+        };
+        assert_eq!(p.build_body(&req).reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn reasoning_effort_absent_for_other_dialects() {
+        let p = OpenAiProvider::new().expect("builds");
+        let msgs: Vec<horsie_models::agent::Message> = vec![];
+        let req = CompletionRequest {
+            messages: &msgs,
+            system: None,
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+        };
+        assert_eq!(p.build_body(&req).reasoning_effort, None);
     }
 }

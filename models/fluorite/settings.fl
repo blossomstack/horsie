@@ -31,6 +31,13 @@ struct ModelView {
     /// The model's total context window, in tokens. A built-in default is
     /// applied for known model ids when a model is added with this omitted.
     context_window: Option<u32>,
+    /// Canonical thinking-effort values this model offers, in ascending order.
+    /// Absent → the model exposes no thinking control.
+    thinking_efforts: Option<Vec<String>>,
+    /// Default applied when a session does not choose one.
+    thinking_effort: Option<String>,
+    /// Wire encoding for this model's thinking control.
+    thinking_dialect: Option<String>,
 }
 
 /// What a vendor can do with a session workspace. Announced by the vendor
@@ -135,6 +142,9 @@ struct ModelInput {
     model_id: String,
     max_tokens: Option<u32>,
     context_window: Option<u32>,
+    thinking_efforts: Option<Vec<String>>,
+    thinking_effort: Option<String>,
+    thinking_dialect: Option<String>,
 }
 
 /// A configurable vendor to persist. Replaces any vendor of the same `name`.

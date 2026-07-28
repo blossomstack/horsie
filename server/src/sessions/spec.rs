@@ -45,6 +45,10 @@ pub struct AgentSettings {
     /// pre-memory journal rows deserialize.
     #[serde(default)]
     pub memory_spaces: Vec<String>,
+    /// Canonical thinking effort chosen at session creation. `#[serde(default)]`
+    /// so pre-thinking journal rows deserialize.
+    #[serde(default)]
+    pub thinking_effort: Option<String>,
 }
 
 /// One session workspace as persisted: just a name — the directory is always

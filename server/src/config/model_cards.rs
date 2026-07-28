@@ -52,7 +52,7 @@ fn validate(
     Ok(())
 }
 
-const COLUMNS: &str = "model_id, name, context_window, max_tokens, created_at, updated_at";
+const COLUMNS: &str = "model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, created_at, updated_at";
 
 fn row_to_card(r: &sqlx::sqlite::SqliteRow) -> Result<ModelCard, sqlx::Error> {
     let cw: Option<i64> = r.try_get("context_window")?;
@@ -62,6 +62,12 @@ fn row_to_card(r: &sqlx::sqlite::SqliteRow) -> Result<ModelCard, sqlx::Error> {
         name: r.try_get("name")?,
         context_window: cw.and_then(|v| u32::try_from(v).ok()),
         max_tokens: mt.and_then(|v| u32::try_from(v).ok()),
+        thinking_efforts: crate::config::store::decode_efforts(
+            r.try_get::<Option<String>, _>("thinking_efforts")?
+                .as_deref(),
+        ),
+        default_thinking_effort: r.try_get("default_thinking_effort")?,
+        thinking_dialect: r.try_get("thinking_dialect")?,
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
     })
@@ -137,13 +143,16 @@ impl ModelCardStore {
             )));
         }
         sqlx::query(
-            "INSERT INTO model_cards (model_id, name, context_window, max_tokens) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&input.model_id)
         .bind(&input.name)
         .bind(input.context_window.map(i64::from))
         .bind(input.max_tokens.map(i64::from))
+        .bind(crate::config::store::encode_efforts(input.thinking_efforts.as_ref()))
+        .bind(input.default_thinking_effort.clone())
+        .bind(input.thinking_dialect.clone())
         .execute(&self.pool)
         .await
         .map_err(|e| ModelCardError::Db(e.to_string()))?;
@@ -166,11 +175,17 @@ impl ModelCardStore {
         )?;
         let res = sqlx::query(
             "UPDATE model_cards SET name = ?, context_window = ?, max_tokens = ?, \
+             thinking_efforts = ?, default_thinking_effort = ?, thinking_dialect = ?, \
              updated_at = datetime('now') WHERE model_id = ?",
         )
         .bind(&update.name)
         .bind(update.context_window.map(i64::from))
         .bind(update.max_tokens.map(i64::from))
+        .bind(crate::config::store::encode_efforts(
+            update.thinking_efforts.as_ref(),
+        ))
+        .bind(update.default_thinking_effort.clone())
+        .bind(update.thinking_dialect.clone())
         .bind(model_id)
         .execute(&self.pool)
         .await
@@ -207,13 +222,16 @@ impl ModelCardStore {
         for c in cards {
             validate(&c.model_id, &c.name, c.context_window, c.max_tokens)?;
             let res = sqlx::query(
-                "INSERT OR IGNORE INTO model_cards (model_id, name, context_window, max_tokens) \
-                 VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&c.model_id)
             .bind(&c.name)
             .bind(c.context_window.map(i64::from))
             .bind(c.max_tokens.map(i64::from))
+            .bind(crate::config::store::encode_efforts(c.thinking_efforts.as_ref()))
+            .bind(c.default_thinking_effort.clone())
+            .bind(c.thinking_dialect.clone())
             .execute(&self.pool)
             .await
             .map_err(|e| ModelCardError::Db(e.to_string()))?;
@@ -277,6 +295,9 @@ mod tests {
             name: name.into(),
             context_window: cw,
             max_tokens: mt,
+            thinking_efforts: None,
+            default_thinking_effort: None,
+            thinking_dialect: None,
         }
     }
 
@@ -302,6 +323,9 @@ mod tests {
                     name: "GPT-4o (2024)".into(),
                     context_window: Some(128_000),
                     max_tokens: Some(16_384),
+                    thinking_efforts: None,
+                    default_thinking_effort: None,
+                    thinking_dialect: None,
                 },
             )
             .await
@@ -399,7 +423,10 @@ mod tests {
                     &ModelCardUpdate {
                         name: "x".into(),
                         context_window: None,
-                        max_tokens: None
+                        max_tokens: None,
+                        thinking_efforts: None,
+                        default_thinking_effort: None,
+                        thinking_dialect: None,
                     }
                 )
                 .await
@@ -461,6 +488,9 @@ mod tests {
                     name: "A-edited".into(),
                     context_window: Some(999),
                     max_tokens: None,
+                    thinking_efforts: None,
+                    default_thinking_effort: None,
+                    thinking_dialect: None,
                 },
             )
             .await

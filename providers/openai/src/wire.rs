@@ -74,6 +74,9 @@ pub struct ChatRequest {
     pub tools: Vec<ToolDef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
+    /// Reasoning depth, for models whose dialect is `openai_effort`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 // ── response (streaming chunks) ──────────────────────────────────────────────

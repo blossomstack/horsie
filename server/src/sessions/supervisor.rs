@@ -486,6 +486,7 @@ mod tests {
                 max_retries: 0,
                 mcp_servers: vec![],
                 memory_spaces: vec![],
+                thinking_effort: None,
             },
             workspaces: vec![],
             provision: vec![],

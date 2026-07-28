@@ -895,6 +895,9 @@ mod tests {
             name: id.into(),
             context_window: Some(1000),
             max_tokens: None,
+            thinking_efforts: None,
+            default_thinking_effort: None,
+            thinking_dialect: None,
         };
         store
             .seed_if_missing(&[

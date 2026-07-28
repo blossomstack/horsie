@@ -52,6 +52,7 @@ fn no_tools_request(messages: &[Message]) -> CompletionRequest<'_> {
         tools: vec![],
         tool_choice: ToolChoice::Auto,
         max_tokens: None,
+        thinking_effort: None,
     }
 }
 
@@ -303,6 +304,7 @@ async fn test_with_tools_in_request() {
         tools,
         tool_choice: ToolChoice::Auto,
         max_tokens: Some(1024),
+        thinking_effort: None,
     };
     let resp = p.complete(req, "msg-1", &sink).await.unwrap();
     assert_eq!(resp.stop_reason, StopReason::EndTurn);

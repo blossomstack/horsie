@@ -16,4 +16,8 @@ export interface AgentSettings {
    * Memory spaces this session may read and write; absent → none, and the
    */
   memorySpaces?: string[];
+  /**
+   * Canonical thinking effort for this session, chosen from the model&#x27;s
+   */
+  thinkingEffort?: string;
 }
