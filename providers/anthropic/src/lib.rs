@@ -680,6 +680,25 @@ impl LlmProvider for AnthropicProvider {
                         };
                         if let Some(u) = usage {
                             output_tokens = u.output_tokens.unwrap_or(output_tokens);
+                            // `message_delta` carries the *final* accounting and
+                            // supersedes `message_start` for every field it sets.
+                            // Anthropic itself reports the cache split up front, but
+                            // Anthropic-compatible endpoints need not: verified
+                            // 2026-07-28 against `https://api.kimi.com/coding/`
+                            // (model `k3`), where `message_start` always reports
+                            // `input_tokens` uncached with both cache counters at 0,
+                            // and only `message_delta` carries the real split (e.g.
+                            // start `input=7507, read=0` vs delta `input=83,
+                            // read=7424` for the same call). Reading the cache fields
+                            // from `message_start` alone reports every kimi turn as a
+                            // 100% cache miss and bills the whole prefix at the fresh
+                            // input rate. Each field falls back to the `message_start`
+                            // value when the delta omits it, so providers that only
+                            // send `output_tokens` here are unaffected.
+                            input_tokens = u.input_tokens.unwrap_or(input_tokens);
+                            cache_creation_tokens =
+                                u.cache_creation_input_tokens.or(cache_creation_tokens);
+                            cache_read_tokens = u.cache_read_input_tokens.or(cache_read_tokens);
                         }
                         None
                     }
