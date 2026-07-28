@@ -229,3 +229,70 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
         unmatched_tool_uses(&body)
     );
 }
+
+/// #61 item 5b: `context_provider.provide()` sat outside the run's cancel
+/// `select!`, so the place most likely to hang was the one place `Stop` could not
+/// reach.
+///
+/// `provide()` awaits an MCP connect, a workspace scan and a `SessionStart` hook —
+/// three process boundaries. With a stalled peer the run hung, `halt()` gave up
+/// after `HALT_CANCEL_TIMEOUT`, and the task leaked for the process lifetime. The
+/// user saw a session wedged in `Running` with a Stop button that did nothing.
+#[tokio::test]
+async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
+    /// A provider that never returns — a wedged runtime or a silent MCP server.
+    struct HangingContextProvider;
+    #[async_trait]
+    impl horsie_workflow::ContextProvider for HangingContextProvider {
+        async fn provide(&self) -> Result<horsie_workflow::Contexts, String> {
+            std::future::pending().await
+        }
+    }
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let journal = Arc::new(InMemoryJournal::new());
+        let session_id = uuid::Uuid::new_v4();
+        let (tx, _outcomes) = tokio::sync::mpsc::channel(8);
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(HangingContextProvider),
+            event_sink: Arc::new(NoopSink),
+            parent: Arc::new(OutcomeChannel(tx)),
+            session_id,
+        };
+        let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+            system_prompt: None,
+            output_schema: None,
+            allow_ask_user: false,
+            allow_timers: None,
+            max_iterations: None,
+            max_retries: None,
+            allowed_tools: None,
+        });
+        params.interactive = true;
+
+        let agent = spawn_root(AgentActor::new(ctx, params), journal);
+        agent
+            .tell(AgentCommand::Run {
+                input: "start something that wedges".into(),
+            })
+            .await
+            .unwrap();
+        // Let the run reach `provide()` and block there.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The ack is the contract `halt()` waits on: it fires when the run is
+        // genuinely over, not when the token was merely flipped.
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Cancel { ack: Some(ack_tx) })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), ack_rx)
+            .await
+            .expect("Stop must reach a run blocked in provide(); it hung instead")
+            .expect("the cancel ack channel must not drop");
+    })
+    .await
+    .expect("test timed out");
+}

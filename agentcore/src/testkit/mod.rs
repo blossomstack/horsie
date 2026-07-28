@@ -223,6 +223,45 @@ impl Toolbox for MockToolbox {
     }
 }
 
+/// An `EventSink` that fails after `allow` successful emits.
+///
+/// Models a journal that cannot write. The agent loop treats a sink failure as
+/// fatal — proceeding would build on a history that was never recorded — so this
+/// is the double for "the disk went away mid-turn" (#61 item 22).
+pub struct FailingEventSink {
+    allow: usize,
+    seen: Mutex<usize>,
+    reason: String,
+}
+
+impl FailingEventSink {
+    /// Fail every emit.
+    pub fn always(reason: impl Into<String>) -> Self {
+        Self::after(0, reason)
+    }
+
+    /// Succeed `allow` times, then fail every emit after.
+    pub fn after(allow: usize, reason: impl Into<String>) -> Self {
+        Self {
+            allow,
+            seen: Mutex::new(0),
+            reason: reason.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl EventSink for FailingEventSink {
+    async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        *seen += 1;
+        if *seen > self.allow {
+            return Err(EventSinkError(self.reason.clone()));
+        }
+        Ok(())
+    }
+}
+
 /// An `EventSink` that records every event for later assertion.
 pub struct CollectingEventSink {
     events: Mutex<Vec<AgentEvent>>,

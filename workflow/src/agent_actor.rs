@@ -460,7 +460,26 @@ impl AgentActor {
             // rehydrate the runtime, reconnect MCP, scan the workspace. A failure
             // here is a recoverable run failure -- report it and stop, exactly as a
             // provider/tool error would.
-            let contexts = match context_provider.provide().await {
+            //
+            // Cancellable, because this is the *most* likely place to hang: it
+            // awaits an MCP connect, a workspace scan and a SessionStart hook, all
+            // of which cross a process boundary. Leaving it outside the cancel
+            // path meant a stalled peer wedged the run exactly where `Stop` could
+            // not reach it — `halt()` gave up after its timeout and the task
+            // leaked for the process lifetime (#61 item 5b).
+            let provided = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    let _ = self_ref
+                        .tell(AgentCommand::RunFinished(Box::new(RunReport {
+                            outcome: RunOutcome::Cancelled,
+                        })))
+                        .await;
+                    return;
+                }
+                provided = context_provider.provide() => provided,
+            };
+            let contexts = match provided {
                 Ok(c) => c,
                 Err(error) => {
                     parent
@@ -2218,7 +2237,10 @@ mod tests {
 )]
 mod retry_tests {
     use super::*;
-    use horsie_agentcore::testkit::{CollectingEventSink, MockProvider, MockToolbox, Script};
+    use horsie_agentcore::EventSinkError;
+    use horsie_agentcore::testkit::{
+        CollectingEventSink, FailingEventSink, MockProvider, MockToolbox, Script,
+    };
     use horsie_agentcore::{CompletionResponse, EmptyToolbox, LlmError, StopReason, ToolSpec};
     use horsie_models::agent::{TextPart, ToolCallPart, Usage};
 
@@ -2309,6 +2331,103 @@ mod retry_tests {
                 !recoverable,
                 "a 401 must not be reported to the user as recoverable"
             ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    async fn run_with_sink(
+        provider: Arc<MockProvider>,
+        sink: Arc<dyn EventSink>,
+        max_retries: u32,
+    ) -> (RunOutcome, usize) {
+        let outcome = run_with_retries(
+            provider.clone(),
+            Arc::new(EmptyToolbox),
+            sink,
+            "sys".into(),
+            None,
+            false,
+            Some(10),
+            max_retries,
+            None,
+            vec![],
+            AgentInput::user_message("m1", "go"),
+            CancellationToken::new(),
+        )
+        .await;
+        let calls = provider.calls();
+        (outcome, calls)
+    }
+
+    /// #61 item 22, half one: the failure raised *inside* `complete()`.
+    ///
+    /// A journal write failure surfacing through the provider arrives as
+    /// `LlmError::EventSink` → `AgentError::Provider`, which this layer used to
+    /// retry against the LLM — burning tokens on a disk fault.
+    #[tokio::test]
+    async fn a_sink_failure_from_the_provider_is_not_retried_against_the_llm() {
+        let provider = MockProvider::scripted(Script::of([]).then_repeating_with(|| {
+            Err(LlmError::EventSink(EventSinkError(
+                "journal write failed: disk full".into(),
+            )))
+        }));
+        let sink: Arc<dyn EventSink> = Arc::new(CollectingEventSink::new());
+        let (outcome, calls) = run_with_sink(provider, sink, 3).await;
+
+        assert_eq!(
+            calls, 1,
+            "a journal failure must not be retried against the LLM"
+        );
+        match outcome {
+            RunOutcome::Failed { recoverable, .. } => {
+                assert!(!recoverable, "a disk failure is not a recoverable turn");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// #61 item 22, half two: the same root cause raised by the agent loop's own
+    /// `events.emit(...)?`, which becomes `AgentError::EventSink`.
+    ///
+    /// The issue's complaint was that one root cause got two different verdicts
+    /// depending on where it surfaced. Both paths must agree, and neither may
+    /// retry against the LLM.
+    #[tokio::test]
+    async fn a_sink_failure_at_turn_start_costs_no_tokens() {
+        // `Agent::run` journals the input message before it ever calls the
+        // provider, so a journal that is already down fails the turn for free.
+        let provider = MockProvider::text("hello");
+        let sink: Arc<dyn EventSink> = Arc::new(FailingEventSink::always("journal write failed"));
+        let (outcome, calls) = run_with_sink(provider, sink, 3).await;
+
+        assert_eq!(calls, 0, "the provider must never be reached");
+        match outcome {
+            RunOutcome::Failed { recoverable, .. } => {
+                assert!(!recoverable, "a disk failure is not a recoverable turn");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sink_failure_mid_turn_is_not_retried_and_agrees_with_the_provider_path() {
+        // Let the input message and the message-start through, so the provider is
+        // genuinely engaged before the journal dies — the realistic shape.
+        let provider = MockProvider::text("hello");
+        let sink: Arc<dyn EventSink> = Arc::new(FailingEventSink::after(2, "journal write failed"));
+        let (outcome, calls) = run_with_sink(provider, sink, 3).await;
+
+        assert_eq!(
+            calls, 1,
+            "the turn must not be re-run against the LLM after a journal failure"
+        );
+        match outcome {
+            RunOutcome::Failed { recoverable, .. } => {
+                assert!(
+                    !recoverable,
+                    "both sink-failure paths must report the same verdict"
+                );
+            }
             other => panic!("expected Failed, got {other:?}"),
         }
     }
