@@ -267,7 +267,6 @@ async fn conformance_rate_limit_is_classified() {
 /// OpenAI: `Err(StreamEnded) => break` (`providers/openai/src/lib.rs:392`).
 /// Anthropic: the `while let` exits with `last_error: None` (`:510`).
 #[tokio::test]
-#[ignore = "red: #61 item 1 — a cut stream is reported as a successful turn"]
 async fn a_cut_stream_is_an_error_not_an_empty_success() {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         for &kind in KINDS {
@@ -305,7 +304,6 @@ async fn a_cut_stream_is_an_error_not_an_empty_success() {
 /// (`providers/anthropic/src/lib.rs:537-548`). The tool then fails with a
 /// confusing `InvalidInput` instead of the run failing with a provider error.
 #[tokio::test]
-#[ignore = "red: #61 item 1 — a tool call with unparseable input is dispatched with fabricated arguments"]
 async fn a_tool_call_with_unparseable_input_is_never_dispatched() {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         for &kind in KINDS {

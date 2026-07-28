@@ -182,11 +182,20 @@ pub(crate) async fn handle_chat_completions(
             input,
         }) => sse_from_pairs(tool_call_chunks(&id, &tid, &name, &input)),
         // No OpenAI equivalent — render as an empty assistant turn.
-        Some(MockResponse::CutStream { chunks, after }) => {
-            let mut pairs = text_stream_chunks(&id, &chunks);
-            pairs.truncate(after.min(pairs.len()));
-            sse_from_pairs(pairs)
-        }
+        Some(MockResponse::CutStream { chunks, after }) => sse_from_pairs(
+            // Content deltas only — no final chunk, no [DONE].
+            chunks
+                .iter()
+                .take(after)
+                .map(|c| {
+                    chunk(
+                        &id,
+                        serde_json::json!({ "role": "assistant", "content": c }),
+                        None,
+                    )
+                })
+                .collect(),
+        ),
         Some(MockResponse::CutToolCallStream {
             name,
             id: tid,

@@ -69,6 +69,25 @@ fn to_llm_error(e: async_llm::errors::AnthropicError) -> LlmError {
     }
 }
 
+/// Parse a streamed tool call's accumulated argument JSON.
+///
+/// An empty string means "no arguments" — backends send that for zero-parameter
+/// tools — and becomes `{}`. Anything else that fails to parse is a malformed
+/// response, and is reported as such rather than silently replaced.
+fn parse_tool_input(raw: &str, tool: &str) -> Result<serde_json::Value, LlmError> {
+    if raw.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::default()));
+    }
+    serde_json::from_str(raw).map_err(|e| LlmError::ApiError {
+        status: 502,
+        message: format!(
+            "tool call '{tool}' had unparseable input JSON ({e}); \
+             {} byte(s) received, likely a truncated stream",
+            raw.len()
+        ),
+    })
+}
+
 fn io_err(msg: impl std::fmt::Display) -> LlmError {
     LlmError::Network(Box::new(std::io::Error::other(msg.to_string())))
 }
@@ -347,6 +366,11 @@ impl LlmProvider for AnthropicProvider {
         let mut cache_creation_tokens: Option<u32> = None;
         let mut cache_read_tokens: Option<u32> = None;
         let mut last_error: Option<LlmError> = None;
+        // Did the backend actually end the turn? A stream that just stops — the
+        // connection dropped mid-response — must not be mistaken for a completed
+        // turn (#61 item 1). `MessageDelta` carries the stop_reason and
+        // `MessageStop` closes the message; either is a genuine terminal event.
+        let mut saw_terminal = false;
 
         'retry: for attempt in 0..=MAX_STREAM_RETRIES {
             if attempt > 0 {
@@ -489,6 +513,7 @@ impl LlmProvider for AnthropicProvider {
                         }))
                     }
                     MessagesStreamEvent::MessageDelta { delta, usage } => {
+                        saw_terminal = true;
                         stop_reason = match delta.stop_reason.as_deref() {
                             Some("tool_use") => StopReason::ToolUse,
                             Some("max_tokens") => StopReason::MaxTokens,
@@ -499,7 +524,10 @@ impl LlmProvider for AnthropicProvider {
                         }
                         None
                     }
-                    MessagesStreamEvent::MessageStop => None,
+                    MessagesStreamEvent::MessageStop => {
+                        saw_terminal = true;
+                        None
+                    }
                 };
 
                 if let Some(ev) = to_emit {
@@ -513,9 +541,18 @@ impl LlmProvider for AnthropicProvider {
         if text_blocks.is_empty()
             && tool_blocks.is_empty()
             && thinking_blocks.is_empty()
-            && let Some(e) = last_error
+            && let Some(e) = last_error.take()
         {
             return Err(e);
+        }
+
+        // A stream that ended without its terminal event is a dropped connection,
+        // not an answer. Returning what arrived would journal a truncated (or
+        // empty) assistant turn and present it to the user as success (#61 item 1).
+        if !saw_terminal {
+            return Err(last_error.take().unwrap_or_else(|| {
+                io_err("stream ended without a terminal event (connection dropped mid-response)")
+            }));
         }
 
         // 5. Assemble parts in block-index order
@@ -535,16 +572,13 @@ impl LlmProvider for AnthropicProvider {
                     parts.push(ContentPart::Text(TextPart { text: text.clone() }));
                 }
             } else if let Some((id, name, json_str)) = tool_blocks.get(&idx) {
-                let input = match serde_json::from_str::<serde_json::Value>(json_str) {
+                // An unparseable input is never substituted with an empty object:
+                // dispatching a tool with fabricated arguments turns a provider
+                // failure into a confusing tool failure, and can run the tool with
+                // arguments the model never chose (#61 item 1).
+                let input = match parse_tool_input(json_str, name) {
                     Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(
-                            tool = %name,
-                            partial = %json_str.chars().take(80).collect::<String>(),
-                            "failed to parse tool input JSON: {e}"
-                        );
-                        serde_json::Value::Object(serde_json::Map::default())
-                    }
+                    Err(e) => return Err(e),
                 };
                 parts.push(ContentPart::ToolCall(ToolCallPart {
                     id: id.clone(),

@@ -499,9 +499,7 @@ async fn handle_messages(
             sse_from_pairs(tool_call_stream_sse(&name, &id, &input))
         }
         Some(MockResponse::CutStream { chunks, after }) => {
-            let mut pairs = text_stream_sse(&chunks);
-            pairs.truncate(after.min(pairs.len()));
-            sse_from_pairs(pairs)
+            sse_from_pairs(cut_text_stream_sse(&chunks, after))
         }
         Some(MockResponse::CutToolCallStream {
             name,
@@ -834,6 +832,29 @@ fn text_stream_sse(chunks: &[String]) -> Vec<(String, String)> {
         "message_stop".into(),
         serde_json::json!({"type":"message_stop"}).to_string(),
     ));
+    events
+}
+
+/// The opening frames plus `after` text deltas, and nothing else: no
+/// `content_block_stop`, no `message_delta`, no `message_stop`.
+fn cut_text_stream_sse(chunks: &[String], after: usize) -> Vec<(String, String)> {
+    let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let mut events = vec![
+        (
+            "message_start".into(),
+            serde_json::json!({"type":"message_start","message":{"id":msg_id,"type":"message","role":"assistant","content":[],"model":"mock-model","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}).to_string(),
+        ),
+        (
+            "content_block_start".into(),
+            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}).to_string(),
+        ),
+    ];
+    for chunk in chunks.iter().take(after) {
+        events.push((
+            "content_block_delta".into(),
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":chunk}}).to_string(),
+        ));
+    }
     events
 }
 
