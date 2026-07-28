@@ -67,6 +67,37 @@ pub enum LlmError {
     EventSink(#[from] EventSinkError),
 }
 
+impl LlmError {
+    /// Whether another attempt could plausibly succeed.
+    ///
+    /// The single definition of "transient" for the whole stack: providers use it
+    /// to decide whether to re-stream, and the agent actor uses it to decide
+    /// whether to re-run a turn. Two layers disagreeing about this is how a
+    /// permanent 401 ends up retried seven times (#61 items 6 and 21).
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::RateLimit { .. } | Self::Overloaded | Self::Network(_) => true,
+            // A classified API error is the server telling us the request itself
+            // is wrong; repeating it verbatim cannot help. An event-sink failure
+            // is a local durability problem, and retrying against the LLM would
+            // burn tokens on a disk fault.
+            Self::ApiError { .. } | Self::EventSink(_) => false,
+        }
+    }
+
+    /// The provider-supplied delay before retrying, when the error carries one.
+    #[must_use]
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::RateLimit { retry_after } => *retry_after,
+            Self::Overloaded | Self::Network(_) | Self::ApiError { .. } | Self::EventSink(_) => {
+                None
+            }
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ToolCallError {
     #[error("invalid input: {0}")]

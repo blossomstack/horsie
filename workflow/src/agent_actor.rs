@@ -362,6 +362,7 @@ pub struct RunReport {
     outcome: RunOutcome,
 }
 
+#[derive(Debug)]
 enum RunOutcome {
     /// Agent ended its turn with plain text (no `conclude` tool registered).
     Completed {
@@ -1519,17 +1520,54 @@ async fn run_with_retries(
                 };
             }
             Err(AgentError::Cancelled) => return RunOutcome::Cancelled,
-            Err(AgentError::Provider(e)) if attempt < max_retries => {
-                attempt += 1;
-                let backoff = Duration::from_millis(50u64 * (1u64 << attempt.min(6)));
-                tracing::warn!(error = %e, attempt, "provider error; retrying after backoff");
-                tokio::time::sleep(backoff).await;
-                continue;
-            }
             Err(AgentError::Provider(e)) => {
+                // Whether the failed attempt already wrote something durable.
+                // `PersistSink` journals exactly the events `coarse_event` maps,
+                // so this is the same test it applied — no proxy, no guessing.
+                let journaled = captured.iter().any(|ev| coarse_event(ev).is_some());
+                // Three independent conditions, all required:
+                //
+                // 1. Budget remains.
+                // 2. The failure is transient. `LlmError` already distinguishes
+                //    RateLimit / Overloaded / Network from a permanent ApiError,
+                //    and this layer used to discard all of it — retrying a 401 or
+                //    a 400 context-length error exactly as eagerly as a 429.
+                // 3. Nothing durable was written. The retry rebuilds the turn from
+                //    the ORIGINAL `history`, which does not contain the events the
+                //    failed attempt persisted, so retrying after partial progress
+                //    leaves a phantom turn in the transcript that the model never
+                //    saw — replayed into every later turn (#61 item 21). This is
+                //    the same "only retry when nothing has been emitted" rule the
+                //    providers already apply to their own streams.
+                if attempt < max_retries && e.is_transient() && !journaled {
+                    attempt += 1;
+                    // Honour a provider-supplied delay when there is one; the
+                    // exponential backoff is the fallback, not the rule.
+                    let delay = e
+                        .retry_after()
+                        .unwrap_or_else(|| Duration::from_millis(50u64 * (1u64 << attempt.min(6))));
+                    tracing::warn!(
+                        error = %e,
+                        attempt,
+                        delay_ms = delay.as_millis(),
+                        "transient provider error with nothing journaled; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                if journaled && e.is_transient() && attempt < max_retries {
+                    tracing::warn!(
+                        error = %e,
+                        "not retrying: the attempt already journaled progress that a \
+                         restart from the original history would duplicate"
+                    );
+                }
                 return RunOutcome::Failed {
+                    // Report the classification rather than assuming recoverable:
+                    // a permanent failure shown as transient invites the user to
+                    // retry something that can never succeed.
+                    recoverable: e.is_transient(),
                     error: e.to_string(),
-                    recoverable: true,
                 };
             }
             Err(e) => {
@@ -2167,6 +2205,135 @@ mod tests {
                 input: AgentInput::user_message("m", "hi"),
             }))
             .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod retry_tests {
+    use super::*;
+    use horsie_agentcore::testkit::{CollectingEventSink, MockProvider, MockToolbox, Script};
+    use horsie_agentcore::{CompletionResponse, EmptyToolbox, LlmError, StopReason, ToolSpec};
+    use horsie_models::agent::{TextPart, ToolCallPart, Usage};
+
+    fn text_response(text: &str) -> CompletionResponse {
+        CompletionResponse {
+            parts: vec![ContentPart::Text(TextPart { text: text.into() })],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::without_cache(1, 1),
+        }
+    }
+
+    fn tool_response(id: &str, name: &str) -> CompletionResponse {
+        CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: id.into(),
+                name: name.into(),
+                input: serde_json::json!({}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::without_cache(1, 1),
+        }
+    }
+
+    fn echo_toolbox() -> Arc<MockToolbox> {
+        MockToolbox::new(
+            vec![ToolSpec {
+                name: "echo".into(),
+                description: "echo".into(),
+                input_schema: serde_json::json!({ "type": "object" }),
+            }],
+            Arc::new(|_, input| Ok(input)),
+        )
+    }
+
+    async fn run(
+        provider: Arc<MockProvider>,
+        toolbox: Arc<dyn Toolbox>,
+        max_retries: u32,
+    ) -> (RunOutcome, usize) {
+        let sink: Arc<dyn EventSink> = Arc::new(CollectingEventSink::new());
+        let outcome = run_with_retries(
+            provider.clone(),
+            toolbox,
+            sink,
+            "sys".into(),
+            None,
+            false,
+            Some(10),
+            max_retries,
+            None,
+            vec![],
+            AgentInput::user_message("m1", "go"),
+            CancellationToken::new(),
+        )
+        .await;
+        let calls = provider.calls();
+        (outcome, calls)
+    }
+
+    #[tokio::test]
+    async fn a_transient_error_is_retried_when_nothing_was_journaled() {
+        let provider = MockProvider::scripted(Script::of([
+            Err(LlmError::Overloaded),
+            Ok(text_response("second time lucky")),
+        ]));
+        let (outcome, calls) = run(provider, Arc::new(EmptyToolbox), 1).await;
+
+        assert!(
+            matches!(outcome, RunOutcome::Completed { .. }),
+            "got {outcome:?}"
+        );
+        assert_eq!(calls, 2, "the transient failure should have been retried");
+    }
+
+    #[tokio::test]
+    async fn a_permanent_error_is_not_retried() {
+        // #61 item 21: every AgentError::Provider used to be retried identically,
+        // so a 401 or a 400 context-length error burned the whole retry budget.
+        let provider = MockProvider::failing(LlmError::ApiError {
+            status: 401,
+            message: "bad key".into(),
+        });
+        let (outcome, calls) = run(provider, Arc::new(EmptyToolbox), 3).await;
+
+        assert_eq!(calls, 1, "a permanent error must not be retried");
+        match outcome {
+            RunOutcome::Failed { recoverable, .. } => assert!(
+                !recoverable,
+                "a 401 must not be reported to the user as recoverable"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transient_error_after_journaled_progress_is_not_retried() {
+        // The crux of #61 item 21: the retry rebuilds the turn from the ORIGINAL
+        // history, which does not contain the events the failed attempt already
+        // persisted. Retrying here would leave a phantom turn in the durable
+        // transcript that the model never saw, replayed into every later turn.
+        let provider = MockProvider::scripted(Script::of([
+            Ok(tool_response("call-1", "echo")),
+            Err(LlmError::Overloaded),
+            Ok(text_response("must never be reached")),
+        ]));
+        let (outcome, calls) = run(provider, echo_toolbox(), 3).await;
+
+        assert_eq!(
+            calls, 2,
+            "once a tool result is journaled the turn must not restart from a \
+             history that omits it"
+        );
+        assert!(
+            matches!(outcome, RunOutcome::Failed { .. }),
+            "got {outcome:?}"
         );
     }
 }
