@@ -32,19 +32,11 @@ pub fn env_base_url() -> Option<String> {
 
 /// Whether a classified error is worth another attempt.
 ///
-/// Decided from the classified variant, never from the error's rendered text. The
-/// previous version grepped the message for `"429"` / `"529"` / `"Too Many
-/// Requests"`, which fires on any error text that happens to contain those digits
-/// — a model id, a request id, a token count, an echoed prompt fragment — and
-/// stops firing entirely if the vendor rewords a body (#61 item 6).
+/// Delegates to [`LlmError::is_transient`] so this layer and the agent actor's
+/// retry loop cannot drift apart — two owners of "is this worth retrying" is how
+/// a permanent 401 ends up retried seven times (#61 items 6 and 21).
 fn is_retryable(error: &LlmError) -> bool {
-    match error {
-        LlmError::RateLimit { .. } | LlmError::Overloaded => true,
-        // A dropped or malformed connection is worth one more attempt; the caller
-        // additionally gates on "nothing emitted yet".
-        LlmError::Network(_) => true,
-        LlmError::ApiError { .. } | LlmError::EventSink(_) => false,
-    }
+    error.is_transient()
 }
 
 /// Map Anthropic's structured error `type` onto a classified [`LlmError`].

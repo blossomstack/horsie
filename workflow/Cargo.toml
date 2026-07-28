@@ -23,6 +23,7 @@ uuid           = { workspace = true }
 eval           = { workspace = true }
 
 [dev-dependencies]
+horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
 horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
 horsie-mock-llm = { path = "../providers/mock-llm" }
 horsie-anthropic = { path = "../providers/anthropic" }
