@@ -415,6 +415,23 @@ impl AgentActor {
         PersistenceId::new("agent", session_id.to_string())
     }
 
+    /// Refuse to begin a turn while one is already in flight.
+    ///
+    /// `start_run` overwrites `self.running` with a fresh token, so a second start
+    /// orphans the first run's cancel token and leaves two background loops
+    /// persisting interleaved events into one journal — including two
+    /// `tool_result`s for the same `tool_call_id`, which makes the provider 400 on
+    /// every later turn (#61 item 3). Callers gate on session status, but that is a
+    /// different actor's state; this is the invariant enforced where it lives.
+    fn reject_if_running(&self, command: &str) -> Option<CommandEffect<AgentDomainEvent>> {
+        self.running.as_ref()?;
+        tracing::warn!(
+            command,
+            "refusing to start a turn while one is already running"
+        );
+        Some(CommandEffect::none())
+    }
+
     fn start_run(&mut self, input: AgentInput, ctx: &ActorContext<Self>, history: Vec<Message>) {
         let cancel = CancellationToken::new();
         self.running = Some(cancel.clone());
@@ -878,6 +895,9 @@ impl EventSourcedActor for AgentActor {
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
             AgentCommand::Run { input } => {
+                if let Some(reason) = self.reject_if_running("Run") {
+                    return reason;
+                }
                 let agent_input = AgentInput::user_message(new_message_id(), input);
                 // Persist the input message here (not via the streaming sink), so a
                 // turn-restarting provider retry that re-emits it can never
@@ -898,6 +918,9 @@ impl EventSourcedActor for AgentActor {
                 tool_call_id,
                 content,
             } => {
+                if let Some(reason) = self.reject_if_running("InjectToolResult") {
+                    return reason;
+                }
                 let agent_input = AgentInput::tool_result(tool_call_id.clone(), content, false);
                 let input_event = AgentDomainEvent::InputMessage {
                     message: agent_input.to_message(),

@@ -122,6 +122,15 @@ pub enum SessionDomainEvent {
         error: String,
     },
     TurnStarted,
+    /// A pending ask was answered and the parked turn resumed.
+    ///
+    /// Distinct from [`Self::TurnStarted`] because it must set `Running` while
+    /// *keeping* `pending_ask`: the status makes a concurrent message 409 instead
+    /// of injecting a second `tool_result` for the same call (#61 item 3), and the
+    /// retained `pending_ask` keeps the resume idempotent, so a crash between this
+    /// event and the agent's own durable input still resumes the ask rather than
+    /// starting a fresh turn. `TurnCompleted` clears it when the turn ends.
+    AskAnswered,
     TurnCompleted,
     TurnFailed {
         error: String,
@@ -684,10 +693,11 @@ impl SessionActor {
                 let _ = reply.send(Err(UserMessageError::TurnInFlight));
                 CommandEffect::none()
             }
-            // Answer a pending ask. Idempotent-resume: stay AwaitingInput until
-            // the agent's own outcome persists the next state (a crash between
-            // the inject and the agent's durable input would otherwise wedge).
-            Some(SessionStatus::AwaitingInput) if state.pending_ask.is_some() => {
+            // Answer a pending ask. Keyed on `pending_ask` rather than on the
+            // status so the resume stays idempotent: a crash mid-resume leaves
+            // the status reconciled to `Interrupted`, and this branch must still
+            // answer the ask rather than start a fresh turn.
+            _ if state.pending_ask.is_some() => {
                 let tool_call_id = state.pending_ask.clone().unwrap_or_default();
                 match self.wake(ctx, WakeMode::Attach).await {
                     Ok(()) => {
@@ -700,7 +710,12 @@ impl SessionActor {
                                 .await;
                         }
                         let _ = reply.send(Ok(()));
-                        CommandEffect::none()
+                        // The resumed turn is a running turn. Without this the
+                        // session stayed `AwaitingInput` for its whole duration,
+                        // the composer stayed enabled, and a second answer started
+                        // a concurrent run on the same journal (#61 item 3).
+                        self.report(SessionStatus::Running).await;
+                        CommandEffect::persist(vec![SessionDomainEvent::AskAnswered])
                     }
                     Err(e) => {
                         let _ = reply.send(Err(UserMessageError::RecoveryFailed(e.clone())));
@@ -1040,6 +1055,11 @@ impl EventSourcedActor for SessionActor {
             SessionDomainEvent::TurnStarted => {
                 state.status = Some(SessionStatus::Running);
                 state.pending_ask = None;
+                state.pending_question = None;
+            }
+            SessionDomainEvent::AskAnswered => {
+                state.status = Some(SessionStatus::Running);
+                // `pending_ask` deliberately survives; see the variant's docs.
                 state.pending_question = None;
             }
             SessionDomainEvent::TurnCompleted => {

@@ -1211,3 +1211,74 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
     .await
     .expect("test timed out");
 }
+
+/// #61 item 3: answering an `ask_user` question leaves the session in
+/// `AwaitingInput`, so a follow-up message starts a *second concurrent run on the
+/// same agent and journal*.
+///
+/// `on_user_message`'s `AwaitingInput` branch injects the answer and returns
+/// `CommandEffect::none()` — no `report(Running)`, no persisted event — so the
+/// status stays `AwaitingInput` for the whole resumed turn. A second message
+/// re-enters the same branch and issues a second `InjectToolResult`;
+/// `AgentActor` has no concurrency guard, and `start_run` overwrites
+/// `self.running` with a fresh token, orphaning the first run's cancel token.
+/// Two background loops then persist interleaved events into one `agent/<id>`
+/// journal, both injecting a `tool_result` for the *same* `tool_call_id` — the
+/// duplicate-tool-result shape that makes the provider 400 on every later turn.
+///
+/// #62 added a client-side latch, so the browser cannot trigger this; the server
+/// still accepts it, which any non-browser client can do.
+#[tokio::test]
+async fn answering_an_ask_marks_the_session_running_and_rejects_a_concurrent_message() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mock = MockLlmServer::builder().build().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let vendor = Arc::new(MockVendor::new());
+        let server = start_server(tmp.path(), vendor, &mock.url()).await;
+        let client = reqwest::Client::new();
+        let id = create_session(&client, &server.addr).await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+
+        // Turn 1: the model parks the turn on a question.
+        mock.queue_tool_call(
+            "ask_user",
+            serde_json::json!({ "question": "which environment?" }),
+        );
+        send_message(&client, &server.addr, &id, "deploy it").await;
+        wait_status(&client, &server.addr, &id, "AwaitingInput").await;
+
+        // The answer resumes the turn. Hold the model so the resumed run is still
+        // in flight when the follow-up arrives — the exact window the bug needs.
+        let gate = mock.blocking_response("resumed and done");
+        assert_eq!(
+            send_message(&client, &server.addr, &id, "production")
+                .await
+                .as_u16(),
+            202
+        );
+        gate.wait_until_received().await;
+
+        // With the resumed run live, the session must present as Running...
+        assert_eq!(
+            get_status(&client, &server.addr, &id).await.as_deref(),
+            Some("Running"),
+            "a resumed turn is a running turn; leaving it AwaitingInput is what \
+             lets a second answer start a concurrent run on one journal"
+        );
+        // ...and a follow-up must be refused rather than starting a second run.
+        assert_eq!(
+            send_message(&client, &server.addr, &id, "actually, staging")
+                .await
+                .as_u16(),
+            409,
+            "a message sent while a resumed turn is in flight must 409, not inject \
+             a second tool_result for the same tool_call_id"
+        );
+
+        gate.release();
+        wait_status(&client, &server.addr, &id, "Idle").await;
+        server.shutdown().await;
+    })
+    .await
+    .expect("test timed out");
+}
