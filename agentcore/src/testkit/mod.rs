@@ -309,6 +309,7 @@ mod tests {
                     tools: vec![],
                     tool_choice: ToolChoice::Auto,
                     max_tokens: None,
+                    thinking_effort: None,
                 },
                 "msg-1",
                 &sink as &dyn EventSink,

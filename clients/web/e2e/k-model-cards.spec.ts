@@ -68,11 +68,13 @@ test.describe("model cards", () => {
     await suggestion.dispatchEvent("mousedown");
 
     await expect(idInput).toHaveValue("claude-sonnet-4-6");
+    // Corrected in migration 0012: Sonnet 4.6 is 1M context / 128K output, not
+    // the 200K / 16K the original bundled catalog shipped.
     await expect(
       page.getByLabel("Context window (optional)").last(),
-    ).toHaveValue("200000");
+    ).toHaveValue("1000000");
     await expect(page.getByLabel("Max tokens (optional)").last()).toHaveValue(
-      "16384",
+      "128000",
     );
   });
 });

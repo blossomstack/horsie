@@ -16,4 +16,8 @@ export interface ProviderView {
    * True when an inline `api_key` is stored.
    */
   hasInlineKey: boolean;
+  /**
+   * Retain thinking-block signatures from this provider. Required for
+   */
+  keepThinkingSignature: boolean;
 }

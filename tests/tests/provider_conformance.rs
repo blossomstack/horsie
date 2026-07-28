@@ -412,6 +412,7 @@ fn request_for(messages: &[horsie_agentcore::Message]) -> horsie_agentcore::Comp
         tools: vec![],
         tool_choice: horsie_agentcore::ToolChoice::Auto,
         max_tokens: None,
+        thinking_effort: None,
     }
 }
 
