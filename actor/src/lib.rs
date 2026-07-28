@@ -15,6 +15,8 @@ mod file_journal;
 mod journal;
 mod persistence_id;
 mod runtime;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testkit;
 
 pub use actor::{CommandEffect, EventSourcedActor};
 pub use error::{JournalError, TellError};

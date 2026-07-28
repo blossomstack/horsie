@@ -8,6 +8,9 @@ edition = "2024"
 
 [features]
 file-journal = ["dep:base64"]
+# Exposes `testkit` (FaultyJournal, corrupt-journal fixture) to other crates.
+# actor's own unit tests get it via `cfg(test)` without the feature.
+test-util = []
 
 [dependencies]
 async-trait  = { workspace = true }

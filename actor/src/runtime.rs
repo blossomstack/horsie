@@ -370,67 +370,14 @@ mod tests {
         assert_eq!(current_value(&actor).await, 5);
     }
 
-    /// A journal whose `persist` always fails, to prove `PersistAndAck` surfaces the
-    /// durable-write failure to the asker (rather than acking success on a write
-    /// that never landed). Other operations delegate to an inner in-memory journal.
-    struct FailingPersistJournal {
-        inner: InMemoryJournal,
-    }
-
-    #[async_trait]
-    impl Journal for FailingPersistJournal {
-        async fn persist(
-            &self,
-            _pid: &PersistenceId,
-            _events: &[Vec<u8>],
-        ) -> crate::journal::JournalResult<()> {
-            Err(JournalError::Backend("disk full".into()))
-        }
-        async fn replay(
-            &self,
-            pid: &PersistenceId,
-            after_seq: u64,
-        ) -> futures_util::stream::BoxStream<'_, crate::journal::JournalResult<Vec<u8>>> {
-            self.inner.replay(pid, after_seq).await
-        }
-        async fn save_snapshot(
-            &self,
-            pid: &PersistenceId,
-            state: Vec<u8>,
-            seq_nr: u64,
-        ) -> crate::journal::JournalResult<()> {
-            self.inner.save_snapshot(pid, state, seq_nr).await
-        }
-        async fn latest_snapshot(
-            &self,
-            pid: &PersistenceId,
-        ) -> crate::journal::JournalResult<Option<(Vec<u8>, u64)>> {
-            self.inner.latest_snapshot(pid).await
-        }
-        async fn delete_events_before(
-            &self,
-            pid: &PersistenceId,
-            seq_nr: u64,
-        ) -> crate::journal::JournalResult<()> {
-            self.inner.delete_events_before(pid, seq_nr).await
-        }
-        async fn copy_snapshot(
-            &self,
-            from: &PersistenceId,
-            to: &PersistenceId,
-        ) -> crate::journal::JournalResult<()> {
-            self.inner.copy_snapshot(from, to).await
-        }
-        async fn clear(&self, pid: &PersistenceId) -> crate::journal::JournalResult<()> {
-            self.inner.clear(pid).await
-        }
-    }
-
     #[tokio::test]
     async fn ask_with_persist_and_ack_reports_journal_failure() {
-        let journal = Arc::new(FailingPersistJournal {
-            inner: InMemoryJournal::new(),
-        });
+        // A journal whose `persist` always fails, to prove `PersistAndAck` surfaces
+        // the durable-write failure to the asker (rather than acking success on a
+        // write that never landed).
+        let journal = Arc::new(
+            crate::testkit::FaultyJournal::wrapping(InMemoryJournal::new()).fail_persist_after(0),
+        );
         let actor = spawn_root(
             Counter {
                 id: "fail".into(),

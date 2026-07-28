@@ -20,6 +20,7 @@ use horsie_models::runtime::{
     RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse,
     SessionStartResponse, ToolCallResponse, ToolOutput, ToolResult,
 };
+use horsie_runtime_client::{BlockHandle, MockTransport, TransportProbe};
 use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
 use horsie_server::sessions::spec::ServerDeps;
@@ -1104,4 +1105,110 @@ async fn shared_local_vendor_resolves_dialed_in_daemon_and_recovers_after_discon
 
     daemon2.abort();
     server.shutdown().await;
+}
+
+/// #61 item 2: a runtime that disconnects mid-run is never released, so every
+/// later turn fails identically.
+///
+/// `ensure_runtime` short-circuits on `if self.runtime.is_some()`
+/// (`server/src/sessions/session_actor.rs:327-330`) and `self.runtime` is cleared
+/// only in `halt()` (`:783`). There is no liveness check anywhere —
+/// `VelosRuntimeHandle::health_check` exists and the server never calls it. So the
+/// session keeps reusing a dead transport until a Stop or a server restart, and
+/// the comment claiming "a failed turn never bricks the session" is false.
+#[tokio::test]
+async fn a_disconnected_runtime_is_released_so_the_next_turn_recovers() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mock = MockLlmServer::builder().build().await;
+        let tmp = tempfile::tempdir().unwrap();
+        // Every runtime reports Disconnected on its first tool call.
+        let vendor = Arc::new(MockVendor::new().disconnect_runtime_after(0));
+        let server = start_server(tmp.path(), vendor.clone(), &mock.url()).await;
+        let client = reqwest::Client::new();
+        let id = create_session(&client, &server.addr).await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+
+        // Turn 1: the model calls a tool; the runtime is dead.
+        mock.queue_tool_call("bash", serde_json::json!({ "command": "echo hi" }));
+        mock.queue_response("done anyway");
+        send_message(&client, &server.addr, &id, "first").await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+
+        // Turn 2: a healthy runtime should be obtained. The invariant under test is
+        // that the session did not pin the dead one — asserted via vendor signals,
+        // which record every create/attach.
+        let before = vendor.signals().len();
+        mock.queue_response("second turn ok");
+        send_message(&client, &server.addr, &id, "second").await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+
+        let after = vendor.signals();
+        assert!(
+            after.len() > before,
+            "a dead runtime must be released and re-acquired; vendor saw no new \
+             create/attach between turns: {after:?}"
+        );
+
+        server.shutdown().await;
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// #61 item 23: tool-call cancellation is never propagated to the sandbox.
+///
+/// On cancel, `Agent::run` drops the in-flight tool futures
+/// (`agentcore/src/agent.rs:574-578`), which abandons them locally only.
+/// `RuntimeClient::cancel(call_id)` exists, the transport declares it, and the
+/// executor WS protocol implements `CancelToolCall` — but a repo-wide grep finds
+/// no caller outside the executor's own inbound handler. Stopping a turn
+/// mid-`bash` leaves the command running to completion inside the sandbox,
+/// holding resources, with its output discarded.
+#[tokio::test]
+#[ignore = "red: #61 item 23 — Stop never reaches the sandbox; cancels() stays empty"]
+async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mock = MockLlmServer::builder().build().await;
+        let tmp = tempfile::tempdir().unwrap();
+
+        // One gate and one probe shared by every transport the vendor builds: the
+        // tool call blocks so Stop lands mid-flight, and the probe lets the test
+        // observe a transport the server constructed.
+        let gate = BlockHandle::new();
+        let probe = TransportProbe::new();
+        let vendor = Arc::new(MockVendor::new().with_transport({
+            let gate = gate.clone();
+            let probe = probe.clone();
+            move |_id| MockTransport::gated_invoke(&gate).observed_by(&probe)
+        }));
+        let server = start_server(tmp.path(), vendor, &mock.url()).await;
+        let client = reqwest::Client::new();
+        let id = create_session(&client, &server.addr).await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+
+        mock.queue_tool_call("bash", serde_json::json!({ "command": "sleep 999" }));
+        send_message(&client, &server.addr, &id, "run something slow").await;
+        wait_status(&client, &server.addr, &id, "Running").await;
+
+        let res = client
+            .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 200);
+        wait_status(&client, &server.addr, &id, "Stopped").await;
+        gate.release();
+
+        assert!(
+            !probe.cancels().is_empty(),
+            "Stop must propagate a cancel to the runtime; the sandbox never heard \
+             about it (invocations seen: {})",
+            probe.invocations().len()
+        );
+
+        server.shutdown().await;
+    })
+    .await
+    .expect("test timed out");
 }
