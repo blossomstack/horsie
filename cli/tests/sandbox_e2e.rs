@@ -58,10 +58,14 @@ enum SandboxProbe {
 }
 
 fn classify_probe(exit_code: Option<i32>) -> SandboxProbe {
+    // The `probe` subcommand's contract: 0 = sandbox applied, 3 = unsupported here,
+    // 2 = the binary doesn't understand the probe CLI (stale build). Anything else
+    // (signal, unexpected failure) can't prove confinement — skip, don't fail CI.
     match exit_code {
+        Some(0) => SandboxProbe::Supported,
         Some(3) => SandboxProbe::Unsupported,
         Some(2) => SandboxProbe::Incompatible,
-        _ => SandboxProbe::Supported,
+        _ => SandboxProbe::Unsupported,
     }
 }
 
@@ -72,10 +76,10 @@ fn probe_sandbox(bin: &Path) -> SandboxProbe {
     let tmp = TempDir::new().unwrap();
     let caps = tmp.path().join("caps.json");
     std::fs::write(&caps, serde_json::to_vec(&spec).unwrap()).unwrap();
+    // The `probe` subcommand applies the sandbox and exits — no endpoint, no
+    // connect, so this returns in milliseconds instead of burning the runtime's
+    // ~13-minute connect-retry budget against an unroutable endpoint.
     match std::process::Command::new(bin)
-        .arg("--endpoint")
-        .arg("ws://127.0.0.1:1")
-        .arg("--runtime-id")
         .arg("probe")
         .arg("--workspace")
         .arg(format!("probe={}", tmp.path().display()))

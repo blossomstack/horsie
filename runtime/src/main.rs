@@ -8,7 +8,7 @@
     )
 )]
 
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
     RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeProvisionFailed, RuntimeProvisioning,
@@ -29,15 +29,24 @@ const CONNECT_RETRIES: usize = 30;
 const CONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
 const CONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 
+// Run mode requires `--endpoint`, `--runtime-id`, and at least one `--workspace`;
+// the `probe` subcommand must not inherit them. clap 4 can't express "required
+// unless a subcommand is present" (`subcommand_negates_reqs` doesn't cover an
+// optional subcommand), so these stay optional here and main() enforces them in
+// run mode with the same exit-2 usage-error contract.
 #[derive(Parser)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
     /// `ws://host:port` (TCP/WebSocket) or `unix:/path/to.sock` (unix socket).
+    /// Required in run mode.
     #[arg(long)]
-    endpoint: String,
+    endpoint: Option<String>,
+    /// Required in run mode.
     #[arg(long)]
-    runtime_id: String,
-    /// Repeatable `name=path` workspace root. At least one is required.
-    #[arg(long = "workspace", required = true, value_parser = parse_workspace_arg)]
+    runtime_id: Option<String>,
+    /// Repeatable `name=path` workspace root. At least one is required in run mode.
+    #[arg(long = "workspace", value_parser = parse_workspace_arg)]
     workspaces: Vec<horsie_models::Workspace>,
     /// Capability file confining tool execution with the nono sandbox before
     /// connecting (fail-closed). Its presence enables the sandbox; absent → no
@@ -52,6 +61,22 @@ struct Cli {
     /// node bin dir.
     #[arg(long = "hook-path")]
     hook_path: Vec<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Apply the sandbox from --sandbox-caps, then exit — no endpoint, no connect,
+    /// no retry. Exit 0 = sandbox applied; 3 = unsupported on this platform/build.
+    /// Lets callers probe confinement support in milliseconds instead of burning
+    /// the ~13-minute connect-retry budget against an unroutable endpoint.
+    Probe {
+        /// Capability file fully defining the sandbox to apply.
+        #[arg(long = "sandbox-caps", required = true)]
+        sandbox_caps: PathBuf,
+        /// Repeatable `name=path` workspace root the sandbox must open up.
+        #[arg(long = "workspace", required = true, value_parser = parse_workspace_arg)]
+        workspaces: Vec<horsie_models::Workspace>,
+    },
 }
 
 fn parse_workspace_arg(s: &str) -> Result<horsie_models::Workspace, String> {
@@ -76,7 +101,38 @@ fn parse_endpoint(s: &str) -> Result<Endpoint, String> {
 fn main() {
     let cli = Cli::parse();
 
-    let endpoint = match parse_endpoint(&cli.endpoint) {
+    // Probe mode: apply the sandbox and exit — before endpoint parsing, the tokio
+    // runtime, provisioning, and any connect attempt.
+    if let Some(Commands::Probe {
+        sandbox_caps,
+        workspaces,
+    }) = &cli.command
+    {
+        let dirs: Vec<PathBuf> = workspaces.iter().map(|w| w.path.clone()).collect();
+        apply_sandbox_or_exit(&dirs, None, sandbox_caps);
+        std::process::exit(0);
+    }
+
+    // Run mode from here on — enforce the required args clap can't (see above),
+    // keeping the exit-2 usage-error contract for a stale/mistaken invocation.
+    let (Some(endpoint), Some(runtime_id)) = (cli.endpoint.clone(), cli.runtime_id.clone()) else {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "run mode requires --endpoint, --runtime-id and at least one --workspace",
+            )
+            .exit()
+    };
+    if cli.workspaces.is_empty() {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "run mode requires --endpoint, --runtime-id and at least one --workspace",
+            )
+            .exit();
+    }
+
+    let endpoint = match parse_endpoint(&endpoint) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("{e}");
@@ -84,34 +140,13 @@ fn main() {
         }
     };
 
-    // Apply the sandbox BEFORE starting the async runtime. Landlock's
-    // `restrict_self` confines only the calling thread plus threads and child
-    // processes created AFTER it — so it must run on this single startup thread,
-    // before tokio spawns its worker/blocking pool, for every worker (and any
-    // subprocess a tool later forks) to inherit the confinement. Applying it
-    // inside `#[tokio::main]` left workers spawned before `apply` unconfined, so
-    // a tool forked onto one of them could escape the workdir non-deterministically.
     if let Some(caps_file) = &cli.sandbox_caps {
-        #[cfg(feature = "sandbox")]
-        {
-            let socket = match &endpoint {
-                Endpoint::Unix(p) => Some(p.as_path()),
-                Endpoint::Ws(_) => None,
-            };
-            let dirs: Vec<PathBuf> = cli.workspaces.iter().map(|w| w.path.clone()).collect();
-            if let Err(e) = horsie_runtime::sandbox::apply(&dirs, socket, caps_file) {
-                eprintln!("sandbox apply failed: {e}");
-                std::process::exit(3);
-            }
-        }
-        #[cfg(not(feature = "sandbox"))]
-        {
-            let _ = caps_file;
-            eprintln!(
-                "--sandbox-caps given but this binary was built without the `sandbox` feature"
-            );
-            std::process::exit(3);
-        }
+        let socket = match &endpoint {
+            Endpoint::Unix(p) => Some(p.as_path()),
+            Endpoint::Ws(_) => None,
+        };
+        let dirs: Vec<PathBuf> = cli.workspaces.iter().map(|w| w.path.clone()).collect();
+        apply_sandbox_or_exit(&dirs, socket, caps_file);
     }
 
     // Build the multi-threaded runtime only after confinement is in place, so
@@ -126,11 +161,40 @@ fn main() {
             std::process::exit(1);
         }
     };
-    runtime.block_on(run(cli, endpoint));
+    runtime.block_on(run(cli, runtime_id, endpoint));
+}
+
+/// Apply the sandbox from `caps_file`, exiting 3 on any failure (fail-closed).
+///
+/// Must run BEFORE starting the async runtime. Landlock's `restrict_self`
+/// confines only the calling thread plus threads and child processes created
+/// AFTER it — so it must run on this single startup thread, before tokio spawns
+/// its worker/blocking pool, for every worker (and any subprocess a tool later
+/// forks) to inherit the confinement. Applying it inside `#[tokio::main]` left
+/// workers spawned before `apply` unconfined, so a tool forked onto one of them
+/// could escape the workdir non-deterministically.
+fn apply_sandbox_or_exit(
+    dirs: &[PathBuf],
+    socket: Option<&std::path::Path>,
+    caps_file: &std::path::Path,
+) {
+    #[cfg(feature = "sandbox")]
+    {
+        if let Err(e) = horsie_runtime::sandbox::apply(dirs, socket, caps_file) {
+            eprintln!("sandbox apply failed: {e}");
+            std::process::exit(3);
+        }
+    }
+    #[cfg(not(feature = "sandbox"))]
+    {
+        let _ = (dirs, socket, caps_file);
+        eprintln!("--sandbox-caps given but this binary was built without the `sandbox` feature");
+        std::process::exit(3);
+    }
 }
 
 /// The async body, run inside a runtime built after the sandbox was applied.
-async fn run(cli: Cli, endpoint: Endpoint) {
+async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
     // In-sandbox hackamore self-provisioning — under the same confinement as the
     // job and before the message loop. Fail closed: a daemon that injected
     // hackamore env expects a provisioned runtime, so any failure fails the job.
@@ -180,7 +244,7 @@ async fn run(cli: Cli, endpoint: Endpoint) {
                     std::process::exit(1);
                 }
             };
-            run_loop(ws, registry, cli.runtime_id, steps).await;
+            run_loop(ws, registry, runtime_id, steps).await;
         }
         Endpoint::Unix(path) => {
             let ws = match retry(
@@ -205,7 +269,7 @@ async fn run(cli: Cli, endpoint: Endpoint) {
                     std::process::exit(1);
                 }
             };
-            run_loop(ws, registry, cli.runtime_id, steps).await;
+            run_loop(ws, registry, runtime_id, steps).await;
         }
     }
 }
