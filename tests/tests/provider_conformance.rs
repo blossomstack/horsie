@@ -424,7 +424,6 @@ fn request_for(messages: &[horsie_agentcore::Message]) -> horsie_agentcore::Comp
 /// These two call the provider directly rather than through `Agent`, because the
 /// assertion is about `LlmError`'s variant, which `Agent` wraps.
 #[tokio::test]
-#[ignore = "red: #61 item 6 — Anthropic classifies 400 as a network error"]
 async fn anthropic_reports_a_400_as_an_api_error_with_its_status() {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         let server = spawn_mock().await;

@@ -30,41 +30,100 @@ pub fn env_base_url() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn is_retryable(msg: &str) -> bool {
-    msg.contains("overloaded_error")
-        || msg.contains("overloaded")
-        || msg.contains("rate_limit_error")
-        || msg.contains("529")
-        || msg.contains("Too Many Requests")
+/// Whether a classified error is worth another attempt.
+///
+/// Decided from the classified variant, never from the error's rendered text. The
+/// previous version grepped the message for `"429"` / `"529"` / `"Too Many
+/// Requests"`, which fires on any error text that happens to contain those digits
+/// — a model id, a request id, a token count, an echoed prompt fragment — and
+/// stops firing entirely if the vendor rewords a body (#61 item 6).
+fn is_retryable(error: &LlmError) -> bool {
+    match error {
+        LlmError::RateLimit { .. } | LlmError::Overloaded => true,
+        // A dropped or malformed connection is worth one more attempt; the caller
+        // additionally gates on "nothing emitted yet".
+        LlmError::Network(_) => true,
+        LlmError::ApiError { .. } | LlmError::EventSink(_) => false,
+    }
+}
+
+/// Map Anthropic's structured error `type` onto a classified [`LlmError`].
+///
+/// These identifiers come from Anthropic's published error schema, so matching
+/// them is exact — unlike grepping a rendered message for status digits. Each
+/// maps to the HTTP status Anthropic documents for it, so the status survives
+/// into `LlmError::ApiError` instead of being discarded.
+fn classify_error_type(error_type: &str, message: &str) -> LlmError {
+    let status = match error_type {
+        "overloaded_error" => return LlmError::Overloaded,
+        "rate_limit_error" => return LlmError::RateLimit { retry_after: None },
+        // Anthropic's own 500. Transient, so it classifies as overloaded rather
+        // than as a permanent API error.
+        "api_error" => return LlmError::Overloaded,
+        "invalid_request_error" => 400,
+        "authentication_error" => 401,
+        "permission_error" => 403,
+        "not_found_error" => 404,
+        "request_too_large" => 413,
+        // An unrecognised type is still a real API response, not a network fault:
+        // 502 says "the upstream answered with something we cannot classify".
+        _ => 502,
+    };
+    LlmError::ApiError {
+        status,
+        message: format!("{error_type}: {message}"),
+    }
+}
+
+/// Best-effort classification for variants that carry only a rendered string.
+///
+/// Looks for a known Anthropic error *type identifier* — a schema field name, not
+/// a status digit — and falls back to an unclassified API error.
+fn classify_opaque(message: &str) -> LlmError {
+    const KNOWN: &[&str] = &[
+        "overloaded_error",
+        "rate_limit_error",
+        "api_error",
+        "invalid_request_error",
+        "authentication_error",
+        "permission_error",
+        "not_found_error",
+        "request_too_large",
+    ];
+    for token in KNOWN {
+        if message.contains(token) {
+            return classify_error_type(token, message);
+        }
+    }
+    LlmError::ApiError {
+        status: 502,
+        message: message.to_string(),
+    }
 }
 
 fn to_llm_error(e: async_llm::errors::AnthropicError) -> LlmError {
-    let msg = e.to_string();
-    if msg.contains("overloaded_error") || msg.contains("overloaded") || msg.contains("529") {
-        return LlmError::Overloaded;
-    }
-    if msg.contains("rate_limit_error") || msg.contains("Too Many Requests") || msg.contains("429")
-    {
-        return LlmError::RateLimit { retry_after: None };
-    }
     use async_llm::errors::AnthropicError;
     match e {
+        // Structured: the wire gave us the error type as a field, so no guessing.
+        AnthropicError::StreamError(se) => classify_error_type(&se.error_type, &se.message),
         AnthropicError::NetworkError(re) => LlmError::Network(Box::new(re)),
         AnthropicError::Unauthorized => LlmError::ApiError {
             status: 401,
             message: "Unauthorized".into(),
         },
-        AnthropicError::BadRequest(m)
-        | AnthropicError::ApiError(m)
-        | AnthropicError::Unknown(m) => LlmError::Network(Box::new(std::io::Error::other(m))),
+        // Upstream names this "malformed request" — it is the 400, and reporting it
+        // as a *network* error told the user a permanent failure was transient.
+        AnthropicError::BadRequest(m) => LlmError::ApiError {
+            status: 400,
+            message: m,
+        },
+        AnthropicError::ApiError(m) | AnthropicError::Unknown(m) => classify_opaque(&m),
+        // Genuinely transport/parse level.
         AnthropicError::DeserializationError(de) => {
             LlmError::Network(Box::new(std::io::Error::other(de.to_string())))
         }
         AnthropicError::UnexpectedError => {
             LlmError::Network(Box::new(std::io::Error::other("unexpected error")))
-        }
-        AnthropicError::StreamError(se) => {
-            LlmError::Network(Box::new(std::io::Error::other(se.to_string())))
         }
     }
 }
@@ -500,16 +559,17 @@ impl LlmProvider for AnthropicProvider {
                 let event = match event {
                     Ok(e) => e,
                     Err(e) => {
-                        let msg = e.to_string();
-                        if is_retryable(&msg)
+                        // Classify once, then decide retryability from the result.
+                        let classified = to_llm_error(e);
+                        if is_retryable(&classified)
                             && text_blocks.is_empty()
                             && tool_blocks.is_empty()
                             && thinking_blocks.is_empty()
                         {
-                            last_error = Some(to_llm_error(e));
+                            last_error = Some(classified);
                             continue 'retry;
                         }
-                        return Err(to_llm_error(e));
+                        return Err(classified);
                     }
                 };
 
@@ -719,6 +779,81 @@ impl LlmProvider for AnthropicProvider {
     clippy::wildcard_enum_match_arm
 )]
 mod tests {
+
+    use async_llm::errors::{AnthropicError, StreamError};
+
+    #[test]
+    fn bad_request_keeps_its_status_instead_of_becoming_a_network_error() {
+        // #61 item 6: this used to be `LlmError::Network`, so a permanent 400 —
+        // context-length exceeded, a malformed tool schema, an unanswered
+        // tool_use — was reported to the user as a transient network failure.
+        let e = to_llm_error(AnthropicError::BadRequest("context too long".into()));
+        assert!(matches!(e, LlmError::ApiError { status: 400, .. }), "{e:?}");
+        assert!(!is_retryable(&e), "a 400 must not be retried");
+    }
+
+    #[test]
+    fn a_permission_error_classifies_as_403() {
+        let e = classify_error_type("permission_error", "no access to this model");
+        assert!(matches!(e, LlmError::ApiError { status: 403, .. }), "{e:?}");
+        assert!(!is_retryable(&e));
+    }
+
+    #[test]
+    fn structured_stream_errors_classify_from_their_type_field() {
+        let overloaded = to_llm_error(AnthropicError::StreamError(StreamError {
+            error_type: "overloaded_error".into(),
+            message: "try later".into(),
+        }));
+        assert!(matches!(overloaded, LlmError::Overloaded));
+        assert!(is_retryable(&overloaded));
+
+        let rate = to_llm_error(AnthropicError::StreamError(StreamError {
+            error_type: "rate_limit_error".into(),
+            message: "slow down".into(),
+        }));
+        assert!(matches!(rate, LlmError::RateLimit { .. }));
+        assert!(is_retryable(&rate));
+
+        let bad = to_llm_error(AnthropicError::StreamError(StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "context too long".into(),
+        }));
+        assert!(
+            matches!(bad, LlmError::ApiError { status: 400, .. }),
+            "{bad:?}"
+        );
+        assert!(!is_retryable(&bad));
+    }
+
+    #[test]
+    fn digits_in_an_error_message_no_longer_fake_a_rate_limit() {
+        // The old classifier grepped the rendered message for "429" / "529", so a
+        // request id, model name or token count containing those digits was
+        // misread as a retryable rate limit. Exactly the string-matching failure
+        // #61 item 6 describes.
+        let e = to_llm_error(AnthropicError::StreamError(StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "request req_4291 exceeded 529 tokens".into(),
+        }));
+        assert!(
+            matches!(e, LlmError::ApiError { status: 400, .. }),
+            "digits in the body must not classify as rate limit / overloaded: {e:?}"
+        );
+        assert!(!is_retryable(&e));
+    }
+
+    #[test]
+    fn an_unknown_error_type_is_an_api_error_not_a_network_error() {
+        let e = classify_error_type("some_new_error", "who knows");
+        assert!(matches!(e, LlmError::ApiError { status: 502, .. }), "{e:?}");
+    }
+
+    #[test]
+    fn opaque_errors_still_recover_a_known_type_token() {
+        let e = classify_opaque(r#"{"type":"overloaded_error","message":"busy"}"#);
+        assert!(matches!(e, LlmError::Overloaded), "{e:?}");
+    }
     use super::*;
 
     #[test]
