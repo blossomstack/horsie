@@ -52,6 +52,19 @@ fn parse_tool_input(raw: &str, tool: &str) -> Result<serde_json::Value, LlmError
     })
 }
 
+/// An HTTP client that cannot wait forever.
+///
+/// Every other HTTP client in the repo sets a timeout — `github/api.rs` (15s),
+/// `velos/client.rs` (10s), `mcp/oauth.rs` (15s) — so the absence here was an
+/// oversight rather than a decision (#61 item 5).
+fn build_http(read_timeout_secs: u64) -> Result<reqwest::Client, LlmError> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .read_timeout(Duration::from_secs(read_timeout_secs))
+        .build()
+        .map_err(|e| LlmError::Network(Box::new(e)))
+}
+
 fn io_err(msg: impl std::fmt::Display) -> LlmError {
     LlmError::Network(Box::new(std::io::Error::other(msg.to_string())))
 }
@@ -78,6 +91,15 @@ fn is_retryable(e: &LlmError) -> bool {
     matches!(e, LlmError::RateLimit { .. } | LlmError::Overloaded)
 }
 
+/// Bounds TCP + TLS setup. A peer that never completes a handshake is dead, not slow.
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Bounds *idle* time between reads, not the total call.
+///
+/// A total `.timeout()` would kill legitimately long generations; this resets on
+/// every chunk, so a slow-but-alive stream runs indefinitely while a stalled one
+/// is bounded (#61 item 5).
+const DEFAULT_READ_TIMEOUT_SECS: u64 = 120;
+
 pub struct OpenAiProvider {
     http: reqwest::Client,
     model: String,
@@ -87,20 +109,20 @@ pub struct OpenAiProvider {
     /// Wire encoding for this model's thinking control.
     thinking_dialect: ThinkingDialect,
     retry_base_secs: u64,
+    read_timeout_secs: u64,
 }
 
 impl OpenAiProvider {
     fn build(api_key: Option<Secret>) -> Result<Self, LlmError> {
         Ok(Self {
-            http: reqwest::Client::builder()
-                .build()
-                .map_err(|e| LlmError::Network(Box::new(e)))?,
+            http: build_http(DEFAULT_READ_TIMEOUT_SECS)?,
             model: DEFAULT_MODEL.to_string(),
             api_key,
             base_url: env_base_url().unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             max_tokens: None,
             thinking_dialect: ThinkingDialect::NoControl,
             retry_base_secs: BACKOFF_BASE_SECS,
+            read_timeout_secs: DEFAULT_READ_TIMEOUT_SECS,
         })
     }
 
@@ -139,6 +161,21 @@ impl OpenAiProvider {
     #[must_use]
     pub fn with_retry_delay_secs(mut self, secs: u64) -> Self {
         self.retry_base_secs = secs;
+        self
+    }
+
+    /// Bound how long the client waits on a silent peer.
+    ///
+    /// Idle time between reads, not total call duration — a long generation that
+    /// keeps streaming is unaffected. Configurable because "how long may a model
+    /// think before its first token" is a per-deployment answer, and because
+    /// tests need a deadline they can actually reach.
+    #[must_use]
+    pub fn with_read_timeout_secs(mut self, secs: u64) -> Self {
+        self.read_timeout_secs = secs;
+        if let Ok(http) = build_http(secs) {
+            self.http = http;
+        }
         self
     }
 

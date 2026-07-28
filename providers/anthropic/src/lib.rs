@@ -151,6 +151,15 @@ fn io_err(msg: impl std::fmt::Display) -> LlmError {
     LlmError::Network(Box::new(std::io::Error::other(msg.to_string())))
 }
 
+/// Bounds TCP + TLS setup. A peer that never completes a handshake is dead, not slow.
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Bounds *idle* time between reads, not the total call.
+///
+/// A total `.timeout()` would kill legitimately long generations; this resets on
+/// every chunk, so a slow-but-alive stream runs indefinitely while a stalled one
+/// is bounded (#61 item 5).
+const DEFAULT_READ_TIMEOUT_SECS: u64 = 120;
+
 pub struct AnthropicProvider {
     client: Client,
     model: String,
@@ -164,6 +173,7 @@ pub struct AnthropicProvider {
     keep_thinking_signature: bool,
     max_tokens: Option<u32>,
     retry_base_secs: u64,
+    read_timeout_secs: u64,
 }
 
 impl AnthropicProvider {
@@ -171,8 +181,14 @@ impl AnthropicProvider {
         api_key: Option<&str>,
         base_url: Option<&str>,
         session_id: Option<&str>,
+        read_timeout_secs: u64,
     ) -> Result<Client, LlmError> {
-        let mut http = reqwest::Client::builder();
+        // Every other HTTP client in the repo sets a timeout — github/api.rs
+        // (15s), velos/client.rs (10s), mcp/oauth.rs (15s) — so the absence here
+        // was an oversight rather than a decision (#61 item 5).
+        let mut http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .read_timeout(Duration::from_secs(read_timeout_secs));
         if let Some(sid) = session_id {
             let mut headers = reqwest::header::HeaderMap::new();
             if let Ok(val) = reqwest::header::HeaderValue::from_str(sid) {
@@ -201,7 +217,8 @@ impl AnthropicProvider {
 
     pub fn new() -> Result<Self, LlmError> {
         let base_url = env_base_url();
-        let client = Self::build_client(None, base_url.as_deref(), None)?;
+        let client =
+            Self::build_client(None, base_url.as_deref(), None, DEFAULT_READ_TIMEOUT_SECS)?;
         Ok(Self {
             client,
             model: DEFAULT_MODEL.into(),
@@ -213,13 +230,19 @@ impl AnthropicProvider {
             keep_thinking_signature: false,
             max_tokens: None,
             retry_base_secs: BACKOFF_BASE_SECS,
+            read_timeout_secs: DEFAULT_READ_TIMEOUT_SECS,
         })
     }
 
     pub fn with_api_key(key: impl Into<Secret>) -> Result<Self, LlmError> {
         let key = key.into();
         let base_url = env_base_url();
-        let client = Self::build_client(Some(key.expose()), base_url.as_deref(), None)?;
+        let client = Self::build_client(
+            Some(key.expose()),
+            base_url.as_deref(),
+            None,
+            DEFAULT_READ_TIMEOUT_SECS,
+        )?;
         Ok(Self {
             client,
             model: DEFAULT_MODEL.into(),
@@ -231,6 +254,7 @@ impl AnthropicProvider {
             keep_thinking_signature: false,
             max_tokens: None,
             retry_base_secs: BACKOFF_BASE_SECS,
+            read_timeout_secs: DEFAULT_READ_TIMEOUT_SECS,
         })
     }
 
@@ -293,11 +317,25 @@ impl AnthropicProvider {
         self
     }
 
+    /// Bound how long the client waits on a silent peer.
+    ///
+    /// Idle time between reads, not total call duration — a long generation that
+    /// keeps streaming is unaffected. Configurable because "how long may a model
+    /// think before its first token" is a per-deployment answer, and because
+    /// tests need a deadline they can actually reach.
+    #[must_use]
+    pub fn with_read_timeout_secs(mut self, secs: u64) -> Self {
+        self.read_timeout_secs = secs;
+        self.rebuild_client();
+        self
+    }
+
     fn rebuild_client(&mut self) {
         match Self::build_client(
             self.api_key.as_ref().map(Secret::expose),
             self.base_url.as_deref(),
             self.session_id.as_deref(),
+            self.read_timeout_secs,
         ) {
             Ok(c) => self.client = c,
             Err(e) => tracing::warn!("failed to rebuild Anthropic client: {e}"),

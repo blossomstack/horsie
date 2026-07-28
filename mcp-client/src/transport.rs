@@ -4,6 +4,13 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+/// Bounds TCP + TLS setup against an MCP endpoint.
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Bounds idle time between reads. MCP calls are request/response, so a silent
+/// server is stalled rather than slow.
+const READ_TIMEOUT_SECS: u64 = 30;
 
 /// The wire seam under [`McpClient`](crate::McpClient): issues JSON-RPC requests
 /// and notifications. Mockable for tests; [`HttpTransport`] is the live impl.
@@ -40,7 +47,15 @@ impl HttpTransport {
         Self {
             endpoint,
             auth,
-            http: reqwest::Client::new(),
+            // Bounded like every other HTTP client in the repo. An MCP server that
+            // accepts the connection and then goes silent used to hang the run in
+            // a place `Stop` cannot reach (#61 item 5); the deadline is what makes
+            // that failure surface as an error instead of a wedged session.
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+                .read_timeout(Duration::from_secs(READ_TIMEOUT_SECS))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             next_id: AtomicU64::new(1),
             session_id: Mutex::new(None),
         }

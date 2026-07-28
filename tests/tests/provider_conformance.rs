@@ -47,7 +47,10 @@ fn build_provider(kind: ProviderKind, base_url: &str) -> Arc<dyn LlmProvider> {
                 .with_model("mock-model")
                 .with_base_url(base_url)
                 .with_max_tokens(Some(1024))
-                .with_retry_delay_secs(0),
+                .with_retry_delay_secs(0)
+                // Short enough that the stalled-peer test reaches its deadline in
+                // seconds rather than minutes.
+                .with_read_timeout_secs(2),
         ),
         ProviderKind::Openai => Arc::new(
             OpenAiProvider::with_api_key("test-key")
@@ -55,7 +58,8 @@ fn build_provider(kind: ProviderKind, base_url: &str) -> Arc<dyn LlmProvider> {
                 .with_model("mock-model")
                 .with_base_url(base_url)
                 .with_max_tokens(Some(1024))
-                .with_retry_delay_secs(0),
+                .with_retry_delay_secs(0)
+                .with_read_timeout_secs(2),
         ),
     }
 }
@@ -358,7 +362,6 @@ async fn a_tool_call_with_unparseable_input_is_never_dispatched() {
 /// Every other HTTP client in the repo does set one, so this is an oversight
 /// rather than a decision.
 #[tokio::test]
-#[ignore = "red: #61 item 5 — no HTTP timeout on either provider; a slow peer waits forever"]
 async fn a_slow_provider_gives_up_rather_than_waiting_forever() {
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         for &kind in KINDS {
