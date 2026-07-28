@@ -357,9 +357,25 @@ impl SessionActor {
     }
 
     /// Ensure a live runtime, emitting the explicit vendor signal for `mode`.
+    ///
+    /// A retained runtime is reused only while its transport is still connected.
+    /// Once the socket has dropped the client is terminally dead, and reusing it
+    /// made every later turn fail identically until a Stop or a server restart
+    /// (#61 item 2) — the case the "a failed turn never bricks the session"
+    /// comment below claimed was covered and was not.
     async fn ensure_runtime(&mut self, mode: WakeMode) -> Result<(), String> {
-        if self.runtime.is_some() {
-            return Ok(());
+        if let Some(runtime) = &self.runtime {
+            if runtime.runtime_client.is_connected() {
+                return Ok(());
+            }
+            // Drop, don't stop: the sandbox itself is very likely still alive
+            // vendor-side, and `attach` below re-acquires that same runtime id.
+            // Calling stop on a dead transport would only fail.
+            tracing::warn!(
+                session = %self.id,
+                "runtime transport disconnected; releasing it and re-acquiring"
+            );
+            self.runtime = None;
         }
         // The runtime is down: provisioning it is the slow, visible step.
         emit_progress(&self.frames, "provisioning_runtime", None);

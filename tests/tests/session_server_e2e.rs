@@ -1117,7 +1117,6 @@ async fn shared_local_vendor_resolves_dialed_in_daemon_and_recovers_after_discon
 /// session keeps reusing a dead transport until a Stop or a server restart, and
 /// the comment claiming "a failed turn never bricks the session" is false.
 #[tokio::test]
-#[ignore = "red: #61 item 2 — a disconnected runtime is retained and reused forever"]
 async fn a_disconnected_runtime_is_released_so_the_next_turn_recovers() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let mock = MockLlmServer::builder().build().await;
