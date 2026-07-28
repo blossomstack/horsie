@@ -192,7 +192,7 @@ test("C5: a choice and a typed note are sent together", async ({
   expect(await answersSent(mock)).toEqual(["blue\n\nbut only for the header"]);
 });
 
-test("C6: answering latches the composer shut and offers Stop until the turn reports back", async ({
+test("C6: answering marks the turn running and offers Stop until it reports back", async ({
   page,
   appBase,
   mock,
@@ -211,11 +211,18 @@ test("C6: answering latches the composer shut and offers Stop until the turn rep
   await page.locator('[data-testid="ask-user-choice"][data-value="blue"]').click();
   await page.getByTestId("ask-user-send").click();
 
-  // Answered, but the turn it resumed is still going: the session stays in
-  // AwaitingInput the whole time, so without the latch the composer would
-  // happily send a second message and inject a duplicate tool_result.
-  await expect(page.getByTestId("composer-input")).toBeDisabled();
+  // Answered, and the turn it resumed is a *running* turn: the server now reports
+  // Running rather than leaving the session in AwaitingInput (#61 item 3), so the
+  // composer swaps Send for Stop and there is no send affordance at all. The
+  // duplicate tool_result this used to guard against with a client-side latch is
+  // refused by the server as well — a second message gets a 409.
+  //
+  // The textarea itself stays enabled on purpose: during any running turn you can
+  // compose the next message ahead of time, which is what `Composer` does for
+  // every other turn.
+  await expectStatus(page, "Running");
   await expect(page.getByTestId("composer-stop")).toBeVisible();
+  await expect(page.getByTestId("composer-send")).toHaveCount(0);
 
   // The next status report releases it.
   await expect(page.getByTestId("assistant-text")).toContainText("Done with blue.");
