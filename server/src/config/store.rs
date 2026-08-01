@@ -422,9 +422,6 @@ fn build_openai(
     Ok(Arc::new(p))
 }
 
-/// A freshly built vendor, tagged so the caller can register it under both
-/// the generic `vendors` map and (for kinds that support live reconfigure) a
-/// concrete-typed side table — without ever downcasting a `dyn RuntimeVendor`.
 // ── secret + value helpers ───────────────────────────────────────────────────
 
 /// Write-only secret input: `None` keeps the stored value, `Some("")` clears,
