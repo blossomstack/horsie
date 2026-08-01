@@ -26,11 +26,6 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 
-/// Finalizes a request-supplied capability spec (path expansion, plugin grants,
-/// platform seatbelt rules) — injected by the host binary, which owns the
-/// capability-resolution helpers.
-pub type CapsFinalize = Arc<dyn Fn(CapabilitySpec) -> CapabilitySpec + Send + Sync>;
-
 /// "http://host" from the request headers (horsie serves same-origin; a
 /// configured `callback_base` overrides this inside a service). Shared by the
 /// github and mcp OAuth callbacks.
@@ -47,7 +42,6 @@ pub struct AppState {
     pub supervisor: ActorRef<SessionSupervisorCommand>,
     pub journal: Arc<dyn Journal>,
     pub global_events: broadcast::Sender<GlobalSessionEvent>,
-    pub caps_finalize: CapsFinalize,
     /// Fully-resolved default capability spec for requests that omit one.
     pub default_caps: CapabilitySpec,
     /// Reads and mutates the runtime-editable configuration (models, providers,
@@ -274,7 +268,6 @@ mod tests {
             supervisor,
             journal,
             global_events: gtx,
-            caps_finalize: Arc::new(|caps| caps),
             default_caps: block_caps(),
             config_store: opened.store,
             model_cards,

@@ -133,7 +133,6 @@ async fn start_server(
         supervisor: supervisor.clone(),
         journal,
         global_events: gtx,
-        caps_finalize: Arc::new(|c| c),
         default_caps: block_caps(),
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
@@ -267,7 +266,6 @@ async fn start_server_with_shared_local(
         supervisor: supervisor.clone(),
         journal,
         global_events: gtx,
-        caps_finalize: Arc::new(|c| c),
         default_caps: block_caps(),
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(

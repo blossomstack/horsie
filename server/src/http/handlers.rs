@@ -105,7 +105,7 @@ pub async fn create_session(
     // spec (which may block the network) gets a network-allow override; an
     // explicit request-supplied spec always wins untouched.
     let caps = match req.capabilities {
-        Some(c) => (state.caps_finalize)(c),
+        Some(c) => c,
         None if !provision.is_empty() => {
             let mut c = state.default_caps.clone();
             c.network = horsie_models::capabilities::NetworkPolicy::Allow(

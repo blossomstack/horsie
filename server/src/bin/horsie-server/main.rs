@@ -24,7 +24,7 @@ use horsie_actor::{FileJournal, Journal, spawn_root};
 use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
 use horsie_models::settings::ServerInfo;
 use horsie_server::config::{DbConfigStore, StoreDeps, model_cards};
-use horsie_server::http::{AppState, CapsFinalize, app};
+use horsie_server::http::{AppState, app};
 use horsie_server::plugins::{ArtifactStore, PluginService, PluginStore};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::SessionSupervisor;
@@ -78,11 +78,8 @@ async fn run(cli: Cli) -> Result<(), BootError> {
 
     // No vendor enforces the per-session capability spec today (the old
     // server-spawned sandboxed local vendor was replaced by the user-launched
-    // LocalDaemonVendor in #8) — supply a fixed minimal default and pass any
-    // request-supplied spec through unchanged. Matches `AppState`'s own doc
-    // comment ("injected by the host binary, which owns the capability-
-    // resolution helpers") and the fallback the crate's own tests already use.
-    let caps_finalize: CapsFinalize = Arc::new(|caps| caps);
+    // LocalDaemonVendor in #8), so requests without one get a fixed minimal
+    // default and a request-supplied spec passes through unchanged.
     let default_caps = CapabilitySpec {
         network: NetworkPolicy::Block(BlockNetwork {}),
         grants: vec![],
@@ -187,7 +184,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         supervisor,
         journal,
         global_events: global_tx,
-        caps_finalize,
         default_caps,
         config_store: opened.store,
         model_cards,
