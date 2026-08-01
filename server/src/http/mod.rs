@@ -12,6 +12,7 @@ mod model_cards;
 mod plugins;
 mod runtime_connect;
 mod sse;
+pub mod vendor_connect;
 
 use crate::config::ConfigStore;
 use crate::sessions::supervisor::SessionSupervisorCommand;
@@ -77,6 +78,10 @@ pub struct AppState {
     /// installed: user-launched runtimes are supported by default, whether
     /// they dial from the same host or a remote machine.
     pub local_daemon_hook: ConnectHook,
+    /// Every connected vendor agent, published into the same vendor map
+    /// sessions select from. Held here so the connect route can register a
+    /// freshly handshaken link.
+    pub vendor_agents: Arc<crate::vendor::VendorAgentRegistry>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
@@ -168,6 +173,7 @@ pub fn app(state: AppState) -> Router {
             "/api/runtime/connect",
             get(runtime_connect::runtime_connect),
         )
+        .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
         .with_state(state);
 
     match web_dir {
@@ -258,9 +264,13 @@ mod tests {
         let model_cards = Arc::new(crate::config::model_cards::ModelCardStore::new(
             opened.pool.clone(),
         ));
+        let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
+        let vendor_agents = Arc::new(crate::vendor::VendorAgentRegistry::new(
+            shared_vendors.clone(),
+        ));
         let deps = ServerDeps {
             provider_registry: opened.registry,
-            vendors: Arc::new(std::sync::RwLock::new(vendors)),
+            vendors: shared_vendors,
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: Some(mcp.clone()),
@@ -284,6 +294,7 @@ mod tests {
             memory,
             runtime_registry,
             local_daemon_hook: Arc::new(|_label: String| {}),
+            vendor_agents,
             web_dir: None,
         }
     }
@@ -996,5 +1007,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_connected_agent_becomes_a_selectable_vendor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let agents = state.vendor_agents.clone();
+        let router = app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        assert!(
+            !agents.connected_names().contains(&"my-laptop".to_string()),
+            "no such vendor before the agent dials in"
+        );
+
+        let _agent = crate::vendor::fake_agent::FakeVendorAgent::builder("my-laptop")
+            .supports_provisioning(false)
+            .connect(&format!("ws://{addr}/api/vendor/connect"))
+            .await
+            .expect("agent connects");
+
+        for _ in 0..100 {
+            if agents.connected_names().contains(&"my-laptop".to_string()) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("agent never registered as a vendor");
     }
 }

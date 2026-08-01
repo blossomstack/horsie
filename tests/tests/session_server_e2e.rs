@@ -82,9 +82,10 @@ async fn start_server(
     providers.insert("mock".into(), provider_at(mock_url));
     let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
     vendors.insert("mock".into(), vendor);
+    let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
     let deps = ServerDeps {
         provider_registry: Arc::new(std::sync::RwLock::new(providers)),
-        vendors: Arc::new(std::sync::RwLock::new(vendors)),
+        vendors: shared_vendors.clone(),
         state_dir: journal_dir.join("state"),
         github_tokens: None,
         mcp: None,
@@ -145,6 +146,9 @@ async fn start_server(
         memory,
         runtime_registry: Arc::new(ConnectedRuntimeRegistry::new()),
         local_daemon_hook: Arc::new(|_label: String| {}),
+        vendor_agents: Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
+            shared_vendors,
+        )),
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -279,6 +283,9 @@ async fn start_server_with_shared_local(
         memory,
         runtime_registry,
         local_daemon_hook,
+        vendor_agents: Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
+            opened.vendors.clone(),
+        )),
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1277,4 +1284,101 @@ async fn answering_an_ask_marks_the_session_running_and_rejects_a_concurrent_mes
     })
     .await
     .expect("test timed out");
+}
+
+/// A session runs a full turn against a vendor agent the server never spawned:
+/// the agent dialed in, announced itself, and every tool call is relayed
+/// through its one link.
+#[tokio::test]
+async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("hello from the agent");
+    let tmp = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::new();
+
+    let (server, _local_addr) = start_server_with_shared_local(tmp.path(), &mock.url()).await;
+    let agent = horsie_server::vendor::fake_agent::FakeVendorAgent::builder("agent-1")
+        .supports_provisioning(true)
+        .bash_stdout("from-the-agent")
+        .connect(&format!("ws://{}/api/vendor/connect", server.addr))
+        .await
+        .expect("agent connects");
+    // Let the handshake land before the session resolves the vendor name.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let id = create_session_for_vendor(&client, &server.addr, "agent-1").await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    assert_eq!(
+        send_message(&client, &server.addr, &id, "hi")
+            .await
+            .as_u16(),
+        202
+    );
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    assert!(
+        agent.signals().contains(&"create".to_string()),
+        "the agent must have been asked to create the runtime, saw {:?}",
+        agent.signals()
+    );
+    assert_eq!(
+        agent.live_runtimes().len(),
+        1,
+        "one runtime for one session"
+    );
+}
+
+/// Stopping one session must not disturb another on the same agent — the
+/// inverse of the shared-local daemon, where `stop` had to be a no-op precisely
+/// because it would have hit every session at once.
+#[tokio::test]
+async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
+    let mock = MockLlmServer::builder().build().await;
+    for _ in 0..4 {
+        mock.queue_response("ok");
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::new();
+
+    let (server, _local_addr) = start_server_with_shared_local(tmp.path(), &mock.url()).await;
+    let agent = horsie_server::vendor::fake_agent::FakeVendorAgent::builder("agent-2")
+        .bash_stdout("ok")
+        .connect(&format!("ws://{}/api/vendor/connect", server.addr))
+        .await
+        .expect("agent connects");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let a = create_session_for_vendor(&client, &server.addr, "agent-2").await;
+    let b = create_session_for_vendor(&client, &server.addr, "agent-2").await;
+    wait_status(&client, &server.addr, &a, "Idle").await;
+    wait_status(&client, &server.addr, &b, "Idle").await;
+
+    send_message(&client, &server.addr, &a, "hi").await;
+    wait_status(&client, &server.addr, &a, "Idle").await;
+    send_message(&client, &server.addr, &b, "hi").await;
+    wait_status(&client, &server.addr, &b, "Idle").await;
+    assert_eq!(agent.live_runtimes().len(), 2, "one runtime per session");
+
+    client
+        .post(format!("http://{}/api/sessions/{a}/stop", server.addr))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    wait_status(&client, &server.addr, &a, "Stopped").await;
+
+    assert_eq!(
+        agent.live_runtimes(),
+        vec![b.clone()],
+        "only the stopped session's runtime is gone"
+    );
+    assert_eq!(
+        send_message(&client, &server.addr, &b, "again")
+            .await
+            .as_u16(),
+        202,
+        "session b must be unaffected by a's stop"
+    );
+    wait_status(&client, &server.addr, &b, "Idle").await;
 }

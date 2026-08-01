@@ -1,0 +1,102 @@
+/// Protocol types for server <-> runtime-vendor-agent communication.
+///
+/// A vendor agent is an external process that owns runtime lifecycle for one
+/// vendor: it spawns/schedules runtimes, listens for their dial-back, and
+/// relays every tool call between them and the server over this one link.
+package vendor;
+
+use capabilities.CapabilitySpec;
+use executor.EnvVar;
+use executor.ProvisionStep;
+use executor.RuntimeInfo;
+use executor.RuntimeState;
+use runtime.ScanRequest;
+use runtime.ScanResponse;
+use runtime.SessionStartRequest;
+use runtime.SessionStartResponse;
+use runtime.ToolCallRequest;
+use runtime.ToolResult;
+
+/// What a vendor can do with a session workspace, announced by the agent
+/// itself so the server and UI never branch on vendor name or kind.
+struct VendorAgentCapabilities {
+    /// The vendor provisions a fresh workspace it owns — cloning repos,
+    /// installing skill bundles, running provision steps. An agent fixed to a
+    /// user-owned directory announces false.
+    supports_provisioning: bool,
+}
+
+/// Everything the server can supply about a runtime. Deliberately minimal:
+/// anything the agent knows better (workspace paths, plugin unpack dirs,
+/// artifact base URLs) is resolved agent-side and never crosses the wire.
+struct VendorRuntimeRequest {
+    /// Workspace *names*. The agent resolves each to a path it owns and fails
+    /// the command with VendorCommandFailed if it cannot honor one.
+    workspaces: Vec<String>,
+    /// Resolved secrets and handles only the server can mint: the scoped
+    /// GitHub token, the plugin bundle manifest, the plugins token.
+    env: Vec<EnvVar>,
+    /// Setup steps the runtime executes before the agent loop.
+    provision: Vec<ProvisionStep>,
+    /// Sandbox policy, inline rather than as a server-local file path. The
+    /// agent writes it to its own disk and passes --sandbox-caps.
+    sandbox_capabilities: Option<CapabilitySpec>,
+}
+
+// --- Commands (server -> agent) ---
+
+struct VendorCreateRuntime { runtime_id: String, request: VendorRuntimeRequest }
+/// Revive a preserved runtime. Agents that cannot resume in place provision a
+/// fresh instance against the same request.
+struct VendorAttachRuntime { runtime_id: String, request: VendorRuntimeRequest }
+/// Halt without destroying — the runtime stays re-attachable.
+struct VendorStopRuntime { runtime_id: String }
+/// The owning session was deleted; the agent decides the runtime's fate.
+struct VendorDeleteRuntime { runtime_id: String }
+/// Asked on reconnect so the server can reconcile what survived.
+struct VendorQueryRuntimes {}
+struct VendorToolCall { runtime_id: String, call: ToolCallRequest }
+struct VendorCancelToolCall { runtime_id: String, call_id: String }
+struct VendorScanWorkspace { runtime_id: String, request: ScanRequest }
+struct VendorSessionStart { runtime_id: String, request: SessionStartRequest }
+
+#[type_tag = "type"]
+union VendorCommand {
+    CreateRuntime(VendorCreateRuntime),
+    AttachRuntime(VendorAttachRuntime),
+    StopRuntime(VendorStopRuntime),
+    DeleteRuntime(VendorDeleteRuntime),
+    QueryRuntimes(VendorQueryRuntimes),
+    ToolCall(VendorToolCall),
+    CancelToolCall(VendorCancelToolCall),
+    ScanWorkspace(VendorScanWorkspace),
+    SessionStart(VendorSessionStart),
+}
+
+struct VendorInboundMessage { request_id: String, command: VendorCommand }
+
+// --- Events (agent -> server) ---
+
+/// First message an agent sends. `vendor_name` is the name sessions select by.
+struct VendorRegistered { vendor_name: String, capabilities: VendorAgentCapabilities }
+struct VendorRuntimeStateChanged { runtime_id: String, state: RuntimeState }
+struct VendorRuntimesListed { runtimes: Vec<RuntimeInfo> }
+struct VendorCommandFailed { message: String }
+struct VendorToolResult { runtime_id: String, call_id: String, result: ToolResult }
+struct VendorScanResult { runtime_id: String, response: ScanResponse }
+struct VendorSessionStartResult { runtime_id: String, response: SessionStartResponse }
+
+#[type_tag = "type"]
+union VendorEvent {
+    Registered(VendorRegistered),
+    RuntimeStateChanged(VendorRuntimeStateChanged),
+    RuntimesListed(VendorRuntimesListed),
+    CommandFailed(VendorCommandFailed),
+    ToolResult(VendorToolResult),
+    ScanResult(VendorScanResult),
+    SessionStartResult(VendorSessionStartResult),
+}
+
+/// request_id echoes the command's for responses; a fresh UUID for
+/// unsolicited events (state changes, the initial Registered).
+struct VendorOutboundMessage { request_id: String, event: VendorEvent }
