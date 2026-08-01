@@ -151,6 +151,12 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         registry.hook()
     };
 
+    // Vendor agents publish themselves into the same map sessions select from,
+    // exactly as the local-daemon registry does for dial-in runtimes.
+    let vendor_agents = Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
+        opened.vendors.clone(),
+    ));
+
     let github = Arc::new(horsie_server::github::GithubService::new(
         horsie_server::github::GithubStore::new(opened.pool.clone()),
         horsie_server::github::GithubApi::new(),
@@ -197,6 +203,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         memory,
         runtime_registry,
         local_daemon_hook,
+        vendor_agents,
         web_dir: cli.web,
     };
     let listener = tokio::net::TcpListener::bind(&cli.addr)

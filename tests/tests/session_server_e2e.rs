@@ -82,9 +82,10 @@ async fn start_server(
     providers.insert("mock".into(), provider_at(mock_url));
     let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
     vendors.insert("mock".into(), vendor);
+    let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
     let deps = ServerDeps {
         provider_registry: Arc::new(std::sync::RwLock::new(providers)),
-        vendors: Arc::new(std::sync::RwLock::new(vendors)),
+        vendors: shared_vendors.clone(),
         state_dir: journal_dir.join("state"),
         github_tokens: None,
         mcp: None,
@@ -145,6 +146,9 @@ async fn start_server(
         memory,
         runtime_registry: Arc::new(ConnectedRuntimeRegistry::new()),
         local_daemon_hook: Arc::new(|_label: String| {}),
+        vendor_agents: Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
+            shared_vendors,
+        )),
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -279,6 +283,9 @@ async fn start_server_with_shared_local(
         memory,
         runtime_registry,
         local_daemon_hook,
+        vendor_agents: Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
+            opened.vendors.clone(),
+        )),
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

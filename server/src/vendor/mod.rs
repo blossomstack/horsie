@@ -6,16 +6,20 @@
 //! exactly one explicit vendor signal (`create` / `attach` / `stop` / `delete`),
 //! never an implicit side effect.
 
-mod link;
-mod local;
+mod agent_registry;
 /// A signal-recording vendor for tests only — never compiled into a production
 /// build. Available to this crate's own tests (`cfg(test)`) and to external test
 /// crates that opt in via the `test-util` feature.
+#[cfg(any(test, feature = "test-util"))]
+pub mod fake_agent;
+mod link;
+mod local;
 #[cfg(any(test, feature = "test-util"))]
 pub mod mock;
 mod transport;
 mod velos;
 
+pub use agent_registry::VendorAgentRegistry;
 pub use link::VendorLink;
 pub use local::{LocalDaemonRegistry, LocalDaemonVendor};
 pub use transport::VendorRuntimeTransport;
