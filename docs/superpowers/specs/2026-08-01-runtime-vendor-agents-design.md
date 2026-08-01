@@ -31,8 +31,8 @@ this design needs — `CreateRuntime` / `AttachRuntime` / `StopRuntime` /
 `RuntimeStateChanged` / `ToolResult` events returning. `Executor::run()` is a
 complete WS client loop for it and `ProcessRuntimeProvider` already spawns
 sandboxed `horsie-runtime` children. The server uses none of it; it shortcuts
-through `InMemExecutorTransport` in-process. Branch
-`refactor/remove-executor-ws-protocol` proposes deleting all 1,835 lines.
+through `InMemExecutorTransport` in-process. PR #83 proposed deleting all
+1,835 lines of it; it is closed in favour of this design.
 
 So this is mostly a promotion, not an invention: make the dead protocol the
 only path, and move each vendor's lifecycle into a process that owns its own
@@ -80,55 +80,60 @@ never has to guess.
 matches what the UI and docs already call these things. The command and
 event sets carry over unchanged except for four things.
 
-**`Registered` carries capabilities.**
+**`Registered` carries exactly one capability.**
 
 ```
-struct VendorCapabilities {
-    supports_provisioning: bool,
-    /// Base URL the vendor's runtimes can reach the server at, for plugin
-    /// artifact fetches. None disables plugin provisioning for this vendor.
-    artifact_base_url: Option<String>,
-    /// Path (host or in-container) runtimes unpack server-managed bundles
-    /// into. Injected back as ENV_PLUGINS_DIR.
-    bundle_dir: Option<String>,
-    /// Optional content-hash cache dir so repeat sessions skip re-fetching.
-    bundle_cache_dir: Option<String>,
-}
+struct VendorCapabilities { supports_provisioning: bool }
 struct RegisteredEvent { vendor_name: String, capabilities: VendorCapabilities }
 ```
 
-These are exactly the four `RuntimeVendor` trait methods the server calls
-locally today, now announced by the process that knows the answers.
-`ensure_runtime` builds the same plugin env vars from the announced values
-instead of from trait calls.
+`supports_provisioning` earns its place: `settings.fl` and
+`config/store.rs` already expose it so the UI adapts to a vendor without
+branching on its name.
 
-**`RuntimeConfig.workspaces` becomes names, not paths.** A server-computed
-path is meaningless to a remote agent; the server-side `WorkspaceSpec` is
-already name-only, and the velos vendor is the only thing that resolves
-`<workspace_root>/<name>`. Resolution moves to the agent.
+The other three `RuntimeVendor` methods — `artifact_base_url()`,
+`plugins_dir_for()`, `plugins_cache_dir()` — are **deleted, not ported**.
+They exist only because the server does the spawning today, so it had to
+know values it has no opinion about. Once the agent spawns, each reason
+evaporates:
+
+- `artifact_base_url()` feeds one line, `PluginService::resolve`, which
+  builds `{base}/api/plugin-artifacts/{hash}.zip`. The hash is already in
+  `PluginArtifactRef`. Drop the `url` field from that struct and have the
+  agent prefix its own base — it is connected to the server, so by
+  definition it knows how its runtimes reach it. `resolve(names, base)`
+  loses its second parameter.
+- `plugins_dir_for()` and `plugins_cache_dir()` only produce
+  `HORSIE_PLUGINS_DIR` / `HORSIE_PLUGINS_CACHE`, paths inside the agent's
+  own filesystem. The agent injects them when it spawns the child.
+
+The server keeps what is genuinely server-owned: resolving bundle names to
+hashes and minting the scoped token.
+
+**`RuntimeConfig` shrinks to what only the server can supply.** A
+server-computed workspace path is meaningless to a remote agent — the
+server-side `WorkspaceSpec` is already name-only, and the velos vendor is
+the only thing that resolves `<workspace_root>/<name>`. Resolution moves to
+the agent.
 
 ```
 struct RuntimeConfig {
     workspaces: Vec<String>,        // names; the agent resolves each to a path
-    env: Vec<EnvVar>,
+    env: Vec<EnvVar>,               // resolved secrets: github token,
+                                    // bundle manifest, scoped plugins token
     provision: Vec<ProvisionStep>,
     sandbox_capabilities: Option<Capabilities>,
-    /// The *host* plugin library the CLI installs (`horsie plugin install`),
-    /// exposed to the agent as the read-only `horsie_shared` workspace.
-    /// Distinct from `VendorCapabilities.bundle_dir`, which is where
-    /// server-managed bundles are unpacked.
-    host_library_dir: Option<String>,
-    hook_path: Vec<String>,
 }
 ```
 
-An agent that cannot honor a requested name fails the create with an
-explicit `CommandFailed`, surfacing as the session's provisioning error.
+`plugins_dir` and `hook_path` are absent by the same argument, and PR #84
+is already deleting them from `SessionSpec`/`RuntimeSpec` server-side on the
+grounds that no vendor reads them. `horsie connect` resolves the host plugin
+library itself and passes `--plugins-dir` straight to the child it spawns;
+that never needed to round-trip through the server.
 
-The two plugin paths are deliberately named apart because the current code
-calls both `plugins_dir` and they are not the same thing: one is the
-per-machine library a user installed with the CLI, the other is where a
-vendor unpacks bundles the server resolved for this session.
+An agent that cannot honor a requested workspace name fails the create with
+an explicit `CommandFailed`, surfacing as the session's provisioning error.
 
 **Sandbox capabilities travel inline.** `RuntimeSpec.capabilities_file` is a
 server-local path today, written to `state_dir/sessions/<id>/`. It becomes
@@ -158,9 +163,12 @@ implements that trait by wrapping each call in a `VendorCommand` and
 correlating the reply by `request_id`. `SessionActor` keeps caching a
 `RuntimeClient`, and `is_connected()` keeps working: when the link drops,
 calls return `TransportError::Disconnected`, the existing latch in
-`RuntimeClient` fires, and `ensure_runtime` re-acquires. `ensure_runtime`
-changes only in where it gets the client and where the four capability
-values come from.
+`RuntimeClient` fires, and `ensure_runtime` re-acquires.
+
+`ensure_runtime` gets *smaller*: it stops consulting three vendor methods to
+build plugin env vars, and its whole `if let (Some(prov), Some(base))` block
+collapses to resolving bundle names to hashes and minting the scoped token.
+Where it gets the client is the only other change.
 
 New:
 
@@ -187,10 +195,23 @@ server/src/http/runtime_connect.rs   replaced by http/vendor_connect.rs
 config store `vendors` table, the Settings velos form, POST /api/config/vendors/:name/test
 ```
 
-**No in-memory transport or in-memory client remains in the server.** The
-only way the server reaches a runtime is a real WebSocket to a real agent.
-`InMemExecutorTransport` and `ExecutorClient` survive only in the
-`supervisor` crate, which is the one-shot CLI job runner and not the server.
+**No in-memory transport or in-memory client survives anywhere in the
+workspace** — not in the server, not behind a test feature, not in the CLI.
+The only way anything reaches a runtime is a real transport.
+
+`InMemExecutorTransport` and the whole `ExecutorClient` abstraction are
+deleted. The server replaces them with `VendorLink` over a real WebSocket.
+The one other caller, `supervisor/src/job_actor.rs`, is pure ceremony: it
+builds `ExecutorClient::new(InMemExecutorTransport::new(provider, connected))`
+and then calls exactly two things through it — `create_runtime(id, config)`
+and `runtime_transport(id)` — which are a direct `provider.create(id, &config)`
+and a direct `connected.runtime_transport(id)` lookup with a fake
+message-passing layer in between. Calling the two directly removes the layer
+and the crate.
+
+`executor-client` therefore disappears as a crate; its one useful part,
+`WsExecutorTransport::accept`, is the server side of the WS and becomes
+`VendorLink`.
 
 ## The two agents
 
@@ -233,8 +254,12 @@ config file. The server stores none of it.
   Keeping a form that wrote to a table the server no longer reads would be
   worse than removing it. Deploying velos now means running a second
   process; the ops repo needs a service for it.
-- **Branch `refactor/remove-executor-ws-protocol` should be closed, not
-  merged** — it deletes the code this design revives.
+- **PR #83 (`refactor/remove-executor-ws-protocol`) is closed** — it deleted
+  the code this design promotes.
+- **PR #84 (`refactor/remove-legacy-plugin-chain`) is a prerequisite, not a
+  conflict.** It removes the dead `plugins_dir`/`hook_path` chain from
+  `SessionSpec`/`RuntimeSpec`, which is exactly the shape `RuntimeConfig`
+  needs here. Merge it first.
 
 ## Testing
 
@@ -265,21 +290,30 @@ drives the runtime protocol, which does not change).
 
 ## Plan
 
-Five PRs, each green on its own.
+Five PRs, each green on its own. `/api/runtime/connect` stays alive until
+the last one, so every intermediate commit has a working way to connect a
+machine and the cutover is a single reviewable step.
 
 1. `vendor.fl` + `VendorLink` / `VendorRegistry` / `VendorRuntimeTransport` +
    `GET /api/vendor/connect` + the `FakeVendorAgent` harness. Nothing
-   removed; the old path still serves.
-2. `horsie connect` rewritten as the local agent. Delete
-   `LocalDaemonVendor`, `LocalDaemonRegistry`, and the
-   `?register=local` route.
+   removed; the old route still serves.
+2. `horsie connect` rewritten as the local agent, dialing
+   `/api/vendor/connect`. `LocalDaemonVendor` and `LocalDaemonRegistry` are
+   deleted, but the `?register=local` route stays, so a hand-run
+   `horsie-runtime --endpoint ...` keeps working through this PR.
 3. `horsie-vendor-velos` binary. Delete `server/src/velos/` and
    `VelosVendor`.
 4. Delete the `RuntimeVendor` trait, `MockVendor`, the config-store vendor
    rows, and the Settings velos form; replace it with the live-vendor list.
-   Port the `session_actor` tests onto `FakeVendorAgent`.
-5. Docs (`runtime-vendors.md`, `getting-started.md`, `self-hosting.md`) and
-   the ops-repo service for the velos agent.
+   Port the `session_actor` tests onto `FakeVendorAgent`. Delete
+   `InMemExecutorTransport`, the `executor-client` crate, and the
+   `supervisor` ceremony that used them.
+5. **Cutover.** Delete `http/runtime_connect.rs` and the
+   `/api/runtime/connect` route, plus `ConnectHook` and the
+   `serve_runtime_connections_with_hook` variant that only existed to feed
+   it. Docs (`runtime-vendors.md`, `getting-started.md`,
+   `self-hosting.md`) and the ops-repo service for the velos agent land
+   here too, so the breaking change and its documentation ship together.
 
 ## Decisions taken, with the alternative rejected
 
@@ -300,3 +334,9 @@ Five PRs, each green on its own.
   protocol. Breaks the "runtime only talks to its agent" invariant in one
   narrow place, in exchange for not building artifact chunking.
 - **No authentication**, unchanged from today. Tracked separately.
+- **Three of the four vendor capabilities are deleted rather than ported.**
+  `artifact_base_url` / `plugins_dir_for` / `plugins_cache_dir` are
+  artifacts of the server doing the spawning; moving the spawn to the agent
+  removes the reason they existed. The alternative — carrying them onto the
+  wire because they exist today — would have made every future vendor
+  declare three values the server does nothing with.
