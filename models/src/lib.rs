@@ -653,13 +653,13 @@ mod vendor_tests {
     #[test]
     fn vendor_event_round_trips_and_carries_capabilities() {
         use crate::vendor::{
-            VendorCapabilities, VendorEvent, VendorOutboundMessage, VendorRegistered,
+            VendorAgentCapabilities, VendorEvent, VendorOutboundMessage, VendorRegistered,
         };
         let msg = VendorOutboundMessage {
             request_id: "req-2".to_string(),
             event: VendorEvent::Registered(VendorRegistered {
                 vendor_name: "my-laptop".to_string(),
-                capabilities: VendorCapabilities {
+                capabilities: VendorAgentCapabilities {
                     supports_provisioning: false,
                 },
             }),

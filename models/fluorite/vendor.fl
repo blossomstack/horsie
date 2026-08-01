@@ -19,7 +19,7 @@ use runtime.ToolResult;
 
 /// What a vendor can do with a session workspace, announced by the agent
 /// itself so the server and UI never branch on vendor name or kind.
-struct VendorCapabilities {
+struct VendorAgentCapabilities {
     /// The vendor provisions a fresh workspace it owns — cloning repos,
     /// installing skill bundles, running provision steps. An agent fixed to a
     /// user-owned directory announces false.
@@ -78,7 +78,7 @@ struct VendorInboundMessage { request_id: String, command: VendorCommand }
 // --- Events (agent -> server) ---
 
 /// First message an agent sends. `vendor_name` is the name sessions select by.
-struct VendorRegistered { vendor_name: String, capabilities: VendorCapabilities }
+struct VendorRegistered { vendor_name: String, capabilities: VendorAgentCapabilities }
 struct VendorRuntimeStateChanged { runtime_id: String, state: RuntimeState }
 struct VendorRuntimesListed { runtimes: Vec<RuntimeInfo> }
 struct VendorCommandFailed { message: String }

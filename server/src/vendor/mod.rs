@@ -6,15 +6,19 @@
 //! exactly one explicit vendor signal (`create` / `attach` / `stop` / `delete`),
 //! never an implicit side effect.
 
+mod link;
 mod local;
 /// A signal-recording vendor for tests only — never compiled into a production
 /// build. Available to this crate's own tests (`cfg(test)`) and to external test
 /// crates that opt in via the `test-util` feature.
 #[cfg(any(test, feature = "test-util"))]
 pub mod mock;
+mod transport;
 mod velos;
 
+pub use link::VendorLink;
 pub use local::{LocalDaemonRegistry, LocalDaemonVendor};
+pub use transport::VendorRuntimeTransport;
 pub use velos::{VelosMutableSettings, VelosVendor, VelosVendorSettings};
 
 use async_trait::async_trait;
