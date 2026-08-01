@@ -16,7 +16,6 @@ horsie-agentcore = { version = "0.1.6", path = "../agentcore" }
 horsie-anthropic = { version = "0.1.6", path = "../providers/anthropic" }
 horsie-openai = { version = "0.1.6", path = "../providers/openai" }
 horsie-executor = { version = "0.1.6", path = "../executor" }
-horsie-executor-client = { version = "0.1.6", path = "../executor-client", default-features = false }
 horsie-runtime-client = { version = "0.1.6", path = "../runtime-client" }
 horsie-workflow = { version = "0.1.6", path = "../workflow" }
 horsie-supervisor = { version = "0.1.6", path = "../supervisor" }
@@ -36,6 +35,7 @@ reqwest-eventsource = { workspace = true }
 futures-util      = { workspace = true }
 
 [dev-dependencies]
+tokio-tungstenite = { workspace = true }
 horsie-mock-llm = { path = "../providers/mock-llm" }
 tempfile = "3"
 

@@ -12,7 +12,7 @@ use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatu
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
 use crate::sessions::{SessionFrame, UserMessageError};
-use crate::vendor::{RuntimeSpec, RuntimeVendor, VendorRuntime};
+use crate::vendor::{RuntimeSpec, VendorLink, VendorRuntime};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
@@ -305,7 +305,7 @@ impl SessionActor {
         Ok(title)
     }
 
-    fn vendor(&self) -> Result<Arc<dyn RuntimeVendor>, String> {
+    fn vendor(&self) -> Result<Arc<VendorLink>, String> {
         let vendors = self
             .deps
             .vendors
@@ -412,21 +412,25 @@ impl SessionActor {
             }
         }
         let id = self.id.to_string();
-        // Resolve the session's selected bundles → fetch refs + a scoped token,
-        // injected as env the runtime reads at startup. Same for create and
-        // attach (re-resolves current versions). Only vendors that advertise an
-        // artifact base URL participate (mock does not).
-        if let (Some(prov), Some(base)) = (self.deps.plugins.as_ref(), vendor.artifact_base_url()) {
+        // Resolve the session's selected bundles to hashes plus a scoped token,
+        // injected as env the runtime reads at startup. Re-resolved on attach
+        // as well, so a session picks up bundle updates.
+        //
+        // Where those bundles land, and what URL the runtime fetches them from,
+        // are the agent's business: it knows its own filesystem and how its
+        // runtimes reach this server. The server supplies only what it alone
+        // can — the hashes and the token authorizing them.
+        if let Some(prov) = self.deps.plugins.as_ref() {
             let mut names = self.spec.plugins.clone();
             if names.is_empty() {
                 names = prov.default_names().await;
             }
             if !names.is_empty() {
-                let refs = prov.resolve(&names, &base).await?;
+                let refs = prov.resolve(&names).await?;
                 let hashes: Vec<String> = refs.iter().map(|r| r.hash.clone()).collect();
                 let token = prov.mint_token(&id, &hashes);
                 let manifest = serde_json::to_string(&refs).map_err(|e| e.to_string())?;
-                let mut env = vec![
+                rt_spec.env.extend([
                     horsie_models::executor::EnvVar {
                         name: horsie_models::ENV_PLUGIN_MANIFEST.to_string(),
                         value: manifest,
@@ -435,20 +439,7 @@ impl SessionActor {
                         name: horsie_models::ENV_PLUGINS_TOKEN.to_string(),
                         value: token,
                     },
-                ];
-                if let Some(dir) = vendor.plugins_dir_for(&id) {
-                    env.push(horsie_models::executor::EnvVar {
-                        name: horsie_models::ENV_PLUGINS_DIR.to_string(),
-                        value: dir,
-                    });
-                }
-                if let Some(cache) = vendor.plugins_cache_dir() {
-                    env.push(horsie_models::executor::EnvVar {
-                        name: horsie_models::ENV_PLUGINS_CACHE.to_string(),
-                        value: cache,
-                    });
-                }
-                rt_spec.env.extend(env);
+                ]);
             }
         }
         let runtime = match mode {
@@ -1201,7 +1192,7 @@ impl EventSourcedActor for SessionActor {
 mod tests {
     use super::*;
     use crate::sessions::spec::AgentSettings;
-    use crate::vendor::mock::MockVendor;
+    use crate::vendor::fake_agent::{FakeVendorAgent, FakeVendorAgentBuilder};
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use std::collections::HashMap;
@@ -1357,7 +1348,7 @@ mod tests {
 
     struct Harness {
         actor: ActorRef<SessionCommand>,
-        vendor: Arc<MockVendor>,
+        vendor: FakeVendorAgent,
         statuses: tokio::sync::mpsc::UnboundedReceiver<SessionStatus>,
         names: tokio::sync::mpsc::UnboundedReceiver<String>,
         published_titles: tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -1365,25 +1356,37 @@ mod tests {
         _tmp: tempfile::TempDir,
     }
 
-    fn harness_on(journal: Arc<dyn Journal>, vendor: MockVendor) -> Harness {
-        harness_with_id(journal, vendor, Uuid::new_v4())
+    /// A fake agent under the vendor name the fixtures select. Every harness
+    /// goes through a real WebSocket and the real `vendor.fl` codec — there is
+    /// no in-process vendor double any more, so a test that passes here
+    /// exercises the same path production takes.
+    fn agent() -> FakeVendorAgentBuilder {
+        FakeVendorAgent::builder("mock")
     }
 
-    fn harness_with_id(journal: Arc<dyn Journal>, vendor: MockVendor, id: Uuid) -> Harness {
-        harness_custom(journal, vendor, id, spec_fixture("mock"), None)
+    async fn harness_on(journal: Arc<dyn Journal>, vendor: FakeVendorAgentBuilder) -> Harness {
+        harness_with_id(journal, vendor, Uuid::new_v4()).await
     }
 
-    fn harness_custom(
+    async fn harness_with_id(
         journal: Arc<dyn Journal>,
-        vendor: MockVendor,
+        vendor: FakeVendorAgentBuilder,
+        id: Uuid,
+    ) -> Harness {
+        harness_custom(journal, vendor, id, spec_fixture("mock"), None).await
+    }
+
+    async fn harness_custom(
+        journal: Arc<dyn Journal>,
+        vendor: FakeVendorAgentBuilder,
         id: Uuid,
         spec: SessionSpec,
         github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,
     ) -> Harness {
         let tmp = tempfile::tempdir().unwrap();
-        let vendor = Arc::new(vendor);
-        let mut vendors: HashMap<String, Arc<dyn crate::vendor::RuntimeVendor>> = HashMap::new();
-        vendors.insert("mock".into(), vendor.clone());
+        let vendor = vendor.serve_in_process().await.expect("fake agent");
+        let mut vendors: HashMap<String, Arc<crate::vendor::VendorLink>> = HashMap::new();
+        vendors.insert("mock".into(), vendor.link());
         let deps = ServerDeps {
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors: Arc::new(std::sync::RwLock::new(vendors)),
@@ -1481,7 +1484,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_user_message_still_derives_a_fallback_title() {
-        let mut h = harness_on(Arc::new(InMemoryJournal::new()), MockVendor::new());
+        let mut h = harness_on(Arc::new(InMemoryJournal::new()), agent()).await;
 
         let result = h
             .actor
@@ -1515,7 +1518,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let mut spec = spec_fixture("mock");
         spec.name = Some("Creation name".into());
-        let mut h = harness_custom(journal, MockVendor::new(), Uuid::new_v4(), spec, None);
+        let mut h = harness_custom(journal, agent(), Uuid::new_v4(), spec, None).await;
 
         let first = h
             .actor
@@ -1552,7 +1555,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_session_title_rejects_invalid_titles_without_renaming() {
-        let mut h = harness_on(Arc::new(InMemoryJournal::new()), MockVendor::new());
+        let mut h = harness_on(Arc::new(InMemoryJournal::new()), agent()).await;
 
         let too_long = "é".repeat(61);
         for title in ["   ", "one\ntwo", too_long.as_str()] {
@@ -1573,7 +1576,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_emits_create_signal_and_stop_preserves() {
-        let mut h = harness_on(Arc::new(InMemoryJournal::new()), MockVendor::new());
+        let mut h = harness_on(Arc::new(InMemoryJournal::new()), agent()).await;
         h.actor.tell(SessionCommand::Provision).await.unwrap();
         h.actor
             .ask(|reply| SessionCommand::Stop { reply })
@@ -1611,26 +1614,33 @@ mod tests {
         }];
         let mut h = harness_custom(
             journal,
-            MockVendor::new(),
+            agent(),
             Uuid::new_v4(),
             spec,
             Some(Arc::new(FixedMinter(Some("ghs_x".into())))),
-        );
+        )
+        .await;
         h.actor.tell(SessionCommand::Provision).await.unwrap();
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Idle);
-        let spec = h.vendor.last_create_spec().expect("vendor saw a spec");
+        // Assert on what actually crossed the wire, not on a server-side
+        // struct: the request the agent received is the real contract.
+        let request = h
+            .vendor
+            .last_create_request()
+            .expect("the agent saw a create request");
         assert!(
-            spec.env
+            request
+                .env
                 .iter()
                 .any(|e| e.name == horsie_models::ENV_GITHUB_TOKEN && e.value == "ghs_x"),
             "GITHUB_TOKEN injected: {:?}",
-            spec.env
+            request.env
         );
     }
 
     #[tokio::test]
     async fn delete_signals_vendor_discretion() {
-        let mut h = harness_on(Arc::new(InMemoryJournal::new()), MockVendor::new());
+        let mut h = harness_on(Arc::new(InMemoryJournal::new()), agent()).await;
         h.actor.tell(SessionCommand::Provision).await.unwrap();
         h.actor
             .ask(|reply| SessionCommand::Delete { reply })
@@ -1651,13 +1661,10 @@ mod tests {
 
     #[tokio::test]
     async fn provision_failure_lands_failed_status() {
-        let mut h = harness_on(
-            Arc::new(InMemoryJournal::new()),
-            MockVendor::new().fail_create(),
-        );
+        let mut h = harness_on(Arc::new(InMemoryJournal::new()), agent().fail_create()).await;
         h.actor.tell(SessionCommand::Provision).await.unwrap();
         match h.statuses.recv().await.unwrap() {
-            SessionStatus::Failed { reason } => assert!(reason.contains("mock create failure")),
+            SessionStatus::Failed { reason } => assert!(reason.contains("create failed")),
             other => panic!("expected Failed, got {other:?}"),
         }
     }
@@ -1675,7 +1682,7 @@ mod tests {
         ];
         journal.persist(&pid, &events).await.unwrap();
 
-        let mut h = harness_with_id(journal, MockVendor::new(), id);
+        let mut h = harness_with_id(journal, agent(), id).await;
         // Recovery reconciles to Interrupted...
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Interrupted);
         // ...without any vendor signal (lazy recovery).
@@ -1690,7 +1697,7 @@ mod tests {
         let events = vec![serde_json::to_vec(&SessionDomainEvent::Provisioned).unwrap()];
         journal.persist(&pid, &events).await.unwrap();
 
-        let mut h = harness_with_id(journal, MockVendor::new().fail_attach_times(1), id);
+        let mut h = harness_with_id(journal, agent().fail_attach_times(1), id).await;
         // Idle after recovery; a message triggers attach, which fails once.
         let res = h
             .actor
@@ -1703,7 +1710,7 @@ mod tests {
         assert!(matches!(res, Err(UserMessageError::RecoveryFailed(_))));
         match h.statuses.recv().await.unwrap() {
             SessionStatus::RecoveryFailed { reason } => {
-                assert!(reason.contains("mock attach failure"));
+                assert!(reason.contains("attach failed"));
             }
             other => panic!("expected RecoveryFailed, got {other:?}"),
         }
@@ -1721,7 +1728,7 @@ mod tests {
             serde_json::to_vec(&SessionDomainEvent::TurnStarted).unwrap(),
         ];
         journal.persist(&pid, &events).await.unwrap();
-        let h = harness_with_id(journal, MockVendor::new(), id);
+        let h = harness_with_id(journal, agent(), id).await;
         // Race the reconcile: send the message before ReconcileInterrupted may
         // have processed — both orders are valid; accept either error.
         let res = h
@@ -1811,11 +1818,14 @@ mod tests {
         }
     }
 
-    fn harness_with_provider(vendor: MockVendor, provider: Arc<dyn LlmProvider>) -> Harness {
+    async fn harness_with_provider(
+        vendor: FakeVendorAgentBuilder,
+        provider: Arc<dyn LlmProvider>,
+    ) -> Harness {
         let tmp = tempfile::tempdir().unwrap();
-        let vendor = Arc::new(vendor);
-        let mut vendors: HashMap<String, Arc<dyn crate::vendor::RuntimeVendor>> = HashMap::new();
-        vendors.insert("mock".into(), vendor.clone());
+        let vendor = vendor.serve_in_process().await.expect("fake agent");
+        let mut vendors: HashMap<String, Arc<crate::vendor::VendorLink>> = HashMap::new();
+        vendors.insert("mock".into(), vendor.link());
         let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
         providers.insert("mock".into(), provider);
         let deps = ServerDeps {
@@ -1927,7 +1937,7 @@ mod tests {
     async fn stale_concluded_outcome_is_dropped() {
         let (provider, mut entered) =
             BlockingProvider::new(vec![text_response("turn one"), text_response("turn two")]);
-        let mut h = harness_with_provider(MockVendor::new(), provider);
+        let mut h = harness_with_provider(agent(), provider).await;
         let release2 = stopped_then_resent(&mut h, &mut entered).await;
 
         // Turn 1's outcome lands late. Usage is applied regardless of generation
@@ -1979,7 +1989,7 @@ mod tests {
     async fn stale_asked_outcome_is_dropped() {
         let (provider, mut entered) =
             BlockingProvider::new(vec![text_response("turn one"), text_response("turn two")]);
-        let mut h = harness_with_provider(MockVendor::new(), provider);
+        let mut h = harness_with_provider(agent(), provider).await;
         let release2 = stopped_then_resent(&mut h, &mut entered).await;
 
         // An `ask_user` handoff from the superseded turn: applying it would strand
@@ -2053,12 +2063,13 @@ mod tests {
         let (tx, mut entered) = tokio::sync::mpsc::unbounded_channel();
         let torn_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut h = harness_with_provider(
-            MockVendor::new(),
+            agent(),
             Arc::new(TeardownRecordingProvider {
                 entered: tx,
                 torn_down: Arc::clone(&torn_down),
             }),
-        );
+        )
+        .await;
 
         h.actor
             .ask(|reply| SessionCommand::UserMessage {
@@ -2091,7 +2102,7 @@ mod tests {
     #[tokio::test]
     async fn stop_aborts_the_in_flight_call_and_waits_for_the_run_to_finish() {
         let (provider, mut entered) = BlockingProvider::new(vec![text_response("never sent")]);
-        let mut h = harness_with_provider(MockVendor::new(), provider);
+        let mut h = harness_with_provider(agent(), provider).await;
 
         h.actor
             .ask(|reply| SessionCommand::UserMessage {
@@ -2135,7 +2146,7 @@ mod tests {
             usage: Usage::without_cache(6, 3),
         };
         let (provider, mut entered) = BlockingProvider::new(vec![ask]);
-        let mut h = harness_with_provider(MockVendor::new(), provider);
+        let mut h = harness_with_provider(agent(), provider).await;
 
         h.actor
             .ask(|reply| SessionCommand::UserMessage {

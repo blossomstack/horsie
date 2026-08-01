@@ -8,7 +8,7 @@ features through the real web UI, against a realistic-but-deterministic system:
 - **Mock LLM** — `horsie-mock-llm` run as a process, with responses programmed
   per test via its control plane (`/queue`, `/reset`).
 - **Real local runtime vendor** — a real `horsie-runtime` daemon dialing back
-  into the server's HTTP port (`/api/runtime/connect?register=local`) and
+  via `horsie connect`, which dials `/api/vendor/connect` and spawns one runtime per session, and
   registering as the `e2e` vendor. Tool calls execute for real in a scratch
   workspace.
 

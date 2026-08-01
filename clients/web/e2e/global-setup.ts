@@ -25,20 +25,32 @@ export default async function globalSetup(): Promise<void> {
   const binDir = path.join(REPO_ROOT, "target", "debug");
   const serverBin = path.join(binDir, "horsie-server");
   const runtimeBin = path.join(binDir, "horsie-runtime");
+  // The vendor agent: sessions reach this machine only through it now.
+  const cliBin = path.join(binDir, "horsie");
   const mockBin = path.join(binDir, "horsie-mock-llm");
   const distDir = path.join(WEB_DIR, "dist");
 
   if (!skipBuild) {
-    log("building rust binaries (horsie-server, horsie-runtime, horsie-mock-llm)…");
+    log("building rust binaries (horsie-server, horsie, horsie-runtime, horsie-mock-llm)…");
     execFileSync(
       "cargo",
-      ["build", "-p", "horsie-server", "-p", "horsie-runtime", "-p", "horsie-mock-llm"],
+      [
+        "build",
+        "-p",
+        "horsie-server",
+        "-p",
+        "horsie",
+        "-p",
+        "horsie-runtime",
+        "-p",
+        "horsie-mock-llm",
+      ],
       { cwd: REPO_ROOT, stdio: "inherit" },
     );
     log("building web assets (bun run build)…");
     execFileSync("bun", ["run", "build"], { cwd: WEB_DIR, stdio: "inherit" });
   }
-  for (const b of [serverBin, runtimeBin, mockBin]) {
+  for (const b of [serverBin, cliBin, runtimeBin, mockBin]) {
     if (!fs.existsSync(b)) {
       throw new Error(`missing binary ${b} — build first, or unset HORSIE_E2E_SKIP_BUILD`);
     }
@@ -149,31 +161,47 @@ export default async function globalSetup(): Promise<void> {
       ],
     });
 
-    log("starting horsie-runtime daemon (runtime-id 'e2e')");
+    // `horsie connect` is the vendor agent: it dials the server and spawns one
+    // `horsie-runtime` per session. The runtime binary and the shared plugin
+    // library reach it through the CLI config, not through flags.
+    const connectConfig = path.join(scratch, "..", "horsie-connect.json");
+    fs.writeFileSync(
+      connectConfig,
+      JSON.stringify({
+        runtime: { bin: runtimeBin },
+        storage: {
+          state_dir: path.join(path.dirname(connectConfig), "connect-state"),
+          // Shared plugin library scanned when a session has plugins enabled
+          // (the default), surfacing shared skills + SessionStart bootstrap.
+          plugins_dir: pluginsLib,
+        },
+      }),
+    );
+    log("starting horsie connect (vendor 'e2e')");
     spawnProc(
-      runtimeBin,
+      cliBin,
       [
-        "--endpoint",
-        `ws://127.0.0.1:${serverPort}/api/runtime/connect?register=local`,
-        "--runtime-id",
+        "connect",
+        "--server",
+        `http://127.0.0.1:${serverPort}`,
+        "--name",
         "e2e",
         "--workspace",
         `main=${scratch}`,
-        // Shared plugin library scanned when a session has plugins enabled
-        // (the default), surfacing shared skills + SessionStart bootstrap.
-        "--plugins-dir",
-        pluginsLib,
+        "--config",
+        connectConfig,
       ],
-      "runtime.log",
+      "connect.log",
     );
     await waitFor(
       async () => {
         const cfg = (await (await fetch(`${baseURL}/api/config`)).json()) as {
-          vendors?: { name: string; active: boolean }[];
+          vendors?: { name: string }[];
         };
-        return (cfg.vendors ?? []).some((v) => v.name === "e2e" && v.active);
+        // Every listed vendor is a connected agent — there is no inactive state.
+        return (cfg.vendors ?? []).some((v) => v.name === "e2e");
       },
-      { timeoutMs: 20_000, label: "vendor 'e2e' active" },
+      { timeoutMs: 20_000, label: "vendor 'e2e' connected" },
     );
 
     log("setting defaultVendor=e2e");

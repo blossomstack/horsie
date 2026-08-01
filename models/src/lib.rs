@@ -114,9 +114,18 @@ pub const ENV_PROVISION: &str = "HORSIE_PROVISION";
 /// github.com URLs.
 pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
 
-/// JSON array of `{name, hash, url}` plugin-bundle refs the runtime fetches at
+/// JSON array of `{name, hash}` plugin-bundle refs the runtime fetches at
 /// startup (written by the server's plugin provisioner into the runtime env).
+///
+/// No URLs: the server does not know what address its runtimes can reach it at.
+/// The vendor agent supplies that separately as [`ENV_PLUGINS_BASE`], and the
+/// runtime builds each fetch URL from the base plus the hash.
 pub const ENV_PLUGIN_MANIFEST: &str = "HORSIE_PLUGIN_MANIFEST";
+
+/// Base URL the runtime fetches bundle artifacts from, injected by the vendor
+/// agent because only it knows how its runtimes reach the server (loopback for
+/// a local agent, an advertise address for a remote one).
+pub const ENV_PLUGINS_BASE: &str = "HORSIE_PLUGINS_BASE";
 
 /// Bearer token the runtime presents when fetching bundle artifacts.
 pub const ENV_PLUGINS_TOKEN: &str = "HORSIE_PLUGINS_TOKEN";

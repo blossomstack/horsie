@@ -7,8 +7,7 @@
 //! unmatched id as a protocol error.
 
 use crate::vendor::{
-    RuntimeSpec, RuntimeVendor, VendorError, VendorRuntime, VendorRuntimeHandle,
-    VendorRuntimeTransport,
+    RuntimeSpec, VendorError, VendorRuntime, VendorRuntimeHandle, VendorRuntimeTransport,
 };
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::vendor::{
@@ -265,15 +264,21 @@ impl VendorLink {
     }
 }
 
-#[async_trait::async_trait]
-impl RuntimeVendor for VendorLink {
-    fn capabilities(&self) -> crate::vendor::VendorCapabilities {
+/// The vendor surface the session layer drives. These were a `RuntimeVendor`
+/// trait while the server had several vendor implementations of its own; every
+/// vendor is a connected agent now, so there is exactly one implementor and the
+/// trait was pure indirection.
+impl VendorLink {
+    /// What the agent announced it can do with a session workspace.
+    #[must_use]
+    pub fn capabilities(&self) -> crate::vendor::VendorCapabilities {
         crate::vendor::VendorCapabilities {
             supports_provisioning: self.capabilities.supports_provisioning,
         }
     }
 
-    async fn create(
+    /// Provision a brand-new runtime.
+    pub async fn create(
         &self,
         runtime_id: &str,
         spec: &RuntimeSpec,
@@ -286,7 +291,9 @@ impl RuntimeVendor for VendorLink {
         me.provision(runtime_id, spec, false).await
     }
 
-    async fn attach(
+    /// Revive a preserved runtime. Agents that cannot resume in place
+    /// provision a fresh instance against the same spec.
+    pub async fn attach(
         &self,
         runtime_id: &str,
         spec: &RuntimeSpec,
@@ -297,7 +304,8 @@ impl RuntimeVendor for VendorLink {
         me.provision(runtime_id, spec, true).await
     }
 
-    async fn delete(&self, runtime_id: &str) {
+    /// The owning session was deleted; the agent decides the runtime's fate.
+    pub async fn delete(&self, runtime_id: &str) {
         let _ = self
             .request(VendorCommand::DeleteRuntime(VendorDeleteRuntime {
                 runtime_id: runtime_id.to_string(),
@@ -577,7 +585,7 @@ mod tests {
         });
         let link = VendorLink::start(server_ws).await.expect("handshake");
         assert!(
-            !RuntimeVendor::capabilities(link.as_ref()).supports_provisioning,
+            !link.capabilities().supports_provisioning,
             "the server must not second-guess what the agent announced"
         );
     }

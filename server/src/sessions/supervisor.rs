@@ -467,8 +467,8 @@ impl EventSourcedActor for SessionSupervisor {
 mod tests {
     use super::*;
     use crate::sessions::spec::AgentSettings;
-    use crate::vendor::RuntimeVendor;
-    use crate::vendor::mock::MockVendor;
+    use crate::vendor::VendorLink;
+    use crate::vendor::fake_agent::FakeVendorAgent;
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use horsie_models::session::SessionStatusKind;
@@ -500,9 +500,13 @@ mod tests {
         }
     }
 
-    fn test_deps(tmp: &tempfile::TempDir) -> ServerDeps {
-        let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
-        vendors.insert("mock".into(), Arc::new(MockVendor::new()));
+    async fn test_deps(tmp: &tempfile::TempDir) -> ServerDeps {
+        let mut vendors: HashMap<String, Arc<VendorLink>> = HashMap::new();
+        let mock_agent = FakeVendorAgent::builder("mock")
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        vendors.insert("mock".into(), mock_agent.link());
         ServerDeps {
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors: Arc::new(std::sync::RwLock::new(vendors)),
@@ -582,7 +586,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _grx) = broadcast::channel(16);
-        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp), gtx), journal);
+        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
 
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
@@ -622,7 +626,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, mut grx) = broadcast::channel(16);
-        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp), gtx), journal);
+        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
 
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
@@ -672,7 +676,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, mut grx) = broadcast::channel(16);
-        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp), gtx), journal);
+        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
 
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
@@ -730,7 +734,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp), gtx), journal);
+        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
         let res = sup
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: "missing".into(),
@@ -756,7 +760,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = broadcast::channel(16);
         let sup = spawn_root(
-            SessionSupervisor::new(test_deps(&tmp), gtx.clone()),
+            SessionSupervisor::new(test_deps(&tmp).await, gtx.clone()),
             journal.clone(),
         );
         let id = sup
@@ -773,7 +777,7 @@ mod tests {
 
         // Second incarnation on the same journal recovers the registry and
         // re-spawns the child (routable, no NotFound).
-        let sup2 = spawn_root(SessionSupervisor::new(test_deps(&tmp), gtx), journal);
+        let sup2 = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
         let rec = sup2
             .ask(|reply| SessionSupervisorCommand::Get {
                 id: id.clone(),

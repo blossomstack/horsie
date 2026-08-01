@@ -1,0 +1,36 @@
+[package]
+name = "horsie-vendor-velos"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/blossomstack/horsie"
+description = "Runtime vendor agent backing horsie sessions with velos-scheduled containers"
+version = "0.1.6"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "horsie-vendor-velos"
+path = "src/main.rs"
+
+[dependencies]
+horsie-models   = { path = "../models" }
+horsie-executor = { path = "../executor" }
+horsie-agentcore = { path = "../agentcore" }
+clap              = { version = "4", features = ["derive", "env"] }
+tokio             = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tokio-util        = { workspace = true }
+reqwest           = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+thiserror         = { workspace = true }
+async-trait       = { workspace = true }
+uuid              = { workspace = true }
+tracing           = { workspace = true }
+
+[dev-dependencies]
+axum              = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util      = { workspace = true }
+tempfile          = "3"
+
+[lints]
+workspace = true

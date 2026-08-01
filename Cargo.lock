@@ -1489,7 +1489,6 @@ dependencies = [
  "horsie-agentcore",
  "horsie-anthropic",
  "horsie-executor",
- "horsie-executor-client",
  "horsie-mock-llm",
  "horsie-models",
  "horsie-openai",
@@ -1503,6 +1502,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "uuid",
@@ -1562,7 +1562,6 @@ version = "0.1.6"
 dependencies = [
  "async-trait",
  "futures-util",
- "horsie-executor-client",
  "horsie-models",
  "horsie-runtime-client",
  "horsie-server",
@@ -1572,21 +1571,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "horsie-executor-client"
-version = "0.1.6"
-dependencies = [
- "async-trait",
- "futures-util",
- "horsie-models",
- "horsie-runtime-client",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
  "uuid",
 ]
 
@@ -1701,7 +1685,6 @@ dependencies = [
  "horsie-agentcore",
  "horsie-anthropic",
  "horsie-executor",
- "horsie-executor-client",
  "horsie-mcp-client",
  "horsie-models",
  "horsie-openai",
@@ -1739,7 +1722,6 @@ dependencies = [
  "horsie-agentcore",
  "horsie-anthropic",
  "horsie-executor",
- "horsie-executor-client",
  "horsie-mock-llm",
  "horsie-models",
  "horsie-runtime-client",
@@ -1750,6 +1732,29 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "horsie-vendor-velos"
+version = "0.1.6"
+dependencies = [
+ "async-trait",
+ "axum",
+ "clap",
+ "futures-util",
+ "horsie-agentcore",
+ "horsie-executor",
+ "horsie-models",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "uuid",

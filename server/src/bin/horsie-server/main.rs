@@ -101,18 +101,9 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         plugins_dir: data_dir.join("plugins").display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    // The one registry every runtime dial-back lands in, shared by the vendors
-    // (velos) and the HTTP `/api/runtime/connect` route.
-    let runtime_registry = Arc::new(horsie_executor::ConnectedRuntimeRegistry::new());
-    let opened = DbConfigStore::open(
-        &db_url,
-        StoreDeps {
-            info,
-            runtime_registry: runtime_registry.clone(),
-        },
-    )
-    .await
-    .map_err(BootError::Config)?;
+    let opened = DbConfigStore::open(&db_url, StoreDeps { info })
+        .await
+        .map_err(BootError::Config)?;
 
     // Seed the model-card catalog: bundled defaults plus an optional operator
     // file. Seed-file parse/read errors are fatal (operator input should fail
@@ -138,18 +129,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         }
         Err(e) => return Err(e),
     }
-
-    // The shared local-runtime vendor registers each daemon that dials
-    // `/api/runtime/connect?register=local` as a vendor. It owns no listener —
-    // it hands the route a hook that fires on registration. Kept alive by
-    // moving its hook into `AppState`.
-    let local_daemon_hook = {
-        let registry = horsie_server::vendor::LocalDaemonRegistry::new(
-            runtime_registry.clone(),
-            opened.vendors.clone(),
-        );
-        registry.hook()
-    };
 
     // Vendor agents publish themselves into the same map sessions select from,
     // exactly as the local-daemon registry does for dial-in runtimes.
@@ -201,8 +180,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         mcp,
         plugins,
         memory,
-        runtime_registry,
-        local_daemon_hook,
         vendor_agents,
         web_dir: cli.web,
     };

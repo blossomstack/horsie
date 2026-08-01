@@ -24,7 +24,6 @@ use serde::Serialize;
 pub struct PluginArtifactRef {
     pub name: String,
     pub hash: String,
-    pub url: String,
 }
 
 /// The subset of plugin operations the session layer needs at provisioning:
@@ -32,13 +31,13 @@ pub struct PluginArtifactRef {
 /// and fall back to the default-enabled set. Injected into `ServerDeps`.
 #[async_trait::async_trait]
 pub trait PluginProvisioner: Send + Sync {
-    /// Resolve bundle `names` to `{name, hash, url}` refs against `base_url`
-    /// (the vendor's artifact base). Errs if any name is unknown.
-    async fn resolve(
-        &self,
-        names: &[String],
-        base_url: &str,
-    ) -> Result<Vec<PluginArtifactRef>, String>;
+    /// Resolve bundle `names` to `{name, hash}` refs. Errs if any name is
+    /// unknown.
+    ///
+    /// No base URL: the agent that runs the runtime knows the address its
+    /// runtimes can reach the server at, and builds the fetch URL from the
+    /// hash itself. The server has no opinion about it.
+    async fn resolve(&self, names: &[String]) -> Result<Vec<PluginArtifactRef>, String>;
 
     /// Mint a short-lived bearer scoped to a session id and the given hashes.
     fn mint_token(&self, session_id: &str, hashes: &[String]) -> String;

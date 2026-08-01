@@ -60,7 +60,7 @@ function DraftControls({ draft }: { draft: SessionDraft }) {
   const { data: mcpServers } = useMcpServers();
   const { data: memorySpaces } = useMemorySpaces();
   const models = settings?.models ?? [];
-  const activeVendors = (settings?.vendors ?? []).filter((v) => v.active);
+  const activeVendors = (settings?.vendors ?? []);
   const enabledMcp = (mcpServers ?? []).filter((s) => s.enabled);
   const { data: repoList } = useGithubRepos(draft.provisions && draft.githubConnected);
 

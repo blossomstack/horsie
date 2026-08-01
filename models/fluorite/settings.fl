@@ -50,50 +50,20 @@ struct VendorCapabilities {
     supports_provisioning: bool,
 }
 
-/// A runtime vendor sessions can target: DB-configured, or daemon-registered.
-/// A daemon-registered vendor (e.g. a connected shared local runtime) is
-/// listed under whatever label it dialed in as, and only once it has
-/// actually registered. A DB-configured vendor carries a kind-tagged config
-/// block; a daemon-registered one carries none.
+/// A runtime vendor sessions can target.
+///
+/// Every vendor is a connected agent now: the server holds no vendor
+/// configuration and builds nothing, so this is a live roster rather than a
+/// settings record. A vendor appears once its agent completes the handshake
+/// and disappears when the link drops — there is no configured-but-inactive
+/// state, so no config block and no build error to report.
 struct VendorView {
+    /// The name the agent announced, which sessions select by.
     name: String,
-    /// Loaded and usable in the running server right now.
-    active: bool,
     /// Whether new sessions default to this vendor.
     is_default: bool,
-    /// Kind-specific config, redacted. Absent for a daemon-registered vendor.
-    config: Option<VendorConfigView>,
-    /// The last build/reconfigure failure for this vendor, if any. `None`
-    /// when active or never attempted.
-    error: Option<String>,
-    /// Announced capabilities of the live vendor instance. `None` when the
-    /// vendor is configured but not currently loaded (no instance to ask);
-    /// the new-session UI only offers active vendors, so it always has a
-    /// value where it matters.
-    capabilities: Option<VendorCapabilities>,
-}
-
-/// Redacted config for a configurable vendor, tagged by kind. Add a variant to
-/// support a new vendor kind — no schema migration needed.
-#[type_tag = "kind"]
-union VendorConfigView {
-    Velos(VelosView),
-}
-
-/// The velos remote-runtime config, redacted (no token).
-struct VelosView {
-    server_url: String,
-    image: String,
-    /// `host:port` the runtime dials back on — the server's externally reachable
-    /// HTTP endpoint. Both the reverse-dial WebSocket and plugin-artifact fetch
-    /// target this one address.
-    advertise_address: String,
-    has_inline_token: bool,
-    runtime_bin: String,
-    workspace_root: String,
-    cpu: u32,
-    memory_mib: u64,
-    connect_timeout_secs: u64,
+    /// What the agent announced it can do with a session workspace.
+    capabilities: VendorCapabilities,
 }
 
 /// Read-only deployment paths and version, for transparency. `config_path` is
@@ -115,8 +85,8 @@ struct SettingsView {
     vendors: Vec<VendorView>,
     default_vendor: String,
     info: ServerInfo,
-    /// Always false: every provider/model/vendor edit now applies live (no
-    /// runtime listener to rebind). Retained for wire compatibility.
+    /// Always false: every provider/model edit applies live. Retained for wire
+    /// compatibility.
     restart_required: bool,
 }
 
@@ -147,50 +117,12 @@ struct ModelInput {
     thinking_dialect: Option<String>,
 }
 
-/// A configurable vendor to persist. Replaces any vendor of the same `name`.
-struct VendorInput {
-    name: String,
-    config: VendorConfigInput,
-}
-
-/// Kind-tagged vendor config input. Add a variant per new vendor kind.
-#[type_tag = "kind"]
-union VendorConfigInput {
-    Velos(VelosInput),
-}
-
-/// velos config to persist. Only `server_url`, `image`, and `advertise_address`
-/// are required; the rest default. `token`: omit to keep, "" to clear.
-struct VelosInput {
-    server_url: String,
-    image: String,
-    /// `host:port` the runtime dials back on (the server's externally reachable
-    /// HTTP endpoint) — serves both the reverse-dial WebSocket and artifact fetch.
-    advertise_address: String,
-    token: Option<String>,
-    runtime_bin: Option<String>,
-    workspace_root: Option<String>,
-    cpu: Option<u32>,
-    memory_mib: Option<u64>,
-    connect_timeout_secs: Option<u64>,
-}
-
 /// Replace the runtime-editable settings. Each present field fully replaces
-/// that section; an omitted (null) field leaves it unchanged. `vendors` covers
-/// the configurable vendors (not the built-in `local`).
+/// that section; an omitted (null) field leaves it unchanged. Vendors are
+/// absent by design: they are connected agents, configured in their own
+/// processes, so there is nothing here to persist.
 struct SettingsUpdate {
     providers: Option<Vec<ProviderInput>>,
     models: Option<Vec<ModelInput>>,
-    vendors: Option<Vec<VendorInput>>,
     default_vendor: Option<String>,
-}
-
-/// The outcome of an on-demand connection check for a configurable vendor
-/// (currently velos only) — reachability + token validity, checked live.
-/// Never persisted; a fresh check every call.
-struct VendorTestResult {
-    ok: bool,
-    /// The authenticated identity when `ok` (e.g. "admin", "worker:name").
-    identity: Option<String>,
-    error: Option<String>,
 }

@@ -55,7 +55,7 @@ export function useSessionDraft(): SessionDraft {
   const { data: memorySpaces } = useMemorySpaces();
   const models = settings?.models ?? [];
   const activeVendors = useMemo(
-    () => (settings?.vendors ?? []).filter((v) => v.active),
+    () => (settings?.vendors ?? []),
     [settings],
   );
 
