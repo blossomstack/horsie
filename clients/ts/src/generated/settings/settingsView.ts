@@ -13,7 +13,7 @@ export interface SettingsView {
   defaultVendor: string;
   info: ServerInfo;
   /**
-   * Always false: every provider/model/vendor edit now applies live (no
+   * Always false: every provider/model edit applies live. Retained for wire
    */
   restartRequired: boolean;
 }

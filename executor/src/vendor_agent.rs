@@ -15,7 +15,7 @@ use crate::{
     provider::{RuntimeHandle, RuntimeProvider},
 };
 use futures_util::{SinkExt, StreamExt};
-use horsie_models::executor::{RuntimeConfig, RuntimeInfo, RuntimeState, WorkspaceConfig};
+use horsie_models::executor::{EnvVar, RuntimeConfig, RuntimeInfo, RuntimeState, WorkspaceConfig};
 use horsie_models::runtime::ToolCall;
 use horsie_models::vendor::{
     VendorAgentCapabilities, VendorCommand, VendorCommandFailed, VendorEvent, VendorInboundMessage,
@@ -85,6 +85,17 @@ type Sink = Arc<
     >,
 >;
 
+/// Where and how an agent's runtimes materialize server-managed bundles.
+pub struct BundleDelivery {
+    /// Base URL reaching the server *from where the runtimes run* — loopback
+    /// for a local agent, an advertise address for a remote one.
+    pub base_url: String,
+    /// Path the runtime unpacks bundles into and scans.
+    pub dir: String,
+    /// Optional content-hash cache, so repeat sessions skip re-fetching.
+    pub cache_dir: Option<String>,
+}
+
 /// One live runtime this agent owns.
 struct LiveRuntime {
     handle: Arc<dyn RuntimeHandle>,
@@ -107,6 +118,11 @@ pub struct VendorAgent {
     /// CLI. Never sent by the server — it is a property of this machine.
     host_library: Option<PathBuf>,
     hook_path: Vec<PathBuf>,
+    /// How this agent's runtimes fetch server-managed bundles: the base URL
+    /// that reaches the server from where they run, the directory they unpack
+    /// into, and an optional content-hash cache. All three are the agent's
+    /// knowledge, not the server's — it sends only hashes and a token.
+    bundles: Option<BundleDelivery>,
     runtimes: Arc<Mutex<HashMap<String, LiveRuntime>>>,
 }
 
@@ -130,6 +146,7 @@ impl VendorAgent {
             sandbox: false,
             host_library: None,
             hook_path: Vec::new(),
+            bundles: None,
             runtimes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -138,6 +155,13 @@ impl VendorAgent {
     #[must_use]
     pub fn with_sandbox(mut self, enabled: bool) -> Self {
         self.sandbox = enabled;
+        self
+    }
+
+    /// Let this agent's runtimes fetch server-managed bundles.
+    #[must_use]
+    pub fn with_bundles(mut self, delivery: BundleDelivery) -> Self {
+        self.bundles = Some(delivery);
         self
     }
 
@@ -369,6 +393,24 @@ impl VendorAgent {
             (None, _) | (Some(_), false) => None,
         };
 
+        let mut env = request.env.clone();
+        if let Some(b) = &self.bundles {
+            env.push(EnvVar {
+                name: horsie_models::ENV_PLUGINS_BASE.to_string(),
+                value: b.base_url.clone(),
+            });
+            env.push(EnvVar {
+                name: horsie_models::ENV_PLUGINS_DIR.to_string(),
+                value: b.dir.clone(),
+            });
+            if let Some(cache) = &b.cache_dir {
+                env.push(EnvVar {
+                    name: horsie_models::ENV_PLUGINS_CACHE.to_string(),
+                    value: cache.clone(),
+                });
+            }
+        }
+
         let config = RuntimeConfig {
             workspaces,
             plugins_dir: self
@@ -380,7 +422,7 @@ impl VendorAgent {
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),
-            env: request.env.clone(),
+            env,
             provision: request.provision.clone(),
         };
         let handle = (self.provider)(runtime_id, caps_file)

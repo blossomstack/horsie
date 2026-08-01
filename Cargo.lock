@@ -1489,7 +1489,6 @@ dependencies = [
  "horsie-agentcore",
  "horsie-anthropic",
  "horsie-executor",
- "horsie-executor-client",
  "horsie-mock-llm",
  "horsie-models",
  "horsie-openai",
@@ -1563,7 +1562,6 @@ version = "0.1.6"
 dependencies = [
  "async-trait",
  "futures-util",
- "horsie-executor-client",
  "horsie-models",
  "horsie-runtime-client",
  "horsie-server",
@@ -1573,21 +1571,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "horsie-executor-client"
-version = "0.1.6"
-dependencies = [
- "async-trait",
- "futures-util",
- "horsie-models",
- "horsie-runtime-client",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
  "uuid",
 ]
 
@@ -1702,7 +1685,6 @@ dependencies = [
  "horsie-agentcore",
  "horsie-anthropic",
  "horsie-executor",
- "horsie-executor-client",
  "horsie-mcp-client",
  "horsie-models",
  "horsie-openai",
@@ -1740,7 +1722,6 @@ dependencies = [
  "horsie-agentcore",
  "horsie-anthropic",
  "horsie-executor",
- "horsie-executor-client",
  "horsie-mock-llm",
  "horsie-models",
  "horsie-runtime-client",

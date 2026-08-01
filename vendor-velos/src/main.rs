@@ -119,6 +119,13 @@ async fn run(cli: Cli) -> Result<(), String> {
         )
         .map_err(|e| format!("velos client: {e}"))?,
     );
+    // Fail fast on an unreachable server or a bad token, rather than letting
+    // the first session discover it as a provisioning error.
+    match api.whoami().await {
+        Ok(identity) => println!("velos: authenticated as {identity}"),
+        Err(e) => return Err(format!("velos {}: {e}", cli.velos_url)),
+    }
+
     let advertise_ws = format!("ws://{}", cli.advertise.trim_end_matches('/'));
     let settings = VelosProviderSettings {
         image: cli.image.clone(),
@@ -150,7 +157,17 @@ async fn run(cli: Cli) -> Result<(), String> {
         connected,
         Arc::new(ManagedWorkspaces::new(cli.workspace_root.clone())),
         cli.state_dir.clone(),
-    );
+    )
+    .with_bundles(horsie_executor::BundleDelivery {
+        // Containers reach the server the same way they reach us: over the
+        // advertise address, which is routable from velos's container network.
+        base_url: format!("http://{}", cli.advertise.trim_end_matches('/')),
+        // A fixed in-container path: the container is ephemeral and isolated,
+        // so one dir per runtime buys nothing, and there is nothing to cache
+        // across containers.
+        dir: "/horsie/plugins".to_string(),
+        cache_dir: None,
+    });
 
     println!(
         "connected to {} as vendor \"{}\" · velos {} · containers dial back to {}",

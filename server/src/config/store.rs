@@ -12,26 +12,19 @@
 
 use crate::config::ConfigStore;
 use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
-use crate::velos::{VelosClient, VelosError};
-use crate::vendor::{RuntimeVendor, VelosMutableSettings, VelosVendor, VelosVendorSettings};
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret, ThinkingDialect, ThinkingEffort};
 use horsie_anthropic::AnthropicProvider;
-use horsie_executor::ConnectedRuntimeRegistry;
 use horsie_models::settings::{
-    ModelView, ProviderView, ServerInfo, SettingsUpdate, SettingsView, VelosView,
-    VendorCapabilities, VendorConfigInput, VendorConfigView, VendorTestResult, VendorView,
+    ModelView, ProviderView, ServerInfo, SettingsUpdate, SettingsView, VendorCapabilities,
+    VendorView,
 };
 use horsie_openai::OpenAiProvider;
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 type Registry = HashMap<String, Arc<dyn LlmProvider>>;
 
@@ -39,12 +32,6 @@ type Registry = HashMap<String, Arc<dyn LlmProvider>>;
 pub struct StoreDeps {
     /// Read-only deployment paths, surfaced in the settings view.
     pub info: ServerInfo,
-    /// The server-wide runtime-connection registry that every velos vendor
-    /// shares — fed by the HTTP `/api/runtime/connect` route, which
-    /// demultiplexes dial-backs by `runtime_id`. The host owns it so both the
-    /// vendors (built here) and the route (in `AppState`) reference the same
-    /// registry.
-    pub runtime_registry: Arc<ConnectedRuntimeRegistry>,
 }
 
 /// What [`DbConfigStore::open`] hands back: the store (for the HTTP layer) plus
@@ -61,28 +48,13 @@ pub struct OpenedConfig {
 pub struct DbConfigStore {
     pool: SqlitePool,
     registry: SharedProviderRegistry,
+    /// The name new sessions prefer. A preference, not a validated reference:
+    /// the agent that answers to it may connect long after boot.
     default_vendor: RwLock<String>,
-    /// Live runtime vendors, kept in sync with the DB by `update()`'s
-    /// reconciliation so most vendor edits apply without a restart.
+    /// The live vendor roster, written by connected agents rather than by this
+    /// store. Read here only to render the settings view.
     vendors: SharedVendors,
-    /// Concrete handles for vendor kinds that support live reconfigure
-    /// (currently only `velos`), keyed by name — lets `update()` call
-    /// `.reconfigure()` on the right concrete type without downcasting the
-    /// generic `vendors` map.
-    velos_instances: RwLock<HashMap<String, Arc<VelosVendor>>>,
-    /// Last build/reconfigure failure per vendor name, surfaced on
-    /// `VendorView.error`. Cleared when that vendor next builds or
-    /// reconfigures successfully.
-    vendor_errors: RwLock<HashMap<String, String>>,
-    /// Always `false` now: every velos edit applies live (there is no listener
-    /// to rebind), so nothing ever requires a restart. Retained so the settings
-    /// view keeps its `restart_required` field without a wire-schema change.
-    restart_required: AtomicBool,
     info: ServerInfo,
-    /// The server-wide runtime-connection registry shared with every velos
-    /// vendor and the HTTP `/api/runtime/connect` route; held so live vendor
-    /// activation (`activate_vendor`) can build new velos vendors against it.
-    runtime_registry: Arc<ConnectedRuntimeRegistry>,
 }
 
 impl DbConfigStore {
@@ -96,42 +68,25 @@ impl DbConfigStore {
         let registry: SharedProviderRegistry =
             Arc::new(RwLock::new(build_registry(&provs, &mods)?));
 
-        let vendor_rows = read_vendors(&pool).await.map_err(|e| e.to_string())?;
-        let (vendors, velos_instances) = build_vendors(&vendor_rows, &deps.runtime_registry).await;
+        // The server builds no vendors: every vendor is an agent that dials in
+        // and publishes itself into this map. It starts empty at boot and is
+        // never repopulated from the database.
+        let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
 
+        // Kept as a preference even when no agent has connected yet — an agent
+        // announcing this name later makes it take effect, so validating it
+        // against the (empty) live map at boot would be wrong.
         let default_vendor = read_setting(&pool, "default_vendor")
             .await
             .map_err(|e| e.to_string())?
             .unwrap_or_else(|| "local".into());
-        let default_vendor = if vendors.contains_key(&default_vendor) {
-            default_vendor
-        } else {
-            // A connected shared-local-vendor label isn't known at open()
-            // time either (daemons dial in after startup), so fall back to
-            // whatever vendor IS already loaded rather than hardcoding a
-            // name that might not exist yet.
-            let fallback = vendors
-                .keys()
-                .min()
-                .cloned()
-                .unwrap_or_else(|| "local".into());
-            eprintln!(
-                "warning: default vendor '{default_vendor}' is not loaded; using '{fallback}'"
-            );
-            fallback
-        };
 
-        let vendors: SharedVendors = Arc::new(RwLock::new(vendors));
         let store = Arc::new(Self {
             pool: pool.clone(),
             registry: registry.clone(),
             default_vendor: RwLock::new(default_vendor),
             vendors: vendors.clone(),
-            velos_instances: RwLock::new(velos_instances),
-            vendor_errors: RwLock::new(HashMap::new()),
-            restart_required: AtomicBool::new(false),
             info: deps.info,
-            runtime_registry: deps.runtime_registry,
         });
         Ok(OpenedConfig {
             store,
@@ -146,184 +101,33 @@ impl DbConfigStore {
             .await
             .map_err(|e| e.to_string())?;
         let mods = read_models(&self.pool).await.map_err(|e| e.to_string())?;
-        let vendor_rows = read_vendors(&self.pool).await.map_err(|e| e.to_string())?;
         let default_vendor = self.default_vendor();
         Ok(SettingsView {
             providers: provs.iter().map(provider_view).collect(),
             models: mods.iter().map(model_view).collect(),
-            vendors: self.vendors_view(&default_vendor, &vendor_rows),
+            vendors: self.vendors_view(&default_vendor),
             default_vendor,
             info: self.info.clone(),
-            restart_required: self.restart_required.load(Ordering::Relaxed),
+            // Nothing the settings page can edit requires a restart any more.
+            restart_required: false,
         })
     }
 
-    fn vendors_view(&self, default_vendor: &str, rows: &[VendorRow]) -> Vec<VendorView> {
+    /// The live vendor roster: whichever agents are connected right now, with
+    /// the capabilities they announced. There is no configured-but-inactive
+    /// state to report, so every entry here is by definition usable.
+    fn vendors_view(&self, default_vendor: &str) -> Vec<VendorView> {
         let live = self.vendors.read().unwrap_or_else(|e| e.into_inner());
-        let errors = self.vendor_errors.read().unwrap_or_else(|e| e.into_inner());
-        // Capabilities are announced by the live vendor instance, so a
-        // configured-but-inactive row reports `None` (nothing to ask). No
-        // branching on vendor name/kind — each vendor declares its own.
-        let caps = |name: &str| live.get(name).map(|v| vendor_caps_view(v.capabilities()));
-        let active = |name: &str| live.contains_key(name);
-        // Daemon-registered vendors (e.g. "local") aren't DB rows — they only
-        // exist once a daemon has actually dialed in and claimed a label, so
-        // unlike `rows` below they're read straight off the live map instead
-        // of being listed unconditionally.
-        let row_names: HashSet<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         let mut out: Vec<VendorView> = live
-            .keys()
-            .filter(|name| !row_names.contains(name.as_str()))
-            .map(|name| VendorView {
+            .iter()
+            .map(|(name, vendor)| VendorView {
                 name: name.clone(),
-                active: true,
                 is_default: default_vendor == name.as_str(),
-                config: None,
-                error: None,
-                capabilities: caps(name),
+                capabilities: vendor_caps_view(vendor.capabilities()),
             })
             .collect();
-        for r in rows {
-            let config = match r.kind.as_str() {
-                "velos" => serde_json::from_str::<VelosConfig>(&r.config)
-                    .ok()
-                    .map(|vc| VendorConfigView::Velos(velos_view(&vc))),
-                _ => None,
-            };
-            out.push(VendorView {
-                name: r.name.clone(),
-                active: active(&r.name),
-                is_default: default_vendor == r.name,
-                config,
-                error: errors.get(&r.name).cloned(),
-                capabilities: caps(&r.name),
-            });
-        }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
-    }
-
-    /// After vendor rows are persisted, bring the live vendor map in line with
-    /// the new DB state: build newly-added or previously-inactive rows,
-    /// live-reconfigure an active `velos` vendor whose listener-affecting
-    /// fields are unchanged, leave an active vendor's old instance running
-    /// (flagged) when those fields did change, and drop rows that were
-    /// removed. Never fails the caller — outcomes land in `vendor_errors` /
-    /// `restart_required` for the view to report.
-    async fn reconcile_vendors(&self, before: &[VendorRow], after: &[VendorRow]) {
-        let before_by_name: HashMap<&str, &VendorRow> =
-            before.iter().map(|r| (r.name.as_str(), r)).collect();
-        let after_names: HashSet<&str> = after.iter().map(|r| r.name.as_str()).collect();
-
-        for name in before_by_name.keys().filter(|n| !after_names.contains(*n)) {
-            self.vendors
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(*name);
-            self.velos_instances
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(*name);
-            self.vendor_errors
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(*name);
-        }
-
-        for row in after {
-            let was_active = self
-                .vendors
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(&row.name);
-            if was_active
-                && let Some(prior) = before_by_name.get(row.name.as_str()).copied()
-                && prior.kind == row.kind
-            {
-                self.apply_active_vendor_edit(row, prior).await;
-            } else {
-                self.activate_vendor(row).await;
-            }
-        }
-    }
-
-    /// A previously-active vendor of the same kind was edited: reconfigure it
-    /// in place. Every velos field is live-editable now (no listener to
-    /// rebind), so this always applies without a restart.
-    async fn apply_active_vendor_edit(&self, row: &VendorRow, prior: &VendorRow) {
-        if row.kind != "velos" {
-            return;
-        }
-        let parsed = (
-            serde_json::from_str::<VelosConfig>(&prior.config),
-            serde_json::from_str::<VelosConfig>(&row.config),
-        );
-        let (Ok(old_vc), Ok(new_vc)) = parsed else {
-            self.vendor_errors
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(
-                    row.name.clone(),
-                    "stored config no longer parses".to_string(),
-                );
-            return;
-        };
-        // Every velos field is now live-editable — there is no listener to
-        // rebind, so `advertise_address`/`server_url` changes apply on the next
-        // provision like any other field. `old_vc` is unused beyond the parse
-        // check that both configs are still valid.
-        let _ = old_vc;
-        match velos_mutable_settings(&new_vc) {
-            Ok(settings) => {
-                let handle = self
-                    .velos_instances
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&row.name)
-                    .cloned();
-                if let Some(handle) = handle {
-                    handle.reconfigure(settings);
-                    self.vendor_errors
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&row.name);
-                }
-            }
-            Err(e) => {
-                self.vendor_errors
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(row.name.clone(), e);
-            }
-        }
-    }
-
-    /// Bring a row online: a brand-new vendor, a previously-inactive one, or a
-    /// kind change. Built against the shared runtime registry.
-    async fn activate_vendor(&self, row: &VendorRow) {
-        match build_one_vendor(row, self.runtime_registry.clone()) {
-            Ok(built) => {
-                let BuiltVendor::Velos(v) = &built;
-                self.velos_instances
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(row.name.clone(), v.clone());
-                self.vendors
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(row.name.clone(), built.as_dyn());
-                self.vendor_errors
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&row.name);
-            }
-            Err(e) => {
-                self.vendor_errors
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(row.name.clone(), e);
-            }
-        }
     }
 }
 
@@ -435,56 +239,14 @@ impl ConfigStore for DbConfigStore {
             }
         }
 
-        let mut vendor_rows_before: Option<Vec<VendorRow>> = None;
-        if let Some(vendors) = &update.vendors {
-            let existing = read_vendors(&mut *tx).await.map_err(|e| e.to_string())?;
-            let keep: HashMap<&str, &str> = existing
-                .iter()
-                .map(|r| (r.name.as_str(), r.config.as_str()))
-                .collect();
-            let mut seen = HashSet::new();
-            sqlx::query("DELETE FROM vendors")
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| e.to_string())?;
-            for v in vendors {
-                let name = v.name.trim();
-                if name.is_empty() {
-                    return Err("vendor name cannot be empty".into());
-                }
-                if name == "local" {
-                    return Err("'local' is reserved and cannot be a configured vendor".into());
-                }
-                if !seen.insert(name.to_string()) {
-                    return Err(format!("duplicate vendor '{name}'"));
-                }
-                let (kind, config) = build_vendor_config(name, &v.config, keep.get(name).copied())?;
-                sqlx::query("INSERT INTO vendors (name, kind, config) VALUES (?, ?, ?)")
-                    .bind(name)
-                    .bind(kind)
-                    .bind(config)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-            vendor_rows_before = Some(existing);
-        }
-
         if let Some(dv) = &update.default_vendor {
-            let (is_loaded, mut names) = {
-                let loaded = self.vendors.read().unwrap_or_else(|e| e.into_inner());
-                (
-                    loaded.contains_key(dv),
-                    loaded.keys().cloned().collect::<Vec<_>>(),
-                )
-            };
-            if !is_loaded {
-                names.sort();
-                return Err(format!(
-                    "vendor '{dv}' is not loaded (available: {})",
-                    names.join(", ")
-                ));
+            if dv.trim().is_empty() {
+                return Err("default vendor cannot be empty".into());
             }
+            // Deliberately not validated against the live roster: the agent
+            // answering to this name may connect long after the preference is
+            // set, and rejecting it here would make the setting unusable
+            // before its agent is running.
             sqlx::query(
                 "INSERT INTO settings (key, value) VALUES ('default_vendor', ?) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -510,11 +272,6 @@ impl ConfigStore for DbConfigStore {
                 .write()
                 .unwrap_or_else(|e| e.into_inner()) = dv.clone();
         }
-        if let Some(before) = vendor_rows_before {
-            let after = read_vendors(&self.pool).await.map_err(|e| e.to_string())?;
-            self.reconcile_vendors(&before, &after).await;
-        }
-
         self.build_view().await
     }
 
@@ -523,41 +280,6 @@ impl ConfigStore for DbConfigStore {
             .read()
             .map(|g| g.clone())
             .unwrap_or_default()
-    }
-
-    async fn test_vendor(&self, name: &str) -> Result<VendorTestResult, String> {
-        let rows = read_vendors(&self.pool).await.map_err(|e| e.to_string())?;
-        let row = rows
-            .into_iter()
-            .find(|r| r.name == name)
-            .ok_or_else(|| format!("unknown vendor '{name}'"))?;
-        match row.kind.as_str() {
-            "velos" => {
-                let vc = serde_json::from_str::<VelosConfig>(&row.config)
-                    .map_err(|e| format!("invalid config: {e}"))?;
-                let token = resolve_velos_token(&vc)?;
-                let client = VelosClient::new(&vc.server_url, token)
-                    .map_err(|e| format!("velos client: {e}"))?;
-                Ok(match client.whoami().await {
-                    Ok(identity) => VendorTestResult {
-                        ok: true,
-                        identity: Some(identity),
-                        error: None,
-                    },
-                    Err(VelosError::Status { status: 401, .. }) => VendorTestResult {
-                        ok: false,
-                        identity: None,
-                        error: Some("token rejected (401 Unauthorized)".into()),
-                    },
-                    Err(e) => VendorTestResult {
-                        ok: false,
-                        identity: None,
-                        error: Some(e.to_string()),
-                    },
-                })
-            }
-            other => Err(format!("vendor kind '{other}' does not support testing")),
-        }
     }
 }
 
@@ -582,57 +304,6 @@ struct ModelRow {
     thinking_dialect: Option<String>,
 }
 
-struct VendorRow {
-    name: String,
-    kind: String,
-    config: String,
-}
-
-/// Server-side velos config, deserialized from a vendor row's JSON. Defaults
-/// mirror the documented file config; `token` deserializes transparently into a
-/// redacting [`Secret`].
-#[derive(Deserialize)]
-struct VelosConfig {
-    server_url: String,
-    image: String,
-    /// `host:port` the server is reachable at from the velos worker network —
-    /// the runtime dials `ws://<advertise_address>/api/runtime/connect` and
-    /// fetches plugin artifacts from `http://<advertise_address>`.
-    advertise_address: String,
-    #[serde(default)]
-    token: Option<Secret>,
-    #[serde(default = "default_runtime_bin")]
-    runtime_bin: String,
-    #[serde(default = "default_workspace_root")]
-    workspace_root: String,
-    #[serde(default = "default_cpu")]
-    cpu: u32,
-    #[serde(default = "default_memory_mib")]
-    memory_mib: u64,
-    #[serde(default = "default_connect_timeout_secs")]
-    connect_timeout_secs: u64,
-}
-
-fn default_runtime_bin() -> String {
-    "horsie-runtime".into()
-}
-fn default_workspace_root() -> String {
-    "/workspace".into()
-}
-fn default_cpu() -> u32 {
-    2
-}
-fn default_memory_mib() -> u64 {
-    1024
-}
-fn default_connect_timeout_secs() -> u64 {
-    60
-}
-
-/// A built-in context-window guess for well-known model ids, applied only
-/// when a model is persisted with `context_window` omitted — the stored
-/// value (once set) is always authoritative, this never overrides it.
-/// Matched by substring against `model_id`; extend as new families ship.
 fn default_context_window(model_id: &str) -> Option<u32> {
     const TABLE: &[(&str, u32)] = &[
         ("claude-", 200_000),
@@ -754,165 +425,6 @@ fn build_openai(
 /// A freshly built vendor, tagged so the caller can register it under both
 /// the generic `vendors` map and (for kinds that support live reconfigure) a
 /// concrete-typed side table — without ever downcasting a `dyn RuntimeVendor`.
-enum BuiltVendor {
-    Velos(Arc<VelosVendor>),
-}
-
-impl BuiltVendor {
-    fn as_dyn(&self) -> Arc<dyn RuntimeVendor> {
-        match self {
-            BuiltVendor::Velos(v) => v.clone(),
-        }
-    }
-}
-
-/// Build one row's vendor instance, kind-dispatched. Used both at boot
-/// (`build_vendors`'s loop) and per-row during a live config update.
-fn build_one_vendor(
-    row: &VendorRow,
-    registry: Arc<ConnectedRuntimeRegistry>,
-) -> Result<BuiltVendor, String> {
-    match row.kind.as_str() {
-        "velos" => {
-            let vc = serde_json::from_str::<VelosConfig>(&row.config)
-                .map_err(|e| format!("invalid config: {e}"))?;
-            let vendor = build_velos_vendor(&vc, registry)?;
-            Ok(BuiltVendor::Velos(Arc::new(vendor)))
-        }
-        other => Err(format!("unknown kind '{other}'")),
-    }
-}
-
-/// Build the vendor set from configured rows. A vendor that fails to build
-/// is logged and left out (reported inactive), never fatal — matches
-/// `reconcile_vendors`'s per-update behavior. Every velos vendor shares the
-/// server-wide `registry` (fed by the HTTP `/api/runtime/connect` route). The
-/// shared local-runtime vendor isn't built here: it registers itself when a
-/// daemon dials in (see [`LocalDaemonRegistry`]).
-async fn build_vendors(
-    rows: &[VendorRow],
-    registry: &Arc<ConnectedRuntimeRegistry>,
-) -> (
-    HashMap<String, Arc<dyn RuntimeVendor>>,
-    HashMap<String, Arc<VelosVendor>>,
-) {
-    let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
-    let mut velos_instances: HashMap<String, Arc<VelosVendor>> = HashMap::new();
-    for r in rows {
-        match build_one_vendor(r, registry.clone()) {
-            Ok(built) => {
-                println!("vendor '{}' ({}) enabled", r.name, r.kind);
-                let BuiltVendor::Velos(v) = &built;
-                velos_instances.insert(r.name.clone(), v.clone());
-                vendors.insert(r.name.clone(), built.as_dyn());
-            }
-            Err(e) => eprintln!("warning: vendor '{}' failed to start ({e})", r.name),
-        }
-    }
-    (vendors, velos_instances)
-}
-
-fn build_velos_vendor(
-    vc: &VelosConfig,
-    registry: Arc<ConnectedRuntimeRegistry>,
-) -> Result<VelosVendor, String> {
-    let token = resolve_velos_token(vc)?;
-    let client =
-        VelosClient::new(&vc.server_url, token).map_err(|e| format!("velos client: {e}"))?;
-    let settings = VelosVendorSettings {
-        image: vc.image.clone(),
-        runtime_bin: vc.runtime_bin.clone(),
-        workspace_root: vc.workspace_root.clone(),
-        advertise_address: vc.advertise_address.clone(),
-        cpu: vc.cpu,
-        memory_bytes: vc.memory_mib.saturating_mul(1024 * 1024),
-        connect_timeout: Duration::from_secs(vc.connect_timeout_secs),
-    };
-    Ok(VelosVendor::new(Arc::new(client), settings, registry))
-}
-
-/// Build a fresh `VelosMutableSettings` from a row's config — used by
-/// `reconcile_vendors` to `reconfigure()` an already-built vendor live (every
-/// velos field is now live-editable; there is no listener to rebind).
-fn velos_mutable_settings(vc: &VelosConfig) -> Result<VelosMutableSettings, String> {
-    let token = resolve_velos_token(vc)?;
-    let client =
-        VelosClient::new(&vc.server_url, token).map_err(|e| format!("velos client: {e}"))?;
-    Ok(VelosMutableSettings {
-        api: Arc::new(client),
-        image: vc.image.clone(),
-        runtime_bin: vc.runtime_bin.clone(),
-        workspace_root: vc.workspace_root.clone(),
-        cpu: vc.cpu,
-        memory_bytes: vc.memory_mib.saturating_mul(1024 * 1024),
-        connect_timeout: Duration::from_secs(vc.connect_timeout_secs),
-        advertise_address: vc.advertise_address.clone(),
-    })
-}
-
-fn resolve_velos_token(vc: &VelosConfig) -> Result<Option<Secret>, String> {
-    match &vc.token {
-        Some(t) if t.is_empty() => Err("velos inline token is empty".into()),
-        Some(t) => Ok(Some(t.clone())),
-        None => Ok(None),
-    }
-}
-
-/// Turn a vendor config input into a `(kind, config-json)` row, carrying a
-/// stored secret forward when the input omits it.
-fn build_vendor_config(
-    name: &str,
-    input: &VendorConfigInput,
-    existing: Option<&str>,
-) -> Result<(&'static str, String), String> {
-    match input {
-        VendorConfigInput::Velos(v) => {
-            if v.server_url.trim().is_empty()
-                || v.image.trim().is_empty()
-                || v.advertise_address.trim().is_empty()
-            {
-                return Err(format!(
-                    "velos vendor '{name}' needs a server URL, image, and advertise address"
-                ));
-            }
-            if !is_host_port(v.advertise_address.trim()) {
-                return Err(format!(
-                    "velos vendor '{name}' advertise address '{}' must be host:port",
-                    v.advertise_address.trim()
-                ));
-            }
-            let existing_token = existing
-                .and_then(|c| serde_json::from_str::<Value>(c).ok())
-                .and_then(|val| val.get("token").and_then(Value::as_str).map(String::from));
-            let token = resolve_secret(&v.token, existing_token.as_deref());
-
-            let mut m = Map::new();
-            m.insert("server_url".into(), json!(v.server_url.trim()));
-            m.insert("image".into(), json!(v.image.trim()));
-            m.insert(
-                "advertise_address".into(),
-                json!(v.advertise_address.trim()),
-            );
-            if let Some(t) = token {
-                m.insert("token".into(), json!(t));
-            }
-            insert_trimmed(&mut m, "runtime_bin", &v.runtime_bin);
-            insert_trimmed(&mut m, "workspace_root", &v.workspace_root);
-            if let Some(x) = v.cpu {
-                m.insert("cpu".into(), json!(x));
-            }
-            if let Some(x) = v.memory_mib {
-                m.insert("memory_mib".into(), json!(x));
-            }
-            if let Some(x) = v.connect_timeout_secs {
-                m.insert("connect_timeout_secs".into(), json!(x));
-            }
-            let config = serde_json::to_string(&Value::Object(m)).map_err(|e| e.to_string())?;
-            Ok(("velos", config))
-        }
-    }
-}
-
 // ── secret + value helpers ───────────────────────────────────────────────────
 
 /// Write-only secret input: `None` keeps the stored value, `Some("")` clears,
@@ -931,12 +443,6 @@ fn trimmed(v: &Option<String>) -> Option<String> {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-}
-
-fn insert_trimmed(m: &mut Map<String, Value>, key: &str, v: &Option<String>) {
-    if let Some(s) = trimmed(v) {
-        m.insert(key.to_string(), json!(s));
-    }
 }
 
 // ── projections ──────────────────────────────────────────────────────────────
@@ -979,32 +485,6 @@ pub(crate) fn decode_efforts(raw: Option<&str>) -> Option<Vec<String>> {
 
 pub(crate) fn encode_efforts(list: Option<&Vec<String>>) -> Option<String> {
     list.and_then(|v| serde_json::to_string(v).ok())
-}
-
-fn velos_view(vc: &VelosConfig) -> VelosView {
-    VelosView {
-        server_url: vc.server_url.clone(),
-        image: vc.image.clone(),
-        advertise_address: vc.advertise_address.clone(),
-        has_inline_token: vc.token.as_ref().is_some_and(|t| !t.is_empty()),
-        runtime_bin: vc.runtime_bin.clone(),
-        workspace_root: vc.workspace_root.clone(),
-        cpu: vc.cpu,
-        memory_mib: vc.memory_mib,
-        connect_timeout_secs: vc.connect_timeout_secs,
-    }
-}
-
-/// Loose `host:port` check: a non-empty host and an all-digit port. Accepts
-/// hostnames or IPs (so we don't force a `SocketAddr` parse, which rejects
-/// hostnames), while still catching a bare host with no port.
-fn is_host_port(s: &str) -> bool {
-    match s.rsplit_once(':') {
-        Some((host, port)) => {
-            !host.is_empty() && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
-        }
-        None => false,
-    }
 }
 
 // ── connection + row reads ───────────────────────────────────────────────────
@@ -1070,24 +550,6 @@ where
     Ok(out)
 }
 
-async fn read_vendors<'e, E>(ex: E) -> Result<Vec<VendorRow>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-{
-    let rows = sqlx::query("SELECT name, kind, config FROM vendors ORDER BY name")
-        .fetch_all(ex)
-        .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in &rows {
-        out.push(VendorRow {
-            name: r.try_get("name")?,
-            kind: r.try_get("kind")?,
-            config: r.try_get("config")?,
-        });
-    }
-    Ok(out)
-}
-
 async fn read_setting(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
     let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
         .bind(key)
@@ -1108,7 +570,7 @@ async fn read_setting(pool: &SqlitePool, key: &str) -> Result<Option<String>, sq
 )]
 mod tests {
     use super::*;
-    use horsie_models::settings::{ModelInput, ProviderInput, VelosInput, VendorInput};
+    use horsie_models::settings::{ModelInput, ProviderInput};
 
     fn info() -> ServerInfo {
         ServerInfo {
@@ -1125,10 +587,7 @@ mod tests {
         let _ = dir; // kept for signature symmetry with other test helpers in this crate
         DbConfigStore::open(
             &format!("sqlite://{}/t.db", dir.display()),
-            StoreDeps {
-                info: info(),
-                runtime_registry: Arc::new(ConnectedRuntimeRegistry::new()),
-            },
+            StoreDeps { info: info() },
         )
         .await
         .unwrap()
@@ -1166,7 +625,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("sk-inline"))]),
                 models: Some(vec![model("m", "p")]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1206,7 +664,6 @@ mod tests {
                         thinking_dialect: None,
                     },
                 ]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1229,7 +686,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("sk-secret"))]),
                 models: None,
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1240,7 +696,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", None)]),
                 models: None,
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1256,7 +711,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("k"))]),
                 models: Some(vec![model("m", "p")]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1266,7 +720,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![]),
                 models: Some(vec![model("m", "ghost")]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1298,7 +751,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider_kind("local", "openai")]),
                 models: Some(vec![model("m", "local")]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1319,164 +771,12 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider_kind("bogus", "cohere")]),
                 models: None,
-                vendors: None,
                 default_vendor: None,
             })
             .await
             .expect_err("unknown kinds must be rejected");
 
         assert!(err.contains("cohere"), "error names the kind: {err}");
-    }
-
-    fn velos_input(image: &str, advertise_address: &str, token: Option<&str>) -> VendorInput {
-        VendorInput {
-            name: "cluster-a".into(),
-            config: VendorConfigInput::Velos(VelosInput {
-                server_url: "http://velos:8080".into(),
-                image: image.into(),
-                advertise_address: advertise_address.into(),
-                token: token.map(str::to_string),
-                runtime_bin: None,
-                workspace_root: None,
-                cpu: None,
-                memory_mib: None,
-                connect_timeout_secs: None,
-            }),
-        }
-    }
-
-    #[tokio::test]
-    async fn new_vendor_activates_live_without_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
-        let view = o
-            .store
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                vendors: Some(vec![velos_input("img", "127.0.0.1:0", Some("secret"))]),
-                default_vendor: None,
-            })
-            .await
-            .expect("velos update ok");
-        assert!(!view.restart_required);
-        let v = view
-            .vendors
-            .iter()
-            .find(|v| v.name == "cluster-a")
-            .expect("present");
-        assert!(v.active, "a valid new vendor activates immediately");
-        assert!(v.error.is_none());
-        // An active vendor announces its capabilities off the live instance.
-        assert_eq!(
-            v.capabilities.as_ref().map(|c| c.supports_provisioning),
-            Some(true),
-            "velos announces it provisions"
-        );
-        match &v.config {
-            Some(VendorConfigView::Velos(velos)) => {
-                assert!(velos.has_inline_token);
-                assert_eq!(velos.runtime_bin, "horsie-runtime"); // default applied
-            }
-            None => panic!("expected velos config"),
-        }
-        assert!(o.vendors.read().unwrap().contains_key("cluster-a"));
-    }
-
-    #[tokio::test]
-    async fn invalid_advertise_address_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
-
-        // A bare host with no port is rejected at update() time (validation in
-        // `build_vendor_config`), before anything is persisted or built.
-        let err = o
-            .store
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                vendors: Some(vec![velos_input("img", "nohost", Some("secret"))]),
-                default_vendor: None,
-            })
-            .await
-            .expect_err("bad advertise address must be rejected");
-        assert!(err.contains("host:port"), "{err}");
-
-        // The rejected update persisted nothing.
-        let view = o.store.view().await.unwrap();
-        assert!(view.vendors.iter().all(|v| v.name != "cluster-a"));
-    }
-
-    #[tokio::test]
-    async fn active_vendor_edit_applies_live() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
-        o.store
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                vendors: Some(vec![velos_input("img-v1", "10.0.0.5:3789", Some("secret"))]),
-                default_vendor: None,
-            })
-            .await
-            .unwrap();
-        assert!(o.vendors.read().unwrap().contains_key("cluster-a"));
-
-        // Both the image AND the advertise address change; with no listener to
-        // rebind, everything applies live to the same instance.
-        let view = o
-            .store
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                vendors: Some(vec![velos_input("img-v2", "10.0.0.9:4000", None)]),
-                default_vendor: None,
-            })
-            .await
-            .unwrap();
-
-        assert!(!view.restart_required);
-        let handle = o
-            .store
-            .velos_instances
-            .read()
-            .unwrap()
-            .get("cluster-a")
-            .cloned()
-            .expect("still the live instance");
-        let settings = handle.settings();
-        assert_eq!(settings.image, "img-v2");
-        assert_eq!(settings.advertise_address, "10.0.0.9:4000");
-    }
-
-    #[tokio::test]
-    async fn removed_vendor_row_drops_from_live_map() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
-        o.store
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                vendors: Some(vec![velos_input("img", "127.0.0.1:0", Some("secret"))]),
-                default_vendor: None,
-            })
-            .await
-            .unwrap();
-        assert!(o.vendors.read().unwrap().contains_key("cluster-a"));
-
-        let view = o
-            .store
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                vendors: Some(vec![]),
-                default_vendor: None,
-            })
-            .await
-            .unwrap();
-
-        assert!(!o.vendors.read().unwrap().contains_key("cluster-a"));
-        assert!(view.vendors.iter().all(|v| v.name != "cluster-a"));
     }
 
     #[tokio::test]
@@ -1533,154 +833,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_rejects_unknown_default_vendor() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
-        let err = o
-            .store
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                vendors: None,
-                default_vendor: Some("cluster-a".into()),
-            })
-            .await
-            .unwrap_err();
-        assert!(err.contains("cluster-a"));
-        assert_eq!(o.store.default_vendor(), "local");
-    }
-
-    #[tokio::test]
-    async fn build_one_vendor_reports_unknown_kind() {
-        let row = VendorRow {
-            name: "x".into(),
-            kind: "bogus".into(),
-            config: "{}".into(),
-        };
-        let err = match build_one_vendor(&row, Arc::new(ConnectedRuntimeRegistry::new())) {
-            Err(e) => e,
-            Ok(_) => panic!("unknown kind must be rejected"),
-        };
-        assert!(err.contains("bogus"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn build_one_vendor_velos_returns_arc_dyn_runtime_vendor() {
-        let row = VendorRow {
-            name: "cluster-a".into(),
-            kind: "velos".into(),
-            config: serde_json::json!({
-                "server_url": "http://velos:8080",
-                "image": "img",
-                "advertise_address": "10.0.0.5:3789",
-            })
-            .to_string(),
-        };
-        let built = build_one_vendor(&row, Arc::new(ConnectedRuntimeRegistry::new()))
-            .expect("velos row builds");
-        assert!(matches!(built, BuiltVendor::Velos(_)));
-    }
-
-    // A tiny mock velos server exposing just `/auth/v1/me`, for `test_vendor`.
-    async fn spawn_mock_velos(accept_token: &str) -> String {
-        use axum::extract::State as AxumState;
-        use axum::http::HeaderMap;
-        use axum::response::IntoResponse;
-        use axum::routing::get;
-
-        #[derive(Clone)]
-        struct S {
-            accept: std::sync::Arc<String>,
-        }
-        async fn whoami(AxumState(s): AxumState<S>, headers: HeaderMap) -> impl IntoResponse {
-            let ok = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v == format!("Bearer {}", s.accept))
-                .unwrap_or(false);
-            if ok {
-                (
-                    axum::http::StatusCode::OK,
-                    axum::Json(serde_json::json!({ "identity": "admin" })),
-                )
-            } else {
-                (
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    axum::Json(serde_json::json!({ "error": "unauthorized" })),
-                )
-            }
-        }
-        let state = S {
-            accept: std::sync::Arc::new(accept_token.to_string()),
-        };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = axum::Router::new()
-            .route("/auth/v1/me", get(whoami))
-            .with_state(state);
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        format!("http://{addr}")
-    }
-
-    #[tokio::test]
-    async fn test_vendor_reports_ok_for_a_good_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
-        let base = spawn_mock_velos("good-token").await;
-        let mut input = velos_input("img", "127.0.0.1:0", Some("good-token"));
-        let VendorConfigInput::Velos(v) = &mut input.config;
-        v.server_url = base;
-        o.store
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                vendors: Some(vec![input]),
-                default_vendor: None,
-            })
-            .await
-            .expect("update ok");
-
-        let result = o.store.test_vendor("cluster-a").await.expect("test ran");
-        assert!(result.ok);
-        assert_eq!(result.identity.as_deref(), Some("admin"));
-        assert!(result.error.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_vendor_reports_error_for_a_bad_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
-        let base = spawn_mock_velos("good-token").await;
-        let mut input = velos_input("img", "127.0.0.1:0", Some("wrong-token"));
-        let VendorConfigInput::Velos(v) = &mut input.config;
-        v.server_url = base;
-        o.store
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                vendors: Some(vec![input]),
-                default_vendor: None,
-            })
-            .await
-            .expect("update ok");
-
-        let result = o.store.test_vendor("cluster-a").await.expect("test ran");
-        assert!(!result.ok);
-        assert!(result.identity.is_none());
-        assert!(result.error.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_vendor_errors_for_unknown_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
-        let err = o.store.test_vendor("ghost").await.unwrap_err();
-        assert!(err.contains("ghost"), "error names the vendor: {err}");
-    }
-
-    #[tokio::test]
     async fn keep_thinking_signature_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let o = open(dir.path()).await;
@@ -1691,7 +843,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider("kimi", Some("sk-test"))]),
                 models: Some(vec![model("m", "kimi")]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1706,7 +857,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![p]),
                 models: Some(vec![model("m", "real-anthropic")]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1727,7 +877,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("sk-test"))]),
                 models: Some(vec![m]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1750,7 +899,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("sk-test"))]),
                 models: Some(vec![model("m", "p")]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1773,7 +921,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("sk-test"))]),
                 models: Some(vec![m]),
-                vendors: None,
                 default_vendor: None,
             })
             .await
@@ -1795,7 +942,6 @@ mod tests {
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("sk-test"))]),
                 models: Some(vec![m]),
-                vendors: None,
                 default_vendor: None,
             })
             .await

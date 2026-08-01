@@ -139,12 +139,7 @@ impl PluginService {
 
 #[async_trait::async_trait]
 impl PluginProvisioner for PluginService {
-    async fn resolve(
-        &self,
-        names: &[String],
-        base_url: &str,
-    ) -> Result<Vec<PluginArtifactRef>, String> {
-        let base = base_url.trim_end_matches('/');
+    async fn resolve(&self, names: &[String]) -> Result<Vec<PluginArtifactRef>, String> {
         let mut refs = Vec::with_capacity(names.len());
         for name in names {
             let row = self
@@ -152,11 +147,9 @@ impl PluginProvisioner for PluginService {
                 .get(name)
                 .await?
                 .ok_or_else(|| format!("no such bundle '{name}'"))?;
-            let url = format!("{base}/api/plugin-artifacts/{}.zip", row.artifact_hash);
             refs.push(PluginArtifactRef {
                 name: row.name,
                 hash: row.artifact_hash,
-                url,
             });
         }
         Ok(refs)
@@ -279,16 +272,20 @@ mod tests {
         assert_eq!(view.skill_count, 1);
 
         // Artifact resolves + is fetchable-by-hash; token authorizes it.
-        let refs = svc.resolve(&["demo".into()], "http://h:1/").await.unwrap();
+        let refs = svc.resolve(&["demo".into()]).await.unwrap();
         assert_eq!(refs.len(), 1);
-        assert!(refs[0].url.starts_with("http://h:1/api/plugin-artifacts/"));
+        assert_eq!(
+            refs[0].hash.len(),
+            64,
+            "the ref carries the content hash; the agent builds the URL from it"
+        );
         assert!(svc.artifact_path(&refs[0].hash).is_file());
         let tok = svc.mint_token("s", &[refs[0].hash.clone()]);
         assert!(svc.verify_token(&tok, &refs[0].hash).is_ok());
         assert!(svc.verify_token(&tok, "deadbeef").is_err());
 
         // Unknown name errors.
-        assert!(svc.resolve(&["nope".into()], "http://h:1").await.is_err());
+        assert!(svc.resolve(&["nope".into()]).await.is_err());
     }
 
     #[tokio::test]

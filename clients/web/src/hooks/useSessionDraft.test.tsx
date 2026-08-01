@@ -24,8 +24,16 @@ const settings: SettingsView = {
     { alias: "opus", provider: "p", modelId: "m2" },
   ],
   vendors: [
-    { name: "local", active: true, isDefault: true },
-    { name: "velos", active: true, isDefault: false },
+    {
+      name: "local",
+      isDefault: true,
+      capabilities: { supportsProvisioning: false },
+    },
+    {
+      name: "velos",
+      isDefault: false,
+      capabilities: { supportsProvisioning: true },
+    },
   ],
   defaultVendor: "local",
   info: {

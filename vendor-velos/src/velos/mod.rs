@@ -8,4 +8,4 @@
 
 mod client;
 
-pub use client::{ContainerApi, ContainerLaunchSpec, ContainerPhase, VelosClient, VelosError};
+pub use client::{ContainerApi, ContainerLaunchSpec, VelosClient};

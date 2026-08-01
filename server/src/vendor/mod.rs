@@ -1,27 +1,27 @@
-//! The runtime vendor protocol layer.
+//! The runtime vendor layer.
 //!
-//! A [`RuntimeVendor`] provisions and manages execution sandboxes for sessions —
-//! the agent loop always stays server-side; vendors only provide tool execution,
-//! a workspace, and a lifecycle. Every user action on a session translates into
+//! A vendor is an external agent process that owns runtime lifecycle; the agent
+//! loop always stays server-side, and vendors only provide tool execution, a
+//! workspace, and a lifecycle. Every user action on a session translates into
 //! exactly one explicit vendor signal (`create` / `attach` / `stop` / `delete`),
 //! never an implicit side effect.
+//!
+//! There is one vendor type — [`VendorLink`], the server's end of a connected
+//! agent's WebSocket. The `RuntimeVendor` trait this module used to define was
+//! pure indirection once the in-process vendors were deleted.
 
 mod agent_registry;
-/// A signal-recording vendor for tests only — never compiled into a production
+/// A scriptable vendor agent for tests only — never compiled into a production
 /// build. Available to this crate's own tests (`cfg(test)`) and to external test
 /// crates that opt in via the `test-util` feature.
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake_agent;
 mod link;
-#[cfg(any(test, feature = "test-util"))]
-pub mod mock;
 mod transport;
-mod velos;
 
 pub use agent_registry::VendorAgentRegistry;
 pub use link::VendorLink;
 pub use transport::VendorRuntimeTransport;
-pub use velos::{VelosMutableSettings, VelosVendor, VelosVendorSettings};
 
 use async_trait::async_trait;
 use horsie_runtime_client::RuntimeClient;
@@ -84,53 +84,6 @@ pub trait VendorRuntimeHandle: Send + Sync {
     /// Halt without destroying (stop-preserve). Idempotent; the runtime stays
     /// re-attachable via [`RuntimeVendor::attach`].
     async fn stop(&self);
-}
-
-#[async_trait]
-pub trait RuntimeVendor: Send + Sync + 'static {
-    /// What this vendor can do with a session workspace. Read by the settings
-    /// view so the UI adapts to the vendor without hardcoding its name/kind.
-    fn capabilities(&self) -> VendorCapabilities;
-
-    /// Provision a brand-new runtime.
-    async fn create(
-        &self,
-        runtime_id: &str,
-        spec: &RuntimeSpec,
-    ) -> Result<VendorRuntime, VendorError>;
-
-    /// Revive a preserved runtime (respawn / resume / restart as the vendor sees
-    /// fit — a local process respawns against the preserved workspace).
-    async fn attach(
-        &self,
-        runtime_id: &str,
-        spec: &RuntimeSpec,
-    ) -> Result<VendorRuntime, VendorError>;
-
-    /// The owning session was deleted; the vendor decides the runtime's fate.
-    /// Callable with no live handle (e.g. after a server restart).
-    async fn delete(&self, runtime_id: &str);
-
-    /// Base URL a runtime should GET plugin-bundle artifacts from, reachable
-    /// from where the runtime executes (loopback for local; `advertise_host`
-    /// for velos). `None` disables plugin provisioning for this vendor (e.g.
-    /// the mock vendor), so `ensure_runtime` injects no plugin env.
-    fn artifact_base_url(&self) -> Option<String> {
-        None
-    }
-
-    /// Filesystem path (host or in-container) the runtime unpacks bundles into
-    /// and scans as its plugins dir. `None` → the runtime does not materialize
-    /// bundles for this vendor.
-    fn plugins_dir_for(&self, _runtime_id: &str) -> Option<String> {
-        None
-    }
-
-    /// Optional content-hash cache dir (local vendor) so repeated sessions skip
-    /// re-fetching and re-unpacking identical bundles.
-    fn plugins_cache_dir(&self) -> Option<String> {
-        None
-    }
 }
 
 #[derive(Debug, thiserror::Error)]

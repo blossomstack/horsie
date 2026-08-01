@@ -104,15 +104,9 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     // The one registry every runtime dial-back lands in, shared by the vendors
     // (velos) and the HTTP `/api/runtime/connect` route.
     let runtime_registry = Arc::new(horsie_executor::ConnectedRuntimeRegistry::new());
-    let opened = DbConfigStore::open(
-        &db_url,
-        StoreDeps {
-            info,
-            runtime_registry: runtime_registry.clone(),
-        },
-    )
-    .await
-    .map_err(BootError::Config)?;
+    let opened = DbConfigStore::open(&db_url, StoreDeps { info })
+        .await
+        .map_err(BootError::Config)?;
 
     // Seed the model-card catalog: bundled defaults plus an optional operator
     // file. Seed-file parse/read errors are fatal (operator input should fail

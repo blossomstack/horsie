@@ -5,7 +5,6 @@ members = [
     "workflow",
     "server",
     "executor",
-    "executor-client",
     "runtime",
     "models",
     "providers/anthropic",

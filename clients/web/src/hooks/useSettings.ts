@@ -24,8 +24,3 @@ export function useUpdateSettings() {
  * per-vendor pending/result display since multiple checks can run at once
  * (e.g. one per vendor right after a save).
  */
-export function useTestVendor() {
-  return useMutation({
-    mutationFn: (name: string) => api.config.testVendor(name),
-  });
-}

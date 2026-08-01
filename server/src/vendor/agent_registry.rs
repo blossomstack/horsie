@@ -6,7 +6,7 @@
 //! difference is what a reconnect means — see [`VendorAgentRegistry::register`].
 
 use crate::sessions::spec::SharedVendors;
-use crate::vendor::{RuntimeVendor, VendorLink};
+use crate::vendor::VendorLink;
 use std::sync::{Arc, PoisonError};
 
 pub struct VendorAgentRegistry {
@@ -32,7 +32,7 @@ impl VendorAgentRegistry {
         self.vendors
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(name, link as Arc<dyn RuntimeVendor>);
+            .insert(name, link);
     }
 
     /// Names currently published. Used by tests today; the settings view's
@@ -113,7 +113,7 @@ mod tests {
             )
             .await
             .expect("create must reach the live agent");
-        assert_eq!(second.signals(), vec!["create".to_string()]);
+        assert_eq!(second.signals(), vec!["create:rt-1".to_string()]);
         assert!(first.signals().is_empty(), "the dead link must not be used");
     }
 }

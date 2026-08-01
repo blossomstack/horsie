@@ -31,7 +31,6 @@ import type {
   SessionAck,
   SettingsUpdate,
   SettingsView,
-  VendorTestResult,
 } from "./types";
 
 // All horsie endpoints live under `/api`. In dev, Vite proxies this prefix to
@@ -144,11 +143,6 @@ export const api = {
       request("/config", { method: "PUT", body: JSON.stringify(body) }),
 
     /** On-demand reachability + token check for a vendor (velos only); never mutates settings. */
-    testVendor: (name: string): Promise<VendorTestResult> =>
-      request(`/config/vendors/${encodeURIComponent(name)}/test`, {
-        method: "POST",
-        body: "{}",
-      }),
   },
 
   modelCards: {

@@ -6,10 +6,9 @@ use horsie_actor::{
 };
 use horsie_agentcore::{AgentEvent, EventSink, EventSinkError};
 use horsie_executor::{
-    ConnectedRuntimeRegistry, InMemExecutorTransport, ProcessRuntimeProvider, RuntimeEndpoint,
-    RuntimeListenerServer, SandboxPolicy, serve_runtime_connections,
+    ConnectedRuntimeRegistry, ProcessRuntimeProvider, RuntimeEndpoint, RuntimeListenerServer,
+    RuntimeProvider, SandboxPolicy, serve_runtime_connections,
 };
-use horsie_executor_client::ExecutorClient;
 use horsie_models::daemon::{JobEventFrame, JobStatus};
 use horsie_models::executor::RuntimeConfig;
 use horsie_runtime_client::RuntimeClient;
@@ -158,41 +157,40 @@ impl JobRuntime for ProcessJobRuntime {
         .with_sandbox(SandboxPolicy {
             capabilities_file: caps_path,
         });
-        let client =
-            ExecutorClient::new(InMemExecutorTransport::new(Arc::new(provider), connected));
-        client
-            .create_runtime(
-                &job_id,
-                RuntimeConfig {
-                    workspaces: spec
-                        .workspaces
-                        .iter()
-                        .map(|w| horsie_models::executor::WorkspaceConfig {
-                            name: w.name.clone(),
-                            path: w.path.to_string_lossy().into_owned(),
-                        })
-                        .collect(),
-                    plugins_dir: spec
-                        .plugins_dir
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().into_owned()),
-                    hook_path: spec
-                        .hook_path
-                        .iter()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .collect(),
-                    // Per-job env injection: the hackamore token + synthetic home when
-                    // minting is configured, empty otherwise.
-                    env,
-                    provision: vec![],
-                },
-            )
+        // Straight to the provider: the `ExecutorClient` + `InMemExecutorTransport`
+        // this used to go through were a message-passing layer wrapped around
+        // exactly these two calls, with no transport in between.
+        let config = RuntimeConfig {
+            workspaces: spec
+                .workspaces
+                .iter()
+                .map(|w| horsie_models::executor::WorkspaceConfig {
+                    name: w.name.clone(),
+                    path: w.path.to_string_lossy().into_owned(),
+                })
+                .collect(),
+            plugins_dir: spec
+                .plugins_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            hook_path: spec
+                .hook_path
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            // Per-job env injection: the hackamore token + synthetic home when
+            // minting is configured, empty otherwise.
+            env,
+            provision: vec![],
+        };
+        let runtime_handle = provider
+            .create(&job_id, &config)
             .await
             .map_err(|e| e.to_string())?;
-        let rt_transport = client
+        let rt_transport = connected
             .runtime_transport(&job_id)
             .await
-            .map_err(|e| e.to_string())?;
+            .ok_or_else(|| format!("runtime '{job_id}' started but never dialed back"))?;
         let runtime_client = RuntimeClient::from_arc(rt_transport);
 
         let ctx = WorkflowRuntimeContext {
@@ -214,9 +212,8 @@ impl JobRuntime for ProcessJobRuntime {
         Ok(LaunchedJob {
             workflow: wf,
             shutdown: Arc::new(ProcessShutdown {
-                client,
+                handle: runtime_handle,
                 cancel,
-                runtime_id: job_id,
             }),
         })
     }
@@ -244,15 +241,16 @@ async fn send_kickoff(
 }
 
 struct ProcessShutdown {
-    client: ExecutorClient,
+    /// The runtime's own lifecycle handle, held directly now that there is no
+    /// executor client in between.
+    handle: Arc<dyn horsie_executor::RuntimeHandle>,
     cancel: CancellationToken,
-    runtime_id: String,
 }
 
 #[async_trait]
 impl JobShutdown for ProcessShutdown {
     async fn shutdown(&self) {
-        let _ = self.client.destroy_runtime(&self.runtime_id).await;
+        let _ = self.handle.stop().await;
         self.cancel.cancel();
     }
 }

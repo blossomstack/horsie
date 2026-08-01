@@ -9,7 +9,7 @@ mod store;
 pub mod model_cards;
 
 use async_trait::async_trait;
-use horsie_models::settings::{SettingsUpdate, SettingsView, VendorTestResult};
+use horsie_models::settings::{SettingsUpdate, SettingsView};
 
 pub use store::{DbConfigStore, OpenedConfig, StoreDeps};
 
@@ -28,10 +28,4 @@ pub trait ConfigStore: Send + Sync {
     /// The vendor a create request defaults to when it omits one. Read on the
     /// hot path, so it stays synchronous and cheap.
     fn default_vendor(&self) -> String;
-
-    /// An on-demand connection check for a configurable vendor (currently
-    /// velos only): is it reachable, and does its stored token still work.
-    /// Read-only — never mutates `active`/`error`/persisted state. Errs only
-    /// when `name` doesn't refer to a testable vendor.
-    async fn test_vendor(&self, name: &str) -> Result<VendorTestResult, String>;
 }

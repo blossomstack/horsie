@@ -9,7 +9,6 @@ pub mod plugins;
 mod registry;
 mod server;
 pub mod sessions;
-pub mod velos;
 pub mod vendor;
 mod wire_redact;
 

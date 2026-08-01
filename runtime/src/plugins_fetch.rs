@@ -1,13 +1,16 @@
 //! Fetch the session's selected plugin bundles at startup and unpack them into
 //! a plugins dir the existing scanner reads. The server injects a manifest of
-//! `{name, hash, url}` refs plus a bearer token via env; the runtime GETs each
-//! zip (over its own outbound connection — loopback for local, `advertise_host`
-//! for velos), verifies the content hash, and materializes the tree.
+//! `{name, hash}` refs plus a bearer token via env, and the vendor agent adds
+//! the base URL its runtimes can reach the server at; the runtime GETs each zip
+//! over its own outbound connection, verifies the content hash, and
+//! materializes the tree.
 //!
 //! Fully best-effort: any failure is logged and skipped, so a session never
 //! fails to start because a bundle was unavailable — it just runs without it.
 
-use horsie_models::{ENV_PLUGIN_MANIFEST, ENV_PLUGINS_CACHE, ENV_PLUGINS_DIR, ENV_PLUGINS_TOKEN};
+use horsie_models::{
+    ENV_PLUGIN_MANIFEST, ENV_PLUGINS_BASE, ENV_PLUGINS_CACHE, ENV_PLUGINS_DIR, ENV_PLUGINS_TOKEN,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -16,7 +19,19 @@ use std::path::{Path, PathBuf};
 struct ArtifactRef {
     name: String,
     hash: String,
-    url: String,
+}
+
+impl ArtifactRef {
+    /// Where this bundle is fetched from. Built here rather than sent by the
+    /// server, which has no way to know the address that reaches it from
+    /// wherever this runtime happens to be running.
+    fn url(&self, base: &str) -> String {
+        format!(
+            "{}/api/plugin-artifacts/{}.zip",
+            base.trim_end_matches('/'),
+            self.hash
+        )
+    }
 }
 
 /// Read the plugin manifest from the environment and materialize the bundles.
@@ -25,9 +40,10 @@ struct ArtifactRef {
 pub async fn provision_plugins() -> Option<PathBuf> {
     let manifest = std::env::var(ENV_PLUGIN_MANIFEST).ok()?;
     let dir = PathBuf::from(std::env::var(ENV_PLUGINS_DIR).ok()?);
+    let base = std::env::var(ENV_PLUGINS_BASE).ok()?;
     let token = std::env::var(ENV_PLUGINS_TOKEN).ok();
     let cache = std::env::var(ENV_PLUGINS_CACHE).ok().map(PathBuf::from);
-    provision_into(&manifest, &dir, token.as_deref(), cache.as_deref()).await
+    provision_into(&manifest, &base, &dir, token.as_deref(), cache.as_deref()).await
 }
 
 /// Env-free core (so tests need not touch process env): parse the manifest,
@@ -35,6 +51,7 @@ pub async fn provision_plugins() -> Option<PathBuf> {
 /// unpack cache when provided.
 async fn provision_into(
     manifest: &str,
+    base: &str,
     dir: &Path,
     token: Option<&str>,
     cache: Option<&Path>,
@@ -62,7 +79,7 @@ async fn provision_into(
     };
     let mut any = false;
     for r in &refs {
-        match materialize(&client, r, dir, token, cache).await {
+        match materialize(&client, r, base, dir, token, cache).await {
             Ok(()) => any = true,
             Err(e) => eprintln!("plugins: skipping bundle '{}': {e}", r.name),
         }
@@ -73,6 +90,7 @@ async fn provision_into(
 async fn materialize(
     client: &reqwest::Client,
     r: &ArtifactRef,
+    base: &str,
     dir: &Path,
     token: Option<&str>,
     cache: Option<&Path>,
@@ -86,7 +104,7 @@ async fn materialize(
             return Ok(());
         }
     }
-    let mut req = client.get(&r.url);
+    let mut req = client.get(r.url(base));
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
@@ -180,8 +198,10 @@ mod tests {
         assert!(tmp.path().join("skills/a/SKILL.md").is_file());
     }
 
-    /// Serve exactly one HTTP/1.1 GET with the given body, then close. A plain
-    /// std-thread stub so the test needs no extra tokio io features.
+    /// Serve exactly one HTTP/1.1 GET with the given body, then close, and
+    /// return the *base* URL. The stub ignores the request path, so it stands
+    /// in for the artifact route the runtime now builds from base + hash. A
+    /// plain std-thread stub so the test needs no extra tokio io features.
     fn serve_once(body: Vec<u8>) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -198,41 +218,52 @@ mod tests {
                 let _ = sock.flush();
             }
         });
-        format!("http://{addr}/artifact.zip")
+        format!("http://{addr}")
     }
 
     #[tokio::test]
     async fn provision_fetches_verifies_and_unpacks() {
         let bytes = make_zip();
         let hash = sha256_hex(&bytes);
-        let url = serve_once(bytes);
-        let manifest =
-            serde_json::json!([{ "name": "demo", "hash": hash, "url": url }]).to_string();
+        let base = serve_once(bytes);
+        let manifest = serde_json::json!([{ "name": "demo", "hash": hash }]).to_string();
 
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("plugins");
-        let out = provision_into(&manifest, &dir, Some("tok"), None).await;
+        let out = provision_into(&manifest, &base, &dir, Some("tok"), None).await;
         assert_eq!(out.as_deref(), Some(dir.as_path()));
         assert!(dir.join("demo/skills/a/SKILL.md").is_file());
     }
 
     #[tokio::test]
     async fn provision_rejects_hash_mismatch() {
-        let url = serve_once(make_zip());
+        let base = serve_once(make_zip());
         // Manifest claims a wrong hash → bundle skipped, nothing materialized.
-        let manifest =
-            serde_json::json!([{ "name": "demo", "hash": "deadbeef", "url": url }]).to_string();
+        let manifest = serde_json::json!([{ "name": "demo", "hash": "deadbeef" }]).to_string();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("plugins");
-        let out = provision_into(&manifest, &dir, None, None).await;
+        let out = provision_into(&manifest, &base, &dir, None, None).await;
         assert!(out.is_none());
         assert!(!dir.join("demo").exists());
+    }
+
+    #[test]
+    fn the_fetch_url_is_built_from_the_base_and_hash() {
+        let r = ArtifactRef {
+            name: "demo".into(),
+            hash: "abc123".into(),
+        };
+        assert_eq!(
+            r.url("http://server:3789/"),
+            "http://server:3789/api/plugin-artifacts/abc123.zip",
+            "a trailing slash on the agent-supplied base must not double up"
+        );
     }
 
     #[tokio::test]
     async fn empty_manifest_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
-        let out = provision_into("[]", &tmp.path().join("p"), None, None).await;
+        let out = provision_into("[]", "http://unused", &tmp.path().join("p"), None, None).await;
         assert!(out.is_none());
     }
 }

@@ -110,7 +110,6 @@ pub fn app(state: AppState) -> Router {
             "/api/config",
             get(config::get_config).put(config::update_config),
         )
-        .route("/api/config/vendors/:name/test", post(config::test_vendor))
         .route("/api/model-cards", get(model_cards::list))
         .route(
             "/api/admin/model-cards",
@@ -200,8 +199,8 @@ mod tests {
     use super::*;
     use crate::sessions::spec::ServerDeps;
     use crate::sessions::supervisor::SessionSupervisor;
-    use crate::vendor::RuntimeVendor;
-    use crate::vendor::mock::MockVendor;
+    use crate::vendor::VendorLink;
+    use crate::vendor::fake_agent::FakeVendorAgent;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use horsie_actor::{InMemoryJournal, spawn_root};
@@ -230,18 +229,19 @@ mod tests {
     }
 
     async fn test_state(tmp: &tempfile::TempDir) -> AppState {
-        let mut vendors: HashMap<String, Arc<dyn RuntimeVendor>> = HashMap::new();
-        vendors.insert("mock".into(), Arc::new(MockVendor::new()));
+        let mut vendors: HashMap<String, Arc<VendorLink>> = HashMap::new();
+        let mock_agent = FakeVendorAgent::builder("mock")
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        vendors.insert("mock".into(), mock_agent.link());
         // A real DB store on a temp SQLite; the registry it opens is empty and
         // shared with the supervisor. `mock` is the runtime vendor under test.
         let db = tmp.path().join("config.db");
         let runtime_registry = Arc::new(ConnectedRuntimeRegistry::new());
         let opened = crate::config::DbConfigStore::open(
             &format!("sqlite://{}", db.display()),
-            crate::config::StoreDeps {
-                info: test_info(),
-                runtime_registry: runtime_registry.clone(),
-            },
+            crate::config::StoreDeps { info: test_info() },
         )
         .await
         .unwrap();
@@ -445,63 +445,6 @@ mod tests {
             serde_json::json!({ "models": [{"alias": "x", "provider": "ghost", "modelId": "y"}] });
         let res = app.oneshot(put_json("/api/config", &bad)).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn vendor_test_endpoint_round_trips() {
-        use horsie_models::settings::VendorTestResult;
-        let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
-
-        // A bound-then-dropped listener frees a port nothing listens on, so
-        // the check fails fast (connection refused) instead of hanging.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let dead_addr = listener.local_addr().unwrap();
-        drop(listener);
-
-        let body = serde_json::json!({
-            "vendors": [{
-                "name": "cluster-a",
-                "config": {
-                    "kind": "Velos",
-                    "value": {
-                        "serverUrl": format!("http://{dead_addr}"),
-                        "image": "img",
-                        "advertiseAddress": "10.0.0.5:3789",
-                        "token": "tok"
-                    }
-                }
-            }]
-        });
-        let res = app
-            .clone()
-            .oneshot(put_json("/api/config", &body))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-
-        let res = app
-            .clone()
-            .oneshot(post_json(
-                "/api/config/vendors/cluster-a/test",
-                &serde_json::json!({}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let result: VendorTestResult = read_json(res).await;
-        assert!(!result.ok);
-        assert!(result.error.is_some());
-
-        // Unknown vendor name -> 500 (mirrors mcp::test's unknown-server case).
-        let res = app
-            .oneshot(post_json(
-                "/api/config/vendors/ghost/test",
-                &serde_json::json!({}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
@@ -775,7 +718,7 @@ mod tests {
         assert_eq!(list.len(), 1);
 
         // Artifact fetch: 403 without a token, 200 with a valid bearer.
-        let refs = plugins.resolve(&["demo".into()], "http://x").await.unwrap();
+        let refs = plugins.resolve(&["demo".into()]).await.unwrap();
         let hash = refs[0].hash.clone();
         let res = app
             .clone()

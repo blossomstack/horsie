@@ -18,7 +18,6 @@ horsie-anthropic       = { path = "../providers/anthropic" }
 horsie-openai          = { path = "../providers/openai" }
 horsie-workflow        = { path = "../workflow" }
 horsie-executor        = { path = "../executor" }
-horsie-executor-client = { path = "../executor-client" }
 horsie-runtime-client  = { path = "../runtime-client" }
 horsie-mcp-client      = { path = "../mcp-client" }
 clap              = { version = "4", features = ["derive"] }
