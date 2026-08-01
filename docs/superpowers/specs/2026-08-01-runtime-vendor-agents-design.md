@@ -294,26 +294,41 @@ Five PRs, each green on its own. `/api/runtime/connect` stays alive until
 the last one, so every intermediate commit has a working way to connect a
 machine and the cutover is a single reviewable step.
 
-1. `vendor.fl` + `VendorLink` / `VendorRegistry` / `VendorRuntimeTransport` +
-   `GET /api/vendor/connect` + the `FakeVendorAgent` harness. Nothing
-   removed; the old route still serves.
-2. `horsie connect` rewritten as the local agent, dialing
-   `/api/vendor/connect`. `LocalDaemonVendor` and `LocalDaemonRegistry` are
-   deleted, but the `?register=local` route stays, so a hand-run
-   `horsie-runtime --endpoint ...` keeps working through this PR.
-3. `horsie-vendor-velos` binary. Delete `server/src/velos/` and
-   `VelosVendor`.
-4. Delete the `RuntimeVendor` trait, `MockVendor`, the config-store vendor
-   rows, and the Settings velos form; replace it with the live-vendor list.
-   Port the `session_actor` tests onto `FakeVendorAgent`. Delete
-   `InMemExecutorTransport`, the `executor-client` crate, and the
-   `supervisor` ceremony that used them.
+1. **#87 — protocol and link.** `vendor.fl` + `VendorLink` /
+   `VendorAgentRegistry` / `VendorRuntimeTransport` + `GET /api/vendor/connect`
+   + the `FakeVendorAgent` harness. Nothing removed.
+2. **#88 — local agent.** `horsie connect` rewritten as a vendor agent with
+   one runtime per session; `VendorAgent` added to the executor crate as the
+   reusable half. `LocalDaemonVendor` and `LocalDaemonRegistry` deleted.
+3. **#89 — velos agent.** The `horsie-vendor-velos` crate, reusing
+   `VendorAgent` behind a container provider and a managed-workspace resolver.
+   **Adds only** — see the revision note below.
+4. **The excision.** Delete the server's `VelosVendor` and `server/src/velos/`,
+   the config-store vendor rows and the Settings velos form, the
+   `RuntimeVendor` trait, `MockVendor`, `InMemExecutorTransport`, and the
+   `executor-client` crate. Port the `session_actor` tests onto
+   `FakeVendorAgent`.
 5. **Cutover.** Delete `http/runtime_connect.rs` and the
    `/api/runtime/connect` route, plus `ConnectHook` and the
-   `serve_runtime_connections_with_hook` variant that only existed to feed
-   it. Docs (`runtime-vendors.md`, `getting-started.md`,
-   `self-hosting.md`) and the ops-repo service for the velos agent land
-   here too, so the breaking change and its documentation ship together.
+   `serve_runtime_connections_with_hook` variant that only existed to feed it.
+   Docs (`runtime-vendors.md`, `getting-started.md`, `self-hosting.md`) and the
+   ops-repo service for the velos agent land here, so the breaking change and
+   its documentation ship together.
+
+### Revision: why the velos deletion moved out of PR 3
+
+The original plan had PR 3 delete the server's velos vendor as it added the
+agent. That is not reviewable as one change: `server/src/config/store.rs` has
+~200 vendor references, and `settings.fl` plus eight files under
+`clients/web/src` hang off the vendor rows it builds. Removing the vendor
+forces removing the rows, which forces removing the settings schema and the UI
+that renders it.
+
+So PR 3 only adds the agent crate, and the whole server-side removal — velos,
+config rows, UI, the `RuntimeVendor` trait, and the in-memory transport — lands
+together in PR 4, where it is one coherent deletion rather than a change
+smeared across two PRs. The cost is that the velos REST client is duplicated
+for exactly one PR.
 
 ## Decisions taken, with the alternative rejected
 
