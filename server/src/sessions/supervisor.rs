@@ -496,8 +496,6 @@ mod tests {
                 unsafe_seatbelt_rules: None,
             },
             vendor: "mock".into(),
-            plugins_dir: None,
-            hook_path: vec![],
             plugins: vec![],
         }
     }

@@ -251,8 +251,6 @@ mod tests {
             provision: vec![],
             env: vec![],
             capabilities_file: std::env::temp_dir().join("caps.json"),
-            plugins_dir: None,
-            hook_path: vec![],
         }
     }
 

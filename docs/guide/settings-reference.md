@@ -20,14 +20,7 @@ file — is valid.
     // Ephemeral runtime state. Default: $XDG_STATE_HOME/horsie or ~/.local/state/horsie
     "state_dir": "/var/lib/horsie/state",
     // Durable session journal + database. Default: $XDG_DATA_HOME/horsie or ~/.local/share/horsie
-    "data_dir": "/var/lib/horsie/data",
-    // Skill/plugin bundle library. Default: <data_dir>/plugins
-    "plugins_dir": "/var/lib/horsie/data/plugins"
-  },
-  "runtime": {
-    // Directories prepended to PATH when running plugin hooks (e.g. the node
-    // bin dir). Absent → auto-discover `node` from the environment.
-    "hook_path": ["/usr/local/bin"]
+    "data_dir": "/var/lib/horsie/data"
   },
   "database": {
     // Where runtime-editable settings are stored. Default: a SQLite file at
@@ -39,7 +32,9 @@ file — is valid.
 
 That's the whole file. Notably, **providers, models, velos vendors, the default
 vendor, GitHub, MCP servers, and skill bundles are not here** — they live in the
-database and are managed from the UI.
+database and are managed from the UI. Old files that still set the removed
+`storage.plugins_dir` or `runtime.hook_path` keys keep parsing — the keys are
+ignored (skill bundles are managed from the UI now).
 
 ## Command-line flags
 
@@ -131,4 +126,3 @@ appends `/v1/chat/completions` itself) or a model id the backend has not loaded.
   settings database (`<data_dir>/server/`). Back this up; mount a volume here in
   containers.
 - **`state_dir`** — ephemeral runtime state; safe to lose across restarts.
-- **`plugins_dir`** — the installed skill/plugin bundle library.

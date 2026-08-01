@@ -54,8 +54,6 @@ pub struct RuntimeSpec {
     pub provision: Vec<horsie_models::executor::ProvisionStep>,
     pub env: Vec<horsie_models::executor::EnvVar>,
     pub capabilities_file: PathBuf,
-    pub plugins_dir: Option<PathBuf>,
-    pub hook_path: Vec<PathBuf>,
 }
 
 /// A live runtime a vendor handed back: the tool-call transport plus the

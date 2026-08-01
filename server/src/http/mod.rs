@@ -50,8 +50,6 @@ pub struct AppState {
     pub caps_finalize: CapsFinalize,
     /// Fully-resolved default capability spec for requests that omit one.
     pub default_caps: CapabilitySpec,
-    pub plugins_dir: Option<PathBuf>,
-    pub hook_path: Vec<PathBuf>,
     /// Reads and mutates the runtime-editable configuration (models, providers,
     /// default vendor). Also the source of the default vendor a create request
     /// falls back to when it omits one.
@@ -278,8 +276,6 @@ mod tests {
             global_events: gtx,
             caps_finalize: Arc::new(|caps| caps),
             default_caps: block_caps(),
-            plugins_dir: None,
-            hook_path: vec![],
             config_store: opened.store,
             model_cards,
             github,

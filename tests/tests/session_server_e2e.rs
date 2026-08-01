@@ -135,8 +135,6 @@ async fn start_server(
         global_events: gtx,
         caps_finalize: Arc::new(|c| c),
         default_caps: block_caps(),
-        plugins_dir: None,
-        hook_path: vec![],
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
             opened.pool.clone(),
@@ -271,8 +269,6 @@ async fn start_server_with_shared_local(
         global_events: gtx,
         caps_finalize: Arc::new(|c| c),
         default_caps: block_caps(),
-        plugins_dir: None,
-        hook_path: vec![],
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
             opened.pool.clone(),
