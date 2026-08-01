@@ -14,14 +14,12 @@ tokio             = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util      = { workspace = true }
 serde_json        = { workspace = true }
-uuid              = { workspace = true }
 thiserror         = { workspace = true }
 async-trait       = { workspace = true }
 tokio-util        = { workspace = true }
 
 [dev-dependencies]
 horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
-horsie-server = { path = "../server" }
 tempfile = "3"
 
 [lints]

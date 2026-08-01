@@ -7,10 +7,6 @@
 
 mod client;
 mod transport;
-#[cfg(feature = "ws")]
-mod ws_transport;
 
 pub use client::{ClientError, ExecutorClient};
 pub use transport::ExecutorTransport;
-#[cfg(feature = "ws")]
-pub use ws_transport::WsExecutorTransport;

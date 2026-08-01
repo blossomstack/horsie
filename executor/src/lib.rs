@@ -13,7 +13,7 @@ pub use connected_registry::ConnectedRuntimeRegistry;
 pub use env_scrub::{SANDBOX_ENV_ALLOWLIST, scrubbed_env};
 pub use error::{ExecutorError, RuntimeError};
 pub use executor::{
-    ConnectHook, Executor, handle_runtime_connection, serve_runtime_connections,
+    ConnectHook, handle_runtime_connection, serve_runtime_connections,
     serve_runtime_connections_with_hook,
 };
 pub use inmem_transport::InMemExecutorTransport;
