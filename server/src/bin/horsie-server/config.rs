@@ -22,8 +22,6 @@ pub enum BootError {
 pub struct BootConfig {
     #[serde(default)]
     pub storage: StorageConfig,
-    #[serde(default)]
-    pub runtime: RuntimeConfig,
     /// Where the session server persists its runtime-editable settings.
     #[serde(default)]
     pub database: DatabaseConfig,
@@ -39,9 +37,6 @@ pub struct StorageConfig {
     /// `$HOME/.local/share/horsie`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
-    /// Shared plugin library root. Defaults to `<data_dir>/plugins`.
-    #[serde(default = "default_plugins_dir")]
-    pub plugins_dir: PathBuf,
 }
 
 impl Default for StorageConfig {
@@ -49,17 +44,8 @@ impl Default for StorageConfig {
         Self {
             state_dir: default_state_dir(),
             data_dir: default_data_dir(),
-            plugins_dir: default_plugins_dir(),
         }
     }
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct RuntimeConfig {
-    /// Directories prepended to PATH when running plugin hooks (e.g. the node
-    /// bin dir). Absent → auto-discover `node` from the ambient environment.
-    #[serde(default)]
-    pub hook_path: Option<Vec<PathBuf>>,
 }
 
 /// Absent → a SQLite file under the server data dir. Set `url` to a
@@ -145,10 +131,6 @@ fn default_data_dir() -> PathBuf {
     )
 }
 
-fn default_plugins_dir() -> PathBuf {
-    default_data_dir().join("plugins")
-}
-
 fn storage_dir_from(
     xdg_base: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
@@ -162,43 +144,6 @@ fn storage_dir_from(
             _ => PathBuf::from("./.horsie").join(fallback_leaf),
         },
     }
-}
-
-/// The plugins root iff it exists and holds at least one plugin — otherwise
-/// `None`, so the shared plugin library feature stays inert.
-pub fn plugins_dir_if_populated(dir: &Path) -> Option<PathBuf> {
-    (dir.is_dir() && count_installed(dir) > 0).then(|| dir.to_path_buf())
-}
-
-fn count_installed(plugins_dir: &Path) -> usize {
-    std::fs::read_dir(plugins_dir)
-        .map(|rd| rd.flatten().filter(|e| e.path().is_dir()).count())
-        .unwrap_or(0)
-}
-
-/// Resolve the hook interpreter dirs: the configured override, else
-/// auto-discover `node` from the ambient environment (its parent dir).
-pub fn resolve_hook_path(configured: Option<Vec<PathBuf>>) -> Vec<PathBuf> {
-    if let Some(paths) = configured {
-        return paths;
-    }
-    which_dir("node").into_iter().collect()
-}
-
-fn which_dir(bin: &str) -> Option<PathBuf> {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {bin}"))
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() {
-        return None;
-    }
-    PathBuf::from(path).parent().map(Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -218,6 +163,17 @@ mod tests {
         // `local_runtime` was removed when user-launched runtimes became
         // always-on; old config files that still set it must keep parsing.
         let cfg: BootConfig = serde_json::from_str(r#"{ "local_runtime": true }"#).unwrap();
+        assert!(cfg.database.url.is_none());
+    }
+
+    #[test]
+    fn legacy_plugin_library_keys_are_tolerated() {
+        // `storage.plugins_dir` and `runtime.hook_path` were removed with the
+        // legacy filesystem plugin library; old files must keep parsing.
+        let cfg: BootConfig = serde_json::from_str(
+            r#"{ "storage": { "plugins_dir": "/x" }, "runtime": { "hook_path": ["/y"] } }"#,
+        )
+        .unwrap();
         assert!(cfg.database.url.is_none());
     }
 
@@ -258,23 +214,5 @@ mod tests {
     fn user_config_path_prefers_xdg() {
         let p = user_config_path_from(Some("/xdg".into()), Some("/home/u".into()));
         assert_eq!(p, Some(PathBuf::from("/xdg/horsie/config.json")));
-    }
-
-    #[test]
-    fn plugins_dir_if_populated_requires_at_least_one_plugin() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(plugins_dir_if_populated(dir.path()).is_none());
-        std::fs::create_dir(dir.path().join("sp")).unwrap();
-        assert_eq!(
-            plugins_dir_if_populated(dir.path()),
-            Some(dir.path().to_path_buf())
-        );
-    }
-
-    #[test]
-    fn resolve_hook_path_prefers_override() {
-        let p = resolve_hook_path(Some(vec![PathBuf::from("/opt/node/bin")]));
-        assert_eq!(p, vec![PathBuf::from("/opt/node/bin")]);
-        assert!(resolve_hook_path(Some(vec![])).is_empty());
     }
 }

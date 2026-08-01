@@ -89,13 +89,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         unsafe_seatbelt_rules: None,
     };
 
-    let plugins_dir = config::plugins_dir_if_populated(&cfg.storage.plugins_dir);
-    let hook_path = if plugins_dir.is_some() {
-        config::resolve_hook_path(cfg.runtime.hook_path.clone())
-    } else {
-        Vec::new()
-    };
-
     let db_url = resolve_db_url(&cfg, &data_dir);
     let info = ServerInfo {
         config_path: config_path
@@ -105,7 +98,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         database: redact_db_url(&db_url),
         state_dir: cfg.storage.state_dir.display().to_string(),
         data_dir: cfg.storage.data_dir.display().to_string(),
-        plugins_dir: cfg.storage.plugins_dir.display().to_string(),
+        plugins_dir: data_dir.join("plugins").display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
     // The one registry every runtime dial-back lands in, shared by the vendors
@@ -196,8 +189,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         global_events: global_tx,
         caps_finalize,
         default_caps,
-        plugins_dir,
-        hook_path,
         config_store: opened.store,
         model_cards,
         github,

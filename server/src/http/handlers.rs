@@ -169,8 +169,6 @@ pub async fn create_session(
         vendor: req
             .vendor
             .unwrap_or_else(|| state.config_store.default_vendor()),
-        plugins_dir: state.plugins_dir.clone(),
-        hook_path: state.hook_path.clone(),
         plugins,
     };
     let created_at = now_ms();

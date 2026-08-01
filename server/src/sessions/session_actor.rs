@@ -360,8 +360,6 @@ impl SessionActor {
                 .collect(),
             env: vec![],
             capabilities_file: caps_path,
-            plugins_dir: self.spec.plugins_dir.clone(),
-            hook_path: self.spec.hook_path.clone(),
         })
     }
 
@@ -1353,8 +1351,6 @@ mod tests {
                 unsafe_seatbelt_rules: None,
             },
             vendor: vendor.into(),
-            plugins_dir: None,
-            hook_path: vec![],
             plugins: vec![],
         }
     }
