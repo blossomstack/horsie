@@ -13,7 +13,6 @@ mod agent_registry;
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake_agent;
 mod link;
-mod local;
 #[cfg(any(test, feature = "test-util"))]
 pub mod mock;
 mod transport;
@@ -21,7 +20,6 @@ mod velos;
 
 pub use agent_registry::VendorAgentRegistry;
 pub use link::VendorLink;
-pub use local::{LocalDaemonRegistry, LocalDaemonVendor};
 pub use transport::VendorRuntimeTransport;
 pub use velos::{VelosMutableSettings, VelosVendor, VelosVendorSettings};
 

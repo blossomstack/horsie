@@ -139,17 +139,17 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         Err(e) => return Err(e),
     }
 
-    // The shared local-runtime vendor registers each daemon that dials
-    // `/api/runtime/connect?register=local` as a vendor. It owns no listener —
-    // it hands the route a hook that fires on registration. Kept alive by
-    // moving its hook into `AppState`.
-    let local_daemon_hook = {
-        let registry = horsie_server::vendor::LocalDaemonRegistry::new(
-            runtime_registry.clone(),
-            opened.vendors.clone(),
+    // `?register=local` no longer publishes a vendor: `horsie connect` is a
+    // vendor agent now and dials `/api/vendor/connect` instead. The route
+    // itself stays until velos moves to an agent too, since velos containers
+    // still dial back on it; the hook is inert in the meantime.
+    let local_daemon_hook: horsie_executor::ConnectHook = Arc::new(|label: String| {
+        tracing::warn!(
+            %label,
+            "a runtime dialed ?register=local, which no longer registers a vendor; \
+             run `horsie connect` instead"
         );
-        registry.hook()
-    };
+    });
 
     // Vendor agents publish themselves into the same map sessions select from,
     // exactly as the local-daemon registry does for dial-in runtimes.

@@ -73,12 +73,16 @@ enum Command {
         /// name "main". At least one is required.
         #[arg(long = "workspace", required = true)]
         workspace: Vec<String>,
-        /// Runtime label the server groups sessions under. Defaults to
+        /// Vendor name the server publishes this machine under. Defaults to
         /// "local", matching the server's default vendor pickup.
-        #[arg(long, default_value = "local")]
-        runtime_id: String,
-        /// Run detached, with output redirected to `<state>/connect.log`.
+        #[arg(long, alias = "runtime-id", default_value = "local")]
+        name: String,
+        /// Apply the server's sandbox policy to every runtime this agent
+        /// spawns. Off by default: the machine is already your own.
         #[arg(long)]
+        sandbox: bool,
+        /// Removed: run the agent under a process manager instead.
+        #[arg(long, hide = true)]
         background: bool,
         #[arg(long)]
         config: Option<PathBuf>,
@@ -587,7 +591,8 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
         Command::Connect {
             server,
             workspace,
-            runtime_id,
+            name,
+            sandbox,
             background,
             config,
         } => {
@@ -606,10 +611,11 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 &runtime_bin,
                 &server,
                 &workspace,
-                &runtime_id,
+                &name,
                 background,
                 &cfg.storage.state_dir,
                 plugins,
+                sandbox,
             )
             .await
         }

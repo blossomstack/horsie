@@ -25,8 +25,8 @@ use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand};
+use horsie_server::vendor::RuntimeVendor;
 use horsie_server::vendor::mock::MockVendor;
-use horsie_server::vendor::{LocalDaemonRegistry, RuntimeVendor};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -203,15 +203,13 @@ async fn create_session_for_vendor(
     v["session"]["id"].as_str().unwrap().to_string()
 }
 
-/// Start a server wired for the shared local runtime vendor over the single
-/// HTTP port: a shared `ConnectedRuntimeRegistry` is threaded into the store
-/// (for velos) and into `AppState`, and a `LocalDaemonRegistry` hook is
-/// installed so a daemon dialing `/api/runtime/connect?register=local` registers
-/// itself as a vendor. Unlike `start_server`, `ServerDeps.vendors` is the SAME
-/// `SharedVendors` map `DbConfigStore::open()` returns, so a daemon dialing in is
-/// visible to session resolution exactly as in production. Returns the server
-/// handle plus the HTTP address fake daemons dial the connect route on.
-async fn start_server_with_shared_local(
+/// Start a server whose `ServerDeps.vendors` is the SAME `SharedVendors` map
+/// `DbConfigStore::open()` returns — unlike `start_server`, which builds its own.
+/// That is the seam a vendor agent needs: an agent dialing
+/// `/api/vendor/connect` publishes itself into that map and becomes resolvable
+/// by session creation exactly as in production. Returns the server handle plus
+/// the HTTP address agents dial.
+async fn start_server_with_live_vendors(
     journal_dir: &Path,
     mock_url: &str,
 ) -> (Server, SocketAddr) {
@@ -236,10 +234,9 @@ async fn start_server_with_shared_local(
     )
     .await
     .unwrap();
-    // Install the local-daemon registration hook over the shared registry and
-    // the store's live vendor map (the same one sessions resolve against).
-    let local_daemon_hook =
-        LocalDaemonRegistry::new(runtime_registry.clone(), opened.vendors.clone()).hook();
+    // `?register=local` no longer publishes a vendor; the route survives only
+    // for velos dial-backs until that vendor becomes an agent too.
+    let local_daemon_hook: horsie_executor::ConnectHook = Arc::new(|_label: String| {});
     let deps = ServerDeps {
         provider_registry: Arc::new(std::sync::RwLock::new(providers)),
         vendors: opened.vendors.clone(),
@@ -1044,72 +1041,6 @@ async fn turn_in_flight_conflicts() {
     server.shutdown().await;
 }
 
-/// End-to-end for the shared local runtime vendor over the single HTTP port: a
-/// fake daemon dials `/api/runtime/connect?register=local`, the installed
-/// `LocalDaemonRegistry` hook registers the label into the SAME `SharedVendors`
-/// map the store returns, and a session resolves that label — the one seam a
-/// unit test of `LocalDaemonRegistry` in isolation can't cover. Also exercises
-/// the vendor's disconnect → `RecoveryFailed` → reconnect → resume cycle end to
-/// end over real HTTP.
-#[tokio::test]
-async fn shared_local_vendor_resolves_dialed_in_daemon_and_recovers_after_disconnect() {
-    let mock = MockLlmServer::builder().build().await;
-    mock.queue_response("hello from my-laptop");
-    let tmp = tempfile::tempdir().unwrap();
-    let client = reqwest::Client::new();
-
-    let (server, local_addr) = start_server_with_shared_local(tmp.path(), &mock.url()).await;
-    let daemon = spawn_fake_local_daemon(local_addr, "my-laptop", "shared-ok");
-    // Give the dial-back handshake a beat to land before the session tries
-    // to resolve the label.
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    let id = create_session_for_vendor(&client, &server.addr, "my-laptop").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
-
-    assert_eq!(
-        send_message(&client, &server.addr, &id, "hi")
-            .await
-            .as_u16(),
-        202
-    );
-    wait_status(&client, &server.addr, &id, "Idle").await;
-
-    // Stop, so the next message must re-attach — then disconnect the daemon
-    // before that happens (simulating the user closing their laptop).
-    client
-        .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap();
-    wait_status(&client, &server.addr, &id, "Stopped").await;
-    daemon.abort();
-    // Give the abort a beat to actually drop the socket server-side.
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    // Re-attach against a disconnected label fails → 502 + RecoveryFailed.
-    let status = send_message(&client, &server.addr, &id, "are you still there").await;
-    assert_eq!(status.as_u16(), 502);
-    wait_status(&client, &server.addr, &id, "RecoveryFailed").await;
-
-    // Reconnect a fresh daemon under the SAME label — the next message
-    // resolves it via the same map and resumes normally.
-    let daemon2 = spawn_fake_local_daemon(local_addr, "my-laptop", "shared-ok-again");
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    mock.queue_response("resumed after reconnect");
-    assert_eq!(
-        send_message(&client, &server.addr, &id, "welcome back")
-            .await
-            .as_u16(),
-        202
-    );
-    wait_status(&client, &server.addr, &id, "Idle").await;
-
-    daemon2.abort();
-    server.shutdown().await;
-}
-
 /// #61 item 2: a runtime that disconnects mid-run is never released, so every
 /// later turn fails identically.
 ///
@@ -1296,7 +1227,7 @@ async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
     let tmp = tempfile::tempdir().unwrap();
     let client = reqwest::Client::new();
 
-    let (server, _local_addr) = start_server_with_shared_local(tmp.path(), &mock.url()).await;
+    let (server, _local_addr) = start_server_with_live_vendors(tmp.path(), &mock.url()).await;
     let agent = horsie_server::vendor::fake_agent::FakeVendorAgent::builder("agent-1")
         .supports_provisioning(true)
         .bash_stdout("from-the-agent")
@@ -1341,7 +1272,7 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
     let tmp = tempfile::tempdir().unwrap();
     let client = reqwest::Client::new();
 
-    let (server, _local_addr) = start_server_with_shared_local(tmp.path(), &mock.url()).await;
+    let (server, _local_addr) = start_server_with_live_vendors(tmp.path(), &mock.url()).await;
     let agent = horsie_server::vendor::fake_agent::FakeVendorAgent::builder("agent-2")
         .bash_stdout("ok")
         .connect(&format!("ws://{}/api/vendor/connect", server.addr))

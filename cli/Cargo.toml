@@ -36,6 +36,7 @@ reqwest-eventsource = { workspace = true }
 futures-util      = { workspace = true }
 
 [dev-dependencies]
+tokio-tungstenite = { workspace = true }
 horsie-mock-llm = { path = "../providers/mock-llm" }
 tempfile = "3"
 
