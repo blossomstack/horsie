@@ -631,3 +631,41 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod vendor_tests {
+    #[test]
+    fn vendor_command_round_trips_with_a_type_tag() {
+        use crate::vendor::{VendorCommand, VendorInboundMessage, VendorStopRuntime};
+        let msg = VendorInboundMessage {
+            request_id: "req-1".to_string(),
+            command: VendorCommand::StopRuntime(VendorStopRuntime {
+                runtime_id: "rt-1".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"StopRuntime\""), "{json}");
+        let back: VendorInboundMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn vendor_event_round_trips_and_carries_capabilities() {
+        use crate::vendor::{
+            VendorCapabilities, VendorEvent, VendorOutboundMessage, VendorRegistered,
+        };
+        let msg = VendorOutboundMessage {
+            request_id: "req-2".to_string(),
+            event: VendorEvent::Registered(VendorRegistered {
+                vendor_name: "my-laptop".to_string(),
+                capabilities: VendorCapabilities {
+                    supports_provisioning: false,
+                },
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: VendorOutboundMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+}
