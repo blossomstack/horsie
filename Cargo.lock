@@ -1757,6 +1757,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "horsie-vendor-velos"
+version = "0.1.6"
+dependencies = [
+ "async-trait",
+ "axum",
+ "clap",
+ "futures-util",
+ "horsie-agentcore",
+ "horsie-executor",
+ "horsie-models",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "horsie-workflow"
 version = "0.1.6"
 dependencies = [

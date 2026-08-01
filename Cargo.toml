@@ -15,6 +15,7 @@ members = [
     "mcp-client",
     "supervisor",
     "cli",
+    "vendor-velos",
     "tests",
 ]
 resolver = "2"
