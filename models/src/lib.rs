@@ -43,6 +43,11 @@ pub mod runtime {
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod vendor {
+    include!(concat!(env!("OUT_DIR"), "/vendor/mod.rs"));
+}
+
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod workflow {
     include!(concat!(env!("OUT_DIR"), "/workflow/mod.rs"));
 }
