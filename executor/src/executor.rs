@@ -1,87 +1,25 @@
+//! Accepting runtime dial-backs.
+//!
+//! A vendor agent binds a listener its runtimes dial; this drives the
+//! handshake and registers each connection's transport. The server no longer
+//! accepts runtime connections at all — runtimes talk only to their agent.
+
 use crate::{
     connected_registry::ConnectedRuntimeRegistry,
-    error::{ExecutorError, RuntimeError},
-    provider::RuntimeProvider,
-    registry::RuntimeRegistry,
     runtime_listener::{AcceptedConn, RuntimeListenerServer},
     socket_transport::SocketRuntimeTransport,
 };
-use futures_util::{SinkExt, StreamExt};
-use horsie_models::executor::{
-    ExecutorEvent, ExecutorOutboundMessage, RuntimeConfig, RuntimeState, RuntimeStateChangedEvent,
-};
+use futures_util::StreamExt;
 use horsie_models::runtime::RuntimeOutboundMessage;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::Mutex;
-use tokio_tungstenite::{MaybeTlsStream, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 /// How long a runtime may spend in provision steps (e.g. cloning) between its
-/// Provisioning announce and Ready before the executor drops the link.
+/// Provisioning announce and Ready before the link is dropped.
 const PROVISION_WINDOW: Duration = Duration::from_secs(900);
-
-type WsSink = Arc<
-    Mutex<
-        futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
-            Message,
-        >,
-    >,
->;
-
-/// Fires with `runtime_id` after a runtime successfully registers (not on a
-/// rejected collision). Lets a vendor that registers runtimes outside any
-/// `create`/`attach` call (e.g. a user-launched daemon dialing in on its own)
-/// learn about a newly (re)connected id without polling.
-pub type ConnectHook = Arc<dyn Fn(String) + Send + Sync>;
-
-async fn send_outbound(sink: &WsSink, msg: ExecutorOutboundMessage) -> Result<(), ExecutorError> {
-    let json =
-        serde_json::to_string(&msg).map_err(|e| ExecutorError::Serialization(e.to_string()))?;
-    sink.lock()
-        .await
-        .send(Message::Text(json.into()))
-        .await
-        .map_err(|e| ExecutorError::SendFailed(e.to_string()))
-}
-
-async fn emit_state(sink: &WsSink, request_id: &str, runtime_id: &str, state: RuntimeState) {
-    let _ = send_outbound(
-        sink,
-        ExecutorOutboundMessage {
-            request_id: request_id.to_string(),
-            event: ExecutorEvent::RuntimeStateChanged(RuntimeStateChangedEvent {
-                runtime_id: runtime_id.to_string(),
-                state,
-            }),
-        },
-    )
-    .await;
-}
-
-/// Core runtime-creation transition, shared by the server WS path ([`do_create`])
-/// and the in-process [`InMemExecutorTransport`](crate::InMemExecutorTransport).
-/// Spawns the runtime (via the provider) and records it Running, or marks it Failed.
-pub(crate) async fn create_core(
-    registry: &Arc<RuntimeRegistry>,
-    provider: &Arc<dyn RuntimeProvider>,
-    id: &str,
-    config: RuntimeConfig,
-) -> Result<(), RuntimeError> {
-    registry.begin_create(id, config.clone()).await?;
-    match provider.create(id, &config).await {
-        Ok(handle) => {
-            registry.complete_create(id, handle).await?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = registry.mark_failed(id).await;
-            Err(e)
-        }
-    }
-}
 
 /// Accept runtime connections on `listener` and register each as a direct transport,
 /// until `cancel` fires. Used by CLI mode (which drives lifecycle via
@@ -91,35 +29,16 @@ pub fn serve_runtime_connections(
     registry: Arc<ConnectedRuntimeRegistry>,
     cancel: CancellationToken,
 ) {
-    serve_runtime_connections_with_hook(listener, registry, cancel, None)
-}
-
-/// Like [`serve_runtime_connections`], but `on_registered` (if given) fires
-/// after each successful registration with the `runtime_id`.
-pub fn serve_runtime_connections_with_hook(
-    listener: RuntimeListenerServer,
-    registry: Arc<ConnectedRuntimeRegistry>,
-    cancel: CancellationToken,
-    on_registered: Option<ConnectHook>,
-) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 result = listener.accept() => match result {
                     Ok(AcceptedConn::Tcp(ws)) => {
-                        tokio::spawn(handle_runtime_connection(
-                            ws,
-                            registry.clone(),
-                            on_registered.clone(),
-                        ));
+                        tokio::spawn(handle_runtime_connection(ws, registry.clone()));
                     }
                     Ok(AcceptedConn::Unix(ws)) => {
-                        tokio::spawn(handle_runtime_connection(
-                            ws,
-                            registry.clone(),
-                            on_registered.clone(),
-                        ));
+                        tokio::spawn(handle_runtime_connection(ws, registry.clone()));
                     }
                     Err(_) => break,
                 }
@@ -139,7 +58,6 @@ pub fn serve_runtime_connections_with_hook(
 pub async fn handle_runtime_connection<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     registry: Arc<ConnectedRuntimeRegistry>,
-    on_registered: Option<ConnectHook>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -237,9 +155,6 @@ pub async fn handle_runtime_connection<S>(
         // it) and exits on its own once its peer disconnects.
         return;
     }
-    if let Some(hook) = &on_registered {
-        hook(runtime_id.clone());
-    }
     // Deregister when the link drops so health checks observe the loss and a stale
     // transport never lingers (explicit destroy also removes it; double-remove is safe).
     let _ = closed.await;
@@ -258,7 +173,7 @@ mod tests {
     use crate::runtime_listener::RuntimeEndpoint;
     use futures_util::SinkExt;
     use horsie_models::runtime::RuntimeReady;
-    use std::sync::Mutex as StdMutex;
+
     use std::time::Duration as StdDuration;
     use tokio_tungstenite::connect_async;
 
@@ -326,29 +241,6 @@ mod tests {
             registry.runtime_transport("dup-id").await.is_some(),
             "the original transport must still be registered"
         );
-        cancel.cancel();
-    }
-
-    #[tokio::test]
-    async fn on_registered_hook_fires_with_id_once_per_registration() {
-        let listener =
-            RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
-                .await
-                .unwrap();
-        let addr = listener.tcp_addr().unwrap();
-        let registry = Arc::new(ConnectedRuntimeRegistry::new());
-        let cancel = CancellationToken::new();
-        let seen: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
-        let hook_seen = seen.clone();
-        let hook: ConnectHook = Arc::new(move |id: String| {
-            hook_seen.lock().unwrap().push(id);
-        });
-        serve_runtime_connections_with_hook(listener, registry.clone(), cancel.clone(), Some(hook));
-
-        let (_sink, _stream) = announce(addr, "rt-1").await;
-        wait_registered(&registry, "rt-1").await;
-
-        assert_eq!(seen.lock().unwrap().as_slice(), &["rt-1".to_string()]);
         cancel.cancel();
     }
 }

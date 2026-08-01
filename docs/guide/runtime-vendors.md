@@ -2,118 +2,135 @@
 
 Every session runs its tools inside a **runtime** — a sandbox where the agent
 reads files, runs commands, and (optionally) clones repositories. A **runtime
-vendor** is a source of runtimes. The server ships two, differing mainly in
-*who runs the compute*:
+vendor** is a source of runtimes.
 
-| Vendor | Where it runs | Who manages it | Repos & skill bundles | Best for |
-| --- | --- | --- | --- | --- |
-| **local** | **Your own machine** — a daemon you run, dialing back to the server | You | ✗ repos/bundles; ✓ skills from a CLI-installed library | Working against code already on your machine |
-| **velos** | Managed, ephemeral containers the server provisions for you | The server | ✓ supported | Running against GitHub repos; isolation per session |
+A vendor is an **agent**: a process you run that connects to the server and
+manages runtimes on its behalf. The server never reaches out to a vendor; every
+agent dials in. That means a vendor's own configuration — a velos URL and
+token, the directories a laptop serves — lives in the agent, not in the server,
+and the server's Settings page only shows which agents are connected.
 
-> **Out of the box there is no active runtime.** A session can be created, but it
-> cannot run a turn until at least one vendor is available. Set one up below.
+The project ships two agents:
 
-## The `local` vendor — run on your own machine
+| Agent | Where runtimes run | Who runs it | Repos & skill bundles |
+| --- | --- | --- | --- |
+| **`horsie connect`** | Your own machine | You | ✗ repos/bundles; ✓ skills from a CLI-installed library |
+| **`horsie-vendor-velos`** | velos-scheduled containers | You, once, near the server | ✓ supported |
 
-The `local` vendor lets you run the runtime **on your own machine** — your laptop
-or workstation, where your working files already are — and connect it back to the
-server. You run a small `horsie-runtime` daemon; it dials the server over an
-outbound WebSocket and registers itself as a selectable vendor. The server never
-reaches into your machine; your machine reaches out to it.
+> **Out of the box there is no vendor.** A session can be created, but it cannot
+> run a turn until an agent connects. Set one up below.
 
-This is the way to point an agent at code on your own computer. (The daemon can
-run anywhere that can reach the server — including the same host as the server —
-but its purpose is bring-your-own-machine compute.)
+## `horsie connect` — run on your own machine
 
-No server-side opt-in is needed: the server accepts user-launched runtimes by
-default, from the same host or a remote machine. (There is no authentication on
-the dial-in route, as on the rest of the API — only bind the server to networks
-you trust.)
-
-**Run the daemon on your machine**, pointing it at the server's address:
+Point the agent at your server and at the directory you want it to work in:
 
 ```bash
-horsie-runtime \
-  --endpoint "ws://SERVER-HOST:3789/api/runtime/connect?register=local" \
-  --runtime-id my-laptop \
-  --workspace main=/path/to/your/project
+horsie connect \
+  --server https://SERVER-HOST \
+  --workspace main=/path/to/your/project \
+  --name my-laptop
 ```
 
-- `--endpoint` — the server's address with `/api/runtime/connect?register=local`.
-  Replace `SERVER-HOST` with wherever the server is reachable (use `127.0.0.1`
-  only if the server runs on the same machine).
-- `--runtime-id` — the name the vendor shows up as in the UI (e.g. `my-laptop`).
-  Use `local` if you want it to match the server's default vendor so sessions
-  pick it automatically.
-- `--workspace name=path` — the directory on your machine the agent works in
-  (repeatable). At least one is required.
+- `--server` — the server's HTTP(S) URL. The agent dials
+  `/api/vendor/connect` on it over an outbound WebSocket; the server never
+  connects to you.
+- `--name` — how this machine appears when picking a runtime. Defaults to
+  `local`, matching the server's default vendor. (`--runtime-id` still works as
+  an alias.)
+- `--workspace name=path` — a directory the agent serves, repeatable. A bare
+  path becomes `main=<path>`. At least one is required.
+- `--sandbox` — apply the server's sandbox policy to each runtime. Off by
+  default: the machine is already yours.
 
-Keep the process running; sessions use it while it's connected. Once it dials in,
-it appears as an active vendor in the UI.
+Keep it running; sessions use it while it's connected. It appears in Settings →
+Runtimes as soon as it dials in.
 
-**What the local vendor does *not* do:** it can't check out GitHub repos or
-install server-managed skill bundles per session, and it works in the fixed
-directory you gave it (there's no per-session provisioning). It *can* load
-skills from a plugin library you install on the machine with
+**One runtime per session.** The agent spawns a separate `horsie-runtime` child
+per session, so stopping or deleting one session doesn't disturb another. When
+the agent exits it kills the runtimes it started.
+
+**Every session shares your directories.** All of them work in the paths passed
+to `--workspace`, so two sessions running at once can edit the same files. The
+agent prints this on startup. If you want isolation per session, use velos.
+
+**No `--background`.** The agent is a long-lived supervisor with child
+processes, so run it under a process manager (systemd, launchd, tmux) where its
+lifetime and logs are managed explicitly.
+
+**What it does not do:** check out GitHub repos, or install server-managed skill
+bundles per session. It *can* load skills from a plugin library you install with
 `horsie plugin install` — see
-[Skills & plugins](skills-and-plugins.md#skills-on-your-own-machine-host-library). Session **stop** and **delete** don't tear
-anything down — your daemon keeps running and is shared across sessions. If you
-need per-session repos or bundles, use velos.
+[Skills & plugins](skills-and-plugins.md#skills-on-your-own-machine-host-library).
 
-## The `velos` vendor — managed runtimes
+## `horsie-vendor-velos` — managed container runtimes
 
-The `velos` vendor is a **managed** runtime: instead of running anything
-yourself, the server provisions a fresh, isolated **container** per session on a
-[velos](https://github.com/blossomstack/velos) backend and tears it down when the
-session ends. It supports full provisioning — it can check out GitHub
-repositories and install skill/plugin bundles into the sandbox.
+This agent provisions a fresh, isolated **container** per session on a
+[velos](https://github.com/blossomstack/velos) backend and tears it down when
+the session ends. It supports full provisioning: GitHub checkouts and skill
+bundles into the sandbox.
 
-You configure velos once (below); after that, sessions get a runtime with nothing
-to launch or babysit.
+Run it wherever it can reach both the server and velos:
 
-**Configure it in the UI** — Settings → **Runtimes** → **Velos remote runtimes** → add a vendor:
+```bash
+HORSIE_VELOS_TOKEN=... horsie-vendor-velos \
+  --server https://SERVER-HOST \
+  --name velos \
+  --velos-url http://velos.example:8080 \
+  --advertise AGENT-HOST:3790 \
+  --image ghcr.io/you/horsie-runtime:latest
+```
 
-| Field | Meaning |
-| --- | --- |
-| **Name** | How the vendor appears when picking a runtime |
-| **Server URL** | Your velos server, e.g. `http://velos.example:8080` |
-| **Runtime image** | The `horsie-runtime` container image velos should run |
-| **Advertise address** | `host:port` the container uses to dial *back* to this server — must be reachable from velos's container network |
-| **Token** | velos API token (entered inline) |
-| Advanced | Runtime binary path, workspace root, CPU, memory (MiB), connect timeout |
+Prefer `HORSIE_VELOS_TOKEN` over `--velos-token` so the token never appears in
+argv. The agent verifies it at startup and exits if velos is unreachable or the
+token is rejected, rather than letting the first session discover it.
 
-Use **Test connection** on the row to check reachability and the token before
-saving. Editing a vendor's server URL or advertise address changes how the
-listener behaves, so the UI shows a **restart required** banner for those.
+- `--advertise` — `host:port` this agent is reachable at **from velos's
+  container network**. Containers publish no inbound ports, so each container's
+  runtime dials *back* to the agent on this address, and fetches skill bundles
+  over it. It must be routable from velos's workers to wherever the agent runs.
+- `--listen` — where the agent binds that listener (default `0.0.0.0:3790`).
+- Advanced: `--runtime-bin`, `--workspace-root`, `--cpu`, `--memory-mib`,
+  `--connect-timeout-secs`.
 
 **Build the runtime image** from `docker/runtime.Dockerfile` and push it where
-velos workers can pull it; set that image in the vendor config.
-
-**How it connects:** velos containers publish no inbound ports, so the runtime
-dials *back* to the server over an outbound WebSocket to the **advertise
-address** — the same HTTP port everything else uses. The advertise address must
-be routable from velos's container network to your server.
+velos workers can pull it.
 
 **Ephemeral by design:** velos has no persistent volumes, so a session's
 workspace is temporary. Stopping a session deletes its container; the next
 message schedules a fresh one. Your session history is safe regardless — the
-durable transcript lives on the server and reconnects automatically.
+durable transcript lives on the server.
 
 ## Choosing a vendor per session
 
-- **Default vendor** — Settings → **Runtimes** → **Default vendor** picks which vendor new
-  sessions use. Only *active* vendors (a connected local daemon, or a reachable
-  velos vendor) are selectable. If unset, it falls back to `local`.
-- **Per session** — the New Session dialog shows a **Runtime vendor** dropdown
-  **only when more than one vendor is active**. With a single vendor, sessions
-  just use the default silently.
+- **Default vendor** — Settings → **Runtimes** → **Default vendor** names which
+  vendor new sessions use. It may name an agent that isn't connected yet; the
+  preference takes effect once that agent dials in.
+- **Per session** — the session config bar offers a **Runtime vendor** dropdown
+  when more than one vendor is connected.
 
-## Which should I use?
+## Writing another vendor
 
-- You want the agent to work on code that lives **on your own machine**, and
-  you're happy to run a small daemon there → **local**.
-- You want a **managed** runtime with nothing to run yourself — per-session
-  isolation, GitHub repo checkout, or skill bundles provisioned into the sandbox
-  → **velos**.
+A vendor agent is a `RuntimeProvider` (spawn a process, schedule a container,
+call a cloud sandbox API) plus a `WorkspaceResolver` (turn a requested workspace
+*name* into a path the vendor owns). Both sit behind `VendorAgent` in the
+`horsie-executor` crate, which owns the protocol, the runtime listener, and
+tool-call relaying. `horsie-vendor-velos` is the worked example: it implements
+those two things and nothing else.
 
-You can configure both and choose per session.
+## Upgrading from the old dial-in runtime
+
+Before vendor agents, a runtime dialed the server directly:
+
+```bash
+# No longer works — the route is gone.
+horsie-runtime --endpoint "ws://SERVER:3789/api/runtime/connect?register=local" ...
+```
+
+Every session shared that one runtime, which is why stopping a session couldn't
+tear anything down. Replace it with `horsie connect` as shown above; the
+`--workspace` flags carry over unchanged and `--runtime-id` becomes `--name`.
+
+If you configured velos in Settings, that form is gone. Move those values onto
+`horsie-vendor-velos` flags: **Server URL** → `--velos-url`, **Runtime image**
+→ `--image`, **Advertise address** → `--advertise`, **Token** →
+`HORSIE_VELOS_TOKEN`, and the advanced fields to their matching flags.

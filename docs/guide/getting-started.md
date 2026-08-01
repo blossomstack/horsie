@@ -16,15 +16,19 @@ address:
 
     horsie connect --server https://horsie.example.com --workspace .
 
-    connected to https://horsie.example.com as runtime "local" · workspace "main" -> /Users/shawn/proj
+    connected to https://horsie.example.com as vendor "local" · workspace "main" -> /Users/shawn/proj
+    note: every session on this vendor works in /Users/shawn/proj; concurrent sessions will edit the same files
     open https://horsie.example.com in your browser to start a session
 
-This registers your current directory as workspace `main`, dials the server,
-and keeps running while it's connected — sessions can only reach this
-machine while this process is up (add `--background` to detach it). Run it
-again from a different directory (with a different `--workspace`) to add
-another workspace, or with a different `--runtime-id` if more than one
-machine connects to the same server.
+This registers your current directory as workspace `main` and dials the
+server. Sessions can reach this machine only while the process is up, so run
+it under a process manager if you want it to survive a logout. Pass
+`--workspace` more than once to serve several directories, and `--name` if
+more than one machine connects to the same server.
+
+Each session gets its own runtime process, so stopping one session leaves the
+others alone — but they all work in the directories you passed, so concurrent
+sessions can edit the same files.
 
 ## 3. Open the web UI, create a session
 
@@ -41,7 +45,7 @@ From here:
 
 ## Manual / advanced setup
 
-`horsie connect` wraps a standalone `horsie-runtime --endpoint ws://... --runtime-id ... --workspace ...` process — the two are equivalent, and the manual form is still useful if you don't want the `horsie` CLI's other subcommands, or need flags `connect` doesn't expose yet (`--sandbox-caps`, `--plugins-dir`, `--hook-path`). See [Runtime vendors](runtime-vendors.md) for the full picture, including the managed **velos** vendor option.
+`horsie connect` is a **vendor agent**: it holds one connection to the server and spawns a `horsie-runtime` child per session. Running `horsie-runtime` by hand no longer connects it to a server — the runtime talks only to its agent now. Add `--sandbox` to apply the server's sandbox policy to each runtime. See [Runtime vendors](runtime-vendors.md) for the full picture, including the managed **velos** option and how to write another vendor.
 
 Building the CLI from source instead of the install script:
 

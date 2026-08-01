@@ -10,17 +10,12 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use futures_util::{SinkExt, StreamExt};
 use horsie_actor::{ActorRef, FileJournal, Journal, spawn_root};
 use horsie_agentcore::LlmProvider;
 use horsie_anthropic::AnthropicProvider;
 use horsie_executor::ConnectedRuntimeRegistry;
 use horsie_mock_llm::MockLlmServer;
 use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
-use horsie_models::runtime::{
-    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse,
-    SessionStartResponse, ToolCallResponse, ToolOutput, ToolResult,
-};
 use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
 use horsie_server::sessions::spec::ServerDeps;
@@ -32,8 +27,6 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::task::JoinHandle;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 // ── harness ──────────────────────────────────────────────────────────────────
 
@@ -139,8 +132,6 @@ async fn start_server(journal_dir: &Path, vendor: Arc<VendorLink>, mock_url: &st
         mcp,
         plugins,
         memory,
-        runtime_registry: Arc::new(ConnectedRuntimeRegistry::new()),
-        local_daemon_hook: Arc::new(|_label: String| {}),
         vendor_agents: Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
             shared_vendors,
         )),
@@ -212,7 +203,7 @@ async fn start_server_with_live_vendors(
     providers.insert("mock".into(), provider_at(mock_url));
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
     let db = journal_dir.join("config.db");
-    let runtime_registry = Arc::new(ConnectedRuntimeRegistry::new());
+    let _runtime_registry = Arc::new(ConnectedRuntimeRegistry::new());
     let opened = DbConfigStore::open(
         &format!("sqlite://{}", db.display()),
         StoreDeps {
@@ -228,9 +219,6 @@ async fn start_server_with_live_vendors(
     )
     .await
     .unwrap();
-    // `?register=local` no longer publishes a vendor; the route survives only
-    // for velos dial-backs until that vendor becomes an agent too.
-    let local_daemon_hook: horsie_executor::ConnectHook = Arc::new(|_label: String| {});
     let deps = ServerDeps {
         provider_registry: Arc::new(std::sync::RwLock::new(providers)),
         vendors: opened.vendors.clone(),
@@ -272,8 +260,6 @@ async fn start_server_with_live_vendors(
         mcp,
         plugins,
         memory,
-        runtime_registry,
-        local_daemon_hook,
         vendor_agents: Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
             opened.vendors.clone(),
         )),
@@ -301,64 +287,6 @@ async fn start_server_with_live_vendors(
 /// scan every session provisioning always performs
 /// (`session_actor.rs`'s `scan_workspace(...)` call, regardless of
 /// `use_plugins`) with an empty result — otherwise the real `RuntimeClient`
-/// awaits a `ScanResult` that never arrives and provisioning hangs forever.
-fn spawn_fake_local_daemon(addr: SocketAddr, label: &str, reply: &str) -> JoinHandle<()> {
-    let label = label.to_string();
-    let reply = reply.to_string();
-    tokio::spawn(async move {
-        let url = format!("ws://{addr}/api/runtime/connect?register=local");
-        let (ws, _) = match connect_async(url).await {
-            Ok(x) => x,
-            Err(_) => return,
-        };
-        let (mut sink, mut stream) = ws.split();
-        let ready = serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
-            runtime_id: label,
-        }))
-        .unwrap();
-        if sink.send(Message::Text(ready.into())).await.is_err() {
-            return;
-        }
-        while let Some(Ok(msg)) = stream.next().await {
-            let Message::Text(text) = msg else { continue };
-            match serde_json::from_str::<RuntimeInboundMessage>(&text) {
-                Ok(RuntimeInboundMessage::ToolCall(req)) => {
-                    let resp = RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
-                        call_id: req.call_id,
-                        result: ToolResult::Ok(ToolOutput {
-                            stdout: reply.clone(),
-                            stderr: String::new(),
-                            exit_code: 0,
-                        }),
-                    });
-                    if let Ok(json) = serde_json::to_string(&resp) {
-                        let _ = sink.send(Message::Text(json.into())).await;
-                    }
-                }
-                Ok(RuntimeInboundMessage::ScanWorkspace(req)) => {
-                    let resp = RuntimeOutboundMessage::ScanResult(ScanResponse {
-                        call_id: req.call_id,
-                        workspaces: vec![],
-                        shared_skills: vec![],
-                    });
-                    if let Ok(json) = serde_json::to_string(&resp) {
-                        let _ = sink.send(Message::Text(json.into())).await;
-                    }
-                }
-                Ok(RuntimeInboundMessage::SessionStart(req)) => {
-                    let resp = RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
-                        call_id: req.call_id,
-                        context: String::new(),
-                    });
-                    if let Ok(json) = serde_json::to_string(&resp) {
-                        let _ = sink.send(Message::Text(json.into())).await;
-                    }
-                }
-                _ => {}
-            }
-        }
-    })
-}
 
 async fn send_message(
     client: &reqwest::Client,

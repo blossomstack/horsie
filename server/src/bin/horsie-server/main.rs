@@ -101,9 +101,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         plugins_dir: data_dir.join("plugins").display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    // The one registry every runtime dial-back lands in, shared by the vendors
-    // (velos) and the HTTP `/api/runtime/connect` route.
-    let runtime_registry = Arc::new(horsie_executor::ConnectedRuntimeRegistry::new());
     let opened = DbConfigStore::open(&db_url, StoreDeps { info })
         .await
         .map_err(BootError::Config)?;
@@ -132,18 +129,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         }
         Err(e) => return Err(e),
     }
-
-    // `?register=local` no longer publishes a vendor: `horsie connect` is a
-    // vendor agent now and dials `/api/vendor/connect` instead. The route
-    // itself stays until velos moves to an agent too, since velos containers
-    // still dial back on it; the hook is inert in the meantime.
-    let local_daemon_hook: horsie_executor::ConnectHook = Arc::new(|label: String| {
-        tracing::warn!(
-            %label,
-            "a runtime dialed ?register=local, which no longer registers a vendor; \
-             run `horsie connect` instead"
-        );
-    });
 
     // Vendor agents publish themselves into the same map sessions select from,
     // exactly as the local-daemon registry does for dial-in runtimes.
@@ -195,8 +180,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         mcp,
         plugins,
         memory,
-        runtime_registry,
-        local_daemon_hook,
         vendor_agents,
         web_dir: cli.web,
     };

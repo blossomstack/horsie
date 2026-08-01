@@ -10,7 +10,6 @@ mod mcp;
 mod memory;
 mod model_cards;
 mod plugins;
-mod runtime_connect;
 mod sse;
 pub mod vendor_connect;
 
@@ -19,7 +18,6 @@ use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Router;
 use axum::routing::{get, post, put};
 use horsie_actor::{ActorRef, Journal};
-use horsie_executor::{ConnectHook, ConnectedRuntimeRegistry};
 use horsie_models::capabilities::CapabilitySpec;
 use horsie_models::session::GlobalSessionEvent;
 use std::path::PathBuf;
@@ -70,14 +68,6 @@ pub struct AppState {
     /// Agent-managed long-term memories: CRUD for the web UI. The agent reaches
     /// the same data through its `MemoryToolbox`, not over HTTP.
     pub memory: Arc<crate::memory::MemoryService>,
-    /// Server-wide registry every runtime dial-back (velos container or local
-    /// daemon) lands in, keyed by `runtime_id`. Shared with the vendors so a
-    /// vendor's `provision()` finds the connection the HTTP route registered.
-    pub runtime_registry: Arc<ConnectedRuntimeRegistry>,
-    /// Hook that registers a `?register=local` daemon as a vendor. Always
-    /// installed: user-launched runtimes are supported by default, whether
-    /// they dial from the same host or a remote machine.
-    pub local_daemon_hook: ConnectHook,
     /// Every connected vendor agent, published into the same vendor map
     /// sessions select from. Held here so the connect route can register a
     /// freshly handshaken link.
@@ -168,10 +158,6 @@ pub fn app(state: AppState) -> Router {
                 .put(memory::update_memory)
                 .delete(memory::delete_memory),
         )
-        .route(
-            "/api/runtime/connect",
-            get(runtime_connect::runtime_connect),
-        )
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
         .with_state(state);
 
@@ -238,7 +224,6 @@ mod tests {
         // A real DB store on a temp SQLite; the registry it opens is empty and
         // shared with the supervisor. `mock` is the runtime vendor under test.
         let db = tmp.path().join("config.db");
-        let runtime_registry = Arc::new(ConnectedRuntimeRegistry::new());
         let opened = crate::config::DbConfigStore::open(
             &format!("sqlite://{}", db.display()),
             crate::config::StoreDeps { info: test_info() },
@@ -292,8 +277,6 @@ mod tests {
             mcp,
             plugins,
             memory,
-            runtime_registry,
-            local_daemon_hook: Arc::new(|_label: String| {}),
             vendor_agents,
             web_dir: None,
         }
