@@ -281,13 +281,6 @@ async fn start_server_with_live_vendors(
     )
 }
 
-/// A fake `horsie-runtime --endpoint ws://... --runtime-id <label>` daemon:
-/// dials the shared local vendor's listener, announces Ready under `label`,
-/// answers every tool call with a fixed stdout, and answers the workspace
-/// scan every session provisioning always performs
-/// (`session_actor.rs`'s `scan_workspace(...)` call, regardless of
-/// `use_plugins`) with an empty result — otherwise the real `RuntimeClient`
-
 async fn send_message(
     client: &reqwest::Client,
     addr: &SocketAddr,
