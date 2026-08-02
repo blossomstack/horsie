@@ -15,6 +15,24 @@ pub use manifest::PluginManifest;
 pub use marketplace::{Marketplace, MarketplaceEntry, PluginSource};
 
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+
+/// Join a manifest- or marketplace-declared relative path onto a root, dropping
+/// the `./` prefix these fields conventionally carry.
+///
+/// `Path::join` keeps the `.` component verbatim, which is harmless to resolve
+/// but leaks into anything that displays the result — the library's symlink
+/// targets read as `…/sources/<key>/./plugin` without this.
+pub fn join_declared(root: &Path, declared: &str) -> PathBuf {
+    let mut rest = declared;
+    while let Some(stripped) = rest.strip_prefix("./") {
+        rest = stripped;
+    }
+    if rest.is_empty() || rest == "." {
+        return root.to_path_buf();
+    }
+    root.join(rest)
+}
 
 /// Stable short key for a checkout of `(url, git_ref)`, used to name the shared
 /// clone under `<data_dir>/sources/`. Keyed by source rather than by plugin name

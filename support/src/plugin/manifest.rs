@@ -137,6 +137,27 @@ mod tests {
     }
 
     #[test]
+    fn join_declared_drops_the_dot_prefix() {
+        use std::path::PathBuf;
+        let root = Path::new("/r");
+        assert_eq!(
+            super::super::join_declared(root, "./plugin"),
+            PathBuf::from("/r/plugin")
+        );
+        assert_eq!(
+            super::super::join_declared(root, "./.claude/skills/"),
+            PathBuf::from("/r/.claude/skills/")
+        );
+        assert_eq!(
+            super::super::join_declared(root, "plugin"),
+            PathBuf::from("/r/plugin")
+        );
+        // A source that points at the repo root itself.
+        assert_eq!(super::super::join_declared(root, "."), PathBuf::from("/r"));
+        assert_eq!(super::super::join_declared(root, "./"), PathBuf::from("/r"));
+    }
+
+    #[test]
     fn source_key_is_stable_and_ref_sensitive() {
         let a = super::super::source_key("https://x/y.git", None);
         let b = super::super::source_key("https://x/y.git", None);

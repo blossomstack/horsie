@@ -37,7 +37,9 @@ impl PluginRoot {
     }
 
     pub fn description(&self) -> Option<&str> {
-        self.manifest.as_ref().and_then(|m| m.description.as_deref())
+        self.manifest
+            .as_ref()
+            .and_then(|m| m.description.as_deref())
     }
 
     /// Today: a plugin is installable when it provides at least one skill.

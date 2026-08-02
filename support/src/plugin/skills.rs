@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 /// Skill roots for a plugin: the manifest override when declared, else `skills/`.
 pub fn skill_locations(plugin_root: &Path, manifest: Option<&PluginManifest>) -> Vec<PathBuf> {
     match manifest.map(|m| m.skills.as_slice()) {
-        Some(roots) if !roots.is_empty() => roots.iter().map(|r| plugin_root.join(r)).collect(),
+        Some(roots) if !roots.is_empty() => roots
+            .iter()
+            .map(|r| super::join_declared(plugin_root, r))
+            .collect(),
         _ => vec![plugin_root.join("skills")],
     }
 }
@@ -89,7 +92,11 @@ mod tests {
         assert!(dirs[0].ends_with("impeccable"));
         // The returned path must stay under the plugin root and must not be
         // canonicalised — callers strip_prefix it to build a relative id.
-        assert!(dirs[0].strip_prefix(dir.path()).is_ok());
+        assert_eq!(
+            dirs[0].strip_prefix(dir.path()).unwrap(),
+            Path::new(".claude/skills/impeccable"),
+            "the declared `./` prefix must not survive into the path"
+        );
     }
 
     #[test]

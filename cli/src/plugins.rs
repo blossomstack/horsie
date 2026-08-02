@@ -188,8 +188,7 @@ pub fn install(
 /// is a marketplace, else the repo root. Returns the entry name when a
 /// marketplace named it.
 fn resolve_plugin_root(clone_dir: &Path, url: &str) -> Result<(PathBuf, Option<String>), CliError> {
-    let market =
-        horsie_support::plugin::Marketplace::read(clone_dir).map_err(CliError::Config)?;
+    let market = horsie_support::plugin::Marketplace::read(clone_dir).map_err(CliError::Config)?;
     let Some(market) = market else {
         return Ok((clone_dir.to_path_buf(), None));
     };
@@ -198,14 +197,18 @@ fn resolve_plugin_root(clone_dir: &Path, url: &str) -> Result<(PathBuf, Option<S
     }
     match market.plugins.as_slice() {
         [only] => match &only.source {
-            horsie_support::plugin::PluginSource::Path(p) => {
-                Ok((clone_dir.join(p), Some(only.name.clone())))
-            }
+            horsie_support::plugin::PluginSource::Path(p) => Ok((
+                horsie_support::plugin::join_declared(clone_dir, p),
+                Some(only.name.clone()),
+            )),
             // Resolving an external source needs the marketplace registry, which
             // lands with `horsie marketplace add` (issue #105, PR2).
-            horsie_support::plugin::PluginSource::Git { url: u, .. } => Err(CliError::Config(
-                format!("'{}' is published from another repo ({u}); install it from there directly", only.name),
-            )),
+            horsie_support::plugin::PluginSource::Git { url: u, .. } => {
+                Err(CliError::Config(format!(
+                    "'{}' is published from another repo ({u}); install it from there directly",
+                    only.name
+                )))
+            }
         },
         [] => Ok((clone_dir.to_path_buf(), None)),
         many => Err(CliError::Config(format!(

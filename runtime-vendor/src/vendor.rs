@@ -586,9 +586,6 @@ impl RuntimeVendor {
             .map(|r| r.transport.clone())
     }
 
-    /// Where this agent writes a runtime's sandbox capability file. Public so
-    /// the process provider can be pointed at the same path.
-    #[must_use]
     /// Persist the effective capability spec for a runtime and return its path.
     ///
     /// The server authors the spec but cannot know this machine's plugin
@@ -610,7 +607,8 @@ impl RuntimeVendor {
             ));
         let path = self.caps_path(runtime_id);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create runtime state dir: {e}"))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create runtime state dir: {e}"))?;
         }
         let bytes =
             serde_json::to_vec_pretty(&spec).map_err(|e| format!("encode capability spec: {e}"))?;
@@ -618,6 +616,9 @@ impl RuntimeVendor {
         Ok(path)
     }
 
+    /// Where this agent writes a runtime's sandbox capability file. Public so
+    /// the process provider can be pointed at the same path.
+    #[must_use]
     pub fn caps_path(&self, runtime_id: &str) -> PathBuf {
         self.state_dir.join(runtime_id).join("capabilities.json")
     }
