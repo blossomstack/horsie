@@ -126,7 +126,10 @@ fn from_json<T: serde::de::DeserializeOwned>(col: &str, text: String) -> Result<
 
 fn row_to_agent(row: &SqliteRow) -> Result<AgentRow, String> {
     let get = |c: &str| row.try_get::<String, _>(c).map_err(|e| e.to_string());
-    let get_opt = |c: &str| row.try_get::<Option<String>, _>(c).map_err(|e| e.to_string());
+    let get_opt = |c: &str| {
+        row.try_get::<Option<String>, _>(c)
+            .map_err(|e| e.to_string())
+    };
     Ok(AgentRow {
         name: get("name")?,
         description: get("description")?,

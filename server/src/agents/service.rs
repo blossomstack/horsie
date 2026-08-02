@@ -78,7 +78,10 @@ impl AgentService {
         }
         let now = now_secs();
         let row = row_from_input(input, now.clone(), now);
-        self.store.insert(&row).await.map_err(AgentError::Internal)?;
+        self.store
+            .insert(&row)
+            .await
+            .map_err(AgentError::Internal)?;
         self.get(&row.name).await
     }
 
@@ -110,7 +113,12 @@ impl AgentService {
     }
 
     pub async fn delete(&self, name: &str) -> Result<(), AgentError> {
-        if self.store.delete(name).await.map_err(AgentError::Internal)? {
+        if self
+            .store
+            .delete(name)
+            .await
+            .map_err(AgentError::Internal)?
+        {
             Ok(())
         } else {
             Err(AgentError::NotFound(format!("unknown agent '{name}'")))
@@ -370,7 +378,13 @@ mod tests {
         let (s, _t) = service().await;
         s.create(input("b", "sonnet")).await.unwrap();
         s.create(input("a", "haiku")).await.unwrap();
-        let names: Vec<String> = s.list().await.unwrap().into_iter().map(|v| v.name).collect();
+        let names: Vec<String> = s
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|v| v.name)
+            .collect();
         assert_eq!(names, vec!["a", "b"]);
     }
 }
