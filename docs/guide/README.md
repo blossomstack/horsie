@@ -7,8 +7,10 @@ the full transcript is journaled server-side and streams live to the browser, so
 you can close the tab, reconnect, and pick up where you left off.
 
 This guide covers horsie server only. It does **not** cover the separate
-`horsie` CLI (`horsie job`/`horsie daemon` and workflow files) — that is a
-different tool.
+`horsie` CLI — that is a different tool. Today `horsie` is a session-server
+client: `horsie connect` runs this machine as a runtime vendor,
+`horsie session tail` streams session events, and `horsie plugin` manages the
+shared plugin library.
 
 ## What you can do
 
