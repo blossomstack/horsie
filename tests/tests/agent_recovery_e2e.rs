@@ -298,3 +298,132 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
     .await
     .expect("test timed out");
 }
+
+/// The repair a crash makes necessary is journaled once, at recovery, rather
+/// than recomputed on a clone at the top of every turn — so the journal itself
+/// records what the model was actually shown.
+#[tokio::test]
+async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
+    let mock = MockLlmServer::builder().build().await;
+
+    let session_id = uuid::Uuid::new_v4();
+    let journal = Arc::new(InMemoryJournal::new());
+    seed(
+        &journal,
+        session_id,
+        &[
+            AgentDomainEvent::InputMessage {
+                message: Message::user("u1", "read the readme"),
+            },
+            // The process died here: the call is journaled, its result is not.
+            AgentDomainEvent::MessageComplete {
+                message: assistant_tool_call("a1", "interrupted-call"),
+            },
+        ],
+    )
+    .await;
+
+    let (tx, _outcomes) = tokio::sync::mpsc::channel(8);
+    let ctx = AgentRuntimeContext {
+        context_provider: Arc::new(FixedContextProvider {
+            provider: provider_at(&mock.url()),
+            toolbox: Arc::new(ReadFileToolbox),
+        }),
+        event_sink: Arc::new(NoopSink),
+        parent: Arc::new(OutcomeChannel(tx)),
+        session_id,
+    };
+    let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+        system_prompt: None,
+        output_schema: None,
+        allow_ask_user: false,
+        allow_timers: None,
+        max_iterations: None,
+        max_retries: None,
+        allowed_tools: None,
+    });
+    params.interactive = true;
+
+    // Recovering alone must repair it — no turn is taken here at all.
+    let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
+    let page = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            agent
+                .tell(AgentCommand::GetHistory {
+                    query: horsie_workflow::HistoryQuery {
+                        before: None,
+                        limit: 100,
+                    },
+                    reply,
+                })
+                .await
+                .unwrap();
+            let page = rx.await.unwrap();
+            if page.messages.iter().any(|m| m.role == Role::Tool) {
+                return page;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("recovery must journal a result for the interrupted call");
+
+    let results: Vec<&str> = page
+        .messages
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
+            ContentPart::ToolResult(r) => Some(r.tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec!["interrupted-call"], "{:?}", page.messages);
+
+    // Durable, not merely in memory: a second incarnation sees the same repair
+    // and has nothing left to fix.
+    let (tx2, _o2) = tokio::sync::mpsc::channel(8);
+    let ctx2 = AgentRuntimeContext {
+        context_provider: Arc::new(FixedContextProvider {
+            provider: provider_at(&mock.url()),
+            toolbox: Arc::new(ReadFileToolbox),
+        }),
+        event_sink: Arc::new(NoopSink),
+        parent: Arc::new(OutcomeChannel(tx2)),
+        session_id,
+    };
+    let mut params2 = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+        system_prompt: None,
+        output_schema: None,
+        allow_ask_user: false,
+        allow_timers: None,
+        max_iterations: None,
+        max_retries: None,
+        allowed_tools: None,
+    });
+    params2.interactive = true;
+    let agent2 = spawn_root(AgentActor::new(ctx2, params2), journal);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    agent2
+        .tell(AgentCommand::GetHistory {
+            query: horsie_workflow::HistoryQuery {
+                before: None,
+                limit: 100,
+            },
+            reply,
+        })
+        .await
+        .unwrap();
+    let page2 = rx.await.unwrap();
+    let tool_msgs = page2
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .count();
+    assert_eq!(
+        tool_msgs, 1,
+        "the repair is recorded once, not re-applied on every load: {:?}",
+        page2.messages
+    );
+}
