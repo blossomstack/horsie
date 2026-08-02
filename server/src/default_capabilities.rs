@@ -49,7 +49,8 @@ mod tests {
         let spec = default_capabilities().unwrap();
         let rules = spec.unsafe_seatbelt_rules.unwrap_or_default();
         assert!(
-            rules.iter()
+            rules
+                .iter()
                 .any(|r| r == r#"(allow mach-lookup (global-name "com.apple.SecurityServer"))"#),
             "macOS Secure Transport needs SecurityServer to validate TLS certs"
         );
@@ -59,9 +60,10 @@ mod tests {
     fn default_spec_grants_system_toolchain_reads() {
         let spec = default_capabilities().unwrap();
         for path in ["/usr", "/bin", "/etc"] {
-            let present = spec.grants.iter().any(
-                |g| matches!(g, Grant::Dir(d) if d.path == path && d.access == Access::Read),
-            );
+            let present = spec
+                .grants
+                .iter()
+                .any(|g| matches!(g, Grant::Dir(d) if d.path == path && d.access == Access::Read));
             assert!(present, "default missing read dir grant for {path}");
         }
     }

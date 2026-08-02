@@ -81,8 +81,8 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     // toolchain reads, network blocked). A request-supplied spec passes
     // through `caps_finalize` unchanged.
     let caps_finalize: CapsFinalize = Arc::new(|caps| caps);
-    let default_caps = horsie_server::default_capabilities::default_capabilities()
-        .map_err(BootError::Config)?;
+    let default_caps =
+        horsie_server::default_capabilities::default_capabilities().map_err(BootError::Config)?;
 
     let db_url = resolve_db_url(&cfg, &data_dir);
     let info = ServerInfo {
