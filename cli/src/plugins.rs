@@ -33,6 +33,12 @@ pub struct PluginEntry {
     /// re-pinned follows along.
     #[serde(default)]
     pub marketplace: Option<String>,
+    /// The name the index knows this plugin by, which is not always the name it
+    /// installs as — a plugin's own manifest may disagree with its catalogue
+    /// entry (`42crunch-api-security-testing` installs as
+    /// `api-security-testing`). Re-resolution must use the index's name.
+    #[serde(default)]
+    pub marketplace_entry: Option<String>,
 }
 
 /// The `plugins.json` lockfile.
@@ -141,10 +147,7 @@ pub struct PluginPaths {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallTarget {
     Url(String),
-    FromMarketplace {
-        plugin: String,
-        marketplace: String,
-    },
+    FromMarketplace { plugin: String, marketplace: String },
 }
 
 impl InstallTarget {
@@ -179,6 +182,11 @@ struct Resolved {
     subpath: Option<String>,
     /// Name to fall back on when the plugin's own manifest declares none.
     fallback: String,
+    /// What the user asked for, for error messages: the plugin name when it came
+    /// from a marketplace, else the URL they typed.
+    label: String,
+    /// The index's own name for this entry, recorded so `update` can re-resolve.
+    entry_name: String,
 }
 
 /// `horsie plugin install <url|plugin@marketplace>`: resolve where the plugin
@@ -209,9 +217,19 @@ pub fn install(
     let root = horsie_support::plugin::PluginRoot::inspect(&root_dir).map_err(CliError::Config)?;
     if !root.is_installable() {
         gc_checkout(paths, &checkout.key);
+        // Common enough to be worth spelling out: a large share of published
+        // plugins ship only agents, commands or MCP servers, none of which
+        // horsie loads yet. Naming the subtree that was checked keeps this
+        // distinguishable from a resolution failure.
+        let checked = resolved
+            .subpath
+            .as_deref()
+            .map(|p| format!(" in {p}"))
+            .unwrap_or_default();
         return Err(CliError::Config(format!(
-            "'{}' is not a skills plugin: {}",
-            resolved.url,
+            "'{}'{checked} provides no skills to install: {}. \
+             horsie loads plugin skills; plugin agents, commands and MCP servers are not supported yet.",
+            resolved.label,
             root.rejection()
         )));
     }
@@ -243,6 +261,10 @@ pub fn install(
             InstallTarget::FromMarketplace { marketplace, .. } => Some(marketplace.clone()),
             InstallTarget::Url(_) => None,
         },
+        marketplace_entry: match target {
+            InstallTarget::FromMarketplace { .. } => Some(resolved.entry_name),
+            InstallTarget::Url(_) => None,
+        },
     });
     save_lock(&paths.plugins, &lock)?;
     Ok(install_name)
@@ -266,7 +288,9 @@ fn resolve_target(
                 // An explicit `--ref` overrides what the index pinned.
                 git_ref: git_ref.or(entry_ref),
                 subpath,
-                fallback: entry_name,
+                label: entry_name.clone(),
+                fallback: entry_name.clone(),
+                entry_name,
             })
         }
         InstallTarget::Url(url) => {
@@ -283,6 +307,8 @@ fn resolve_target(
                     git_ref,
                     subpath: None,
                     fallback: name_from_url(url),
+                    label: url.clone(),
+                    entry_name: String::new(),
                 });
             };
             for why in &market.skipped {
@@ -300,6 +326,8 @@ fn resolve_target(
                         git_ref: entry_ref,
                         subpath,
                         fallback: only.name.clone(),
+                        label: only.name.clone(),
+                        entry_name: only.name.clone(),
                     })
                 }
                 [] => Ok(Resolved {
@@ -307,6 +335,8 @@ fn resolve_target(
                     git_ref,
                     subpath: None,
                     fallback: name_from_url(url),
+                    label: url.clone(),
+                    entry_name: String::new(),
                 }),
                 many => Err(CliError::Config(format!(
                     "'{url}' is a marketplace listing {} plugins. Add it with `horsie marketplace add {url}`, then install one by name. Available: {}",
@@ -385,20 +415,24 @@ pub fn update(paths: &PluginPaths, name: &str) -> Result<(), CliError> {
         ))
     })?;
 
-    let (url, git_ref, subpath) = match &entry.marketplace {
-        Some(m) => {
-            let (url, r, sub, _) = crate::marketplace::resolve_entry(paths, m, name)?;
+    let (url, git_ref, subpath) = match (&entry.marketplace, &entry.marketplace_entry) {
+        // Re-resolve by the *index's* name for this plugin, not the name it
+        // installed as; the two differ whenever a plugin's manifest disagrees
+        // with its catalogue entry.
+        (Some(m), Some(index_name)) => {
+            let (url, r, sub, _) = crate::marketplace::resolve_entry(paths, m, index_name)?;
             (url, r, sub)
         }
-        None => (
+        _ => (
             entry.source.clone(),
             entry.git_ref.clone(),
             entry.subpath.clone(),
         ),
     };
 
-    let checkout = horsie_support::plugin::ensure_checkout(&paths.sources, &url, git_ref.as_deref())
-        .map_err(CliError::Executor)?;
+    let checkout =
+        horsie_support::plugin::ensure_checkout(&paths.sources, &url, git_ref.as_deref())
+            .map_err(CliError::Executor)?;
     horsie_support::git::pull_ff_only(&checkout.dir).map_err(CliError::Executor)?;
 
     let root_dir = match &subpath {
@@ -528,6 +562,7 @@ mod tests {
                 source_key: Some("deadbeefdeadbeef".into()),
                 subpath: None,
                 marketplace: None,
+                marketplace_entry: None,
             }],
         };
         save_lock(dir.path(), &lock).unwrap();
@@ -773,14 +808,7 @@ mod tests {
         let p = paths(home.path());
         crate::marketplace::add(&p, &file_url(src.path()), None, None, false).unwrap();
 
-        let name = install(
-            &p,
-            &InstallTarget::parse("beta@acme"),
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let name = install(&p, &InstallTarget::parse("beta@acme"), None, None, false).unwrap();
         assert_eq!(name, "beta");
         assert!(p.plugins.join("beta/skills/beta/SKILL.md").is_file());
 
@@ -847,6 +875,102 @@ mod tests {
             p.plugins.join("alpha/skills/alpha/SKILL.md").is_file(),
             "the symlink must still point at plugins/alpha, not the repo root"
         );
+    }
+
+    /// Most published plugins ship only agents/commands/MCP, which horsie does
+    /// not load yet. The error must name the plugin and say so, rather than
+    /// reading like a failure to find the repo.
+    #[test]
+    fn a_marketplace_plugin_with_no_skills_says_what_is_missing() {
+        let src = TempDir::new().unwrap();
+        let cp = src.path().join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("marketplace.json"),
+            r#"{"name":"acme","plugins":[
+                 {"name":"cmdsonly","source":"./plugins/cmdsonly"},
+                 {"name":"other","source":"./plugins/other"}]}"#,
+        )
+        .unwrap();
+        // Ships commands, no skills — the agent-sdk-dev shape.
+        let d = src.path().join("plugins/cmdsonly/commands");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("go.md"), "---\ndescription: go\n---\n").unwrap();
+        let o = src.path().join("plugins/other/skills/other");
+        std::fs::create_dir_all(&o).unwrap();
+        std::fs::write(o.join("SKILL.md"), "---\nname: other\n---\nb").unwrap();
+        commit_all(src.path());
+
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        crate::marketplace::add(&p, &file_url(src.path()), None, None, false).unwrap();
+
+        let err = install(
+            &p,
+            &InstallTarget::parse("cmdsonly@acme"),
+            None,
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cmdsonly"), "must name the plugin: {err}");
+        assert!(
+            err.contains("./plugins/cmdsonly"),
+            "must name the subtree it checked: {err}"
+        );
+        assert!(
+            err.contains("not supported yet"),
+            "must explain that agents/commands are unsupported: {err}"
+        );
+        // The failure must not strand the marketplace's own checkout.
+        assert!(!crate::marketplace::list(&p).is_empty());
+        assert!(
+            install(&p, &InstallTarget::parse("other@acme"), None, None, false).is_ok(),
+            "a sibling plugin in the same marketplace must still install"
+        );
+    }
+
+    /// A plugin's manifest name may differ from its catalogue name, so `update`
+    /// must re-resolve by the index's name rather than the installed one.
+    #[test]
+    #[cfg(unix)]
+    fn update_re_resolves_by_the_index_name_not_the_installed_name() {
+        let src = TempDir::new().unwrap();
+        let cp = src.path().join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("marketplace.json"),
+            r#"{"name":"acme","plugins":[{"name":"vendor-long-name","source":"./plugins/p"}]}"#,
+        )
+        .unwrap();
+        let pcp = src.path().join("plugins/p/.claude-plugin");
+        std::fs::create_dir_all(&pcp).unwrap();
+        // The plugin calls itself something shorter than its catalogue entry.
+        std::fs::write(pcp.join("plugin.json"), r#"{"name":"shortname"}"#).unwrap();
+        let d = src.path().join("plugins/p/skills/s");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("SKILL.md"), "---\nname: s\n---\nb").unwrap();
+        commit_all(src.path());
+
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        crate::marketplace::add(&p, &file_url(src.path()), None, None, false).unwrap();
+        let installed = install(
+            &p,
+            &InstallTarget::parse("vendor-long-name@acme"),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(installed, "shortname", "the manifest name wins for install");
+
+        let entry = list(&p).into_iter().next().unwrap();
+        assert_eq!(entry.marketplace_entry.as_deref(), Some("vendor-long-name"));
+
+        update(&p, "shortname").expect("update must re-resolve via the index name");
+        assert!(p.plugins.join("shortname/skills/s/SKILL.md").is_file());
     }
 
     #[test]

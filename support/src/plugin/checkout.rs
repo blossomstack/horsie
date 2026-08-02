@@ -156,7 +156,9 @@ mod tests {
         let err = ensure_checkout(&sources, "file:///definitely/not/a/repo", None).unwrap_err();
         assert!(err.contains("git clone failed"), "err: {err}");
         assert_eq!(
-            std::fs::read_dir(&sources).map(Iterator::count).unwrap_or(0),
+            std::fs::read_dir(&sources)
+                .map(Iterator::count)
+                .unwrap_or(0),
             0,
             "a half-clone must not survive to trip up the next attempt"
         );

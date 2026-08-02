@@ -66,10 +66,7 @@ fn name_from_url(url: &str) -> String {
 /// Read a marketplace out of a checkout, warning about entries it could not
 /// understand. A repo with no index is an error: the user asked to add a
 /// marketplace, and a plain plugin repo is not one.
-fn read_index(
-    dir: &Path,
-    url: &str,
-) -> Result<horsie_support::plugin::Marketplace, CliError> {
+fn read_index(dir: &Path, url: &str) -> Result<horsie_support::plugin::Marketplace, CliError> {
     let market = horsie_support::plugin::Marketplace::read(dir).map_err(CliError::Config)?;
     let Some(market) = market else {
         return Err(CliError::Config(format!(
@@ -91,9 +88,8 @@ pub fn add(
     git_ref: Option<String>,
     force: bool,
 ) -> Result<String, CliError> {
-    let checkout =
-        horsie_support::plugin::ensure_checkout(&paths.sources, url, git_ref.as_deref())
-            .map_err(CliError::Executor)?;
+    let checkout = horsie_support::plugin::ensure_checkout(&paths.sources, url, git_ref.as_deref())
+        .map_err(CliError::Executor)?;
     let market = read_index(&checkout.dir, url)?;
 
     let registered = name
@@ -168,6 +164,23 @@ pub fn remove(paths: &PluginPaths, name: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// How many candidate names an error message lists before deferring to
+/// `marketplace show`. The public marketplace has 276 entries; dumping them all
+/// buries the error itself.
+const MAX_SUGGESTIONS: usize = 8;
+
+/// A short "did you mean" tail for an unknown plugin name.
+fn suggest(names: &[&str], marketplace: &str) -> String {
+    if names.len() <= MAX_SUGGESTIONS {
+        return format!("Available: {}", names.join(", "));
+    }
+    format!(
+        "Available (first {MAX_SUGGESTIONS} of {}): {}. Run `horsie marketplace show {marketplace}` for the full list.",
+        names.len(),
+        names[..MAX_SUGGESTIONS].join(", ")
+    )
+}
+
 /// Resolve `<plugin>@<marketplace>` to everything an install needs:
 /// `(url, ref, subpath, entry name)`.
 pub fn resolve_entry(
@@ -180,8 +193,8 @@ pub fn resolve_entry(
     let market = read_index(&dir, &e.source)?;
     let found = market.find(plugin).ok_or_else(|| {
         CliError::Config(format!(
-            "marketplace '{marketplace}' has no plugin '{plugin}'. Available: {}",
-            market.names().join(", ")
+            "marketplace '{marketplace}' has no plugin '{plugin}'. {}",
+            suggest(&market.names(), marketplace)
         ))
     })?;
     let (url, git_ref, subpath) =
@@ -263,7 +276,10 @@ mod tests {
         let p = paths(home.path());
 
         let name = add(&p, &file_url(src.path()), None, None, false).unwrap();
-        assert_eq!(name, "acme", "the index's own name wins over the repo basename");
+        assert_eq!(
+            name, "acme",
+            "the index's own name wins over the repo basename"
+        );
 
         let rows = list(&p);
         assert_eq!(rows.len(), 1);
@@ -362,6 +378,22 @@ mod tests {
         let err = resolve_entry(&p, "acme", "nope").unwrap_err().to_string();
         assert!(err.contains("alpha"), "err: {err}");
         assert!(err.contains("beta"), "err: {err}");
+    }
+
+    /// The public marketplace has 276 entries; an error that lists them all
+    /// buries itself.
+    #[test]
+    fn unknown_plugin_truncates_a_long_candidate_list() {
+        let names: Vec<String> = (0..40).map(|i| format!("p{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let msg = suggest(&refs, "big");
+        assert!(msg.contains("first 8 of 40"), "msg: {msg}");
+        assert!(msg.contains("horsie marketplace show big"), "msg: {msg}");
+        assert!(!msg.contains("p39"), "must not dump the tail: {msg}");
+
+        // A short list is still shown in full.
+        let short = suggest(&["a", "b"], "small");
+        assert!(short.contains("Available: a, b"), "msg: {short}");
     }
 
     #[test]

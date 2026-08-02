@@ -67,8 +67,35 @@ horsie reads the repository's own plugin packaging rather than guessing:
   from a subdirectory, this says which one.
 
 A repository whose marketplace lists *several* plugins cannot be installed by
-URL alone, because there is no way to tell which one you meant. Install the
-plugin from its own repository instead; the error lists the available names.
+URL alone, because there is no way to tell which one you meant — add it as a
+marketplace and install by name instead (see below). The error lists the
+available names.
+
+### Marketplaces
+
+Some repositories are *marketplaces*: they carry an index of plugins rather than
+a plugin. Add one once, then install from it by name:
+
+```
+horsie marketplace add https://github.com/anthropics/claude-plugins-public
+horsie marketplace show claude-plugins-public
+horsie plugin install agent-sdk-dev@claude-plugins-public
+```
+
+`horsie marketplace list` shows what you have added and how many plugins each
+offers; `update` pulls a fresh index; `remove` drops it.
+
+Removing a marketplace does **not** uninstall plugins you installed from it —
+dropping a source is not dropping the software. Use `horsie plugin remove` for
+that.
+
+An index entry may point at a different repository than the marketplace itself
+(most entries in the public marketplace do). horsie clones whatever the entry
+names, at the ref it pins, and installs the subdirectory it declares.
+
+Since `<plugin>@<marketplace>` and a git URL are both just text, horsie treats
+an argument as a marketplace reference only when both halves are plain lowercase
+names — so `git@github.com:you/your-plugin.git` is always read as a URL.
 
 ### How the library is stored
 
