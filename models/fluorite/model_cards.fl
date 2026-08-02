@@ -21,6 +21,13 @@ struct ModelCard {
     default_thinking_effort: Option<String>,
     /// Wire encoding for this model's thinking control.
     thinking_dialect: Option<String>,
+    /// Where this model is officially served (e.g. "https://api.deepseek.com").
+    /// Reference data only — nothing reads it, and an operator's configured
+    /// provider base URL always wins.
+    base_url: Option<String>,
+    /// This backend rejects a pinned `tool_choice` while thinking is enabled,
+    /// so thinking is disabled for those requests. Absent means false.
+    forced_tools_disable_thinking: Option<bool>,
     created_at: String,
     updated_at: String,
 }
@@ -37,6 +44,11 @@ struct ModelCardInput {
     default_thinking_effort: Option<String>,
     /// Wire encoding for this model's thinking control.
     thinking_dialect: Option<String>,
+    /// Where this model is officially served (e.g. "https://api.deepseek.com").
+    base_url: Option<String>,
+    /// This backend rejects a pinned `tool_choice` while thinking is enabled.
+    /// Absent means false.
+    forced_tools_disable_thinking: Option<bool>,
 }
 
 /// Update input — `model_id` is immutable (rename = delete + create).
@@ -50,4 +62,9 @@ struct ModelCardUpdate {
     default_thinking_effort: Option<String>,
     /// Wire encoding for this model's thinking control.
     thinking_dialect: Option<String>,
+    /// Where this model is officially served (e.g. "https://api.deepseek.com").
+    base_url: Option<String>,
+    /// This backend rejects a pinned `tool_choice` while thinking is enabled.
+    /// Absent means false.
+    forced_tools_disable_thinking: Option<bool>,
 }

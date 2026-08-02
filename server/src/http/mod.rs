@@ -831,6 +831,8 @@ mod tests {
             thinking_efforts: None,
             default_thinking_effort: None,
             thinking_dialect: None,
+            base_url: None,
+            forced_tools_disable_thinking: None,
         };
         store
             .seed_if_missing(&[
