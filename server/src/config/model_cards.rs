@@ -52,7 +52,7 @@ fn validate(
     Ok(())
 }
 
-const COLUMNS: &str = "model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, created_at, updated_at";
+const COLUMNS: &str = "model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking, created_at, updated_at";
 
 fn row_to_card(r: &sqlx::sqlite::SqliteRow) -> Result<ModelCard, sqlx::Error> {
     let cw: Option<i64> = r.try_get("context_window")?;
@@ -68,6 +68,10 @@ fn row_to_card(r: &sqlx::sqlite::SqliteRow) -> Result<ModelCard, sqlx::Error> {
         ),
         default_thinking_effort: r.try_get("default_thinking_effort")?,
         thinking_dialect: r.try_get("thinking_dialect")?,
+        base_url: r.try_get("base_url")?,
+        forced_tools_disable_thinking: Some(
+            r.try_get::<i64, _>("forced_tools_disable_thinking")? != 0,
+        ),
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
     })
@@ -143,8 +147,8 @@ impl ModelCardStore {
             )));
         }
         sqlx::query(
-            "INSERT INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&input.model_id)
         .bind(&input.name)
@@ -153,6 +157,8 @@ impl ModelCardStore {
         .bind(crate::config::store::encode_efforts(input.thinking_efforts.as_ref()))
         .bind(input.default_thinking_effort.clone())
         .bind(input.thinking_dialect.clone())
+        .bind(input.base_url.clone())
+        .bind(i64::from(input.forced_tools_disable_thinking.unwrap_or(false)))
         .execute(&self.pool)
         .await
         .map_err(|e| ModelCardError::Db(e.to_string()))?;
@@ -176,6 +182,7 @@ impl ModelCardStore {
         let res = sqlx::query(
             "UPDATE model_cards SET name = ?, context_window = ?, max_tokens = ?, \
              thinking_efforts = ?, default_thinking_effort = ?, thinking_dialect = ?, \
+             base_url = ?, forced_tools_disable_thinking = ?, \
              updated_at = datetime('now') WHERE model_id = ?",
         )
         .bind(&update.name)
@@ -186,6 +193,10 @@ impl ModelCardStore {
         ))
         .bind(update.default_thinking_effort.clone())
         .bind(update.thinking_dialect.clone())
+        .bind(update.base_url.clone())
+        .bind(i64::from(
+            update.forced_tools_disable_thinking.unwrap_or(false),
+        ))
         .bind(model_id)
         .execute(&self.pool)
         .await
@@ -222,8 +233,8 @@ impl ModelCardStore {
         for c in cards {
             validate(&c.model_id, &c.name, c.context_window, c.max_tokens)?;
             let res = sqlx::query(
-                "INSERT OR IGNORE INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&c.model_id)
             .bind(&c.name)
@@ -232,6 +243,8 @@ impl ModelCardStore {
             .bind(crate::config::store::encode_efforts(c.thinking_efforts.as_ref()))
             .bind(c.default_thinking_effort.clone())
             .bind(c.thinking_dialect.clone())
+            .bind(c.base_url.clone())
+            .bind(i64::from(c.forced_tools_disable_thinking.unwrap_or(false)))
             .execute(&self.pool)
             .await
             .map_err(|e| ModelCardError::Db(e.to_string()))?;
@@ -298,7 +311,67 @@ mod tests {
             thinking_efforts: None,
             default_thinking_effort: None,
             thinking_dialect: None,
+            base_url: None,
+            forced_tools_disable_thinking: None,
         }
+    }
+
+    fn update_of(name: &str, cw: Option<u32>, mt: Option<u32>) -> ModelCardUpdate {
+        ModelCardUpdate {
+            name: name.into(),
+            context_window: cw,
+            max_tokens: mt,
+            thinking_efforts: None,
+            default_thinking_effort: None,
+            thinking_dialect: None,
+            base_url: None,
+            forced_tools_disable_thinking: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn base_url_and_forced_tools_flag_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path()).await;
+
+        let mut card = input("ds", "DS", Some(1000), Some(100));
+        card.base_url = Some("https://api.deepseek.com".into());
+        card.forced_tools_disable_thinking = Some(true);
+        let created = store.insert(&card).await.unwrap();
+        assert_eq!(
+            created.base_url.as_deref(),
+            Some("https://api.deepseek.com")
+        );
+        assert_eq!(created.forced_tools_disable_thinking, Some(true));
+
+        let fetched = store.get("ds").await.unwrap().unwrap();
+        assert_eq!(
+            fetched.base_url.as_deref(),
+            Some("https://api.deepseek.com")
+        );
+        assert_eq!(fetched.forced_tools_disable_thinking, Some(true));
+
+        let mut change = update_of("DS", Some(1000), Some(100));
+        change.base_url = Some("https://proxy.example".into());
+        change.forced_tools_disable_thinking = Some(false);
+        let updated = store.update("ds", &change).await.unwrap();
+        assert_eq!(updated.base_url.as_deref(), Some("https://proxy.example"));
+        assert_eq!(updated.forced_tools_disable_thinking, Some(false));
+    }
+
+    /// Omitting the flag is legal and means false, so existing seed files and
+    /// API clients keep working unchanged.
+    #[tokio::test]
+    async fn absent_flag_reads_back_as_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path()).await;
+        store
+            .insert(&input("plain", "Plain", None, None))
+            .await
+            .unwrap();
+        let c = store.get("plain").await.unwrap().unwrap();
+        assert_eq!(c.base_url, None);
+        assert_eq!(c.forced_tools_disable_thinking, Some(false));
     }
 
     #[tokio::test]
@@ -319,14 +392,7 @@ mod tests {
         let updated = store
             .update(
                 "gpt-4o",
-                &ModelCardUpdate {
-                    name: "GPT-4o (2024)".into(),
-                    context_window: Some(128_000),
-                    max_tokens: Some(16_384),
-                    thinking_efforts: None,
-                    default_thinking_effort: None,
-                    thinking_dialect: None,
-                },
+                &update_of("GPT-4o (2024)", Some(128_000), Some(16_384)),
             )
             .await
             .unwrap();
@@ -418,17 +484,7 @@ mod tests {
         let store = test_store(dir.path()).await;
         assert!(matches!(
             store
-                .update(
-                    "ghost",
-                    &ModelCardUpdate {
-                        name: "x".into(),
-                        context_window: None,
-                        max_tokens: None,
-                        thinking_efforts: None,
-                        default_thinking_effort: None,
-                        thinking_dialect: None,
-                    }
-                )
+                .update("ghost", &update_of("x", None, None))
                 .await
                 .unwrap_err(),
             ModelCardError::NotFound(_),
@@ -482,17 +538,7 @@ mod tests {
         assert_eq!(store.seed_if_missing(&seeds).await.unwrap(), 2);
 
         store
-            .update(
-                "a",
-                &ModelCardUpdate {
-                    name: "A-edited".into(),
-                    context_window: Some(999),
-                    max_tokens: None,
-                    thinking_efforts: None,
-                    default_thinking_effort: None,
-                    thinking_dialect: None,
-                },
-            )
+            .update("a", &update_of("A-edited", Some(999), None))
             .await
             .unwrap();
 
@@ -590,6 +636,101 @@ mod tests {
                 .contains(&"xhigh".to_string()),
             "xhigh arrived with Opus 4.7"
         );
+    }
+
+    /// The migration adds the new columns and retires the superseded card.
+    /// It deliberately does not write the replacement cards — those are new
+    /// ids, so the bundled seed inserts them everywhere on the next boot.
+    #[tokio::test]
+    async fn migration_adds_the_new_columns_and_drops_deepseek_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool =
+            crate::config::store::open_pool(&format!("sqlite://{}/t.db", dir.path().display()))
+                .await
+                .unwrap();
+
+        let stale: Option<String> =
+            sqlx::query_scalar("SELECT model_id FROM model_cards WHERE model_id = 'deepseek-chat'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(stale.is_none(), "deepseek-chat must be gone");
+
+        // A fresh database is still empty: nothing is seeded from a migration.
+        let cards: i64 = sqlx::query_scalar("SELECT count(*) FROM model_cards")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cards, 0, "migrations must not seed the catalog");
+
+        // The new columns exist and default correctly on both tables.
+        sqlx::query("INSERT INTO model_cards (model_id, name) VALUES ('probe', 'Probe')")
+            .execute(&pool)
+            .await
+            .expect("insert without the new columns still works");
+        let row = sqlx::query(
+            "SELECT base_url, forced_tools_disable_thinking FROM model_cards WHERE model_id = 'probe'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<Option<String>, _>("base_url"), None);
+        assert_eq!(row.get::<i64, _>("forced_tools_disable_thinking"), 0);
+
+        let models_flag: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('models') \
+             WHERE name = 'forced_tools_disable_thinking'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(models_flag, 1, "models must carry the flag too");
+    }
+
+    #[tokio::test]
+    async fn bundled_seed_carries_the_deepseek_v4_cards() {
+        let cards = bundled_seed().expect("bundled seed parses");
+        assert!(
+            !cards.iter().any(|c| c.model_id == "deepseek-chat"),
+            "deepseek-chat is superseded and must not be seeded",
+        );
+        for id in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+            let c = cards
+                .iter()
+                .find(|c| c.model_id == id)
+                .unwrap_or_else(|| panic!("catalog includes {id}"));
+            assert_eq!(c.base_url.as_deref(), Some("https://api.deepseek.com"));
+            assert_eq!(c.context_window, Some(1_048_576));
+            assert_eq!(c.max_tokens, Some(393_216));
+            assert_eq!(c.thinking_dialect.as_deref(), Some("openai_effort"));
+            assert_eq!(c.default_thinking_effort.as_deref(), Some("high"));
+            assert_eq!(c.forced_tools_disable_thinking, Some(true));
+            assert_eq!(
+                c.thinking_efforts
+                    .as_ref()
+                    .expect("efforts listed")
+                    .as_slice(),
+                ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            );
+        }
+    }
+
+    /// End-to-end: a fresh database plus the boot-time seed pass must produce
+    /// usable DeepSeek cards, since the migration deliberately seeds nothing.
+    #[tokio::test]
+    async fn seeding_a_fresh_database_installs_the_deepseek_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path()).await;
+        store
+            .seed_if_missing(&bundled_seed().unwrap())
+            .await
+            .unwrap();
+
+        let flash = store.get("deepseek-v4-flash").await.unwrap().unwrap();
+        assert_eq!(flash.base_url.as_deref(), Some("https://api.deepseek.com"));
+        assert_eq!(flash.context_window, Some(1_048_576));
+        assert_eq!(flash.forced_tools_disable_thinking, Some(true));
+        assert!(store.get("deepseek-chat").await.unwrap().is_none());
     }
 
     #[tokio::test]

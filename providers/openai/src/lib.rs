@@ -108,6 +108,11 @@ pub struct OpenAiProvider {
     max_tokens: Option<u32>,
     /// Wire encoding for this model's thinking control.
     thinking_dialect: ThinkingDialect,
+    /// Backends that reject a pinned `tool_choice` while thinking is enabled.
+    /// DeepSeek answers `Thinking mode does not support this tool_choice` with
+    /// a 400. Per-model data rather than inference, for the same reason
+    /// `thinking_dialect` is.
+    forced_tools_disable_thinking: bool,
     retry_base_secs: u64,
     read_timeout_secs: u64,
 }
@@ -121,6 +126,7 @@ impl OpenAiProvider {
             base_url: env_base_url().unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             max_tokens: None,
             thinking_dialect: ThinkingDialect::NoControl,
+            forced_tools_disable_thinking: false,
             retry_base_secs: BACKOFF_BASE_SECS,
             read_timeout_secs: DEFAULT_READ_TIMEOUT_SECS,
         })
@@ -218,6 +224,20 @@ impl OpenAiProvider {
             }
         };
 
+        // `tool_choice` is `Some` only when tools exist AND the choice is not
+        // `Auto` — precisely the shapes DeepSeek rejects under thinking. This
+        // sits outside the dialect match on purpose: a model with no thinking
+        // control still thinks by default on such a backend, so a
+        // dialect-local fix would miss `NoControl` entirely.
+        let reasoning_effort = if self.forced_tools_disable_thinking && tool_choice.is_some() {
+            Some("none".to_string())
+        } else {
+            match (self.thinking_dialect, request.thinking_effort) {
+                (ThinkingDialect::OpenAiEffort, Some(e)) => Some(e.as_str().to_string()),
+                _ => None,
+            }
+        };
+
         ChatRequest {
             model: self.model.clone(),
             messages,
@@ -228,10 +248,7 @@ impl OpenAiProvider {
                 .or(Some(DEFAULT_MAX_TOKENS)),
             tools,
             tool_choice,
-            reasoning_effort: match (self.thinking_dialect, request.thinking_effort) {
-                (ThinkingDialect::OpenAiEffort, Some(e)) => Some(e.as_str().to_string()),
-                _ => None,
-            },
+            reasoning_effort,
         }
     }
 
@@ -239,6 +256,14 @@ impl OpenAiProvider {
     #[must_use]
     pub fn with_thinking_dialect(mut self, dialect: ThinkingDialect) -> Self {
         self.thinking_dialect = dialect;
+        self
+    }
+
+    /// Force `reasoning_effort: "none"` on requests that pin a tool, for
+    /// backends that reject the combination.
+    #[must_use]
+    pub fn with_forced_tools_disable_thinking(mut self, yes: bool) -> Self {
+        self.forced_tools_disable_thinking = yes;
         self
     }
 }
@@ -798,5 +823,115 @@ mod tests {
             thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
         };
         assert_eq!(p.build_body(&req).reasoning_effort, None);
+    }
+
+    fn tool_spec() -> horsie_agentcore::ToolSpec {
+        horsie_agentcore::ToolSpec {
+            name: "get_weather".into(),
+            description: "Get the weather.".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    /// DeepSeek rejects a pinned tool while thinking is on ("Thinking mode does
+    /// not support this tool_choice"), so a model carrying this flag must turn
+    /// thinking off for exactly those requests.
+    #[test]
+    fn forced_tool_choice_disables_thinking_when_flagged() {
+        let p = OpenAiProvider::new()
+            .expect("builds")
+            .with_thinking_dialect(horsie_agentcore::ThinkingDialect::OpenAiEffort)
+            .with_forced_tools_disable_thinking(true);
+        let msgs: Vec<horsie_models::agent::Message> = vec![];
+        for choice in [ToolChoice::Any, ToolChoice::Required("get_weather".into())] {
+            let req = CompletionRequest {
+                messages: &msgs,
+                system: None,
+                tools: vec![tool_spec()],
+                tool_choice: choice.clone(),
+                max_tokens: None,
+                thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+            };
+            assert_eq!(
+                p.build_body(&req).reasoning_effort.as_deref(),
+                Some("none"),
+                "{choice:?} must disable thinking",
+            );
+        }
+    }
+
+    /// The flag must fire even when the model declares no thinking control at
+    /// all: DeepSeek thinks by default, so sending nothing still 400s.
+    #[test]
+    fn forced_tool_choice_disables_thinking_even_without_a_dialect() {
+        let p = OpenAiProvider::new()
+            .expect("builds")
+            .with_forced_tools_disable_thinking(true);
+        let msgs: Vec<horsie_models::agent::Message> = vec![];
+        let req = CompletionRequest {
+            messages: &msgs,
+            system: None,
+            tools: vec![tool_spec()],
+            tool_choice: ToolChoice::Any,
+            max_tokens: None,
+            thinking_effort: None,
+        };
+        assert_eq!(p.build_body(&req).reasoning_effort.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn auto_tool_choice_keeps_thinking_even_when_flagged() {
+        let p = OpenAiProvider::new()
+            .expect("builds")
+            .with_thinking_dialect(horsie_agentcore::ThinkingDialect::OpenAiEffort)
+            .with_forced_tools_disable_thinking(true);
+        let msgs: Vec<horsie_models::agent::Message> = vec![];
+        let req = CompletionRequest {
+            messages: &msgs,
+            system: None,
+            tools: vec![tool_spec()],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+        };
+        assert_eq!(p.build_body(&req).reasoning_effort.as_deref(), Some("high"));
+    }
+
+    /// No tools means no `tool_choice` on the wire, so nothing to reconcile.
+    #[test]
+    fn flag_is_inert_without_tools() {
+        let p = OpenAiProvider::new()
+            .expect("builds")
+            .with_thinking_dialect(horsie_agentcore::ThinkingDialect::OpenAiEffort)
+            .with_forced_tools_disable_thinking(true);
+        let msgs: Vec<horsie_models::agent::Message> = vec![];
+        let req = CompletionRequest {
+            messages: &msgs,
+            system: None,
+            tools: vec![],
+            tool_choice: ToolChoice::Any,
+            max_tokens: None,
+            thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+        };
+        let body = p.build_body(&req);
+        assert!(body.tool_choice.is_none());
+        assert_eq!(body.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn forced_tool_choice_keeps_thinking_when_not_flagged() {
+        let p = OpenAiProvider::new()
+            .expect("builds")
+            .with_thinking_dialect(horsie_agentcore::ThinkingDialect::OpenAiEffort);
+        let msgs: Vec<horsie_models::agent::Message> = vec![];
+        let req = CompletionRequest {
+            messages: &msgs,
+            system: None,
+            tools: vec![tool_spec()],
+            tool_choice: ToolChoice::Any,
+            max_tokens: None,
+            thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+        };
+        assert_eq!(p.build_body(&req).reasoning_effort.as_deref(), Some("high"));
     }
 }

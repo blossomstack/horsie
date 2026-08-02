@@ -44,6 +44,7 @@ type ModelDraft = {
   thinkingEfforts: string[];
   thinkingEffort: string; // "" = no default
   thinkingDialect: string; // "" = no thinking control
+  forcedToolsDisableThinking: boolean;
 };
 
 const toProviderDrafts = (v: SettingsView): ProviderDraft[] =>
@@ -66,6 +67,7 @@ const toModelDrafts = (v: SettingsView): ModelDraft[] =>
     thinkingEfforts: m.thinkingEfforts ?? [],
     thinkingEffort: m.thinkingEffort ?? "",
     thinkingDialect: m.thinkingDialect ?? "",
+    forcedToolsDisableThinking: m.forcedToolsDisableThinking ?? false,
   }));
 
 /**
@@ -132,6 +134,7 @@ export function ModelsSettings() {
       thinkingEfforts: m.thinkingEfforts.length ? m.thinkingEfforts : undefined,
       thinkingEffort: m.thinkingEffort || undefined,
       thinkingDialect: m.thinkingDialect || undefined,
+      forcedToolsDisableThinking: m.forcedToolsDisableThinking,
       contextWindow: m.contextWindow.trim()
         ? Number(m.contextWindow.trim())
         : undefined,
@@ -238,6 +241,7 @@ export function ModelsSettings() {
                       thinkingEfforts: [],
                       thinkingEffort: "",
                       thinkingDialect: "",
+                      forcedToolsDisableThinking: false,
                     },
                   ]);
                   touch();
@@ -376,6 +380,12 @@ function ModelIdField({
         draft.thinkingDialect === "" && card.thinkingDialect != null
           ? card.thinkingDialect
           : draft.thinkingDialect,
+      // Same "only fill what is still empty" rule as the fields above; for a
+      // boolean, unset is `false`. The card's `baseUrl` is deliberately not
+      // read here — it describes the provider, not the model.
+      forcedToolsDisableThinking:
+        draft.forcedToolsDisableThinking ||
+        (card.forcedToolsDisableThinking ?? false),
     });
     setFocused(false);
   };
@@ -531,6 +541,25 @@ function ModelRow({
               </select>
             </label>
           </div>
+          <label className="mt-2 flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={draft.forcedToolsDisableThinking}
+              onChange={(ev) =>
+                set({ forcedToolsDisableThinking: ev.target.checked })
+              }
+              data-testid="model-forced-tools"
+            />
+            <span>
+              Pinned tool choice disables thinking
+              <span className="block text-xs opacity-70">
+                Required for DeepSeek, which rejects a forced tool choice while
+                thinking is on. Sub-agents that must call a handoff tool will
+                run without thinking.
+              </span>
+            </span>
+          </label>
         </div>
       </div>
     </RowShell>

@@ -11,4 +11,8 @@ export interface ModelInput {
   thinkingEfforts?: string[];
   thinkingEffort?: string;
   thinkingDialect?: string;
+  /**
+   * This backend rejects a pinned `tool_choice` while thinking is enabled,
+   */
+  forcedToolsDisableThinking?: boolean;
 }

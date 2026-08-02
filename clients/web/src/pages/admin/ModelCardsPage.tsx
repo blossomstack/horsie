@@ -82,6 +82,10 @@ function ModelCardRow({
   const [maxTokens, setMaxTokens] = useState(
     card?.maxTokens != null ? String(card.maxTokens) : "",
   );
+  const [baseUrl, setBaseUrl] = useState(card?.baseUrl ?? "");
+  const [forcedToolsDisableThinking, setForcedToolsDisableThinking] = useState(
+    card?.forcedToolsDisableThinking ?? false,
+  );
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const touch = () => setDirty(true);
@@ -107,6 +111,8 @@ function ModelCardRow({
           name: name.trim(),
           contextWindow: parseNum(contextWindow),
           maxTokens: parseNum(maxTokens),
+          baseUrl: baseUrl.trim() || undefined,
+          forcedToolsDisableThinking,
         });
         onDone?.();
       } else {
@@ -116,6 +122,8 @@ function ModelCardRow({
             name: name.trim(),
             contextWindow: parseNum(contextWindow),
             maxTokens: parseNum(maxTokens),
+            baseUrl: baseUrl.trim() || undefined,
+            forcedToolsDisableThinking,
           },
         });
         setDirty(false);
@@ -198,6 +206,39 @@ function ModelCardRow({
             }}
             placeholder="16384"
           />
+        </label>
+        <label className="block">
+          <RowLabel>Base URL (optional)</RowLabel>
+          <input
+            className="input font-mono"
+            value={baseUrl}
+            onChange={(e) => {
+              setBaseUrl(e.target.value);
+              touch();
+            }}
+            placeholder="https://api.deepseek.com"
+            data-testid="model-card-base-url"
+          />
+        </label>
+        <label className="col-span-2 flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={forcedToolsDisableThinking}
+            onChange={(e) => {
+              setForcedToolsDisableThinking(e.target.checked);
+              touch();
+            }}
+            data-testid="model-card-forced-tools"
+          />
+          <span>
+            Pinned tool choice disables thinking
+            <span className="block text-xs opacity-70">
+              For backends that reject a forced <code>tool_choice</code> while
+              thinking is on — DeepSeek answers 400 “Thinking mode does not
+              support this tool_choice”.
+            </span>
+          </span>
         </label>
       </div>
 

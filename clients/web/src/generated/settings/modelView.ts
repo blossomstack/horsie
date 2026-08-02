@@ -29,6 +29,10 @@ export interface ModelView {
    */
   thinkingEffort?: string;
   /**
+   * This backend rejects a pinned `tool_choice` while thinking is enabled,
+   */
+  forcedToolsDisableThinking?: boolean;
+  /**
    * Wire encoding for this model&#x27;s thinking control.
    */
   thinkingDialect?: string;
