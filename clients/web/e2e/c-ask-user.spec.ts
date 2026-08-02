@@ -58,8 +58,10 @@ test("C1: a single-select ask is answered by picking a choice and sending", asyn
   await expect(card).toHaveAttribute("data-pending", "true");
   await expectStatus(page, "AwaitingInput");
 
-  // The card owns the input while an ask is pending.
-  await expect(page.getByTestId("composer-input")).toBeDisabled();
+  // The composer stays live — a message sent from it answers the ask, exactly
+  // as the card does — but points at the question so the two surfaces are not
+  // mistaken for a choice between sending and answering.
+  await expect(page.getByTestId("composer-input")).toBeEnabled();
   await expect(page.getByTestId("composer-ask-hint")).toBeVisible();
 
   const blue = page.locator('[data-testid="ask-user-choice"][data-value="blue"]');
@@ -192,7 +194,7 @@ test("C5: a choice and a typed note are sent together", async ({
   expect(await answersSent(mock)).toEqual(["blue\n\nbut only for the header"]);
 });
 
-test("C6: answering marks the turn running and offers Stop until it reports back", async ({
+test("C6: answering marks the turn running and offers Stop alongside Send", async ({
   page,
   appBase,
   mock,
@@ -211,18 +213,14 @@ test("C6: answering marks the turn running and offers Stop until it reports back
   await page.locator('[data-testid="ask-user-choice"][data-value="blue"]').click();
   await page.getByTestId("ask-user-send").click();
 
-  // Answered, and the turn it resumed is a *running* turn: the server now reports
-  // Running rather than leaving the session in AwaitingInput (#61 item 3), so the
-  // composer swaps Send for Stop and there is no send affordance at all. The
-  // duplicate tool_result this used to guard against with a client-side latch is
-  // refused by the server as well — a second message gets a 409.
-  //
-  // The textarea itself stays enabled on purpose: during any running turn you can
-  // compose the next message ahead of time, which is what `Composer` does for
-  // every other turn.
+  // Answered, and the turn it resumed is a *running* turn, so Stop appears.
+  // Send stays alongside it: a message sent now is queued and answered by the
+  // next turn, which is also why the duplicate-tool_result latch this test used
+  // to assert is gone — the server decides what a message answers, and only a
+  // turn that begins while an ask is pending answers that ask.
   await expectStatus(page, "Running");
   await expect(page.getByTestId("composer-stop")).toBeVisible();
-  await expect(page.getByTestId("composer-send")).toHaveCount(0);
+  await expect(page.getByTestId("composer-send")).toBeVisible();
 
   // The next status report releases it.
   await expect(page.getByTestId("assistant-text")).toContainText("Done with blue.");

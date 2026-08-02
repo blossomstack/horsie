@@ -3,7 +3,10 @@ import { SessionStatusKind } from './sessionStatusKind';
 export interface SessionSummary {
   id: string;
   name?: string;
-  status: SessionStatusKind;
+  /**
+   * Absent when the session is not loaded: the server does not guess, and
+   */
+  status?: SessionStatusKind;
   createdAt: number;
   lastError?: string;
 }

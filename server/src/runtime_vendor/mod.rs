@@ -81,15 +81,24 @@ impl std::fmt::Debug for VendorRuntime {
 /// Lifecycle handle for one live runtime instance.
 #[async_trait]
 pub trait VendorRuntimeHandle: Send + Sync {
-    /// Halt without destroying (stop-preserve). Idempotent; the runtime stays
-    /// re-attachable via [`RuntimeVendor::attach`].
-    async fn stop(&self);
+    /// Advisory suspend. Idempotent; the runtime stays reachable via
+    /// [`RuntimeVendorLink::get`] afterwards, whether the vendor actually
+    /// suspended anything or kept it running.
+    async fn hibernate(&self);
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum VendorError {
+    /// A create could not provision the runtime. The session can try again.
     #[error("provision failed: {0}")]
     Provision(String),
-    #[error("attach failed: {0}")]
-    Attach(String),
+    /// A live vendor has no runtime under this id and cannot produce one.
+    /// Terminal for the session — the alternative would be silently rebuilding
+    /// a workspace the user believes still exists.
+    #[error("runtime is gone: {0}")]
+    Gone(String),
+    /// The vendor itself is unreachable: not registered, or its socket is
+    /// dead. Always retryable, and never to be confused with [`Self::Gone`].
+    #[error("vendor unavailable: {0}")]
+    Unavailable(String),
 }

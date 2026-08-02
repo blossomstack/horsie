@@ -5,7 +5,7 @@ use crate::http::AppState;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
 use crate::sessions::events::fold_session_state;
-use crate::sessions::session_actor::SessionUsageStats;
+use crate::sessions::session_actor::{InboxMessage, SessionUsageStats};
 use crate::sessions::spec::{
     AgentSettings, ProvisionStepSpec, SessionSpec, SessionStatus, WorkspaceDef, status_kind,
     status_reason,
@@ -16,12 +16,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::session::{
-    AgentSettings as WireAgentSettings, AgentUsageView, SessionDetail, SessionStatusKind,
-    SessionSummary, SessionUsageStats as WireSessionUsageStats, TaskItem,
+    AgentSettings as WireAgentSettings, AgentUsageView, QueuedMessage, SessionDetail,
+    SessionStatusKind, SessionSummary, SessionUsageStats as WireSessionUsageStats, TaskItem,
     TaskStatus as WireTaskStatus, UsageView,
 };
 use horsie_models::session_api::{
-    CreateSessionRequest, CreateSessionResponse, GetSessionResponse, GetSessionUsageResponse,
+    Ack, CreateSessionRequest, CreateSessionResponse, GetSessionResponse, GetSessionUsageResponse,
     HistoryPage, ListSessionsResponse, SendMessageRequest, SessionAck,
 };
 use horsie_workflow::{AgentHistoryPage, HistoryQuery, TaskStatus as AgentTaskStatus};
@@ -37,6 +37,16 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+/// The wire shape of one queued message. Shared with the SSE layer so the
+/// detail endpoint and `InboxChanged` can never disagree about the queue.
+pub fn wire_queued_message(m: InboxMessage) -> QueuedMessage {
+    QueuedMessage {
+        id: m.id,
+        text: m.text,
+        at_ms: m.at_ms,
+    }
 }
 
 pub async fn health() -> impl IntoResponse {
@@ -70,13 +80,13 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
     }
 }
 
-fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
+fn summary(id: &str, rec: &SessionRecord, status: Option<&SessionStatus>) -> SessionSummary {
     SessionSummary {
         id: id.to_string(),
         name: rec.spec.name.clone(),
-        status: status_kind(&rec.status),
+        status: status.map(status_kind),
         created_at: rec.created_at,
-        last_error: status_reason(&rec.status),
+        last_error: status.and_then(status_reason),
     }
 }
 
@@ -178,22 +188,23 @@ pub async fn create_session(
         reply,
     })
     .await?;
-    let rec = SessionRecord {
-        spec,
-        status: SessionStatus::Provisioning,
-        created_at,
-    };
+    let rec = SessionRecord { spec, created_at };
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
-            session: summary(&id, &rec),
+            // A freshly created session is loaded and idle; its runtime is
+            // being provisioned in the background.
+            session: summary(&id, &rec, Some(&SessionStatus::Idle)),
         }),
     ))
 }
 
 pub async fn list_sessions(State(state): State<AppState>) -> Result<impl IntoResponse, Api> {
     let sessions = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
-    let sessions = sessions.iter().map(|(id, rec)| summary(id, rec)).collect();
+    let sessions = sessions
+        .iter()
+        .map(|(id, rec, status)| summary(id, rec, status.as_ref()))
+        .collect();
     Ok(Json(ListSessionsResponse { sessions }))
 }
 
@@ -201,28 +212,25 @@ pub async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, Api> {
-    let rec = ask(&state, |reply| SessionSupervisorCommand::Get {
+    let (rec, status) = ask(&state, |reply| SessionSupervisorCommand::Get {
         id: id.clone(),
         reply,
     })
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
-    // pending_question / last_error are durable truth in the session journal.
-    let pending_question = match Uuid::parse_str(&id) {
-        Ok(uuid) => {
-            fold_session_state(&state.journal, uuid)
-                .await
-                .pending_question
-        }
-        Err(_) => None,
+    // pending_question / inbox are durable truth in the session journal, and
+    // are read from it whether or not the session happens to be loaded.
+    let folded = match Uuid::parse_str(&id) {
+        Ok(uuid) => fold_session_state(&state.journal, uuid).await,
+        Err(_) => Default::default(),
     };
     let detail = SessionDetail {
         id: id.clone(),
         name: rec.spec.name.clone(),
-        status: status_kind(&rec.status),
+        status: status.as_ref().map(status_kind),
         created_at: rec.created_at,
-        last_error: status_reason(&rec.status),
-        pending_question,
+        last_error: status.as_ref().and_then(status_reason),
+        pending_question: folded.pending_question,
         model: rec.spec.agent.model.clone(),
         vendor: rec.spec.vendor.clone(),
         repos: rec
@@ -241,6 +249,7 @@ pub async fn get_session(
         mcp_servers: rec.spec.agent.mcp_servers.clone(),
         memory_spaces: rec.spec.agent.memory_spaces.clone(),
         use_plugins: rec.spec.agent.use_plugins.unwrap_or(false),
+        inbox: folded.inbox.into_iter().map(wire_queued_message).collect(),
     };
     Ok(Json(GetSessionResponse { session: detail }))
 }
@@ -374,17 +383,11 @@ pub async fn send_message(
     })
     .await?;
     match result {
-        Ok(()) => Ok((StatusCode::ACCEPTED, Json(SessionAck {}))),
+        // Always accepted, never 409: a turn in flight queues the message and
+        // answers it at the next turn boundary.
+        Ok(message_id) => Ok((StatusCode::ACCEPTED, Json(SessionAck { message_id }))),
         Err(UserMessageError::NotFound) => Err(Api::not_found("no such session")),
-        Err(UserMessageError::Provisioning) => Err(Api::conflict(
-            "provisioning",
-            "session is still provisioning",
-        )),
-        Err(UserMessageError::TurnInFlight) => Err(Api::conflict(
-            "turn_in_flight",
-            "a turn is already in flight",
-        )),
-        Err(UserMessageError::RecoveryFailed(msg)) => Err(Api::bad_gateway("recovery_failed", msg)),
+        Err(UserMessageError::Unrecoverable(reason)) => Err(Api::conflict("unrecoverable", reason)),
     }
 }
 
@@ -394,7 +397,7 @@ pub async fn stop_session(
 ) -> Result<impl IntoResponse, Api> {
     let result = ask(&state, |reply| SessionSupervisorCommand::Stop { id, reply }).await?;
     match result {
-        Ok(()) => Ok(Json(SessionAck {})),
+        Ok(()) => Ok(Json(Ack {})),
         Err(msg) => Err(Api::not_found(msg)),
     }
 }
@@ -409,7 +412,7 @@ pub async fn delete_session(
     })
     .await?;
     match result {
-        Ok(()) => Ok(Json(SessionAck {})),
+        Ok(()) => Ok(Json(Ack {})),
         Err(msg) => Err(Api::not_found(msg)),
     }
 }

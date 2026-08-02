@@ -8,22 +8,18 @@ export function Composer({
   status,
   busy,
   blockedReason = null,
-  askLocked = false,
-  showStop = false,
+  askPending = false,
   onSend,
   onStop,
   onFocusAsk,
 }: {
-  status: SessionStatusKind;
+  status: SessionStatusKind | null | undefined;
   busy: boolean;
   blockedReason?: string | null;
-  /** A question in the transcript is awaiting an answer (or one is in flight).
-   * The ask card owns the input, so the composer stands down — two live input
-   * surfaces would make it ambiguous which one a Send submits. */
-  askLocked?: boolean;
-  /** Show Stop even when the status isn't `Running`: a turn resumed from an ask
-   * stays `AwaitingInput` for its whole duration. */
-  showStop?: boolean;
+  /** A question in the transcript is awaiting an answer. The composer stays
+   * live — sending from here answers it, exactly as the card does — but says
+   * where the question is. */
+  askPending?: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
   onFocusAsk?: () => void;
@@ -34,7 +30,6 @@ export function Composer({
   const running = status === SessionStatusKind.Running;
   const awaiting = status === SessionStatusKind.AwaitingInput;
   const blocked = blockedReason != null;
-  const stoppable = running || showStop;
 
   // Auto-grow the textarea up to a cap.
   useEffect(() => {
@@ -46,7 +41,7 @@ export function Composer({
 
   const submit = () => {
     const trimmed = text.trim();
-    if (!trimmed || !meta.canSend || busy || blocked || askLocked) return;
+    if (!trimmed || !meta.canSend || busy || blocked) return;
     onSend(trimmed);
     setText("");
   };
@@ -75,51 +70,52 @@ export function Composer({
           onKeyDown={onKeyDown}
           data-testid="composer-input"
           placeholder={
-            askLocked
-              ? "Answer the question above"
-              : meta.canSend
-                ? awaiting
-                  ? "Answer the agent…"
+            !meta.canSend
+              ? meta.hint
+              : awaiting
+                ? "Answer the agent…"
+                : running
+                  ? "Send a message… it goes in with the next turn"
                   : "Send a message…  (Enter to send, Shift+Enter for newline)"
-                : meta.hint
           }
-          disabled={askLocked || (!meta.canSend && !running)}
+          disabled={!meta.canSend}
           className="max-h-[200px] flex-1 resize-none bg-transparent px-2 py-1.5 text-[0.9375rem] text-text placeholder:text-faint outline-none disabled:opacity-60"
         />
 
-        {stoppable ? (
+        {/* Stop sits *beside* Send, never instead of it: a turn in flight is
+            exactly when queueing the next message is most useful. */}
+        {running && (
           <button
             className="btn-outline shrink-0"
             onClick={onStop}
             disabled={busy}
-            title="Stop the session (preserves the runtime)"
+            title="Stop this turn (queued messages are kept)"
             data-testid="composer-stop"
           >
             <Square size={15} className="fill-current" />
             Stop
           </button>
-        ) : (
-          <button
-            className="btn-primary shrink-0 !px-3"
-            onClick={submit}
-            disabled={!text.trim() || !meta.canSend || busy || blocked || askLocked}
-            title={blockedReason ?? "Send"}
-            aria-label="Send message"
-            data-testid="composer-send"
-          >
-            <ArrowUp size={18} />
-          </button>
         )}
+        <button
+          className="btn-primary shrink-0 !px-3"
+          onClick={submit}
+          disabled={!text.trim() || !meta.canSend || busy || blocked}
+          title={blockedReason ?? (running ? "Queue for the next turn" : "Send")}
+          aria-label="Send message"
+          data-testid="composer-send"
+        >
+          <ArrowUp size={18} />
+        </button>
       </div>
 
-      {askLocked && (
+      {askPending && (
         <button
           type="button"
           onClick={onFocusAsk}
           data-testid="composer-ask-hint"
           className="mt-1.5 px-2 text-xs text-faint hover:text-muted"
         >
-          Answer the question above
+          Jump to the question
         </button>
       )}
 

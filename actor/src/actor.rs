@@ -93,6 +93,17 @@ impl<E> CommandEffect<E> {
         self.stop = true;
         self
     }
+
+    /// What this command decided to persist.
+    ///
+    /// For tests: a command handler's whole decision is which events it returns,
+    /// and asserting on them directly beats inferring it from side effects — a
+    /// handler that *declines* to emit an event (a failed turn that deliberately
+    /// does not start the next one) leaves no side effect to observe at all.
+    #[must_use]
+    pub fn events(&self) -> &[E] {
+        &self.events
+    }
 }
 
 /// An actor whose state is rebuilt by replaying persisted events.

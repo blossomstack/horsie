@@ -1,9 +1,10 @@
 
+import { QueuedMessage } from './queuedMessage';
 import { SessionStatusKind } from './sessionStatusKind';
 export interface SessionDetail {
   id: string;
   name?: string;
-  status: SessionStatusKind;
+  status?: SessionStatusKind;
   createdAt: number;
   lastError?: string;
   /**
@@ -32,4 +33,8 @@ export interface SessionDetail {
    * Whether the runtime&#x27;s plugin/skill machinery is enabled for this session.
    */
   usePlugins: boolean;
+  /**
+   * Messages accepted but not yet carried into a turn, oldest first (empty
+   */
+  inbox: QueuedMessage[];
 }

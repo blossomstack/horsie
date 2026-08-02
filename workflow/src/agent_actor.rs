@@ -136,6 +136,10 @@ pub enum AgentCommand {
         query: HistoryQuery,
         reply: tokio::sync::oneshot::Sender<AgentHistoryPage>,
     },
+    /// Stop this actor. Sent when the session it belongs to unloads: the agent
+    /// is resident for the session's *loaded* lifetime, not forever, and going
+    /// cold must not leave a task behind holding a whole transcript in memory.
+    Shutdown,
     /// Read this agent's own usage + context-size snapshot — no messages or
     /// tasks, cheaper than `GetHistory` when only the numbers are needed.
     /// Backs the session-level usage aggregation.
@@ -359,7 +363,18 @@ impl AgentState {
 /// Coarse events are streamed separately and incrementally via
 /// [`AgentCommand::PersistProgress`]; this carries only the terminal outcome.
 pub struct RunReport {
+    /// Which run this is the report of. A cancelled run is still unwinding when
+    /// the next one may already have started, and a report that arrives after
+    /// its run was superseded must be dropped rather than clearing the *new*
+    /// run's handle and delivering the old run's outcome as if it were its own.
+    run_id: u64,
     outcome: RunOutcome,
+}
+
+/// The in-flight run: its identity and the token that cancels it.
+struct RunHandle {
+    id: u64,
+    cancel: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -389,7 +404,10 @@ enum RunOutcome {
 pub struct AgentActor {
     ctx: AgentRuntimeContext,
     params: AgentParams,
-    running: Option<CancellationToken>,
+    running: Option<RunHandle>,
+    /// Id of the next run to start. Monotonic for this actor's loaded lifetime,
+    /// which is all the fence needs — a report can only be stale within it.
+    next_run_id: u64,
     /// A timer fired while a run was in flight; consume it when the run parks.
     pending_wake: bool,
     /// Callers waiting to hear that the in-flight run has terminated (see
@@ -405,6 +423,7 @@ impl AgentActor {
             ctx,
             params,
             running: None,
+            next_run_id: 0,
             pending_wake: false,
             cancel_acks: Vec::new(),
         }
@@ -435,7 +454,12 @@ impl AgentActor {
 
     fn start_run(&mut self, input: AgentInput, ctx: &ActorContext<Self>, history: Vec<Message>) {
         let cancel = CancellationToken::new();
-        self.running = Some(cancel.clone());
+        let run_id = self.next_run_id;
+        self.next_run_id += 1;
+        self.running = Some(RunHandle {
+            id: run_id,
+            cancel: cancel.clone(),
+        });
 
         let self_ref = ctx.self_ref();
         let context_provider = self.ctx.context_provider.clone();
@@ -472,6 +496,7 @@ impl AgentActor {
                 () = cancel.cancelled() => {
                     let _ = self_ref
                         .tell(AgentCommand::RunFinished(Box::new(RunReport {
+                            run_id,
                             outcome: RunOutcome::Cancelled,
                         })))
                         .await;
@@ -485,12 +510,14 @@ impl AgentActor {
                     parent
                         .deliver(AgentOutcome::Failed {
                             session_id,
-                            error,
+                            error: error.message,
                             recoverable: true,
+                            terminal: error.terminal,
                         })
                         .await;
                     let _ = self_ref
                         .tell(AgentCommand::RunFinished(Box::new(RunReport {
+                            run_id,
                             outcome: RunOutcome::AlreadyReported,
                         })))
                         .await;
@@ -545,7 +572,10 @@ impl AgentActor {
             // All coarse events were already persisted (each `emit` awaited its ack),
             // so `RunFinished` lands after them in mailbox order.
             let _ = self_ref
-                .tell(AgentCommand::RunFinished(Box::new(RunReport { outcome })))
+                .tell(AgentCommand::RunFinished(Box::new(RunReport {
+                    run_id,
+                    outcome,
+                })))
                 .await;
         });
     }
@@ -560,6 +590,18 @@ impl AgentActor {
         state: &AgentState,
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<AgentDomainEvent> {
+        // A report from a run that has already been superseded says nothing
+        // about the run that is in flight now: clearing the handle on its word
+        // would leave the live run unstoppable, and delivering its outcome
+        // would tell the parent that a turn it never saw is over.
+        if self.running.as_ref().map(|r| r.id) != Some(report.run_id) {
+            tracing::warn!(
+                run_id = report.run_id,
+                current = ?self.running.as_ref().map(|r| r.id),
+                "dropping the report of a superseded run"
+            );
+            return CommandEffect::none();
+        }
         self.running = None;
         // Answered before any parent delivery below: a canceller is likely
         // blocking its own mailbox waiting on this, and those deliveries `tell`
@@ -587,7 +629,10 @@ impl AgentActor {
                         output: Value::String(text),
                     })
                     .await;
-                CommandEffect::stop()
+                // Resident: the agent goes idle, it does not die. Its whole
+                // transcript stays in memory for the next turn and for history
+                // reads, and nothing has to replay a journal to answer either.
+                CommandEffect::none()
             }
             RunOutcome::Concluded { data, tool_call_id } => {
                 match self.interpret(data, tool_call_id) {
@@ -601,7 +646,7 @@ impl AgentActor {
                         parent
                             .deliver(AgentOutcome::Concluded { session_id, output })
                             .await;
-                        CommandEffect::stop()
+                        CommandEffect::none()
                     }
                     Conclusion::Ask {
                         tool_call_id,
@@ -633,9 +678,20 @@ impl AgentActor {
                 }
             }
             RunOutcome::Cancelled => {
+                // A cancelled tool call has no result and never will get one.
+                // Journal the synthetic result now, where it belongs — directly
+                // after the assistant message that made the call — rather than
+                // recomputing it on a clone at the top of every later turn. The
+                // journal is then a faithful record of what the model was shown,
+                // and a mid-history dangle can no longer accumulate.
+                let mut events: Vec<AgentDomainEvent> = missing_tool_results(&state.messages)
+                    .into_iter()
+                    .map(|message| AgentDomainEvent::InputMessage { message })
+                    .collect();
+                events.push(AgentDomainEvent::RunCancelled);
                 // Snapshot to compact the incrementally-persisted log on cancel
                 // (never in interactive mode: cursors must stay stable).
-                let eff = CommandEffect::persist(vec![AgentDomainEvent::RunCancelled]);
+                let eff = CommandEffect::persist(events);
                 if self.params.compact_on_pause() {
                     eff.and_snapshot()
                 } else {
@@ -648,18 +704,21 @@ impl AgentActor {
                         session_id,
                         error,
                         recoverable,
+                        // A run that failed inside the loop says nothing about
+                        // whether the sandbox still exists.
+                        terminal: false,
                     })
                     .await;
                 // The partial conversation was already journaled incrementally, so the
-                // failed session stays inspectable and a recoverable failure can
-                // `resume`/`fork` from where it stopped.
-                CommandEffect::stop()
+                // failed session stays inspectable. The agent stays alive: a failed
+                // turn is not a dead agent, and the next message reuses it.
+                CommandEffect::none()
             }
             RunOutcome::AlreadyReported => {
                 // Context preparation failed before the loop began; the failure was
-                // already delivered to the parent. Stop like any failed run so the
-                // session can retry on the next message.
-                CommandEffect::stop()
+                // already delivered to the parent. Stay alive so the next message
+                // can retry against the same in-memory transcript.
+                CommandEffect::none()
             }
         }
     }
@@ -708,6 +767,7 @@ impl AgentActor {
                     error: "agent parked with no active timers — nothing would ever wake it"
                         .to_string(),
                     recoverable: false,
+                    terminal: false,
                 })
                 .await;
             return CommandEffect::stop();
@@ -930,7 +990,7 @@ impl EventSourcedActor for AgentActor {
                 self.start_run(
                     agent_input,
                     ctx,
-                    sanitize_for_resume(state.messages.clone()),
+                    repair_unanswered_tool_calls(state.messages.clone()),
                 );
                 CommandEffect::persist(vec![input_event])
             }
@@ -948,7 +1008,7 @@ impl EventSourcedActor for AgentActor {
                 self.start_run(
                     agent_input,
                     ctx,
-                    sanitize_answering(state.messages.clone(), &tool_call_id),
+                    repair_unanswered_tool_calls_except(state.messages.clone(), &tool_call_id),
                 );
                 CommandEffect::persist(vec![input_event])
             }
@@ -957,8 +1017,8 @@ impl EventSourcedActor for AgentActor {
             }
             AgentCommand::Cancel { ack } => {
                 match (&self.running, ack) {
-                    (Some(token), ack) => {
-                        token.cancel();
+                    (Some(run), ack) => {
+                        run.cancel.cancel();
                         // Answered when the run reports back, not now: the point of
                         // the ack is "the run is over", and it is still winding down.
                         self.cancel_acks.extend(ack);
@@ -1048,15 +1108,16 @@ impl EventSourcedActor for AgentActor {
                 let _ = reply.send(state.usage_snapshot());
                 CommandEffect::none()
             }
+            AgentCommand::Shutdown => CommandEffect::stop(),
         }
     }
 
-    /// After recovery, re-drive an interrupted session. An empty history means
-    /// nothing ran yet (the workflow will send `Run`); otherwise the process died
-    /// mid-turn, so sanitize any dangling tool calls and re-enter the loop with a
-    /// synthetic continuation message. The synthetic input is intentionally not
-    /// persisted as a new turn boundary: if we crash again before progress,
-    /// recovery simply re-synthesizes it.
+    /// After recovery, repair whatever the crash left half-done, and re-drive an
+    /// interrupted session. An empty history means nothing ran yet (the workflow
+    /// will send `Run`); otherwise the process died mid-turn, so re-enter the
+    /// loop with a synthetic continuation message. That continuation is
+    /// intentionally not persisted as a new turn boundary: if we crash again
+    /// before progress, recovery simply re-synthesizes it.
     async fn on_recovery_complete(&mut self, state: &AgentState, ctx: &mut ActorContext<Self>) {
         // Re-arm every surviving timer with its remaining delay (fires immediately if
         // already due). Do this whether parked or mid-run, so timers keep firing.
@@ -1064,8 +1125,26 @@ impl EventSourcedActor for AgentActor {
         for t in &state.timers {
             spawn_timer_sleep(ctx.self_ref(), t.id.clone(), t.remaining(now));
         }
+        // A tool call the dead process was running has no result and never will.
+        // Record the repair once, here, where it still belongs at the end of the
+        // transcript — recomputing it per turn instead is what let it drift into
+        // the middle of a history nobody could then repair in place.
+        let repairs = missing_tool_results(&state.messages);
+        if !repairs.is_empty() {
+            let (ack, _) = tokio::sync::oneshot::channel();
+            let _ = ctx
+                .self_ref()
+                .tell(AgentCommand::PersistProgress {
+                    events: repairs
+                        .into_iter()
+                        .map(|message| AgentDomainEvent::InputMessage { message })
+                        .collect(),
+                    ack,
+                })
+                .await;
+        }
         // Interactive sessions never self-continue: the user's next message is
-        // the continuation (the session layer passes sanitized history on Run).
+        // the continuation.
         if self.params.interactive {
             return;
         }
@@ -1076,7 +1155,7 @@ impl EventSourcedActor for AgentActor {
         if state.messages.is_empty() {
             return;
         }
-        let history = sanitize_for_resume(state.messages.clone());
+        let history = repair_unanswered_tool_calls(state.messages.clone());
         self.start_run(
             AgentInput::user_message(new_message_id(), "continue the interrupted task"),
             ctx,
@@ -1355,9 +1434,44 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
 /// What a synthetic result says stands in for a tool call that never finished.
 const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded";
 
-/// Make a recovered history well-formed for the provider: every `tool_use`, in
-/// *any* assistant message, must have a matching `tool_result`. Any missing one
-/// (a tool call interrupted by Stop or a crash) gets a synthetic error result so
+/// The synthetic results a history is missing, in call order — the repair as
+/// *messages to journal*, where [`repair_unanswered_tool_calls`] returns the
+/// repaired history to put on the wire.
+///
+/// Called at the two moments a call becomes permanently unanswerable — a cancel
+/// and a recovery — so the repair is recorded where it belongs, at the end of
+/// the transcript as it stands. Nothing else needs to journal it: a call that is
+/// still in flight is not missing a result, it just does not have one yet.
+fn missing_tool_results(messages: &[Message]) -> Vec<Message> {
+    let answered: std::collections::HashSet<&str> = messages
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
+            ContentPart::ToolResult(r) => Some(r.tool_call_id.as_str()),
+            ContentPart::Text(_) | ContentPart::ToolCall(_) | ContentPart::Thinking(_) => None,
+        })
+        .collect();
+    let dangling: Vec<String> = messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
+            ContentPart::ToolCall(tc) if !answered.contains(tc.id.as_str()) => Some(tc.id.clone()),
+            ContentPart::ToolCall(_)
+            | ContentPart::Text(_)
+            | ContentPart::ToolResult(_)
+            | ContentPart::Thinking(_) => None,
+        })
+        .collect();
+    if dangling.is_empty() {
+        return Vec::new();
+    }
+    synthetic_results(dangling).collect()
+}
+
+/// Make a history well-formed for the provider: every `tool_use`, in *any*
+/// assistant message, must have a matching `tool_result`. Any missing one (a
+/// tool call interrupted by Stop or a crash) gets a synthetic error result so
 /// the model can retry.
 ///
 /// Repairing only the last assistant message is not enough. A Stop mid-turn
@@ -1369,20 +1483,26 @@ const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded";
 /// Each repair is placed where the wire expects the result: directly after its
 /// assistant message, joining any run of real results already following it —
 /// never appended to the end of a history that has moved on to later turns.
-fn sanitize_for_resume(messages: Vec<Message>) -> Vec<Message> {
-    sanitize_dangling(messages, None)
+///
+/// Since [`missing_tool_results`] journals the repair at the moment a call
+/// becomes unanswerable, this should now find nothing. It stays as the guard on
+/// the one thing that must never reach a provider, and costs one pass over an
+/// in-memory history.
+fn repair_unanswered_tool_calls(messages: Vec<Message>) -> Vec<Message> {
+    repair_dangling(messages, None)
 }
 
-/// `sanitize_for_resume` for the resume-from-ask path, where `answering` is the
-/// tool call this very command is injecting a result for (e.g. `ask_user`).
-/// That call is about to be answered for real, so it is not dangling: repairing
-/// it too would put *two* results on one `tool_use_id` — the duplicate shape
-/// stricter providers reject outright, and pure noise for the ones that don't.
-fn sanitize_answering(messages: Vec<Message>, answering: &str) -> Vec<Message> {
-    sanitize_dangling(messages, Some(answering))
+/// [`repair_unanswered_tool_calls`] for the resume-from-ask path, where
+/// `answering` is the tool call this very command is injecting a result for
+/// (e.g. `ask_user`). That call is about to be answered for real, so it is not
+/// dangling: repairing it too would put *two* results on one `tool_use_id` — the
+/// duplicate shape stricter providers reject outright, and pure noise for the
+/// ones that don't.
+fn repair_unanswered_tool_calls_except(messages: Vec<Message>, answering: &str) -> Vec<Message> {
+    repair_dangling(messages, Some(answering))
 }
 
-fn sanitize_dangling(messages: Vec<Message>, answering: Option<&str>) -> Vec<Message> {
+fn repair_dangling(messages: Vec<Message>, answering: Option<&str>) -> Vec<Message> {
     let mut answered: std::collections::HashSet<String> = messages
         .iter()
         .flat_map(|m| m.parts.iter())
@@ -1724,7 +1844,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_appends_error_results_for_dangling_tool_calls() {
+    fn repair_appends_error_results_for_dangling_tool_calls() {
         let history = vec![
             user_msg("do it"),
             Message {
@@ -1745,7 +1865,7 @@ mod tests {
             },
             Message::tool_result("tc1", "ok", false),
         ];
-        let fixed = sanitize_for_resume(history);
+        let fixed = repair_unanswered_tool_calls(history);
         // tc2 was dangling → an error tool_result is appended at the end.
         let last = fixed.last().unwrap();
         match &last.parts[0] {
@@ -1776,11 +1896,11 @@ mod tests {
             },
         ];
 
-        let fixed = sanitize_answering(history.clone(), "ask1");
+        let fixed = repair_unanswered_tool_calls_except(history.clone(), "ask1");
         assert_eq!(fixed.len(), history.len(), "nothing is repaired: {fixed:?}");
 
         // Without the exclusion it *is* repaired — the bug this guards.
-        assert_eq!(sanitize_for_resume(history).len(), 3);
+        assert_eq!(repair_unanswered_tool_calls(history).len(), 3);
     }
 
     /// Every `tool_use` id in `messages` that has no matching `tool_result`
@@ -1822,7 +1942,7 @@ mod tests {
     /// later turns pushed it off the end. Sanitizing only the last assistant
     /// message leaves it unrepaired, and the provider 400s on every later turn.
     #[test]
-    fn sanitize_repairs_dangling_tool_calls_before_the_last_assistant_message() {
+    fn repair_fixes_dangling_tool_calls_before_the_last_assistant_message() {
         let history = vec![
             user_msg("read it"),
             assistant_call("a1", "stopped"), // Stop landed here: no result ever journaled
@@ -1837,7 +1957,7 @@ mod tests {
                 })],
             },
         ];
-        let fixed = sanitize_for_resume(history);
+        let fixed = repair_unanswered_tool_calls(history);
         assert!(
             unmatched_tool_uses(&fixed).is_empty(),
             "dangling calls left in rebuilt history: {:?}",
@@ -1849,7 +1969,7 @@ mod tests {
     /// assistant message that made the call — not appended to the end of a
     /// history that has moved on to later turns.
     #[test]
-    fn sanitize_places_synthetic_result_next_to_its_assistant_message() {
+    fn repair_places_synthetic_result_next_to_its_assistant_message() {
         let history = vec![
             user_msg("read it"),
             assistant_call("a1", "stopped"),
@@ -1857,7 +1977,7 @@ mod tests {
             assistant_call("a2", "tc2"),
             Message::tool_result("tc2", "ok", false),
         ];
-        let fixed = sanitize_for_resume(history);
+        let fixed = repair_unanswered_tool_calls(history);
         match &fixed[2].parts[0] {
             ContentPart::ToolResult(r) => {
                 assert_eq!(r.tool_call_id, "stopped");
@@ -1871,7 +1991,7 @@ mod tests {
     /// A partially-answered parallel batch: the synthetic result joins the run
     /// of real results, still ahead of the next user turn.
     #[test]
-    fn sanitize_appends_to_an_existing_run_of_tool_results() {
+    fn repair_appends_to_an_existing_run_of_tool_results() {
         let history = vec![
             user_msg("do both"),
             Message {
@@ -1893,7 +2013,7 @@ mod tests {
             Message::tool_result("tc1", "ok", false),
             user_msg("stop, do something else"),
         ];
-        let fixed = sanitize_for_resume(history);
+        let fixed = repair_unanswered_tool_calls(history);
         match &fixed[3].parts[0] {
             ContentPart::ToolResult(r) => assert_eq!(r.tool_call_id, "tc2"),
             other => panic!("expected tc2's result after tc1's, got {other:?}"),
@@ -1902,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_leaves_well_formed_history_untouched() {
+    fn repair_leaves_well_formed_history_untouched() {
         let history = vec![
             user_msg("do it"),
             Message {
@@ -1917,7 +2037,7 @@ mod tests {
             Message::tool_result("tc1", "ok", false),
         ];
         let before = history.len();
-        let fixed = sanitize_for_resume(history);
+        let fixed = repair_unanswered_tool_calls(history);
         assert_eq!(fixed.len(), before);
     }
 
@@ -2453,6 +2573,119 @@ mod retry_tests {
         assert!(
             matches!(outcome, RunOutcome::Failed { .. }),
             "got {outcome:?}"
+        );
+    }
+}
+
+/// The run-id fence: a report can only speak for the run it came from.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod fence_tests {
+    use super::*;
+    use crate::context::{ContextError, ContextProvider, Contexts};
+    use horsie_actor::{InMemoryJournal, spawn_root};
+
+    struct HangingProvider;
+    #[async_trait]
+    impl ContextProvider for HangingProvider {
+        async fn provide(&self) -> Result<Contexts, ContextError> {
+            std::future::pending().await
+        }
+    }
+
+    struct NoopSink;
+    #[async_trait]
+    impl EventSink for NoopSink {
+        async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
+            Ok(())
+        }
+    }
+
+    struct OutcomeChannel(tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
+    #[async_trait]
+    impl AgentOutcomeSink for OutcomeChannel {
+        async fn deliver(&self, outcome: AgentOutcome) {
+            let _ = self.0.send(outcome);
+        }
+    }
+
+    /// A run that was superseded can still be unwinding, and its report must not
+    /// be mistaken for the live run's. Taking its word for it would clear the
+    /// live run's handle — leaving a turn nobody can stop and a parent told that
+    /// a turn it never saw is over.
+    #[tokio::test]
+    async fn a_report_from_a_superseded_run_is_ignored() {
+        let (tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(HangingProvider),
+            event_sink: Arc::new(NoopSink),
+            parent: Arc::new(OutcomeChannel(tx)),
+            session_id: uuid::Uuid::new_v4(),
+        };
+        let mut params = AgentParams::from_def(&AgentRunDef {
+            system_prompt: None,
+            output_schema: None,
+            allow_ask_user: false,
+            allow_timers: None,
+            max_iterations: None,
+            max_retries: None,
+            allowed_tools: None,
+        });
+        params.interactive = true;
+        let journal = Arc::new(InMemoryJournal::new());
+        let agent = spawn_root(AgentActor::new(ctx, params), journal);
+
+        // Run 0 starts and hangs in `provide`, so it is genuinely in flight.
+        agent
+            .tell(AgentCommand::Run {
+                input: "first".into(),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // A report from some earlier run arrives late.
+        agent
+            .tell(AgentCommand::RunFinished(Box::new(RunReport {
+                run_id: 99,
+                outcome: RunOutcome::Completed {
+                    text: "from a run that is over".into(),
+                },
+            })))
+            .await
+            .unwrap();
+
+        // Run 0 is still in flight, so a second turn is refused — the fence
+        // held. Without it, `running` would have been cleared and this would
+        // start a second background loop against the same journal.
+        agent
+            .tell(AgentCommand::Run {
+                input: "second".into(),
+            })
+            .await
+            .unwrap();
+
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::GetHistory {
+                query: HistoryQuery {
+                    before: None,
+                    limit: 50,
+                },
+                reply,
+            })
+            .await
+            .unwrap();
+        let page = rx.await.unwrap();
+        assert_eq!(
+            page.messages.len(),
+            1,
+            "the refused turn must journal nothing: {:?}",
+            page.messages
+        );
+        assert!(
+            outcomes.try_recv().is_err(),
+            "a superseded run's outcome must not reach the parent"
         );
     }
 }

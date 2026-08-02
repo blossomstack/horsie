@@ -7,10 +7,11 @@ import {
   type ContentPart,
   type HistoryPage,
   type Message,
+  type QueuedMessage,
   type SessionEvent,
   type TaskItem,
 } from "../api/types";
-import { qk } from "./useSessions";
+import { qk, useSession } from "./useSessions";
 
 /** Messages per history page (initial tail and each scroll-back load). */
 const HISTORY_LIMIT = 50;
@@ -33,6 +34,10 @@ export interface RenderedMessage {
   thinking: string[];
   toolCalls: RenderedToolCall[];
   optimistic?: boolean;
+  /** Accepted by the server but not yet carried into a turn. Rendered as
+   * unread: without the marker, "stop, then the queued message immediately
+   * starts a new turn" reads as the UI sending something on its own. */
+  queued?: boolean;
 }
 
 export interface SessionStream {
@@ -76,7 +81,14 @@ interface State {
   byId: Record<string, StoredMessage>;
   toolResults: Record<string, { output: string; isError: boolean }>;
   liveTools: Record<string, { name: string; running: boolean }>;
-  optimistic: { id: string; text: string }[];
+  /** Local echoes of messages this tab sent, shown until the server's own
+   * account of them arrives — either in the queue or in the transcript.
+   * `serverId` is the id the send was acknowledged with, once it resolves. */
+  optimistic: { id: string; text: string; serverId?: string }[];
+  /** The server's queue. Seeded from the session detail and kept live by
+   * `InboxChanged`; a queue this tab has never been told about is `null`,
+   * which is different from a queue known to be empty. */
+  queued: QueuedMessage[] | null;
   streaming: string;
   usage: { input: number; output: number };
   liveStatus: SessionStatusKind | null;
@@ -96,6 +108,7 @@ const INITIAL: State = {
   toolResults: {},
   liveTools: {},
   optimistic: [],
+  queued: null,
   streaming: "",
   usage: { input: 0, output: 0 },
   liveStatus: null,
@@ -114,6 +127,11 @@ type Action =
   | { kind: "connected"; value: boolean }
   | { kind: "optimistic"; id: string; text: string }
   | { kind: "remove-optimistic"; id: string }
+  // The send was acknowledged: this echo now has a server-side identity.
+  | { kind: "ack-optimistic"; id: string; serverId: string }
+  // The queue as the *detail* endpoint reported it; ignored once a live frame
+  // has arrived, which is always fresher.
+  | { kind: "seed-queue"; queued: QueuedMessage[] }
   | { kind: "loading-more"; value: boolean }
   | { kind: "history"; page: HistoryPage; prepend: boolean }
   // `fromBackfill` marks a live event replayed from the pre-seed buffer: its
@@ -241,6 +259,24 @@ function reducer(state: State, action: Action): State {
         ...state,
         optimistic: state.optimistic.filter((o) => o.id !== action.id),
       };
+    case "ack-optimistic": {
+      // Already in the queue → the server's own copy is what we render, and
+      // this echo would double it.
+      if (state.queued?.some((q) => q.id === action.serverId)) {
+        return {
+          ...state,
+          optimistic: state.optimistic.filter((o) => o.id !== action.id),
+        };
+      }
+      return {
+        ...state,
+        optimistic: state.optimistic.map((o) =>
+          o.id === action.id ? { ...o, serverId: action.serverId } : o,
+        ),
+      };
+    }
+    case "seed-queue":
+      return state.queued === null ? { ...state, queued: action.queued } : state;
     case "history": {
       const { page, prepend } = action;
       let next = applyHistory(state, page.messages, prepend);
@@ -287,6 +323,21 @@ function reducer(state: State, action: Action): State {
                 isError: ev.value.isError,
               },
             },
+          };
+        }
+        case "InboxChanged": {
+          const queued = ev.value.queued;
+          const ids = new Set(queued.map((q) => q.id));
+          return {
+            ...state,
+            queued,
+            // A queued message the server now owns is rendered from the queue;
+            // dropping the echo here is also what keeps several messages
+            // merged into one turn from leaving orphan echoes behind, since
+            // that turn produces a single user message for all of them.
+            optimistic: state.optimistic.filter(
+              (o) => !(o.serverId && ids.has(o.serverId)),
+            ),
           };
         }
         case "ToolStart":
@@ -359,10 +410,14 @@ export function useSessionStream(sessionId: string | undefined): {
   stream: SessionStream;
   addOptimisticUser: (text: string) => string;
   removeOptimisticUser: (id: string) => void;
+  ackOptimisticUser: (id: string, serverId: string) => void;
   loadMore: () => void;
 } {
   const [state, dispatch] = useReducer(reducer, INITIAL);
   const queryClient = useQueryClient();
+  // The durable queue, for a session opened with messages already waiting.
+  // Shares `useSession`'s cache entry with the view, so this costs no request.
+  const { data: detail } = useSession(sessionId);
   const esRef = useRef<EventSource | null>(null);
   // Earliest loaded message id — the cursor for the next scroll-back page.
   const earliestRef = useRef<string | null>(null);
@@ -440,6 +495,11 @@ export function useSessionStream(sessionId: string | undefined): {
     };
   }, [sessionId, queryClient]);
 
+  const seedQueue = detail?.inbox;
+  useEffect(() => {
+    if (seedQueue) dispatch({ kind: "seed-queue", queued: seedQueue });
+  }, [seedQueue]);
+
   const loadMore = useCallback(() => {
     const before = earliestRef.current;
     if (!sessionId || !before || !canLoadMoreRef.current) return;
@@ -458,6 +518,10 @@ export function useSessionStream(sessionId: string | undefined): {
 
   const removeOptimisticUser = (id: string) => {
     dispatch({ kind: "remove-optimistic", id });
+  };
+
+  const ackOptimisticUser = (id: string, serverId: string) => {
+    dispatch({ kind: "ack-optimistic", id, serverId });
   };
 
   const stream = useMemo<SessionStream>(() => {
@@ -480,6 +544,19 @@ export function useSessionStream(sessionId: string | undefined): {
       const m = state.byId[id];
       return { ...m, toolCalls: m.toolCalls.map(resolveTool) };
     });
+
+    // Queued first, then this tab's un-acknowledged echoes: everything the
+    // server already holds is older than anything still in flight to it.
+    for (const q of state.queued ?? []) {
+      messages.push({
+        id: q.id,
+        role: "User",
+        text: q.text,
+        thinking: [],
+        toolCalls: [],
+        queued: true,
+      });
+    }
 
     for (const opt of state.optimistic) {
       messages.push({
@@ -524,5 +601,11 @@ export function useSessionStream(sessionId: string | undefined): {
     };
   }, [state]);
 
-  return { stream, addOptimisticUser, removeOptimisticUser, loadMore };
+  return {
+    stream,
+    addOptimisticUser,
+    removeOptimisticUser,
+    ackOptimisticUser,
+    loadMore,
+  };
 }

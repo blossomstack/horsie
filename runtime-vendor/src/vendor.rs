@@ -23,11 +23,10 @@ use futures_util::{SinkExt, StreamExt};
 use horsie_models::executor::{EnvVar, RuntimeConfig, RuntimeInfo, RuntimeState, WorkspaceConfig};
 use horsie_models::runtime::RuntimeInboundMessage;
 use horsie_models::runtime_vendor::{
-    AttachRuntimeResponse, CreateRuntimeResponse, DeleteRuntimeResponse, QueryRuntimesResponse,
-    RequestFailed, RuntimeRelayRequest, RuntimeRelayResponse, RuntimeSpec,
+    CreateRuntimeResponse, DeleteRuntimeResponse, GetRuntimeResponse, HibernateRuntimeResponse,
+    QueryRuntimesResponse, RequestFailed, RuntimeRelayRequest, RuntimeRelayResponse, RuntimeSpec,
     RuntimeVendorCapabilities, RuntimeVendorCommand, RuntimeVendorEvent,
     RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage, RuntimeVendorReady,
-    StopRuntimeResponse,
 };
 use horsie_runtime_client::RuntimeTransport;
 use std::collections::HashMap;
@@ -143,6 +142,14 @@ pub struct RuntimeVendor {
     /// constant so tests can run the reconnect path on a millisecond scale.
     backoff: Backoff,
     runtimes: Arc<Mutex<HashMap<String, LiveRuntime>>>,
+    /// One lock per runtime id, held for the whole of a lifecycle command.
+    ///
+    /// Commands dispatch on their own tasks, so without this a `GetRuntime`
+    /// arriving while its `CreateRuntime` is still provisioning would answer
+    /// "gone" for a runtime that is moments from existing. The server's
+    /// contract says a get waits for an in-flight create, and this is where
+    /// that promise is kept.
+    lifecycle_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl RuntimeVendor {
@@ -168,6 +175,7 @@ impl RuntimeVendor {
             bundles: None,
             backoff: Backoff::default(),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -341,10 +349,22 @@ impl RuntimeVendor {
         }
     }
 
+    /// The lock guarding lifecycle commands for one runtime id.
+    async fn lifecycle_lock(&self, runtime_id: &str) -> Arc<Mutex<()>> {
+        self.lifecycle_locks
+            .lock()
+            .await
+            .entry(runtime_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     async fn dispatch(&self, inbound: RuntimeVendorInboundMessage, sink: Sink) {
         let request_id = inbound.request_id;
         let outcome = match inbound.command {
             RuntimeVendorCommand::CreateRuntime(cmd) => {
+                let lock = self.lifecycle_lock(&cmd.runtime_id).await;
+                let _guard = lock.lock().await;
                 let created = self.provision(&cmd.runtime_id, &cmd.spec).await;
                 created.map(|()| {
                     RuntimeVendorEvent::CreateRuntime(CreateRuntimeResponse {
@@ -352,22 +372,37 @@ impl RuntimeVendor {
                     })
                 })
             }
-            RuntimeVendorCommand::AttachRuntime(cmd) => {
-                let attached = self.provision(&cmd.runtime_id, &cmd.spec).await;
-                attached.map(|()| {
-                    RuntimeVendorEvent::AttachRuntime(AttachRuntimeResponse {
+            // Never provisions. This agent cannot suspend a process, so
+            // hibernate left the runtime running and a get is a liveness check:
+            // if the process is gone the session is gone with it, and saying so
+            // beats rebuilding a workspace the user thinks they still have.
+            RuntimeVendorCommand::GetRuntime(cmd) => {
+                let lock = self.lifecycle_lock(&cmd.runtime_id).await;
+                let _guard = lock.lock().await;
+                if self.transport_for(&cmd.runtime_id).await.is_some() {
+                    Ok(RuntimeVendorEvent::GetRuntime(GetRuntimeResponse {
                         runtime_id: cmd.runtime_id,
-                    })
-                })
+                    }))
+                } else {
+                    Err(format!(
+                        "no runtime '{}' on this vendor; it cannot be resumed",
+                        cmd.runtime_id
+                    ))
+                }
             }
-            RuntimeVendorCommand::StopRuntime(cmd) => {
-                self.halt(&cmd.runtime_id).await;
-                Ok(RuntimeVendorEvent::StopRuntime(StopRuntimeResponse {
+            // Advisory, and this agent declines: a process cannot be suspended
+            // and re-entered, and killing it would destroy the workspace. The
+            // runtime stays up until the session is deleted.
+            RuntimeVendorCommand::HibernateRuntime(cmd) => Ok(
+                RuntimeVendorEvent::HibernateRuntime(HibernateRuntimeResponse {
                     runtime_id: cmd.runtime_id,
-                }))
-            }
+                }),
+            ),
             RuntimeVendorCommand::DeleteRuntime(cmd) => {
+                let lock = self.lifecycle_lock(&cmd.runtime_id).await;
+                let _guard = lock.lock().await;
                 self.halt(&cmd.runtime_id).await;
+                self.lifecycle_locks.lock().await.remove(&cmd.runtime_id);
                 Ok(RuntimeVendorEvent::DeleteRuntime(DeleteRuntimeResponse {
                     runtime_id: cmd.runtime_id,
                 }))

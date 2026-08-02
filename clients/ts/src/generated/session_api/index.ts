@@ -8,4 +8,5 @@ export * from './listSessionsResponse';
 export * from './getSessionResponse';
 export * from './sendMessageRequest';
 export * from './sessionAck';
+export * from './ack';
 export * from './apiError';

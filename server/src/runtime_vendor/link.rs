@@ -11,9 +11,9 @@ use crate::runtime_vendor::{
 };
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime_vendor::{
-    AttachRuntimeRequest, CreateRuntimeRequest, DeleteRuntimeRequest,
+    CreateRuntimeRequest, DeleteRuntimeRequest, GetRuntimeRequest, HibernateRuntimeRequest,
     RuntimeSpec as WireRuntimeSpec, RuntimeVendorCommand, RuntimeVendorEvent,
-    RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage, StopRuntimeRequest,
+    RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage,
 };
 use horsie_runtime_client::RuntimeClient;
 use std::collections::HashMap;
@@ -73,8 +73,8 @@ impl RuntimeVendorLink {
                                 RuntimeVendorEvent::Ready(ev) => return Some(ev),
                                 RuntimeVendorEvent::RuntimeStateChanged(_)
                                 | RuntimeVendorEvent::CreateRuntime(_)
-                                | RuntimeVendorEvent::AttachRuntime(_)
-                                | RuntimeVendorEvent::StopRuntime(_)
+                                | RuntimeVendorEvent::GetRuntime(_)
+                                | RuntimeVendorEvent::HibernateRuntime(_)
                                 | RuntimeVendorEvent::DeleteRuntime(_)
                                 | RuntimeVendorEvent::QueryRuntimes(_)
                                 | RuntimeVendorEvent::Runtime(_)
@@ -232,37 +232,10 @@ impl RuntimeVendorLink {
         })
     }
 
-    async fn provision(
-        self: &Arc<Self>,
-        runtime_id: &str,
-        spec: &RuntimeSpec,
-        attach: bool,
-    ) -> Result<VendorRuntime, VendorError> {
-        let wrap = |e: String| {
-            if attach {
-                VendorError::Attach(e)
-            } else {
-                VendorError::Provision(e)
-            }
-        };
-        let wire_spec = Self::runtime_spec(spec).map_err(wrap)?;
-        let command = if attach {
-            RuntimeVendorCommand::AttachRuntime(AttachRuntimeRequest {
-                runtime_id: runtime_id.to_string(),
-                spec: wire_spec,
-            })
-        } else {
-            RuntimeVendorCommand::CreateRuntime(CreateRuntimeRequest {
-                runtime_id: runtime_id.to_string(),
-                spec: wire_spec,
-            })
-        };
-        // `request` already turns RequestFailed into Err, so any other reply
-        // means the agent accepted the command.
-        self.request(command).await.map_err(wrap)?;
-
+    /// Build the client + handle for a runtime the agent has just confirmed.
+    fn runtime_handle(self: &Arc<Self>, runtime_id: &str) -> VendorRuntime {
         let transport = RuntimeVendorTransport::new(self.clone(), runtime_id.to_string());
-        Ok(VendorRuntime {
+        VendorRuntime {
             // The runtime's own id doubles as its main agent's identity: the
             // server passes the session id as `runtime_id`, and that is also
             // what the agent journal is keyed by (`agent/<session-uuid>`). A
@@ -273,7 +246,7 @@ impl RuntimeVendorLink {
                 link: self.clone(),
                 runtime_id: runtime_id.to_string(),
             }),
-        })
+        }
     }
 }
 
@@ -290,31 +263,61 @@ impl RuntimeVendorLink {
         }
     }
 
-    /// Provision a brand-new runtime.
+    /// Provision a brand-new runtime. Called exactly once per session, at
+    /// session creation; every later acquisition is [`Self::get`].
     pub async fn create(
         &self,
         runtime_id: &str,
         spec: &RuntimeSpec,
     ) -> Result<VendorRuntime, VendorError> {
         let Some(me) = self.arc_self() else {
-            return Err(VendorError::Provision(
+            return Err(VendorError::Unavailable(
                 "vendor link was dropped".to_string(),
             ));
         };
-        me.provision(runtime_id, spec, false).await
+        let wire_spec = Self::runtime_spec(spec).map_err(VendorError::Provision)?;
+        me.request(RuntimeVendorCommand::CreateRuntime(CreateRuntimeRequest {
+            runtime_id: runtime_id.to_string(),
+            spec: wire_spec,
+        }))
+        .await
+        .map_err(VendorError::Provision)?;
+        Ok(me.runtime_handle(runtime_id))
     }
 
-    /// Revive a preserved runtime. Agents that cannot resume in place
-    /// provision a fresh instance against the same spec.
-    pub async fn attach(
-        &self,
-        runtime_id: &str,
-        spec: &RuntimeSpec,
-    ) -> Result<VendorRuntime, VendorError> {
+    /// Hand back an existing runtime, resuming it if the agent hibernated it.
+    ///
+    /// Never provisions. A failure here means the agent has nothing under this
+    /// id, which is terminal for the owning session — see [`VendorError::Gone`].
+    pub async fn get(&self, runtime_id: &str) -> Result<VendorRuntime, VendorError> {
         let Some(me) = self.arc_self() else {
-            return Err(VendorError::Attach("vendor link was dropped".to_string()));
+            return Err(VendorError::Unavailable(
+                "vendor link was dropped".to_string(),
+            ));
         };
-        me.provision(runtime_id, spec, true).await
+        if !me.is_connected() {
+            return Err(VendorError::Unavailable(
+                "vendor agent disconnected".to_string(),
+            ));
+        }
+        me.request(RuntimeVendorCommand::GetRuntime(GetRuntimeRequest {
+            runtime_id: runtime_id.to_string(),
+        }))
+        .await
+        .map_err(VendorError::Gone)?;
+        Ok(me.runtime_handle(runtime_id))
+    }
+
+    /// Advisory suspend, best effort: a vendor that cannot suspend keeps the
+    /// runtime, and a vendor that is not there simply misses the hint.
+    pub async fn hibernate(&self, runtime_id: &str) {
+        let _ = self
+            .request(RuntimeVendorCommand::HibernateRuntime(
+                HibernateRuntimeRequest {
+                    runtime_id: runtime_id.to_string(),
+                },
+            ))
+            .await;
     }
 
     /// The owning session was deleted; the agent decides the runtime's fate.
@@ -327,8 +330,8 @@ impl RuntimeVendorLink {
     }
 }
 
-/// Lifecycle handle for one runtime on one agent. `stop` is the explicit
-/// stop-preserve signal; the agent decides what preservation means.
+/// Lifecycle handle for one runtime on one agent. `hibernate` is the explicit
+/// advisory suspend; the agent decides what, if anything, that means.
 struct LinkRuntimeHandle {
     link: Arc<RuntimeVendorLink>,
     runtime_id: String,
@@ -336,13 +339,8 @@ struct LinkRuntimeHandle {
 
 #[async_trait::async_trait]
 impl VendorRuntimeHandle for LinkRuntimeHandle {
-    async fn stop(&self) {
-        let _ = self
-            .link
-            .request(RuntimeVendorCommand::StopRuntime(StopRuntimeRequest {
-                runtime_id: self.runtime_id.clone(),
-            }))
-            .await;
+    async fn hibernate(&self) {
+        self.link.hibernate(&self.runtime_id).await;
     }
 }
 
@@ -547,7 +545,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_stop_delete_emit_three_distinct_signals() {
+    async fn create_hibernate_delete_emit_three_distinct_signals() {
         use std::sync::Mutex as StdMutex;
         let seen: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
         let recorder = seen.clone();
@@ -559,8 +557,8 @@ mod tests {
                 let inbound: RuntimeVendorInboundMessage = serde_json::from_str(&text).unwrap();
                 let label = match &inbound.command {
                     RuntimeVendorCommand::CreateRuntime(_) => "create",
-                    RuntimeVendorCommand::AttachRuntime(_) => "attach",
-                    RuntimeVendorCommand::StopRuntime(_) => "stop",
+                    RuntimeVendorCommand::GetRuntime(_) => "get",
+                    RuntimeVendorCommand::HibernateRuntime(_) => "hibernate",
                     RuntimeVendorCommand::DeleteRuntime(_) => "delete",
                     RuntimeVendorCommand::QueryRuntimes(_) => "query",
                     RuntimeVendorCommand::Runtime(_) => "runtime",
@@ -582,14 +580,14 @@ mod tests {
             .await
             .expect("handshake");
         let rt = link.create("rt-1", &spec_fixture()).await.expect("create");
-        rt.handle.stop().await;
+        rt.handle.hibernate().await;
         link.delete("rt-1").await;
 
         assert_eq!(
             seen.lock().unwrap().as_slice(),
             &[
                 "create".to_string(),
-                "stop".to_string(),
+                "hibernate".to_string(),
                 "delete".to_string()
             ],
             "every lifecycle action must be its own explicit signal"

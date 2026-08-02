@@ -95,9 +95,18 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
     <div
       data-testid="message"
       data-role={msg.role}
-      className={cn("animate-rise", msg.optimistic && "opacity-70")}
+      data-queued={msg.queued ? "true" : undefined}
+      className={cn("animate-rise", (msg.optimistic || msg.queued) && "opacity-70")}
     >
       <UserBubble text={msg.text} />
+      {msg.queued && (
+        <div
+          className="mt-1 flex justify-end pr-1 text-xs text-faint"
+          data-testid="queued-marker"
+        >
+          Unsent — goes in with the next turn
+        </div>
+      )}
     </div>
   );
 }

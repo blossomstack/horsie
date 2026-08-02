@@ -6,7 +6,7 @@ export function StatusDot({
   status,
   className,
 }: {
-  status: SessionStatusKind;
+  status: SessionStatusKind | null | undefined;
   className?: string;
 }) {
   const meta = statusMeta(status);
@@ -23,12 +23,16 @@ export function StatusDot({
   );
 }
 
-export function StatusBadge({ status }: { status: SessionStatusKind }) {
+export function StatusBadge({
+  status,
+}: {
+  status: SessionStatusKind | null | undefined;
+}) {
   const meta = statusMeta(status);
   return (
     <span
       data-testid="status-badge"
-      data-status={status}
+      data-status={status ?? "Unknown"}
       className={cn(
         "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium",
         TONE_TEXT[meta.tone],

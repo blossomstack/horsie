@@ -18,10 +18,10 @@ use horsie_models::runtime::{
     ToolCallResponse, ToolOutput, ToolResult, WorkspaceScan,
 };
 use horsie_models::runtime_vendor::{
-    AttachRuntimeResponse, CreateRuntimeResponse, DeleteRuntimeResponse, QueryRuntimesResponse,
-    RequestFailed, RuntimeRelayResponse, RuntimeSpec as WireRuntimeSpec, RuntimeVendorCapabilities,
-    RuntimeVendorCommand, RuntimeVendorEvent, RuntimeVendorInboundMessage,
-    RuntimeVendorOutboundMessage, RuntimeVendorReady, StopRuntimeResponse,
+    CreateRuntimeResponse, DeleteRuntimeResponse, GetRuntimeResponse, HibernateRuntimeResponse,
+    QueryRuntimesResponse, RequestFailed, RuntimeRelayResponse, RuntimeSpec as WireRuntimeSpec,
+    RuntimeVendorCapabilities, RuntimeVendorCommand, RuntimeVendorEvent,
+    RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage, RuntimeVendorReady,
 };
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -37,7 +37,7 @@ struct Recorder {
     /// actually put on the wire (workspaces, env, provision steps).
     last_create: Mutex<Option<WireRuntimeSpec>>,
     /// Remaining attach failures to inject, and whether creates fail.
-    attach_failures: Mutex<u32>,
+    gone_on_get: Mutex<bool>,
     tool_calls: Mutex<usize>,
     /// The agent id on each relayed tool call, in order — how a test proves the
     /// caller identity survives the trip across the vendor link.
@@ -100,7 +100,10 @@ impl Gate {
 #[derive(Clone, Default)]
 struct Faults {
     fail_create: bool,
-    fail_attach_times: u32,
+    gone_on_get: bool,
+    /// Hold every create until released, so a test can issue a get while one
+    /// is genuinely in flight.
+    block_create: bool,
     /// Drop the socket after this many tool calls, simulating an agent that
     /// dies mid-session.
     disconnect_after_tool_calls: Option<usize>,
@@ -109,6 +112,7 @@ struct Faults {
 pub struct FakeRuntimeVendor {
     recorder: Arc<Recorder>,
     gate: Gate,
+    create_gate: Gate,
     /// Present only for the in-process shape, where the test drives the link
     /// directly instead of going through a server.
     link: Option<Arc<RuntimeVendorLink>>,
@@ -124,6 +128,7 @@ impl FakeRuntimeVendor {
             bash_stdout: "ok".to_string(),
             faults: Faults::default(),
             block: false,
+            resume: None,
         }
     }
 
@@ -169,6 +174,12 @@ impl FakeRuntimeVendor {
         self.gate.release();
     }
 
+    /// Let blocked creates answer. No-op unless built with
+    /// [`FakeRuntimeVendorBuilder::block_creates`].
+    pub fn release_creates(&self) {
+        self.create_gate.release();
+    }
+
     /// The agent id each relayed tool call carried, in order.
     #[must_use]
     pub fn tool_agent_ids(&self) -> Vec<String> {
@@ -211,9 +222,25 @@ pub struct FakeRuntimeVendorBuilder {
     bash_stdout: String,
     faults: Faults,
     block: bool,
+    /// Runtime state carried over from a previous agent process — see
+    /// [`FakeRuntimeVendorBuilder::resuming`].
+    resume: Option<Arc<Recorder>>,
 }
 
 impl FakeRuntimeVendorBuilder {
+    /// Come back as the same vendor, remembering the runtimes `prior` created.
+    ///
+    /// A real vendor's runtimes outlive its agent process — that is the whole
+    /// point of hibernate — so a reconnecting agent still owns them. Without
+    /// this, a fresh fake reports every runtime `Gone`, which is a truthful
+    /// answer to a *different* question and turns "the vendor came back" into
+    /// "the vendor lost everything".
+    #[must_use]
+    pub fn resuming(mut self, prior: &FakeRuntimeVendor) -> Self {
+        self.resume = Some(prior.recorder.clone());
+        self
+    }
+
     #[must_use]
     pub fn supports_provisioning(mut self, value: bool) -> Self {
         self.supports_provisioning = value;
@@ -234,11 +261,11 @@ impl FakeRuntimeVendorBuilder {
         self
     }
 
-    /// Fail the first `n` `AttachRuntime` commands, then succeed — the shape a
-    /// session's recovery retry has to survive.
+    /// Answer every `GetRuntime` with a failure, so a test can drive the
+    /// terminal `RuntimeGone` path without tearing the agent down.
     #[must_use]
-    pub fn fail_attach_times(mut self, n: u32) -> Self {
-        self.faults.fail_attach_times = n;
+    pub fn gone_on_get(mut self, value: bool) -> Self {
+        self.faults.gone_on_get = value;
         self
     }
 
@@ -258,29 +285,44 @@ impl FakeRuntimeVendorBuilder {
         self
     }
 
+    /// Hold every create until [`FakeRuntimeVendor::release_creates`], so a
+    /// test can prove a get waits for an in-flight create.
+    #[must_use]
+    pub fn block_creates(mut self) -> Self {
+        self.faults.block_create = true;
+        self
+    }
+
     /// Dial a running server's `/api/vendor/connect`.
     pub async fn connect(self, url: &str) -> Result<FakeRuntimeVendor, String> {
         let (ws, _) = tokio_tungstenite::connect_async(url)
             .await
             .map_err(|e| format!("dial {url}: {e}"))?;
-        let recorder = Arc::new(Recorder::default());
+        let recorder = self
+            .resume
+            .clone()
+            .unwrap_or_else(|| Arc::new(Recorder::default()));
         let gate = if self.block {
+            Gate::closed()
+        } else {
+            Gate::open()
+        };
+        let create_gate = if self.faults.block_create {
             Gate::closed()
         } else {
             Gate::open()
         };
         let task = tokio::spawn(run_agent(
             ws,
-            self.vendor_name,
-            self.supports_provisioning,
-            self.bash_stdout,
-            self.faults,
+            self,
             gate.clone(),
+            create_gate.clone(),
             recorder.clone(),
         ));
         Ok(FakeRuntimeVendor {
             recorder,
             gate,
+            create_gate,
             link: None,
             task,
         })
@@ -293,25 +335,32 @@ impl FakeRuntimeVendorBuilder {
         let (a, b) = tokio::io::duplex(256 * 1024);
         let server = WebSocketStream::from_raw_socket(a, Role::Server, None).await;
         let agent = WebSocketStream::from_raw_socket(b, Role::Client, None).await;
-        let recorder = Arc::new(Recorder::default());
+        let recorder = self
+            .resume
+            .clone()
+            .unwrap_or_else(|| Arc::new(Recorder::default()));
         let gate = if self.block {
+            Gate::closed()
+        } else {
+            Gate::open()
+        };
+        let create_gate = if self.faults.block_create {
             Gate::closed()
         } else {
             Gate::open()
         };
         let task = tokio::spawn(run_agent(
             agent,
-            self.vendor_name,
-            self.supports_provisioning,
-            self.bash_stdout,
-            self.faults,
+            self,
             gate.clone(),
+            create_gate.clone(),
             recorder.clone(),
         ));
         let link = RuntimeVendorLink::start(server).await?;
         Ok(FakeRuntimeVendor {
             recorder,
             gate,
+            create_gate,
             link: Some(link),
             task,
         })
@@ -324,21 +373,30 @@ impl FakeRuntimeVendorBuilder {
 /// optional politeness: `session_actor` calls `scan_workspace()` at session
 /// creation regardless of vendor, so an agent that ignores it hangs session
 /// provisioning forever with no error output.
+/// Takes the builder whole rather than its fields one by one: the builder *is*
+/// this agent's configuration, and both gates are already derived from it by
+/// the caller.
 async fn run_agent<S>(
     ws: WebSocketStream<S>,
-    vendor_name: String,
-    supports_provisioning: bool,
-    bash_stdout: String,
-    faults: Faults,
+    config: FakeRuntimeVendorBuilder,
     gate: Gate,
+    create_gate: Gate,
     recorder: Arc<Recorder>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let FakeRuntimeVendorBuilder {
+        vendor_name,
+        supports_provisioning,
+        bash_stdout,
+        faults,
+        block: _,
+        resume: _,
+    } = config;
     *recorder
-        .attach_failures
+        .gone_on_get
         .lock()
-        .unwrap_or_else(PoisonError::into_inner) = faults.fail_attach_times;
+        .unwrap_or_else(PoisonError::into_inner) = faults.gone_on_get;
 
     let (sink, mut stream) = ws.split();
     // Shared so a blocked tool call can be answered from its own task without
@@ -375,6 +433,10 @@ async fn run_agent<S>(
         let reply = match inbound.command {
             RuntimeVendorCommand::CreateRuntime(cmd) => {
                 recorder.record(&format!("create:{}", cmd.runtime_id));
+                // Deliberately blocks this loop: lifecycle commands for one
+                // runtime are serialized, so a get arriving mid-create is not
+                // even read until the create resolves. That is the contract.
+                create_gate.wait().await;
                 *recorder
                     .last_create
                     .lock()
@@ -394,42 +456,39 @@ async fn run_agent<S>(
                     }))
                 }
             }
-            RuntimeVendorCommand::AttachRuntime(cmd) => {
-                recorder.record(&format!("attach:{}", cmd.runtime_id));
-                let remaining = {
-                    let mut g = recorder
-                        .attach_failures
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    let n = *g;
-                    *g = g.saturating_sub(1);
-                    n
-                };
-                if remaining > 0 {
+            // A get answers from what the agent actually holds, so a test that
+            // never created (or that asked for `gone_on_get`) exercises the
+            // terminal path instead of silently provisioning.
+            RuntimeVendorCommand::GetRuntime(cmd) => {
+                recorder.record(&format!("get:{}", cmd.runtime_id));
+                let forced_gone = *recorder
+                    .gone_on_get
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let live = recorder
+                    .live
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(&cmd.runtime_id);
+                if forced_gone || !live {
                     Some(RuntimeVendorEvent::RequestFailed(RequestFailed {
-                        message: "fake agent: attach failed".to_string(),
+                        message: format!("fake agent: no runtime '{}'", cmd.runtime_id),
                     }))
                 } else {
-                    recorder
-                        .live
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(cmd.runtime_id.clone());
-                    Some(RuntimeVendorEvent::AttachRuntime(AttachRuntimeResponse {
+                    Some(RuntimeVendorEvent::GetRuntime(GetRuntimeResponse {
                         runtime_id: cmd.runtime_id,
                     }))
                 }
             }
-            RuntimeVendorCommand::StopRuntime(cmd) => {
-                recorder.record(&format!("stop:{}", cmd.runtime_id));
-                recorder
-                    .live
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&cmd.runtime_id);
-                Some(RuntimeVendorEvent::StopRuntime(StopRuntimeResponse {
-                    runtime_id: cmd.runtime_id,
-                }))
+            // Advisory and declined, exactly like the real process-backed
+            // agent: the runtime stays live, so a later get still succeeds.
+            RuntimeVendorCommand::HibernateRuntime(cmd) => {
+                recorder.record(&format!("hibernate:{}", cmd.runtime_id));
+                Some(RuntimeVendorEvent::HibernateRuntime(
+                    HibernateRuntimeResponse {
+                        runtime_id: cmd.runtime_id,
+                    },
+                ))
             }
             RuntimeVendorCommand::DeleteRuntime(cmd) => {
                 recorder.record(&format!("delete:{}", cmd.runtime_id));
@@ -707,11 +766,94 @@ mod tests {
         let spec = runtime_spec_fixture("main");
         let rt = link.create("rt-1", &spec).await.expect("create");
         assert_eq!(agent.live_runtimes(), vec!["rt-1".to_string()]);
-        rt.handle.stop().await;
+        rt.handle.hibernate().await;
         assert_eq!(
             agent.signals(),
-            vec!["create:rt-1".to_string(), "stop:rt-1".to_string()]
+            vec!["create:rt-1".to_string(), "hibernate:rt-1".to_string()]
         );
-        assert!(agent.live_runtimes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_after_create_returns_a_client() {
+        let agent = FakeRuntimeVendor::builder("test-agent")
+            .serve_in_process()
+            .await
+            .expect("agent");
+        let link = agent.link();
+        link.create("rt-1", &runtime_spec_fixture("main"))
+            .await
+            .expect("create");
+        link.get("rt-1").await.expect("get must find the runtime");
+        assert_eq!(
+            agent.signals(),
+            vec!["create:rt-1".to_string(), "get:rt-1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_without_create_is_gone() {
+        let agent = FakeRuntimeVendor::builder("test-agent")
+            .serve_in_process()
+            .await
+            .expect("agent");
+        let err = agent
+            .link()
+            .get("rt-1")
+            .await
+            .expect_err("a get must never provision");
+        assert!(
+            matches!(err, crate::runtime_vendor::VendorError::Gone(_)),
+            "an absent runtime is Gone, not Unavailable: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hibernate_then_get_still_returns_a_client() {
+        let agent = FakeRuntimeVendor::builder("test-agent")
+            .serve_in_process()
+            .await
+            .expect("agent");
+        let link = agent.link();
+        link.create("rt-1", &runtime_spec_fixture("main"))
+            .await
+            .expect("create");
+        link.hibernate("rt-1").await;
+        // Hibernate is advisory; this agent keeps the runtime, so the session
+        // it belongs to is still resumable.
+        link.get("rt-1").await.expect("get after hibernate");
+    }
+
+    #[tokio::test]
+    async fn get_during_an_in_flight_create_waits_for_it() {
+        let agent = FakeRuntimeVendor::builder("test-agent")
+            .block_creates()
+            .serve_in_process()
+            .await
+            .expect("agent");
+        let link = agent.link();
+
+        let creating = {
+            let link = link.clone();
+            tokio::spawn(async move { link.create("rt-1", &runtime_spec_fixture("main")).await })
+        };
+        // The create is parked in the agent. A get issued now must not resolve
+        // to Gone just because the runtime is not there *yet*.
+        let getting = {
+            let link = link.clone();
+            tokio::spawn(async move { link.get("rt-1").await })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), async {})
+                .await
+                .is_ok()
+        );
+        assert!(!getting.is_finished(), "the get must wait for the create");
+
+        agent.release_creates();
+        creating.await.expect("join").expect("create");
+        getting
+            .await
+            .expect("join")
+            .expect("get after create lands");
     }
 }

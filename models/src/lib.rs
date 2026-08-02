@@ -648,16 +648,16 @@ mod vendor_tests {
     #[test]
     fn vendor_command_round_trips_with_a_type_tag() {
         use crate::runtime_vendor::{
-            RuntimeVendorCommand, RuntimeVendorInboundMessage, StopRuntimeRequest,
+            HibernateRuntimeRequest, RuntimeVendorCommand, RuntimeVendorInboundMessage,
         };
         let msg = RuntimeVendorInboundMessage {
             request_id: "req-1".to_string(),
-            command: RuntimeVendorCommand::StopRuntime(StopRuntimeRequest {
+            command: RuntimeVendorCommand::HibernateRuntime(HibernateRuntimeRequest {
                 runtime_id: "rt-1".to_string(),
             }),
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"StopRuntime\""), "{json}");
+        assert!(json.contains("\"type\":\"HibernateRuntime\""), "{json}");
         let back: RuntimeVendorInboundMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back, msg);
     }
