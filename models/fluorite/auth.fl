@@ -24,3 +24,41 @@ struct PasswordChangeRequest {
     current_password: String,
     new_password: String,
 }
+
+/// What the CLI gets when it starts a device authorization. The device code is
+/// the secret it polls with; the user code is what a human reads out and types.
+struct DeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    /// The same page with the code pre-filled, for when the CLI can print a
+    /// link the user can click.
+    verification_uri_complete: String,
+    /// Seconds until the code expires.
+    expires_in: u32,
+    /// Seconds the CLI must wait between polls while the code is still
+    /// pending. Polling faster is answered with `slow_down`.
+    interval: u32,
+}
+
+struct DeviceTokenRequest {
+    device_code: String,
+}
+
+/// An access token and the refresh token that replaces it. The refresh token
+/// rotates on every use.
+struct TokenPair {
+    access_token: String,
+    refresh_token: String,
+    /// Seconds until the access token expires.
+    expires_in: u32,
+}
+
+/// Approve or deny a pending device authorization from the browser.
+struct DeviceApprovalRequest {
+    user_code: String,
+}
+
+struct RefreshRequest {
+    refresh_token: String,
+}
