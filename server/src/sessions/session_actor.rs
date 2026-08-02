@@ -139,7 +139,6 @@ pub enum SessionCommand {
     /// nothing and the tool gets the error.
     FinishSpawnSubAgent {
         id: Uuid,
-        caller: SubAgentParent,
         label: String,
         task: String,
         reply: oneshot::Sender<Result<Uuid, String>>,
@@ -1065,11 +1064,17 @@ impl ContextProvider for SessionContextProvider {
             SessionAgentKind::Main => SubAgentParent::Main,
             SessionAgentKind::Sub(id) => SubAgentParent::SubAgent(id),
         };
-        let with_spawn: Arc<dyn Toolbox> = Arc::new(SubAgentToolbox::new(
-            with_memory,
-            self.session.clone(),
-            caller,
-        ));
+        // A zero cap disables subagents outright: no tools advertised, so the
+        // model never meets a tool that only ever rejects.
+        let with_spawn: Arc<dyn Toolbox> = if settings.max_subagents() == 0 {
+            with_memory
+        } else {
+            Arc::new(SubAgentToolbox::new(
+                with_memory,
+                self.session.clone(),
+                caller,
+            ))
+        };
         let toolbox: Arc<dyn Toolbox> = match self.kind {
             SessionAgentKind::Main => {
                 let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
@@ -1378,7 +1383,6 @@ impl EventSourcedActor for SessionActor {
                     let _ = self_ref
                         .tell(SessionCommand::FinishSpawnSubAgent {
                             id,
-                            caller,
                             label,
                             task,
                             reply,
@@ -1394,7 +1398,6 @@ impl EventSourcedActor for SessionActor {
                 task,
                 reply,
                 persisted,
-                ..
             } => {
                 if let Err(e) = persisted {
                     let _ = reply.send(Err(format!("persist subagent: {e}")));
@@ -1412,10 +1415,13 @@ impl EventSourcedActor for SessionActor {
             }
             SessionCommand::SubAgentStatus { caller, id, reply } => {
                 let rendered = match id {
-                    Some(id) => state
+                    Some(id) if state.subagents.visible_to(caller, &id) => state
                         .subagents
                         .render_node(&id)
                         .ok_or_else(|| format!("no such subagent: {id}")),
+                    // Out-of-subtree and unknown ids are indistinguishable —
+                    // neither confirms the node exists.
+                    Some(id) => Err(format!("no such subagent: {id}")),
                     None => Ok(state.subagents.render_subtree(caller)),
                 };
                 let _ = reply.send(rendered);
@@ -2316,6 +2322,40 @@ mod tests {
             sub.system_prompt.unwrap().contains("# Subagent role"),
             "the subagent prompt must explain its role"
         );
+    }
+
+    #[tokio::test]
+    async fn a_zero_subagent_cap_hides_the_spawn_tools() {
+        let (f, session, id, _journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let mut settings = actor_spec_fixture().agent;
+        settings.max_concurrent_subagents = Some(0);
+        let provider = SessionContextProvider {
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings,
+            session_id: id,
+            kind: SessionAgentKind::Main,
+            session: session.clone(),
+            frames: broadcast::channel(8).0,
+            last_client: Mutex::new(None),
+        };
+        let tools: Vec<String> = provider
+            .provide()
+            .await
+            .unwrap()
+            .toolbox
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        // Disabled, not merely unusable: an advertised tool that always
+        // rejects reads as a bug to the model.
+        for t in ["spawn_agent", "subagent_status"] {
+            assert!(!tools.contains(&t.to_string()), "disabled session has {t}");
+        }
     }
 
     #[test]

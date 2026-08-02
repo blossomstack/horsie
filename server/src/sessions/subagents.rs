@@ -15,6 +15,29 @@ pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: u32 = 8;
 /// Error recorded for a subagent that was mid-run when the process died.
 pub const INTERRUPTED_ERROR: &str = "interrupted by restart";
 
+/// Largest result (output or error) injected into a parent's context or
+/// rendered by `subagent_status` — the same bound the runtime puts on a
+/// tool's streamed output.
+pub const MAX_RESULT_BYTES: usize = 50_000;
+
+/// Cap a result for injection/rendering, marking the cut so the reader knows
+/// the answer continues elsewhere (the full transcript is always in the
+/// subagent's own history).
+fn truncate_result(text: &str) -> String {
+    if text.len() <= MAX_RESULT_BYTES {
+        return text.to_string();
+    }
+    let mut end = MAX_RESULT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}…\n\n[truncated: {} bytes total]",
+        &text[..end],
+        text.len()
+    )
+}
+
 /// Who spawned a subagent: the session's main agent, or another subagent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SubAgentParent {
@@ -58,8 +81,12 @@ pub struct SubAgentTree {
 /// The message injected into a parent when a child reaches a terminal state.
 pub fn notification_text(label: &str, output: Option<&str>, error: Option<&str>) -> String {
     match (output, error) {
-        (Some(output), _) => format!("[subagent \"{label}\" completed]\n\n{output}"),
-        (None, Some(error)) => format!("[subagent \"{label}\" failed]\n\n{error}"),
+        (Some(output), _) => {
+            format!("[subagent \"{label}\" completed]\n\n{}", truncate_result(output))
+        }
+        (None, Some(error)) => {
+            format!("[subagent \"{label}\" failed]\n\n{}", truncate_result(error))
+        }
         (None, None) => format!("[subagent \"{label}\" completed]"),
     }
 }
@@ -212,12 +239,21 @@ impl SubAgentTree {
             rec.label, rec.depth
         );
         if let Some(output) = &rec.output {
-            out.push_str(&format!("\n\noutput:\n{output}"));
+            out.push_str(&format!("\n\noutput:\n{}", truncate_result(output)));
         }
         if let Some(error) = &rec.error {
-            out.push_str(&format!("\n\nerror:\n{error}"));
+            out.push_str(&format!("\n\nerror:\n{}", truncate_result(error)));
         }
         Some(out)
+    }
+
+    /// Whether `caller` may inspect node `id`: the main agent sees the whole
+    /// tree; a subagent sees itself and its own subtree, never siblings.
+    pub fn visible_to(&self, caller: SubAgentParent, id: &Uuid) -> bool {
+        match caller {
+            SubAgentParent::Main => self.nodes.contains_key(id),
+            SubAgentParent::SubAgent(root) => *id == root || self.descends_from(id, root),
+        }
     }
 
     /// The subtree under `from` as an indented list, for `subagent_status`
@@ -393,5 +429,33 @@ mod tests {
             notification_text("research", None, Some("boom")),
             "[subagent \"research\" failed]\n\nboom"
         );
+    }
+
+    #[test]
+    fn notification_text_caps_a_huge_result() {
+        let huge = "x".repeat(MAX_RESULT_BYTES + 10_000);
+        let text = notification_text("w", Some(&huge), None);
+        assert!(text.contains("[truncated:"), "{text:.200}");
+        assert!(text.len() < huge.len());
+        // No mid-character split: the kept prefix is valid and bounded.
+        assert!(text.len() <= MAX_RESULT_BYTES + 100);
+    }
+
+    #[test]
+    fn a_node_is_visible_to_main_to_itself_and_to_its_ancestors() {
+        let mut tree = SubAgentTree::default();
+        let parent = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        spawn(&mut tree, parent, SubAgentParent::Main, 1);
+        spawn(&mut tree, child, SubAgentParent::SubAgent(parent), 2);
+        spawn(&mut tree, other, SubAgentParent::Main, 1);
+
+        assert!(tree.visible_to(SubAgentParent::Main, &child));
+        assert!(tree.visible_to(SubAgentParent::SubAgent(parent), &child));
+        assert!(tree.visible_to(SubAgentParent::SubAgent(parent), &parent));
+        // A sibling branch and an unknown id are not.
+        assert!(!tree.visible_to(SubAgentParent::SubAgent(other), &child));
+        assert!(!tree.visible_to(SubAgentParent::Main, &Uuid::new_v4()));
     }
 }
