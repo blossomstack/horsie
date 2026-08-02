@@ -4,9 +4,11 @@
 //! horsie reads this format and never writes it. See
 //! `docs/superpowers/specs/2026-08-02-plugin-marketplace-design.md`.
 
+pub mod layout;
 pub mod manifest;
 pub mod skills;
 
+pub use layout::PluginRoot;
 pub use manifest::PluginManifest;
 
 use sha2::{Digest, Sha256};
