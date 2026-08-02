@@ -1253,6 +1253,77 @@ async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
     );
 }
 
+/// The agent is resident for the session's loaded lifetime, not spawned per
+/// turn. So once a turn concludes, reading the session costs nothing: history
+/// and usage are answered from the agent already in memory, and no read ever
+/// asks the vendor for a runtime.
+#[tokio::test]
+async fn reads_after_a_concluded_turn_acquire_no_runtime() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("first reply");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    send_message(&client, &server.addr, &id, "hello").await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    let after_turn = agent.signals();
+    assert_eq!(
+        after_turn,
+        vec![format!("create:{id}"), format!("get:{id}")],
+        "one create at session creation, one get for the turn that ran"
+    );
+
+    // Read it every way a client can, repeatedly.
+    for _ in 0..3 {
+        let page: serde_json::Value = client
+            .get(format!(
+                "http://{}/api/sessions/{id}/history?limit=50",
+                server.addr
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            !page["messages"].as_array().unwrap().is_empty(),
+            "the resident agent still holds the transcript: {page}"
+        );
+        let usage: serde_json::Value = client
+            .get(format!("http://{}/api/sessions/{id}/usage", server.addr))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            usage["usage"]["sessionTotal"]["inputTokens"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        let _ = get_detail(&client, &server.addr, &id).await;
+    }
+
+    assert_eq!(
+        agent.signals(),
+        after_turn,
+        "reading a session must cost no vendor call at all"
+    );
+
+    server.shutdown().await;
+}
+
 /// The promise a `202` makes: every accepted message is answered, and messages
 /// accepted during one turn go in together as the next one.
 #[tokio::test]

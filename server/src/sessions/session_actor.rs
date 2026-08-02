@@ -1084,11 +1084,19 @@ mod tests {
 
     #[test]
     fn a_failed_turn_is_sticky_but_not_terminal() {
-        let s = fold(vec![SessionDomainEvent::TurnFailed {
-            error: "provider exploded".into(),
-        }]);
+        let s = fold(vec![
+            queued("m1", "still owed an answer"),
+            SessionDomainEvent::TurnFailed {
+                error: "provider exploded".into(),
+            },
+        ]);
         assert!(matches!(s.status, SessionStatus::Failed { .. }));
         assert_eq!(s.last_error.as_deref(), Some("provider exploded"));
+        assert_eq!(
+            s.inbox.len(),
+            1,
+            "a turn that failed answered nothing; the queue is still owed"
+        );
 
         // The next turn moves it straight back to Running.
         let s = SessionActor::apply_event(
@@ -1290,6 +1298,79 @@ mod tests {
             events.is_empty(),
             "a terminal session must never start another turn"
         );
+    }
+
+    /// A failed turn is a turn boundary that deliberately does *not* drain. The
+    /// cause is usually stuck — an expired key, a dead vendor — and draining
+    /// would turn three queued messages into three back-to-back failures the
+    /// user never asked for. The next message they send drains them.
+    #[tokio::test]
+    async fn a_failed_turn_does_not_drain() {
+        let f = actor_fixture().await;
+        let parent = spawn_deaf_supervisor();
+        let id = Uuid::new_v4();
+        let mut actor = SessionActor::new(id, actor_spec_fixture(), f.deps, parent);
+        // A turn is running, and a message arrived while it was.
+        let state = fold(vec![
+            queued("m1", "one"),
+            SessionDomainEvent::TurnBegan {
+                consumed: vec!["m1".into()],
+                answering: None,
+            },
+            queued("m2", "queued while running"),
+        ]);
+
+        let effect = actor
+            .on_agent_outcome(
+                &state,
+                AgentOutcome::Failed {
+                    session_id: id,
+                    error: "provider exploded".into(),
+                    recoverable: true,
+                    terminal: false,
+                },
+            )
+            .await;
+
+        let events = effect.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "a failed turn records the failure and nothing else: {events:?}"
+        );
+        assert!(
+            matches!(events[0], SessionDomainEvent::TurnFailed { .. }),
+            "{events:?}"
+        );
+    }
+
+    /// Stop is a turn boundary like any other: it cancels the turn, not the
+    /// promise. Whatever was queued while the cancelled turn ran starts the
+    /// next one immediately — which is exactly why the client marks queued
+    /// messages as unread, so that next turn does not look self-inflicted.
+    #[tokio::test]
+    async fn stop_then_a_queued_message_starts_the_next_turn() {
+        let f = actor_fixture().await;
+        let parent = spawn_deaf_supervisor();
+        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let running = fold(vec![
+            queued("m1", "one"),
+            SessionDomainEvent::TurnBegan {
+                consumed: vec!["m1".into()],
+                answering: None,
+            },
+            queued("m2", "queued while running"),
+        ]);
+
+        let stopped = SessionActor::apply_event(running, SessionDomainEvent::TurnStopped);
+        assert_eq!(stopped.status, SessionStatus::Idle);
+        let events = actor.drain(&stopped).await;
+
+        assert_eq!(events.len(), 1, "{events:?}");
+        let SessionDomainEvent::TurnBegan { consumed, .. } = &events[0] else {
+            panic!("a stop must let the queue start the next turn, got {events:?}");
+        };
+        assert_eq!(consumed, &vec!["m2".to_string()]);
     }
 
     #[tokio::test]

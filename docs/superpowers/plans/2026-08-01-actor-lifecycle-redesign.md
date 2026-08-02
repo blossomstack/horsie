@@ -33,14 +33,14 @@
 - Produces: `RuntimeVendorCommand::GetRuntime(GetRuntimeRequest { runtime_id })`, `RuntimeVendorCommand::HibernateRuntime(HibernateRuntimeRequest { runtime_id })`, `RuntimeVendorEvent::GetRuntime(GetRuntimeResponse { runtime_id })`, `RuntimeVendorEvent::HibernateRuntime(HibernateRuntimeResponse { runtime_id })`; `RuntimeVendorLink::get(&self, runtime_id) -> Result<VendorRuntime, VendorError>`, `RuntimeVendorLink::hibernate(&self, runtime_id)`.
 - `VendorError` becomes `{ Provision(String), Gone(String), Unavailable(String) }`.
 
-- [ ] **Step 1: Rename the schema.** In `runtime_vendor.fl` replace `AttachRuntimeRequest`/`Response` with `GetRuntimeRequest { runtime_id: String }` / `GetRuntimeResponse { runtime_id: String }` (no `spec` field — a get must not be able to re-provision), and `StopRuntimeRequest`/`Response` with `HibernateRuntimeRequest`/`HibernateRuntimeResponse`. Update the union arms and the doc comments to the semantics in the spec's vendor contract table.
-- [ ] **Step 2: Regenerate.** `make generate` (or the fluorite codegen npm scripts for `clients/ts` and `clients/web`). Expected: `models/src/generated/runtime_vendor.rs` and both TS trees update; the CI drift job would otherwise fail.
-- [ ] **Step 3: Server link.** In `link.rs`, split `provision()` into `create()` (unchanged, sends `CreateRuntime`) and `get()` (sends `GetRuntime`, builds the same `RuntimeVendorTransport` + `RuntimeClient` on success). Add `hibernate()` sending `HibernateRuntime` and ignoring the reply like `delete()` does. Map a `RequestFailed` from `GetRuntime` to `VendorError::Gone`, and a write failure / disconnected socket to `VendorError::Unavailable`.
-- [ ] **Step 4: Agent loop.** In `runtime-vendor/src/vendor.rs` handle the two new commands: `GetRuntime` answers `GetRuntimeResponse` if `ConnectedRuntimeRegistry` has a live transport for that id, else `RequestFailed { message: "runtime gone" }`; `HibernateRuntime` is a no-op that answers `HibernateRuntimeResponse` (this agent cannot suspend a process, and saying so honestly beats destroying the workspace). Delete the create-fallback path that `AttachRuntime` had.
-- [ ] **Step 5: Serialize lifecycle per runtime id.** In the same command loop, hold a `tokio::sync::Mutex` per `runtime_id` (a `HashMap<String, Arc<Mutex<()>>>`) around create/get/hibernate/delete handling, so a `GetRuntime` arriving during an in-flight `CreateRuntime` waits for it — the conformance requirement from the spec.
-- [ ] **Step 6: Fake vendor.** Update `fake.rs` to record `get:<id>` and `hibernate:<id>` signals, and add a builder knob `gone_on_get(bool)` so tests can drive the `RuntimeGone` path.
-- [ ] **Step 7: Conformance tests.** In `server/src/runtime_vendor/link.rs` tests: (a) `get_after_create_returns_a_client`; (b) `get_without_create_is_gone`; (c) `hibernate_then_get_still_returns_a_client`; (d) `get_during_an_in_flight_create_waits_for_it` — drive the fake with a create that blocks on a barrier and assert the get resolves after it, not before.
-- [ ] **Step 8: `make check`, then commit.** `git commit -m "feat(vendor): GetRuntime and HibernateRuntime replace attach/stop"`
+- [x] **Step 1: Rename the schema.** In `runtime_vendor.fl` replace `AttachRuntimeRequest`/`Response` with `GetRuntimeRequest { runtime_id: String }` / `GetRuntimeResponse { runtime_id: String }` (no `spec` field — a get must not be able to re-provision), and `StopRuntimeRequest`/`Response` with `HibernateRuntimeRequest`/`HibernateRuntimeResponse`. Update the union arms and the doc comments to the semantics in the spec's vendor contract table.
+- [x] **Step 2: Regenerate.** `make generate` (or the fluorite codegen npm scripts for `clients/ts` and `clients/web`). Expected: `models/src/generated/runtime_vendor.rs` and both TS trees update; the CI drift job would otherwise fail.
+- [x] **Step 3: Server link.** In `link.rs`, split `provision()` into `create()` (unchanged, sends `CreateRuntime`) and `get()` (sends `GetRuntime`, builds the same `RuntimeVendorTransport` + `RuntimeClient` on success). Add `hibernate()` sending `HibernateRuntime` and ignoring the reply like `delete()` does. Map a `RequestFailed` from `GetRuntime` to `VendorError::Gone`, and a write failure / disconnected socket to `VendorError::Unavailable`.
+- [x] **Step 4: Agent loop.** In `runtime-vendor/src/vendor.rs` handle the two new commands: `GetRuntime` answers `GetRuntimeResponse` if `ConnectedRuntimeRegistry` has a live transport for that id, else `RequestFailed { message: "runtime gone" }`; `HibernateRuntime` is a no-op that answers `HibernateRuntimeResponse` (this agent cannot suspend a process, and saying so honestly beats destroying the workspace). Delete the create-fallback path that `AttachRuntime` had.
+- [x] **Step 5: Serialize lifecycle per runtime id.** In the same command loop, hold a `tokio::sync::Mutex` per `runtime_id` (a `HashMap<String, Arc<Mutex<()>>>`) around create/get/hibernate/delete handling, so a `GetRuntime` arriving during an in-flight `CreateRuntime` waits for it — the conformance requirement from the spec.
+- [x] **Step 6: Fake vendor.** Update `fake.rs` to record `get:<id>` and `hibernate:<id>` signals, and add a builder knob `gone_on_get(bool)` so tests can drive the `RuntimeGone` path.
+- [x] **Step 7: Conformance tests.** In `server/src/runtime_vendor/link.rs` tests: (a) `get_after_create_returns_a_client`; (b) `get_without_create_is_gone`; (c) `hibernate_then_get_still_returns_a_client`; (d) `get_during_an_in_flight_create_waits_for_it` — drive the fake with a create that blocks on a barrier and assert the get resolves after it, not before.
+- [x] **Step 8: `make check`, then commit.** `git commit -m "feat(vendor): GetRuntime and HibernateRuntime replace attach/stop"`
 
 ---
 
@@ -68,11 +68,11 @@ pub struct RuntimeClientProvider { /* Arc<RuntimeManager>, session, vendor */ }
 impl RuntimeClientProvider { pub async fn get(&self) -> Result<RuntimeClient, RuntimeError>; }
 ```
 
-- [ ] **Step 1: Move spec assembly.** Lift `write_runtime_spec`, the GitHub-token minting and the plugin-bundle/env resolution out of `session_actor.rs` into `RuntimeManager::runtime_spec(session, spec)`, re-assembled fresh on every `create`. Keep the capability file under `<state_dir>/sessions/<id>/`.
-- [ ] **Step 2: Implement the four verbs.** Each resolves the vendor by name from `SharedVendors`; a missing name or a disconnected link is `RuntimeError::Unavailable` — never `Gone`. `get` returns the client from `link.get()`, mapping `VendorError::Gone` to `RuntimeError::Gone`. `hibernate` and `delete` are best-effort and ignore failures.
-- [ ] **Step 3: Tests.** `unavailable_when_the_vendor_name_is_not_registered`, `unavailable_when_the_link_is_disconnected`, `gone_when_the_vendor_has_no_runtime`, `get_returns_a_client_after_create`, `create_assembles_env_fresh_each_time` (mint twice, assert two distinct tokens reached the fake).
-- [ ] **Step 4: Wire into `ServerDeps`** and construct it in `server/src/bin/horsie-server/main.rs`. No call sites yet.
-- [ ] **Step 5: `make check`, commit.** `git commit -m "feat(server): RuntimeManager owns runtime lifecycle"`
+- [x] **Step 1: Move spec assembly.** Lift `write_runtime_spec`, the GitHub-token minting and the plugin-bundle/env resolution out of `session_actor.rs` into `RuntimeManager::runtime_spec(session, spec)`, re-assembled fresh on every `create`. Keep the capability file under `<state_dir>/sessions/<id>/`.
+- [x] **Step 2: Implement the four verbs.** Each resolves the vendor by name from `SharedVendors`; a missing name or a disconnected link is `RuntimeError::Unavailable` — never `Gone`. `get` returns the client from `link.get()`, mapping `VendorError::Gone` to `RuntimeError::Gone`. `hibernate` and `delete` are best-effort and ignore failures.
+- [x] **Step 3: Tests.** `unavailable_when_the_vendor_name_is_not_registered`, `unavailable_when_the_link_is_disconnected`, `gone_when_the_vendor_has_no_runtime`, `get_returns_a_client_after_create`, `create_assembles_env_fresh_each_time` (mint twice, assert two distinct tokens reached the fake).
+- [x] **Step 4: Wire into `ServerDeps`** and construct it in `server/src/bin/horsie-server/main.rs`. No call sites yet.
+- [x] **Step 5: `make check`, commit.** `git commit -m "feat(server): RuntimeManager owns runtime lifecycle"`
 
 ---
 
@@ -85,15 +85,15 @@ impl RuntimeClientProvider { pub async fn get(&self) -> Result<RuntimeClient, Ru
 **Interfaces:**
 - Produces: `SessionStatus::{Idle, Running, AwaitingInput, Failed { reason }, Unrecoverable { reason }}`; `SessionDomainEvent::{MessageQueued, TurnBegan, AskRecorded, TurnEnded, TurnFailed, TurnStopped, TurnInterrupted, SessionFailed, UsageRecorded}`; `SessionState { status, pending_ask, inbox, agent_usage, last_error }`.
 
-- [ ] **Step 1: Replace the status enum** in `spec.rs` and `SessionStatusKind` in `session.fl`; regenerate. Delete `Provisioning`, `Interrupted`, `Stopped`, `RecoveryFailed`; add `Unrecoverable`. Update `status_kind` / `status_reason`.
-- [ ] **Step 2: Replace the event enum and `SessionState`** with the spec's tables. `InboxMessage { id: String, text: String, at_ms: u64 }`.
-- [ ] **Step 3: Write the fold tests first** — `queued_then_begun_consumes_the_inbox`, `turn_began_clears_a_pending_ask`, `turn_stopped_keeps_the_inbox`, `turn_failed_sets_failed_and_keeps_the_inbox`, `session_failed_is_terminal`.
-- [ ] **Step 4: Implement `apply_event`** to make them pass.
-- [ ] **Step 5: Rewrite `handle_command`.** `UserMessage` always persists `MessageQueued` and replies `Ok(message_id)`; if the status is `Idle` or `Failed`, follow with the drain. `Stop` cancels the run, awaits the ack, persists `TurnStopped`, then drains. Delete `Provision`, `WakeMode`, `ensure_runtime`, `ensure_agent`, `wake`, `halt`'s runtime handling (cancel only), and the `on_agent_outcome` generation check.
-- [ ] **Step 6: Implement `drain()`** — if the inbox is non-empty and no run is in flight: merge the texts in arrival order joined by `"\n\n"`, send `AgentCommand::Run { input }` or `AgentCommand::InjectToolResult` when `pending_ask` is set, and persist `TurnBegan { consumed, answering }`. Never called from recovery.
-- [ ] **Step 7: `on_recovery_complete`** persists `TurnInterrupted` when the recovered status is `Running`, and does nothing else. No drain, no agent run.
-- [ ] **Step 8: Behaviour tests** — `a_message_during_a_run_is_queued_not_rejected`, `turn_end_drains_the_inbox_as_one_merged_message`, `a_failed_turn_does_not_drain`, `stop_then_queued_message_starts_the_next_turn`, `recovery_from_running_lands_idle_with_the_inbox_intact`, `answering_an_ask_consumes_the_inbox_as_a_tool_result`.
-- [ ] **Step 9: `make check`, commit.** `git commit -m "feat(session): durable inbox, four states plus terminal"`
+- [x] **Step 1: Replace the status enum** in `spec.rs` and `SessionStatusKind` in `session.fl`; regenerate. Delete `Provisioning`, `Interrupted`, `Stopped`, `RecoveryFailed`; add `Unrecoverable`. Update `status_kind` / `status_reason`.
+- [x] **Step 2: Replace the event enum and `SessionState`** with the spec's tables. `InboxMessage { id: String, text: String, at_ms: u64 }`.
+- [x] **Step 3: Write the fold tests first** — `queued_then_begun_consumes_the_inbox`, `turn_began_clears_a_pending_ask`, `turn_stopped_keeps_the_inbox`, `turn_failed_sets_failed_and_keeps_the_inbox`, `session_failed_is_terminal`.
+- [x] **Step 4: Implement `apply_event`** to make them pass.
+- [x] **Step 5: Rewrite `handle_command`.** `UserMessage` always persists `MessageQueued` and replies `Ok(message_id)`; if the status is `Idle` or `Failed`, follow with the drain. `Stop` cancels the run, awaits the ack, persists `TurnStopped`, then drains. Delete `Provision`, `WakeMode`, `ensure_runtime`, `ensure_agent`, `wake`, `halt`'s runtime handling (cancel only), and the `on_agent_outcome` generation check.
+- [x] **Step 6: Implement `drain()`** — if the inbox is non-empty and no run is in flight: merge the texts in arrival order joined by `"\n\n"`, send `AgentCommand::Run { input }` or `AgentCommand::InjectToolResult` when `pending_ask` is set, and persist `TurnBegan { consumed, answering }`. Never called from recovery.
+- [x] **Step 7: `on_recovery_complete`** persists `TurnInterrupted` when the recovered status is `Running`, and does nothing else. No drain, no agent run.
+- [x] **Step 8: Behaviour tests** — `a_message_during_a_run_is_queued_not_rejected`, `turn_end_drains_the_inbox_as_one_merged_message`, `a_failed_turn_does_not_drain`, `stop_then_queued_message_starts_the_next_turn`, `recovery_from_running_lands_idle_with_the_inbox_intact`, `answering_an_ask_consumes_the_inbox_as_a_tool_result`.
+- [x] **Step 9: `make check`, commit.** `git commit -m "feat(session): durable inbox, four states plus terminal"`
 
 ---
 
@@ -105,13 +105,13 @@ impl RuntimeClientProvider { pub async fn get(&self) -> Result<RuntimeClient, Ru
 **Interfaces:**
 - Produces: `AgentActor` stays alive across turns; `RunReport { run_id, outcome }`; `ContextProvider` implementations receive a `RuntimeClientProvider`.
 
-- [ ] **Step 1: Stop stopping.** In `handle_finished`, replace `CommandEffect::stop()` on `Completed` / `Concluded` / `Failed` with `CommandEffect::none()` (plus the existing persists). The agent goes idle instead of dying.
-- [ ] **Step 2: `run_id`.** Give each started run a `u64` id held in `self.running`; `RunFinished` carries it; drop a report whose id is stale. Delete `SessionParent::generation` and `SessionActor::generation` and the staleness branch in `on_agent_outcome`.
-- [ ] **Step 3: Provider not client.** `SessionContextProvider` holds `RuntimeClientProvider`; `provide()` calls `.get().await` and maps `RuntimeError::Gone` to a distinct failure the session turns into `SessionFailed { RuntimeGone }`, and `Unavailable`/`Provision` into `TurnFailed`.
-- [ ] **Step 4: Delete transient readers.** Remove `NoContextProvider` and both spawn sites; `read_history` / `read_usage` ask `main_agent` directly. The session holds `main_agent: ActorRef<AgentCommand>` and `sub_agents: HashMap<String, ActorRef<AgentCommand>>`, both created when the session actor starts.
-- [ ] **Step 5: Rename and persist the repair.** `sanitize_for_resume` → `repair_unanswered_tool_calls`; `sanitize_answering` → `repair_unanswered_tool_calls_except`. Persist the synthetic results as `AgentDomainEvent::MessageComplete` rows on `RunCancelled` and on recovery when the last turn was interrupted, and stop repairing on the turn-start path.
-- [ ] **Step 6: Tests** — `agent_survives_a_concluded_turn`, `a_stale_run_report_is_ignored`, `history_reads_spawn_no_actor` (count children before/after), `interrupted_tool_calls_are_repaired_once_in_the_journal`.
-- [ ] **Step 7: `make check`, commit.** `git commit -m "feat(agent): resident agent, run_id fence, persisted repair"`
+- [x] **Step 1: Stop stopping.** In `handle_finished`, replace `CommandEffect::stop()` on `Completed` / `Concluded` / `Failed` with `CommandEffect::none()` (plus the existing persists). The agent goes idle instead of dying.
+- [x] **Step 2: `run_id`.** Give each started run a `u64` id held in `self.running`; `RunFinished` carries it; drop a report whose id is stale. Delete `SessionParent::generation` and `SessionActor::generation` and the staleness branch in `on_agent_outcome`.
+- [x] **Step 3: Provider not client.** `SessionContextProvider` holds `RuntimeClientProvider`; `provide()` calls `.get().await` and maps `RuntimeError::Gone` to a distinct failure the session turns into `SessionFailed { RuntimeGone }`, and `Unavailable`/`Provision` into `TurnFailed`.
+- [x] **Step 4: Delete transient readers.** Remove `NoContextProvider` and both spawn sites; `read_history` / `read_usage` ask `main_agent` directly. The session holds `main_agent: ActorRef<AgentCommand>` and `sub_agents: HashMap<String, ActorRef<AgentCommand>>`, both created when the session actor starts.
+- [x] **Step 5: Rename and persist the repair.** `sanitize_for_resume` → `repair_unanswered_tool_calls`; `sanitize_answering` → `repair_unanswered_tool_calls_except`. Persist the synthetic results as `AgentDomainEvent::MessageComplete` rows on `RunCancelled` and on recovery when the last turn was interrupted, and stop repairing on the turn-start path.
+- [x] **Step 6: Tests** — `agent_survives_a_concluded_turn`, `a_stale_run_report_is_ignored`, `history_reads_spawn_no_actor` (count children before/after), `interrupted_tool_calls_are_repaired_once_in_the_journal`.
+- [x] **Step 7: `make check`, commit.** `git commit -m "feat(agent): resident agent, run_id fence, persisted repair"`
 
 ---
 
@@ -124,13 +124,13 @@ impl RuntimeClientProvider { pub async fn get(&self) -> Result<RuntimeClient, Ru
 **Interfaces:**
 - Produces: `trait Clock { fn now(&self) -> Instant }` with `SystemClock` and `TestClock`; `SessionSupervisorEvent::{SessionCreated, SessionNamed, SessionDeleted}` only; `SessionSupervisorCommand::{..., Tick}`.
 
-- [ ] **Step 1: Delete `SessionStatusChanged` from the event enum** and from `SessionRecord`; keep an in-memory `status: HashMap<SessionId, SessionStatus>` updated by the (retained) `SessionStatusChanged` *command*. `List`/`Get` return `Option<SessionStatus>` — `None` means not loaded.
-- [ ] **Step 2: Delete `on_recovery_complete`'s re-spawn loop.** Nothing loads at boot.
-- [ ] **Step 3: Add `ensure_loaded(&mut self, ctx, id) -> Option<ActorRef<SessionCommand>>`** — returns the live child or spawns one from the recovered `SessionRecord`. Route `UserMessage`, `Stop`, `Subscribe`, `History`, `UsageStats`, `Delete` through it.
-- [ ] **Step 4: Idle clock.** Record `last_activity: HashMap<SessionId, Instant>` on every routed command. A detached task sends `Tick` every 10s (interval also injectable). `Tick` offloads every loaded session whose last activity is older than the configured idle timeout **and** whose cached status is not `Running`.
-- [ ] **Step 5: Offload sequence.** `SessionCommand::PrepareOffload { reply }` → the session refuses (`reply(false)`) if a run is in flight, else stops its agents, calls `runtimes.hibernate`, and returns `CommandEffect::none().and_ack(...).and_stop()`. On `true` the supervisor removes the child and its status entry.
-- [ ] **Step 6: Tests** — `boot_loads_nothing` (assert no child and zero vendor signals after recovery with two sessions in the journal), `any_command_loads_the_session`, `idle_past_the_timeout_offloads_and_hibernates`, `a_running_session_is_never_offloaded`, `a_message_after_offload_reloads_and_gets_not_creates`.
-- [ ] **Step 7: `make check`, commit.** `git commit -m "feat(supervisor): lazy load and idle offload"`
+- [x] **Step 1: Delete `SessionStatusChanged` from the event enum** and from `SessionRecord`; keep an in-memory `status: HashMap<SessionId, SessionStatus>` updated by the (retained) `SessionStatusChanged` *command*. `List`/`Get` return `Option<SessionStatus>` — `None` means not loaded.
+- [x] **Step 2: Delete `on_recovery_complete`'s re-spawn loop.** Nothing loads at boot.
+- [x] **Step 3: Add `ensure_loaded(&mut self, ctx, id) -> Option<ActorRef<SessionCommand>>`** — returns the live child or spawns one from the recovered `SessionRecord`. Route `UserMessage`, `Stop`, `Subscribe`, `History`, `UsageStats`, `Delete` through it.
+- [x] **Step 4: Idle clock.** Record `last_activity: HashMap<SessionId, Instant>` on every routed command. A detached task sends `Tick` every 10s (interval also injectable). `Tick` offloads every loaded session whose last activity is older than the configured idle timeout **and** whose cached status is not `Running`.
+- [x] **Step 5: Offload sequence.** `SessionCommand::PrepareOffload { reply }` → the session refuses (`reply(false)`) if a run is in flight, else stops its agents, calls `runtimes.hibernate`, and returns `CommandEffect::none().and_ack(...).and_stop()`. On `true` the supervisor removes the child and its status entry.
+- [x] **Step 6: Tests** — `boot_loads_nothing` (assert no child and zero vendor signals after recovery with two sessions in the journal), `any_command_loads_the_session`, `idle_past_the_timeout_offloads_and_hibernates`, `a_running_session_is_never_offloaded`, `a_message_after_offload_reloads_and_gets_not_creates`.
+- [x] **Step 7: `make check`, commit.** `git commit -m "feat(supervisor): lazy load and idle offload"`
 
 ---
 
@@ -139,11 +139,11 @@ impl RuntimeClientProvider { pub async fn get(&self) -> Result<RuntimeClient, Ru
 **Files:**
 - Modify: `server/src/sessions/supervisor.rs` (`Create`), `server/src/sessions/session_actor.rs`
 
-- [ ] **Step 1:** On `SessionSupervisorCommand::Create`, after persisting `SessionCreated`, spawn a **detached task** calling `runtimes.create(id, vendor, spec)`. Do not await it on the mailbox and do not await it in the HTTP handler.
-- [ ] **Step 2:** Delete `SessionCommand::Provision` entirely. The first turn's `provider.get()` is what waits for creation to land — that wait is the vendor's obligation.
-- [ ] **Step 3:** On `Delete`, call `runtimes.delete(id, vendor)` after the session actor stops.
-- [ ] **Step 4: Test** — `twenty_turns_and_three_offloads_create_once`: drive twenty turns with offloads interleaved against the fake vendor and assert exactly one `create:` signal and many `get:` signals.
-- [ ] **Step 5: `make check`, commit.** `git commit -m "feat(session): create the runtime once, at session creation"`
+- [x] **Step 1:** On `SessionSupervisorCommand::Create`, after persisting `SessionCreated`, spawn a **detached task** calling `runtimes.create(id, vendor, spec)`. Do not await it on the mailbox and do not await it in the HTTP handler.
+- [x] **Step 2:** Delete `SessionCommand::Provision` entirely. The first turn's `provider.get()` is what waits for creation to land — that wait is the vendor's obligation.
+- [x] **Step 3:** On `Delete`, call `runtimes.delete(id, vendor)` after the session actor stops.
+- [x] **Step 4: Test** — `twenty_turns_and_three_offloads_create_once`: drive twenty turns with offloads interleaved against the fake vendor and assert exactly one `create:` signal and many `get:` signals.
+- [x] **Step 5: `make check`, commit.** `git commit -m "feat(session): create the runtime once, at session creation"`
 
 ---
 
@@ -152,11 +152,11 @@ impl RuntimeClientProvider { pub async fn get(&self) -> Result<RuntimeClient, Ru
 **Files:**
 - Modify: `server/src/http/handlers.rs`, `server/src/sessions/events.rs`, `models/fluorite/session.fl`, `models/fluorite/session_api.fl`
 
-- [ ] **Step 1:** `send_message` returns `202 Accepted` with `{ messageId }`. Delete `UserMessageError::{TurnInFlight, Provisioning, RecoveryFailed}` and the `409` mapping; keep `NotFound`.
-- [ ] **Step 2:** `SessionDetail` gains `inbox: Vec<QueuedMessage { id, text, at_ms }>`; regenerate schemas.
-- [ ] **Step 3:** Add `SessionEvent::InboxChanged { queued: Vec<QueuedMessage> }` to the SSE union and emit it from the session on `MessageQueued` and `TurnBegan`. Delete the dead `SessionEvent::Asked` variant.
-- [ ] **Step 4: Tests** — `send_message_returns_202_with_an_id`, `send_message_during_a_run_is_also_202`, `detail_exposes_the_inbox`.
-- [ ] **Step 5: `make check`, commit.** `git commit -m "feat(api): 202 for messages, inbox on the wire"`
+- [x] **Step 1:** `send_message` returns `202 Accepted` with `{ messageId }`. Delete `UserMessageError::{TurnInFlight, Provisioning, RecoveryFailed}` and the `409` mapping; keep `NotFound`.
+- [x] **Step 2:** `SessionDetail` gains `inbox: Vec<QueuedMessage { id, text, at_ms }>`; regenerate schemas.
+- [x] **Step 3:** Add `SessionEvent::InboxChanged { queued: Vec<QueuedMessage> }` to the SSE union and emit it from the session on `MessageQueued` and `TurnBegan`. Delete the dead `SessionEvent::Asked` variant.
+- [x] **Step 4: Tests** — `send_message_returns_202_with_an_id`, `send_message_during_a_run_is_also_202`, `detail_exposes_the_inbox`.
+- [x] **Step 5: `make check`, commit.** `git commit -m "feat(api): 202 for messages, inbox on the wire"`
 
 ---
 
@@ -165,12 +165,12 @@ impl RuntimeClientProvider { pub async fn get(&self) -> Result<RuntimeClient, Ru
 **Files:**
 - Modify: `clients/web/src/pages/SessionView.tsx`, `clients/web/src/components/Composer.tsx`, `clients/web/src/hooks/useSessionStream.ts`, `clients/web/src/hooks/useSessions.ts`
 
-- [ ] **Step 1:** Remove the `409` handling and the `askLocked` / `stoppable` composer latch that depended on `AwaitingInput`. The composer is always enabled except when the session is `Unrecoverable`.
-- [ ] **Step 2:** Render queued inbox messages as unread — a muted bubble with an "unsent" marker — sourced from `detail.inbox` and kept live by `InboxChanged`.
-- [ ] **Step 3:** Render `Unrecoverable` as a read-only banner carrying the reason, with the composer disabled and a "start a new session" link.
-- [ ] **Step 4:** Show "unknown" (an em dash) for a session whose status the list does not have yet.
-- [ ] **Step 5:** Update `clients/web/e2e/` specs that assert the old statuses or the 409 path.
-- [ ] **Step 6: `make check` + `bun run build`, commit.** `git commit -m "feat(web): unread queued messages, terminal sessions"`
+- [x] **Step 1:** Remove the `409` handling and the `askLocked` / `stoppable` composer latch that depended on `AwaitingInput`. The composer is always enabled except when the session is `Unrecoverable`.
+- [x] **Step 2:** Render queued inbox messages as unread — a muted bubble with an "unsent" marker — sourced from `detail.inbox` and kept live by `InboxChanged`.
+- [x] **Step 3:** Render `Unrecoverable` as a read-only banner carrying the reason, with the composer disabled and a "start a new session" link.
+- [x] **Step 4:** Show "unknown" (an em dash) for a session whose status the list does not have yet.
+- [x] **Step 5:** Update `clients/web/e2e/` specs that assert the old statuses or the 409 path.
+- [x] **Step 6: `make check` + `bun run build`, commit.** `git commit -m "feat(web): unread queued messages, terminal sessions"`
 
 ---
 
@@ -179,9 +179,9 @@ impl RuntimeClientProvider { pub async fn get(&self) -> Result<RuntimeClient, Ru
 **Files:**
 - Modify: `tests/tests/session_server_e2e.rs`
 
-- [ ] **Step 1:** Port the existing suite to the new statuses and the 202 contract.
-- [ ] **Step 2:** Add the spec's remaining invariants that are not already covered by a unit test: boot loads nothing (2), reads acquire no runtime (2), hibernate on idle (3), no offload during a run (4), crash mid-turn keeps the inbox (6), `Gone` is terminal while `Unavailable` is retryable (8).
-- [ ] **Step 3: `make check`, commit.** `git commit -m "test: pin the lifecycle invariants end to end"`
+- [x] **Step 1:** Port the existing suite to the new statuses and the 202 contract.
+- [x] **Step 2:** Add the spec's remaining invariants that are not already covered by a unit test: boot loads nothing (2), reads acquire no runtime (2), hibernate on idle (3), no offload during a run (4), crash mid-turn keeps the inbox (6), `Gone` is terminal while `Unavailable` is retryable (8).
+- [x] **Step 3: `make check`, commit.** `git commit -m "test: pin the lifecycle invariants end to end"`
 
 ---
 
@@ -215,9 +215,20 @@ Everything under "Still owed" above is now done:
 - **Vendor conformance** — `runtime-vendor/tests/vendor_conformance.rs` drives the real `RuntimeVendor::run` over a real WebSocket; removing the per-id lock makes its fourth test fail, so `lifecycle_locks` is now genuinely exercised.
 - **Warts** — `RUNTIME_GONE_PREFIX` replaced by a typed `ContextError { message, terminal }` carried through `AgentOutcome::Failed`; stop/delete answer with their own `Ack {}`.
 
-### Still owed
+### Closed out
 
-Both items above are now done.
+Nothing is owed. Every step above is ticked and the workspace is green.
+
+A pass over the plan's named tests found the substance covered but three invariants asserted nowhere — the plan names them, and nothing in the code did. Now closed:
+
+- **`a_failed_turn_does_not_drain`** — the deliberate no-drain-on-failure rule existed only as a comment. `on_agent_outcome` now has a direct test that a `Failed` outcome with a non-empty inbox emits `TurnFailed` and nothing else. Needed a read-only `CommandEffect::events()`: a handler that *declines* to emit an event leaves no side effect to observe, so the returned events are the only honest assertion.
+- **`turn_failed_sets_failed_and_keeps_the_inbox`** — folded into `a_failed_turn_is_sticky_but_not_terminal`, which now queues a message first and asserts it survives.
+- **`stop_then_queued_message_starts_the_next_turn`** — `stop_then_a_queued_message_starts_the_next_turn` drives the stop boundary through `drain()` and asserts the queued message becomes the next `TurnBegan`. This is the behaviour the client's unread markers exist to explain.
+- **`agent_survives_a_concluded_turn`** — `reads_after_a_concluded_turn_acquire_no_runtime` (e2e) reads history, usage and detail three times after a turn and asserts the vendor signal list is byte-identical.
+
+Everything else the plan named exists under a different name: `a_stale_run_report_is_ignored` → `a_report_from_a_superseded_run_is_ignored`, `detail_exposes_the_inbox` → `a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream`, `twenty_turns_and_three_offloads_create_once` → `a_reloaded_session_never_creates_a_second_runtime`, `idle_past_the_timeout_offloads_and_hibernates` → `an_idle_session_is_unloaded_and_hibernated` plus the e2e `an_idle_session_hibernates_and_the_next_message_resumes_it`, `interrupted_tool_calls_are_repaired_once_in_the_journal` → `recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted`.
+
+### Fixed in the 2026-08-02 follow-up run
 
 - **Coverage the rewrite dropped** — `SessionActor` unit tests now spawn the actor directly (a `DeafSupervisor` stand-in for the parent) and cover `drain()`'s four branches (empty inbox, run in flight, terminal session, merged consume-and-answer) plus `PrepareOffload`'s refuse-if-running branch, driven with a `BlockingProvider` that holds a real turn open. `create_assembles_env_fresh_each_time` mints through a `CountingMinter` and asserts two distinct `GITHUB_TOKEN` values reached the fake vendor's wire requests.
 - **`stopping_a_turn_cancels_the_in_flight_tool_call`** is un-ignored and green. The design smell was real: `cancel_run` called `RuntimeManager::get` for a fresh client, which is a `GetRuntime` round-trip on the session's own mailbox — the fake's sequential command loop can't answer it until the very tool call being cancelled resolves. Fixed by caching the client `provide()` already resolved on `SessionContextProvider` (shared in-flight tracking via `RuntimeClient::clone`) and cancelling through that instead — `cancel_in_flight` is a one-way write, not a round-trip, so it no longer touches the mailbox at all. The e2e test itself had a second, unrelated race (asserting on the fake's recorder synchronously right after releasing its gate, with no `.await` giving the fake's task a chance to run); it now polls with a deadline like the file's other `wait_*` helpers.
