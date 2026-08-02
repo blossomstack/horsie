@@ -8,6 +8,7 @@ edition = "2024"
 
 [dependencies]
 horsie-models = { version = "0.1.6", path = "../models" }
+horsie-support = { version = "0.1.6", path = "../support" }
 horsie-runtime-client = { version = "0.1.6", path = "../runtime-client" }
 tokio             = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }

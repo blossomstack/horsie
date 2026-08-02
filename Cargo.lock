@@ -1665,6 +1665,7 @@ dependencies = [
  "horsie-models",
  "horsie-runtime-client",
  "horsie-server",
+ "horsie-support",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",

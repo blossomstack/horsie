@@ -8,30 +8,26 @@
 //! per-OS JSON so they are reviewable and fully replaceable via `--capabilities`.
 
 use crate::error::CliError;
-use horsie_models::capabilities::{Access, CapabilitySpec, DirGrant, FileGrant, Grant};
+use horsie_models::capabilities::{CapabilitySpec, DirGrant, FileGrant, Grant};
 use std::path::{Path, PathBuf};
 
-/// Append read-only `Dir` grants for the shared plugin library and the hook
-/// interpreter dirs, so the sandboxed runtime can read plugin skills/resources and
-/// execute hooks (e.g. node). A no-op when `plugins_dir` is `None`.
+/// Append read-only `Dir` grants for the shared plugin library, the clone roots
+/// its symlinks point into, and the hook interpreter dirs, so the sandboxed
+/// runtime can read plugin skills/resources and execute hooks (e.g. node). A
+/// no-op when `plugins_dir` is `None`.
 pub fn with_plugin_grants(
     mut spec: CapabilitySpec,
     plugins_dir: Option<&Path>,
+    sources_dir: Option<&Path>,
     hook_path: &[PathBuf],
 ) -> CapabilitySpec {
-    let Some(dir) = plugins_dir else {
-        return spec;
-    };
-    spec.grants.push(Grant::Dir(DirGrant {
-        path: dir.to_string_lossy().into_owned(),
-        access: Access::Read,
-    }));
-    for hp in hook_path {
-        spec.grants.push(Grant::Dir(DirGrant {
-            path: hp.to_string_lossy().into_owned(),
-            access: Access::Read,
-        }));
-    }
+    let extra: Vec<PathBuf> = sources_dir.into_iter().map(Path::to_path_buf).collect();
+    spec.grants
+        .extend(horsie_support::plugin::grants::plugin_library_grants(
+            plugins_dir,
+            &extra,
+            hook_path,
+        ));
     spec
 }
 

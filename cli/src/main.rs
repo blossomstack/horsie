@@ -614,7 +614,12 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 &cfg.storage.plugins_dir,
                 cfg.runtime.hook_path.clone(),
             );
-            let plugins = plugins_dir.map(|dir| connect::PluginLibrary { dir, hook_path });
+            let sources = cfg.storage.data_dir.join("sources");
+            let plugins = plugins_dir.map(|dir| connect::PluginLibrary {
+                dir,
+                sources: Some(sources),
+                hook_path,
+            });
             connect::run(
                 &runtime_bin,
                 &server,
