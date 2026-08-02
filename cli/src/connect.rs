@@ -161,6 +161,10 @@ pub async fn run(
     // A stale socket from a previous run would make bind fail.
     let _ = std::fs::remove_file(&socket);
 
+    // Bound once, for the whole life of the process: the agent reconnects to
+    // the server without disturbing this socket. Rebinding it per connection
+    // would risk "address in use" and would drop every runtime currently dialed
+    // into it, none of which the server hanging up has any bearing on.
     let connected = Arc::new(ConnectedRuntimeRegistry::new());
     let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Unix(socket.clone()))
         .await
@@ -220,18 +224,21 @@ pub async fn run(
     println!("{}", shared_directory_notice(&table));
     println!("open {server} in your browser to start a session");
 
+    // The signal cancels rather than races the agent: `run` reconnects on its
+    // own until the token fires, and only then stops the runtimes it spawned.
+    // Selecting against it would drop that shutdown on the floor.
     let signal = install_signal_handler().map_err(CliError::Io)?;
-    let run_cancel = cancel.clone();
-    tokio::select! {
-        result = agent.run(&endpoint, cancel.clone()) => {
-            result.map_err(CliError::Executor)?;
-            Ok(0)
-        }
-        () = signal => {
-            run_cancel.cancel();
-            Ok(0)
-        }
-    }
+    let signal_cancel = cancel.clone();
+    tokio::spawn(async move {
+        signal.await;
+        signal_cancel.cancel();
+    });
+
+    agent
+        .run(&endpoint, cancel.clone())
+        .await
+        .map_err(CliError::Executor)?;
+    Ok(0)
 }
 
 #[cfg(unix)]

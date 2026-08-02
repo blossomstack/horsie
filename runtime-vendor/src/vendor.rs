@@ -17,6 +17,7 @@
 use crate::{
     connected_registry::ConnectedRuntimeRegistry,
     provider::{RuntimeHandle, RuntimeProvider},
+    reconnect::Backoff,
 };
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::executor::{EnvVar, RuntimeConfig, RuntimeInfo, RuntimeState, WorkspaceConfig};
@@ -34,6 +35,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
 
 /// Turns a requested workspace name into a path this vendor owns.
@@ -80,16 +82,21 @@ impl WorkspaceResolver for FixedWorkspaces {
     }
 }
 
-type Sink = Arc<
-    Mutex<
-        futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            Message,
-        >,
-    >,
->;
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+type Sink = Arc<Mutex<futures_util::stream::SplitSink<Socket, Message>>>;
+
+type Stream = futures_util::stream::SplitStream<Socket>;
+
+/// How one link to the server ended — the only thing the reconnect loop
+/// branches on.
+enum LinkEnd {
+    /// The agent was asked to shut down. Its runtimes go with it.
+    Cancelled,
+    /// The socket died. Says nothing about the runtimes, which keep running.
+    Disconnected,
+}
 
 /// Where and how an agent's runtimes materialize server-managed bundles.
 pub struct BundleDelivery {
@@ -132,6 +139,9 @@ pub struct RuntimeVendor {
     /// into, and an optional content-hash cache. All three are the agent's
     /// knowledge, not the server's — it sends only hashes and a token.
     bundles: Option<BundleDelivery>,
+    /// How long to wait between connection attempts. A field rather than a
+    /// constant so tests can run the reconnect path on a millisecond scale.
+    backoff: Backoff,
     runtimes: Arc<Mutex<HashMap<String, LiveRuntime>>>,
 }
 
@@ -156,6 +166,7 @@ impl RuntimeVendor {
             host_library: None,
             hook_path: Vec::new(),
             bundles: None,
+            backoff: Backoff::default(),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -164,6 +175,14 @@ impl RuntimeVendor {
     #[must_use]
     pub fn with_sandbox(mut self, enabled: bool) -> Self {
         self.sandbox = enabled;
+        self
+    }
+
+    /// Reconnect on a schedule other than [`Backoff::default`]. Tests use a
+    /// millisecond-scale one; nothing in production has a reason to.
+    #[must_use]
+    pub fn with_backoff(mut self, backoff: Backoff) -> Self {
+        self.backoff = backoff;
         self
     }
 
@@ -182,16 +201,93 @@ impl RuntimeVendor {
         self
     }
 
-    /// Dial the server and serve commands until the socket closes or `cancel`
-    /// fires. Returns `Ok(())` on a clean shutdown so the caller can decide
-    /// whether to reconnect.
+    /// Serve this vendor until `cancel` fires, reconnecting whenever the link
+    /// to the server dies.
+    ///
+    /// The link is the *only* thing a disconnect destroys. The runtime
+    /// listener, the [`ConnectedRuntimeRegistry`] it feeds, and every runtime
+    /// this agent spawned are owned outside the link and deliberately outlive
+    /// it: a dead socket to the server says nothing about the sandboxes running
+    /// here, and rebinding the listener would both risk "address in use" and
+    /// strand the runtimes currently dialed into it. Runtimes die on
+    /// cancellation, not on disconnection.
+    ///
+    /// The server, for its part, does not ask what survived when the same
+    /// vendor name re-registers — it re-creates or re-attaches lazily on the
+    /// next turn. Reconciling the two views with `QueryRuntimes` is issue #92
+    /// item 4 and deliberately not done here.
+    ///
+    /// The only `Err` is fail-fast: a `server_url` no attempt could ever dial.
+    /// Dial, handshake and transport failures are retried indefinitely.
     pub async fn run(self, server_url: &str, cancel: CancellationToken) -> Result<(), String> {
+        // Reject an undialable URL before the first attempt, so a typo is an
+        // error the operator sees once rather than a retry loop that can never
+        // succeed.
+        server_url
+            .into_client_request()
+            .map_err(|e| format!("invalid server URL '{server_url}': {e}"))?;
+
+        let mut backoff = self.backoff;
+        let mut failures: u32 = 0;
+        let mut connections: u32 = 0;
+        let agent = Arc::new(self);
+
+        loop {
+            let ended = match agent.connect(server_url).await {
+                Ok((sink, stream)) => {
+                    connections = connections.saturating_add(1);
+                    failures = 0;
+                    // A fresh incident from here on, however long the last
+                    // streak of failures waited.
+                    backoff.reset();
+                    if connections > 1 {
+                        note(&format!(
+                            "vendor agent: reconnected to {server_url} as \"{}\"",
+                            agent.vendor_name
+                        ));
+                    }
+                    Ok(agent.serve(sink, stream, &cancel).await)
+                }
+                Err(e) => {
+                    failures = failures.saturating_add(1);
+                    Err(e)
+                }
+            };
+
+            let reason = match ended {
+                Ok(LinkEnd::Cancelled) => break,
+                Ok(LinkEnd::Disconnected) => format!("lost the link to {server_url}"),
+                Err(e) => format!("attempt {failures} failed: {e}"),
+            };
+            let delay = backoff.next_delay();
+            note(&format!(
+                "vendor agent: {reason}; reconnecting in {:.1}s",
+                delay.as_secs_f64()
+            ));
+            // Cancellation must not have to wait out a 30s delay to be heard.
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(delay) => {}
+            }
+        }
+
+        // Kill every runtime we spawned. `tokio::process::Child` does not kill
+        // on drop, so without this an agent shutdown (Ctrl-C, SIGTERM) would
+        // orphan one `horsie-runtime` per live session. A mere server hangup
+        // does not reach here — that is the point of the loop above.
+        agent.halt_all().await;
+        Ok(())
+    }
+
+    /// Dial the server and announce this vendor. Both halves are one step: a
+    /// socket that never got its `Ready` across is no more usable than one that
+    /// never opened, and the reconnect loop treats them identically.
+    async fn connect(&self, server_url: &str) -> Result<(Sink, Stream), String> {
         let (ws, _) = tokio_tungstenite::connect_async(server_url)
             .await
             .map_err(|e| format!("connect {server_url}: {e}"))?;
-        let (sink_inner, mut stream) = ws.split();
+        let (sink_inner, stream) = ws.split();
         let sink: Sink = Arc::new(Mutex::new(sink_inner));
-
         send(
             &sink,
             RuntimeVendorOutboundMessage {
@@ -205,29 +301,37 @@ impl RuntimeVendor {
             },
         )
         .await?;
+        Ok((sink, stream))
+    }
 
-        let me = Arc::new(self);
+    /// Serve commands over one live link until it dies or `cancel` fires.
+    async fn serve(
+        self: &Arc<Self>,
+        sink: Sink,
+        mut stream: Stream,
+        cancel: &CancellationToken,
+    ) -> LinkEnd {
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => break,
+                _ = cancel.cancelled() => return LinkEnd::Cancelled,
                 next = stream.next() => {
-                    let Some(next) = next else { break };
+                    let Some(next) = next else { return LinkEnd::Disconnected };
                     let text = match next {
                         Ok(Message::Text(text)) => text,
                         Ok(Message::Binary(_))
                         | Ok(Message::Ping(_))
                         | Ok(Message::Pong(_))
                         | Ok(Message::Frame(_)) => continue,
-                        Ok(Message::Close(_)) | Err(_) => break,
+                        Ok(Message::Close(_)) | Err(_) => return LinkEnd::Disconnected,
                     };
                     let Ok(inbound) = serde_json::from_str::<RuntimeVendorInboundMessage>(&text) else {
-                        tracing_warn("vendor agent: undecodable command, ignoring");
+                        note("vendor agent: undecodable command, ignoring");
                         continue;
                     };
                     // Each command runs on its own task: a bash tool call can
                     // legitimately run for minutes, and blocking the read loop
                     // on it would stall every other session on this agent.
-                    let agent = me.clone();
+                    let agent = self.clone();
                     let sink = sink.clone();
                     tokio::spawn(async move {
                         agent.dispatch(inbound, sink).await;
@@ -235,11 +339,6 @@ impl RuntimeVendor {
                 }
             }
         }
-        // Kill every runtime we spawned. `tokio::process::Child` does not kill
-        // on drop, so without this an agent shutdown (Ctrl-C, SIGTERM, server
-        // hangup) would orphan one `horsie-runtime` per live session.
-        me.halt_all().await;
-        Ok(())
     }
 
     async fn dispatch(&self, inbound: RuntimeVendorInboundMessage, sink: Sink) {
@@ -429,7 +528,7 @@ impl RuntimeVendor {
         };
         for (id, handle) in live {
             if let Err(e) = handle.stop().await {
-                tracing_warn(&format!("vendor agent: stopping runtime '{id}': {e}"));
+                note(&format!("vendor agent: stopping runtime '{id}': {e}"));
             }
         }
     }
@@ -465,8 +564,89 @@ async fn send(sink: &Sink, msg: RuntimeVendorOutboundMessage) -> Result<(), Stri
         .map_err(|e| format!("send event: {e}"))
 }
 
-/// The executor crate has no tracing dependency; agent diagnostics go to stderr,
-/// which `horsie connect` already redirects to its log file in background mode.
-fn tracing_warn(message: &str) {
+/// This crate has no tracing dependency, and these lines are addressed to
+/// whoever is watching the agent — a terminal, or a process manager's log — so
+/// they go straight to stderr rather than through a subscriber that a vendor
+/// binary may never have installed.
+fn note(message: &str) {
     eprintln!("{message}");
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::reconnect::Backoff;
+
+    struct NeverProvider;
+
+    #[async_trait::async_trait]
+    impl RuntimeProvider for NeverProvider {
+        async fn create(
+            &self,
+            _id: &str,
+            _config: &RuntimeConfig,
+        ) -> Result<Arc<dyn RuntimeHandle>, crate::error::RuntimeError> {
+            panic!("an agent that never connects must never provision")
+        }
+    }
+
+    fn agent() -> RuntimeVendor {
+        RuntimeVendor::new(
+            "test-vendor".to_string(),
+            false,
+            Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
+            Arc::new(ConnectedRuntimeRegistry::new()),
+            Arc::new(FixedWorkspaces::new(HashMap::new())),
+            PathBuf::from("/tmp/horsie-vendor-test"),
+        )
+        // Long enough that a retry would visibly hang the test if the URL were
+        // treated as retryable.
+        .with_backoff(Backoff::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        ))
+    }
+
+    #[tokio::test]
+    async fn an_undialable_url_fails_before_any_attempt_instead_of_retrying_forever() {
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            agent().run(
+                "ws://not a host/api/vendor/connect",
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a URL no attempt could succeed with must fail fast, not back off")
+        .expect_err("an unparseable server URL is an operator error, not an outage");
+        assert!(err.contains("invalid server URL"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_agent_stops_without_waiting_out_the_backoff() {
+        let cancel = CancellationToken::new();
+        // Port 1 on loopback: the dial fails immediately, so the agent is in its
+        // 60s backoff sleep by the time the cancel lands.
+        let run = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                agent()
+                    .run("ws://127.0.0.1:1/api/vendor/connect", cancel)
+                    .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), run)
+            .await
+            .expect("the backoff sleep must give way to cancellation")
+            .expect("the agent task must not panic")
+            .expect("a cancelled agent exits cleanly");
+    }
 }

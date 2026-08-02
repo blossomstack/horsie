@@ -10,6 +10,12 @@ agent dials in. That means a vendor's own configuration — a velos URL and
 token, the directories a laptop serves — lives in the agent, not in the server,
 and the server's Settings page only shows which agents are connected.
 
+Either agent reconnects on its own: a server restart or a network blip is
+retried with a backoff of one second growing to thirty, indefinitely, with every
+attempt printed. Runtimes already running are kept alive across the gap — only
+stopping the agent stops them — but a turn that was in flight when the link
+dropped has to be sent again.
+
 The project ships two agents:
 
 | Agent | Where runtimes run | Who runs it | Repos & skill bundles |

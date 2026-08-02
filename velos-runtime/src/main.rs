@@ -105,6 +105,10 @@ fn server_to_endpoint(server: &str) -> Result<String, String> {
 async fn run(cli: Cli) -> Result<(), String> {
     let endpoint = server_to_endpoint(&cli.server)?;
 
+    // Bound once, for the whole life of the process: the agent reconnects to
+    // the server without disturbing this listener. Rebinding it per connection
+    // would risk "address in use" and would drop every container currently
+    // dialed into it, none of which the server hanging up has any bearing on.
     let connected = Arc::new(ConnectedRuntimeRegistry::new());
     let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Tcp(cli.listen))
         .await
@@ -172,15 +176,16 @@ async fn run(cli: Cli) -> Result<(), String> {
         cli.server, cli.name, cli.velos_url, advertise_ws
     );
 
-    let shutdown = shutdown_signal();
-    let run_cancel = cancel.clone();
-    tokio::select! {
-        result = agent.run(&endpoint, cancel.clone()) => result,
-        () = shutdown => {
-            run_cancel.cancel();
-            Ok(())
-        }
-    }
+    // The signal cancels rather than races the agent: `run` reconnects on its
+    // own until the token fires, and only then stops the containers it
+    // scheduled. Selecting against it would drop that shutdown on the floor.
+    let signal_cancel = cancel.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        signal_cancel.cancel();
+    });
+
+    agent.run(&endpoint, cancel.clone()).await
 }
 
 #[cfg(unix)]
