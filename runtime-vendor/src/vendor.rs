@@ -125,9 +125,8 @@ pub struct RuntimeVendor {
     workspaces: Arc<dyn WorkspaceResolver>,
     /// Where per-runtime scratch (the sandbox capability file) is written.
     state_dir: PathBuf,
-    /// Whether to honor the server's sandbox spec. Off by default so the local
-    /// vendor keeps behaving as it does today, where the machine is already the
-    /// user's own; `horsie connect --sandbox` turns it on.
+    /// Whether to honor the server's sandbox spec. The library default is off;
+    /// `horsie connect` turns it on unless started with `--no-sandbox`.
     sandbox: bool,
     /// The host plugin library this agent serves, resolved agent-side by the
     /// CLI. Never sent by the server — it is a property of this machine.
