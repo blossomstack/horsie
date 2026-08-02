@@ -79,6 +79,8 @@ cannot run a turn yet. Do these in order:
 | [Skills & plugins](skills-and-plugins.md) | Install skill bundles; select them per session |
 | [Settings reference](settings-reference.md) | `config.json` vs. the Settings database; every field |
 
-> **No built-in authentication.** The server has no login or access control. Bind
-> it to a trusted network only, and put it behind your own auth proxy if it needs
-> to be reachable more widely.
+> **Authentication is on by default.** On first boot the server creates an
+> `admin` account, prints a generated password, and writes it to
+> `initial-admin-password` in its state directory. Change it from
+> **Settings → Account**. To run without a password on a trusted network, set
+> `HORSIE_AUTH_ENABLED=false` or `{"auth": {"enabled": false}}` in `config.json`.

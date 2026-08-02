@@ -26,6 +26,11 @@ file — is valid.
     // Where runtime-editable settings are stored. Default: a SQLite file at
     // <data_dir>/server/config.db. Only sqlite:// is supported today.
     "url": "sqlite:///var/lib/horsie/data/server/config.db"
+  },
+  "auth": {
+    // Require a password for the web UI and API. Default: true. First boot
+    // creates an `admin` account and prints a generated password.
+    "enabled": true
   }
 }
 ```
@@ -52,6 +57,7 @@ ignored (skill bundles are managed from the UI now).
 | --- | --- |
 | `HORSIE_DATABASE_URL` | Overrides `database.url`. Takes precedence over the config file. |
 | `HORSIE_ARTIFACT_SECRET` | Signing secret for the short-lived tokens runtimes use to fetch skill bundles. Unset → a random per-process secret (fine for a single instance). Set a stable value if you run more than one server instance. |
+| `HORSIE_AUTH_ENABLED` | Overrides `auth.enabled`. `false`/`0`/`no` turns authentication off; `true`/`1`/`yes` turns it on. An unrecognised value falls through to the config file rather than silently disabling it. |
 
 ## Settings database (managed in the UI)
 
@@ -68,6 +74,7 @@ Open **Settings**. The left nav lists one page per group of settings:
 | **Integrations** | GitHub | GitHub App config + connection; the GitHub-tools-(MCP) toggle. See [GitHub](github.md). |
 | | MCP servers | Remote MCP servers: name, URL, auth. See [MCP servers](mcp-servers.md). |
 | | Server *(read-only)* | Config file path, database, state dir, data dir, plugins dir, version. |
+| **Account** | — | Change the admin password and sign out. Shows a notice while the deployment is still using its generated first-boot password. Says so plainly when authentication is disabled. |
 
 **Models** and **Runtimes** batch their edits behind a **Save changes** button —
 leaving either page with unsaved edits asks for confirmation first. Every other

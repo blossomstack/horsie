@@ -139,6 +139,43 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         horsie_server::memory::MemoryStore::new(opened.pool.clone()),
     ));
 
+    let auth = Arc::new(horsie_server::auth::AuthService::new(
+        horsie_server::auth::AuthStore::new(opened.pool.clone()),
+        horsie_server::auth::AuthDeps {
+            enabled: config::auth_enabled(&cfg),
+            state_dir: state_dir.clone(),
+        },
+    ));
+    match auth.bootstrap().await {
+        Ok(Some(password)) => {
+            let file = state_dir
+                .join(horsie_server::auth::INITIAL_PASSWORD_FILE)
+                .display()
+                .to_string();
+            println!(
+                "\n\
+                 ┌──────────────────────────────────────────────────────────────┐\n\
+                 │  horsie created its admin account                            │\n\
+                 └──────────────────────────────────────────────────────────────┘\n\
+                 \n  username: admin\n  password: {password}\n\n\
+                 Also written to {file} (deleted when you change the password).\n\
+                 Change it from Settings → Account.\n"
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(BootError::Config(format!(
+                "bootstrapping the admin account: {e}"
+            )));
+        }
+    }
+    if !auth.enabled() {
+        println!(
+            "warning: authentication is disabled — every caller that can reach \
+             this port has full access"
+        );
+    }
+
     let runtimes = Arc::new(horsie_server::runtime_manager::RuntimeManager::new(
         horsie_server::runtime_manager::RuntimeDeps {
             vendors: opened.vendors.clone(),
@@ -166,6 +203,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     let state = AppState {
         supervisor,
         global_events: global_tx,
+        auth,
         config_store: opened.store,
         model_cards,
         github,

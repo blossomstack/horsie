@@ -23,6 +23,11 @@ pub mod agent {
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod auth {
+    include!(concat!(env!("OUT_DIR"), "/auth/mod.rs"));
+}
+
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod capabilities {
     include!(concat!(env!("OUT_DIR"), "/capabilities/mod.rs"));
 }
@@ -710,5 +715,33 @@ mod vendor_tests {
         let json = serde_json::to_string(&msg).unwrap();
         let back: RuntimeVendorOutboundMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back, msg);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod auth_wire_tests {
+    use crate::auth::{AuthStatus, LoginRequest, PasswordChangeRequest};
+
+    #[test]
+    fn auth_status_is_camel_case_on_the_wire() {
+        let json = serde_json::to_string(&AuthStatus {
+            enabled: true,
+            authenticated: false,
+            must_change_password: false,
+        })
+        .unwrap();
+        assert!(json.contains("\"mustChangePassword\""), "{json}");
+        assert!(!json.contains("must_change_password"), "{json}");
+    }
+
+    #[test]
+    fn login_and_password_change_deserialize_from_camel_case() {
+        let req: LoginRequest = serde_json::from_str(r#"{"password":"p"}"#).unwrap();
+        assert_eq!(req.password, "p");
+        let req: PasswordChangeRequest =
+            serde_json::from_str(r#"{"currentPassword":"a","newPassword":"b"}"#).unwrap();
+        assert_eq!(req.current_password, "a");
+        assert_eq!(req.new_password, "b");
     }
 }

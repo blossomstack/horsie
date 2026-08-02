@@ -32,5 +32,18 @@ Everything you tune later lives in the Settings UI; `docker/docker-compose.yml`
 seeds just the storage paths for you. If you're running the binary directly
 and want non-default paths, write that file yourself and pass `--config <path>`.
 
-**Security:** there is no authentication. Only bind `0.0.0.0` on a trusted
-network, or front the server with your own auth proxy.
+## Signing in
+
+The first time the server starts it creates an `admin` account and prints a
+generated password:
+
+    docker compose -f docker/docker-compose.yml logs horsie | grep -A4 'admin account'
+
+The same password is written to `initial-admin-password` in the server's state
+directory, so a rotated log is not a lockout. Change it from
+**Settings → Account**, which deletes that file.
+
+**Turning it off.** On a trusted network — or behind an auth proxy that already
+identifies callers — set `HORSIE_AUTH_ENABLED=false`, or `"auth": {"enabled":
+false}` in `config.json`. The server then behaves exactly as it did before
+authentication existed: anything that can reach the port has full access.

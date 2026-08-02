@@ -20,4 +20,8 @@ export interface AgentSettings {
    * Canonical thinking effort for this session, chosen from the model&#x27;s
    */
   thinkingEffort?: string;
+  /**
+   * Cap on concurrently-active subagents in this session; absent → the
+   */
+  maxConcurrentSubagents?: number;
 }

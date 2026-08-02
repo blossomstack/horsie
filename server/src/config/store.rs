@@ -498,7 +498,13 @@ pub(crate) fn encode_efforts(list: Option<&Vec<String>>) -> Option<String> {
 pub(crate) async fn open_pool(url: &str) -> Result<SqlitePool, String> {
     let opts = SqliteConnectOptions::from_str(url)
         .map_err(|e| format!("invalid database url '{url}': {e}"))?
-        .create_if_missing(true);
+        .create_if_missing(true)
+        // Wait for a contended write rather than failing it. The pool hands out
+        // several connections, and authentication put a (throttled) token write
+        // on the path of every API request — without this, a write that lands
+        // while another connection holds the database surfaces as an immediate
+        // `database is locked` instead of a short wait.
+        .busy_timeout(std::time::Duration::from_secs(5));
     let pool = SqlitePool::connect_with(opts)
         .await
         .map_err(|e| format!("open database '{url}': {e}"))?;

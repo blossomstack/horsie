@@ -149,9 +149,20 @@ async fn start_server_with(
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
         horsie_server::memory::MemoryStore::new(opened.pool.clone()),
     ));
+    // Auth off: this suite drives the HTTP API without a credential, and a
+    // disabled deployment is a supported configuration. Authenticated coverage
+    // lives in the server crate's own HTTP tests.
+    let auth = Arc::new(horsie_server::auth::AuthService::new(
+        horsie_server::auth::AuthStore::new(opened.pool.clone()),
+        horsie_server::auth::AuthDeps {
+            enabled: false,
+            state_dir: journal_dir.to_path_buf(),
+        },
+    ));
     let state = AppState {
         supervisor: supervisor.clone(),
         global_events: gtx,
+        auth,
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
             opened.pool.clone(),
@@ -280,9 +291,20 @@ async fn start_server_with_live_vendors(
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
         horsie_server::memory::MemoryStore::new(opened.pool.clone()),
     ));
+    // Auth off: this suite drives the HTTP API without a credential, and a
+    // disabled deployment is a supported configuration. Authenticated coverage
+    // lives in the server crate's own HTTP tests.
+    let auth = Arc::new(horsie_server::auth::AuthService::new(
+        horsie_server::auth::AuthStore::new(opened.pool.clone()),
+        horsie_server::auth::AuthDeps {
+            enabled: false,
+            state_dir: journal_dir.to_path_buf(),
+        },
+    ));
     let state = AppState {
         supervisor: supervisor.clone(),
         global_events: gtx,
+        auth,
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
             opened.pool.clone(),

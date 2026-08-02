@@ -25,6 +25,41 @@ pub struct BootConfig {
     /// Where the session server persists its runtime-editable settings.
     #[serde(default)]
     pub database: DatabaseConfig,
+    /// Authentication. Enabled unless explicitly turned off — a deployment
+    /// reachable from anywhere but localhost should not be open by accident.
+    #[serde(default)]
+    pub auth: AuthConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `$HORSIE_AUTH_ENABLED` if set to a recognised value, else the config file.
+/// An unrecognised value falls through to the file rather than silently
+/// disabling authentication.
+pub fn auth_enabled(cfg: &BootConfig) -> bool {
+    auth_enabled_from(cfg, std::env::var("HORSIE_AUTH_ENABLED").ok())
+}
+
+fn auth_enabled_from(cfg: &BootConfig, env: Option<String>) -> bool {
+    match env.as_deref().map(str::trim) {
+        Some("1" | "true" | "TRUE" | "yes") => true,
+        Some("0" | "false" | "FALSE" | "no") => false,
+        _ => cfg.auth.enabled,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,5 +249,35 @@ mod tests {
     fn user_config_path_prefers_xdg() {
         let p = user_config_path_from(Some("/xdg".into()), Some("/home/u".into()));
         assert_eq!(p, Some(PathBuf::from("/xdg/horsie/config.json")));
+    }
+
+    #[test]
+    fn auth_is_enabled_unless_the_config_turns_it_off() {
+        let cfg = BootConfig::default();
+        assert!(cfg.auth.enabled, "default is on");
+
+        let cfg: BootConfig = serde_json::from_str(r#"{ "auth": { "enabled": false } }"#).unwrap();
+        assert!(!cfg.auth.enabled);
+
+        // An unrelated config still gets the default.
+        let cfg: BootConfig =
+            serde_json::from_str(r#"{ "database": { "url": "sqlite://x.db" } }"#).unwrap();
+        assert!(cfg.auth.enabled);
+    }
+
+    #[test]
+    fn the_env_override_beats_the_file_in_both_directions() {
+        let on = BootConfig::default();
+        let off: BootConfig = serde_json::from_str(r#"{ "auth": { "enabled": false } }"#).unwrap();
+        // An explicit env value wins over whatever the file said.
+        assert!(auth_enabled_from(&off, Some("true".into())));
+        assert!(auth_enabled_from(&off, Some("1".into())));
+        assert!(!auth_enabled_from(&on, Some("false".into())));
+        assert!(!auth_enabled_from(&on, Some("0".into())));
+        // Unset, or a value we do not recognise, falls through to the file —
+        // a typo must not silently disable authentication.
+        assert!(auth_enabled_from(&on, None));
+        assert!(auth_enabled_from(&on, Some("maybe".into())));
+        assert!(!auth_enabled_from(&off, None));
     }
 }
