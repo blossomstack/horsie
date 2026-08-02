@@ -1046,6 +1046,10 @@ impl EventSourcedActor for SessionActor {
                 state.status = Some(SessionStatus::Running);
                 state.pending_ask = None;
                 state.pending_question = None;
+                // The previous turn's failure is history once a new turn is
+                // under way; leaving it set makes the detail endpoint report a
+                // stale error for the rest of the session's life.
+                state.last_error = None;
             }
             SessionDomainEvent::AskAnswered => {
                 state.status = Some(SessionStatus::Running);
@@ -1464,6 +1468,22 @@ mod tests {
         );
         assert_eq!(s.status, Some(SessionStatus::Idle));
         assert_eq!(s.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn a_new_turn_clears_the_previous_failure() {
+        use SessionDomainEvent as E;
+        let s = SessionActor::apply_event(
+            SessionState::default(),
+            E::TurnFailed {
+                error: "boom".into(),
+            },
+        );
+        assert_eq!(s.last_error.as_deref(), Some("boom"));
+        // The detail endpoint reports `last_error`, so a turn that has just
+        // started must not still be advertising the previous turn's failure.
+        let s = SessionActor::apply_event(s, E::TurnStarted);
+        assert_eq!(s.last_error, None);
     }
 
     #[test]

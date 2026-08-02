@@ -118,7 +118,9 @@ export function SessionView() {
     }
   }, [stream.statusSeq]);
 
-  // A stream error ends the turn without a status frame.
+  // Release the latch on a stream error too. The failed turn does report Idle
+  // right after the error, but the `Error` frame arrives first — releasing here
+  // means the composer comes back without waiting on frame ordering.
   useEffect(() => {
     if (stream.streamError) {
       answerSeq.current = null;
