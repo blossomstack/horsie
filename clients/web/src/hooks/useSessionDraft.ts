@@ -18,7 +18,10 @@ import { usePersistentState } from "./usePersistentState";
 import { usePlugins } from "./usePlugins";
 import { useSettings } from "./useSettings";
 
-export interface SessionDraft {
+/** The picker state every session-config surface shares: the new-session
+ * draft and the agent-preset form. `SessionDraft` adds what only sending a
+ * first message needs. */
+export interface ConfigDraft {
   vendor: string;
   setVendor: (v: string) => void;
   model: string;
@@ -42,6 +45,9 @@ export interface SessionDraft {
   modelDefaultThinkingEffort: string;
   provisions: boolean;
   githubConnected: boolean;
+}
+
+export interface SessionDraft extends ConfigDraft {
   canSend: boolean;
   blockedReason: string | null;
   buildRequest: () => CreateSessionRequest;

@@ -7,12 +7,12 @@ import { useMcpServers } from "../hooks/useMcp";
 import { useMemorySpaces } from "../hooks/useMemory";
 import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
-import type { SessionDraft } from "../hooks/useSessionDraft";
+import type { ConfigDraft } from "../hooks/useSessionDraft";
 import { basename } from "../lib/format";
 import { PopoverMenu } from "./PopoverMenu";
 
 type Props =
-  | { mode: "draft"; draft: SessionDraft }
+  | { mode: "draft"; draft: ConfigDraft }
   | { mode: "locked"; detail: SessionDetail };
 
 /** A non-interactive labelled chip used in locked mode. */
@@ -54,7 +54,7 @@ export function SessionConfigBar(props: Props) {
   );
 }
 
-function DraftControls({ draft }: { draft: SessionDraft }) {
+function DraftControls({ draft }: { draft: ConfigDraft }) {
   const { data: settings } = useSettings();
   const { data: bundles } = usePlugins();
   const { data: mcpServers } = useMcpServers();
