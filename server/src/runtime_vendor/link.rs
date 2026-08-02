@@ -218,17 +218,12 @@ impl RuntimeVendorLink {
         .await
     }
 
-    /// Translate the server-side spec into the wire request. The capability
-    /// file is read here and inlined: a server-local path means nothing to a
-    /// remote agent.
+    /// Translate the server-side spec into the wire request.
     fn runtime_spec(spec: &RuntimeSpec) -> Result<WireRuntimeSpec, String> {
-        let sandbox_capabilities =
-            horsie_models::capabilities::CapabilitySpec::load(&spec.capabilities_file)?;
         Ok(WireRuntimeSpec {
             workspaces: spec.workspaces.iter().map(|w| w.name.clone()).collect(),
             env: spec.env.clone(),
             provision: spec.provision.clone(),
-            sandbox_capabilities: Some(sandbox_capabilities),
         })
     }
 
@@ -389,20 +384,6 @@ mod tests {
         })
     }
 
-    fn caps_file() -> std::path::PathBuf {
-        use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
-        let dir = std::env::temp_dir().join(format!("horsie-link-test-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("capabilities.json");
-        let spec = CapabilitySpec {
-            network: NetworkPolicy::Block(BlockNetwork {}),
-            grants: vec![],
-            unsafe_seatbelt_rules: None,
-        };
-        std::fs::write(&path, serde_json::to_vec(&spec).unwrap()).unwrap();
-        path
-    }
-
     fn spec_fixture() -> RuntimeSpec {
         RuntimeSpec {
             workspaces: vec![crate::runtime_vendor::WorkspaceSpec {
@@ -410,7 +391,6 @@ mod tests {
             }],
             provision: vec![],
             env: vec![],
-            capabilities_file: caps_file(),
         }
     }
 

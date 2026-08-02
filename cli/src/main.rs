@@ -57,9 +57,9 @@ enum Command {
         /// "local", matching the server's default vendor pickup.
         #[arg(long, alias = "runtime-id", default_value = "local")]
         name: String,
-        /// Do not sandbox the runtimes this agent spawns: the server's
-        /// capability spec is ignored and runtimes inherit the ambient
-        /// environment. Sandboxing is on by default.
+        /// Do not sandbox the runtimes this agent spawns: they run unconfined
+        /// and inherit the ambient environment. Sandboxing (this vendor's
+        /// baseline capability spec) is on by default.
         #[arg(long)]
         no_sandbox: bool,
         /// Removed: run the agent under a process manager instead.

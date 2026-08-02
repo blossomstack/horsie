@@ -75,7 +75,7 @@ impl RuntimeManager {
         Ok(link)
     }
 
-    /// Write the capability file and assemble the vendor-facing spec.
+    /// Assemble the vendor-facing spec.
     ///
     /// Re-assembled on every create rather than cached: the GitHub token and
     /// the plugin token are short-lived, and a stale one is worse than none.
@@ -87,13 +87,6 @@ impl RuntimeManager {
     ) -> Result<RuntimeSpec, RuntimeError> {
         let dir = self.deps.state_dir.join("sessions").join(session);
         std::fs::create_dir_all(&dir).map_err(|e| RuntimeError::Provision(e.to_string()))?;
-        let caps_path = dir.join("capabilities.json");
-        std::fs::write(
-            &caps_path,
-            serde_json::to_vec_pretty(&spec.capabilities)
-                .map_err(|e| RuntimeError::Provision(e.to_string()))?,
-        )
-        .map_err(|e| RuntimeError::Provision(e.to_string()))?;
 
         let mut rt_spec = RuntimeSpec {
             workspaces: spec
@@ -120,7 +113,6 @@ impl RuntimeManager {
                 })
                 .collect(),
             env: vec![],
-            capabilities_file: caps_path,
         };
 
         // A fresh, scoped token authorizing this session's `git_checkout`
@@ -284,7 +276,6 @@ mod tests {
     use super::*;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::spec::{AgentSettings, SessionSpec, WorkspaceDef};
-    use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use std::collections::HashMap;
     use std::sync::RwLock;
 
@@ -305,11 +296,6 @@ mod tests {
                 name: "main".into(),
             }],
             provision: vec![],
-            capabilities: CapabilitySpec {
-                network: NetworkPolicy::Block(BlockNetwork {}),
-                grants: vec![],
-                unsafe_seatbelt_rules: None,
-            },
             vendor: vendor.into(),
             plugins: vec![],
         }
@@ -402,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_writes_the_capability_file_the_vendor_reads() {
+    async fn create_sends_the_vendor_workspace_names_not_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let agent = FakeRuntimeVendor::builder("v")
             .serve_in_process()
@@ -412,18 +398,7 @@ mod tests {
         m.create("s1", "v", &session_spec("v"))
             .await
             .expect("create");
-        assert!(
-            tmp.path()
-                .join("sessions")
-                .join("s1")
-                .join("capabilities.json")
-                .exists()
-        );
         let sent = agent.last_create_request().expect("create request");
-        assert!(
-            sent.sandbox_capabilities.is_some(),
-            "the vendor must receive the policy inline, not a server-local path"
-        );
         assert_eq!(sent.workspaces, vec!["main".to_string()]);
     }
 

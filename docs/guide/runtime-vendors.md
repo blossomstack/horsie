@@ -46,8 +46,9 @@ horsie connect \
 - `--workspace name=path` — a directory the agent serves, repeatable. A bare
   path becomes `main=<path>`. At least one is required.
 - `--no-sandbox` — do not sandbox the runtimes this agent spawns. Sandboxing
-  is on by default: the agent applies the server's capability spec to each
-  runtime, probes sandbox support at startup, and refuses to start on a host
+  is on by default: the agent confines each runtime with its own baseline
+  capability spec (workspaces read-write, system toolchain read-only, network
+  allowed), probes sandbox support at startup, and refuses to start on a host
   that can't be confined unless this flag is given.
 
 Keep it running; sessions use it while it's connected. It appears in Settings →

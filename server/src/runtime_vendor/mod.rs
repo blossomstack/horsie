@@ -25,7 +25,6 @@ pub use transport::RuntimeVendorTransport;
 
 use async_trait::async_trait;
 use horsie_runtime_client::RuntimeClient;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// A session workspace request. The directory is always vendor-allocated
@@ -59,7 +58,6 @@ pub struct RuntimeSpec {
     pub workspaces: Vec<WorkspaceSpec>,
     pub provision: Vec<horsie_models::executor::ProvisionStep>,
     pub env: Vec<horsie_models::executor::EnvVar>,
-    pub capabilities_file: PathBuf,
 }
 
 /// A live runtime a vendor handed back: the tool-call transport plus the

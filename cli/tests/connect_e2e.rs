@@ -162,7 +162,6 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
                 workspaces: vec!["main".to_string()],
                 env: vec![],
                 provision: vec![],
-                sandbox_capabilities: None,
             },
         }),
     )
@@ -218,7 +217,6 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
                 workspaces: vec!["nope".to_string()],
                 env: vec![],
                 provision: vec![],
-                sandbox_capabilities: None,
             },
         }),
     )
@@ -338,7 +336,6 @@ async fn runtimes_die_with_the_agent() {
                 workspaces: vec!["main".to_string()],
                 env: vec![],
                 provision: vec![],
-                sandbox_capabilities: None,
             },
         }),
     )

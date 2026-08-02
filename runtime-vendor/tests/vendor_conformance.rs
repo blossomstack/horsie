@@ -19,7 +19,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use async_trait::async_trait;
-use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
 use horsie_models::executor::RuntimeConfig;
 use horsie_runtime_client::{MockTransport, RuntimeTransport};
 use horsie_runtime_vendor::{
@@ -84,14 +83,12 @@ impl RuntimeProvider for GatedProvider {
 struct Agent {
     link: Arc<RuntimeVendorLink>,
     cancel: CancellationToken,
-    /// Holds the workspace and the capability file alive for the test's life.
-    dir: tempfile::TempDir,
+    /// Holds the workspace alive for the test's life.
+    _dir: tempfile::TempDir,
 }
 
 impl Agent {
-    /// The workspace name matches the agent's only configured directory. The
-    /// capability file has to exist because the *server* side inlines it into
-    /// the wire spec, even though this agent runs unsandboxed and ignores it.
+    /// The workspace name matches the agent's only configured directory.
     fn spec(&self) -> RuntimeSpec {
         RuntimeSpec {
             workspaces: vec![WorkspaceSpec {
@@ -99,7 +96,6 @@ impl Agent {
             }],
             provision: vec![],
             env: vec![],
-            capabilities_file: self.dir.path().join("capabilities.json"),
         }
     }
 }
@@ -127,16 +123,6 @@ async fn start_agent(gate: Option<tokio::sync::watch::Receiver<bool>>) -> Agent 
 
     let dir = tempfile::tempdir().unwrap();
     let state_dir = dir.path().join("state");
-    std::fs::write(
-        dir.path().join("capabilities.json"),
-        serde_json::to_vec(&CapabilitySpec {
-            network: NetworkPolicy::Block(BlockNetwork {}),
-            grants: vec![],
-            unsafe_seatbelt_rules: None,
-        })
-        .unwrap(),
-    )
-    .unwrap();
     let connected = Arc::new(ConnectedRuntimeRegistry::new());
     let provider_connected = connected.clone();
     let mut workspaces = HashMap::new();
@@ -168,7 +154,11 @@ async fn start_agent(gate: Option<tokio::sync::watch::Receiver<bool>>) -> Agent 
         .await
         .expect("the agent must connect")
         .expect("link channel");
-    Agent { link, cancel, dir }
+    Agent {
+        link,
+        cancel,
+        _dir: dir,
+    }
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────

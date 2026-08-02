@@ -23,7 +23,7 @@ use config::{BootConfig, BootError};
 use horsie_actor::{FileJournal, Journal, spawn_root};
 use horsie_models::settings::ServerInfo;
 use horsie_server::config::{DbConfigStore, StoreDeps, model_cards};
-use horsie_server::http::{AppState, CapsFinalize, app};
+use horsie_server::http::{AppState, app};
 use horsie_server::plugins::{ArtifactStore, PluginService, PluginStore};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::SessionSupervisor;
@@ -74,15 +74,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     std::fs::create_dir_all(&data_dir).map_err(|e| BootError::Io(e.to_string()))?;
 
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(data_dir.clone()));
-
-    // `horsie connect` sandboxes its runtimes by default, so this default is
-    // enforced on every session that didn't supply its own spec: it must
-    // confine a runtime without breaking it (working dir read-write, system
-    // toolchain reads, network blocked). A request-supplied spec passes
-    // through `caps_finalize` unchanged.
-    let caps_finalize: CapsFinalize = Arc::new(|caps| caps);
-    let default_caps =
-        horsie_server::default_capabilities::default_capabilities().map_err(BootError::Config)?;
 
     let db_url = resolve_db_url(&cfg, &data_dir);
     let info = ServerInfo {
@@ -176,8 +167,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         supervisor,
         journal,
         global_events: global_tx,
-        caps_finalize,
-        default_caps,
         config_store: opened.store,
         model_cards,
         github,
