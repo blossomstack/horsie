@@ -78,19 +78,23 @@ mailbox. Two tools:
 
 ### SessionActor changes
 
-- New commands: `SpawnSubAgent`, `SubAgentStatus` (both with `reply`).
+- New commands: `SpawnSubAgent`, `SubAgentStatus` (both with `reply`),
+  `SubAgentTree` (API read), and the internal `FinishSpawnSubAgent`
+  (persist-then-spawn second phase) and `ReconcileSubAgents` (post-recovery).
 - New persisted events (folded into `SessionState.subagents`):
   - `SubAgentSpawned { id, parent, label, task, depth }`
+  - `SubAgentRunning { id }` — a terminal node started another run, woken to
+    consume child results.
   - `SubAgentCompleted { id, output }`
   - `SubAgentFailed { id, error }`
   - `SubAgentNotified { id }` — the parent's notification was sent; persisted
     in the same effect as the send so a reload never double- or never-delivers.
 - `sub_agents: HashMap<Uuid, ActorRef<AgentCommand>>` (the existing seam)
-  holds the live refs; `pending_notifications: Vec<SubAgentNotification>`
-  buffers completion notices whose parent is mid-run. The buffer is runtime
-  only, but it is *rebuildable*: any terminal node with `notified == false`
-  is exactly the set of owed notifications, so a reload re-derives it from
-  the tree.
+  holds the live refs. There is no notification buffer, durable or otherwise:
+  owed notifications are *derived* — any terminal node with `notified ==
+  false` is exactly the set of owed results, recomputed at every flush point
+  (a subagent outcome, a main-agent turn start), so offload and reload need
+  no bookkeeping beyond the tree.
 - `on_agent_outcome` branches on `session_id`: the session's own uuid keeps
   today's main-agent flow; any other uuid is a subagent outcome (see below).
 
@@ -126,16 +130,21 @@ mailbox. Two tools:
    whole tree) and emits a quiet progression frame
    (`subagent_completed`/`subagent_failed`).
 3. The parent is **notified** with a synthetic message
-   (`[subagent "<label>" (<id>) completed]\n\n<output>`, or the error text):
-   - Parent idle → `AgentCommand::Run { input: notification }` now.
-   - Parent mid-run → buffer in `pending_notifications`; flush when that
-     parent's outcome next arrives (same turn-boundary discipline as the
+   (`[subagent "<label>" completed]\n\n<output>`, or the error text).
+   Delivery is derived, not queued — a terminal, un-notified node is owed to
+   its parent, and each flush point delivers what is owed:
+   - Subagent parent idle (Completed/Failed) → woken now: `SubAgentRunning`
+     + `AgentCommand::Run { input: owed results }`. A woken parent is a
+     multi-cycle node: it may conclude again, which re-owes its own parent.
+   - Subagent parent mid-run → stays owed; the flush that follows the
+     parent's own outcome wakes it (same turn-boundary discipline as the
      session inbox).
-   - Parent is the main agent and the session is `AwaitingInput` → the
-     notification waits in the buffer and is merged into the user's next turn
-     input; it must never answer the user's pending ask.
-   - Multiple buffered notifications for one parent merge into a single
-     message, mirroring `MERGE_SEPARATOR` inbox merging.
+   - Parent is the main agent → owed results merge into the main agent's
+     next turn input inside `drain` (appended after any queued user
+     messages, `MERGE_SEPARATOR`-joined). If the session is Idle with an
+     empty inbox, an owed result *starts* a turn. An `AwaitingInput` session
+     only drains on user input, so a notification never answers the user's
+     pending ask by itself; a `Failed` session is never chased.
    - Every actual send to a parent persists `SubAgentNotified { id }` in the
      same command effect, so the owed/delivered distinction is durable and
      exactly-once across offloads and restarts.
@@ -152,21 +161,22 @@ On session load (`on_recovery_complete`): re-spawn a resident `AgentActor`
 (journal replay only, no run) for every node in the tree so transcripts stay
 pageable, re-attributing nothing. Any node still `Running` at crash folds to
 `Failed { "interrupted by restart" }` — recorded via a `SubAgentFailed` event
-sent as a self-command after recovery, so the transition is in the log — and
-its parent is notified through the normal buffer. This matches the session's
-"an interrupted turn is over" rule; subagents never auto-resume. Terminal
-nodes with `notified == false` (delivered into the buffer but lost to an
-offload, or interrupted before the flush) re-populate `pending_notifications`
-at load, so every result reaches its parent exactly once.
+sent as a self-command after recovery, so the transition is in the log. This
+matches the session's "an interrupted turn is over" rule; subagents never
+auto-resume. Recovery starts **no** runs: owed results (terminal,
+un-notified nodes — including freshly reconciled failures) flush at the next
+turn boundary, never on load, keeping a session open free of side effects.
+The trade-off: a result owed to an idle subagent parent when the process
+died waits for the session's next activity to be delivered.
 
 ### Offload, stop, delete
 
 - `PrepareOffload` refuses while the session status is `Running` **or** any
   subagent is active — a hibernate must not kill a subagent's sandbox mid-run.
 - `Stop` cancels only the main agent's turn (unchanged); running subagents
-  continue and their completions land in the buffer.
-- `Delete`/`stop_agents` drain `sub_agents` alongside the main agent (already
-  the shape of that code).
+  continue and their completions stay owed until the next flush point.
+- `Delete`/`stop_agents` cancel-then-stop every agent (main and subs) and
+  drain `sub_agents` alongside the main agent.
 
 ## API & wire changes
 
@@ -192,8 +202,8 @@ at load, so every result reaches its parent exactly once.
 | Depth/concurrency limit hit | Tool error naming the limit; nothing persisted |
 | Journal write fails on spawn | Tool error; no actor spawned (persist-then-spawn) |
 | Subagent run fails (provider/tool) | `SubAgentFailed` node; parent notified with error text; session status unaffected |
-| Crash with subagents running | Nodes fold to `Failed("interrupted by restart")` at load; parents notified via buffer |
-| Notification owed when the session offloads | Rebuilt at load from terminal nodes with `notified == false`; delivered with the parent's next turn — exactly once, no replay storm |
+| Crash with subagents running | Nodes fold to `Failed("interrupted by restart")` at load; parents notified at the next turn boundary |
+| Notification owed when the session offloads | Rebuilt from terminal nodes with `notified == false`; delivered with the parent's next turn — exactly once, no replay storm |
 | `subagent_status` on unknown id | Tool error listing nothing sensitive: `"no such subagent: <id>"` |
 
 ## Testing
@@ -207,8 +217,9 @@ at load, so every result reaches its parent exactly once.
   agent's include all four.
 - **Actor tests** (fake vendor + scripted mock provider, existing patterns):
   - spawn → async completion → parent receives the notification as a new turn;
-  - notification buffers while the parent is mid-run and flushes at its turn
-    boundary; buffers while `AwaitingInput` and merges into the next user turn;
+  - notification stays owed while the parent is mid-run and flushes at its
+    turn boundary; stays owed while `AwaitingInput` and merges into the next
+    user turn;
   - depth-4 and concurrency-limit rejections;
   - `PrepareOffload` refuses with an active subagent;
   - recovery: `Running` nodes become `Failed("interrupted by restart")` and
