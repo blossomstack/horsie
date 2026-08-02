@@ -28,9 +28,15 @@ impl std::error::Error for RuntimeCallError {}
 #[derive(Clone)]
 pub struct RuntimeClient {
     inner: Arc<dyn RuntimeTransport>,
-    /// Caller identity stamped on every invoke; the runtime keys its
-    /// per-caller cwd/env state by it. `None` = the shared default bucket.
-    session_id: Option<String>,
+    /// The agent this handle acts for. Stamped on every invoke; the runtime
+    /// keys its per-agent cwd/env state by it, so an agent and its subagents
+    /// never see each other's working directory or environment.
+    ///
+    /// Required, not optional: a client without an identity would share a
+    /// bucket with every other unidentified caller. Today it is the session id
+    /// (also the main agent's journal id); a subagent derives its own handle
+    /// with [`Self::with_agent_id`].
+    agent_id: String,
     /// Cleared the first time the transport reports [`TransportError::Disconnected`].
     ///
     /// A disconnect is terminal for this client: the socket is gone, and every
@@ -51,10 +57,10 @@ pub struct RuntimeClient {
 }
 
 impl RuntimeClient {
-    pub fn new(transport: impl RuntimeTransport + 'static) -> Self {
+    pub fn new(transport: impl RuntimeTransport + 'static, agent_id: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(transport),
-            session_id: None,
+            agent_id: agent_id.into(),
             connected: Arc::new(AtomicBool::new(true)),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -63,23 +69,33 @@ impl RuntimeClient {
     /// Build a client from an already-type-erased transport — e.g. the one handed
     /// back by `ExecutorClient::runtime_transport`, which cannot be re-boxed by
     /// [`RuntimeClient::new`]'s `impl RuntimeTransport` bound.
-    pub fn from_arc(transport: Arc<dyn RuntimeTransport>) -> Self {
+    pub fn from_arc(transport: Arc<dyn RuntimeTransport>, agent_id: impl Into<String>) -> Self {
         Self {
             inner: transport,
-            session_id: None,
+            agent_id: agent_id.into(),
             connected: Arc::new(AtomicBool::new(true)),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    /// Stamp every invoke with this caller identity; the runtime keys its
-    /// per-caller cwd/env state by it. Cheap — shares the inner Arcs.
+    /// A handle onto the same runtime acting for a different agent.
+    ///
+    /// The seam subagents use: a subagent sharing its parent's runtime derives
+    /// a client with its own id and gets its own cwd/env bucket, or reuses the
+    /// parent's id to share deliberately. Cheap — shares the inner Arcs, so the
+    /// disconnect latch and in-flight tracking stay common to both.
     #[must_use]
-    pub fn with_session_id(self, session_id: String) -> Self {
+    pub fn with_agent_id(self, agent_id: impl Into<String>) -> Self {
         Self {
-            session_id: Some(session_id),
+            agent_id: agent_id.into(),
             ..self
         }
+    }
+
+    /// The agent this handle acts for.
+    #[must_use]
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
     }
 
     /// Whether this client's transport is still usable.
@@ -101,10 +117,7 @@ impl RuntimeClient {
     pub async fn invoke(&self, call: ToolCall) -> Result<ToolOutput, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.track(&call_id);
-        let outcome = self
-            .inner
-            .invoke(&call_id, self.session_id.as_deref(), call)
-            .await;
+        let outcome = self.inner.invoke(&call_id, &self.agent_id, call).await;
         self.untrack(&call_id);
         match outcome {
             Ok(ToolResult::Ok(output)) => Ok(output),
@@ -224,7 +237,10 @@ mod tests {
         // The gate holds two invokes open so both are genuinely in flight when the
         // cancel arrives — the shape a Stop mid-batch produces.
         let gate = crate::testkit::BlockHandle::new();
-        let c = RuntimeClient::new(crate::testkit::MockTransport::gated_invoke(&gate));
+        let c = RuntimeClient::new(
+            crate::testkit::MockTransport::gated_invoke(&gate),
+            "test-agent",
+        );
         let probe = c.clone();
         let calls = tokio::spawn(async move {
             tokio::join!(probe.invoke(probe_call()), probe.invoke(probe_call()))
@@ -247,7 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_settled_call_is_no_longer_tracked() {
-        let c = RuntimeClient::new(crate::testkit::MockTransport::ok(""));
+        let c = RuntimeClient::new(crate::testkit::MockTransport::ok(""), "test-agent");
         assert_eq!(c.in_flight_count(), 0);
         assert!(c.invoke(probe_call()).await.is_ok());
         assert_eq!(
@@ -259,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_healthy_client_reports_connected() {
-        let c = RuntimeClient::new(MockTransport::ok(""));
+        let c = RuntimeClient::new(MockTransport::ok(""), "test-agent");
         assert!(c.is_connected());
         assert!(c.invoke(probe_call()).await.is_ok());
         assert!(c.is_connected());
@@ -269,7 +285,7 @@ mod tests {
     async fn a_tool_level_failure_does_not_mark_the_client_disconnected() {
         // `ToolResult::Err` is the tool failing, not the socket dropping — the
         // runtime is still perfectly usable.
-        let c = RuntimeClient::new(MockTransport::err("exit 1"));
+        let c = RuntimeClient::new(MockTransport::err("exit 1"), "test-agent");
         assert!(c.invoke(probe_call()).await.is_err());
         assert!(
             c.is_connected(),
@@ -279,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_disconnect_latches_and_never_clears() {
-        let c = RuntimeClient::new(MockTransport::disconnect_after(0));
+        let c = RuntimeClient::new(MockTransport::disconnect_after(0), "test-agent");
         assert!(c.is_connected());
         assert!(c.invoke(probe_call()).await.is_err());
         assert!(!c.is_connected(), "a disconnect must be latched");
@@ -291,7 +307,7 @@ mod tests {
     async fn the_latch_is_shared_across_clones() {
         // The agent gets a clone of the session's client; a disconnect seen there
         // has to be visible to the session, which is what releases the runtime.
-        let session_side = RuntimeClient::new(MockTransport::disconnect_after(0));
+        let session_side = RuntimeClient::new(MockTransport::disconnect_after(0), "test-agent");
         let agent_side = session_side.clone();
         assert!(agent_side.invoke(probe_call()).await.is_err());
         assert!(
@@ -305,25 +321,31 @@ mod tests {
     use horsie_models::runtime::BashInput;
 
     #[tokio::test]
-    async fn session_id_is_stamped_on_invokes() {
+    async fn the_agent_id_is_stamped_on_invokes() {
         let probe = crate::testkit::TransportProbe::new();
-        let client = RuntimeClient::new(MockTransport::ok("").observed_by(&probe))
-            .with_session_id("sess-1".into());
+        let client = RuntimeClient::new(MockTransport::ok("").observed_by(&probe), "agent-1");
         client.invoke(probe_call()).await.unwrap();
-        assert_eq!(probe.session_ids(), vec![Some("sess-1".to_string())]);
+        assert_eq!(probe.agent_ids(), vec!["agent-1".to_string()]);
     }
 
+    /// The subagent seam: a derived handle shares the runtime but carries its
+    /// own identity, so the runtime keys its cwd/env in a separate bucket.
     #[tokio::test]
-    async fn an_unstamped_client_sends_no_session_id() {
+    async fn a_derived_handle_stamps_its_own_agent_id() {
         let probe = crate::testkit::TransportProbe::new();
-        let client = RuntimeClient::new(MockTransport::ok("").observed_by(&probe));
-        client.invoke(probe_call()).await.unwrap();
-        assert_eq!(probe.session_ids(), vec![None]);
+        let parent = RuntimeClient::new(MockTransport::ok("").observed_by(&probe), "main");
+        let sub = parent.clone().with_agent_id("sub-1");
+        parent.invoke(probe_call()).await.unwrap();
+        sub.invoke(probe_call()).await.unwrap();
+        assert_eq!(
+            probe.agent_ids(),
+            vec!["main".to_string(), "sub-1".to_string()]
+        );
     }
 
     #[tokio::test]
     async fn client_returns_ok_output() {
-        let client = RuntimeClient::new(MockTransport::ok("hello"));
+        let client = RuntimeClient::new(MockTransport::ok("hello"), "test-agent");
         let output = client
             .invoke(ToolCall::Bash(BashInput {
                 command: "echo hello".into(),
@@ -337,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_returns_err_on_tool_failure() {
-        let client = RuntimeClient::new(MockTransport::err("oops"));
+        let client = RuntimeClient::new(MockTransport::err("oops"), "test-agent");
         let err = client
             .invoke(ToolCall::Bash(BashInput {
                 command: "bad".into(),
@@ -363,7 +385,7 @@ mod tests {
             skills: vec![],
             platform: None,
         };
-        let client = RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan]));
+        let client = RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan]), "test-agent");
         let (out, shared) = client
             .scan_workspace(
                 None,

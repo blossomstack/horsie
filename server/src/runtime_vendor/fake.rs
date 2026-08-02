@@ -39,6 +39,9 @@ struct Recorder {
     /// Remaining attach failures to inject, and whether creates fail.
     attach_failures: Mutex<u32>,
     tool_calls: Mutex<usize>,
+    /// The agent id on each relayed tool call, in order — how a test proves the
+    /// caller identity survives the trip across the vendor link.
+    tool_agent_ids: Mutex<Vec<String>>,
     /// Call ids the server asked to cancel — how a test proves a stop reached
     /// the sandbox instead of merely being dropped locally.
     cancels: Mutex<Vec<String>>,
@@ -164,6 +167,16 @@ impl FakeRuntimeVendor {
     /// [`FakeRuntimeVendorBuilder::block_tool_calls`].
     pub fn release_tool_calls(&self) {
         self.gate.release();
+    }
+
+    /// The agent id each relayed tool call carried, in order.
+    #[must_use]
+    pub fn tool_agent_ids(&self) -> Vec<String> {
+        self.recorder
+            .tool_agent_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Call ids the server asked this agent to cancel.
@@ -450,6 +463,11 @@ async fn run_agent<S>(
                 let runtime_id = cmd.runtime_id;
                 let answer = match cmd.message {
                     RuntimeInboundMessage::ToolCall(req) => {
+                        recorder
+                            .tool_agent_ids
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(req.agent_id.clone());
                         let seen = {
                             let mut g = recorder
                                 .tool_calls
@@ -613,6 +631,50 @@ mod tests {
     /// upstream fails if it silently goes nowhere. The only other assertion that
     /// it reaches the vendor lives in an `#[ignore]`d e2e (the `POST /stop` port
     /// gap), which would leave the one-way branch of the relay uncovered.
+    /// The identity has to survive the whole path — `RuntimeClient` stamps it,
+    /// the vendor link relays the message verbatim, and the agent reads it back
+    /// off the wire. Stamping and the runtime's use of the id are unit-tested
+    /// separately; without this, the plumbing between them is not.
+    #[tokio::test]
+    async fn the_agent_id_survives_the_trip_across_the_vendor_link() {
+        use horsie_models::runtime::{BashInput, ToolCall};
+        use horsie_runtime_client::RuntimeClient;
+
+        let agent = FakeRuntimeVendor::builder("test-agent")
+            .serve_in_process()
+            .await
+            .expect("agent");
+        let transport =
+            crate::runtime_vendor::RuntimeVendorTransport::new(agent.link(), "rt-1".to_string());
+        let client = RuntimeClient::from_arc(std::sync::Arc::new(transport), "main-agent");
+
+        client
+            .invoke(ToolCall::Bash(BashInput {
+                command: "true".to_string(),
+                timeout_secs: None,
+                workspace: None,
+            }))
+            .await
+            .expect("tool call");
+        assert_eq!(agent.tool_agent_ids(), vec!["main-agent".to_string()]);
+
+        // A subagent's derived handle carries its own id over the same link.
+        client
+            .clone()
+            .with_agent_id("sub-1")
+            .invoke(ToolCall::Bash(BashInput {
+                command: "true".to_string(),
+                timeout_secs: None,
+                workspace: None,
+            }))
+            .await
+            .expect("subagent tool call");
+        assert_eq!(
+            agent.tool_agent_ids(),
+            vec!["main-agent".to_string(), "sub-1".to_string()]
+        );
+    }
+
     #[tokio::test]
     async fn a_cancel_reaches_the_vendor_as_a_one_way_relay() {
         let agent = FakeRuntimeVendor::builder("test-agent")

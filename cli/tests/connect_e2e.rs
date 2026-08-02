@@ -179,6 +179,7 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
             runtime_id: "rt-1".to_string(),
             message: RuntimeInboundMessage::ToolCall(ToolCallRequest {
                 call_id: "call-1".to_string(),
+                agent_id: "agent-1".to_string(),
                 call: ToolCall::Bash(BashInput {
                     command: "cat marker.txt".to_string(),
                     timeout_secs: None,

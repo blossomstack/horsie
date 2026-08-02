@@ -263,7 +263,12 @@ impl RuntimeVendorLink {
 
         let transport = RuntimeVendorTransport::new(self.clone(), runtime_id.to_string());
         Ok(VendorRuntime {
-            runtime_client: RuntimeClient::from_arc(Arc::new(transport)),
+            // The runtime's own id doubles as its main agent's identity: the
+            // server passes the session id as `runtime_id`, and that is also
+            // what the agent journal is keyed by (`agent/<session-uuid>`). A
+            // subagent sharing this runtime derives its own handle with
+            // `RuntimeClient::with_agent_id`.
+            runtime_client: RuntimeClient::from_arc(Arc::new(transport), runtime_id),
             handle: Arc::new(LinkRuntimeHandle {
                 link: self.clone(),
                 runtime_id: runtime_id.to_string(),

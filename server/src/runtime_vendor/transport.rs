@@ -169,7 +169,10 @@ mod tests {
     async fn invoke_round_trips_a_tool_call_through_the_link() {
         let link = boot_agent(true, "hello-from-agent").await;
         let transport = RuntimeVendorTransport::new(link, "rt-1".to_string());
-        let result = transport.invoke("call-1", bash()).await.expect("tool call");
+        let result = transport
+            .invoke("call-1", "agent-1", bash())
+            .await
+            .expect("tool call");
         match result {
             ToolResult::Ok(out) => assert_eq!(out.stdout, "hello-from-agent"),
             ToolResult::Err(ToolError { reason }) => panic!("expected success, got {reason}"),
@@ -181,7 +184,7 @@ mod tests {
         let link = boot_agent(false, "").await;
         let transport = RuntimeVendorTransport::new(link, "rt-1".to_string());
         let err = transport
-            .invoke("call-1", bash())
+            .invoke("call-1", "agent-1", bash())
             .await
             .expect_err("a dead link must fail the call");
         assert!(

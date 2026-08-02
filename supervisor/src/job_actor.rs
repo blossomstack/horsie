@@ -191,7 +191,9 @@ impl JobRuntime for ProcessJobRuntime {
             .runtime_transport(&job_id)
             .await
             .ok_or_else(|| format!("runtime '{job_id}' started but never dialed back"))?;
-        let runtime_client = RuntimeClient::from_arc(rt_transport);
+        // One agent per job here, so the job id is that agent's identity — the
+        // runtime keys its cwd/env state by it.
+        let runtime_client = RuntimeClient::from_arc(rt_transport, &job_id);
 
         let ctx = WorkflowRuntimeContext {
             provider_registry: self.deps.provider_registry.clone(),

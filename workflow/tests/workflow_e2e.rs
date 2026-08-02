@@ -94,7 +94,7 @@ fn runtime_context(
         WorkflowRuntimeContext {
             provider_registry: registry,
             toolbox_factory: factory,
-            runtime_client: RuntimeClient::new(MockTransport::ok("")),
+            runtime_client: RuntimeClient::new(MockTransport::ok(""), "test-agent"),
             event_sink: Arc::new(NoopSink),
             workflow_events: tx,
         },

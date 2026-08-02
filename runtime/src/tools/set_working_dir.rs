@@ -6,26 +6,31 @@ use std::path::Path;
 pub fn exec(
     registry: &WorkspaceRegistry,
     state: &RuntimeState,
-    session: &Option<String>,
+    agent: &str,
     input: SetWorkingDirInput,
 ) -> ToolResult {
     match &input.path {
-        Some(path) => set(registry, state, session, &input.workspace, path),
-        None => reset(registry, state, session, &input.workspace),
+        Some(path) => set(registry, state, agent, &input.workspace, path),
+        None => reset(registry, state, agent, &input.workspace),
     }
 }
 
-/// Point the caller's cwd at `path` — absolute, or relative to the caller's
-/// current effective cwd. A bad target is an error and changes nothing.
+/// Point the agent's cwd at `path` — absolute, or relative to its current
+/// effective cwd. A bad target is an error and changes nothing.
+///
+/// Naming a `workspace` restarts from that workspace's root instead of
+/// chaining off the current cwd, matching how the other tools read an explicit
+/// workspace: as the base, not a hint.
 fn set(
     registry: &WorkspaceRegistry,
     state: &RuntimeState,
-    session: &Option<String>,
+    agent: &str,
     workspace: &Option<String>,
     path: &str,
 ) -> ToolResult {
     let base = match registry.resolve(workspace) {
-        Ok(root) => state.effective_dir(session, &root),
+        Ok(root) if workspace.is_none() => state.effective_dir(agent, &root),
+        Ok(root) => root,
         Err(reason) => return ToolResult::Err(ToolError { reason }),
     };
     // Path::join discards the base when `path` is absolute — exactly cd semantics.
@@ -43,24 +48,24 @@ fn set(
             reason: format!("not a directory: {}", dir.display()),
         });
     }
-    state.set_cwd(session, Some(dir.clone()));
+    state.set_cwd(agent, Some(dir.clone()));
     ok(dir.display().to_string())
 }
 
-/// Clear the caller's override, returning to per-call workspace resolution.
+/// Clear the agent's override, returning to per-call workspace resolution.
 /// The target workspace is validated first so a typo doesn't silently drop
 /// the override.
 fn reset(
     registry: &WorkspaceRegistry,
     state: &RuntimeState,
-    session: &Option<String>,
+    agent: &str,
     workspace: &Option<String>,
 ) -> ToolResult {
     let root = match registry.resolve(workspace) {
         Ok(r) => r,
         Err(reason) => return ToolResult::Err(ToolError { reason }),
     };
-    state.set_cwd(session, None);
+    state.set_cwd(agent, None);
     ok(root.display().to_string())
 }
 
@@ -105,8 +110,7 @@ mod tests {
     fn relative_path_resolves_against_current_cwd_and_chains() {
         let (dir, registry, state) = fixture();
         std::fs::create_dir(dir.path().join("sub/deep")).unwrap();
-        let session = None;
-        let r = exec(&registry, &state, &session, input(Some("sub"), None));
+        let r = exec(&registry, &state, "a", input(Some("sub"), None));
         match r {
             ToolResult::Ok(o) => assert_eq!(
                 o.stdout,
@@ -120,10 +124,10 @@ mod tests {
             ToolResult::Err(e) => panic!("{}", e.reason),
         }
         // A second relative set chains off the first.
-        let r = exec(&registry, &state, &session, input(Some("deep"), None));
+        let r = exec(&registry, &state, "a", input(Some("deep"), None));
         assert!(matches!(r, ToolResult::Ok(_)));
         assert_eq!(
-            state.effective_dir(&session, dir.path()),
+            state.effective_dir("a", dir.path()),
             dir.path().join("sub/deep").canonicalize().unwrap()
         );
     }
@@ -132,24 +136,23 @@ mod tests {
     fn absolute_path_is_used_as_is() {
         let (dir, registry, state) = fixture();
         let abs = dir.path().join("sub").display().to_string();
-        let r = exec(&registry, &state, &None, input(Some(&abs), None));
+        let r = exec(&registry, &state, "a", input(Some(&abs), None));
         assert!(matches!(r, ToolResult::Ok(_)));
     }
 
     #[test]
     fn nonexistent_target_errors_and_preserves_state() {
         let (dir, registry, state) = fixture();
-        let session = None;
-        let r = exec(&registry, &state, &session, input(Some("nope"), None));
+        let r = exec(&registry, &state, "a", input(Some("nope"), None));
         assert!(matches!(r, ToolResult::Err(_)));
-        assert_eq!(state.effective_dir(&session, dir.path()), dir.path());
+        assert_eq!(state.effective_dir("a", dir.path()), dir.path());
     }
 
     #[test]
     fn a_file_is_not_a_directory() {
         let (dir, registry, state) = fixture();
         std::fs::write(dir.path().join("f.txt"), "x").unwrap();
-        let r = exec(&registry, &state, &None, input(Some("f.txt"), None));
+        let r = exec(&registry, &state, "a", input(Some("f.txt"), None));
         match r {
             ToolResult::Err(e) => assert!(e.reason.contains("not a directory"), "{}", e.reason),
             ToolResult::Ok(_) => panic!("expected error"),
@@ -159,22 +162,20 @@ mod tests {
     #[test]
     fn reset_clears_the_override() {
         let (dir, registry, state) = fixture();
-        let session = None;
-        let _ = exec(&registry, &state, &session, input(Some("sub"), None));
-        let r = exec(&registry, &state, &session, input(None, None));
+        let _ = exec(&registry, &state, "a", input(Some("sub"), None));
+        let r = exec(&registry, &state, "a", input(None, None));
         assert!(matches!(r, ToolResult::Ok(_)));
-        assert_eq!(state.effective_dir(&session, dir.path()), dir.path());
+        assert_eq!(state.effective_dir("a", dir.path()), dir.path());
     }
 
     #[test]
     fn reset_with_unknown_workspace_errors_and_keeps_the_override() {
         let (dir, registry, state) = fixture();
-        let session = None;
-        let _ = exec(&registry, &state, &session, input(Some("sub"), None));
-        let r = exec(&registry, &state, &session, input(None, Some("zzz")));
+        let _ = exec(&registry, &state, "a", input(Some("sub"), None));
+        let r = exec(&registry, &state, "a", input(None, Some("zzz")));
         assert!(matches!(r, ToolResult::Err(_)));
         assert_eq!(
-            state.effective_dir(&session, dir.path()),
+            state.effective_dir("a", dir.path()),
             dir.path().join("sub").canonicalize().unwrap()
         );
     }

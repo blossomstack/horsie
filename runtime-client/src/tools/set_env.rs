@@ -64,6 +64,7 @@ mod tests {
         let probe = crate::testkit::TransportProbe::new();
         let tool = SetEnvTool::new(RuntimeClient::new(
             MockTransport::ok("set FOO").observed_by(&probe),
+            "test-agent",
         ));
         let v = tool
             .execute(json!({"name": "FOO", "value": "1"}))
@@ -84,6 +85,7 @@ mod tests {
         let probe = crate::testkit::TransportProbe::new();
         let tool = SetEnvTool::new(RuntimeClient::new(
             MockTransport::ok("").observed_by(&probe),
+            "test-agent",
         ));
         tool.execute(json!({"name": "FOO"})).await.unwrap();
         match &probe.invocations()[0] {
@@ -94,14 +96,14 @@ mod tests {
 
     #[tokio::test]
     async fn missing_name_is_an_input_error() {
-        let tool = SetEnvTool::new(RuntimeClient::new(MockTransport::ok("")));
+        let tool = SetEnvTool::new(RuntimeClient::new(MockTransport::ok(""), "test-agent"));
         let err = tool.execute(json!({})).await.unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
     }
 
     #[test]
     fn spec_shape() {
-        let tool = SetEnvTool::new(RuntimeClient::new(MockTransport::ok("")));
+        let tool = SetEnvTool::new(RuntimeClient::new(MockTransport::ok(""), "test-agent"));
         let spec = tool.spec();
         assert_eq!(spec.name, "set_env");
         assert_eq!(spec.input_schema["required"], json!(["name"]));

@@ -35,10 +35,20 @@ pub trait RuntimeTransport: Send + Sync {
     /// today, and a caller that is tearing a turn down must not block on it.
     async fn send_oneway(&self, message: RuntimeInboundMessage) -> Result<(), TransportError>;
 
-    async fn invoke(&self, call_id: &str, call: ToolCall) -> Result<ToolResult, TransportError> {
+    /// `agent_id` keys the runtime's per-agent cwd/env state. It is a required
+    /// parameter rather than transport state so the single place that builds a
+    /// [`ToolCallRequest`] cannot omit it — an unkeyed call would share mutable
+    /// state with every other unkeyed caller.
+    async fn invoke(
+        &self,
+        call_id: &str,
+        agent_id: &str,
+        call: ToolCall,
+    ) -> Result<ToolResult, TransportError> {
         let reply = self
             .relay(RuntimeInboundMessage::ToolCall(ToolCallRequest {
                 call_id: call_id.to_string(),
+                agent_id: agent_id.to_string(),
                 call,
             }))
             .await?;

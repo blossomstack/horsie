@@ -69,6 +69,7 @@ mod tests {
         let probe = crate::testkit::TransportProbe::new();
         let tool = SetWorkingDirTool::new(RuntimeClient::new(
             MockTransport::ok("/ws/sub").observed_by(&probe),
+            "test-agent",
         ));
         let v = tool
             .execute(json!({"path": "sub", "workspace": "ws"}))
@@ -89,6 +90,7 @@ mod tests {
         let probe = crate::testkit::TransportProbe::new();
         let tool = SetWorkingDirTool::new(RuntimeClient::new(
             MockTransport::ok("").observed_by(&probe),
+            "test-agent",
         ));
         tool.execute(json!({})).await.unwrap();
         match &probe.invocations()[0] {
@@ -99,7 +101,7 @@ mod tests {
 
     #[test]
     fn spec_shape() {
-        let tool = SetWorkingDirTool::new(RuntimeClient::new(MockTransport::ok("")));
+        let tool = SetWorkingDirTool::new(RuntimeClient::new(MockTransport::ok(""), "test-agent"));
         let spec = tool.spec();
         assert_eq!(spec.name, "set_working_dir");
         assert!(spec.input_schema["required"].is_null());
