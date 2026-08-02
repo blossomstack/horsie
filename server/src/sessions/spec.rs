@@ -92,44 +92,44 @@ pub struct SessionSpec {
 
 /// User-visible lifecycle state. Failure reasons ride inside the variants;
 /// [`status_kind`]/[`status_reason`] project them onto the wire shape.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum SessionStatus {
-    Provisioning,
+    /// Loaded and not working. The resting state, and where a session lands
+    /// after a turn ends, is stopped, or is found interrupted at load.
+    #[default]
     Idle,
     Running,
     AwaitingInput,
-    Interrupted,
-    Stopped,
-    RecoveryFailed { reason: String },
-    Failed { reason: String },
+    /// The last turn failed. Sticky so the UI can badge it, but fully
+    /// recoverable: the next turn moves it back to `Running`.
+    Failed {
+        reason: String,
+    },
+    /// Terminal. The session can never run again — today only because its
+    /// runtime is gone and re-provisioning would silently destroy work.
+    Unrecoverable {
+        reason: String,
+    },
 }
 
 /// Project a storage status onto its wire discriminant.
 pub fn status_kind(s: &SessionStatus) -> SessionStatusKind {
     match s {
-        SessionStatus::Provisioning => SessionStatusKind::Provisioning,
         SessionStatus::Idle => SessionStatusKind::Idle,
         SessionStatus::Running => SessionStatusKind::Running,
         SessionStatus::AwaitingInput => SessionStatusKind::AwaitingInput,
-        SessionStatus::Interrupted => SessionStatusKind::Interrupted,
-        SessionStatus::Stopped => SessionStatusKind::Stopped,
-        SessionStatus::RecoveryFailed { .. } => SessionStatusKind::RecoveryFailed,
         SessionStatus::Failed { .. } => SessionStatusKind::Failed,
+        SessionStatus::Unrecoverable { .. } => SessionStatusKind::Unrecoverable,
     }
 }
 
 /// The failure reason a status carries, if any.
 pub fn status_reason(s: &SessionStatus) -> Option<String> {
     match s {
-        SessionStatus::RecoveryFailed { reason } | SessionStatus::Failed { reason } => {
+        SessionStatus::Unrecoverable { reason } | SessionStatus::Failed { reason } => {
             Some(reason.clone())
         }
-        SessionStatus::Provisioning
-        | SessionStatus::Idle
-        | SessionStatus::Running
-        | SessionStatus::AwaitingInput
-        | SessionStatus::Interrupted
-        | SessionStatus::Stopped => None,
+        SessionStatus::Idle | SessionStatus::Running | SessionStatus::AwaitingInput => None,
     }
 }
 
@@ -220,10 +220,10 @@ mod tests {
 
     #[test]
     fn status_kind_and_reason_project_failures() {
-        let s = SessionStatus::RecoveryFailed {
+        let s = SessionStatus::Unrecoverable {
             reason: "gone".into(),
         };
-        assert_eq!(status_kind(&s), SessionStatusKind::RecoveryFailed);
+        assert_eq!(status_kind(&s), SessionStatusKind::Unrecoverable);
         assert_eq!(status_reason(&s).as_deref(), Some("gone"));
         assert_eq!(status_reason(&SessionStatus::Idle), None);
     }

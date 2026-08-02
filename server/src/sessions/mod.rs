@@ -6,6 +6,7 @@
 //! journals replay at startup, runtimes respawn only on user action.
 
 pub mod ask_tool;
+pub mod clock;
 pub mod events;
 pub mod session_actor;
 pub mod spec;
@@ -35,14 +36,12 @@ pub enum SessionFrame {
     },
 }
 
+/// Why a message could not be accepted. There is no "busy" here by design: a
+/// turn in flight queues the message rather than rejecting it.
 #[derive(Debug, thiserror::Error)]
 pub enum UserMessageError {
     #[error("session not found")]
     NotFound,
-    #[error("session is provisioning")]
-    Provisioning,
-    #[error("a turn is already in flight")]
-    TurnInFlight,
-    #[error("runtime recovery failed: {0}")]
-    RecoveryFailed(String),
+    #[error("session is unrecoverable: {0}")]
+    Unrecoverable(String),
 }

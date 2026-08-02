@@ -323,7 +323,14 @@ async fn get_status(client: &reqwest::Client, addr: &SocketAddr, id: &str) -> Op
         return None;
     }
     let v: serde_json::Value = res.json().await.unwrap();
-    Some(v["session"]["status"].as_str().unwrap().to_string())
+    // `null` means the session is known but not loaded, so the server has no
+    // status to report rather than a guess.
+    Some(
+        v["session"]["status"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string(),
+    )
 }
 
 /// Poll the session detail until its status equals `want` or the deadline passes.
@@ -474,7 +481,11 @@ async fn create_message_sse_roundtrip() {
     );
 
     wait_status(&client, &server.addr, &id, "Idle").await;
-    assert_eq!(agent.signals(), vec![format!("create:{id}")]);
+    assert_eq!(
+        agent.signals(),
+        vec![format!("create:{id}"), format!("get:{id}")],
+        "one create at session creation, then a get for the turn that ran"
+    );
 
     server.shutdown().await;
 }
@@ -578,7 +589,8 @@ async fn history_endpoint_returns_windowed_messages() {
             }
         }
     };
-    // Serialize the turns: the second send would 409 while the first is Running,
+    // Serialize the turns: a second send while the first is Running would be
+    // queued and merged into the next turn,
     // so wait for turn one's reply (2 messages) before sending turn two.
     send_message(&client, &server.addr, &id, "one").await;
     wait_for(2).await;
@@ -697,7 +709,7 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
 }
 
 #[tokio::test]
-async fn stop_preserves_and_message_reattaches() {
+async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
     let mock = MockLlmServer::builder().build().await;
     mock.queue_response("first");
     mock.queue_response("second");
@@ -714,7 +726,8 @@ async fn stop_preserves_and_message_reattaches() {
     send_message(&client, &server.addr, &id, "one").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
-    // Stop → runtime stopped but preserved.
+    // Stop cancels the turn and nothing else: the runtime is the supervisor's
+    // to release when the session goes cold, not the user's to destroy.
     let res = client
         .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
         .json(&serde_json::json!({}))
@@ -722,10 +735,14 @@ async fn stop_preserves_and_message_reattaches() {
         .await
         .unwrap();
     assert_eq!(res.status().as_u16(), 200);
-    wait_status(&client, &server.addr, &id, "Stopped").await;
-    assert!(agent.signals().contains(&format!("hibernate:{id}")));
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    assert!(
+        !agent.signals().contains(&format!("hibernate:{id}")),
+        "stop must not hibernate: {:?}",
+        agent.signals()
+    );
 
-    // A new message re-attaches and runs.
+    // A new message runs against the same runtime.
     assert_eq!(
         send_message(&client, &server.addr, &id, "two")
             .await
@@ -739,7 +756,7 @@ async fn stop_preserves_and_message_reattaches() {
 }
 
 #[tokio::test]
-async fn restart_marks_interrupted_and_message_resumes() {
+async fn restart_leaves_status_unknown_until_loaded_and_never_resumes() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
     let agent = FakeRuntimeVendor::builder("mock")
@@ -760,18 +777,19 @@ async fn restart_marks_interrupted_and_message_resumes() {
     // Crash: stop the server core without letting the turn finish.
     server.shutdown().await;
 
-    // New incarnation on the SAME journal recovers the registry and reconciles
-    // the in-flight session to Interrupted — with no vendor calls.
+    // New incarnation on the SAME journal. The registry comes back, but the
+    // session is not loaded, so the server reports no status rather than
+    // guessing — and calls no vendor.
     let signals_before = agent.signals();
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    wait_status(&client, &server2.addr, &id, "Interrupted").await;
+    wait_status(&client, &server2.addr, &id, "Unknown").await;
     assert_eq!(
         agent.signals(),
         signals_before,
         "recovery must not emit vendor signals (lazy)"
     );
 
-    // A new message attaches and completes the (now answerable) turn.
+    // A message loads it, repairs the interrupted turn to Idle, and runs.
     mock.queue_response("resumed answer");
     assert_eq!(
         send_message(&client, &server2.addr, &id, "continue")
@@ -926,49 +944,6 @@ async fn session_detail_echoes_full_config() {
 }
 
 #[tokio::test]
-async fn turn_in_flight_conflicts() {
-    let mock = MockLlmServer::builder().build().await;
-    let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeRuntimeVendor::builder("mock")
-        .serve_in_process()
-        .await
-        .expect("fake agent");
-    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let client = reqwest::Client::new();
-
-    let id = create_session(&client, &server.addr).await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
-
-    // Hang the first turn, then a concurrent message must 409.
-    let block = mock.blocking_response("eventually");
-    assert_eq!(
-        send_message(&client, &server.addr, &id, "first")
-            .await
-            .as_u16(),
-        202
-    );
-    block.wait_until_received().await;
-    wait_status(&client, &server.addr, &id, "Running").await;
-
-    let status = send_message(&client, &server.addr, &id, "second").await;
-    assert_eq!(status.as_u16(), 409);
-
-    block.release();
-    wait_status(&client, &server.addr, &id, "Idle").await;
-
-    server.shutdown().await;
-}
-
-/// #61 item 2: a runtime that disconnects mid-run is never released, so every
-/// later turn fails identically.
-///
-/// `ensure_runtime` short-circuits on `if self.runtime.is_some()`
-/// (`server/src/sessions/session_actor.rs:327-330`) and `self.runtime` is cleared
-/// only in `halt()` (`:783`). There is no liveness check anywhere —
-/// `VelosRuntimeHandle::health_check` exists and the server never calls it. So the
-/// session keeps reusing a dead transport until a Stop or a server restart, and
-/// the comment claiming "a failed turn never bricks the session" is false.
-#[tokio::test]
 async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let mock = MockLlmServer::builder().build().await;
@@ -1004,7 +979,7 @@ async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
         }
         let settled = settled.expect("the turn never left Running after the agent hung up");
         assert!(
-            matches!(settled.as_str(), "Idle" | "Failed" | "RecoveryFailed"),
+            matches!(settled.as_str(), "Idle" | "Failed" | "Unrecoverable"),
             "expected a terminal status, got {settled}"
         );
 
@@ -1062,7 +1037,7 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
             .await
             .unwrap();
         assert_eq!(res.status().as_u16(), 200);
-        wait_status(&client, &server.addr, &id, "Stopped").await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
         agent.release_tool_calls();
 
         assert!(
@@ -1094,67 +1069,6 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
 ///
 /// #62 added a client-side latch, so the browser cannot trigger this; the server
 /// still accepts it, which any non-browser client can do.
-#[tokio::test]
-async fn answering_an_ask_marks_the_session_running_and_rejects_a_concurrent_message() {
-    tokio::time::timeout(Duration::from_secs(60), async {
-        let mock = MockLlmServer::builder().build().await;
-        let tmp = tempfile::tempdir().unwrap();
-        let agent = FakeRuntimeVendor::builder("mock")
-            .serve_in_process()
-            .await
-            .expect("fake agent");
-        let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
-        let client = reqwest::Client::new();
-        let id = create_session(&client, &server.addr).await;
-        wait_status(&client, &server.addr, &id, "Idle").await;
-
-        // Turn 1: the model parks the turn on a question.
-        mock.queue_tool_call(
-            "ask_user",
-            serde_json::json!({ "question": "which environment?" }),
-        );
-        send_message(&client, &server.addr, &id, "deploy it").await;
-        wait_status(&client, &server.addr, &id, "AwaitingInput").await;
-
-        // The answer resumes the turn. Hold the model so the resumed run is still
-        // in flight when the follow-up arrives — the exact window the bug needs.
-        let gate = mock.blocking_response("resumed and done");
-        assert_eq!(
-            send_message(&client, &server.addr, &id, "production")
-                .await
-                .as_u16(),
-            202
-        );
-        gate.wait_until_received().await;
-
-        // With the resumed run live, the session must present as Running...
-        assert_eq!(
-            get_status(&client, &server.addr, &id).await.as_deref(),
-            Some("Running"),
-            "a resumed turn is a running turn; leaving it AwaitingInput is what \
-             lets a second answer start a concurrent run on one journal"
-        );
-        // ...and a follow-up must be refused rather than starting a second run.
-        assert_eq!(
-            send_message(&client, &server.addr, &id, "actually, staging")
-                .await
-                .as_u16(),
-            409,
-            "a message sent while a resumed turn is in flight must 409, not inject \
-             a second tool_result for the same tool_call_id"
-        );
-
-        gate.release();
-        wait_status(&client, &server.addr, &id, "Idle").await;
-        server.shutdown().await;
-    })
-    .await
-    .expect("test timed out");
-}
-
-/// A session runs a full turn against a vendor agent the server never spawned:
-/// the agent dialed in, announced itself, and every tool call is relayed
-/// through its one link.
 #[tokio::test]
 async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
     let mock = MockLlmServer::builder().build().await;
@@ -1232,7 +1146,7 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         .send()
         .await
         .unwrap();
-    wait_status(&client, &server.addr, &a, "Stopped").await;
+    wait_status(&client, &server.addr, &a, "Idle").await;
 
     // Hibernate is advisory and this agent declines it, so both runtimes are
     // still there. What matters is that stopping one session did not disturb

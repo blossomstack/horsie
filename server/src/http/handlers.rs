@@ -70,13 +70,13 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
     }
 }
 
-fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
+fn summary(id: &str, rec: &SessionRecord, status: Option<&SessionStatus>) -> SessionSummary {
     SessionSummary {
         id: id.to_string(),
         name: rec.spec.name.clone(),
-        status: status_kind(&rec.status),
+        status: status.map(status_kind),
         created_at: rec.created_at,
-        last_error: status_reason(&rec.status),
+        last_error: status.and_then(status_reason),
     }
 }
 
@@ -178,22 +178,23 @@ pub async fn create_session(
         reply,
     })
     .await?;
-    let rec = SessionRecord {
-        spec,
-        status: SessionStatus::Provisioning,
-        created_at,
-    };
+    let rec = SessionRecord { spec, created_at };
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
-            session: summary(&id, &rec),
+            // A freshly created session is loaded and idle; its runtime is
+            // being provisioned in the background.
+            session: summary(&id, &rec, Some(&SessionStatus::Idle)),
         }),
     ))
 }
 
 pub async fn list_sessions(State(state): State<AppState>) -> Result<impl IntoResponse, Api> {
     let sessions = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
-    let sessions = sessions.iter().map(|(id, rec)| summary(id, rec)).collect();
+    let sessions = sessions
+        .iter()
+        .map(|(id, rec, status)| summary(id, rec, status.as_ref()))
+        .collect();
     Ok(Json(ListSessionsResponse { sessions }))
 }
 
@@ -201,7 +202,7 @@ pub async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, Api> {
-    let rec = ask(&state, |reply| SessionSupervisorCommand::Get {
+    let (rec, status) = ask(&state, |reply| SessionSupervisorCommand::Get {
         id: id.clone(),
         reply,
     })
@@ -219,9 +220,9 @@ pub async fn get_session(
     let detail = SessionDetail {
         id: id.clone(),
         name: rec.spec.name.clone(),
-        status: status_kind(&rec.status),
+        status: status.as_ref().map(status_kind),
         created_at: rec.created_at,
-        last_error: status_reason(&rec.status),
+        last_error: status.as_ref().and_then(status_reason),
         pending_question,
         model: rec.spec.agent.model.clone(),
         vendor: rec.spec.vendor.clone(),
@@ -374,17 +375,11 @@ pub async fn send_message(
     })
     .await?;
     match result {
-        Ok(()) => Ok((StatusCode::ACCEPTED, Json(SessionAck {}))),
+        // Always accepted, never 409: a turn in flight queues the message and
+        // answers it at the next turn boundary.
+        Ok(message_id) => Ok((StatusCode::ACCEPTED, Json(SessionAck { message_id }))),
         Err(UserMessageError::NotFound) => Err(Api::not_found("no such session")),
-        Err(UserMessageError::Provisioning) => Err(Api::conflict(
-            "provisioning",
-            "session is still provisioning",
-        )),
-        Err(UserMessageError::TurnInFlight) => Err(Api::conflict(
-            "turn_in_flight",
-            "a turn is already in flight",
-        )),
-        Err(UserMessageError::RecoveryFailed(msg)) => Err(Api::bad_gateway("recovery_failed", msg)),
+        Err(UserMessageError::Unrecoverable(reason)) => Err(Api::conflict("unrecoverable", reason)),
     }
 }
 
@@ -394,7 +389,9 @@ pub async fn stop_session(
 ) -> Result<impl IntoResponse, Api> {
     let result = ask(&state, |reply| SessionSupervisorCommand::Stop { id, reply }).await?;
     match result {
-        Ok(()) => Ok(Json(SessionAck {})),
+        Ok(()) => Ok(Json(SessionAck {
+            message_id: String::new(),
+        })),
         Err(msg) => Err(Api::not_found(msg)),
     }
 }
@@ -409,7 +406,9 @@ pub async fn delete_session(
     })
     .await?;
     match result {
-        Ok(()) => Ok(Json(SessionAck {})),
+        Ok(()) => Ok(Json(SessionAck {
+            message_id: String::new(),
+        })),
         Err(msg) => Err(Api::not_found(msg)),
     }
 }

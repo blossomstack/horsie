@@ -136,6 +136,10 @@ pub enum AgentCommand {
         query: HistoryQuery,
         reply: tokio::sync::oneshot::Sender<AgentHistoryPage>,
     },
+    /// Stop this actor. Sent when the session it belongs to unloads: the agent
+    /// is resident for the session's *loaded* lifetime, not forever, and going
+    /// cold must not leave a task behind holding a whole transcript in memory.
+    Shutdown,
     /// Read this agent's own usage + context-size snapshot — no messages or
     /// tasks, cheaper than `GetHistory` when only the numbers are needed.
     /// Backs the session-level usage aggregation.
@@ -587,7 +591,10 @@ impl AgentActor {
                         output: Value::String(text),
                     })
                     .await;
-                CommandEffect::stop()
+                // Resident: the agent goes idle, it does not die. Its whole
+                // transcript stays in memory for the next turn and for history
+                // reads, and nothing has to replay a journal to answer either.
+                CommandEffect::none()
             }
             RunOutcome::Concluded { data, tool_call_id } => {
                 match self.interpret(data, tool_call_id) {
@@ -601,7 +608,7 @@ impl AgentActor {
                         parent
                             .deliver(AgentOutcome::Concluded { session_id, output })
                             .await;
-                        CommandEffect::stop()
+                        CommandEffect::none()
                     }
                     Conclusion::Ask {
                         tool_call_id,
@@ -651,15 +658,15 @@ impl AgentActor {
                     })
                     .await;
                 // The partial conversation was already journaled incrementally, so the
-                // failed session stays inspectable and a recoverable failure can
-                // `resume`/`fork` from where it stopped.
-                CommandEffect::stop()
+                // failed session stays inspectable. The agent stays alive: a failed
+                // turn is not a dead agent, and the next message reuses it.
+                CommandEffect::none()
             }
             RunOutcome::AlreadyReported => {
                 // Context preparation failed before the loop began; the failure was
-                // already delivered to the parent. Stop like any failed run so the
-                // session can retry on the next message.
-                CommandEffect::stop()
+                // already delivered to the parent. Stay alive so the next message
+                // can retry against the same in-memory transcript.
+                CommandEffect::none()
             }
         }
     }
@@ -1048,6 +1055,7 @@ impl EventSourcedActor for AgentActor {
                 let _ = reply.send(state.usage_snapshot());
                 CommandEffect::none()
             }
+            AgentCommand::Shutdown => CommandEffect::stop(),
         }
     }
 

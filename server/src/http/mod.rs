@@ -364,7 +364,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
-        // message: mock vendor is fine but no provider for the model → 502
+        // A message is always accepted: an unregistered model is a *turn*
+        // failure the session reports later, not a rejection at the door.
         let res = app
             .clone()
             .oneshot(post_json(
@@ -373,7 +374,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
         // stop / delete
         let res = app
             .clone()

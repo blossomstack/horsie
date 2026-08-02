@@ -1,7 +1,17 @@
-//! The session registry: one event-sourced supervisor owning a
-//! [`SessionActor`] child per live session. The registry is rebuilt by
-//! replaying this actor's own journal — never by scanning disk.
+//! The session registry: which sessions exist, which are loaded, and when a
+//! loaded one goes cold.
+//!
+//! What is persisted here is **existence only** — created, named, deleted.
+//! Status is not: the session's own journal is the truth for that, and this
+//! actor keeps a cache filled in when a session loads and reports in. So after
+//! a restart the list renders with every status unknown until someone opens a
+//! session, which is the honest thing to show.
+//!
+//! Nothing is loaded at boot. A session actor is spawned the first time a
+//! command is addressed to it, and dropped again once it has been idle for
+//! [`SupervisorConfig::idle_timeout`].
 
+use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::session_actor::{SessionActor, SessionCommand, SessionUsageStats};
 use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
@@ -14,72 +24,98 @@ use horsie_models::session::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
+/// How long a loaded session may sit untouched before it is unloaded and its
+/// runtime hibernated.
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How often the supervisor looks for sessions to unload.
+const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Knobs the idle policy reads. Separated so tests drive time explicitly.
+pub struct SupervisorConfig {
+    pub clock: Arc<dyn Clock>,
+    pub idle_timeout: Duration,
+    /// `None` disables the background ticker — tests send `Tick` themselves.
+    pub tick_interval: Option<Duration>,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            clock: Arc::new(SystemClock),
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            tick_interval: Some(DEFAULT_TICK_INTERVAL),
+        }
+    }
+}
+
 /// Commands accepted by the [`SessionSupervisor`].
-// `Create` inherently carries the full `SessionSpec`; the size gap to the small
-// control variants is by design for a one-shot create command.
 #[allow(clippy::large_enum_variant)]
 pub enum SessionSupervisorCommand {
-    /// Create a new session; replies with its generated id. The child begins
-    /// provisioning immediately.
+    /// Create a new session; replies with its generated id.
     Create {
         spec: SessionSpec,
         /// Unix epoch millis (supplied by the caller for deterministic tests).
         created_at: u64,
         reply: oneshot::Sender<SessionId>,
     },
-    /// List all known sessions, every state.
+    /// List every known session. `status` is `None` for one that is not loaded.
     List {
-        reply: oneshot::Sender<Vec<(SessionId, SessionRecord)>>,
+        reply: oneshot::Sender<Vec<(SessionId, SessionRecord, Option<SessionStatus>)>>,
     },
-    /// Fetch one session's registry record.
+    /// Fetch one session's row, plus its status if it happens to be loaded.
     Get {
         id: SessionId,
-        reply: oneshot::Sender<Option<SessionRecord>>,
+        reply: oneshot::Sender<Option<(SessionRecord, Option<SessionStatus>)>>,
     },
-    /// Route a user message to the session (the child replies directly).
+    /// Route a user message to the session, loading it if necessary.
     UserMessage {
         id: SessionId,
         text: String,
-        reply: oneshot::Sender<Result<(), UserMessageError>>,
+        reply: oneshot::Sender<Result<String, UserMessageError>>,
     },
-    /// Stop a session (runtime stopped, preserved).
+    /// Cancel the session's turn in flight.
     Stop {
         id: SessionId,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Delete a session (the vendor decides the runtime's fate).
+    /// Delete a session; the vendor decides its runtime's fate.
     Delete {
         id: SessionId,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Hand back a live frame subscriber for a session, or `None` if unknown.
+    /// Hand back a live frame subscriber, or `None` if the session is unknown.
     Subscribe {
         id: SessionId,
         reply: oneshot::Sender<Option<broadcast::Receiver<SessionFrame>>>,
     },
-    /// Read a window of a session's conversation history, or `None` if unknown.
+    /// Read a window of a session's conversation history.
     History {
         id: SessionId,
         query: horsie_workflow::HistoryQuery,
         reply: oneshot::Sender<Option<horsie_workflow::AgentHistoryPage>>,
     },
-    /// Read a session's aggregated usage, or `None` if unknown.
+    /// Read a session's aggregated usage.
     UsageStats {
         id: SessionId,
         reply: oneshot::Sender<Option<SessionUsageStats>>,
     },
-    /// Tear down every live session's OS resources for a clean shutdown.
+    /// Unload every session that has gone idle. Sent by the ticker, or by a
+    /// test that has moved its clock.
+    Tick,
+    /// Tear down every loaded session for a clean shutdown.
     Shutdown { reply: oneshot::Sender<()> },
     /// Internal: a session actor reports its status changed.
     SessionStatusChanged {
         id: SessionId,
         status: SessionStatus,
     },
-    /// Internal: a session actor requests a durable rename. Replies only after
-    /// the SessionNamed event is journaled.
+    /// Internal: a session actor requests a durable rename.
     RenameSession {
         id: SessionId,
         name: String,
@@ -89,7 +125,9 @@ pub enum SessionSupervisorCommand {
     PublishSessionTitle { id: SessionId, name: String },
 }
 
-/// Events recording the session registry. Persisted.
+/// Events recording which sessions exist. Status is deliberately absent — it
+/// belongs to the session's own journal, and duplicating it here is what made
+/// the two disagree after a crash.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionSupervisorEvent {
@@ -97,10 +135,6 @@ pub enum SessionSupervisorEvent {
         id: SessionId,
         spec: SessionSpec,
         created_at: u64,
-    },
-    SessionStatusChanged {
-        id: SessionId,
-        status: SessionStatus,
     },
     SessionDeleted {
         id: SessionId,
@@ -115,11 +149,10 @@ pub enum SessionSupervisorEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub spec: SessionSpec,
-    pub status: SessionStatus,
     pub created_at: u64,
 }
 
-/// Persisted supervisor state — the session registry, purely a function of events.
+/// Persisted supervisor state — which sessions exist, nothing more.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionSupervisorState {
     pub sessions: BTreeMap<SessionId, SessionRecord>,
@@ -128,26 +161,63 @@ pub struct SessionSupervisorState {
 pub struct SessionSupervisor {
     deps: ServerDeps,
     global_tx: broadcast::Sender<GlobalSessionEvent>,
+    config: SupervisorConfig,
     children: BTreeMap<SessionId, ActorRef<SessionCommand>>,
+    /// Last known status of each *loaded* session. Absent means "not loaded",
+    /// which the API reports as unknown rather than guessing.
+    status: BTreeMap<SessionId, SessionStatus>,
+    last_activity: BTreeMap<SessionId, Instant>,
 }
 
 impl SessionSupervisor {
     pub fn new(deps: ServerDeps, global_tx: broadcast::Sender<GlobalSessionEvent>) -> Self {
+        Self::with_config(deps, global_tx, SupervisorConfig::default())
+    }
+
+    pub fn with_config(
+        deps: ServerDeps,
+        global_tx: broadcast::Sender<GlobalSessionEvent>,
+        config: SupervisorConfig,
+    ) -> Self {
         Self {
             deps,
             global_tx,
+            config,
             children: BTreeMap::new(),
+            status: BTreeMap::new(),
+            last_activity: BTreeMap::new(),
         }
     }
 
-    fn spawn_session(&mut self, ctx: &ActorContext<Self>, id: Uuid, spec: SessionSpec) {
+    /// The live child for `id`, spawning it if this is the first command to
+    /// reach it. Loading reads two journals and calls no vendor.
+    fn ensure_loaded(
+        &mut self,
+        ctx: &ActorContext<Self>,
+        state: &SessionSupervisorState,
+        id: &SessionId,
+    ) -> Option<ActorRef<SessionCommand>> {
+        self.last_activity
+            .insert(id.clone(), self.config.clock.now());
+        if let Some(child) = self.children.get(id) {
+            return Some(child.clone());
+        }
+        let record = state.sessions.get(id)?;
+        let uuid = match Uuid::parse_str(id) {
+            Ok(uuid) => uuid,
+            Err(e) => {
+                tracing::error!(session_id = %id, error = %e, "unparseable session id");
+                return None;
+            }
+        };
         let child = ctx.spawn(SessionActor::new(
-            id,
-            spec,
+            uuid,
+            record.spec.clone(),
             self.deps.clone(),
             ctx.self_ref(),
         ));
-        self.children.insert(id.to_string(), child);
+        self.children.insert(id.clone(), child.clone());
+        Some(child)
     }
 
     fn publish(&self, id: &str, status: &SessionStatus) {
@@ -169,19 +239,56 @@ impl SessionSupervisor {
             }));
     }
 
-    /// A child's mailbox closed outside the normal lifecycle — its own journal
-    /// recovery failed and the actor shut down. Mark the session visibly
-    /// RecoveryFailed so one corrupt session never takes the server down.
-    fn dead_child_effect(&mut self, id: SessionId) -> CommandEffect<SessionSupervisorEvent> {
-        self.children.remove(&id);
-        let status = SessionStatus::RecoveryFailed {
-            reason: "session unavailable: journal recovery failed".to_string(),
-        };
-        self.publish(&id, &status);
-        CommandEffect::persist(vec![SessionSupervisorEvent::SessionStatusChanged {
-            id,
-            status,
-        }])
+    fn forget(&mut self, id: &SessionId) {
+        self.children.remove(id);
+        self.status.remove(id);
+        self.last_activity.remove(id);
+    }
+
+    /// Unload every session that has been idle past the timeout.
+    ///
+    /// Runs inline on this mailbox, which is what makes it race-free: every
+    /// command to a child goes through here, so nothing can reach a session
+    /// between it agreeing to unload and its reference being dropped.
+    async fn offload_idle(&mut self) {
+        let now = self.config.clock.now();
+        let timeout = self.config.idle_timeout;
+        let candidates: Vec<SessionId> = self
+            .children
+            .keys()
+            .filter(|id| {
+                // A running session is never a candidate: a long tool call must
+                // not be unloaded out from under itself.
+                if self.status.get(*id) == Some(&SessionStatus::Running) {
+                    return false;
+                }
+                self.last_activity
+                    .get(*id)
+                    .is_none_or(|last| now.duration_since(*last) >= timeout)
+            })
+            .cloned()
+            .collect();
+
+        for id in candidates {
+            let Some(child) = self.children.get(&id).cloned() else {
+                continue;
+            };
+            match child
+                .ask(|reply| SessionCommand::PrepareOffload { reply })
+                .await
+            {
+                Ok(true) => {
+                    tracing::debug!(session = %id, "session idle; unloaded");
+                    self.forget(&id);
+                }
+                // Refused: a run started while we were deciding. Restart its clock.
+                Ok(false) => {
+                    self.last_activity.insert(id, now);
+                }
+                // Its mailbox is gone, so it is already unloaded.
+                Err(_) => self.forget(&id),
+            }
+        }
     }
 }
 
@@ -209,19 +316,9 @@ impl EventSourcedActor for SessionSupervisor {
                 spec,
                 created_at,
             } => {
-                state.sessions.insert(
-                    id,
-                    SessionRecord {
-                        spec,
-                        status: SessionStatus::Provisioning,
-                        created_at,
-                    },
-                );
-            }
-            SessionSupervisorEvent::SessionStatusChanged { id, status } => {
-                if let Some(rec) = state.sessions.get_mut(&id) {
-                    rec.status = status;
-                }
+                state
+                    .sessions
+                    .insert(id, SessionRecord { spec, created_at });
             }
             SessionSupervisorEvent::SessionDeleted { id } => {
                 state.sessions.remove(&id);
@@ -247,14 +344,25 @@ impl EventSourcedActor for SessionSupervisor {
                 created_at,
                 reply,
             } => {
-                let id = Uuid::new_v4();
-                self.spawn_session(ctx, id, spec.clone());
-                if let Some(child) = self.children.get(&id.to_string()) {
-                    let _ = child.tell(SessionCommand::Provision).await;
-                }
-                let id = id.to_string();
+                let id = Uuid::new_v4().to_string();
+                // The runtime is provisioned exactly here, exactly once in a
+                // session's life — that single call site *is* the guarantee.
+                // Detached, because a create legitimately runs for minutes and
+                // the first turn's `get` is what waits for it.
+                let runtimes = self.deps.runtimes.clone();
+                let vendor = spec.vendor.clone();
+                let spec_for_create = spec.clone();
+                let create_id = id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = runtimes.create(&create_id, &vendor, &spec_for_create).await {
+                        tracing::error!(session = %create_id, error = %e, "runtime create failed");
+                    }
+                });
                 let _ = reply.send(id.clone());
-                self.publish(&id, &SessionStatus::Provisioning);
+                // A fresh session's status is not a guess, so seed the cache:
+                // it is idle, with a runtime being provisioned behind it.
+                self.status.insert(id.clone(), SessionStatus::Idle);
+                self.publish(&id, &SessionStatus::Idle);
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionCreated {
                     id,
                     spec,
@@ -265,67 +373,64 @@ impl EventSourcedActor for SessionSupervisor {
                 let sessions = state
                     .sessions
                     .iter()
-                    .map(|(id, rec)| (id.clone(), rec.clone()))
+                    .map(|(id, rec)| (id.clone(), rec.clone(), self.status.get(id).cloned()))
                     .collect();
                 let _ = reply.send(sessions);
                 CommandEffect::none()
             }
             SessionSupervisorCommand::Get { id, reply } => {
-                let _ = reply.send(state.sessions.get(&id).cloned());
+                let row = state
+                    .sessions
+                    .get(&id)
+                    .cloned()
+                    .map(|rec| (rec, self.status.get(&id).cloned()));
+                let _ = reply.send(row);
                 CommandEffect::none()
             }
             SessionSupervisorCommand::UserMessage { id, text, reply } => {
-                match self.children.get(&id) {
+                match self.ensure_loaded(ctx, state, &id) {
                     None => {
                         let _ = reply.send(Err(UserMessageError::NotFound));
-                        CommandEffect::none()
                     }
                     Some(child) => {
-                        // The child replies directly; a failed tell means its
-                        // mailbox closed (journal recovery failure) — the
-                        // caller's reply was dropped with it (the HTTP ask
-                        // surfaces the closed channel), and the session is
-                        // marked visibly RecoveryFailed here.
-                        if child
+                        let _ = child
                             .tell(SessionCommand::UserMessage { text, reply })
+                            .await;
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::Stop { id, reply } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    None => {
+                        let _ = reply.send(Err(format!("no such session: {id}")));
+                    }
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        if child
+                            .tell(SessionCommand::Stop { reply: tx })
                             .await
                             .is_err()
                         {
-                            return self.dead_child_effect(id);
+                            let _ = reply.send(Err("session unavailable".to_string()));
+                        } else {
+                            tokio::spawn(async move {
+                                let _ = rx.await;
+                                let _ = reply.send(Ok(()));
+                            });
                         }
-                        CommandEffect::none()
                     }
                 }
+                CommandEffect::none()
             }
-            SessionSupervisorCommand::Stop { id, reply } => match self.children.get(&id) {
-                None => {
-                    let _ = reply.send(Err(format!("no such session: {id}")));
-                    CommandEffect::none()
-                }
-                Some(child) => {
-                    let (tx, rx) = oneshot::channel();
-                    if child
-                        .tell(SessionCommand::Stop { reply: tx })
-                        .await
-                        .is_err()
-                    {
-                        let _ = reply.send(Err("session unavailable".to_string()));
-                        return self.dead_child_effect(id);
-                    }
-                    // Forward the ack off the mailbox.
-                    tokio::spawn(async move {
-                        let _ = rx.await;
-                        let _ = reply.send(Ok(()));
-                    });
-                    CommandEffect::none()
-                }
-            },
             SessionSupervisorCommand::Delete { id, reply } => {
                 if !state.sessions.contains_key(&id) {
                     let _ = reply.send(Err(format!("no such session: {id}")));
                     return CommandEffect::none();
                 }
-                if let Some(child) = self.children.remove(&id) {
+                // Loading it first is deliberate: the session actor is what
+                // knows how to cancel a run and tell the vendor.
+                if let Some(child) = self.ensure_loaded(ctx, state, &id) {
                     let (tx, rx) = oneshot::channel();
                     if child
                         .tell(SessionCommand::Delete { reply: tx })
@@ -335,15 +440,15 @@ impl EventSourcedActor for SessionSupervisor {
                         let _ = rx.await;
                     }
                 }
+                self.forget(&id);
                 let _ = reply.send(Ok(()));
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionDeleted { id }])
             }
             SessionSupervisorCommand::Subscribe { id, reply } => {
-                match self.children.get(&id) {
+                match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child.tell(SessionCommand::Subscribe { reply: tx }).await;
-                        // Forward the child's receiver once it answers, off the mailbox.
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
                         });
@@ -355,14 +460,12 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::History { id, query, reply } => {
-                match self.children.get(&id) {
+                match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
                             .tell(SessionCommand::History { query, reply: tx })
                             .await;
-                        // The child answers off its mailbox (a transient reader may
-                        // recover a journal); forward the page when it lands.
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
                         });
@@ -374,7 +477,7 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::UsageStats { id, reply } => {
-                match self.children.get(&id) {
+                match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child.tell(SessionCommand::UsageStats { reply: tx }).await;
@@ -388,39 +491,35 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
+            SessionSupervisorCommand::Tick => {
+                self.offload_idle().await;
+                CommandEffect::none()
+            }
             SessionSupervisorCommand::Shutdown { reply } => {
-                let mut acks = Vec::new();
-                for child in self.children.values() {
-                    let (tx, rx) = oneshot::channel();
-                    if child
-                        .tell(SessionCommand::Shutdown { reply: tx })
-                        .await
-                        .is_ok()
-                    {
-                        acks.push(rx);
+                let ids: Vec<SessionId> = self.children.keys().cloned().collect();
+                for id in ids {
+                    if let Some(child) = self.children.get(&id) {
+                        let _ = child
+                            .ask(|reply| SessionCommand::PrepareOffload { reply })
+                            .await;
                     }
-                }
-                self.children.clear();
-                for ack in acks {
-                    let _ = ack.await;
+                    self.forget(&id);
                 }
                 let _ = reply.send(());
                 CommandEffect::none()
             }
             SessionSupervisorCommand::SessionStatusChanged { id, status } => {
                 self.publish(&id, &status);
-                CommandEffect::persist(vec![SessionSupervisorEvent::SessionStatusChanged {
-                    id,
-                    status,
-                }])
+                self.status.insert(id, status);
+                CommandEffect::none()
             }
             SessionSupervisorCommand::RenameSession { id, name, reply } => {
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed { id, name }])
                     .and_ack(reply)
             }
             SessionSupervisorCommand::PublishSessionTitle { id, name } => {
-                // A rename command that was superseded while its publish request
-                // was queued must not broadcast a stale title.
+                // A rename superseded while its publish was queued must not
+                // broadcast a stale title.
                 let current = state
                     .sessions
                     .get(&id)
@@ -433,26 +532,26 @@ impl EventSourcedActor for SessionSupervisor {
         }
     }
 
-    /// After recovery, re-spawn a [`SessionActor`] for every session in the
-    /// registry (deleted ones are already gone from state). No vendor calls
-    /// happen here — children reconcile themselves and wake lazily.
+    /// Recovery rebuilds the registry and stops there. No session actor is
+    /// spawned, no journal but this one is read, and no vendor is called — a
+    /// restart costs one journal replay however many sessions exist.
     async fn on_recovery_complete(
         &mut self,
-        state: &SessionSupervisorState,
+        _state: &SessionSupervisorState,
         ctx: &mut ActorContext<Self>,
     ) {
-        let to_spawn: Vec<(SessionId, SessionSpec)> = state
-            .sessions
-            .iter()
-            .map(|(id, rec)| (id.clone(), rec.spec.clone()))
-            .collect();
-        for (id, spec) in to_spawn {
-            match Uuid::parse_str(&id) {
-                Ok(uuid) => self.spawn_session(ctx, uuid, spec),
-                Err(e) => {
-                    tracing::error!(session_id = %id, error = %e, "unparseable session id; skipping");
+        if let Some(interval) = self.config.tick_interval {
+            let me = ctx.self_ref();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.tick().await; // the first tick fires immediately
+                loop {
+                    ticker.tick().await;
+                    if me.tell(SessionSupervisorCommand::Tick).await.is_err() {
+                        break;
+                    }
                 }
-            }
+            });
         }
     }
 }
@@ -466,14 +565,12 @@ impl EventSourcedActor for SessionSupervisor {
 )]
 mod tests {
     use super::*;
-    use crate::runtime_vendor::RuntimeVendorLink;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
+    use crate::sessions::clock::TestClock;
     use crate::sessions::spec::AgentSettings;
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
-    use horsie_models::session::SessionStatusKind;
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     fn spec_fixture() -> SessionSpec {
         SessionSpec {
@@ -500,15 +597,22 @@ mod tests {
         }
     }
 
-    async fn test_deps(tmp: &tempfile::TempDir) -> ServerDeps {
-        let mut vendors: HashMap<String, Arc<RuntimeVendorLink>> = HashMap::new();
-        let mock_agent = FakeRuntimeVendor::builder("mock")
+    struct Fixture {
+        deps: ServerDeps,
+        agent: FakeRuntimeVendor,
+        _tmp: tempfile::TempDir,
+    }
+
+    async fn fixture() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = FakeRuntimeVendor::builder("mock")
             .serve_in_process()
             .await
             .expect("fake agent");
-        vendors.insert("mock".into(), mock_agent.link());
+        let mut vendors = HashMap::new();
+        vendors.insert("mock".to_string(), agent.link());
         let vendors = Arc::new(std::sync::RwLock::new(vendors));
-        ServerDeps {
+        let deps = ServerDeps {
             runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors,
@@ -517,11 +621,46 @@ mod tests {
             mcp: None,
             plugins: None,
             memory: None,
+        };
+        Fixture {
+            deps,
+            agent,
+            _tmp: tmp,
         }
     }
 
+    fn manual_config(clock: &Arc<TestClock>) -> SupervisorConfig {
+        SupervisorConfig {
+            clock: clock.clone(),
+            idle_timeout: Duration::from_secs(180),
+            // No background ticker: the test decides when time passes and when
+            // the sweep runs, so nothing here is a race.
+            tick_interval: None,
+        }
+    }
+
+    async fn create(sup: &ActorRef<SessionSupervisorCommand>) -> SessionId {
+        sup.ask(|reply| SessionSupervisorCommand::Create {
+            spec: spec_fixture(),
+            created_at: 1,
+            reply,
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn await_signal(agent: &FakeRuntimeVendor, signal: &str) -> bool {
+        for _ in 0..100 {
+            if agent.signals().iter().any(|s| s == signal) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
     #[test]
-    fn created_then_status_then_deleted_folds() {
+    fn created_then_named_then_deleted_folds() {
         let s = SessionSupervisor::apply_event(
             SessionSupervisorState::default(),
             SessionSupervisorEvent::SessionCreated {
@@ -530,19 +669,18 @@ mod tests {
                 created_at: 7,
             },
         );
-        assert_eq!(
-            s.sessions.get("s1").unwrap().status,
-            SessionStatus::Provisioning
-        );
         assert_eq!(s.sessions.get("s1").unwrap().created_at, 7);
         let s = SessionSupervisor::apply_event(
             s,
-            SessionSupervisorEvent::SessionStatusChanged {
+            SessionSupervisorEvent::SessionNamed {
                 id: "s1".into(),
-                status: SessionStatus::Idle,
+                name: "Latest".into(),
             },
         );
-        assert_eq!(s.sessions.get("s1").unwrap().status, SessionStatus::Idle);
+        assert_eq!(
+            s.sessions.get("s1").unwrap().spec.name.as_deref(),
+            Some("Latest")
+        );
         let s = SessionSupervisor::apply_event(
             s,
             SessionSupervisorEvent::SessionDeleted { id: "s1".into() },
@@ -550,86 +688,191 @@ mod tests {
         assert!(s.sessions.is_empty());
     }
 
-    #[test]
-    fn session_named_event_folds_the_latest_title() {
-        let state = SessionSupervisor::apply_event(
-            SessionSupervisorState::default(),
-            SessionSupervisorEvent::SessionCreated {
-                id: "s1".into(),
-                spec: SessionSpec {
-                    name: None,
-                    ..spec_fixture()
-                },
-                created_at: 7,
-            },
-        );
-        let state = SessionSupervisor::apply_event(
-            state,
-            SessionSupervisorEvent::SessionNamed {
-                id: "s1".into(),
-                name: "First title".into(),
-            },
-        );
-        let state = SessionSupervisor::apply_event(
-            state,
-            SessionSupervisorEvent::SessionNamed {
-                id: "s1".into(),
-                name: "Latest title".into(),
-            },
-        );
-        assert_eq!(
-            state.sessions.get("s1").unwrap().spec.name.as_deref(),
-            Some("Latest title")
-        );
-    }
-
     #[tokio::test]
-    async fn rename_session_replies_after_journaling_the_title() {
-        let tmp = tempfile::tempdir().unwrap();
+    async fn boot_loads_nothing() {
+        let f = fixture().await;
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let (gtx, _grx) = broadcast::channel(16);
-        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
 
-        let id = sup
-            .ask(|reply| SessionSupervisorCommand::Create {
-                spec: SessionSpec {
-                    name: None,
-                    ..spec_fixture()
-                },
-                created_at: 1,
-                reply,
-            })
+        let sup = spawn_root(
+            SessionSupervisor::with_config(f.deps.clone(), gtx.clone(), manual_config(&clock)),
+            journal.clone(),
+        );
+        let id = create(&sup).await;
+        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        sup.ask(|reply| SessionSupervisorCommand::Shutdown { reply })
             .await
             .unwrap();
+        let before = f.agent.signals();
 
-        let persisted = sup
-            .ask(|reply| SessionSupervisorCommand::RenameSession {
-                id: id.clone(),
-                name: "Investigate login failure".into(),
-                reply,
-            })
-            .await
-            .unwrap();
-        assert!(persisted.is_ok());
-
-        let rec = sup
+        // Second incarnation on the same journal: the registry comes back, but
+        // nothing is loaded and no vendor is touched.
+        let sup2 = spawn_root(
+            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            journal,
+        );
+        let row = sup2
             .ask(|reply| SessionSupervisorCommand::Get {
                 id: id.clone(),
                 reply,
             })
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(rec.spec.name.as_deref(), Some("Investigate login failure"));
+        let (_, status) = row.expect("the session still exists");
+        assert!(
+            status.is_none(),
+            "an unloaded session has no status to report, and must not be loaded to find one"
+        );
+        assert_eq!(
+            f.agent.signals(),
+            before,
+            "recovery must not call the vendor"
+        );
     }
 
     #[tokio::test]
-    async fn publish_session_title_emits_a_dedicated_title_event() {
-        let tmp = tempfile::tempdir().unwrap();
+    async fn any_command_loads_the_session_without_acquiring_a_runtime() {
+        let f = fixture().await;
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let (gtx, mut grx) = broadcast::channel(16);
-        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let sup = spawn_root(
+            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            journal,
+        );
+        let id = create(&sup).await;
+        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
 
+        let before = f.agent.signals();
+        let sub = sup
+            .ask(|reply| SessionSupervisorCommand::Subscribe {
+                id: id.clone(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(sub.is_some(), "the session must load on demand");
+        assert_eq!(
+            f.agent.signals(),
+            before,
+            "loading a session to read it must not touch its runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_session_is_unloaded_and_hibernated() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let sup = spawn_root(
+            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            journal,
+        );
+        let id = create(&sup).await;
+        sup.ask(|reply| SessionSupervisorCommand::Subscribe {
+            id: id.clone(),
+            reply,
+        })
+        .await
+        .unwrap();
+
+        // Not idle yet: a sweep now must leave it alone.
+        sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert!(
+            !f.agent.signals().contains(&format!("hibernate:{id}")),
+            "a session inside its idle window must not be unloaded"
+        );
+
+        clock.advance(Duration::from_secs(181));
+        sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert!(
+            await_signal(&f.agent, &format!("hibernate:{id}")).await,
+            "going cold must tell the vendor: {:?}",
+            f.agent.signals()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reloaded_session_never_creates_a_second_runtime() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let sup = spawn_root(
+            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            journal,
+        );
+        let id = create(&sup).await;
+        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+
+        for _ in 0..3 {
+            sup.ask(|reply| SessionSupervisorCommand::Subscribe {
+                id: id.clone(),
+                reply,
+            })
+            .await
+            .unwrap();
+            clock.advance(Duration::from_secs(181));
+            sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+            let _ = sup
+                .ask(|reply| SessionSupervisorCommand::List { reply })
+                .await
+                .unwrap();
+        }
+
+        let creates = f
+            .agent
+            .signals()
+            .iter()
+            .filter(|s| s.starts_with("create:"))
+            .count();
+        assert_eq!(
+            creates, 1,
+            "a runtime is provisioned once per session, ever"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_session_routes_to_not_found() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let sup = spawn_root(
+            SessionSupervisor::with_config(f.deps, gtx, manual_config(&clock)),
+            journal,
+        );
+        let res = sup
+            .ask(|reply| SessionSupervisorCommand::UserMessage {
+                id: "missing".into(),
+                text: "hi".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(res, Err(UserMessageError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn rename_is_durable_and_publishes_the_current_title() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, mut grx) = broadcast::channel(16);
+        let sup = spawn_root(
+            SessionSupervisor::with_config(f.deps, gtx, manual_config(&clock)),
+            journal,
+        );
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: SessionSpec {
@@ -649,7 +892,6 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-
         sup.tell(SessionSupervisorCommand::PublishSessionTitle {
             id: id.clone(),
             name: "Investigate login failure".into(),
@@ -658,140 +900,15 @@ mod tests {
         .unwrap();
 
         loop {
-            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), grx.recv())
+            let frame = tokio::time::timeout(Duration::from_secs(2), grx.recv())
                 .await
                 .unwrap()
                 .unwrap();
-            match frame {
-                horsie_models::session::GlobalSessionEvent::TitleChanged(event) => {
-                    assert_eq!(event.session_id, id);
-                    assert_eq!(event.name, "Investigate login failure");
-                    break;
-                }
-                horsie_models::session::GlobalSessionEvent::StatusChanged(_) => {}
+            if let GlobalSessionEvent::TitleChanged(event) = frame {
+                assert_eq!(event.session_id, id);
+                assert_eq!(event.name, "Investigate login failure");
+                break;
             }
         }
-    }
-
-    #[tokio::test]
-    async fn create_list_get_delete_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let (gtx, mut grx) = broadcast::channel(16);
-        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
-
-        let id = sup
-            .ask(|reply| SessionSupervisorCommand::Create {
-                spec: spec_fixture(),
-                created_at: 1,
-                reply,
-            })
-            .await
-            .unwrap();
-
-        let list = sup
-            .ask(|reply| SessionSupervisorCommand::List { reply })
-            .await
-            .unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].0, id);
-
-        let rec = sup
-            .ask(|reply| SessionSupervisorCommand::Get {
-                id: id.clone(),
-                reply,
-            })
-            .await
-            .unwrap();
-        assert!(rec.is_some());
-
-        // Creation published a Provisioning frame on the global stream.
-        match grx.recv().await.unwrap() {
-            horsie_models::session::GlobalSessionEvent::StatusChanged(frame) => {
-                assert_eq!(frame.session_id, id);
-                assert_eq!(frame.status, SessionStatusKind::Provisioning);
-            }
-            horsie_models::session::GlobalSessionEvent::TitleChanged(_) => {
-                panic!("creation must not publish a title frame")
-            }
-        }
-
-        let res = sup
-            .ask(|reply| SessionSupervisorCommand::Delete {
-                id: id.clone(),
-                reply,
-            })
-            .await
-            .unwrap();
-        assert!(res.is_ok());
-        let list = sup
-            .ask(|reply| SessionSupervisorCommand::List { reply })
-            .await
-            .unwrap();
-        assert!(list.is_empty());
-    }
-
-    #[tokio::test]
-    async fn unknown_session_routes_to_not_found() {
-        let tmp = tempfile::tempdir().unwrap();
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
-        let res = sup
-            .ask(|reply| SessionSupervisorCommand::UserMessage {
-                id: "missing".into(),
-                text: "hi".into(),
-                reply,
-            })
-            .await
-            .unwrap();
-        assert!(matches!(res, Err(UserMessageError::NotFound)));
-        let sub = sup
-            .ask(|reply| SessionSupervisorCommand::Subscribe {
-                id: "missing".into(),
-                reply,
-            })
-            .await
-            .unwrap();
-        assert!(sub.is_none());
-    }
-
-    #[tokio::test]
-    async fn registry_recovers_across_restart() {
-        let tmp = tempfile::tempdir().unwrap();
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(
-            SessionSupervisor::new(test_deps(&tmp).await, gtx.clone()),
-            journal.clone(),
-        );
-        let id = sup
-            .ask(|reply| SessionSupervisorCommand::Create {
-                spec: spec_fixture(),
-                created_at: 9,
-                reply,
-            })
-            .await
-            .unwrap();
-        sup.ask(|reply| SessionSupervisorCommand::Shutdown { reply })
-            .await
-            .unwrap();
-
-        // Second incarnation on the same journal recovers the registry and
-        // re-spawns the child (routable, no NotFound).
-        let sup2 = spawn_root(SessionSupervisor::new(test_deps(&tmp).await, gtx), journal);
-        let rec = sup2
-            .ask(|reply| SessionSupervisorCommand::Get {
-                id: id.clone(),
-                reply,
-            })
-            .await
-            .unwrap();
-        assert!(rec.is_some());
-        let sub = sup2
-            .ask(|reply| SessionSupervisorCommand::Subscribe { id, reply })
-            .await
-            .unwrap();
-        assert!(sub.is_some());
     }
 }

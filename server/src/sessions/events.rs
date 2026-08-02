@@ -283,8 +283,8 @@ mod tests {
         let sid = Uuid::new_v4();
         let pid = SessionActor::persistence_id_for(sid);
         let events = vec![
-            serde_json::to_vec(&SessionDomainEvent::Provisioned).unwrap(),
-            serde_json::to_vec(&SessionDomainEvent::Asked {
+            serde_json::to_vec(&SessionDomainEvent::TurnEnded).unwrap(),
+            serde_json::to_vec(&SessionDomainEvent::AskRecorded {
                 tool_call_id: Some("tc".into()),
                 question: "which one?".into(),
             })

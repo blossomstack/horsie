@@ -53,7 +53,9 @@ struct CreateSessionResponse { session: SessionSummary }
 struct ListSessionsResponse { sessions: Vec<SessionSummary> }
 struct GetSessionResponse { session: SessionDetail }
 struct SendMessageRequest { text: String }
-struct SessionAck {}
+/// Acknowledges an accepted user message. The id is how a client matches its
+/// optimistic bubble to the queued message the server now owes an answer for.
+struct SessionAck { message_id: String }
 
 /// Uniform HTTP error envelope.
 struct ApiError { code: String, message: String }

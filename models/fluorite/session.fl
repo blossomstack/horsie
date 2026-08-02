@@ -7,14 +7,11 @@ use agent.Usage;
 /// User-visible lifecycle state of a session. Failure reasons ride separately
 /// in `last_error` so the enum stays a plain discriminant.
 enum SessionStatusKind {
-    Provisioning,
     Idle,
     Running,
     AwaitingInput,
-    Interrupted,
-    Stopped,
-    RecoveryFailed,
     Failed,
+    Unrecoverable,
 }
 
 /// Agent settings supplied at session creation.
@@ -38,7 +35,9 @@ struct AgentSettings {
 struct SessionSummary {
     id: String,
     name: Option<String>,
-    status: SessionStatusKind,
+    /// Absent when the session is not loaded: the server does not guess, and
+    /// a restart leaves every row unknown until one is opened.
+    status: Option<SessionStatusKind>,
     created_at: u64,
     last_error: Option<String>,
 }
@@ -46,7 +45,7 @@ struct SessionSummary {
 struct SessionDetail {
     id: String,
     name: Option<String>,
-    status: SessionStatusKind,
+    status: Option<SessionStatusKind>,
     created_at: u64,
     last_error: Option<String>,
     /// The question the agent is awaiting an answer to (status AwaitingInput).
