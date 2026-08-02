@@ -146,8 +146,9 @@ hands a clone to each `SessionActor` it spawns. `forget` keeps an entry while
 
 Offloading a watched session then leaves its SSE streams connected and silent —
 correct, since nothing can happen while unloaded — and frames resume when anything
-reloads it. `Subscribe` can be answered from the registry without loading the
-session at all.
+reloads it. `Subscribe` is answered from the registry without loading the session:
+a broadcast channel is transport, not state the actor owns, and no journal is read
+to hand one out.
 
 ### Fix 5 — answering is atomic (server + web)
 
@@ -199,6 +200,48 @@ text; one submit sends them together and stays disabled until every ask has an
 answer. An errored ask (a rejected handoff) renders as superseded rather than
 putting the rejection text where an answer goes.
 
+### Fix 6 — the journal is unreachable outside its actor (server)
+
+Reading a journal from outside the owning actor has now caused this class of bug
+more than once, so the invariant gets enforced by the compiler rather than by
+review. Three bypasses exist today, all in `server/src/http`:
+
+| site | call |
+| --- | --- |
+| handlers.rs:224 | `fold_session_state(&state.journal, uuid)` |
+| sse.rs:92 | `journal_head_seq(&state.journal, sid)` |
+| sse.rs:102,117 | `replay_session_events(&journal, sid, last)`, re-read per journaled frame |
+
+All three are enabled by one line — `AppState.journal: Arc<dyn Journal>`
+(http/mod.rs:47). The HTTP layer is handed the journal, so replaying it is one
+call away and looks reasonable in review.
+
+1. **Take the handle away.** `journal` leaves `AppState`; it is constructed in
+   `http/mod.rs` and handed only to `spawn_root` and the actor deps. A handler then
+   *cannot* replay, and the compile error a future author meets ("no field
+   `journal`") points at adding a supervisor command, which is the right instinct.
+   SSE's cursor and replay become actor-served commands, with
+   `SessionCommand::History` as the precedent. The per-frame re-read becomes a
+   command per journaled frame — which only happens while the actor is loaded,
+   since something journaling means something is running.
+2. **Make the read API unnameable.** `fold_session_state` and
+   `replay_session_events` are `pub` free functions in `sessions::events`, which is
+   what made them reachable; they become `pub(in crate::sessions)`, and the handle
+   is wrapped in a `SessionJournal` newtype whose `replay`/`head_seq` are scoped the
+   same way. Rust visibility is compile-time and total: `http` cannot name the
+   method, so it cannot call it even holding a handle. This catches what step 1
+   misses — a bypass written inside `crate::sessions` by something that isn't the
+   actor.
+3. **Backstop with a lint.** `clippy.toml` `disallowed-methods` on the journal's
+   `replay`, with `#[expect(clippy::disallowed_methods)]` at each legitimate site.
+   CI already runs `clippy --all-targets -- -D warnings`, so a future bypass can
+   still be written — but not silently: it shows up in the diff as an explicit
+   opt-out with its justification beside it.
+
+What this does not prevent is someone re-adding `journal` to `AppState`. That is a
+visible, arguable line in a diff, where `replay()` on a handle already in scope is
+invisible; the asymmetry is the point.
+
 ## Testing
 
 - agentcore: an optional handoff alongside other tools runs them and parks; a
@@ -212,6 +255,8 @@ putting the rejection text where an answer goes.
 - web e2e: answer an ask after a reload with no status; answer a two-ask turn;
   a partial submit is refused by the UI.
 - providers: a Tool-role message with N results maps correctly on both wires.
+- SSE keeps replaying durable events with stable ids once its cursor and replay
+  are actor commands, including a reconnect with `Last-Event-ID`.
 
 ## Out of scope
 
