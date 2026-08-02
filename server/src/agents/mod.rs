@@ -4,6 +4,8 @@
 //! types; the fluorite wire types in `horsie_models::agents` are mapped at the
 //! service boundary.
 
+mod service;
 mod store;
 
+pub use service::{AgentError, AgentService};
 pub use store::{AgentRepo, AgentRow, AgentStore};
