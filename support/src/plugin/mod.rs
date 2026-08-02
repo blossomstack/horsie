@@ -4,12 +4,16 @@
 //! horsie reads this format and never writes it. See
 //! `docs/superpowers/specs/2026-08-02-plugin-marketplace-design.md`.
 
+#[cfg(feature = "git")]
+pub mod checkout;
 pub mod grants;
 pub mod layout;
 pub mod manifest;
 pub mod marketplace;
 pub mod skills;
 
+#[cfg(feature = "git")]
+pub use checkout::{Checkout, ensure_checkout, source_location};
 pub use layout::PluginRoot;
 pub use manifest::PluginManifest;
 pub use marketplace::{Marketplace, MarketplaceEntry, PluginSource};
