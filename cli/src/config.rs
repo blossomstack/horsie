@@ -177,7 +177,10 @@ mod tests {
         let cfg = HorsieConfig::default();
         // State and data resolve to distinct dirs (different XDG bases / leaves).
         assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
-        assert_eq!(cfg.storage.plugins_dir, cfg.storage.data_dir.join("plugins"));
+        assert_eq!(
+            cfg.storage.plugins_dir,
+            cfg.storage.data_dir.join("plugins")
+        );
     }
 
     #[test]
