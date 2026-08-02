@@ -92,6 +92,20 @@ fn assistant_tool_call(id: &str, call_id: &str) -> Message {
     }
 }
 
+/// The shape a session parked on a question leaves behind: `ask_user` is a
+/// handoff tool, so the run ends on the call and it is never executed.
+fn assistant_ask(id: &str, call_id: &str) -> Message {
+    Message {
+        id: id.into(),
+        role: Role::Assistant,
+        parts: vec![ContentPart::ToolCall(ToolCallPart {
+            id: call_id.into(),
+            name: "ask_user".into(),
+            input: json!({"question": "which commands?"}),
+        })],
+    }
+}
+
 fn assistant_text(id: &str, text: &str) -> Message {
     Message {
         id: id.into(),
@@ -142,6 +156,20 @@ fn unmatched_tool_uses(body: &Value) -> Vec<String> {
         .filter_map(|b| b["id"].as_str())
         .filter(|id| !answered.contains(id))
         .map(str::to_string)
+        .collect()
+}
+
+/// Every `tool_result` in an Anthropic request body answering `tool_use_id`,
+/// as its rendered text. More than one is the duplicate shape providers reject.
+fn tool_results_for(body: &Value, tool_use_id: &str) -> Vec<String> {
+    body["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .filter(|b| b["type"] == "tool_result" && b["tool_use_id"] == tool_use_id)
+        .map(|b| b["content"].to_string())
         .collect()
 }
 
@@ -223,6 +251,129 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
     );
 
     let body = last_request(&mock).await;
+    assert!(
+        unmatched_tool_uses(&body).is_empty(),
+        "request carried unanswered tool_use ids {:?}: {body}",
+        unmatched_tool_uses(&body)
+    );
+}
+
+/// Regression: a session parked on `ask_user` is idle, so idle offload unloads
+/// it (180s) and the next message reloads it. Recovery treated the parked call
+/// as wreckage from a dead process and journaled a synthetic "interrupted"
+/// result for it; the user's answer was then appended to a `tool_use_id` that
+/// already had one, and the provider 400d on the duplicate for the rest of the
+/// session's life.
+///
+/// This seeds exactly what an offloaded parked session leaves behind, reloads a
+/// real `AgentActor` on it, and answers the ask.
+#[tokio::test]
+async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
+    /// Advertises `ask_user`, like the server's `AskUserToolbox`. Executing it
+    /// is a test failure: a handoff tool is never run.
+    struct AskUserToolbox;
+    #[async_trait]
+    impl Toolbox for AskUserToolbox {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec {
+                name: "ask_user".into(),
+                description: "ask the user".into(),
+                input_schema: json!({"type": "object"}),
+            }]
+        }
+        async fn execute(&self, name: &str, _input: Value) -> Result<Value, ToolCallError> {
+            Err(ToolCallError::ExecutionFailed(format!(
+                "unexpected tool call: {name}"
+            )))
+        }
+    }
+
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("removing validate, daemon and job");
+    mock.queue_response("done");
+
+    let session_id = uuid::Uuid::new_v4();
+    let journal = Arc::new(InMemoryJournal::new());
+    seed(
+        &journal,
+        session_id,
+        &[
+            AgentDomainEvent::InputMessage {
+                message: Message::user("u1", "remove some commands"),
+            },
+            AgentDomainEvent::MessageComplete {
+                message: assistant_ask("a1", "ask-1"),
+            },
+        ],
+    )
+    .await;
+
+    let (tx, mut outcomes) = tokio::sync::mpsc::channel(8);
+    let ctx = AgentRuntimeContext {
+        context_provider: Arc::new(FixedContextProvider {
+            provider: provider_at(&mock.url()),
+            toolbox: Arc::new(AskUserToolbox),
+        }),
+        event_sink: Arc::new(NoopSink),
+        parent: Arc::new(OutcomeChannel(tx)),
+        session_id,
+    };
+    let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+        system_prompt: None,
+        output_schema: None,
+        allow_ask_user: false,
+        allow_timers: None,
+        max_iterations: None,
+        max_retries: None,
+        allowed_tools: None,
+    });
+    params.interactive = true;
+    // What makes the call a park rather than an interruption, exactly as
+    // `SessionActor` configures its agent.
+    params.optional_handoff_tool = Some("ask_user".into());
+
+    let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
+    agent
+        .tell(AgentCommand::InjectToolResult {
+            tool_call_id: "ask-1".into(),
+            content: "validate, daemon, job".into(),
+        })
+        .await
+        .unwrap();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), outcomes.recv())
+        .await
+        .expect("timed out waiting for the answered turn")
+        .expect("outcome channel closed");
+    assert!(
+        !matches!(outcome, AgentOutcome::Failed { .. }),
+        "answering a parked ask must not fail: {outcome:?}"
+    );
+
+    // Take another turn: any synthetic result recovery journaled is in the
+    // history by now, so this is what every later turn would carry forever.
+    agent
+        .tell(AgentCommand::Run {
+            input: "carry on".into(),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), outcomes.recv())
+        .await
+        .expect("timed out waiting for the follow-up turn")
+        .expect("outcome channel closed");
+
+    let body = last_request(&mock).await;
+    let results = tool_results_for(&body, "ask-1");
+    assert_eq!(
+        results.len(),
+        1,
+        "the parked ask must carry exactly one result — the user's answer. Got {results:?} in {body}"
+    );
+    assert!(
+        results[0].contains("validate, daemon, job"),
+        "the surviving result must be the real answer, not a synthetic repair: {results:?}"
+    );
     assert!(
         unmatched_tool_uses(&body).is_empty(),
         "request carried unanswered tool_use ids {:?}: {body}",
