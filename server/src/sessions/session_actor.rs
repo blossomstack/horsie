@@ -563,8 +563,12 @@ impl SessionActor {
     /// result owed to a subagent parent strands the moment no further
     /// subagent outcome can arrive (every node terminal), since an outcome
     /// was previously the only flush trigger.
-    async fn flush_then_drain(&mut self, state: &SessionState) -> Vec<SessionDomainEvent> {
-        let mut events = self.flush_owed(state).await;
+    async fn flush_then_drain(
+        &mut self,
+        state: &SessionState,
+        ctx: &ActorContext<Self>,
+    ) -> Vec<SessionDomainEvent> {
+        let mut events = self.flush_owed(state, ctx).await;
         let next = events
             .iter()
             .cloned()
@@ -576,14 +580,24 @@ impl SessionActor {
     /// Wake every idle subagent parent whose children have results it has not
     /// been sent. The main agent is deliberately excluded: its owed results
     /// merge into its next turn inside `drain`.
-    async fn flush_owed(&mut self, state: &SessionState) -> Vec<SessionDomainEvent> {
+    async fn flush_owed(
+        &mut self,
+        state: &SessionState,
+        ctx: &ActorContext<Self>,
+    ) -> Vec<SessionDomainEvent> {
         let mut events = Vec::new();
         for (parent_id, owed) in state.subagents.owed_by_sub_parent() {
             if state.subagents.is_running(&parent_id) {
                 continue;
             }
-            let Some(agent) = self.sub_agents.get(&parent_id).cloned() else {
-                continue;
+            let agent = match self.sub_agents.get(&parent_id) {
+                Some(agent) => agent.clone(),
+                // A cold node woken for the first time since load: spawn its
+                // resident actor on demand (see `on_recovery_complete`).
+                None if state.subagents.get(&parent_id).is_some() => {
+                    self.spawn_sub_agent_actor(ctx, parent_id)
+                }
+                None => continue,
             };
             let input = owed
                 .iter()
@@ -607,6 +621,7 @@ impl SessionActor {
         state: &SessionState,
         text: String,
         reply: oneshot::Sender<Result<String, UserMessageError>>,
+        ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
         if let SessionStatus::Unrecoverable { reason } = &state.status {
             let _ = reply.send(Err(UserMessageError::Unrecoverable(reason.clone())));
@@ -635,7 +650,7 @@ impl SessionActor {
         // persist — same fold the runtime will apply, just one step early.
         let next = Self::apply_event(state.clone(), queued.clone());
         let mut events = vec![queued];
-        events.extend(self.flush_then_drain(&next).await);
+        events.extend(self.flush_then_drain(&next, ctx).await);
         self.publish_inbox(state, &events);
         CommandEffect::persist(events)
     }
@@ -644,6 +659,7 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         outcome: AgentOutcome,
+        ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
         let outcome_session = match &outcome {
             AgentOutcome::Concluded { session_id, .. }
@@ -654,7 +670,7 @@ impl SessionActor {
         };
         if outcome_session != self.id {
             return self
-                .on_sub_agent_outcome(state, outcome_session, outcome)
+                .on_sub_agent_outcome(state, outcome_session, outcome, ctx)
                 .await;
         }
         // Usage is always recorded: the tokens were spent whatever became of
@@ -735,7 +751,7 @@ impl SessionActor {
             for e in &events {
                 next = Self::apply_event(next, e.clone());
             }
-            events.extend(self.flush_then_drain(&next).await);
+            events.extend(self.flush_then_drain(&next, ctx).await);
         }
         self.publish_inbox(state, &events);
         CommandEffect::persist(events)
@@ -749,6 +765,7 @@ impl SessionActor {
         state: &SessionState,
         id: Uuid,
         outcome: AgentOutcome,
+        ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
         if let AgentOutcome::UsageRecorded { usage_total, .. } = outcome {
             return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
@@ -798,7 +815,7 @@ impl SessionActor {
             .iter()
             .cloned()
             .fold(state.clone(), Self::apply_event);
-        events.extend(self.flush_then_drain(&next).await);
+        events.extend(self.flush_then_drain(&next, ctx).await);
         CommandEffect::persist(events)
     }
 
@@ -1185,7 +1202,7 @@ impl EventSourcedActor for SessionActor {
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             SessionCommand::UserMessage { text, reply } => {
-                self.on_user_message(state, text, reply).await
+                self.on_user_message(state, text, reply, ctx).await
             }
             SessionCommand::Stop { reply } => {
                 if state.status != SessionStatus::Running {
@@ -1199,7 +1216,7 @@ impl EventSourcedActor for SessionActor {
                 // Stop is a turn boundary like any other, so anything the user
                 // queued while the cancelled turn ran starts the next one.
                 let next = Self::apply_event(state.clone(), SessionDomainEvent::TurnStopped);
-                events.extend(self.flush_then_drain(&next).await);
+                events.extend(self.flush_then_drain(&next, ctx).await);
                 self.publish_inbox(state, &events);
                 CommandEffect::persist(events)
             }
@@ -1224,9 +1241,19 @@ impl EventSourcedActor for SessionActor {
             } => {
                 let agent = match agent_id.as_deref() {
                     None | Some("main") => self.main_agent.clone(),
-                    Some(raw) => Uuid::parse_str(raw)
-                        .ok()
-                        .and_then(|id| self.sub_agents.get(&id).cloned()),
+                    Some(raw) => match Uuid::parse_str(raw) {
+                        Ok(id) => match self.sub_agents.get(&id) {
+                            Some(agent) => Some(agent.clone()),
+                            // A cold node read for the first time since load:
+                            // spawn its resident actor on demand (see
+                            // `on_recovery_complete`).
+                            None if state.subagents.get(&id).is_some() => {
+                                Some(self.spawn_sub_agent_actor(ctx, id))
+                            }
+                            None => None,
+                        },
+                        Err(_) => None,
+                    },
                 };
                 // Read history from the resident actor's in-memory state. No
                 // journal access, no runtime — opening a session to read it
@@ -1266,7 +1293,7 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(true);
                 CommandEffect::stop()
             }
-            SessionCommand::AgentOutcome(outcome) => self.on_agent_outcome(state, outcome).await,
+            SessionCommand::AgentOutcome(outcome) => self.on_agent_outcome(state, outcome, ctx).await,
             SessionCommand::SubAgentTree { reply } => {
                 let tree = state
                     .subagents
@@ -1403,12 +1430,10 @@ impl EventSourcedActor for SessionActor {
     /// the next turn the user starts.
     async fn on_recovery_complete(&mut self, state: &SessionState, ctx: &mut ActorContext<Self>) {
         self.spawn_main_agent(ctx);
-        // Resident subagent actors — journal replay only. No runs start here:
-        // nodes the process died under are reconciled to failed, and results
-        // owed to parents flush at the next turn boundary, never on load.
-        for id in state.subagents.ids() {
-            self.spawn_sub_agent_actor(ctx, id);
-        }
+        // Subagent actors stay cold: a session that spawned hundreds of them
+        // must not replay hundreds of journals on open. They spawn lazily —
+        // on a history read or an owed-result flush — and recovery starts no
+        // runs either way.
         if !state.subagents.interrupted().is_empty() {
             let _ = ctx
                 .self_ref()
@@ -1813,39 +1838,55 @@ mod tests {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
         let id = Uuid::new_v4();
-        let mut actor = SessionActor::new(id, actor_spec_fixture(), f.deps, parent);
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
         // A turn is running, and a message arrived while it was.
-        let state = fold(vec![
+        let prior = [
             queued("m1", "one"),
             SessionDomainEvent::TurnBegan {
                 consumed: vec!["m1".into()],
                 answering: None,
             },
             queued("m2", "queued while running"),
-        ]);
+        ];
+        let bytes: Vec<Vec<u8>> = prior.iter().map(|e| serde_json::to_vec(e).unwrap()).collect();
+        journal
+            .persist(&SessionActor::persistence_id_for(id), &bytes)
+            .await
+            .unwrap();
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(id, actor_spec_fixture(), f.deps, parent),
+            journal.clone(),
+        );
+        // Recovery reconciles the interrupted turn first (event 4); wait for
+        // that to settle so the failure is the only thing left to observe.
+        wait_for_journal_len(&journal, id, 4).await;
 
-        let effect = actor
-            .on_agent_outcome(
-                &state,
-                AgentOutcome::Failed {
-                    session_id: id,
-                    error: "provider exploded".into(),
-                    recoverable: true,
-                    terminal: false,
-                },
-            )
-            .await;
+        session
+            .tell(SessionCommand::AgentOutcome(AgentOutcome::Failed {
+                session_id: id,
+                error: "provider exploded".into(),
+                recoverable: true,
+                terminal: false,
+            }))
+            .await
+            .unwrap();
 
-        let events = effect.events();
+        // The failure lands (event 5) — and nothing follows: no drain into a
+        // back-to-back failure.
+        wait_for_journal_len(&journal, id, 5).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(
-            events.len(),
-            1,
-            "a failed turn records the failure and nothing else: {events:?}"
+            session_journal_len(&journal, id).await,
+            5,
+            "a failed turn records the failure and nothing else"
         );
-        assert!(
-            matches!(events[0], SessionDomainEvent::TurnFailed { .. }),
-            "{events:?}"
-        );
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert!(matches!(
+            state.status,
+            crate::sessions::spec::SessionStatus::Failed { .. }
+        ));
+        assert_eq!(state.inbox.len(), 1, "the queued message is still owed");
     }
 
     /// Stop is a turn boundary like any other: it cancels the turn, not the
@@ -2095,6 +2136,37 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("tree condition not met within 2s");
+    }
+
+    /// Entry count of the session's own journal (`session/<id>`), not the
+    /// agent's.
+    async fn session_journal_len(journal: &Arc<dyn horsie_actor::Journal>, session_id: Uuid) -> u64 {
+        use futures_util::StreamExt;
+        let pid = SessionActor::persistence_id_for(session_id);
+        let mut count = 0u64;
+        let mut stream = journal.replay(&pid, 0).await;
+        while let Some(item) = stream.next().await {
+            if item.is_ok() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Poll the session's own journal until it holds at least `n` entries
+    /// (2s cap).
+    async fn wait_for_journal_len(
+        journal: &Arc<dyn horsie_actor::Journal>,
+        session_id: Uuid,
+        n: u64,
+    ) {
+        for _ in 0..200 {
+            if session_journal_len(journal, session_id).await >= n {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("journal did not reach {n} entries within 2s");
     }
 
     async fn spawn_sub(session: &ActorRef<SessionCommand>, label: &str, task: &str) -> Uuid {
