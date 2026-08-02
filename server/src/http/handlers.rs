@@ -23,7 +23,7 @@ use horsie_models::session::{
 use horsie_models::session_api::{
     Ack, CreateSessionRequest, CreateSessionResponse, GetSessionResponse,
     GetSessionSubAgentsResponse, GetSessionUsageResponse, HistoryPage, ListSessionsResponse,
-    SendMessageRequest, SessionAck, SubAgentView,
+    RepoConfig, SendMessageRequest, SessionAck, SubAgentView,
 };
 use horsie_workflow::{AgentHistoryPage, HistoryQuery, TaskStatus as AgentTaskStatus};
 use serde::Deserialize;
@@ -33,7 +33,7 @@ use uuid::Uuid;
 const HISTORY_DEFAULT_LIMIT: usize = 50;
 const HISTORY_MAX_LIMIT: usize = 200;
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -55,7 +55,7 @@ pub async fn health() -> impl IntoResponse {
 }
 
 /// Ask the supervisor a question, mapping a closed mailbox to a 500.
-async fn ask<T, F>(state: &AppState, make: F) -> Result<T, Api>
+pub(crate) async fn ask<T, F>(state: &AppState, make: F) -> Result<T, Api>
 where
     F: FnOnce(tokio::sync::oneshot::Sender<T>) -> SessionSupervisorCommand,
     T: Send + 'static,
@@ -82,7 +82,11 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
     }
 }
 
-fn summary(id: &str, rec: &SessionRecord, status: Option<&SessionStatus>) -> SessionSummary {
+pub(crate) fn summary(
+    id: &str,
+    rec: &SessionRecord,
+    status: Option<&SessionStatus>,
+) -> SessionSummary {
     SessionSummary {
         id: id.to_string(),
         name: rec.spec.name.clone(),
@@ -92,15 +96,21 @@ fn summary(id: &str, rec: &SessionRecord, status: Option<&SessionStatus>) -> Ses
     }
 }
 
-pub async fn create_session(
-    State(state): State<AppState>,
-    Json(req): Json<CreateSessionRequest>,
-) -> Result<impl IntoResponse, Api> {
+/// Assemble a [`SessionSpec`] from the pieces every creation path supplies.
+/// Shared by `create_session` and the agent-preset invoke endpoint so the two
+/// can never drift on provisioning, plugin, or thinking-effort semantics.
+pub(crate) async fn build_session_spec(
+    state: &AppState,
+    name: Option<String>,
+    agent: WireAgentSettings,
+    vendor: Option<String>,
+    repos: Vec<RepoConfig>,
+    plugins: Option<Vec<String>>,
+) -> Result<SessionSpec, Api> {
     // The workspace is always vendor-allocated; `repos` (when the vendor
     // supports provisioning) become git-checkout provision steps that clone
     // into it. The UI only sends repos to a provisioning-capable vendor; a
     // vendor that can't provision rejects them at `create()`.
-    let repos = req.repos.unwrap_or_default();
     let provision: Vec<ProvisionStepSpec> = horsie_models::provision_from_repos(&repos)
         .map_err(|e| Api::unprocessable(format!("invalid repos: {e}")))?
         .into_iter()
@@ -116,8 +126,8 @@ pub async fn create_session(
     // Selected bundle names (empty → the provisioner falls back to the
     // default-enabled set). Selecting bundles implies plugins are surfaced, so
     // force the agent's opt-in when any are chosen.
-    let plugins = req.plugins.unwrap_or_default();
-    let mut agent = settings_from_wire(req.agent);
+    let plugins = plugins.unwrap_or_default();
+    let mut agent = settings_from_wire(agent);
     if !plugins.is_empty() {
         agent.use_plugins = Some(true);
     }
@@ -158,16 +168,29 @@ pub async fn create_session(
             }
         }
     }
-    let spec = SessionSpec {
-        name: req.name,
+    Ok(SessionSpec {
+        name,
         agent,
         workspaces,
         provision,
-        vendor: req
-            .vendor
-            .unwrap_or_else(|| state.config_store.default_vendor()),
+        vendor: vendor.unwrap_or_else(|| state.config_store.default_vendor()),
         plugins,
-    };
+    })
+}
+
+pub async fn create_session(
+    State(state): State<AppState>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Result<impl IntoResponse, Api> {
+    let spec = build_session_spec(
+        &state,
+        req.name,
+        req.agent,
+        req.vendor,
+        req.repos.unwrap_or_default(),
+        req.plugins,
+    )
+    .await?;
     let created_at = now_ms();
     let id = ask(&state, |reply| SessionSupervisorCommand::Create {
         spec: spec.clone(),
