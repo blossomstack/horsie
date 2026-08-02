@@ -592,6 +592,55 @@ mod tests {
         );
     }
 
+    /// The migration adds the new columns and retires the superseded card.
+    /// It deliberately does not write the replacement cards — those are new
+    /// ids, so the bundled seed inserts them everywhere on the next boot.
+    #[tokio::test]
+    async fn migration_adds_the_new_columns_and_drops_deepseek_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool =
+            crate::config::store::open_pool(&format!("sqlite://{}/t.db", dir.path().display()))
+                .await
+                .unwrap();
+
+        let stale: Option<String> =
+            sqlx::query_scalar("SELECT model_id FROM model_cards WHERE model_id = 'deepseek-chat'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(stale.is_none(), "deepseek-chat must be gone");
+
+        // A fresh database is still empty: nothing is seeded from a migration.
+        let cards: i64 = sqlx::query_scalar("SELECT count(*) FROM model_cards")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cards, 0, "migrations must not seed the catalog");
+
+        // The new columns exist and default correctly on both tables.
+        sqlx::query("INSERT INTO model_cards (model_id, name) VALUES ('probe', 'Probe')")
+            .execute(&pool)
+            .await
+            .expect("insert without the new columns still works");
+        let row = sqlx::query(
+            "SELECT base_url, forced_tools_disable_thinking FROM model_cards WHERE model_id = 'probe'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<Option<String>, _>("base_url"), None);
+        assert_eq!(row.get::<i64, _>("forced_tools_disable_thinking"), 0);
+
+        let models_flag: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('models') \
+             WHERE name = 'forced_tools_disable_thinking'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(models_flag, 1, "models must carry the flag too");
+    }
+
     #[tokio::test]
     async fn bundled_seed_efforts_and_dialects_are_canonical() {
         for c in bundled_seed().expect("bundled seed parses") {
