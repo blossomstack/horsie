@@ -10,7 +10,6 @@ use crate::http::AppState;
 use crate::http::error::Api;
 use crate::http::handlers::{wire_queued_message, wire_status_kind};
 use crate::sessions::SessionFrame;
-use crate::sessions::events::{journal_head_seq, replay_session_events};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -74,7 +73,8 @@ pub async fn session_events(
     Query(params): Query<EventsParams>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Api> {
-    let sid = Uuid::parse_str(&id).map_err(|_| Api::not_found("no such session"))?;
+    // Parsed only to reject a malformed id before it reaches the supervisor.
+    Uuid::parse_str(&id).map_err(|_| Api::not_found("no such session"))?;
     let sub = state
         .supervisor
         .ask(|reply| SessionSupervisorCommand::Subscribe {
@@ -89,17 +89,44 @@ pub async fn session_events(
     // emits nothing and only subsequent events stream. `Last-Event-ID` still wins
     // for reconnects (resume exactly after the last delivered id).
     let cursor = if params.live == Some(1) && headers.get("last-event-id").is_none() {
-        journal_head_seq(&state.journal, sid).await
+        state
+            .supervisor
+            .ask(|reply| SessionSupervisorCommand::HeadSeq {
+                id: id.clone(),
+                reply,
+            })
+            .await
+            .unwrap_or(0)
     } else {
         last_event_id(&headers)
     };
-    let journal = state.journal.clone();
+    // The stream holds no journal handle: durable events are asked of the
+    // session, which is the only thing that reads its own journal.
+    let supervisor = state.supervisor.clone();
+    let events_of = {
+        let supervisor = supervisor.clone();
+        let id = id.clone();
+        move |after_seq: u64| {
+            let supervisor = supervisor.clone();
+            let id = id.clone();
+            async move {
+                supervisor
+                    .ask(|reply| SessionSupervisorCommand::Events {
+                        id,
+                        after_seq,
+                        reply,
+                    })
+                    .await
+                    .unwrap_or_default()
+            }
+        }
+    };
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);
 
     tokio::spawn(async move {
         let mut last = cursor;
         // 1) Replay durable history after the cursor.
-        for se in replay_session_events(&journal, sid, last).await {
+        for se in events_of(last).await {
             last = se.seq;
             if let Some(ev) = stamped(se.seq, &se.event)
                 && tx.send(Ok(ev)).await.is_err()
@@ -114,7 +141,7 @@ pub async fn session_events(
                 // A coarse event was journaled (or we lagged) — re-read the
                 // journal after our cursor to pick it up with stable ids.
                 Ok(SessionFrame::Journaled) | Err(RecvError::Lagged(_)) => {
-                    for se in replay_session_events(&journal, sid, last).await {
+                    for se in events_of(last).await {
                         last = se.seq;
                         if let Some(ev) = stamped(se.seq, &se.event)
                             && tx.send(Ok(ev)).await.is_err()

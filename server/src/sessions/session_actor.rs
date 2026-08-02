@@ -11,7 +11,7 @@
 
 use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
-use crate::sessions::events::{QuietEventSink, SessionEventSink};
+use crate::sessions::events::{QuietEventSink, SessionEventSink, StampedEvent, wire_event};
 use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::subagents::{
@@ -100,6 +100,13 @@ pub enum SessionCommand {
     Snapshot {
         reply: oneshot::Sender<SessionSnapshot>,
     },
+    /// Durable events after `after_seq`, for the SSE stream.
+    Events {
+        after_seq: u64,
+        reply: oneshot::Sender<Vec<StampedEvent>>,
+    },
+    /// The journal head, for a stream that wants only what happens next.
+    HeadSeq { reply: oneshot::Sender<u64> },
     /// The supervisor wants to unload this session. Answers `false` if a run
     /// started in the meantime, in which case nothing has changed and the idle
     /// clock simply restarts.
@@ -1291,6 +1298,35 @@ impl EventSourcedActor for SessionActor {
             SessionCommand::UsageStats { reply } => {
                 let stats = self.read_usage(state).await;
                 let _ = reply.send(stats);
+                CommandEffect::none()
+            }
+            SessionCommand::Events { after_seq, reply } => {
+                let events = match self.agent() {
+                    Some(agent) => agent
+                        .ask(|reply| AgentCommand::ReplayEvents { after_seq, reply })
+                        .await
+                        .unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                let _ = reply.send(
+                    events
+                        .into_iter()
+                        .filter_map(|(seq, event)| {
+                            wire_event(event).map(|event| StampedEvent { seq, event })
+                        })
+                        .collect(),
+                );
+                CommandEffect::none()
+            }
+            SessionCommand::HeadSeq { reply } => {
+                let head = match self.agent() {
+                    Some(agent) => agent
+                        .ask(|reply| AgentCommand::HeadSeq { reply })
+                        .await
+                        .unwrap_or(0),
+                    None => 0,
+                };
+                let _ = reply.send(head);
                 CommandEffect::none()
             }
             SessionCommand::Snapshot { reply } => {

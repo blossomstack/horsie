@@ -12,6 +12,7 @@
 //! [`SupervisorConfig::idle_timeout`].
 
 use crate::sessions::clock::{Clock, SystemClock};
+use crate::sessions::events::StampedEvent;
 use crate::sessions::session_actor::{
     FRAME_BROADCAST_CAPACITY, SessionActor, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
@@ -117,6 +118,17 @@ pub enum SessionSupervisorCommand {
     SubAgents {
         id: SessionId,
         reply: oneshot::Sender<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
+    },
+    /// Durable events after `after_seq`, for the SSE stream.
+    Events {
+        id: SessionId,
+        after_seq: u64,
+        reply: oneshot::Sender<Vec<StampedEvent>>,
+    },
+    /// The journal head for a session's stream.
+    HeadSeq {
+        id: SessionId,
+        reply: oneshot::Sender<u64>,
     },
     /// Unload every session that has gone idle. Sent by the ticker, or by a
     /// test that has moved its clock.
@@ -557,6 +569,45 @@ impl EventSourcedActor for SessionSupervisor {
                     }
                     None => {
                         let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::Events {
+                id,
+                after_seq,
+                reply,
+            } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child
+                            .tell(SessionCommand::Events {
+                                after_seq,
+                                reply: tx,
+                            })
+                            .await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.unwrap_or_default());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(Vec::new());
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::HeadSeq { id, reply } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child.tell(SessionCommand::HeadSeq { reply: tx }).await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.unwrap_or(0));
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(0);
                     }
                 }
                 CommandEffect::none()

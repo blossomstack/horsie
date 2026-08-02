@@ -27,6 +27,7 @@ use horsie_models::session_api::{
 };
 use horsie_workflow::{AgentHistoryPage, HistoryQuery, TaskStatus as AgentTaskStatus};
 use serde::Deserialize;
+use uuid::Uuid;
 
 /// Default and maximum messages returned by one `/history` page.
 const HISTORY_DEFAULT_LIMIT: usize = 50;
