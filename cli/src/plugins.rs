@@ -23,6 +23,16 @@ pub struct PluginEntry {
     /// Absent for entries installed before the shared-clone layout.
     #[serde(default)]
     pub source_key: Option<String>,
+    /// Where inside the checkout the plugin root sits, when it is not the repo
+    /// root. Recorded so `update` re-points the symlink at the same subtree
+    /// instead of falling back to the repo root.
+    #[serde(default)]
+    pub subpath: Option<String>,
+    /// The marketplace this plugin was installed from, if any. `update`
+    /// re-resolves through it, so a plugin that the index has since moved or
+    /// re-pinned follows along.
+    #[serde(default)]
+    pub marketplace: Option<String>,
 }
 
 /// The `plugins.json` lockfile.
@@ -127,11 +137,56 @@ pub struct PluginPaths {
     pub marketplaces: PathBuf,
 }
 
-/// `horsie plugin install <url>`: clone into the shared sources dir, resolve the
-/// plugin root (honouring `marketplace.json`), and symlink it into the library.
+/// What `horsie plugin install <arg>` was pointed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallTarget {
+    Url(String),
+    FromMarketplace {
+        plugin: String,
+        marketplace: String,
+    },
+}
+
+impl InstallTarget {
+    /// `<plugin>@<marketplace>` only when both sides match the name shape the
+    /// Agent Skills spec guarantees — lowercase alphanumerics and hyphens.
+    ///
+    /// This is what keeps SSH URLs safe: `git@github.com:x/y.git` has a `.`,
+    /// `:` and `/` on its right-hand side, so it can never be mistaken for a
+    /// marketplace reference.
+    pub fn parse(arg: &str) -> InstallTarget {
+        let is_name = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        };
+        match arg.split_once('@') {
+            Some((plugin, market)) if is_name(plugin) && is_name(market) => {
+                InstallTarget::FromMarketplace {
+                    plugin: plugin.to_string(),
+                    marketplace: market.to_string(),
+                }
+            }
+            _ => InstallTarget::Url(arg.to_string()),
+        }
+    }
+}
+
+/// Where a plugin's tree comes from, once the target has been resolved.
+struct Resolved {
+    url: String,
+    git_ref: Option<String>,
+    subpath: Option<String>,
+    /// Name to fall back on when the plugin's own manifest declares none.
+    fallback: String,
+}
+
+/// `horsie plugin install <url|plugin@marketplace>`: resolve where the plugin
+/// lives, check it out under the shared sources dir, and symlink its root into
+/// the library.
 pub fn install(
     paths: &PluginPaths,
-    url: &str,
+    target: &InstallTarget,
     name: Option<String>,
     git_ref: Option<String>,
     force: bool,
@@ -139,28 +194,29 @@ pub fn install(
     std::fs::create_dir_all(&paths.plugins).map_err(|e| CliError::Io(e.to_string()))?;
     std::fs::create_dir_all(&paths.sources).map_err(|e| CliError::Io(e.to_string()))?;
 
-    let key = horsie_support::plugin::source_key(url, git_ref.as_deref());
-    let clone_dir = paths.sources.join(&key);
-    if !clone_dir.exists() {
-        horsie_support::git::clone(url, git_ref.as_deref(), &clone_dir).map_err(|e| {
-            // Do not leave a half-clone behind for the next attempt to trip over.
-            let _ = std::fs::remove_dir_all(&clone_dir);
-            CliError::Executor(e)
-        })?;
-    }
+    let resolved = resolve_target(paths, target, git_ref)?;
+    let checkout = horsie_support::plugin::ensure_checkout(
+        &paths.sources,
+        &resolved.url,
+        resolved.git_ref.as_deref(),
+    )
+    .map_err(CliError::Executor)?;
 
-    let (root_dir, entry_name) = resolve_plugin_root(&clone_dir, url)?;
+    let root_dir = match &resolved.subpath {
+        Some(p) => horsie_support::plugin::join_declared(&checkout.dir, p),
+        None => checkout.dir.clone(),
+    };
     let root = horsie_support::plugin::PluginRoot::inspect(&root_dir).map_err(CliError::Config)?;
     if !root.is_installable() {
-        gc_checkout(paths, &key);
+        gc_checkout(paths, &checkout.key);
         return Err(CliError::Config(format!(
-            "'{url}' is not a skills plugin: {}",
+            "'{}' is not a skills plugin: {}",
+            resolved.url,
             root.rejection()
         )));
     }
 
-    let fallback = entry_name.unwrap_or_else(|| name_from_url(url));
-    let install_name = name.unwrap_or_else(|| root.name(&fallback));
+    let install_name = name.unwrap_or_else(|| root.name(&resolved.fallback));
     let link = paths.plugins.join(&install_name);
     if link.symlink_metadata().is_ok() {
         if !force {
@@ -176,49 +232,89 @@ pub fn install(
     lock.plugins.retain(|p| p.name != install_name);
     lock.plugins.push(PluginEntry {
         name: install_name.clone(),
-        source: url.to_string(),
-        git_ref,
+        source: resolved.url,
+        git_ref: resolved.git_ref,
         version: root.version().map(str::to_string),
-        // Resolves through the symlink into the real clone.
+        // Resolves through the symlink into the real checkout.
         sha: horsie_support::git::head_sha(&link),
-        source_key: Some(key),
+        source_key: Some(checkout.key),
+        subpath: resolved.subpath,
+        marketplace: match target {
+            InstallTarget::FromMarketplace { marketplace, .. } => Some(marketplace.clone()),
+            InstallTarget::Url(_) => None,
+        },
     });
     save_lock(&paths.plugins, &lock)?;
     Ok(install_name)
 }
 
-/// The plugin root inside a clone: the marketplace-declared entry when the repo
-/// is a marketplace, else the repo root. Returns the entry name when a
-/// marketplace named it.
-fn resolve_plugin_root(clone_dir: &Path, url: &str) -> Result<(PathBuf, Option<String>), CliError> {
-    let market = horsie_support::plugin::Marketplace::read(clone_dir).map_err(CliError::Config)?;
-    let Some(market) = market else {
-        return Ok((clone_dir.to_path_buf(), None));
-    };
-    for why in &market.skipped {
-        tracing::warn!(marketplace = %url, "skipping unreadable marketplace {why}");
-    }
-    match market.plugins.as_slice() {
-        [only] => match &only.source {
-            horsie_support::plugin::PluginSource::Path(p) => Ok((
-                horsie_support::plugin::join_declared(clone_dir, p),
-                Some(only.name.clone()),
-            )),
-            // Resolving an external source needs the marketplace registry, which
-            // lands with `horsie marketplace add` (issue #105, PR2).
-            horsie_support::plugin::PluginSource::Git { url: u, .. } => {
-                Err(CliError::Config(format!(
-                    "'{}' is published from another repo ({u}); install it from there directly",
-                    only.name
-                )))
+/// Turn an install target into a concrete `(url, ref, subpath)`.
+fn resolve_target(
+    paths: &PluginPaths,
+    target: &InstallTarget,
+    git_ref: Option<String>,
+) -> Result<Resolved, CliError> {
+    match target {
+        InstallTarget::FromMarketplace {
+            plugin,
+            marketplace,
+        } => {
+            let (url, entry_ref, subpath, entry_name) =
+                crate::marketplace::resolve_entry(paths, marketplace, plugin)?;
+            Ok(Resolved {
+                url,
+                // An explicit `--ref` overrides what the index pinned.
+                git_ref: git_ref.or(entry_ref),
+                subpath,
+                fallback: entry_name,
+            })
+        }
+        InstallTarget::Url(url) => {
+            // A plain repo URL may still point at a marketplace, in which case
+            // the index says where the plugin actually is.
+            let checkout =
+                horsie_support::plugin::ensure_checkout(&paths.sources, url, git_ref.as_deref())
+                    .map_err(CliError::Executor)?;
+            let market = horsie_support::plugin::Marketplace::read(&checkout.dir)
+                .map_err(CliError::Config)?;
+            let Some(market) = market else {
+                return Ok(Resolved {
+                    url: url.clone(),
+                    git_ref,
+                    subpath: None,
+                    fallback: name_from_url(url),
+                });
+            };
+            for why in &market.skipped {
+                tracing::warn!(marketplace = %url, "skipping unreadable entry: {why}");
             }
-        },
-        [] => Ok((clone_dir.to_path_buf(), None)),
-        many => Err(CliError::Config(format!(
-            "'{url}' is a marketplace listing {} plugins; install one directly by its own repo URL. Available: {}",
-            many.len(),
-            market.names().join(", ")
-        ))),
+            match market.plugins.as_slice() {
+                [only] => {
+                    let (entry_url, entry_ref, subpath) = horsie_support::plugin::source_location(
+                        &only.source,
+                        url,
+                        git_ref.as_deref(),
+                    );
+                    Ok(Resolved {
+                        url: entry_url,
+                        git_ref: entry_ref,
+                        subpath,
+                        fallback: only.name.clone(),
+                    })
+                }
+                [] => Ok(Resolved {
+                    url: url.clone(),
+                    git_ref,
+                    subpath: None,
+                    fallback: name_from_url(url),
+                }),
+                many => Err(CliError::Config(format!(
+                    "'{url}' is a marketplace listing {} plugins. Add it with `horsie marketplace add {url}`, then install one by name. Available: {}",
+                    many.len(),
+                    market.names().join(", ")
+                ))),
+            }
+        }
     }
 }
 
@@ -269,8 +365,12 @@ pub fn list(paths: &PluginPaths) -> Vec<PluginEntry> {
     load_lock(&paths.plugins).plugins
 }
 
-/// `horsie plugin update <name>`: fast-forward the backing clone and refresh the
-/// lockfile. Re-points the symlink in case the plugin's declared root moved.
+/// `horsie plugin update <name>`: fast-forward the backing checkout and refresh
+/// the lockfile. Re-points the symlink in case the plugin's root moved.
+///
+/// A plugin installed from a marketplace is re-resolved through that index
+/// first, so an entry the marketplace has since moved or re-pinned follows
+/// along rather than silently staying on the old location.
 pub fn update(paths: &PluginPaths, name: &str) -> Result<(), CliError> {
     let mut lock = load_lock(&paths.plugins);
     let entry = lock
@@ -279,29 +379,55 @@ pub fn update(paths: &PluginPaths, name: &str) -> Result<(), CliError> {
         .find(|p| p.name == name)
         .ok_or_else(|| CliError::Config(format!("plugin '{name}' is not installed")))?
         .clone();
-    let key = entry.source_key.clone().ok_or_else(|| {
+    let old_key = entry.source_key.clone().ok_or_else(|| {
         CliError::Config(format!(
             "plugin '{name}' predates the shared-clone layout; reinstall it with --force"
         ))
     })?;
-    let clone_dir = paths.sources.join(&key);
-    horsie_support::git::pull_ff_only(&clone_dir).map_err(CliError::Executor)?;
 
-    let (root_dir, _) = resolve_plugin_root(&clone_dir, &entry.source)?;
+    let (url, git_ref, subpath) = match &entry.marketplace {
+        Some(m) => {
+            let (url, r, sub, _) = crate::marketplace::resolve_entry(paths, m, name)?;
+            (url, r, sub)
+        }
+        None => (
+            entry.source.clone(),
+            entry.git_ref.clone(),
+            entry.subpath.clone(),
+        ),
+    };
+
+    let checkout = horsie_support::plugin::ensure_checkout(&paths.sources, &url, git_ref.as_deref())
+        .map_err(CliError::Executor)?;
+    horsie_support::git::pull_ff_only(&checkout.dir).map_err(CliError::Executor)?;
+
+    let root_dir = match &subpath {
+        Some(p) => horsie_support::plugin::join_declared(&checkout.dir, p),
+        None => checkout.dir.clone(),
+    };
+    let root = horsie_support::plugin::PluginRoot::inspect(&root_dir).map_err(CliError::Config)?;
     let link = paths.plugins.join(name);
     remove_link(&link)?;
     symlink_dir(&root_dir, &link)?;
 
-    let root = horsie_support::plugin::PluginRoot::inspect(&root_dir).map_err(CliError::Config)?;
     let version = root.version().map(str::to_string);
     let sha = horsie_support::git::head_sha(&link);
     if let Some(e) = lock.plugins.iter_mut().find(|p| p.name == name) {
+        e.source = url;
+        e.git_ref = git_ref;
+        e.subpath = subpath;
+        e.source_key = Some(checkout.key.clone());
         e.sha = sha;
         if version.is_some() {
             e.version = version;
         }
     }
-    save_lock(&paths.plugins, &lock)
+    save_lock(&paths.plugins, &lock)?;
+    // The index may have moved the plugin to a different repo entirely.
+    if checkout.key != old_key {
+        gc_checkout(paths, &old_key);
+    }
+    Ok(())
 }
 
 /// `horsie plugin remove <name>`: drop the library entry and the lockfile row,
@@ -400,6 +526,8 @@ mod tests {
                 version: Some("5.1.0".into()),
                 sha: Some("abc".into()),
                 source_key: Some("deadbeefdeadbeef".into()),
+                subpath: None,
+                marketplace: None,
             }],
         };
         save_lock(dir.path(), &lock).unwrap();
@@ -418,10 +546,13 @@ mod tests {
         assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 
+    /// Initialise `dir` as a repo (if needed) and commit everything in it.
     fn commit_all(dir: &Path) {
-        git_run(dir, &["init", "-q", "-b", "main"]);
-        git_run(dir, &["config", "user.email", "t@example.com"]);
-        git_run(dir, &["config", "user.name", "t"]);
+        if !dir.join(".git").exists() {
+            git_run(dir, &["init", "-q", "-b", "main"]);
+            git_run(dir, &["config", "user.email", "t@example.com"]);
+            git_run(dir, &["config", "user.name", "t"]);
+        }
         git_run(dir, &["add", "-A"]);
         git_run(dir, &["commit", "-qm", "init"]);
     }
@@ -470,7 +601,14 @@ mod tests {
         let home = TempDir::new().unwrap();
         let p = paths(home.path());
 
-        let name = install(&p, &file_url(src.path()), None, None, false).unwrap();
+        let name = install(
+            &p,
+            &InstallTarget::Url(file_url(src.path())),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(name, "impeccable");
 
         let link = p.plugins.join("impeccable");
@@ -491,7 +629,14 @@ mod tests {
         impeccable_fixture(src.path());
         let home = TempDir::new().unwrap();
         let p = paths(home.path());
-        install(&p, &file_url(src.path()), None, None, false).unwrap();
+        install(
+            &p,
+            &InstallTarget::Url(file_url(src.path())),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         update(&p, "impeccable").unwrap();
         assert!(
@@ -519,9 +664,15 @@ mod tests {
 
         let home = TempDir::new().unwrap();
         let p = paths(home.path());
-        let err = install(&p, &file_url(src.path()), None, None, false)
-            .unwrap_err()
-            .to_string();
+        let err = install(
+            &p,
+            &InstallTarget::Url(file_url(src.path())),
+            None,
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("SKILL.md"), "err: {err}");
         assert!(
             err.contains("skills"),
@@ -552,11 +703,150 @@ mod tests {
 
         let home = TempDir::new().unwrap();
         let p = paths(home.path());
-        let err = install(&p, &file_url(src.path()), None, None, false)
-            .unwrap_err()
-            .to_string();
+        let err = install(
+            &p,
+            &InstallTarget::Url(file_url(src.path())),
+            None,
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("alpha"), "err: {err}");
         assert!(err.contains("beta"), "err: {err}");
+    }
+
+    /// SSH URLs contain `@`, so the marketplace form is recognised only by the
+    /// strict shape the Agent Skills spec guarantees for names: lowercase
+    /// alphanumerics and hyphens on both sides.
+    #[test]
+    fn install_target_parsing_never_mistakes_a_url_for_a_marketplace_ref() {
+        assert_eq!(
+            InstallTarget::parse("impeccable@official"),
+            InstallTarget::FromMarketplace {
+                plugin: "impeccable".into(),
+                marketplace: "official".into(),
+            }
+        );
+        for url in [
+            "git@github.com:x/y.git",
+            "https://github.com/o/r",
+            "ssh://git@host/x.git",
+            "file:///tmp/x",
+            "https://user@host/x.git",
+            "Impeccable@Official",
+            "a@",
+            "@b",
+        ] {
+            assert!(
+                matches!(InstallTarget::parse(url), InstallTarget::Url(_)),
+                "{url} must parse as a URL"
+            );
+        }
+    }
+
+    /// A marketplace repo indexing two plugins that live inside it.
+    fn market_fixture(dir: &Path) {
+        let cp = dir.join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("marketplace.json"),
+            r#"{"name":"acme","plugins":[
+                 {"name":"alpha","source":"./plugins/alpha"},
+                 {"name":"beta","source":"./plugins/beta"}]}"#,
+        )
+        .unwrap();
+        for n in ["alpha", "beta"] {
+            let d = dir.join(format!("plugins/{n}/skills/{n}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), format!("---\nname: {n}\n---\nbody")).unwrap();
+        }
+        commit_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn installs_a_named_plugin_out_of_a_registered_marketplace() {
+        let src = TempDir::new().unwrap();
+        market_fixture(src.path());
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        crate::marketplace::add(&p, &file_url(src.path()), None, None, false).unwrap();
+
+        let name = install(
+            &p,
+            &InstallTarget::parse("beta@acme"),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(name, "beta");
+        assert!(p.plugins.join("beta/skills/beta/SKILL.md").is_file());
+
+        let entry = list(&p).into_iter().next().unwrap();
+        assert_eq!(entry.marketplace.as_deref(), Some("acme"));
+        assert_eq!(entry.subpath.as_deref(), Some("./plugins/beta"));
+        // The marketplace was already checked out; installing from it must not
+        // clone the same repo a second time.
+        assert_eq!(std::fs::read_dir(&p.sources).unwrap().count(), 1);
+    }
+
+    /// The case PR1 could not reach: a marketplace entry whose `source` points
+    /// at a different repository, with a subdirectory.
+    #[test]
+    #[cfg(unix)]
+    fn installs_an_external_source_from_a_marketplace() {
+        let plugin_repo = TempDir::new().unwrap();
+        let d = plugin_repo.path().join("packages/gamma/skills/gamma");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("SKILL.md"), "---\nname: gamma\n---\nbody").unwrap();
+        commit_all(plugin_repo.path());
+
+        let market = TempDir::new().unwrap();
+        let cp = market.path().join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("marketplace.json"),
+            format!(
+                r#"{{"name":"ext","plugins":[{{"name":"gamma","source":{{"source":"git-subdir","url":"{}","path":"packages/gamma"}}}}]}}"#,
+                file_url(plugin_repo.path())
+            ),
+        )
+        .unwrap();
+        commit_all(market.path());
+
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        crate::marketplace::add(&p, &file_url(market.path()), None, None, false).unwrap();
+
+        let name = install(&p, &InstallTarget::parse("gamma@ext"), None, None, false).unwrap();
+        assert_eq!(name, "gamma");
+        assert!(p.plugins.join("gamma/skills/gamma/SKILL.md").is_file());
+        // Two distinct repos → two checkouts.
+        assert_eq!(std::fs::read_dir(&p.sources).unwrap().count(), 2);
+
+        // Removing the marketplace must not disturb the installed plugin.
+        crate::marketplace::remove(&p, "ext").unwrap();
+        assert!(p.plugins.join("gamma/skills/gamma/SKILL.md").is_file());
+    }
+
+    /// `update` must re-point at the same subtree, not at the repo root.
+    #[test]
+    #[cfg(unix)]
+    fn update_keeps_a_subpath_plugin_pointed_at_its_subtree() {
+        let src = TempDir::new().unwrap();
+        market_fixture(src.path());
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        crate::marketplace::add(&p, &file_url(src.path()), None, None, false).unwrap();
+        install(&p, &InstallTarget::parse("alpha@acme"), None, None, false).unwrap();
+
+        update(&p, "alpha").unwrap();
+        assert!(
+            p.plugins.join("alpha/skills/alpha/SKILL.md").is_file(),
+            "the symlink must still point at plugins/alpha, not the repo root"
+        );
     }
 
     #[test]
@@ -566,7 +856,7 @@ mod tests {
         impeccable_fixture(src.path());
         let home = TempDir::new().unwrap();
         let p = paths(home.path());
-        let url = file_url(src.path());
+        let url = InstallTarget::Url(file_url(src.path()));
         install(&p, &url, None, None, false).unwrap();
         assert!(install(&p, &url, None, None, false).is_err());
         install(&p, &url, None, None, true).unwrap();
