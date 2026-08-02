@@ -185,6 +185,23 @@ impl RuntimeClientProvider { pub async fn get(&self) -> Result<RuntimeClient, Ru
 
 ---
 
+## Status as of 2026-08-01
+
+Landed on `feat/actor-lifecycle-redesign`, workspace green (`cargo fmt`, `clippy --all-targets`, `cargo test --workspace`) at every commit:
+
+- **Task 1** — `GetRuntime` / `HibernateRuntime` replace attach/stop across the schema, the link, the agent loop and the fake, with the four conformance tests. Commit `6f86867`.
+- **Task 2** — `RuntimeManager` + `RuntimeClientProvider`, spec assembly moved out of the session, `Unavailable` / `Gone` / `Provision` taxonomy. Commit `d23682f`.
+- **Tasks 3–6** — session state machine (inbox, `TurnBegan`, four states plus terminal `Unrecoverable`), resident agent with `Shutdown`, supervisor rewritten for existence-only persistence, lazy load, injectable clock and idle offload, runtime created once at session creation. Commits `3e9d76f`, `5932666`.
+- **Task 7** — done as far as the server needed to compile and be honest: `202` with a message id, optional `status` on the wire, `UserMessageError` reduced to `NotFound` / `Unrecoverable`.
+
+### Still owed
+
+- **Task 7 remainder** — `inbox` on `SessionDetail` and an `InboxChanged` SSE event. Without them the client cannot render unread messages, so Task 8 is blocked on it.
+- **Task 8** — the whole web client.
+- **Task 9** — the e2e suite was ported to the new contract (statuses, `202`, `get`/`hibernate` signals) and two tests whose premise was the `409` path were deleted. The invariants that replace them — queue-and-merge across a restart, hibernate on the idle clock through HTTP, `Gone` terminal vs `Unavailable` retryable — are not yet written.
+- **Agent-side gaps from Task 4**: `run_id` still needs to replace the internal staleness check, and the tool-call repair is still recomputed per turn rather than journaled once (`repair_unanswered_tool_calls` rename not yet applied).
+- **Vendor conformance against the real agent loop**: the four tests run against `FakeRuntimeVendor`. The per-id `lifecycle_locks` in `runtime-vendor/src/vendor.rs` are unexercised by them.
+
 ## Self-review notes
 
 - Spec sections map to tasks: components/tiers → 2, 5; lifecycle invariants → 5, 6; state machine → 3; RuntimeManager → 2; vendor contract → 1; agent actor → 4; deletions → spread across 1, 3, 4, 5, 7; wire/client → 7, 8; testing → every task plus 9.
