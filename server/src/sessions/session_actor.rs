@@ -900,6 +900,16 @@ enum SessionAgentKind {
     Sub(Uuid),
 }
 
+/// The runtime client an agent runs with. Subagents share the session's
+/// sandbox but never its cwd/env bucket: the runtime keys that state by
+/// agent id, so each subagent acts under its own identity.
+fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> RuntimeClient {
+    match kind {
+        SessionAgentKind::Main => client,
+        SessionAgentKind::Sub(id) => client.with_agent_id(id.to_string()),
+    }
+}
+
 /// Appended to a subagent's system prompt: its place in the tree and how its
 /// result travels. Deliberately short — the tools carry their own docs.
 const SUBAGENT_PROMPT_SUFFIX: &str = "\n\n# Subagent role\n\
@@ -976,6 +986,7 @@ impl ContextProvider for SessionContextProvider {
             .last_client
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
+        let runtime_client = scoped_client(&self.kind, runtime_client);
 
         if broadcast {
             emit_progress(&self.frames, "scanning_workspace", None);
@@ -2220,6 +2231,20 @@ mod tests {
             sub.system_prompt.unwrap().contains("# Subagent role"),
             "the subagent prompt must explain its role"
         );
+    }
+
+    #[test]
+    fn a_subagent_gets_its_own_runtime_identity() {
+        let client = horsie_runtime_client::RuntimeClient::new(
+            horsie_runtime_client::MockTransport::ok(""),
+            "session-id",
+        );
+        let main = scoped_client(&SessionAgentKind::Main, client.clone());
+        assert_eq!(main.agent_id(), "session-id");
+
+        let sub_id = Uuid::new_v4();
+        let sub = scoped_client(&SessionAgentKind::Sub(sub_id), client);
+        assert_eq!(sub.agent_id(), sub_id.to_string());
     }
 
     fn user_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
