@@ -200,12 +200,22 @@ pub enum SessionDomainEvent {
         depth: u32,
     },
     /// A terminal node started another run, woken to consume child results.
-    SubAgentRunning { id: Uuid },
-    SubAgentCompleted { id: Uuid, output: String },
-    SubAgentFailed { id: Uuid, error: String },
+    SubAgentRunning {
+        id: Uuid,
+    },
+    SubAgentCompleted {
+        id: Uuid,
+        output: String,
+    },
+    SubAgentFailed {
+        id: Uuid,
+        error: String,
+    },
     /// The node's latest terminal result was sent to its parent. Persisted in
     /// the same effect as the send, so a reload neither re- nor never-sends.
-    SubAgentNotified { id: Uuid },
+    SubAgentNotified {
+        id: Uuid,
+    },
 }
 
 /// One accepted-but-undelivered user message.
@@ -627,7 +637,9 @@ impl SessionActor {
             | AgentOutcome::UsageRecorded { session_id, .. } => *session_id,
         };
         if outcome_session != self.id {
-            return self.on_sub_agent_outcome(state, outcome_session, outcome).await;
+            return self
+                .on_sub_agent_outcome(state, outcome_session, outcome)
+                .await;
         }
         // Usage is always recorded: the tokens were spent whatever became of
         // the turn that spent them.
@@ -1121,7 +1133,9 @@ impl EventSourcedActor for SessionActor {
                 task,
                 depth,
             } => {
-                state.subagents.apply_spawned(id, parent, label, task, depth);
+                state
+                    .subagents
+                    .apply_spawned(id, parent, label, task, depth);
             }
             SessionDomainEvent::SubAgentRunning { id } => {
                 state.subagents.apply_running(id);
@@ -1281,8 +1295,9 @@ impl EventSourcedActor for SessionActor {
                     return CommandEffect::none();
                 };
                 if parent_depth >= MAX_SUBAGENT_DEPTH {
-                    let _ =
-                        reply.send(Err(format!("max subagent depth {MAX_SUBAGENT_DEPTH} reached")));
+                    let _ = reply.send(Err(format!(
+                        "max subagent depth {MAX_SUBAGENT_DEPTH} reached"
+                    )));
                     return CommandEffect::none();
                 }
                 let max = self.spec.agent.max_subagents();
@@ -1336,7 +1351,11 @@ impl EventSourcedActor for SessionActor {
                 }
                 let agent = self.spawn_sub_agent_actor(ctx, id);
                 let _ = agent.tell(AgentCommand::Run { input: task }).await;
-                emit_progress(&self.frames, "subagent_spawned", Some(format!("\"{label}\" ({id})")));
+                emit_progress(
+                    &self.frames,
+                    "subagent_spawned",
+                    Some(format!("\"{label}\" ({id})")),
+                );
                 let _ = reply.send(Ok(id));
                 CommandEffect::none()
             }
@@ -1367,7 +1386,10 @@ impl EventSourcedActor for SessionActor {
             self.spawn_sub_agent_actor(ctx, id);
         }
         if !state.subagents.interrupted().is_empty() {
-            let _ = ctx.self_ref().tell(SessionCommand::ReconcileSubAgents).await;
+            let _ = ctx
+                .self_ref()
+                .tell(SessionCommand::ReconcileSubAgents)
+                .await;
         }
         if state.status == SessionStatus::Running {
             let _ = ctx
@@ -2072,9 +2094,8 @@ mod tests {
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
         let sub = spawn_sub(&session, "research", "dig into it").await;
         wait_for_tree(&journal, id, |t| {
-            t.get(&sub).is_some_and(|r| {
-                r.status == crate::sessions::subagents::SubAgentStatus::Running
-            })
+            t.get(&sub)
+                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
         })
         .await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
@@ -2157,8 +2178,7 @@ mod tests {
 
     #[tokio::test]
     async fn subagent_toolbox_strips_session_metadata_tools() {
-        let (f, session, id, _journal) =
-            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
 
         let build = |kind: SessionAgentKind| SessionContextProvider {
             runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
@@ -2209,7 +2229,9 @@ mod tests {
             .flat_map(|m| m.parts.iter())
             .filter_map(|p| match p {
                 horsie_agentcore::ContentPart::Text(t) => Some(t.text.clone()),
-                _ => None,
+                horsie_agentcore::ContentPart::ToolCall(_)
+                | horsie_agentcore::ContentPart::ToolResult(_)
+                | horsie_agentcore::ContentPart::Thinking(_) => None,
             })
             .collect()
     }
@@ -2231,15 +2253,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_completed_subagent_notifies_an_idle_main_agent() {
-        let (_f, session, id, journal) =
-            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let sub = spawn_sub(&session, "research", "dig").await;
         // Owed, then delivered: the tree's notified flag flips exactly once.
         wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
         let texts = user_texts(&main_history(&session).await);
         assert!(
-            texts.iter().any(|t| t.contains("[subagent \"research\" completed]")
-                && t.contains("sub answer")),
+            texts.iter().any(
+                |t| t.contains("[subagent \"research\" completed]") && t.contains("sub answer")
+            ),
             "the main agent must be told the result: {texts:?}"
         );
     }
@@ -2295,7 +2317,10 @@ mod tests {
         wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         let rec = state.subagents.get(&sub).unwrap();
-        assert_eq!(rec.status, crate::sessions::subagents::SubAgentStatus::Failed);
+        assert_eq!(
+            rec.status,
+            crate::sessions::subagents::SubAgentStatus::Failed
+        );
         assert!(rec.error.as_deref().unwrap().contains("bad key"));
         let texts = user_texts(&main_history(&session).await);
         assert!(
@@ -2365,7 +2390,10 @@ mod tests {
         .await;
         // The ask is still pending — the notification must not have answered it.
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        assert_eq!(state.status, crate::sessions::spec::SessionStatus::AwaitingInput);
+        assert_eq!(
+            state.status,
+            crate::sessions::spec::SessionStatus::AwaitingInput
+        );
 
         // The user's reply carries the notification along in the same input.
         session
@@ -2386,12 +2414,16 @@ mod tests {
             .flat_map(|m| m.parts.iter())
             .filter_map(|p| match p {
                 horsie_agentcore::ContentPart::ToolResult(r) => Some(r.output.clone()),
-                _ => None,
+                horsie_agentcore::ContentPart::Text(_)
+                | horsie_agentcore::ContentPart::ToolCall(_)
+                | horsie_agentcore::ContentPart::Thinking(_) => None,
             })
             .collect();
         assert!(
-            results.iter().any(|t| t.contains("the first one")
-                && t.contains("[subagent \"research\" completed]")),
+            results
+                .iter()
+                .any(|t| t.contains("the first one")
+                    && t.contains("[subagent \"research\" completed]")),
             "the notification rides with the user's answer: {results:?}"
         );
     }
@@ -2403,9 +2435,8 @@ mod tests {
         let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
         let sub = spawn_sub(&session, "w", "t").await;
         wait_for_tree(&journal, id, |t| {
-            t.get(&sub).is_some_and(|r| {
-                r.status == crate::sessions::subagents::SubAgentStatus::Running
-            })
+            t.get(&sub)
+                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
         })
         .await;
         // Simulate process death: the last ref drops, the journal lives on.
@@ -2418,9 +2449,8 @@ mod tests {
             journal.clone(),
         );
         wait_for_tree(&journal, id, |t| {
-            t.get(&sub).is_some_and(|r| {
-                r.status == crate::sessions::subagents::SubAgentStatus::Failed
-            })
+            t.get(&sub)
+                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Failed)
         })
         .await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;

@@ -510,10 +510,7 @@ mod tests {
         // No `output` field exists on the wire type at all — transcripts are
         // read via the history endpoint, never the tree.
 
-        let root = to_wire_subagent(
-            id,
-            &record(SubAgentParent::Main, SubAgentStatus::Running),
-        );
+        let root = to_wire_subagent(id, &record(SubAgentParent::Main, SubAgentStatus::Running));
         assert_eq!(root.parent, None);
         assert_eq!(root.status, "running");
     }

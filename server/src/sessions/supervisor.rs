@@ -112,8 +112,7 @@ pub enum SessionSupervisorCommand {
     /// Read a session's subagent tree (`None` when the session is unknown).
     SubAgents {
         id: SessionId,
-        reply:
-            oneshot::Sender<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
+        reply: oneshot::Sender<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
     },
     /// Unload every session that has gone idle. Sent by the ticker, or by a
     /// test that has moved its clock.

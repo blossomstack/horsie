@@ -232,7 +232,10 @@ mod tests {
     async fn spawn_returns_the_new_id() {
         let id = Uuid::new_v4();
         let out = toolbox(Ok(id))
-            .execute(SPAWN_AGENT_TOOL, json!({"label": "research", "task": "dig"}))
+            .execute(
+                SPAWN_AGENT_TOOL,
+                json!({"label": "research", "task": "dig"}),
+            )
             .await
             .unwrap();
         assert_eq!(out, Value::String(format!("Subagent spawned: {id}")));
