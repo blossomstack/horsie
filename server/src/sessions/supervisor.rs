@@ -13,7 +13,7 @@
 
 use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::session_actor::{
-    FRAME_BROADCAST_CAPACITY, SessionActor, SessionCommand, SessionUsageStats,
+    FRAME_BROADCAST_CAPACITY, SessionActor, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
@@ -70,10 +70,12 @@ pub enum SessionSupervisorCommand {
     List {
         reply: oneshot::Sender<Vec<(SessionId, SessionRecord, Option<SessionStatus>)>>,
     },
-    /// Fetch one session's row, plus its status if it happens to be loaded.
+    /// Fetch one session's row and the state its actor recovered. Loads the
+    /// session: its journal is the truth, and the actor is the only thing that
+    /// reads it.
     Get {
         id: SessionId,
-        reply: oneshot::Sender<Option<(SessionRecord, Option<SessionStatus>)>>,
+        reply: oneshot::Sender<Option<(SessionRecord, Option<SessionSnapshot>)>>,
     },
     /// Route a user message to the session, loading it if necessary.
     UserMessage {
@@ -415,12 +417,22 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::Get { id, reply } => {
-                let row = state
-                    .sessions
-                    .get(&id)
-                    .cloned()
-                    .map(|rec| (rec, self.status.get(&id).cloned()));
-                let _ = reply.send(row);
+                let Some(record) = state.sessions.get(&id).cloned() else {
+                    let _ = reply.send(None);
+                    return CommandEffect::none();
+                };
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child.tell(SessionCommand::Snapshot { reply: tx }).await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(Some((record, rx.await.ok())));
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(Some((record, None)));
+                    }
+                }
                 CommandEffect::none()
             }
             SessionSupervisorCommand::UserMessage { id, text, reply } => {
@@ -625,6 +637,7 @@ mod tests {
     use super::*;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::clock::TestClock;
+    use crate::sessions::session_actor::SessionDomainEvent;
     use crate::sessions::spec::AgentSettings;
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use std::collections::HashMap;
@@ -765,17 +778,17 @@ mod tests {
             SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
             journal,
         );
-        let row = sup2
-            .ask(|reply| SessionSupervisorCommand::Get {
-                id: id.clone(),
-                reply,
-            })
+        let rows = sup2
+            .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap();
-        let (_, status) = row.expect("the session still exists");
+        let (_, _, status) = rows
+            .into_iter()
+            .find(|(row_id, _, _)| row_id == &id)
+            .expect("the session still exists");
         assert!(
             status.is_none(),
-            "an unloaded session has no status to report, and must not be loaded to find one"
+            "listing sessions must not load one to find its status"
         );
         assert_eq!(
             f.agent.signals(),
@@ -811,6 +824,51 @@ mod tests {
             before,
             "loading a session to read it must not touch its runtime"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unloaded_session_reports_the_status_in_its_journal() {
+        // The supervisor's status map is a cache. Reading a session must ask the
+        // actor, which recovers the truth from its journal — otherwise a session
+        // that parked on a question and then went cold reports nothing, and the
+        // UI has no way to know the question is still answerable.
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let sup = spawn_root(
+            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            journal.clone(),
+        );
+        let id = create(&sup).await;
+
+        // The session asked a question in an earlier incarnation. `Create` left
+        // `Idle` in the cache, so a cache read would answer with the wrong thing.
+        let pid = SessionActor::persistence_id_for(Uuid::parse_str(&id).unwrap());
+        journal
+            .persist(
+                &pid,
+                &[serde_json::to_vec(&SessionDomainEvent::AskRecorded {
+                    tool_call_id: Some("call-1".into()),
+                    question: "which shape?".into(),
+                })
+                .unwrap()],
+            )
+            .await
+            .unwrap();
+
+        let row = sup
+            .ask(|reply| SessionSupervisorCommand::Get {
+                id: id.clone(),
+                reply,
+            })
+            .await
+            .unwrap();
+        let (_, snapshot) = row.expect("the session still exists");
+        let snapshot = snapshot.expect("a known session answers with its state");
+        assert_eq!(snapshot.status, SessionStatus::AwaitingInput);
+        assert_eq!(snapshot.pending_ask.as_deref(), Some("call-1"));
+        assert_eq!(snapshot.pending_question.as_deref(), Some("which shape?"));
     }
 
     #[tokio::test]

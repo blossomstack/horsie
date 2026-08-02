@@ -96,6 +96,10 @@ pub enum SessionCommand {
     UsageStats {
         reply: oneshot::Sender<SessionUsageStats>,
     },
+    /// Read this session's recovered state: status, pending ask, inbox.
+    Snapshot {
+        reply: oneshot::Sender<SessionSnapshot>,
+    },
     /// The supervisor wants to unload this session. Answers `false` if a run
     /// started in the meantime, in which case nothing has changed and the idle
     /// clock simply restarts.
@@ -245,6 +249,17 @@ pub struct SessionState {
 pub struct AgentUsageEntry {
     pub model: String,
     pub snapshot: AgentUsageSnapshot,
+}
+
+/// What a reader needs to know about a session, answered by the actor that owns
+/// it. Every field is recovered from the journal, so an unloaded session gives
+/// the same answers as a loaded one — it just has to be loaded to give them.
+#[derive(Debug, Clone)]
+pub struct SessionSnapshot {
+    pub status: SessionStatus,
+    pub pending_ask: Option<String>,
+    pub pending_question: Option<String>,
+    pub inbox: Vec<InboxMessage>,
 }
 
 /// A session's aggregated usage.
@@ -1278,6 +1293,15 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(stats);
                 CommandEffect::none()
             }
+            SessionCommand::Snapshot { reply } => {
+                let _ = reply.send(SessionSnapshot {
+                    status: state.status.clone(),
+                    pending_ask: state.pending_ask.clone(),
+                    pending_question: state.pending_question.clone(),
+                    inbox: state.inbox.clone(),
+                });
+                CommandEffect::none()
+            }
             SessionCommand::PrepareOffload { reply } => {
                 // A run started while the supervisor was deciding: refuse, and
                 // let the idle clock start again. This is the invariant that
@@ -1453,7 +1477,12 @@ impl EventSourcedActor for SessionActor {
                 .self_ref()
                 .tell(SessionCommand::ReconcileInterrupted)
                 .await;
+            return;
         }
+        // Loading is not a transition, but it is the first moment anyone can
+        // learn this status: the supervisor's cache is empty until a session
+        // reports, and a page already watching hears nothing otherwise.
+        self.report(state.status.clone()).await;
     }
 }
 

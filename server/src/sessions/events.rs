@@ -6,10 +6,9 @@
 //! without ids.
 
 use crate::sessions::SessionFrame;
-use crate::sessions::session_actor::{SessionActor, SessionDomainEvent, SessionState};
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use horsie_actor::{EventSourcedActor, Journal};
+use horsie_actor::Journal;
 use horsie_agentcore::{AgentEvent, EventSink, EventSinkError};
 use horsie_models::session::{
     MessageEvent, SessionEvent, TaskItem, TaskListEvent, TaskStatus as WireTaskStatus,
@@ -191,22 +190,6 @@ fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
     }
 }
 
-/// Fold a session's own journal into its [`SessionState`] (durable truth for
-/// `pending_question` / `last_error` on the detail endpoint). Session actors
-/// never snapshot, so replaying from 0 sees the full log.
-pub async fn fold_session_state(journal: &Arc<dyn Journal>, session_id: Uuid) -> SessionState {
-    let pid = SessionActor::persistence_id_for(session_id);
-    let mut state = SessionState::default();
-    let mut stream = journal.replay(&pid, 0).await;
-    while let Some(item) = stream.next().await {
-        let Ok(bytes) = item else { break };
-        if let Ok(event) = serde_json::from_slice::<SessionDomainEvent>(&bytes) {
-            state = SessionActor::apply_event(state, event);
-        }
-    }
-    state
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -287,25 +270,6 @@ mod tests {
             }
             other => panic!("expected TaskListChanged, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn fold_session_state_reads_pending_question() {
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let sid = Uuid::new_v4();
-        let pid = SessionActor::persistence_id_for(sid);
-        let events = vec![
-            serde_json::to_vec(&SessionDomainEvent::TurnEnded).unwrap(),
-            serde_json::to_vec(&SessionDomainEvent::AskRecorded {
-                tool_call_id: Some("tc".into()),
-                question: "which one?".into(),
-            })
-            .unwrap(),
-        ];
-        journal.persist(&pid, &events).await.unwrap();
-        let state = fold_session_state(&journal, sid).await;
-        assert_eq!(state.pending_question.as_deref(), Some("which one?"));
-        assert_eq!(state.pending_ask.as_deref(), Some("tc"));
     }
 
     #[test]
