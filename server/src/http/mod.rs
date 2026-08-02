@@ -255,6 +255,7 @@ mod tests {
         ));
         let deps = ServerDeps {
             provider_registry: opened.registry,
+            runtimes: crate::runtime_manager::test_runtime_manager(&shared_vendors, tmp.path()),
             vendors: shared_vendors,
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,

@@ -136,6 +136,9 @@ pub fn status_reason(s: &SessionStatus) -> Option<String> {
 /// Process-wide dependencies injected into every [`crate::sessions::session_actor::SessionActor`].
 #[derive(Clone)]
 pub struct ServerDeps {
+    /// Runtime lifecycle, owned server-side. The actors ask it for a client
+    /// and never learn how one comes to exist.
+    pub runtimes: Arc<crate::runtime_manager::RuntimeManager>,
     /// LLM providers keyed by the session's `model`, swappable at runtime.
     pub provider_registry: SharedProviderRegistry,
     /// Runtime vendors keyed by the session spec's `vendor` name.

@@ -1393,9 +1393,11 @@ mod tests {
         let mut vendors: HashMap<String, Arc<crate::runtime_vendor::RuntimeVendorLink>> =
             HashMap::new();
         vendors.insert("mock".into(), vendor.link());
+        let vendors = Arc::new(std::sync::RwLock::new(vendors));
         let deps = ServerDeps {
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            vendors: Arc::new(std::sync::RwLock::new(vendors)),
+            vendors,
             state_dir: tmp.path().to_path_buf(),
             github_tokens,
             mcp: None,
@@ -1851,9 +1853,11 @@ mod tests {
         vendors.insert("mock".into(), vendor.link());
         let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
         providers.insert("mock".into(), provider);
+        let vendors = Arc::new(std::sync::RwLock::new(vendors));
         let deps = ServerDeps {
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
             provider_registry: Arc::new(std::sync::RwLock::new(providers)),
-            vendors: Arc::new(std::sync::RwLock::new(vendors)),
+            vendors,
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: None,

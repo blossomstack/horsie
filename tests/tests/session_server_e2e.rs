@@ -18,6 +18,7 @@ use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
 use horsie_runtime_vendor::ConnectedRuntimeRegistry;
 use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
+use horsie_server::runtime_manager::{RuntimeDeps, RuntimeManager};
 use horsie_server::runtime_vendor::RuntimeVendorLink;
 use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
 use horsie_server::sessions::spec::ServerDeps;
@@ -77,6 +78,12 @@ async fn start_server(
     vendors.insert("mock".into(), vendor);
     let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
     let deps = ServerDeps {
+        runtimes: Arc::new(RuntimeManager::new(RuntimeDeps {
+            vendors: shared_vendors.clone(),
+            state_dir: journal_dir.join("state"),
+            github_tokens: None,
+            plugins: None,
+        })),
         provider_registry: Arc::new(std::sync::RwLock::new(providers)),
         vendors: shared_vendors.clone(),
         state_dir: journal_dir.join("state"),
@@ -224,6 +231,12 @@ async fn start_server_with_live_vendors(
     .await
     .unwrap();
     let deps = ServerDeps {
+        runtimes: Arc::new(RuntimeManager::new(RuntimeDeps {
+            vendors: opened.vendors.clone(),
+            state_dir: journal_dir.join("state"),
+            github_tokens: None,
+            plugins: None,
+        })),
         provider_registry: Arc::new(std::sync::RwLock::new(providers)),
         vendors: opened.vendors.clone(),
         state_dir: journal_dir.join("state"),

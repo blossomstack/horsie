@@ -153,7 +153,16 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         horsie_server::memory::MemoryStore::new(opened.pool.clone()),
     ));
 
+    let runtimes = Arc::new(horsie_server::runtime_manager::RuntimeManager::new(
+        horsie_server::runtime_manager::RuntimeDeps {
+            vendors: opened.vendors.clone(),
+            state_dir: state_dir.clone(),
+            github_tokens: Some(github.clone()),
+            plugins: Some(plugins.clone() as Arc<dyn horsie_server::plugins::PluginProvisioner>),
+        },
+    ));
     let deps = ServerDeps {
+        runtimes,
         provider_registry: opened.registry,
         vendors: opened.vendors,
         state_dir,

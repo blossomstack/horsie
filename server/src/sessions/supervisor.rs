@@ -507,9 +507,11 @@ mod tests {
             .await
             .expect("fake agent");
         vendors.insert("mock".into(), mock_agent.link());
+        let vendors = Arc::new(std::sync::RwLock::new(vendors));
         ServerDeps {
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            vendors: Arc::new(std::sync::RwLock::new(vendors)),
+            vendors,
             state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: None,
