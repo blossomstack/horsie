@@ -1,5 +1,5 @@
 
 export * from './agentView';
-export * from './agentInput';
+export * from './agentPresetInput';
 export * from './agentInvokeRequest';
 export * from './agentInvokeResponse';

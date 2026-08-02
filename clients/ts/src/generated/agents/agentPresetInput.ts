@@ -3,7 +3,7 @@ import { RepoConfig } from '../session_api';
 /**
  * Create or fully replace an agent preset. Omitted list fields default to
  */
-export interface AgentInput {
+export interface AgentPresetInput {
   name: string;
   description?: string;
   vendor?: string;

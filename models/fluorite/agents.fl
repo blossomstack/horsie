@@ -32,7 +32,11 @@ struct AgentView {
 
 /// Create or fully replace an agent preset. Omitted list fields default to
 /// empty; `description` defaults to "".
-struct AgentInput {
+///
+/// Named `AgentPresetInput`, not `AgentInput`: fluorite resolves imported types
+/// by bare name across packages, so a second `AgentInput` would hijack
+/// `events`' reference to the agent-loop `agent.AgentInput`.
+struct AgentPresetInput {
     name: String,
     description: Option<String>,
     vendor: Option<String>,
