@@ -4,8 +4,11 @@
 //! Mirrors the `memory` and `plugins` modules' store/service split and shares
 //! the config store's `SqlitePool`.
 
+pub mod password;
 mod store;
+mod throttle;
 mod token;
 
 pub use store::{AuthStore, TokenRow, UserRow};
+pub use throttle::Throttle;
 pub use token::{GeneratedToken, Principal, TokenKind, generate, hash_secret, parse};
