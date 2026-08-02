@@ -1,12 +1,10 @@
-/// Protocol types for executor ↔ server communication
+/// Shared runtime-provisioning types.
+///
+/// What remains here is the vocabulary a runtime provider needs — workspaces,
+/// env, provision steps, lifecycle state. The executor ↔ server command/event
+/// protocol this package used to define was replaced by `runtime_vendor.fl`
+/// and is gone.
 package executor;
-
-use runtime.ToolCallRequest;
-use runtime.ToolResult;
-use runtime.ScanRequest;
-use runtime.ScanResponse;
-use runtime.SessionStartRequest;
-use runtime.SessionStartResponse;
 
 /// One named workspace root passed to a runtime.
 struct WorkspaceConfig { name: String, path: String }
@@ -64,81 +62,4 @@ struct RuntimeInfo {
     runtime_id: String,
     state: RuntimeState,
     restart_count: u32,
-}
-
-struct ToolCallCmd { runtime_id: String, call: ToolCallRequest }
-struct CancelToolCallCmd { runtime_id: String, call_id: String }
-struct ToolResultEvent { runtime_id: String, call_id: String, result: ToolResult }
-
-// Workspace-context relay (AGENTS.md / skills / SessionStart hooks). The request
-// payloads are the runtime protocol's own — the executor forwards them verbatim
-// to the runtime link and wraps the response in the matching event.
-struct ScanWorkspaceCmd { runtime_id: String, request: ScanRequest }
-struct SessionStartCmd { runtime_id: String, request: SessionStartRequest }
-struct ScanResultEvent { runtime_id: String, response: ScanResponse }
-struct SessionStartResultEvent { runtime_id: String, response: SessionStartResponse }
-
-// --- Commands (server → executor) ---
-
-struct CreateRuntimeCmd { runtime_id: String, config: RuntimeConfig }
-struct DestroyRuntimeCmd { runtime_id: String }
-struct RestartRuntimeCmd { runtime_id: String }
-/// Halt a runtime without destroying it — the runtime stays re-attachable
-/// (workspace/state preserved). The explicit signal for "user stopped the session".
-struct StopRuntimeCmd { runtime_id: String }
-/// Re-attach to (revive) a preserved runtime. Vendors that cannot resume in
-/// place provision a fresh instance against the same config.
-struct AttachRuntimeCmd { runtime_id: String, config: RuntimeConfig }
-/// The owning session was deleted; the executor/vendor decides whether the
-/// underlying runtime is destroyed or kept.
-struct DeleteRuntimeCmd { runtime_id: String }
-struct QueryRuntimesCmd {}
-
-/// All commands the server can send to an executor
-#[type_tag = "type"]
-union ExecutorCommand {
-    CreateRuntime(CreateRuntimeCmd),
-    DestroyRuntime(DestroyRuntimeCmd),
-    RestartRuntime(RestartRuntimeCmd),
-    StopRuntime(StopRuntimeCmd),
-    AttachRuntime(AttachRuntimeCmd),
-    DeleteRuntime(DeleteRuntimeCmd),
-    QueryRuntimes(QueryRuntimesCmd),
-    ToolCall(ToolCallCmd),
-    CancelToolCall(CancelToolCallCmd),
-    ScanWorkspace(ScanWorkspaceCmd),
-    SessionStart(SessionStartCmd),
-}
-
-/// Envelope for server → executor messages
-struct ExecutorInboundMessage {
-    request_id: String,
-    command: ExecutorCommand,
-}
-
-// --- Events (executor → server) ---
-
-struct RegisteredEvent { executor_id: String }
-struct RuntimeStateChangedEvent { runtime_id: String, state: RuntimeState }
-struct RuntimesListedEvent { runtimes: Vec<RuntimeInfo> }
-struct CommandFailedEvent { message: String }
-
-/// All events the executor can send to the server
-#[type_tag = "type"]
-union ExecutorEvent {
-    Registered(RegisteredEvent),
-    RuntimeStateChanged(RuntimeStateChangedEvent),
-    RuntimesListed(RuntimesListedEvent),
-    CommandFailed(CommandFailedEvent),
-    ToolResult(ToolResultEvent),
-    ScanResult(ScanResultEvent),
-    SessionStartResult(SessionStartResultEvent),
-}
-
-/// Envelope for executor → server messages.
-/// request_id echoes the command's request_id for responses;
-/// a fresh UUID is used for unsolicited events (e.g. health-check state changes).
-struct ExecutorOutboundMessage {
-    request_id: String,
-    event: ExecutorEvent,
 }

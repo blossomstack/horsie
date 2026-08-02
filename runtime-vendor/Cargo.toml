@@ -1,8 +1,8 @@
 [package]
-name = "horsie-executor"
+name = "horsie-runtime-vendor"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
-description = "Job executor for horsie"
+description = "Runtime vendor library for horsie: the reusable half of a vendor process"
 version = "0.1.6"
 edition = "2024"
 

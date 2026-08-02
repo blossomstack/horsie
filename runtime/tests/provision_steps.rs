@@ -10,11 +10,11 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use horsie_executor::{
+use horsie_models::executor::{ProvisionStep, RuntimeConfig, StepParam, WorkspaceConfig};
+use horsie_runtime_vendor::{
     ConnectedRuntimeRegistry, ProcessRuntimeProvider, RuntimeEndpoint, RuntimeListenerServer,
     RuntimeProvider, serve_runtime_connections,
 };
-use horsie_models::executor::{ProvisionStep, RuntimeConfig, StepParam, WorkspaceConfig};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

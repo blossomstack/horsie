@@ -11,9 +11,9 @@
 //! concurrent sessions on one agent share those files.
 
 use crate::error::CliError;
-use horsie_executor::{
+use horsie_runtime_vendor::{
     ConnectedRuntimeRegistry, FixedWorkspaces, ProcessRuntimeProvider, RuntimeEndpoint,
-    RuntimeListenerServer, SandboxPolicy, VendorAgent, serve_runtime_connections,
+    RuntimeListenerServer, RuntimeVendor, SandboxPolicy, serve_runtime_connections,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -171,7 +171,7 @@ pub async fn run(
     let bin = runtime_bin.to_path_buf();
     let sock_for_provider = socket.clone();
     let registry_for_provider = connected.clone();
-    let provider: horsie_executor::ProviderFactory =
+    let provider: horsie_runtime_vendor::ProviderFactory =
         Arc::new(move |_runtime_id: &str, caps: Option<PathBuf>| {
             let mut p = ProcessRuntimeProvider::new(
                 bin.clone(),
@@ -184,7 +184,7 @@ pub async fn run(
             Arc::new(p)
         });
 
-    let mut agent = VendorAgent::new(
+    let mut agent = RuntimeVendor::new(
         vendor_name.to_string(),
         // A fixed, user-owned directory: no repo checkout, no bundle install.
         false,
@@ -194,7 +194,7 @@ pub async fn run(
         state_dir.join("runtimes"),
     )
     .with_sandbox(sandbox)
-    .with_bundles(horsie_executor::BundleDelivery {
+    .with_bundles(horsie_runtime_vendor::BundleDelivery {
         // The runtimes run on this machine, so whatever address reaches the
         // server from here reaches it from them.
         base_url: server.trim_end_matches('/').to_string(),

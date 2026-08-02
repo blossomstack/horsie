@@ -71,7 +71,7 @@ pub struct AppState {
     /// Every connected vendor agent, published into the same vendor map
     /// sessions select from. Held here so the connect route can register a
     /// freshly handshaken link.
-    pub vendor_agents: Arc<crate::vendor::VendorAgentRegistry>,
+    pub vendor_agents: Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
@@ -183,10 +183,10 @@ pub fn app(state: AppState) -> Router {
 )]
 mod tests {
     use super::*;
+    use crate::runtime_vendor::RuntimeVendorLink;
+    use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::spec::ServerDeps;
     use crate::sessions::supervisor::SessionSupervisor;
-    use crate::vendor::VendorLink;
-    use crate::vendor::fake_agent::FakeVendorAgent;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use horsie_actor::{InMemoryJournal, spawn_root};
@@ -215,8 +215,8 @@ mod tests {
     }
 
     async fn test_state(tmp: &tempfile::TempDir) -> AppState {
-        let mut vendors: HashMap<String, Arc<VendorLink>> = HashMap::new();
-        let mock_agent = FakeVendorAgent::builder("mock")
+        let mut vendors: HashMap<String, Arc<RuntimeVendorLink>> = HashMap::new();
+        let mock_agent = FakeRuntimeVendor::builder("mock")
             .serve_in_process()
             .await
             .expect("fake agent");
@@ -250,7 +250,7 @@ mod tests {
             opened.pool.clone(),
         ));
         let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
-        let vendor_agents = Arc::new(crate::vendor::VendorAgentRegistry::new(
+        let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
             shared_vendors.clone(),
         ));
         let deps = ServerDeps {
@@ -952,7 +952,7 @@ mod tests {
             "no such vendor before the agent dials in"
         );
 
-        let _agent = crate::vendor::fake_agent::FakeVendorAgent::builder("my-laptop")
+        let _agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
             .supports_provisioning(false)
             .connect(&format!("ws://{addr}/api/vendor/connect"))
             .await

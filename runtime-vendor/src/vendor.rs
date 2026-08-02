@@ -2,8 +2,12 @@
 //!
 //! An agent owns runtime lifecycle for one vendor: it dials the server's
 //! `/api/vendor/connect`, announces itself, and thereafter serves
-//! [`VendorCommand`]s by driving a [`RuntimeProvider`] and relaying tool calls
-//! to the runtimes that dialed its own listener.
+//! [`RuntimeVendorCommand`]s by driving a [`RuntimeProvider`] and relaying the
+//! runtime protocol, verbatim, to the runtimes that dialed its own listener.
+//!
+//! Only lifecycle is decoded here. Anything addressed to a runtime is forwarded
+//! untouched in both directions, so a new runtime capability needs no change in
+//! this file.
 //!
 //! Everything vendor-specific lives behind two seams — the `RuntimeProvider`
 //! (spawn a process, schedule a container, …) and the [`WorkspaceResolver`]
@@ -16,13 +20,15 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::executor::{EnvVar, RuntimeConfig, RuntimeInfo, RuntimeState, WorkspaceConfig};
-use horsie_models::runtime::ToolCall;
-use horsie_models::vendor::{
-    VendorAgentCapabilities, VendorCommand, VendorCommandFailed, VendorEvent, VendorInboundMessage,
-    VendorOutboundMessage, VendorRegistered, VendorRuntimeRequest, VendorRuntimeStateChanged,
-    VendorRuntimesListed, VendorScanResult, VendorSessionStartResult, VendorToolResult,
+use horsie_models::runtime::RuntimeInboundMessage;
+use horsie_models::runtime_vendor::{
+    AttachRuntimeResponse, CreateRuntimeResponse, DeleteRuntimeResponse, QueryRuntimesResponse,
+    RequestFailed, RuntimeRelayRequest, RuntimeRelayResponse, RuntimeSpec,
+    RuntimeVendorCapabilities, RuntimeVendorCommand, RuntimeVendorEvent,
+    RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage, RuntimeVendorReady,
+    StopRuntimeResponse,
 };
-use horsie_runtime_client::RuntimeClient;
+use horsie_runtime_client::RuntimeTransport;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,12 +103,15 @@ pub struct BundleDelivery {
 }
 
 /// One live runtime this agent owns.
+///
+/// The transport rather than a `RuntimeClient`: this agent never interprets what
+/// it forwards, so the typed client would only be a layer to unwrap.
 struct LiveRuntime {
     handle: Arc<dyn RuntimeHandle>,
-    client: RuntimeClient,
+    transport: Arc<dyn RuntimeTransport>,
 }
 
-pub struct VendorAgent {
+pub struct RuntimeVendor {
     vendor_name: String,
     supports_provisioning: bool,
     provider: ProviderFactory,
@@ -126,7 +135,7 @@ pub struct VendorAgent {
     runtimes: Arc<Mutex<HashMap<String, LiveRuntime>>>,
 }
 
-impl VendorAgent {
+impl RuntimeVendor {
     #[must_use]
     pub fn new(
         vendor_name: String,
@@ -185,11 +194,11 @@ impl VendorAgent {
 
         send(
             &sink,
-            VendorOutboundMessage {
+            RuntimeVendorOutboundMessage {
                 request_id: "boot".to_string(),
-                event: VendorEvent::Registered(VendorRegistered {
+                event: RuntimeVendorEvent::Ready(RuntimeVendorReady {
                     vendor_name: self.vendor_name.clone(),
-                    capabilities: VendorAgentCapabilities {
+                    capabilities: RuntimeVendorCapabilities {
                         supports_provisioning: self.supports_provisioning,
                     },
                 }),
@@ -211,7 +220,7 @@ impl VendorAgent {
                         | Ok(Message::Frame(_)) => continue,
                         Ok(Message::Close(_)) | Err(_) => break,
                     };
-                    let Ok(inbound) = serde_json::from_str::<VendorInboundMessage>(&text) else {
+                    let Ok(inbound) = serde_json::from_str::<RuntimeVendorInboundMessage>(&text) else {
                         tracing_warn("vendor agent: undecodable command, ignoring");
                         continue;
                     };
@@ -233,26 +242,38 @@ impl VendorAgent {
         Ok(())
     }
 
-    async fn dispatch(&self, inbound: VendorInboundMessage, sink: Sink) {
+    async fn dispatch(&self, inbound: RuntimeVendorInboundMessage, sink: Sink) {
         let request_id = inbound.request_id;
         let outcome = match inbound.command {
-            VendorCommand::CreateRuntime(cmd) => self
-                .provision(&cmd.runtime_id, &cmd.request)
-                .await
-                .map(|()| running(&cmd.runtime_id)),
-            VendorCommand::AttachRuntime(cmd) => self
-                .provision(&cmd.runtime_id, &cmd.request)
-                .await
-                .map(|()| running(&cmd.runtime_id)),
-            VendorCommand::StopRuntime(cmd) => {
-                self.halt(&cmd.runtime_id).await;
-                Ok(stopped(&cmd.runtime_id))
+            RuntimeVendorCommand::CreateRuntime(cmd) => {
+                let created = self.provision(&cmd.runtime_id, &cmd.spec).await;
+                created.map(|()| {
+                    RuntimeVendorEvent::CreateRuntime(CreateRuntimeResponse {
+                        runtime_id: cmd.runtime_id,
+                    })
+                })
             }
-            VendorCommand::DeleteRuntime(cmd) => {
-                self.halt(&cmd.runtime_id).await;
-                Ok(stopped(&cmd.runtime_id))
+            RuntimeVendorCommand::AttachRuntime(cmd) => {
+                let attached = self.provision(&cmd.runtime_id, &cmd.spec).await;
+                attached.map(|()| {
+                    RuntimeVendorEvent::AttachRuntime(AttachRuntimeResponse {
+                        runtime_id: cmd.runtime_id,
+                    })
+                })
             }
-            VendorCommand::QueryRuntimes(_) => {
+            RuntimeVendorCommand::StopRuntime(cmd) => {
+                self.halt(&cmd.runtime_id).await;
+                Ok(RuntimeVendorEvent::StopRuntime(StopRuntimeResponse {
+                    runtime_id: cmd.runtime_id,
+                }))
+            }
+            RuntimeVendorCommand::DeleteRuntime(cmd) => {
+                self.halt(&cmd.runtime_id).await;
+                Ok(RuntimeVendorEvent::DeleteRuntime(DeleteRuntimeResponse {
+                    runtime_id: cmd.runtime_id,
+                }))
+            }
+            RuntimeVendorCommand::QueryRuntimes(_) => {
                 let runtimes = self
                     .runtimes
                     .lock()
@@ -264,105 +285,64 @@ impl VendorAgent {
                         restart_count: 0,
                     })
                     .collect();
-                Ok(VendorEvent::RuntimesListed(VendorRuntimesListed {
+                Ok(RuntimeVendorEvent::QueryRuntimes(QueryRuntimesResponse {
                     runtimes,
                 }))
             }
-            VendorCommand::ToolCall(cmd) => {
-                self.with_client(&cmd.runtime_id, |client| {
-                    let call = cmd.call.call.clone();
-                    let call_id = cmd.call.call_id.clone();
-                    let runtime_id = cmd.runtime_id.clone();
-                    async move {
-                        let result = invoke(&client, &call_id, call).await;
-                        VendorEvent::ToolResult(VendorToolResult {
-                            runtime_id,
-                            call_id,
-                            result,
-                        })
-                    }
-                })
-                .await
-            }
-            VendorCommand::CancelToolCall(cmd) => {
-                if let Some(client) = self.client_for(&cmd.runtime_id).await {
-                    client.cancel(&cmd.call_id).await;
-                }
+            RuntimeVendorCommand::Runtime(cmd) => match self.relay(cmd).await {
+                Some(outcome) => outcome,
                 // One-way by protocol: the server is not waiting.
-                return;
-            }
-            VendorCommand::ScanWorkspace(cmd) => {
-                self.with_client(&cmd.runtime_id, |client| {
-                    let req = cmd.request.clone();
-                    let runtime_id = cmd.runtime_id.clone();
-                    async move {
-                        match client
-                            .scan_workspace(
-                                req.workspace.clone(),
-                                req.instruction_candidates.clone(),
-                                req.skills_glob.clone(),
-                                req.include_shared,
-                            )
-                            .await
-                        {
-                            Ok((workspaces, shared_skills)) => {
-                                VendorEvent::ScanResult(VendorScanResult {
-                                    runtime_id,
-                                    response: horsie_models::runtime::ScanResponse {
-                                        call_id: req.call_id,
-                                        workspaces,
-                                        shared_skills,
-                                    },
-                                })
-                            }
-                            Err(e) => VendorEvent::CommandFailed(VendorCommandFailed {
-                                message: format!("scan workspace: {e}"),
-                            }),
-                        }
-                    }
-                })
-                .await
-            }
-            VendorCommand::SessionStart(cmd) => {
-                self.with_client(&cmd.runtime_id, |client| {
-                    let call_id = cmd.request.call_id.clone();
-                    let runtime_id = cmd.runtime_id.clone();
-                    async move {
-                        match client.run_session_start().await {
-                            Ok(context) => {
-                                VendorEvent::SessionStartResult(VendorSessionStartResult {
-                                    runtime_id,
-                                    response: horsie_models::runtime::SessionStartResponse {
-                                        call_id,
-                                        context,
-                                    },
-                                })
-                            }
-                            Err(e) => VendorEvent::CommandFailed(VendorCommandFailed {
-                                message: format!("session start: {e}"),
-                            }),
-                        }
-                    }
-                })
-                .await
-            }
+                None => return,
+            },
         };
 
         let event = match outcome {
             Ok(event) => event,
-            Err(message) => VendorEvent::CommandFailed(VendorCommandFailed { message }),
+            Err(message) => RuntimeVendorEvent::RequestFailed(RequestFailed { message }),
         };
-        let _ = send(&sink, VendorOutboundMessage { request_id, event }).await;
+        let _ = send(&sink, RuntimeVendorOutboundMessage { request_id, event }).await;
+    }
+
+    /// Forward a runtime message to the runtime it names, verbatim in both
+    /// directions. This agent does not decode what it carries, which is why
+    /// adding a runtime capability costs nothing here.
+    ///
+    /// `None` means the message draws no reply — `CancelCall`, matching the
+    /// runtime link itself, where a cancel is fire-and-forget.
+    async fn relay(
+        &self,
+        request: RuntimeRelayRequest,
+    ) -> Option<Result<RuntimeVendorEvent, String>> {
+        let RuntimeRelayRequest {
+            runtime_id,
+            message,
+        } = request;
+        let oneway = matches!(message, RuntimeInboundMessage::CancelCall(_));
+        let Some(transport) = self.transport_for(&runtime_id).await else {
+            if oneway {
+                return None;
+            }
+            return Some(Err(format!(
+                "no live runtime '{runtime_id}' on this vendor"
+            )));
+        };
+        if oneway {
+            let _ = transport.send_oneway(message).await;
+            return None;
+        }
+        Some(match transport.relay(message).await {
+            Ok(message) => Ok(RuntimeVendorEvent::Runtime(RuntimeRelayResponse {
+                runtime_id,
+                message,
+            })),
+            Err(e) => Err(format!("relay to runtime '{runtime_id}': {e}")),
+        })
     }
 
     /// Create or revive a runtime. Both paths are identical for a process-backed
     /// vendor — the workspace is on disk and survives — so `attach` re-spawns
     /// against the same resolved directory.
-    async fn provision(
-        &self,
-        runtime_id: &str,
-        request: &VendorRuntimeRequest,
-    ) -> Result<(), String> {
+    async fn provision(&self, runtime_id: &str, request: &RuntimeSpec) -> Result<(), String> {
         let mut workspaces = Vec::with_capacity(request.workspaces.len());
         for name in &request.workspaces {
             let path = self.workspaces.resolve(name).ok_or_else(|| {
@@ -434,13 +414,10 @@ impl VendorAgent {
             .runtime_transport(runtime_id)
             .await
             .ok_or_else(|| format!("runtime '{runtime_id}' started but never dialed back"))?;
-        self.runtimes.lock().await.insert(
-            runtime_id.to_string(),
-            LiveRuntime {
-                handle,
-                client: RuntimeClient::from_arc(transport),
-            },
-        );
+        self.runtimes
+            .lock()
+            .await
+            .insert(runtime_id.to_string(), LiveRuntime { handle, transport });
         Ok(())
     }
 
@@ -463,26 +440,12 @@ impl VendorAgent {
         }
     }
 
-    async fn client_for(&self, runtime_id: &str) -> Option<RuntimeClient> {
+    async fn transport_for(&self, runtime_id: &str) -> Option<Arc<dyn RuntimeTransport>> {
         self.runtimes
             .lock()
             .await
             .get(runtime_id)
-            .map(|r| r.client.clone())
-    }
-
-    /// Run `f` against the runtime's client, or fail the command if the server
-    /// named a runtime this agent does not have.
-    async fn with_client<F, Fut>(&self, runtime_id: &str, f: F) -> Result<VendorEvent, String>
-    where
-        F: FnOnce(RuntimeClient) -> Fut,
-        Fut: std::future::Future<Output = VendorEvent>,
-    {
-        let client = self
-            .client_for(runtime_id)
-            .await
-            .ok_or_else(|| format!("no live runtime '{runtime_id}' on this vendor"))?;
-        Ok(f(client).await)
+            .map(|r| r.transport.clone())
     }
 
     /// Where this agent writes a runtime's sandbox capability file. Public so
@@ -493,34 +456,7 @@ impl VendorAgent {
     }
 }
 
-async fn invoke(
-    client: &RuntimeClient,
-    _call_id: &str,
-    call: ToolCall,
-) -> horsie_models::runtime::ToolResult {
-    match client.invoke(call).await {
-        Ok(output) => horsie_models::runtime::ToolResult::Ok(output),
-        Err(e) => horsie_models::runtime::ToolResult::Err(horsie_models::runtime::ToolError {
-            reason: e.to_string(),
-        }),
-    }
-}
-
-fn running(runtime_id: &str) -> VendorEvent {
-    VendorEvent::RuntimeStateChanged(VendorRuntimeStateChanged {
-        runtime_id: runtime_id.to_string(),
-        state: RuntimeState::Running,
-    })
-}
-
-fn stopped(runtime_id: &str) -> VendorEvent {
-    VendorEvent::RuntimeStateChanged(VendorRuntimeStateChanged {
-        runtime_id: runtime_id.to_string(),
-        state: RuntimeState::Stopped,
-    })
-}
-
-async fn send(sink: &Sink, msg: VendorOutboundMessage) -> Result<(), String> {
+async fn send(sink: &Sink, msg: RuntimeVendorOutboundMessage) -> Result<(), String> {
     let json = serde_json::to_string(&msg).map_err(|e| format!("encode event: {e}"))?;
     sink.lock()
         .await

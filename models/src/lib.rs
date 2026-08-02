@@ -43,8 +43,8 @@ pub mod runtime {
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
-pub mod vendor {
-    include!(concat!(env!("OUT_DIR"), "/vendor/mod.rs"));
+pub mod runtime_vendor {
+    include!(concat!(env!("OUT_DIR"), "/runtime_vendor/mod.rs"));
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
@@ -646,35 +646,38 @@ mod tests {
 mod vendor_tests {
     #[test]
     fn vendor_command_round_trips_with_a_type_tag() {
-        use crate::vendor::{VendorCommand, VendorInboundMessage, VendorStopRuntime};
-        let msg = VendorInboundMessage {
+        use crate::runtime_vendor::{
+            RuntimeVendorCommand, RuntimeVendorInboundMessage, StopRuntimeRequest,
+        };
+        let msg = RuntimeVendorInboundMessage {
             request_id: "req-1".to_string(),
-            command: VendorCommand::StopRuntime(VendorStopRuntime {
+            command: RuntimeVendorCommand::StopRuntime(StopRuntimeRequest {
                 runtime_id: "rt-1".to_string(),
             }),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"StopRuntime\""), "{json}");
-        let back: VendorInboundMessage = serde_json::from_str(&json).unwrap();
+        let back: RuntimeVendorInboundMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back, msg);
     }
 
     #[test]
     fn vendor_event_round_trips_and_carries_capabilities() {
-        use crate::vendor::{
-            VendorAgentCapabilities, VendorEvent, VendorOutboundMessage, VendorRegistered,
+        use crate::runtime_vendor::{
+            RuntimeVendorCapabilities, RuntimeVendorEvent, RuntimeVendorOutboundMessage,
+            RuntimeVendorReady,
         };
-        let msg = VendorOutboundMessage {
+        let msg = RuntimeVendorOutboundMessage {
             request_id: "req-2".to_string(),
-            event: VendorEvent::Registered(VendorRegistered {
+            event: RuntimeVendorEvent::Ready(RuntimeVendorReady {
                 vendor_name: "my-laptop".to_string(),
-                capabilities: VendorAgentCapabilities {
+                capabilities: RuntimeVendorCapabilities {
                     supports_provisioning: false,
                 },
             }),
         };
         let json = serde_json::to_string(&msg).unwrap();
-        let back: VendorOutboundMessage = serde_json::from_str(&json).unwrap();
+        let back: RuntimeVendorOutboundMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back, msg);
     }
 }

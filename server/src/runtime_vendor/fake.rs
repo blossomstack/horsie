@@ -1,6 +1,6 @@
 //! A scriptable vendor agent for tests — never compiled into a production build.
 //!
-//! It speaks the real `vendor.fl` protocol over a real WebSocket, in the two
+//! It speaks the real `runtime_vendor.fl` protocol over a real WebSocket, in the two
 //! shapes production uses: dialing a running server's `/api/vendor/connect`, or
 //! serving one end of an in-process duplex pipe. There is deliberately no
 //! in-memory shortcut: a test that passes here exercises the same codec,
@@ -11,15 +11,17 @@
 // is inside `#[cfg(test)]` modules.
 #![allow(clippy::panic)]
 
-use crate::vendor::{RuntimeSpec, VendorLink, WorkspaceSpec};
+use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, WorkspaceSpec};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    ScanResponse, SessionStartResponse, ToolOutput, ToolResult, WorkspaceScan,
+    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
+    ToolCallResponse, ToolOutput, ToolResult, WorkspaceScan,
 };
-use horsie_models::vendor::{
-    VendorAgentCapabilities, VendorCommand, VendorCommandFailed, VendorEvent, VendorInboundMessage,
-    VendorOutboundMessage, VendorRegistered, VendorRuntimeRequest, VendorRuntimeStateChanged,
-    VendorRuntimesListed, VendorScanResult, VendorSessionStartResult, VendorToolResult,
+use horsie_models::runtime_vendor::{
+    AttachRuntimeResponse, CreateRuntimeResponse, DeleteRuntimeResponse, QueryRuntimesResponse,
+    RequestFailed, RuntimeRelayResponse, RuntimeSpec as WireRuntimeSpec, RuntimeVendorCapabilities,
+    RuntimeVendorCommand, RuntimeVendorEvent, RuntimeVendorInboundMessage,
+    RuntimeVendorOutboundMessage, RuntimeVendorReady, StopRuntimeResponse,
 };
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -33,7 +35,7 @@ struct Recorder {
     live: Mutex<BTreeSet<String>>,
     /// The most recent create request, so a test can assert what the server
     /// actually put on the wire (workspaces, env, provision steps).
-    last_create: Mutex<Option<VendorRuntimeRequest>>,
+    last_create: Mutex<Option<WireRuntimeSpec>>,
     /// Remaining attach failures to inject, and whether creates fail.
     attach_failures: Mutex<u32>,
     tool_calls: Mutex<usize>,
@@ -101,19 +103,19 @@ struct Faults {
     disconnect_after_tool_calls: Option<usize>,
 }
 
-pub struct FakeVendorAgent {
+pub struct FakeRuntimeVendor {
     recorder: Arc<Recorder>,
     gate: Gate,
     /// Present only for the in-process shape, where the test drives the link
     /// directly instead of going through a server.
-    link: Option<Arc<VendorLink>>,
+    link: Option<Arc<RuntimeVendorLink>>,
     task: tokio::task::JoinHandle<()>,
 }
 
-impl FakeVendorAgent {
+impl FakeRuntimeVendor {
     #[must_use]
-    pub fn builder(vendor_name: &str) -> FakeVendorAgentBuilder {
-        FakeVendorAgentBuilder {
+    pub fn builder(vendor_name: &str) -> FakeRuntimeVendorBuilder {
+        FakeRuntimeVendorBuilder {
             vendor_name: vendor_name.to_string(),
             supports_provisioning: true,
             bash_stdout: "ok".to_string(),
@@ -151,7 +153,7 @@ impl FakeVendorAgent {
     /// # Panics
     /// If called on an agent built with `connect`, where the server owns the link.
     #[must_use]
-    pub fn link(&self) -> Arc<VendorLink> {
+    pub fn link(&self) -> Arc<RuntimeVendorLink> {
         match &self.link {
             Some(link) => link.clone(),
             None => panic!("link() is only available on an in-process fake agent"),
@@ -159,7 +161,7 @@ impl FakeVendorAgent {
     }
 
     /// Let blocked tool calls answer. No-op unless built with
-    /// [`FakeVendorAgentBuilder::block_tool_calls`].
+    /// [`FakeRuntimeVendorBuilder::block_tool_calls`].
     pub fn release_tool_calls(&self) {
         self.gate.release();
     }
@@ -176,7 +178,7 @@ impl FakeVendorAgent {
 
     /// The most recent `CreateRuntime` request the server sent.
     #[must_use]
-    pub fn last_create_request(&self) -> Option<VendorRuntimeRequest> {
+    pub fn last_create_request(&self) -> Option<WireRuntimeSpec> {
         self.recorder
             .last_create
             .lock()
@@ -190,7 +192,7 @@ impl FakeVendorAgent {
     }
 }
 
-pub struct FakeVendorAgentBuilder {
+pub struct FakeRuntimeVendorBuilder {
     vendor_name: String,
     supports_provisioning: bool,
     bash_stdout: String,
@@ -198,7 +200,7 @@ pub struct FakeVendorAgentBuilder {
     block: bool,
 }
 
-impl FakeVendorAgentBuilder {
+impl FakeRuntimeVendorBuilder {
     #[must_use]
     pub fn supports_provisioning(mut self, value: bool) -> Self {
         self.supports_provisioning = value;
@@ -212,7 +214,7 @@ impl FakeVendorAgentBuilder {
         self
     }
 
-    /// Fail every `CreateRuntime` with `CommandFailed`.
+    /// Fail every `CreateRuntime` with `RequestFailed`.
     #[must_use]
     pub fn fail_create(mut self) -> Self {
         self.faults.fail_create = true;
@@ -235,7 +237,7 @@ impl FakeVendorAgentBuilder {
         self
     }
 
-    /// Hold every tool call until [`FakeVendorAgent::release_tool_calls`], so a
+    /// Hold every tool call until [`FakeRuntimeVendor::release_tool_calls`], so a
     /// test can act while one is genuinely in flight.
     #[must_use]
     pub fn block_tool_calls(mut self) -> Self {
@@ -244,7 +246,7 @@ impl FakeVendorAgentBuilder {
     }
 
     /// Dial a running server's `/api/vendor/connect`.
-    pub async fn connect(self, url: &str) -> Result<FakeVendorAgent, String> {
+    pub async fn connect(self, url: &str) -> Result<FakeRuntimeVendor, String> {
         let (ws, _) = tokio_tungstenite::connect_async(url)
             .await
             .map_err(|e| format!("dial {url}: {e}"))?;
@@ -263,7 +265,7 @@ impl FakeVendorAgentBuilder {
             gate.clone(),
             recorder.clone(),
         ));
-        Ok(FakeVendorAgent {
+        Ok(FakeRuntimeVendor {
             recorder,
             gate,
             link: None,
@@ -273,7 +275,7 @@ impl FakeVendorAgentBuilder {
 
     /// Serve one end of an in-process duplex pipe and hand back the link the
     /// server side would hold.
-    pub async fn serve_in_process(self) -> Result<FakeVendorAgent, String> {
+    pub async fn serve_in_process(self) -> Result<FakeRuntimeVendor, String> {
         use tokio_tungstenite::tungstenite::protocol::Role;
         let (a, b) = tokio::io::duplex(256 * 1024);
         let server = WebSocketStream::from_raw_socket(a, Role::Server, None).await;
@@ -293,8 +295,8 @@ impl FakeVendorAgentBuilder {
             gate.clone(),
             recorder.clone(),
         ));
-        let link = VendorLink::start(server).await?;
-        Ok(FakeVendorAgent {
+        let link = RuntimeVendorLink::start(server).await?;
+        Ok(FakeRuntimeVendor {
             recorder,
             gate,
             link: Some(link),
@@ -331,11 +333,11 @@ async fn run_agent<S>(
     // never be read.
     let sink = Arc::new(tokio::sync::Mutex::new(sink));
 
-    let boot = VendorOutboundMessage {
+    let boot = RuntimeVendorOutboundMessage {
         request_id: "boot".to_string(),
-        event: VendorEvent::Registered(VendorRegistered {
+        event: RuntimeVendorEvent::Ready(RuntimeVendorReady {
             vendor_name,
-            capabilities: VendorAgentCapabilities {
+            capabilities: RuntimeVendorCapabilities {
                 supports_provisioning,
             },
         }),
@@ -354,18 +356,18 @@ async fn run_agent<S>(
     }
 
     while let Some(Ok(Message::Text(text))) = stream.next().await {
-        let Ok(inbound) = serde_json::from_str::<VendorInboundMessage>(&text) else {
+        let Ok(inbound) = serde_json::from_str::<RuntimeVendorInboundMessage>(&text) else {
             continue;
         };
         let reply = match inbound.command {
-            VendorCommand::CreateRuntime(cmd) => {
+            RuntimeVendorCommand::CreateRuntime(cmd) => {
                 recorder.record(&format!("create:{}", cmd.runtime_id));
                 *recorder
                     .last_create
                     .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = Some(cmd.request.clone());
+                    .unwrap_or_else(PoisonError::into_inner) = Some(cmd.spec.clone());
                 if faults.fail_create {
-                    Some(VendorEvent::CommandFailed(VendorCommandFailed {
+                    Some(RuntimeVendorEvent::RequestFailed(RequestFailed {
                         message: "fake agent: create failed".to_string(),
                     }))
                 } else {
@@ -374,15 +376,12 @@ async fn run_agent<S>(
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .insert(cmd.runtime_id.clone());
-                    Some(VendorEvent::RuntimeStateChanged(
-                        VendorRuntimeStateChanged {
-                            runtime_id: cmd.runtime_id,
-                            state: horsie_models::executor::RuntimeState::Running,
-                        },
-                    ))
+                    Some(RuntimeVendorEvent::CreateRuntime(CreateRuntimeResponse {
+                        runtime_id: cmd.runtime_id,
+                    }))
                 }
             }
-            VendorCommand::AttachRuntime(cmd) => {
+            RuntimeVendorCommand::AttachRuntime(cmd) => {
                 recorder.record(&format!("attach:{}", cmd.runtime_id));
                 let remaining = {
                     let mut g = recorder
@@ -394,7 +393,7 @@ async fn run_agent<S>(
                     n
                 };
                 if remaining > 0 {
-                    Some(VendorEvent::CommandFailed(VendorCommandFailed {
+                    Some(RuntimeVendorEvent::RequestFailed(RequestFailed {
                         message: "fake agent: attach failed".to_string(),
                     }))
                 } else {
@@ -403,43 +402,34 @@ async fn run_agent<S>(
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .insert(cmd.runtime_id.clone());
-                    Some(VendorEvent::RuntimeStateChanged(
-                        VendorRuntimeStateChanged {
-                            runtime_id: cmd.runtime_id,
-                            state: horsie_models::executor::RuntimeState::Running,
-                        },
-                    ))
+                    Some(RuntimeVendorEvent::AttachRuntime(AttachRuntimeResponse {
+                        runtime_id: cmd.runtime_id,
+                    }))
                 }
             }
-            VendorCommand::StopRuntime(cmd) => {
+            RuntimeVendorCommand::StopRuntime(cmd) => {
                 recorder.record(&format!("stop:{}", cmd.runtime_id));
                 recorder
                     .live
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&cmd.runtime_id);
-                Some(VendorEvent::RuntimeStateChanged(
-                    VendorRuntimeStateChanged {
-                        runtime_id: cmd.runtime_id,
-                        state: horsie_models::executor::RuntimeState::Stopped,
-                    },
-                ))
+                Some(RuntimeVendorEvent::StopRuntime(StopRuntimeResponse {
+                    runtime_id: cmd.runtime_id,
+                }))
             }
-            VendorCommand::DeleteRuntime(cmd) => {
+            RuntimeVendorCommand::DeleteRuntime(cmd) => {
                 recorder.record(&format!("delete:{}", cmd.runtime_id));
                 recorder
                     .live
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&cmd.runtime_id);
-                Some(VendorEvent::RuntimeStateChanged(
-                    VendorRuntimeStateChanged {
-                        runtime_id: cmd.runtime_id,
-                        state: horsie_models::executor::RuntimeState::Stopped,
-                    },
-                ))
+                Some(RuntimeVendorEvent::DeleteRuntime(DeleteRuntimeResponse {
+                    runtime_id: cmd.runtime_id,
+                }))
             }
-            VendorCommand::QueryRuntimes(_) => {
+            RuntimeVendorCommand::QueryRuntimes(_) => {
                 recorder.record("query");
                 let runtimes = recorder
                     .live
@@ -452,83 +442,89 @@ async fn run_agent<S>(
                         restart_count: 0,
                     })
                     .collect();
-                Some(VendorEvent::RuntimesListed(VendorRuntimesListed {
+                Some(RuntimeVendorEvent::QueryRuntimes(QueryRuntimesResponse {
                     runtimes,
                 }))
             }
-            VendorCommand::ToolCall(cmd) => {
-                let seen = {
-                    let mut g = recorder
-                        .tool_calls
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    *g += 1;
-                    *g
+            RuntimeVendorCommand::Runtime(cmd) => {
+                let runtime_id = cmd.runtime_id;
+                let answer = match cmd.message {
+                    RuntimeInboundMessage::ToolCall(req) => {
+                        let seen = {
+                            let mut g = recorder
+                                .tool_calls
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            *g += 1;
+                            *g
+                        };
+                        if faults
+                            .disconnect_after_tool_calls
+                            .is_some_and(|limit| seen > limit)
+                        {
+                            // Hang up mid-call: the server must observe the
+                            // transport die rather than wait forever.
+                            return;
+                        }
+                        // A blocked call must not stall the read loop, or the
+                        // cancel that releases it could never arrive.
+                        gate.wait().await;
+                        Some(RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
+                            call_id: req.call_id,
+                            result: ToolResult::Ok(ToolOutput {
+                                stdout: bash_stdout.clone(),
+                                stderr: String::new(),
+                                exit_code: 0,
+                            }),
+                        }))
+                    }
+                    RuntimeInboundMessage::CancelCall(req) => {
+                        recorder.record("cancel");
+                        recorder
+                            .cancels
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(req.call_id);
+                        // Unblock the call this cancel targets. A real runtime
+                        // abandons the command and answers with an error, and the
+                        // server's stop path waits for that unwind — leaving it
+                        // blocked deadlocks the stop instead of testing it.
+                        gate.release();
+                        // One-way by protocol: no reply.
+                        None
+                    }
+                    RuntimeInboundMessage::ScanWorkspace(req) => {
+                        Some(RuntimeOutboundMessage::ScanResult(ScanResponse {
+                            call_id: req.call_id,
+                            workspaces: vec![WorkspaceScan {
+                                name: "main".to_string(),
+                                path: "/fake/main".to_string(),
+                                is_git_repo: false,
+                                instructions: None,
+                                skills: vec![],
+                                platform: Some("linux-x86_64".to_string()),
+                            }],
+                            shared_skills: vec![],
+                        }))
+                    }
+                    RuntimeInboundMessage::SessionStart(req) => Some(
+                        RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
+                            call_id: req.call_id,
+                            context: String::new(),
+                        }),
+                    ),
                 };
-                if faults
-                    .disconnect_after_tool_calls
-                    .is_some_and(|limit| seen > limit)
-                {
-                    // Hang up mid-call: the server must observe the transport
-                    // die rather than wait forever.
-                    return;
-                }
-                // A blocked call must not stall the read loop, or the cancel
-                // that releases it could never arrive.
-                gate.wait().await;
-                Some(VendorEvent::ToolResult(VendorToolResult {
-                    runtime_id: cmd.runtime_id,
-                    call_id: cmd.call.call_id.clone(),
-                    result: ToolResult::Ok(ToolOutput {
-                        stdout: bash_stdout.clone(),
-                        stderr: String::new(),
-                        exit_code: 0,
-                    }),
-                }))
-            }
-            VendorCommand::CancelToolCall(cmd) => {
-                recorder.record("cancel");
-                recorder
-                    .cancels
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(cmd.call_id.clone());
-                // Unblock the call this cancel targets. A real runtime abandons
-                // the command and answers with an error, and the server's stop
-                // path waits for that unwind — leaving it blocked deadlocks the
-                // stop instead of testing it.
-                gate.release();
-                // One-way by protocol: no reply.
-                None
-            }
-            VendorCommand::ScanWorkspace(cmd) => Some(VendorEvent::ScanResult(VendorScanResult {
-                runtime_id: cmd.runtime_id,
-                response: ScanResponse {
-                    call_id: cmd.request.call_id,
-                    workspaces: vec![WorkspaceScan {
-                        name: "main".to_string(),
-                        path: "/fake/main".to_string(),
-                        is_git_repo: false,
-                        instructions: None,
-                        skills: vec![],
-                        platform: Some("linux-x86_64".to_string()),
-                    }],
-                    shared_skills: vec![],
-                },
-            })),
-            VendorCommand::SessionStart(cmd) => {
-                Some(VendorEvent::SessionStartResult(VendorSessionStartResult {
-                    runtime_id: cmd.runtime_id,
-                    response: SessionStartResponse {
-                        call_id: cmd.request.call_id,
-                        context: String::new(),
-                    },
-                }))
+                answer.map(|message| {
+                    RuntimeVendorEvent::Runtime(RuntimeRelayResponse {
+                        runtime_id,
+                        message,
+                    })
+                })
             }
         };
 
         let Some(event) = reply else { continue };
-        let out = VendorOutboundMessage {
+        let out = RuntimeVendorOutboundMessage {
             request_id: inbound.request_id,
             event,
         };
@@ -591,13 +587,13 @@ mod tests {
 
     #[tokio::test]
     async fn fake_agent_answers_scan_so_session_provisioning_cannot_hang() {
-        let agent = FakeVendorAgent::builder("test-agent")
+        let agent = FakeRuntimeVendor::builder("test-agent")
             .bash_stdout("ok")
             .serve_in_process()
             .await
             .expect("agent");
         let transport =
-            crate::vendor::VendorRuntimeTransport::new(agent.link(), "rt-1".to_string());
+            crate::runtime_vendor::RuntimeVendorTransport::new(agent.link(), "rt-1".to_string());
         let (workspaces, shared) = transport
             .scan_workspace(
                 "scan-1",
@@ -615,7 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_agent_records_lifecycle_signals_in_order() {
-        let agent = FakeVendorAgent::builder("test-agent")
+        let agent = FakeRuntimeVendor::builder("test-agent")
             .serve_in_process()
             .await
             .expect("agent");

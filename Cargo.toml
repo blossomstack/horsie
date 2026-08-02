@@ -4,7 +4,7 @@ members = [
     "agentcore",
     "workflow",
     "server",
-    "executor",
+    "runtime-vendor",
     "runtime",
     "models",
     "providers/anthropic",
@@ -14,7 +14,7 @@ members = [
     "mcp-client",
     "supervisor",
     "cli",
-    "vendor-velos",
+    "velos-runtime",
     "tests",
 ]
 resolver = "2"

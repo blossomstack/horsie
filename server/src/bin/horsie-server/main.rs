@@ -132,7 +132,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
 
     // Vendor agents publish themselves into the same map sessions select from,
     // exactly as the local-daemon registry does for dial-in runtimes.
-    let vendor_agents = Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
+    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
         opened.vendors.clone(),
     ));
 

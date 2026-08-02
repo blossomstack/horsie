@@ -15,7 +15,7 @@ The project ships two agents:
 | Agent | Where runtimes run | Who runs it | Repos & skill bundles |
 | --- | --- | --- | --- |
 | **`horsie connect`** | Your own machine | You | ✗ repos/bundles; ✓ skills from a CLI-installed library |
-| **`horsie-vendor-velos`** | velos-scheduled containers | You, once, near the server | ✓ supported |
+| **`horsie-velos-runtime`** | velos-scheduled containers | You, once, near the server | ✓ supported |
 
 > **Out of the box there is no vendor.** A session can be created, but it cannot
 > run a turn until an agent connects. Set one up below.
@@ -62,7 +62,7 @@ bundles per session. It *can* load skills from a plugin library you install with
 `horsie plugin install` — see
 [Skills & plugins](skills-and-plugins.md#skills-on-your-own-machine-host-library).
 
-## `horsie-vendor-velos` — managed container runtimes
+## `horsie-velos-runtime` — managed container runtimes
 
 This agent provisions a fresh, isolated **container** per session on a
 [velos](https://github.com/blossomstack/velos) backend and tears it down when
@@ -72,7 +72,7 @@ bundles into the sandbox.
 Run it wherever it can reach both the server and velos:
 
 ```bash
-HORSIE_VELOS_TOKEN=... horsie-vendor-velos \
+HORSIE_VELOS_TOKEN=... horsie-velos-runtime \
   --server https://SERVER-HOST \
   --name velos \
   --velos-url http://velos.example:8080 \
@@ -112,9 +112,9 @@ durable transcript lives on the server.
 
 A vendor agent is a `RuntimeProvider` (spawn a process, schedule a container,
 call a cloud sandbox API) plus a `WorkspaceResolver` (turn a requested workspace
-*name* into a path the vendor owns). Both sit behind `VendorAgent` in the
-`horsie-executor` crate, which owns the protocol, the runtime listener, and
-tool-call relaying. `horsie-vendor-velos` is the worked example: it implements
+*name* into a path the vendor owns). Both sit behind `RuntimeVendor` in the
+`horsie-runtime-vendor` crate, which owns the protocol, the runtime listener, and
+relaying the runtime protocol. `horsie-velos-runtime` is the worked example: it implements
 those two things and nothing else.
 
 ## Upgrading from the old dial-in runtime
@@ -131,6 +131,6 @@ tear anything down. Replace it with `horsie connect` as shown above; the
 `--workspace` flags carry over unchanged and `--runtime-id` becomes `--name`.
 
 If you configured velos in Settings, that form is gone. Move those values onto
-`horsie-vendor-velos` flags: **Server URL** → `--velos-url`, **Runtime image**
+`horsie-velos-runtime` flags: **Server URL** → `--velos-url`, **Runtime image**
 → `--image`, **Advertise address** → `--advertise`, **Token** →
 `HORSIE_VELOS_TOKEN`, and the advanced fields to their matching flags.

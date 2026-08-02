@@ -12,7 +12,7 @@ horsie-anthropic = { path = "../providers/anthropic" }
 horsie-openai = { path = "../providers/openai" }
 horsie-mock-llm = { path = "../providers/mock-llm" }
 horsie-server = { path = "../server", features = ["test-util"] }
-horsie-executor = { path = "../executor" }
+horsie-runtime-vendor = { path = "../runtime-vendor" }
 horsie-actor = { path = "../actor", features = ["file-journal"] }
 horsie-workflow = { path = "../workflow" }
 horsie-models = { path = "../models" }

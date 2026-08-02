@@ -1,19 +1,19 @@
 //! Tracks every connected vendor agent and mirrors it into the shared vendor
 //! map sessions select from.
 //!
-//! This deliberately mirrors [`LocalDaemonRegistry`](crate::vendor::LocalDaemonRegistry):
+//! This deliberately mirrors [`LocalDaemonRegistry`](crate::runtime_vendor::LocalDaemonRegistry):
 //! the same `SharedVendors` map, the same publish-on-connect shape. The one
-//! difference is what a reconnect means — see [`VendorAgentRegistry::register`].
+//! difference is what a reconnect means — see [`RuntimeVendorRegistry::register`].
 
+use crate::runtime_vendor::RuntimeVendorLink;
 use crate::sessions::spec::SharedVendors;
-use crate::vendor::VendorLink;
 use std::sync::{Arc, PoisonError};
 
-pub struct VendorAgentRegistry {
+pub struct RuntimeVendorRegistry {
     vendors: SharedVendors,
 }
 
-impl VendorAgentRegistry {
+impl RuntimeVendorRegistry {
     #[must_use]
     pub fn new(vendors: SharedVendors) -> Self {
         Self { vendors }
@@ -27,7 +27,7 @@ impl VendorAgentRegistry {
     /// runtimes are gone: keeping it would strand every session on a transport
     /// that can never answer, and `RuntimeClient` would latch each of them
     /// disconnected in turn.
-    pub fn register(&self, link: Arc<VendorLink>) {
+    pub fn register(&self, link: Arc<RuntimeVendorLink>) {
         let name = link.vendor_name().to_string();
         self.vendors
             .write()
@@ -57,7 +57,7 @@ impl VendorAgentRegistry {
 )]
 mod tests {
     use super::*;
-    use crate::vendor::fake_agent::FakeVendorAgent;
+    use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use std::collections::HashMap;
     use std::sync::RwLock;
 
@@ -68,8 +68,8 @@ mod tests {
     #[tokio::test]
     async fn register_publishes_the_agent_under_its_announced_name() {
         let vendors = empty_vendors();
-        let registry = VendorAgentRegistry::new(vendors.clone());
-        let agent = FakeVendorAgent::builder("my-laptop")
+        let registry = RuntimeVendorRegistry::new(vendors.clone());
+        let agent = FakeRuntimeVendor::builder("my-laptop")
             .supports_provisioning(false)
             .serve_in_process()
             .await
@@ -88,16 +88,16 @@ mod tests {
     #[tokio::test]
     async fn a_reconnecting_agent_replaces_its_dead_link() {
         let vendors = empty_vendors();
-        let registry = VendorAgentRegistry::new(vendors.clone());
+        let registry = RuntimeVendorRegistry::new(vendors.clone());
 
-        let first = FakeVendorAgent::builder("same-name")
+        let first = FakeRuntimeVendor::builder("same-name")
             .serve_in_process()
             .await
             .expect("first agent");
         registry.register(first.link());
         first.disconnect();
 
-        let second = FakeVendorAgent::builder("same-name")
+        let second = FakeRuntimeVendor::builder("same-name")
             .serve_in_process()
             .await
             .expect("second agent");
@@ -109,7 +109,7 @@ mod tests {
         vendor
             .create(
                 "rt-1",
-                &crate::vendor::fake_agent::runtime_spec_fixture("main"),
+                &crate::runtime_vendor::fake::runtime_spec_fixture("main"),
             )
             .await
             .expect("create must reach the live agent");

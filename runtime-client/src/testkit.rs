@@ -8,7 +8,8 @@ use crate::transport::{RuntimeTransport, TransportError};
 use async_trait::async_trait;
 use horsie_agentcore::testkit::Script;
 use horsie_models::runtime::{
-    PluginSkill, ToolCall, ToolError, ToolOutput, ToolResult, WorkspaceScan,
+    PluginSkill, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
+    ToolCall, ToolCallResponse, ToolError, ToolOutput, ToolResult, WorkspaceScan,
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Notify;
@@ -240,57 +241,77 @@ impl MockTransport {
 
 #[async_trait]
 impl RuntimeTransport for MockTransport {
-    async fn invoke(&self, _call_id: &str, call: ToolCall) -> Result<ToolResult, TransportError> {
-        self.invocations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(call);
-        if let Some(gate) = &self.invoke_gate {
-            gate.notified().await;
-        }
-        let Some(script) = &self.script else {
-            return Ok(self.result.clone());
-        };
-        match script.next_step() {
-            Ok(TransportOutcome::Ok(result)) => Ok(result),
-            Ok(TransportOutcome::Err(e)) => Err(e),
-            Ok(TransportOutcome::Hang) => std::future::pending().await,
-            Err(exhausted) => Err(TransportError::SendFailed(exhausted.to_string())),
-        }
-    }
-
-    async fn cancel(&self, call_id: &str) -> Result<(), TransportError> {
-        self.cancels
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(call_id.to_string());
-        Ok(())
-    }
-
-    async fn scan_workspace(
+    async fn relay(
         &self,
-        _call_id: &str,
-        _workspace: Option<String>,
-        _instruction_candidates: Vec<String>,
-        _skills_glob: String,
-        include_shared: bool,
-    ) -> Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), TransportError> {
-        if let Some(gate) = &self.prep_gate {
-            gate.notified().await;
+        message: RuntimeInboundMessage,
+    ) -> Result<RuntimeOutboundMessage, TransportError> {
+        match message {
+            RuntimeInboundMessage::ToolCall(req) => {
+                self.invocations
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(req.call.clone());
+                if let Some(gate) = &self.invoke_gate {
+                    gate.notified().await;
+                }
+                let result = match &self.script {
+                    None => self.result.clone(),
+                    Some(script) => match script.next_step() {
+                        Ok(TransportOutcome::Ok(result)) => result,
+                        Ok(TransportOutcome::Err(e)) => return Err(e),
+                        Ok(TransportOutcome::Hang) => std::future::pending().await,
+                        Err(exhausted) => {
+                            return Err(TransportError::SendFailed(exhausted.to_string()));
+                        }
+                    },
+                };
+                Ok(RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
+                    call_id: req.call_id,
+                    result,
+                }))
+            }
+            RuntimeInboundMessage::ScanWorkspace(req) => {
+                if let Some(gate) = &self.prep_gate {
+                    gate.notified().await;
+                }
+                let shared = if req.include_shared {
+                    self.shared.clone()
+                } else {
+                    Vec::new()
+                };
+                Ok(RuntimeOutboundMessage::ScanResult(ScanResponse {
+                    call_id: req.call_id,
+                    workspaces: self.scan.clone(),
+                    shared_skills: shared,
+                }))
+            }
+            RuntimeInboundMessage::SessionStart(req) => {
+                if let Some(gate) = &self.prep_gate {
+                    gate.notified().await;
+                }
+                Ok(RuntimeOutboundMessage::SessionStartResult(
+                    SessionStartResponse {
+                        call_id: req.call_id,
+                        context: self.session_context.clone(),
+                    },
+                ))
+            }
+            // A cancel draws no reply, so relaying one would hang a real
+            // transport; a test that does it has a bug worth surfacing.
+            RuntimeInboundMessage::CancelCall(_) => Err(TransportError::SendFailed(
+                "CancelCall must be sent one-way, not relayed".to_string(),
+            )),
         }
-        let shared = if include_shared {
-            self.shared.clone()
-        } else {
-            Vec::new()
-        };
-        Ok((self.scan.clone(), shared))
     }
 
-    async fn run_session_start(&self, _call_id: &str) -> Result<String, TransportError> {
-        if let Some(gate) = &self.prep_gate {
-            gate.notified().await;
+    async fn send_oneway(&self, message: RuntimeInboundMessage) -> Result<(), TransportError> {
+        if let RuntimeInboundMessage::CancelCall(req) = message {
+            self.cancels
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(req.call_id);
         }
-        Ok(self.session_context.clone())
+        Ok(())
     }
 }
 

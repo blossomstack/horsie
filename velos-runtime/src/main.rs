@@ -1,4 +1,4 @@
-//! `horsie-vendor-velos` — a runtime vendor agent backed by velos containers.
+//! `horsie-velos-runtime` — a runtime vendor agent backed by velos containers.
 //!
 //! It dials a session server's `/api/vendor/connect` and serves runtimes by
 //! scheduling one velos container each. The server holds no velos credentials:
@@ -12,8 +12,8 @@ mod provider;
 mod velos;
 
 use clap::Parser;
-use horsie_executor::{
-    ConnectedRuntimeRegistry, RuntimeEndpoint, RuntimeListenerServer, VendorAgent,
+use horsie_runtime_vendor::{
+    ConnectedRuntimeRegistry, RuntimeEndpoint, RuntimeListenerServer, RuntimeVendor,
     serve_runtime_connections,
 };
 use provider::{ManagedWorkspaces, VelosContainerProvider, VelosProviderSettings};
@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(
-    name = "horsie-vendor-velos",
+    name = "horsie-velos-runtime",
     about = "Serve horsie sessions with velos-scheduled container runtimes"
 )]
 struct Cli {
@@ -66,7 +66,7 @@ struct Cli {
     #[arg(long, default_value_t = 60)]
     connect_timeout_secs: u64,
     /// Scratch directory for per-runtime state.
-    #[arg(long, default_value = "/var/lib/horsie-vendor-velos")]
+    #[arg(long, default_value = "/var/lib/horsie-velos-runtime")]
     state_dir: PathBuf,
 }
 
@@ -76,7 +76,7 @@ async fn main() -> std::process::ExitCode {
     match run(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("horsie-vendor-velos: {e}");
+            eprintln!("horsie-velos-runtime: {e}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -138,17 +138,15 @@ async fn run(cli: Cli) -> Result<(), String> {
 
     // One provider serves every runtime: unlike the local agent, there is no
     // per-runtime sandbox file to bind — the container is the boundary.
-    let shared: Arc<dyn horsie_executor::RuntimeProvider> = Arc::new(VelosContainerProvider::new(
-        api,
-        connected.clone(),
-        settings,
-    ));
-    let provider: horsie_executor::ProviderFactory = {
+    let shared: Arc<dyn horsie_runtime_vendor::RuntimeProvider> = Arc::new(
+        VelosContainerProvider::new(api, connected.clone(), settings),
+    );
+    let provider: horsie_runtime_vendor::ProviderFactory = {
         let shared = shared.clone();
         Arc::new(move |_runtime_id: &str, _caps: Option<PathBuf>| shared.clone())
     };
 
-    let agent = VendorAgent::new(
+    let agent = RuntimeVendor::new(
         cli.name.clone(),
         // velos allocates a fresh workspace per runtime: repos and bundles can
         // be provisioned into it.
@@ -158,7 +156,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         Arc::new(ManagedWorkspaces::new(cli.workspace_root.clone())),
         cli.state_dir.clone(),
     )
-    .with_bundles(horsie_executor::BundleDelivery {
+    .with_bundles(horsie_runtime_vendor::BundleDelivery {
         // Containers reach the server the same way they reach us: over the
         // advertise address, which is routable from velos's container network.
         base_url: format!("http://{}", cli.advertise.trim_end_matches('/')),

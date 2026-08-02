@@ -1488,11 +1488,11 @@ dependencies = [
  "horsie-actor",
  "horsie-agentcore",
  "horsie-anthropic",
- "horsie-executor",
  "horsie-mock-llm",
  "horsie-models",
  "horsie-openai",
  "horsie-runtime-client",
+ "horsie-runtime-vendor",
  "horsie-supervisor",
  "horsie-workflow",
  "reqwest 0.12.28",
@@ -1554,24 +1554,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
-]
-
-[[package]]
-name = "horsie-executor"
-version = "0.1.6"
-dependencies = [
- "async-trait",
- "futures-util",
- "horsie-models",
- "horsie-runtime-client",
- "horsie-server",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "uuid",
 ]
 
 [[package]]
@@ -1640,8 +1622,8 @@ dependencies = [
  "futures-util",
  "glob",
  "hackamore-agent",
- "horsie-executor",
  "horsie-models",
+ "horsie-runtime-vendor",
  "libc",
  "nono",
  "regex",
@@ -1673,6 +1655,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "horsie-runtime-vendor"
+version = "0.1.6"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "horsie-models",
+ "horsie-runtime-client",
+ "horsie-server",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "horsie-server"
 version = "0.1.6"
 dependencies = [
@@ -1684,11 +1684,11 @@ dependencies = [
  "horsie-actor",
  "horsie-agentcore",
  "horsie-anthropic",
- "horsie-executor",
  "horsie-mcp-client",
  "horsie-models",
  "horsie-openai",
  "horsie-runtime-client",
+ "horsie-runtime-vendor",
  "horsie-workflow",
  "hyper",
  "hyper-util",
@@ -1721,10 +1721,10 @@ dependencies = [
  "horsie-actor",
  "horsie-agentcore",
  "horsie-anthropic",
- "horsie-executor",
  "horsie-mock-llm",
  "horsie-models",
  "horsie-runtime-client",
+ "horsie-runtime-vendor",
  "horsie-workflow",
  "reqwest 0.12.28",
  "serde",
@@ -1738,7 +1738,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "horsie-vendor-velos"
+name = "horsie-velos-runtime"
 version = "0.1.6"
 dependencies = [
  "async-trait",
@@ -1746,8 +1746,8 @@ dependencies = [
  "clap",
  "futures-util",
  "horsie-agentcore",
- "horsie-executor",
  "horsie-models",
+ "horsie-runtime-vendor",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2085,11 +2085,11 @@ dependencies = [
  "horsie-actor",
  "horsie-agentcore",
  "horsie-anthropic",
- "horsie-executor",
  "horsie-mock-llm",
  "horsie-models",
  "horsie-openai",
  "horsie-runtime-client",
+ "horsie-runtime-vendor",
  "horsie-server",
  "horsie-workflow",
  "reqwest 0.12.28",

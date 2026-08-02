@@ -3,16 +3,17 @@
 //! The agent owns runtime lifecycle; this link is the server's only handle on
 //! it. Every command carries a fresh `request_id`; the read loop matches each
 //! inbound event back to the waiter that issued it, and drops unsolicited
-//! events (state changes, the boot `Registered`) rather than treating an
+//! events (state changes, the boot `Ready`) rather than treating an
 //! unmatched id as a protocol error.
 
-use crate::vendor::{
-    RuntimeSpec, VendorError, VendorRuntime, VendorRuntimeHandle, VendorRuntimeTransport,
+use crate::runtime_vendor::{
+    RuntimeSpec, RuntimeVendorTransport, VendorError, VendorRuntime, VendorRuntimeHandle,
 };
 use futures_util::{SinkExt, StreamExt};
-use horsie_models::vendor::{
-    VendorAttachRuntime, VendorCommand, VendorCreateRuntime, VendorDeleteRuntime, VendorEvent,
-    VendorInboundMessage, VendorOutboundMessage, VendorRuntimeRequest, VendorStopRuntime,
+use horsie_models::runtime_vendor::{
+    AttachRuntimeRequest, CreateRuntimeRequest, DeleteRuntimeRequest,
+    RuntimeSpec as WireRuntimeSpec, RuntimeVendorCommand, RuntimeVendorEvent,
+    RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage, StopRuntimeRequest,
 };
 use horsie_runtime_client::RuntimeClient;
 use std::collections::HashMap;
@@ -32,30 +33,30 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// provision window rather than a typical request timeout.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
-type Waiters = Arc<Mutex<HashMap<String, oneshot::Sender<VendorEvent>>>>;
+type Waiters = Arc<Mutex<HashMap<String, oneshot::Sender<RuntimeVendorEvent>>>>;
 
-/// A sink that erases the socket type, so `VendorLink` is not generic over the
+/// A sink that erases the socket type, so `RuntimeVendorLink` is not generic over the
 /// transport once constructed.
 type BoxedSink = Box<
     dyn futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Send + Unpin,
 >;
 
-pub struct VendorLink {
+pub struct RuntimeVendorLink {
     vendor_name: String,
-    capabilities: horsie_models::vendor::VendorAgentCapabilities,
+    capabilities: horsie_models::runtime_vendor::RuntimeVendorCapabilities,
     sink: Mutex<BoxedSink>,
     waiters: Waiters,
     connected: Arc<AtomicBool>,
     /// The `Arc` this link lives in, held weakly so the link never keeps
     /// itself alive. Needed because `create`/`attach` hand an owned `Arc` to
     /// the transport and lifecycle handle they build.
-    this: std::sync::Weak<VendorLink>,
+    this: std::sync::Weak<RuntimeVendorLink>,
 }
 
-impl VendorLink {
+impl RuntimeVendorLink {
     /// Handshake on an accepted agent connection and start its read loop.
     ///
-    /// The first message must be `VendorEvent::Registered`; anything else (or
+    /// The first message must be `RuntimeVendorEvent::Ready`; anything else (or
     /// silence past [`HANDSHAKE_TIMEOUT`]) drops the connection.
     pub async fn start<S>(ws: WebSocketStream<S>) -> Result<Arc<Self>, String>
     where
@@ -67,15 +68,17 @@ impl VendorLink {
             loop {
                 match stream.next().await {
                     Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<VendorOutboundMessage>(&text) {
+                        match serde_json::from_str::<RuntimeVendorOutboundMessage>(&text) {
                             Ok(msg) => match msg.event {
-                                VendorEvent::Registered(ev) => return Some(ev),
-                                VendorEvent::RuntimeStateChanged(_)
-                                | VendorEvent::RuntimesListed(_)
-                                | VendorEvent::CommandFailed(_)
-                                | VendorEvent::ToolResult(_)
-                                | VendorEvent::ScanResult(_)
-                                | VendorEvent::SessionStartResult(_) => return None,
+                                RuntimeVendorEvent::Ready(ev) => return Some(ev),
+                                RuntimeVendorEvent::RuntimeStateChanged(_)
+                                | RuntimeVendorEvent::CreateRuntime(_)
+                                | RuntimeVendorEvent::AttachRuntime(_)
+                                | RuntimeVendorEvent::StopRuntime(_)
+                                | RuntimeVendorEvent::DeleteRuntime(_)
+                                | RuntimeVendorEvent::QueryRuntimes(_)
+                                | RuntimeVendorEvent::Runtime(_)
+                                | RuntimeVendorEvent::RequestFailed(_) => return None,
                             },
                             Err(_) => return None,
                         }
@@ -117,11 +120,11 @@ impl VendorLink {
                     | Ok(Message::Frame(_)) => continue,
                     Ok(Message::Close(_)) | Err(_) => break,
                 };
-                let Ok(msg) = serde_json::from_str::<VendorOutboundMessage>(&text) else {
+                let Ok(msg) = serde_json::from_str::<RuntimeVendorOutboundMessage>(&text) else {
                     tracing::warn!("vendor link: undecodable frame, ignoring");
                     continue;
                 };
-                if let VendorEvent::RuntimeStateChanged(ev) = &msg.event {
+                if let RuntimeVendorEvent::RuntimeStateChanged(ev) = &msg.event {
                     tracing::debug!(
                         runtime = %ev.runtime_id,
                         state = ?ev.state,
@@ -148,7 +151,9 @@ impl VendorLink {
     }
 
     #[must_use]
-    pub fn announced_capabilities(&self) -> horsie_models::vendor::VendorAgentCapabilities {
+    pub fn announced_capabilities(
+        &self,
+    ) -> horsie_models::runtime_vendor::RuntimeVendorCapabilities {
         self.capabilities.clone()
     }
 
@@ -161,7 +166,7 @@ impl VendorLink {
         self.this.upgrade()
     }
 
-    async fn write(&self, msg: &VendorInboundMessage) -> Result<(), String> {
+    async fn write(&self, msg: &RuntimeVendorInboundMessage) -> Result<(), String> {
         if !self.is_connected() {
             return Err("vendor agent disconnected".to_string());
         }
@@ -175,12 +180,15 @@ impl VendorLink {
     }
 
     /// Send a command and await the event carrying the same `request_id`.
-    pub async fn request(&self, command: VendorCommand) -> Result<VendorEvent, String> {
+    pub async fn request(
+        &self,
+        command: RuntimeVendorCommand,
+    ) -> Result<RuntimeVendorEvent, String> {
         let request_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.waiters.lock().await.insert(request_id.clone(), tx);
 
-        let msg = VendorInboundMessage {
+        let msg = RuntimeVendorInboundMessage {
             request_id: request_id.clone(),
             command,
         };
@@ -190,7 +198,7 @@ impl VendorLink {
         }
 
         match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(VendorEvent::CommandFailed(ev))) => Err(ev.message),
+            Ok(Ok(RuntimeVendorEvent::RequestFailed(ev))) => Err(ev.message),
             Ok(Ok(event)) => Ok(event),
             // The sender was dropped: the read loop exited, i.e. the socket died.
             Ok(Err(_)) => Err("vendor agent disconnected".to_string()),
@@ -201,9 +209,9 @@ impl VendorLink {
         }
     }
 
-    /// Send a command that has no reply (`CancelToolCall`).
-    pub async fn send_oneway(&self, command: VendorCommand) -> Result<(), String> {
-        self.write(&VendorInboundMessage {
+    /// Send a command that has no reply (a relayed `CancelCall`).
+    pub async fn send_oneway(&self, command: RuntimeVendorCommand) -> Result<(), String> {
+        self.write(&RuntimeVendorInboundMessage {
             request_id: Uuid::new_v4().to_string(),
             command,
         })
@@ -213,10 +221,10 @@ impl VendorLink {
     /// Translate the server-side spec into the wire request. The capability
     /// file is read here and inlined: a server-local path means nothing to a
     /// remote agent.
-    fn runtime_request(spec: &RuntimeSpec) -> Result<VendorRuntimeRequest, String> {
+    fn runtime_spec(spec: &RuntimeSpec) -> Result<WireRuntimeSpec, String> {
         let sandbox_capabilities =
             horsie_models::capabilities::CapabilitySpec::load(&spec.capabilities_file)?;
-        Ok(VendorRuntimeRequest {
+        Ok(WireRuntimeSpec {
             workspaces: spec.workspaces.iter().map(|w| w.name.clone()).collect(),
             env: spec.env.clone(),
             provision: spec.provision.clone(),
@@ -237,23 +245,23 @@ impl VendorLink {
                 VendorError::Provision(e)
             }
         };
-        let request = Self::runtime_request(spec).map_err(wrap)?;
+        let wire_spec = Self::runtime_spec(spec).map_err(wrap)?;
         let command = if attach {
-            VendorCommand::AttachRuntime(VendorAttachRuntime {
+            RuntimeVendorCommand::AttachRuntime(AttachRuntimeRequest {
                 runtime_id: runtime_id.to_string(),
-                request,
+                spec: wire_spec,
             })
         } else {
-            VendorCommand::CreateRuntime(VendorCreateRuntime {
+            RuntimeVendorCommand::CreateRuntime(CreateRuntimeRequest {
                 runtime_id: runtime_id.to_string(),
-                request,
+                spec: wire_spec,
             })
         };
-        // `request` already turns CommandFailed into Err, so any other reply
+        // `request` already turns RequestFailed into Err, so any other reply
         // means the agent accepted the command.
         self.request(command).await.map_err(wrap)?;
 
-        let transport = VendorRuntimeTransport::new(self.clone(), runtime_id.to_string());
+        let transport = RuntimeVendorTransport::new(self.clone(), runtime_id.to_string());
         Ok(VendorRuntime {
             runtime_client: RuntimeClient::from_arc(Arc::new(transport)),
             handle: Arc::new(LinkRuntimeHandle {
@@ -268,11 +276,11 @@ impl VendorLink {
 /// trait while the server had several vendor implementations of its own; every
 /// vendor is a connected agent now, so there is exactly one implementor and the
 /// trait was pure indirection.
-impl VendorLink {
+impl RuntimeVendorLink {
     /// What the agent announced it can do with a session workspace.
     #[must_use]
-    pub fn capabilities(&self) -> crate::vendor::VendorCapabilities {
-        crate::vendor::VendorCapabilities {
+    pub fn capabilities(&self) -> crate::runtime_vendor::VendorCapabilities {
+        crate::runtime_vendor::VendorCapabilities {
             supports_provisioning: self.capabilities.supports_provisioning,
         }
     }
@@ -307,7 +315,7 @@ impl VendorLink {
     /// The owning session was deleted; the agent decides the runtime's fate.
     pub async fn delete(&self, runtime_id: &str) {
         let _ = self
-            .request(VendorCommand::DeleteRuntime(VendorDeleteRuntime {
+            .request(RuntimeVendorCommand::DeleteRuntime(DeleteRuntimeRequest {
                 runtime_id: runtime_id.to_string(),
             }))
             .await;
@@ -317,7 +325,7 @@ impl VendorLink {
 /// Lifecycle handle for one runtime on one agent. `stop` is the explicit
 /// stop-preserve signal; the agent decides what preservation means.
 struct LinkRuntimeHandle {
-    link: Arc<VendorLink>,
+    link: Arc<RuntimeVendorLink>,
     runtime_id: String,
 }
 
@@ -326,7 +334,7 @@ impl VendorRuntimeHandle for LinkRuntimeHandle {
     async fn stop(&self) {
         let _ = self
             .link
-            .request(VendorCommand::StopRuntime(VendorStopRuntime {
+            .request(RuntimeVendorCommand::StopRuntime(StopRuntimeRequest {
                 runtime_id: self.runtime_id.clone(),
             }))
             .await;
@@ -342,8 +350,8 @@ impl VendorRuntimeHandle for LinkRuntimeHandle {
 )]
 mod tests {
     use super::*;
-    use horsie_models::vendor::{
-        VendorAgentCapabilities, VendorRegistered, VendorRuntimeStateChanged, VendorRuntimesListed,
+    use horsie_models::runtime_vendor::{
+        QueryRuntimesResponse, RuntimeStateChanged, RuntimeVendorCapabilities, RuntimeVendorReady,
     };
     use tokio_tungstenite::tungstenite::protocol::Role;
 
@@ -359,8 +367,8 @@ mod tests {
         (server, agent)
     }
 
-    async fn send_event(sink: &mut AgentWs, request_id: &str, event: VendorEvent) {
-        let msg = VendorOutboundMessage {
+    async fn send_event(sink: &mut AgentWs, request_id: &str, event: RuntimeVendorEvent) {
+        let msg = RuntimeVendorOutboundMessage {
             request_id: request_id.to_string(),
             event,
         };
@@ -369,10 +377,10 @@ mod tests {
             .unwrap();
     }
 
-    fn boot(name: &str, provisioning: bool) -> VendorEvent {
-        VendorEvent::Registered(VendorRegistered {
+    fn boot(name: &str, provisioning: bool) -> RuntimeVendorEvent {
+        RuntimeVendorEvent::Ready(RuntimeVendorReady {
             vendor_name: name.to_string(),
-            capabilities: VendorAgentCapabilities {
+            capabilities: RuntimeVendorCapabilities {
                 supports_provisioning: provisioning,
             },
         })
@@ -394,7 +402,7 @@ mod tests {
 
     fn spec_fixture() -> RuntimeSpec {
         RuntimeSpec {
-            workspaces: vec![crate::vendor::WorkspaceSpec {
+            workspaces: vec![crate::runtime_vendor::WorkspaceSpec {
                 name: "main".to_string(),
             }],
             provision: vec![],
@@ -411,7 +419,9 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let link = VendorLink::start(server_ws).await.expect("handshake");
+        let link = RuntimeVendorLink::start(server_ws)
+            .await
+            .expect("handshake");
         assert_eq!(link.vendor_name(), "my-laptop");
         assert!(!link.announced_capabilities().supports_provisioning);
         assert!(link.is_connected());
@@ -424,14 +434,14 @@ mod tests {
             send_event(
                 &mut agent_ws,
                 "wrong",
-                VendorEvent::RuntimesListed(VendorRuntimesListed { runtimes: vec![] }),
+                RuntimeVendorEvent::QueryRuntimes(QueryRuntimesResponse { runtimes: vec![] }),
             )
             .await;
             std::future::pending::<()>().await;
         });
-        let outcome = VendorLink::start(server_ws).await;
+        let outcome = RuntimeVendorLink::start(server_ws).await;
         let Err(err) = outcome else {
-            panic!("a non-Registered first message must be rejected");
+            panic!("a non-Ready first message must be rejected");
         };
         assert!(err.contains("announce"), "{err}");
     }
@@ -442,13 +452,13 @@ mod tests {
         tokio::spawn(async move {
             send_event(&mut agent_ws, "boot", boot("v", true)).await;
             while let Some(Ok(Message::Text(text))) = agent_ws.next().await {
-                let inbound: VendorInboundMessage = serde_json::from_str(&text).unwrap();
+                let inbound: RuntimeVendorInboundMessage = serde_json::from_str(&text).unwrap();
                 // An unsolicited event first, proving it is ignored rather than
                 // mistaken for the reply.
                 send_event(
                     &mut agent_ws,
                     "unsolicited",
-                    VendorEvent::RuntimeStateChanged(VendorRuntimeStateChanged {
+                    RuntimeVendorEvent::RuntimeStateChanged(RuntimeStateChanged {
                         runtime_id: "rt-1".to_string(),
                         state: horsie_models::executor::RuntimeState::Running,
                     }),
@@ -457,34 +467,36 @@ mod tests {
                 send_event(
                     &mut agent_ws,
                     &inbound.request_id,
-                    VendorEvent::RuntimesListed(VendorRuntimesListed { runtimes: vec![] }),
+                    RuntimeVendorEvent::QueryRuntimes(QueryRuntimesResponse { runtimes: vec![] }),
                 )
                 .await;
             }
         });
 
-        let link = VendorLink::start(server_ws).await.expect("handshake");
+        let link = RuntimeVendorLink::start(server_ws)
+            .await
+            .expect("handshake");
         let event = link
-            .request(VendorCommand::QueryRuntimes(
-                horsie_models::vendor::VendorQueryRuntimes {},
+            .request(RuntimeVendorCommand::QueryRuntimes(
+                horsie_models::runtime_vendor::QueryRuntimesRequest {},
             ))
             .await
             .expect("reply");
-        assert!(matches!(event, VendorEvent::RuntimesListed(_)));
+        assert!(matches!(event, RuntimeVendorEvent::QueryRuntimes(_)));
     }
 
     #[tokio::test]
     async fn request_fails_when_the_agent_reports_command_failed() {
-        use horsie_models::vendor::VendorCommandFailed;
+        use horsie_models::runtime_vendor::RequestFailed;
         let (server_ws, mut agent_ws) = ws_pair().await;
         tokio::spawn(async move {
             send_event(&mut agent_ws, "boot", boot("v", true)).await;
             while let Some(Ok(Message::Text(text))) = agent_ws.next().await {
-                let inbound: VendorInboundMessage = serde_json::from_str(&text).unwrap();
+                let inbound: RuntimeVendorInboundMessage = serde_json::from_str(&text).unwrap();
                 send_event(
                     &mut agent_ws,
                     &inbound.request_id,
-                    VendorEvent::CommandFailed(VendorCommandFailed {
+                    RuntimeVendorEvent::RequestFailed(RequestFailed {
                         message: "no such workspace 'ghost'".to_string(),
                     }),
                 )
@@ -492,9 +504,11 @@ mod tests {
             }
         });
 
-        let link = VendorLink::start(server_ws).await.expect("handshake");
+        let link = RuntimeVendorLink::start(server_ws)
+            .await
+            .expect("handshake");
         let Err(err) = link.create("rt-1", &spec_fixture()).await else {
-            panic!("a CommandFailed reply must surface as an error");
+            panic!("a RequestFailed reply must surface as an error");
         };
         assert!(format!("{err}").contains("ghost"), "{err}");
     }
@@ -508,10 +522,12 @@ mod tests {
             drop(agent_ws);
         });
 
-        let link = VendorLink::start(server_ws).await.expect("handshake");
+        let link = RuntimeVendorLink::start(server_ws)
+            .await
+            .expect("handshake");
         let err = link
-            .request(VendorCommand::QueryRuntimes(
-                horsie_models::vendor::VendorQueryRuntimes {},
+            .request(RuntimeVendorCommand::QueryRuntimes(
+                horsie_models::runtime_vendor::QueryRuntimesRequest {},
             ))
             .await
             .expect_err("a hung-up agent must fail the request, not hang");
@@ -535,23 +551,20 @@ mod tests {
         tokio::spawn(async move {
             send_event(&mut agent_ws, "boot", boot("v", true)).await;
             while let Some(Ok(Message::Text(text))) = agent_ws.next().await {
-                let inbound: VendorInboundMessage = serde_json::from_str(&text).unwrap();
+                let inbound: RuntimeVendorInboundMessage = serde_json::from_str(&text).unwrap();
                 let label = match &inbound.command {
-                    VendorCommand::CreateRuntime(_) => "create",
-                    VendorCommand::AttachRuntime(_) => "attach",
-                    VendorCommand::StopRuntime(_) => "stop",
-                    VendorCommand::DeleteRuntime(_) => "delete",
-                    VendorCommand::QueryRuntimes(_) => "query",
-                    VendorCommand::ToolCall(_) => "tool",
-                    VendorCommand::CancelToolCall(_) => "cancel",
-                    VendorCommand::ScanWorkspace(_) => "scan",
-                    VendorCommand::SessionStart(_) => "session-start",
+                    RuntimeVendorCommand::CreateRuntime(_) => "create",
+                    RuntimeVendorCommand::AttachRuntime(_) => "attach",
+                    RuntimeVendorCommand::StopRuntime(_) => "stop",
+                    RuntimeVendorCommand::DeleteRuntime(_) => "delete",
+                    RuntimeVendorCommand::QueryRuntimes(_) => "query",
+                    RuntimeVendorCommand::Runtime(_) => "runtime",
                 };
                 recorder.lock().unwrap().push(label.to_string());
                 send_event(
                     &mut agent_ws,
                     &inbound.request_id,
-                    VendorEvent::RuntimeStateChanged(VendorRuntimeStateChanged {
+                    RuntimeVendorEvent::RuntimeStateChanged(RuntimeStateChanged {
                         runtime_id: "rt-1".to_string(),
                         state: horsie_models::executor::RuntimeState::Running,
                     }),
@@ -560,7 +573,9 @@ mod tests {
             }
         });
 
-        let link = VendorLink::start(server_ws).await.expect("handshake");
+        let link = RuntimeVendorLink::start(server_ws)
+            .await
+            .expect("handshake");
         let rt = link.create("rt-1", &spec_fixture()).await.expect("create");
         rt.handle.stop().await;
         link.delete("rt-1").await;
@@ -583,7 +598,9 @@ mod tests {
             send_event(&mut agent_ws, "boot", boot("fixed-dir", false)).await;
             std::future::pending::<()>().await;
         });
-        let link = VendorLink::start(server_ws).await.expect("handshake");
+        let link = RuntimeVendorLink::start(server_ws)
+            .await
+            .expect("handshake");
         assert!(
             !link.capabilities().supports_provisioning,
             "the server must not second-guess what the agent announced"

@@ -6,13 +6,13 @@
 //! (`Running` → `Interrupted`); no vendor call and no agent spawn happens until
 //! the next user action ("a user message means make it run").
 
+use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, VendorRuntime};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::SessionEventSink;
 use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
 use crate::sessions::{SessionFrame, UserMessageError};
-use crate::vendor::{RuntimeSpec, VendorLink, VendorRuntime};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
@@ -305,7 +305,7 @@ impl SessionActor {
         Ok(title)
     }
 
-    fn vendor(&self) -> Result<Arc<VendorLink>, String> {
+    fn vendor(&self) -> Result<Arc<RuntimeVendorLink>, String> {
         let vendors = self
             .deps
             .vendors
@@ -337,7 +337,7 @@ impl SessionActor {
                 .spec
                 .workspaces
                 .iter()
-                .map(|w| crate::vendor::WorkspaceSpec {
+                .map(|w| crate::runtime_vendor::WorkspaceSpec {
                     name: w.name.clone(),
                 })
                 .collect(),
@@ -1191,8 +1191,8 @@ impl EventSourcedActor for SessionActor {
 )]
 mod tests {
     use super::*;
+    use crate::runtime_vendor::fake::{FakeRuntimeVendor, FakeRuntimeVendorBuilder};
     use crate::sessions::spec::AgentSettings;
-    use crate::vendor::fake_agent::{FakeVendorAgent, FakeVendorAgentBuilder};
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use std::collections::HashMap;
@@ -1348,7 +1348,7 @@ mod tests {
 
     struct Harness {
         actor: ActorRef<SessionCommand>,
-        vendor: FakeVendorAgent,
+        vendor: FakeRuntimeVendor,
         statuses: tokio::sync::mpsc::UnboundedReceiver<SessionStatus>,
         names: tokio::sync::mpsc::UnboundedReceiver<String>,
         published_titles: tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -1357,20 +1357,20 @@ mod tests {
     }
 
     /// A fake agent under the vendor name the fixtures select. Every harness
-    /// goes through a real WebSocket and the real `vendor.fl` codec — there is
+    /// goes through a real WebSocket and the real `runtime_vendor.fl` codec — there is
     /// no in-process vendor double any more, so a test that passes here
     /// exercises the same path production takes.
-    fn agent() -> FakeVendorAgentBuilder {
-        FakeVendorAgent::builder("mock")
+    fn agent() -> FakeRuntimeVendorBuilder {
+        FakeRuntimeVendor::builder("mock")
     }
 
-    async fn harness_on(journal: Arc<dyn Journal>, vendor: FakeVendorAgentBuilder) -> Harness {
+    async fn harness_on(journal: Arc<dyn Journal>, vendor: FakeRuntimeVendorBuilder) -> Harness {
         harness_with_id(journal, vendor, Uuid::new_v4()).await
     }
 
     async fn harness_with_id(
         journal: Arc<dyn Journal>,
-        vendor: FakeVendorAgentBuilder,
+        vendor: FakeRuntimeVendorBuilder,
         id: Uuid,
     ) -> Harness {
         harness_custom(journal, vendor, id, spec_fixture("mock"), None).await
@@ -1378,14 +1378,15 @@ mod tests {
 
     async fn harness_custom(
         journal: Arc<dyn Journal>,
-        vendor: FakeVendorAgentBuilder,
+        vendor: FakeRuntimeVendorBuilder,
         id: Uuid,
         spec: SessionSpec,
         github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,
     ) -> Harness {
         let tmp = tempfile::tempdir().unwrap();
         let vendor = vendor.serve_in_process().await.expect("fake agent");
-        let mut vendors: HashMap<String, Arc<crate::vendor::VendorLink>> = HashMap::new();
+        let mut vendors: HashMap<String, Arc<crate::runtime_vendor::RuntimeVendorLink>> =
+            HashMap::new();
         vendors.insert("mock".into(), vendor.link());
         let deps = ServerDeps {
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -1819,12 +1820,13 @@ mod tests {
     }
 
     async fn harness_with_provider(
-        vendor: FakeVendorAgentBuilder,
+        vendor: FakeRuntimeVendorBuilder,
         provider: Arc<dyn LlmProvider>,
     ) -> Harness {
         let tmp = tempfile::tempdir().unwrap();
         let vendor = vendor.serve_in_process().await.expect("fake agent");
-        let mut vendors: HashMap<String, Arc<crate::vendor::VendorLink>> = HashMap::new();
+        let mut vendors: HashMap<String, Arc<crate::runtime_vendor::RuntimeVendorLink>> =
+            HashMap::new();
         vendors.insert("mock".into(), vendor.link());
         let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
         providers.insert("mock".into(), provider);
