@@ -38,7 +38,7 @@ use uuid::Uuid;
 
 /// Capacity of a session's live frame broadcast. Slow subscribers see `lagged`
 /// drops and catch up from the journal.
-const FRAME_BROADCAST_CAPACITY: usize = 256;
+pub(crate) const FRAME_BROADCAST_CAPACITY: usize = 256;
 
 /// The agent id a session's primary agent reports usage under.
 const MAIN_AGENT_ID: &str = "main";
@@ -84,10 +84,6 @@ pub enum SessionCommand {
     Stop { reply: oneshot::Sender<()> },
     /// Delete: cancel, tell the vendor, and stop.
     Delete { reply: oneshot::Sender<()> },
-    /// Hand back a live frame subscriber for the SSE stream.
-    Subscribe {
-        reply: oneshot::Sender<broadcast::Receiver<SessionFrame>>,
-    },
     /// Read a window of conversation history from one of the session's
     /// agents: `agent_id` absent or `"main"` for the primary agent, otherwise
     /// a subagent id. `None` answers "no such agent".
@@ -295,13 +291,15 @@ pub struct SessionActor {
 }
 
 impl SessionActor {
+    /// `frames` is owned by the supervisor and outlives this actor: a session
+    /// that unloads under a watching client must not disconnect it.
     pub fn new(
         id: Uuid,
         spec: SessionSpec,
         deps: ServerDeps,
         parent: ActorRef<SessionSupervisorCommand>,
+        frames: broadcast::Sender<SessionFrame>,
     ) -> Self {
-        let (frames, _) = broadcast::channel(FRAME_BROADCAST_CAPACITY);
         Self {
             id,
             spec,
@@ -1241,10 +1239,6 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(());
                 CommandEffect::stop()
             }
-            SessionCommand::Subscribe { reply } => {
-                let _ = reply.send(self.frames.subscribe());
-                CommandEffect::none()
-            }
             SessionCommand::History {
                 agent_id,
                 query,
@@ -1783,6 +1777,12 @@ mod tests {
         }
     }
 
+    /// The frame channel a supervisor would hand the actor. Owned by the test,
+    /// exactly as the real one is owned by the supervisor rather than the actor.
+    fn test_frames() -> broadcast::Sender<SessionFrame> {
+        broadcast::channel(FRAME_BROADCAST_CAPACITY).0
+    }
+
     fn spawn_deaf_supervisor() -> ActorRef<SessionSupervisorCommand> {
         horsie_actor::spawn_root(
             DeafSupervisor,
@@ -1794,7 +1794,13 @@ mod tests {
     async fn drain_does_nothing_when_the_inbox_is_empty() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let mut actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            test_frames(),
+        );
         let events = actor.drain(&SessionState::default()).await;
         assert!(events.is_empty());
     }
@@ -1803,7 +1809,13 @@ mod tests {
     async fn drain_does_nothing_while_a_turn_is_already_running() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let mut actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            test_frames(),
+        );
         let state = fold(vec![
             queued("m1", "one"),
             SessionDomainEvent::TurnBegan {
@@ -1823,7 +1835,13 @@ mod tests {
     async fn drain_refuses_once_the_session_is_unrecoverable() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let mut actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            test_frames(),
+        );
         let state = fold(vec![
             queued("m1", "one"),
             SessionDomainEvent::SessionFailed {
@@ -1866,7 +1884,7 @@ mod tests {
             .await
             .unwrap();
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), f.deps, parent),
+            SessionActor::new(id, actor_spec_fixture(), f.deps, parent, test_frames()),
             journal.clone(),
         );
         // Recovery reconciles the interrupted turn first (event 4); wait for
@@ -1892,12 +1910,16 @@ mod tests {
             5,
             "a failed turn records the failure and nothing else"
         );
-        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        // Asked of the actor, which is the only thing that reads this journal.
+        let snapshot = session
+            .ask(|reply| SessionCommand::Snapshot { reply })
+            .await
+            .unwrap();
         assert!(matches!(
-            state.status,
+            snapshot.status,
             crate::sessions::spec::SessionStatus::Failed { .. }
         ));
-        assert_eq!(state.inbox.len(), 1, "the queued message is still owed");
+        assert_eq!(snapshot.inbox.len(), 1, "the queued message is still owed");
     }
 
     /// Stop is a turn boundary like any other: it cancels the turn, not the
@@ -1908,7 +1930,13 @@ mod tests {
     async fn stop_then_a_queued_message_starts_the_next_turn() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let mut actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            test_frames(),
+        );
         let running = fold(vec![
             queued("m1", "one"),
             SessionDomainEvent::TurnBegan {
@@ -1933,7 +1961,13 @@ mod tests {
     async fn drain_consumes_the_whole_inbox_and_starts_a_turn() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let mut actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            test_frames(),
+        );
         let state = fold(vec![queued("m1", "one"), queued("m2", "two")]);
         let events = actor.drain(&state).await;
         assert_eq!(events.len(), 1);
@@ -1952,7 +1986,13 @@ mod tests {
     async fn drain_delivers_a_merged_message_as_the_pending_asks_answer() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let mut actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            test_frames(),
+        );
         let state = fold(vec![
             SessionDomainEvent::AskRecorded {
                 tool_call_id: Some("call-1".into()),
@@ -2034,7 +2074,13 @@ mod tests {
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), f.deps.clone(), parent),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                parent,
+                test_frames(),
+            ),
             journal,
         );
 
