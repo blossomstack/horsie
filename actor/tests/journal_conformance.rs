@@ -1,3 +1,5 @@
+// The journal itself is under test here, so it is called directly.
+#![allow(clippy::disallowed_methods)]
 //! Journal conformance suite.
 //!
 //! The same contract assertions run against every `Journal` implementation. The

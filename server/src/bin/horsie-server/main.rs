@@ -165,7 +165,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
 
     let state = AppState {
         supervisor,
-        journal,
         global_events: global_tx,
         config_store: opened.store,
         model_cards,

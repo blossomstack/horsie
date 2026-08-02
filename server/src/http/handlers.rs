@@ -4,7 +4,6 @@
 use crate::http::AppState;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
-use crate::sessions::events::fold_session_state;
 use crate::sessions::session_actor::{InboxMessage, SessionUsageStats};
 use crate::sessions::spec::{
     AgentSettings, ProvisionStepSpec, SessionSpec, SessionStatus, WorkspaceDef, status_kind,
@@ -200,25 +199,20 @@ pub async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, Api> {
-    let (rec, status) = ask(&state, |reply| SessionSupervisorCommand::Get {
+    let (rec, snapshot) = ask(&state, |reply| SessionSupervisorCommand::Get {
         id: id.clone(),
         reply,
     })
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
-    // pending_question / inbox are durable truth in the session journal, and
-    // are read from it whether or not the session happens to be loaded.
-    let folded = match Uuid::parse_str(&id) {
-        Ok(uuid) => fold_session_state(&state.journal, uuid).await,
-        Err(_) => Default::default(),
-    };
+    let status = snapshot.as_ref().map(|s| s.status.clone());
     let detail = SessionDetail {
         id: id.clone(),
         name: rec.spec.name.clone(),
         status: status.as_ref().map(status_kind),
         created_at: rec.created_at,
         last_error: status.as_ref().and_then(status_reason),
-        pending_question: folded.pending_question,
+        pending_question: snapshot.as_ref().and_then(|s| s.pending_question.clone()),
         model: rec.spec.agent.model.clone(),
         vendor: rec.spec.vendor.clone(),
         repos: rec
@@ -238,7 +232,9 @@ pub async fn get_session(
         memory_spaces: rec.spec.agent.memory_spaces.clone(),
         use_plugins: rec.spec.agent.use_plugins.unwrap_or(false),
         thinking_effort: rec.spec.agent.thinking_effort.clone(),
-        inbox: folded.inbox.into_iter().map(wire_queued_message).collect(),
+        inbox: snapshot
+            .map(|s| s.inbox.into_iter().map(wire_queued_message).collect())
+            .unwrap_or_default(),
     };
     Ok(Json(GetSessionResponse { session: detail }))
 }

@@ -12,7 +12,10 @@
 //! [`SupervisorConfig::idle_timeout`].
 
 use crate::sessions::clock::{Clock, SystemClock};
-use crate::sessions::session_actor::{SessionActor, SessionCommand, SessionUsageStats};
+use crate::sessions::events::StampedEvent;
+use crate::sessions::session_actor::{
+    FRAME_BROADCAST_CAPACITY, SessionActor, SessionCommand, SessionSnapshot, SessionUsageStats,
+};
 use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
 };
@@ -68,10 +71,12 @@ pub enum SessionSupervisorCommand {
     List {
         reply: oneshot::Sender<Vec<(SessionId, SessionRecord, Option<SessionStatus>)>>,
     },
-    /// Fetch one session's row, plus its status if it happens to be loaded.
+    /// Fetch one session's row and the state its actor recovered. Loads the
+    /// session: its journal is the truth, and the actor is the only thing that
+    /// reads it.
     Get {
         id: SessionId,
-        reply: oneshot::Sender<Option<(SessionRecord, Option<SessionStatus>)>>,
+        reply: oneshot::Sender<Option<(SessionRecord, Option<SessionSnapshot>)>>,
     },
     /// Route a user message to the session, loading it if necessary.
     UserMessage {
@@ -113,6 +118,17 @@ pub enum SessionSupervisorCommand {
     SubAgents {
         id: SessionId,
         reply: oneshot::Sender<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
+    },
+    /// Durable events after `after_seq`, for the SSE stream.
+    Events {
+        id: SessionId,
+        after_seq: u64,
+        reply: oneshot::Sender<Vec<StampedEvent>>,
+    },
+    /// The journal head for a session's stream.
+    HeadSeq {
+        id: SessionId,
+        reply: oneshot::Sender<u64>,
     },
     /// Unload every session that has gone idle. Sent by the ticker, or by a
     /// test that has moved its clock.
@@ -176,6 +192,10 @@ pub struct SessionSupervisor {
     /// which the API reports as unknown rather than guessing.
     status: BTreeMap<SessionId, SessionStatus>,
     last_activity: BTreeMap<SessionId, Instant>,
+    /// One live-frame channel per session, owned here rather than by the actor
+    /// so that unloading a session does not disconnect whoever is watching it.
+    /// An entry outlives its actor only while something still holds a receiver.
+    frames: BTreeMap<SessionId, broadcast::Sender<SessionFrame>>,
 }
 
 impl SessionSupervisor {
@@ -195,6 +215,7 @@ impl SessionSupervisor {
             children: BTreeMap::new(),
             status: BTreeMap::new(),
             last_activity: BTreeMap::new(),
+            frames: BTreeMap::new(),
         }
     }
 
@@ -219,11 +240,13 @@ impl SessionSupervisor {
                 return None;
             }
         };
+        let frames = self.frames_for(id);
         let child = ctx.spawn(SessionActor::new(
             uuid,
             record.spec.clone(),
             self.deps.clone(),
             ctx.self_ref(),
+            frames,
         ));
         self.children.insert(id.clone(), child.clone());
         Some(child)
@@ -248,10 +271,28 @@ impl SessionSupervisor {
             }));
     }
 
+    /// This session's live-frame channel, created on first use.
+    fn frames_for(&mut self, id: &SessionId) -> broadcast::Sender<SessionFrame> {
+        self.frames
+            .entry(id.clone())
+            .or_insert_with(|| broadcast::channel(FRAME_BROADCAST_CAPACITY).0)
+            .clone()
+    }
+
     fn forget(&mut self, id: &SessionId) {
         self.children.remove(id);
         self.status.remove(id);
         self.last_activity.remove(id);
+        // The channel outlives the actor while anyone is still watching: an
+        // unloaded session has nothing to say until something reloads it, and
+        // ending the stream would only make the client reconnect and reload it.
+        if self
+            .frames
+            .get(id)
+            .is_none_or(|tx| tx.receiver_count() == 0)
+        {
+            self.frames.remove(id);
+        }
     }
 
     /// Unload every session that has been idle past the timeout.
@@ -388,12 +429,22 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::Get { id, reply } => {
-                let row = state
-                    .sessions
-                    .get(&id)
-                    .cloned()
-                    .map(|rec| (rec, self.status.get(&id).cloned()));
-                let _ = reply.send(row);
+                let Some(record) = state.sessions.get(&id).cloned() else {
+                    let _ = reply.send(None);
+                    return CommandEffect::none();
+                };
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child.tell(SessionCommand::Snapshot { reply: tx }).await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(Some((record, rx.await.ok())));
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(Some((record, None)));
+                    }
+                }
                 CommandEffect::none()
             }
             SessionSupervisorCommand::UserMessage { id, text, reply } => {
@@ -450,22 +501,20 @@ impl EventSourcedActor for SessionSupervisor {
                     }
                 }
                 self.forget(&id);
+                // A deleted session has no stream to keep alive.
+                self.frames.remove(&id);
                 let _ = reply.send(Ok(()));
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionDeleted { id }])
             }
             SessionSupervisorCommand::Subscribe { id, reply } => {
-                match self.ensure_loaded(ctx, state, &id) {
-                    Some(child) => {
-                        let (tx, rx) = oneshot::channel();
-                        let _ = child.tell(SessionCommand::Subscribe { reply: tx }).await;
-                        tokio::spawn(async move {
-                            let _ = reply.send(rx.await.ok());
-                        });
-                    }
-                    None => {
-                        let _ = reply.send(None);
-                    }
-                }
+                // Answered here, not by the actor: a broadcast channel is
+                // transport, not state the actor owns, and watching a session
+                // is no reason to load one.
+                let receiver = state
+                    .sessions
+                    .contains_key(&id)
+                    .then(|| self.frames_for(&id).subscribe());
+                let _ = reply.send(receiver);
                 CommandEffect::none()
             }
             SessionSupervisorCommand::History {
@@ -520,6 +569,45 @@ impl EventSourcedActor for SessionSupervisor {
                     }
                     None => {
                         let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::Events {
+                id,
+                after_seq,
+                reply,
+            } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child
+                            .tell(SessionCommand::Events {
+                                after_seq,
+                                reply: tx,
+                            })
+                            .await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.unwrap_or_default());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(Vec::new());
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::HeadSeq { id, reply } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child.tell(SessionCommand::HeadSeq { reply: tx }).await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.unwrap_or(0));
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(0);
                     }
                 }
                 CommandEffect::none()
@@ -600,6 +688,7 @@ mod tests {
     use super::*;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::clock::TestClock;
+    use crate::sessions::session_actor::SessionDomainEvent;
     use crate::sessions::spec::AgentSettings;
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use std::collections::HashMap;
@@ -740,17 +829,17 @@ mod tests {
             SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
             journal,
         );
-        let row = sup2
-            .ask(|reply| SessionSupervisorCommand::Get {
-                id: id.clone(),
-                reply,
-            })
+        let rows = sup2
+            .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap();
-        let (_, status) = row.expect("the session still exists");
+        let (_, _, status) = rows
+            .into_iter()
+            .find(|(row_id, _, _)| row_id == &id)
+            .expect("the session still exists");
         assert!(
             status.is_none(),
-            "an unloaded session has no status to report, and must not be loaded to find one"
+            "listing sessions must not load one to find its status"
         );
         assert_eq!(
             f.agent.signals(),
@@ -773,18 +862,125 @@ mod tests {
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
 
         let before = f.agent.signals();
-        let sub = sup
-            .ask(|reply| SessionSupervisorCommand::Subscribe {
+        let stats = sup
+            .ask(|reply| SessionSupervisorCommand::UsageStats {
                 id: id.clone(),
                 reply,
             })
             .await
             .unwrap();
-        assert!(sub.is_some(), "the session must load on demand");
+        assert!(stats.is_some(), "the session must load on demand");
         assert_eq!(
             f.agent.signals(),
             before,
             "loading a session to read it must not touch its runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unloaded_session_reports_the_status_in_its_journal() {
+        // The supervisor's status map is a cache. Reading a session must ask the
+        // actor, which recovers the truth from its journal — otherwise a session
+        // that parked on a question and then went cold reports nothing, and the
+        // UI has no way to know the question is still answerable.
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let sup = spawn_root(
+            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            journal.clone(),
+        );
+        let id = create(&sup).await;
+
+        // The session asked a question in an earlier incarnation. `Create` left
+        // `Idle` in the cache, so a cache read would answer with the wrong thing.
+        let pid = SessionActor::persistence_id_for(Uuid::parse_str(&id).unwrap());
+        journal
+            .persist(
+                &pid,
+                &[serde_json::to_vec(&SessionDomainEvent::AskRecorded {
+                    tool_call_id: Some("call-1".into()),
+                    question: "which shape?".into(),
+                })
+                .unwrap()],
+            )
+            .await
+            .unwrap();
+
+        let row = sup
+            .ask(|reply| SessionSupervisorCommand::Get {
+                id: id.clone(),
+                reply,
+            })
+            .await
+            .unwrap();
+        let (_, snapshot) = row.expect("the session still exists");
+        let snapshot = snapshot.expect("a known session answers with its state");
+        assert_eq!(snapshot.status, SessionStatus::AwaitingInput);
+        assert_eq!(snapshot.pending_ask.as_deref(), Some("call-1"));
+        assert_eq!(snapshot.pending_question.as_deref(), Some("which shape?"));
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_survives_an_offload() {
+        // The frame channel is transport, not the actor's state. Killing it at
+        // offload ends every SSE stream on the session, the browser reconnects,
+        // the reconnect loads the session again — a ~3 minute churn loop for as
+        // long as a tab is open.
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let sup = spawn_root(
+            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            journal,
+        );
+        let id = create(&sup).await;
+        let mut sub = sup
+            .ask(|reply| SessionSupervisorCommand::Subscribe {
+                id: id.clone(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("subscribed");
+        // Subscribing does not load a session, so ask for something that does.
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::UsageStats {
+                id: id.clone(),
+                reply,
+            })
+            .await
+            .unwrap();
+
+        clock.advance(Duration::from_secs(181));
+        sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+        assert!(
+            await_signal(&f.agent, &format!("hibernate:{id}")).await,
+            "the session must actually unload for this test to mean anything"
+        );
+
+        assert!(
+            !matches!(sub.try_recv(), Err(broadcast::error::TryRecvError::Closed)),
+            "an offload must not close a live subscriber's stream"
+        );
+
+        // And the same receiver still sees the session's next frame.
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::UserMessage {
+                id: id.clone(),
+                text: "hello".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+            .await
+            .expect("a frame must arrive within the timeout");
+        assert!(
+            frame.is_ok(),
+            "the reloaded session publishes to the same channel"
         );
     }
 
@@ -799,7 +995,7 @@ mod tests {
             journal,
         );
         let id = create(&sup).await;
-        sup.ask(|reply| SessionSupervisorCommand::Subscribe {
+        sup.ask(|reply| SessionSupervisorCommand::UsageStats {
             id: id.clone(),
             reply,
         })

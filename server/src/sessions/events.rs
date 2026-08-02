@@ -6,19 +6,14 @@
 //! without ids.
 
 use crate::sessions::SessionFrame;
-use crate::sessions::session_actor::{SessionActor, SessionDomainEvent, SessionState};
 use async_trait::async_trait;
-use futures_util::StreamExt;
-use horsie_actor::{EventSourcedActor, Journal};
 use horsie_agentcore::{AgentEvent, EventSink, EventSinkError};
 use horsie_models::session::{
     MessageEvent, SessionEvent, TaskItem, TaskListEvent, TaskStatus as WireTaskStatus,
     ToolOutputEvent, TurnCompletedEvent,
 };
-use horsie_workflow::{AgentActor, AgentDomainEvent, TaskStatus as AgentTaskStatus};
-use std::sync::Arc;
+use horsie_workflow::{AgentDomainEvent, TaskStatus as AgentTaskStatus};
 use tokio::sync::broadcast;
-use uuid::Uuid;
 
 /// Forwards live agent events into the session's broadcast: deltas pass through
 /// id-less; journaled coarse events become `Journaled` wakeups (SSE handlers
@@ -80,67 +75,8 @@ pub struct StampedEvent {
     pub event: SessionEvent,
 }
 
-/// Replay the session's agent journal after `after_seq`, mapping each journaled
-/// [`AgentDomainEvent`] to its wire [`SessionEvent`]. Every journal entry
-/// advances the sequence counter — including entries that produce no frame
-/// (cancellations, timer events) — so ids match journal positions exactly.
-/// Interactive agents never compact, so replaying from 0 with our own counter
-/// is exact.
-/// The current journal head (number of persisted entries) for a session's agent.
-/// Used by the SSE `live` mode to begin streaming *after* everything already in
-/// the journal, so a paginating client that backfills via `/history` does not
-/// also receive the whole transcript over SSE. Counts entries without decoding
-/// them.
-pub async fn journal_head_seq(journal: &Arc<dyn Journal>, session_id: Uuid) -> u64 {
-    let pid = AgentActor::persistence_id_for(session_id);
-    let mut seq = 0u64;
-    let mut stream = journal.replay(&pid, 0).await;
-    while let Some(item) = stream.next().await {
-        if item.is_err() {
-            break;
-        }
-        seq += 1;
-    }
-    seq
-}
-
-pub async fn replay_session_events(
-    journal: &Arc<dyn Journal>,
-    session_id: Uuid,
-    after_seq: u64,
-) -> Vec<StampedEvent> {
-    let pid = AgentActor::persistence_id_for(session_id);
-    let mut out = Vec::new();
-    let mut seq = 0u64;
-    let mut stream = journal.replay(&pid, 0).await;
-    while let Some(item) = stream.next().await {
-        let bytes = match item {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(%pid, error = %e, "journal replay error; truncating SSE history");
-                break;
-            }
-        };
-        seq += 1;
-        if seq <= after_seq {
-            continue;
-        }
-        match serde_json::from_slice::<AgentDomainEvent>(&bytes) {
-            Ok(event) => {
-                if let Some(wire) = wire_event(event) {
-                    out.push(StampedEvent { seq, event: wire });
-                }
-            }
-            Err(e) => {
-                tracing::warn!(%pid, seq, error = %e, "undecodable journal event; skipping");
-            }
-        }
-    }
-    out
-}
-
 /// Map one journaled agent event onto its wire shape (`None` = not surfaced).
-fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
+pub(crate) fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
     match event {
         AgentDomainEvent::InputMessage { mut message }
         | AgentDomainEvent::MessageComplete { mut message } => {
@@ -183,28 +119,45 @@ fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
     }
 }
 
+/// Fold a session's own journal into its [`SessionState`] — **tests only**.
+///
+/// Production reads a session's state by asking its actor, which is the only
+/// thing allowed to read that journal. A test asserting on what was journaled
+/// has no actor to ask (and often deliberately none running), so it folds
+/// directly; `cfg(test)` is what keeps that from becoming a production path
+/// again. See docs/superpowers/specs/2026-08-02-answerable-asks-design.md.
+#[cfg(test)]
+pub(in crate::sessions) async fn fold_session_state(
+    journal: &std::sync::Arc<dyn horsie_actor::Journal>,
+    session_id: uuid::Uuid,
+) -> crate::sessions::session_actor::SessionState {
+    use futures_util::StreamExt;
+    use horsie_actor::EventSourcedActor;
+
+    let pid = crate::sessions::session_actor::SessionActor::persistence_id_for(session_id);
+    let mut state = crate::sessions::session_actor::SessionState::default();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only inspection of a journal, with no actor running to ask"
+    )]
+    let mut stream = journal.replay(&pid, 0).await;
+    while let Some(item) = stream.next().await {
+        let Ok(bytes) = item else { break };
+        if let Ok(event) =
+            serde_json::from_slice::<crate::sessions::session_actor::SessionDomainEvent>(&bytes)
+        {
+            state = crate::sessions::session_actor::SessionActor::apply_event(state, event);
+        }
+    }
+    state
+}
+
 fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
     match status {
         AgentTaskStatus::Pending => WireTaskStatus::Pending,
         AgentTaskStatus::InProgress => WireTaskStatus::InProgress,
         AgentTaskStatus::Completed => WireTaskStatus::Completed,
     }
-}
-
-/// Fold a session's own journal into its [`SessionState`] (durable truth for
-/// `pending_question` / `last_error` on the detail endpoint). Session actors
-/// never snapshot, so replaying from 0 sees the full log.
-pub async fn fold_session_state(journal: &Arc<dyn Journal>, session_id: Uuid) -> SessionState {
-    let pid = SessionActor::persistence_id_for(session_id);
-    let mut state = SessionState::default();
-    let mut stream = journal.replay(&pid, 0).await;
-    while let Some(item) = stream.next().await {
-        let Ok(bytes) = item else { break };
-        if let Ok(event) = serde_json::from_slice::<SessionDomainEvent>(&bytes) {
-            state = SessionActor::apply_event(state, event);
-        }
-    }
-    state
 }
 
 #[cfg(test)]
@@ -216,49 +169,36 @@ pub async fn fold_session_state(journal: &Arc<dyn Journal>, session_id: Uuid) ->
 )]
 mod tests {
     use super::*;
-    use horsie_actor::InMemoryJournal;
 
-    #[tokio::test]
-    async fn replay_maps_and_stamps_sequential_ids() {
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let sid = Uuid::new_v4();
-        let pid = AgentActor::persistence_id_for(sid);
+    #[test]
+    fn wire_event_maps_journaled_events_and_drops_the_rest() {
+        // Sequence numbering lives with the agent that owns the journal (see
+        // `an_agent_replays_its_own_journal_after_a_cursor`); what is left here
+        // is the mapping onto the wire, including the events that produce no
+        // frame at all.
         let msg = horsie_models::agent::Message::user("m1", "hello");
-        let events = vec![
-            serde_json::to_vec(&AgentDomainEvent::InputMessage {
-                message: msg.clone(),
-            })
-            .unwrap(),
-            // No frame, still consumes a sequence number.
-            serde_json::to_vec(&AgentDomainEvent::RunCancelled).unwrap(),
-            serde_json::to_vec(&AgentDomainEvent::ToolComplete {
-                tool_call_id: "tc".into(),
-                output: "ok".into(),
-                is_error: false,
-            })
-            .unwrap(),
-        ];
-        journal.persist(&pid, &events).await.unwrap();
-
-        let all = replay_session_events(&journal, sid, 0).await;
-        assert_eq!(all.len(), 2);
-        assert_eq!(all[0].seq, 1);
-        assert_eq!(all[1].seq, 3); // RunCancelled consumed seq 2
-        match &all[0].event {
-            SessionEvent::Message(m) => assert_eq!(m.message.id, "m1"),
+        match wire_event(AgentDomainEvent::InputMessage {
+            message: msg.clone(),
+        }) {
+            Some(SessionEvent::Message(m)) => assert_eq!(m.message.id, "m1"),
             other => panic!("expected Message, got {other:?}"),
         }
-
-        let after = replay_session_events(&journal, sid, 1).await;
-        assert_eq!(after.len(), 1);
-        assert_eq!(after[0].seq, 3);
+        assert!(
+            wire_event(AgentDomainEvent::RunCancelled).is_none(),
+            "a cancellation has no wire shape, but still consumed a sequence number"
+        );
+        match wire_event(AgentDomainEvent::ToolComplete {
+            tool_call_id: "tc".into(),
+            output: "ok".into(),
+            is_error: false,
+        }) {
+            Some(SessionEvent::ToolResult(e)) => assert_eq!(e.tool_call_id, "tc"),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 
-    #[tokio::test]
-    async fn task_list_changed_maps_to_wire_event() {
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let sid = Uuid::new_v4();
-        let pid = AgentActor::persistence_id_for(sid);
+    #[test]
+    fn task_list_changed_maps_to_wire_event() {
         let mut snapshot = horsie_workflow::TaskListState::default();
         snapshot
             .apply(horsie_workflow::TaskListAction::Create {
@@ -271,14 +211,9 @@ mod tests {
                 status: horsie_workflow::TaskStatus::Completed,
             })
             .unwrap();
-        let events =
-            vec![serde_json::to_vec(&AgentDomainEvent::TaskListChanged { snapshot }).unwrap()];
-        journal.persist(&pid, &events).await.unwrap();
 
-        let all = replay_session_events(&journal, sid, 0).await;
-        assert_eq!(all.len(), 1);
-        match &all[0].event {
-            SessionEvent::TaskListChanged(e) => {
+        match wire_event(AgentDomainEvent::TaskListChanged { snapshot }) {
+            Some(SessionEvent::TaskListChanged(e)) => {
                 assert_eq!(e.tasks.len(), 2);
                 assert_eq!(e.tasks[0].id, 1);
                 assert_eq!(e.tasks[0].content, "a");
@@ -287,25 +222,6 @@ mod tests {
             }
             other => panic!("expected TaskListChanged, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn fold_session_state_reads_pending_question() {
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let sid = Uuid::new_v4();
-        let pid = SessionActor::persistence_id_for(sid);
-        let events = vec![
-            serde_json::to_vec(&SessionDomainEvent::TurnEnded).unwrap(),
-            serde_json::to_vec(&SessionDomainEvent::AskRecorded {
-                tool_call_id: Some("tc".into()),
-                question: "which one?".into(),
-            })
-            .unwrap(),
-        ];
-        journal.persist(&pid, &events).await.unwrap();
-        let state = fold_session_state(&journal, sid).await;
-        assert_eq!(state.pending_question.as_deref(), Some("which one?"));
-        assert_eq!(state.pending_ask.as_deref(), Some("tc"));
     }
 
     #[test]

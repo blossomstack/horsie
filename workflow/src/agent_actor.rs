@@ -2,6 +2,7 @@ use crate::context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL,
 };
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
@@ -159,6 +160,19 @@ pub enum AgentCommand {
     /// Backs the session-level usage aggregation.
     GetUsage {
         reply: tokio::sync::oneshot::Sender<AgentUsageSnapshot>,
+    },
+    /// Replay this agent's journal after `after_seq`, stamping each entry with
+    /// its position. Backs the SSE stream, which needs ids that stay stable
+    /// across reconnects — and this actor is the only thing that reads this
+    /// journal.
+    ReplayEvents {
+        after_seq: u64,
+        reply: tokio::sync::oneshot::Sender<Vec<(u64, AgentDomainEvent)>>,
+    },
+    /// The journal's current head position, for a stream that wants only what
+    /// happens from now on.
+    HeadSeq {
+        reply: tokio::sync::oneshot::Sender<u64>,
     },
 }
 
@@ -447,6 +461,45 @@ impl AgentActor {
     /// UUID. Centralizes the kind so the workflow (e.g. fork) and the actor agree.
     pub fn persistence_id_for(session_id: uuid::Uuid) -> PersistenceId {
         PersistenceId::new("agent", session_id.to_string())
+    }
+
+    /// Replay this agent's journal, advancing the position for *every* entry —
+    /// including any that no longer decodes — so an id is always an exact
+    /// journal position and a reconnecting client's cursor still means what it
+    /// meant. Returns the decodable events after `after_seq`, and the head.
+    async fn replay_journal(
+        &self,
+        after_seq: u64,
+        ctx: &ActorContext<Self>,
+    ) -> (Vec<(u64, AgentDomainEvent)>, u64) {
+        let pid = Self::persistence_id_for(self.ctx.session_id);
+        let mut out = Vec::new();
+        let mut seq = 0u64;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this actor owns this journal — the rule is that nothing else reads it"
+        )]
+        let mut stream = ctx.journal().replay(&pid, 0).await;
+        while let Some(item) = stream.next().await {
+            let bytes = match item {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(%pid, error = %e, "journal replay error; truncating");
+                    break;
+                }
+            };
+            seq += 1;
+            if seq <= after_seq {
+                continue;
+            }
+            match serde_json::from_slice::<AgentDomainEvent>(&bytes) {
+                Ok(event) => out.push((seq, event)),
+                Err(e) => {
+                    tracing::warn!(%pid, seq, error = %e, "undecodable journal event; skipping");
+                }
+            }
+        }
+        (out, seq)
     }
 
     /// Refuse to begin a turn while one is already in flight.
@@ -1123,6 +1176,16 @@ impl EventSourcedActor for AgentActor {
                 let _ = reply.send(state.usage_snapshot());
                 CommandEffect::none()
             }
+            AgentCommand::ReplayEvents { after_seq, reply } => {
+                let (events, _) = self.replay_journal(after_seq, ctx).await;
+                let _ = reply.send(events);
+                CommandEffect::none()
+            }
+            AgentCommand::HeadSeq { reply } => {
+                let (_, head) = self.replay_journal(u64::MAX, ctx).await;
+                let _ = reply.send(head);
+                CommandEffect::none()
+            }
             AgentCommand::Shutdown => CommandEffect::stop(),
         }
     }
@@ -1784,6 +1847,88 @@ mod tests {
     #[test]
     fn from_def_defaults_to_non_interactive() {
         assert!(!AgentParams::from_def(&def_fixture()).interactive);
+    }
+
+    #[tokio::test]
+    async fn an_agent_replays_its_own_journal_after_a_cursor() {
+        // The SSE stream needs durable events with stable ids, and the only
+        // thing allowed to read this journal is the actor that owns it.
+        use crate::context::{ContextError, ContextProvider, Contexts};
+        use horsie_actor::{InMemoryJournal, Journal, PersistenceId, spawn_root};
+
+        struct NoContext;
+        #[async_trait]
+        impl ContextProvider for NoContext {
+            async fn provide(&self) -> Result<Contexts, ContextError> {
+                std::future::pending().await
+            }
+        }
+        struct NoopSink;
+        #[async_trait]
+        impl EventSink for NoopSink {
+            async fn emit(&self, _: AgentEvent) -> Result<(), horsie_agentcore::EventSinkError> {
+                Ok(())
+            }
+        }
+        struct DeafParent;
+        #[async_trait]
+        impl AgentOutcomeSink for DeafParent {
+            async fn deliver(&self, _: AgentOutcome) {}
+        }
+
+        let session_id = uuid::Uuid::new_v4();
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let pid: PersistenceId = AgentActor::persistence_id_for(session_id);
+        journal
+            .persist(
+                &pid,
+                &[
+                    serde_json::to_vec(&AgentDomainEvent::InputMessage {
+                        message: user_msg("one"),
+                    })
+                    .unwrap(),
+                    serde_json::to_vec(&AgentDomainEvent::MessageComplete {
+                        message: user_msg("two"),
+                    })
+                    .unwrap(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(NoContext),
+            event_sink: Arc::new(NoopSink),
+            parent: Arc::new(DeafParent),
+            session_id,
+        };
+        let agent = spawn_root(
+            AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+            journal,
+        );
+
+        let all = agent
+            .ask(|reply| AgentCommand::ReplayEvents {
+                after_seq: 0,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            all.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+            vec![1, 2],
+            "ids are journal positions"
+        );
+
+        let tail = agent
+            .ask(|reply| AgentCommand::ReplayEvents {
+                after_seq: 1,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(tail.len(), 1, "a cursor skips what the client already has");
+        assert_eq!(tail[0].0, 2);
     }
 
     #[test]
