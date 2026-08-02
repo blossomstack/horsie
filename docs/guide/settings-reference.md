@@ -94,11 +94,36 @@ whose model id is a tag you have pulled (e.g. `qwen2.5`).
 **Example — a hosted OpenAI-compatible service**: kind **OpenAI-compatible**,
 base URL the service's endpoint, and an inline API key.
 
+#### DeepSeek
+
+DeepSeek speaks the OpenAI wire, so it needs no special kind:
+
+- **Kind:** OpenAI-compatible
+- **Base URL:** `https://api.deepseek.com`
+- **Models:** `deepseek-v4-flash`, `deepseek-v4-pro`
+
+Both models ship in the bundled card catalog, so picking the model id in
+**Settings → Models** fills in the context window (1,048,576), the generation
+cap (393,216) and the thinking configuration for you.
+
+Thinking is on by default and accepts the full effort ladder — `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max` — despite DeepSeek's own
+documentation listing only three of them.
+
+One constraint is worth knowing before choosing DeepSeek for sub-agents.
+DeepSeek rejects a pinned tool choice while thinking is enabled, answering
+`400 Thinking mode does not support this tool_choice`. The model's **Pinned tool
+choice disables thinking** setting handles this by turning thinking off for
+exactly those requests, and the bundled DeepSeek cards enable it. Because a
+forced-handoff agent pins a tool on *every* turn, such an agent runs with
+thinking off throughout — so DeepSeek is a weak choice for handoff-style
+sub-agents. Ordinary sessions are unaffected.
+
 Two behaviors differ by kind, and are handled automatically:
 
 - **Reasoning / thinking.** Reasoning models surface their thinking differently
-  by backend, and horsie shows it the same way it shows Claude's. DeepSeek
-  (`deepseek-reasoner`), vLLM started with a reasoning parser, and OpenRouter
+  by backend, and horsie shows it the same way it shows Claude's. DeepSeek,
+  vLLM started with a reasoning parser, and OpenRouter
   stream a reasoning trace over `/v1/chat/completions`, which horsie displays as
   a thinking block. **Genuine OpenAI** models (the o-series, GPT-5) keep their
   reasoning hidden on chat completions — only OpenAI's separate Responses API
