@@ -688,6 +688,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bundled_seed_carries_the_deepseek_v4_cards() {
+        let cards = bundled_seed().expect("bundled seed parses");
+        assert!(
+            !cards.iter().any(|c| c.model_id == "deepseek-chat"),
+            "deepseek-chat is superseded and must not be seeded",
+        );
+        for id in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+            let c = cards
+                .iter()
+                .find(|c| c.model_id == id)
+                .unwrap_or_else(|| panic!("catalog includes {id}"));
+            assert_eq!(c.base_url.as_deref(), Some("https://api.deepseek.com"));
+            assert_eq!(c.context_window, Some(1_048_576));
+            assert_eq!(c.max_tokens, Some(393_216));
+            assert_eq!(c.thinking_dialect.as_deref(), Some("openai_effort"));
+            assert_eq!(c.default_thinking_effort.as_deref(), Some("high"));
+            assert_eq!(c.forced_tools_disable_thinking, Some(true));
+            assert_eq!(
+                c.thinking_efforts
+                    .as_ref()
+                    .expect("efforts listed")
+                    .as_slice(),
+                ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            );
+        }
+    }
+
+    /// End-to-end: a fresh database plus the boot-time seed pass must produce
+    /// usable DeepSeek cards, since the migration deliberately seeds nothing.
+    #[tokio::test]
+    async fn seeding_a_fresh_database_installs_the_deepseek_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path()).await;
+        store
+            .seed_if_missing(&bundled_seed().unwrap())
+            .await
+            .unwrap();
+
+        let flash = store.get("deepseek-v4-flash").await.unwrap().unwrap();
+        assert_eq!(flash.base_url.as_deref(), Some("https://api.deepseek.com"));
+        assert_eq!(flash.context_window, Some(1_048_576));
+        assert_eq!(flash.forced_tools_disable_thinking, Some(true));
+        assert!(store.get("deepseek-chat").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn bundled_seed_efforts_and_dialects_are_canonical() {
         for c in bundled_seed().expect("bundled seed parses") {
             if let Some(d) = c.thinking_dialect.as_deref() {
