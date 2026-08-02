@@ -139,17 +139,19 @@ Only a live vendor can declare `Gone`; absence never can.
 
 ### Vendor contract
 
-```
-create(session_id, spec) -> Runtime
-get(session_id)          -> Runtime            // resumes if hibernated; never creates
-hibernate(session_id)                          // advisory, idempotent
-delete(session_id)
-capabilities()
-```
+Vendors are external agent processes speaking the WebSocket protocol in `models/fluorite/runtime_vendor.fl`; the server's end is `RuntimeVendorLink`, and the reusable agent half is the `runtime-vendor` crate. The redesign changes two commands:
 
-- **`hibernate` is advisory.** A vendor that cannot suspend implements it as a no-op and keeps the sandbox. That is velos's honest answer today, since its `stop` deletes the container.
-- **Concurrency is the vendor's responsibility.** `get` must not answer before an in-flight `create` for the same session id resolves, whether it succeeded or failed; concurrent `get`s for one session must never produce two sandboxes. The manager does no joining or deduplication.
-- A **vendor conformance suite** (same shape as the OpenAI wire conformance tests from #24) pins these behaviours across `velos`, the local daemon, and `mock`.
+| Today | After | Meaning |
+|---|---|---|
+| `CreateRuntime { runtime_id, spec }` | unchanged | provision a brand-new runtime |
+| `AttachRuntime { runtime_id, spec }` | **`GetRuntime { runtime_id }`** | return this runtime, resuming it if hibernated. **Never creates**, and takes no spec — the vendor already holds it from create, and accepting one is what makes silent re-provisioning possible |
+| `StopRuntime { runtime_id }` | **`HibernateRuntime { runtime_id }`** | advisory: suspend if you can, otherwise do nothing and keep the runtime |
+| `DeleteRuntime`, `QueryRuntimes`, `Runtime` relay | unchanged | |
+
+- **`hibernate` is advisory.** A vendor that cannot suspend implements it as a no-op and keeps the sandbox alive. That is the honest answer for the process-backed agent today, and for any container agent whose stop destroys the workspace.
+- **`GetRuntime` fails rather than provisions.** A vendor with no live runtime for that id replies `RequestFailed`; the server maps that to `RuntimeGone`, and the session becomes `Unrecoverable`. This is the single rule that keeps a silent re-clone impossible.
+- **Concurrency is the vendor's responsibility.** `GetRuntime` must not answer before an in-flight `CreateRuntime` for the same id resolves, whether it succeeded or failed; concurrent gets for one id must never produce two sandboxes. The manager does no joining or deduplication.
+- A **vendor conformance suite** (same shape as the OpenAI wire conformance tests from #24) pins these behaviours, run against `FakeRuntimeVendor` and the real agent loop.
 
 ## Agent actor
 
@@ -162,7 +164,7 @@ capabilities()
 
 ## Deletions
 
-`Stopped`, `Interrupted`, `RecoveryFailed`, `Provisioning`; `WakeMode`; `attach` (already a synonym for `create` — `AttachRuntime` calls the same `do_create`); `ensure_runtime` / `ensure_agent` as session methods; the generation fence; `is_connected` above the manager; `NoContextProvider` and both transient-reader spawn sites; boot-time session re-spawn; the `409 TurnInFlight` path; the dead `SessionEvent::Asked` wire variant; every legacy session event variant.
+`Stopped`, `Interrupted`, `RecoveryFailed`, `Provisioning`; `WakeMode`; `attach` (its "provision a fresh instance against the same spec" fallback is exactly the silent re-provision this design bans); `ensure_runtime` / `ensure_agent` as session methods; the generation fence; `is_connected` above the manager; `NoContextProvider` and both transient-reader spawn sites; boot-time session re-spawn; the `409 TurnInFlight` path; the dead `SessionEvent::Asked` wire variant; every legacy session event variant.
 
 ## Wire and client
 
