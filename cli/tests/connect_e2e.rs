@@ -7,10 +7,10 @@
 //! answered. Nothing is stubbed between the CLI and the runtime binary.
 //!
 //! `horsie-runtime` isn't a build dependency of `cli` (see
-//! `cli/src/daemon/mod.rs`'s `default_runtime_bin` — the CLI finds it as a
+//! `cli/src/connect.rs`'s `default_runtime_bin` — the CLI finds it as a
 //! sibling *file* at runtime, not a linked crate), so there's no
 //! `CARGO_BIN_EXE_horsie-runtime`. `locate_runtime_bin` mirrors the
-//! relative-path search `cli/tests/sandbox_e2e.rs` already uses. Only built
+//! relative-path search the daemon-era sandbox e2e used. Only built
 //! when the workspace has been compiled — skip, don't fail, if it's absent.
 
 #![allow(
