@@ -20,6 +20,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// Locate the sibling `horsie-runtime` binary next to this executable — the
+/// default `horsie connect` uses when the config sets no explicit `runtime.bin`.
+pub fn default_runtime_bin() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("horsie-runtime")))
+        .unwrap_or_else(|| PathBuf::from("horsie-runtime"))
+}
+
 /// Translate a `--server` URL (`http(s)://host[:port]`) into the
 /// `ws(s)://.../api/vendor/connect` endpoint the agent dials.
 pub fn server_to_endpoint(server: &str) -> Result<String, CliError> {
