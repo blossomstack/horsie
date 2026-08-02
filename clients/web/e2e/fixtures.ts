@@ -9,6 +9,7 @@ export type MockResponse =
   | { type: "text"; content: string }
   | { type: "text_stream"; chunks: string[] }
   | { type: "tool_call"; name: string; input: unknown }
+  | { type: "tool_calls"; calls: [string, unknown][] }
   | { type: "error"; status: number; message: string }
   | { type: "thinking"; text: string; signature: string };
 
@@ -61,6 +62,10 @@ export class MockLlm {
   }
   queueToolCall(name: string, input: unknown): Promise<void> {
     return this.queue({ type: "tool_call", name, input });
+  }
+  /** One assistant message making several calls at once (parallel tool use). */
+  queueToolCalls(calls: [string, unknown][]): Promise<void> {
+    return this.queue({ type: "tool_calls", calls });
   }
   queueError(status: number, message: string): Promise<void> {
     return this.queue({ type: "error", status, message });

@@ -22,6 +22,11 @@ pub enum MockResponse {
         name: String,
         input: serde_json::Value,
     },
+    /// Several tool calls in one assistant message — parallel tool use, which is
+    /// how a model asks two questions at once.
+    ToolCalls {
+        calls: Vec<(String, serde_json::Value)>,
+    },
     /// `status` is used as the HTTP status code when returned as a plain JSON response,
     /// and as an SSE StreamError when returned in streaming mode.
     Error {
@@ -302,6 +307,14 @@ impl MockLlmServer {
                 content: text.into(),
             }));
     }
+    /// Queue one assistant message that makes several tool calls at once.
+    pub fn queue_tool_calls(&self, calls: Vec<(String, serde_json::Value)>) {
+        self.state
+            .queue
+            .lock()
+            .push(QueueEntry::immediate(MockResponse::ToolCalls { calls }));
+    }
+
     pub fn queue_tool_call(&self, name: impl Into<String>, input: serde_json::Value) {
         self.state
             .queue
@@ -516,6 +529,7 @@ async fn handle_messages(
                     Some(MockResponse::ToolCall { name, input }) => {
                         tool_sse(&msg_id, &tool_id, &name, &input)
                     }
+                    Some(MockResponse::ToolCalls { calls }) => tools_sse(&msg_id, &calls),
                     Some(MockResponse::Thinking { text, signature }) => {
                         thinking_sse(&msg_id, &text, &signature)
                     }
@@ -557,6 +571,9 @@ async fn handle_messages(
                     }
                     Some(MockResponse::ToolCall { name, input }) => {
                         ResponseKind::Json(axum::Json(tool_json(&name, &input)))
+                    }
+                    Some(MockResponse::ToolCalls { calls }) => {
+                        ResponseKind::Json(axum::Json(tools_json(&calls)))
                     }
                     Some(MockResponse::Thinking { text, signature }) => {
                         ResponseKind::Json(axum::Json(thinking_json(&text, &signature)))
@@ -769,6 +786,40 @@ fn tool_sse(
     ]
 }
 
+/// One assistant message carrying several `tool_use` blocks, each its own
+/// content-block index — the shape a provider streams for parallel tool use.
+fn tools_sse(msg_id: &str, calls: &[(String, serde_json::Value)]) -> Vec<(String, String)> {
+    let mut out = vec![(
+        "message_start".to_string(),
+        serde_json::json!({"type":"message_start","message":{"id":msg_id,"type":"message","role":"assistant","content":[],"model":"mock-model","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}).to_string(),
+    )];
+    for (index, (name, input)) in calls.iter().enumerate() {
+        let tool_id = format!("toolu_{}", uuid::Uuid::new_v4());
+        let input_str = serde_json::to_string(input).unwrap_or_default();
+        out.push((
+            "content_block_start".to_string(),
+            serde_json::json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":tool_id,"name":name,"input":{}}}).to_string(),
+        ));
+        out.push((
+            "content_block_delta".to_string(),
+            serde_json::json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":input_str}}).to_string(),
+        ));
+        out.push((
+            "content_block_stop".to_string(),
+            serde_json::json!({"type":"content_block_stop","index":index}).to_string(),
+        ));
+    }
+    out.push((
+        "message_delta".to_string(),
+        serde_json::json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":20}}).to_string(),
+    ));
+    out.push((
+        "message_stop".to_string(),
+        serde_json::json!({"type":"message_stop"}).to_string(),
+    ));
+    out
+}
+
 fn thinking_sse(msg_id: &str, text: &str, signature: &str) -> Vec<(String, String)> {
     vec![
         (
@@ -937,6 +988,24 @@ fn tool_json(name: &str, input: &serde_json::Value) -> serde_json::Value {
         "id": format!("msg_{}", uuid::Uuid::new_v4()),
         "role": "assistant",
         "content": [{"type": "tool_use", "id": format!("toolu_{}", uuid::Uuid::new_v4()), "name": name, "input": input}],
+        "model": "mock-model",
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 10, "output_tokens": 20}
+    })
+}
+
+fn tools_json(calls: &[(String, serde_json::Value)]) -> serde_json::Value {
+    let content: Vec<serde_json::Value> = calls
+        .iter()
+        .map(|(name, input)| {
+            serde_json::json!({"type": "tool_use", "id": format!("toolu_{}", uuid::Uuid::new_v4()), "name": name, "input": input})
+        })
+        .collect();
+    serde_json::json!({
+        "type": "message",
+        "id": format!("msg_{}", uuid::Uuid::new_v4()),
+        "role": "assistant",
+        "content": content,
         "model": "mock-model",
         "stop_reason": "tool_use",
         "usage": {"input_tokens": 10, "output_tokens": 20}

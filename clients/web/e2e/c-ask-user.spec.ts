@@ -228,3 +228,81 @@ test("C6: answering marks the turn running and offers Stop alongside Send", asyn
   await expect(page.getByTestId("composer-input")).toBeEnabled();
   await expect(page.getByTestId("composer-stop")).toHaveCount(0);
 });
+
+test("C7: two questions in one turn are answered together", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  // Parallel tool use: the model asks twice in a single assistant message.
+  // Neither question can be answered alone — the run cannot resume while the
+  // other one still has no result — so the card group sends both at once.
+  await mock.queueToolCalls([
+    ["ask_user", { question: "Which branch?", choices: ["main", "dev"] }],
+    ["ask_user", { question: "Which model?", choices: ["kimi", "deepseek"] }],
+  ]);
+  await mock.queueText("Building on main with kimi.");
+  await createSession(page, appBase);
+
+  await sendMessage(page, "set it up");
+
+  const cards = page.getByTestId("ask-user-card");
+  await expect(cards).toHaveCount(2);
+  await expect(cards.nth(0)).toContainText("Which branch?");
+  await expect(cards.nth(1)).toContainText("Which model?");
+  await expectStatus(page, "AwaitingInput");
+
+  // Both are live: an older question is not stale just because a newer one
+  // exists, which is exactly what the single-pending-ask rule got wrong.
+  await expect(cards.nth(0)).toHaveAttribute("data-pending", "true");
+  await expect(cards.nth(1)).toHaveAttribute("data-pending", "true");
+
+  // Answering one is not enough to send.
+  await cards
+    .nth(0)
+    .locator('[data-testid="ask-user-choice"][data-value="main"]')
+    .click();
+  await expect(page.getByTestId("ask-user-send").nth(0)).toBeDisabled();
+  expect(await answersSent(mock)).toEqual([]);
+
+  await cards
+    .nth(1)
+    .locator('[data-testid="ask-user-choice"][data-value="kimi"]')
+    .click();
+  await page.getByTestId("ask-user-send").nth(0).click();
+
+  await expect(page.getByTestId("assistant-text")).toContainText(
+    "Building on main with kimi.",
+  );
+  await expectStatus(page, "Idle");
+  expect((await answersSent(mock)).sort()).toEqual(["kimi", "main"]);
+});
+
+test("C8: a question is answerable after a reload, with no live status", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  // A page opened on an already-parked session has no `StatusChanged` frame to
+  // learn from: the session detail must say what is answerable, or the card is
+  // dead exactly as it was for an offloaded session.
+  await mock.queueToolCall("ask_user", { question: "What should I name it?" });
+  await mock.queueText("Naming it Ferdinand.");
+  await createSession(page, appBase);
+
+  const id = await sendMessage(page, "name the thing");
+  await expect(page.getByTestId("ask-user-card")).toBeVisible();
+
+  await page.goto(`${appBase}/sessions/${id}`);
+  await expect(page.getByTestId("ask-user-card")).toHaveAttribute(
+    "data-pending",
+    "true",
+  );
+
+  await page.getByTestId("ask-user-text").fill("Ferdinand");
+  await page.getByTestId("ask-user-send").click();
+  await expect(page.getByTestId("assistant-text")).toContainText(
+    "Naming it Ferdinand.",
+  );
+  expect(await answersSent(mock)).toEqual(["Ferdinand"]);
+});

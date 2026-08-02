@@ -17,8 +17,8 @@ pub use thinking::{ThinkingDialect, ThinkingEffort};
 pub use tool::{EmptyToolbox, Tool, ToolSpec, Toolbox, ToolboxImpl};
 
 pub use horsie_models::agent::{
-    AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, HandoffOutput, Message,
-    Role, TextPart, ThinkingPart, ToolCallPart, ToolResultInput, ToolResultPart, Usage,
+    AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, HandoffCall, HandoffOutput,
+    Message, Role, TextPart, ThinkingPart, ToolCallPart, ToolResultInput, ToolResultPart, Usage,
     UserMessageInput,
 };
 pub use horsie_models::events::{

@@ -99,8 +99,18 @@ pub struct SessionSpec {
     pub plugins: Vec<String>,
 }
 
-/// User-visible lifecycle state. Failure reasons ride inside the variants;
-/// [`status_kind`]/[`status_reason`] project them onto the wire shape.
+/// One question the agent is parked on, and the tool call that asked it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAsk {
+    /// `None` only in a pre-#62 journal, where the call id was not recorded;
+    /// such an ask can be read but not answered on its own.
+    pub tool_call_id: Option<String>,
+    pub question: String,
+}
+
+/// User-visible lifecycle state. Failure reasons and pending questions ride
+/// inside the variants; [`status_kind`]/[`status_reason`] project them onto the
+/// wire shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum SessionStatus {
     /// Loaded and not working. The resting state, and where a session lands
@@ -108,7 +118,12 @@ pub enum SessionStatus {
     #[default]
     Idle,
     Running,
-    AwaitingInput,
+    /// Parked on one or more questions. Every one of them must be answered
+    /// before the turn can resume, so the status carries them all: a caller that
+    /// can see the status can see exactly what it has to answer.
+    AwaitingInput {
+        asks: Vec<PendingAsk>,
+    },
     /// The last turn failed. Sticky so the UI can badge it, but fully
     /// recoverable: the next turn moves it back to `Running`.
     Failed {
@@ -126,7 +141,7 @@ pub fn status_kind(s: &SessionStatus) -> SessionStatusKind {
     match s {
         SessionStatus::Idle => SessionStatusKind::Idle,
         SessionStatus::Running => SessionStatusKind::Running,
-        SessionStatus::AwaitingInput => SessionStatusKind::AwaitingInput,
+        SessionStatus::AwaitingInput { .. } => SessionStatusKind::AwaitingInput,
         SessionStatus::Failed { .. } => SessionStatusKind::Failed,
         SessionStatus::Unrecoverable { .. } => SessionStatusKind::Unrecoverable,
     }
@@ -138,7 +153,7 @@ pub fn status_reason(s: &SessionStatus) -> Option<String> {
         SessionStatus::Unrecoverable { reason } | SessionStatus::Failed { reason } => {
             Some(reason.clone())
         }
-        SessionStatus::Idle | SessionStatus::Running | SessionStatus::AwaitingInput => None,
+        SessionStatus::Idle | SessionStatus::Running | SessionStatus::AwaitingInput { .. } => None,
     }
 }
 

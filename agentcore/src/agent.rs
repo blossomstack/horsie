@@ -5,8 +5,8 @@ use crate::{
     tool::Toolbox,
 };
 use horsie_models::agent::{
-    AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, HandoffOutput, Message,
-    Role, ToolResultPart, Usage,
+    AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, HandoffCall, HandoffOutput,
+    Message, Role, ToolResultPart, Usage,
 };
 use horsie_models::events::{
     AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
@@ -220,33 +220,25 @@ impl Agent {
         AgentBuilder::new(provider, toolbox)
     }
 
-    /// Returns `Some(reason)` when a handoff call must be rejected: it was issued
-    /// more than once, a *forced* handoff was issued alongside other tool calls,
-    /// or its input fails the tool's schema.
+    /// Returns `Some(reason)` when a handoff turn must be rejected: a *forced*
+    /// handoff issued more than once or alongside other tool calls, or any
+    /// handoff whose input fails the tool's schema.
     ///
     /// An *optional* handoff is a park, not a conclusion: the run resumes on this
     /// very history once the park is answered, so tools called in the same turn
     /// are ordinary work — they run, and their results are recorded (see
-    /// [`Self::run`]). A forced handoff ends the run for good, so a sibling's
-    /// result would never be read by anyone; the model is nudged to finish on its
-    /// own turn instead.
-    ///
-    /// Calling the handoff tool twice is rejected either way: only one park can
-    /// be pending, and only one conclusion can be the output.
+    /// [`Self::run`]) — and several parks may be issued at once, since they are
+    /// answered together. A forced handoff ends the run for good: a sibling's
+    /// result would never be read by anyone, and a run has only one conclusion.
     fn validate_handoff(
         &self,
         handoff_name: &str,
         tool_calls: &[(String, String, Value)],
-        data: &Value,
+        handoffs: &[HandoffCall],
     ) -> Option<String> {
-        if tool_calls
-            .iter()
-            .filter(|(_, n, _)| n == handoff_name)
-            .count()
-            > 1
-        {
+        if self.force_handoff_choice && handoffs.len() > 1 {
             return Some(format!(
-                "Call '{handoff_name}' at most once per turn — wait for the answer before asking again."
+                "Call '{handoff_name}' once: a run has one conclusion."
             ));
         }
         if self.force_handoff_choice && tool_calls.len() > 1 {
@@ -254,15 +246,18 @@ impl Agent {
                 "The '{handoff_name}' tool must be called on its own, with no other tool calls in the same turn."
             ));
         }
-        if let Some(validator) = &self.handoff_validator
-            && !validator.is_valid(data)
-        {
-            let detail = validator
-                .validate(data)
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "input does not match the tool's schema".to_string());
-            return Some(format!("Invalid '{handoff_name}' input: {detail}"));
+        if let Some(validator) = &self.handoff_validator {
+            for call in handoffs {
+                if validator.is_valid(&call.data) {
+                    continue;
+                }
+                let detail = validator
+                    .validate(&call.data)
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "input does not match the tool's schema".to_string());
+                return Some(format!("Invalid '{handoff_name}' input: {detail}"));
+            }
         }
         None
     }
@@ -450,13 +445,21 @@ impl Agent {
             // run resumes on this same history once the park is answered. What
             // `validate_handoff` still rejects is nudged (via tool-result errors)
             // for the model to re-issue, bounded by `handoff_max_retries`.
-            if let Some(handoff_name) = self.handoff_tool.clone()
-                && let Some((_, _, data)) = tool_calls
+            let handoffs: Vec<HandoffCall> = match &self.handoff_tool {
+                Some(name) => tool_calls
                     .iter()
-                    .find(|(_, n, _)| n == &handoff_name)
-                    .cloned()
+                    .filter(|(_, n, _)| n == name)
+                    .map(|(id, _, input)| HandoffCall {
+                        tool_call_id: id.clone(),
+                        data: input.clone(),
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            if let Some(handoff_name) = self.handoff_tool.clone()
+                && !handoffs.is_empty()
             {
-                let rejection = self.validate_handoff(&handoff_name, &tool_calls, &data);
+                let rejection = self.validate_handoff(&handoff_name, &tool_calls, &handoffs);
                 match rejection {
                     None => {
                         // A park's siblings are ordinary work: run them, record
@@ -482,7 +485,7 @@ impl Agent {
                         return Ok(AgentOutput {
                             result: AgentResult::Handoff(HandoffOutput {
                                 tool_name: handoff_name,
-                                data,
+                                calls: handoffs,
                             }),
                             usage: total_usage,
                         });
@@ -922,8 +925,9 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Handoff(HandoffOutput { tool_name, data }) => {
+            AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
                 assert_eq!(tool_name, "handoff");
+                let data = &calls[0].data;
                 assert_eq!(data["answer"], 42);
             }
             other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
@@ -990,7 +994,9 @@ mod tests {
             .await
             .unwrap();
         match output.result {
-            AgentResult::Handoff(HandoffOutput { data, .. }) => assert_eq!(data["answer"], 7),
+            AgentResult::Handoff(HandoffOutput { calls, .. }) => {
+                assert_eq!(calls[0].data["answer"], 7)
+            }
             other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
         }
     }
@@ -1114,9 +1120,10 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Handoff(HandoffOutput { tool_name, data }) => {
+            AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
                 assert_eq!(tool_name, "ask");
-                assert_eq!(data["question"], "which shape?");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].data["question"], "which shape?");
             }
             other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
         }
@@ -1161,7 +1168,9 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Handoff(HandoffOutput { data, .. }) => assert_eq!(data["answer"], 2),
+            AgentResult::Handoff(HandoffOutput { calls, .. }) => {
+                assert_eq!(calls[0].data["answer"], 2)
+            }
             other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
         }
         let recorded = tool_results(&sink);
@@ -1174,17 +1183,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_calls_to_the_handoff_tool_in_one_turn_are_rejected() {
-        // Only one park can be pending, so a second ask in the same turn has no
-        // honest answer. Nudge instead — and journal both rejections.
-        let provider = MockProvider::new(vec![
-            calls_response(vec![
-                ("h1", "ask", json!({"question": "first?"})),
-                ("h2", "ask", json!({"question": "second?"})),
-            ]),
-            calls_response(vec![("h3", "ask", json!({"question": "just one?"}))]),
-        ]);
-        let mut agent = Agent::builder(provider, toolbox_where(&["ask"], "ask"))
+    async fn several_asks_in_one_turn_park_together() {
+        // A park may be issued more than once in a turn: each question is a
+        // separate tool call, they are answered together, and the run resumes
+        // once every one of them has a result.
+        let provider = MockProvider::new(vec![calls_response(vec![
+            ("h1", "ask", json!({"question": "first?"})),
+            ("t1", "notes", json!({})),
+            ("h2", "ask", json!({"question": "second?"})),
+        ])]);
+        let mut agent = Agent::builder(provider, toolbox_where(&["notes", "ask"], "ask"))
             .with_handoff_tool_optional("ask")
             .build()
             .unwrap();
@@ -1200,8 +1208,52 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Handoff(HandoffOutput { data, .. }) => {
-                assert_eq!(data["question"], "just one?");
+            AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
+                assert_eq!(tool_name, "ask");
+                let ids: Vec<&str> = calls.iter().map(|c| c.tool_call_id.as_str()).collect();
+                assert_eq!(ids, vec!["h1", "h2"], "in the order the model asked them");
+                assert_eq!(calls[0].data["question"], "first?");
+                assert_eq!(calls[1].data["question"], "second?");
+            }
+            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
+        }
+        assert_eq!(
+            tool_results(&sink),
+            vec![("t1".to_string(), "done".to_string(), false)],
+            "the sibling still runs; neither ask is executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_calls_to_a_forced_handoff_tool_are_rejected() {
+        // A run has one conclusion, so a second `finish` in the same turn has no
+        // honest reading. Nudge instead — and journal both rejections.
+        let provider = MockProvider::new(vec![
+            calls_response(vec![
+                ("h1", "finish", json!({"answer": "first"})),
+                ("h2", "finish", json!({"answer": "second"})),
+            ]),
+            calls_response(vec![("h3", "finish", json!({"answer": "just one"}))]),
+        ]);
+        let mut agent = Agent::builder(provider, toolbox_where(&["finish"], "finish"))
+            .with_handoff_tool("finish")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+
+        let output = agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        match output.result {
+            AgentResult::Handoff(HandoffOutput { calls, .. }) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].data["answer"], "just one");
             }
             other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
         }
@@ -1706,8 +1758,9 @@ mod tests {
             .await
             .unwrap();
         match output.result {
-            AgentResult::Handoff(HandoffOutput { tool_name, data }) => {
+            AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
                 assert_eq!(tool_name, "finish");
+                let data = &calls[0].data;
                 assert_eq!(data["answer"], 42);
             }
             other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),

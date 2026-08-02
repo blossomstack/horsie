@@ -15,12 +15,12 @@ import { useSessionStream } from "../hooks/useSessionStream";
 import { useUiSettings } from "../hooks/useUiSettings";
 import {
   useDeleteSession,
+  useAnswerAsks,
   useSendMessage,
   useSession,
   useSessionUsage,
   useStopSession,
 } from "../hooks/useSessions";
-import { findPendingAsk } from "../lib/askUser";
 import { sessionTitle } from "../lib/format";
 import { statusMeta } from "../lib/status";
 
@@ -56,6 +56,7 @@ export function SessionView() {
   } = useSessionStream(id);
   const { data: usageStats } = useSessionUsage(id);
   const send = useSendMessage();
+  const answerAsks = useAnswerAsks();
   const stop = useStopSession();
   const del = useDeleteSession();
   const { values: uiSettings } = useUiSettings();
@@ -92,11 +93,20 @@ export function SessionView() {
   // answer is persisted as a tool result, never as a user message, so an echo
   // would linger unreconciled forever (and vanish on reload). The card renders
   // the durable answer instead.
-  const handleAnswer = async (text: string) => {
+  // Answers are all-or-nothing: the run cannot resume while any parked call is
+  // still missing a result, so every card's answer goes in one request.
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const submitAnswers = async () => {
     if (!id) return;
     setSendError(null);
     try {
-      await send.mutateAsync({ id, text });
+      await answerAsks.mutateAsync({
+        id,
+        answers: pendingAsks
+          .filter((a) => a.toolCallId)
+          .map((a) => ({ toolCallId: a.toolCallId as string, text: answers[a.toolCallId as string] ?? "" })),
+      });
+      setAnswers({});
     } catch (e) {
       setSendError(
         e instanceof ApiRequestError ? e.message : "Failed to send your answer.",
@@ -139,13 +149,18 @@ export function SessionView() {
       : null;
   const totalTokens = stream.usage.input + stream.usage.output;
 
-  const pendingAskId = useMemo(
-    () =>
-      status === SessionStatusKind.AwaitingInput
-        ? findPendingAsk(stream.messages)
-        : null,
-    [status, stream.messages],
+  // The server names what is answerable: live from the status frame, and from
+  // the session detail for a page opened on an already-parked session. Nothing
+  // is inferred from the transcript, so a question stays answerable whether or
+  // not the session happens to be loaded.
+  const pendingAsks = stream.livePendingAsks ?? detail?.pendingAsks ?? [];
+  const answerableIds = useMemo(
+    () => pendingAsks.map((a) => a.toolCallId).filter((x): x is string => !!x),
+    [pendingAsks],
   );
+  const canSubmitAnswers =
+    answerableIds.length > 0 &&
+    answerableIds.every((id) => (answers[id] ?? "").trim().length > 0);
 
   // Stick-to-bottom auto scroll; also trigger scroll-back near the top.
   const onScroll = () => {
@@ -204,9 +219,13 @@ export function SessionView() {
   return (
     <AskAnswerProvider
       value={{
-        pendingId: pendingAskId,
-        submitting: send.isPending,
-        submit: handleAnswer,
+        pendingIds: answerableIds,
+        submitting: answerAsks.isPending,
+        answers,
+        setAnswer: (callId, text) =>
+          setAnswers((prev) => ({ ...prev, [callId]: text })),
+        canSubmit: canSubmitAnswers,
+        submit: submitAnswers,
       }}
     >
       <div className="flex h-full">
@@ -373,7 +392,7 @@ export function SessionView() {
             onSend={(text) => handleSend(id, text)}
             onStop={handleStop}
             onFocusAsk={focusPendingAsk}
-            askPending={pendingAskId !== null}
+            askPending={answerableIds.length > 0}
           />
         </div>
 

@@ -4,10 +4,10 @@
 use crate::http::AppState;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
-use crate::sessions::session_actor::{InboxMessage, SessionUsageStats};
+use crate::sessions::session_actor::{AskAnswer, InboxMessage, SessionUsageStats};
 use crate::sessions::spec::{
-    AgentSettings, ProvisionStepSpec, SessionSpec, SessionStatus, WorkspaceDef, status_kind,
-    status_reason,
+    AgentSettings, PendingAsk, ProvisionStepSpec, SessionSpec, SessionStatus, WorkspaceDef,
+    status_kind, status_reason,
 };
 use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
@@ -16,9 +16,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::session::{
-    AgentSettings as WireAgentSettings, AgentUsageView, QueuedMessage, SessionDetail,
-    SessionStatusKind, SessionSummary, SessionUsageStats as WireSessionUsageStats, TaskItem,
-    TaskStatus as WireTaskStatus, UsageView,
+    AgentSettings as WireAgentSettings, AgentUsageView, AnswerAsksRequest, PendingAskView,
+    QueuedMessage, SessionDetail, SessionStatusKind, SessionSummary,
+    SessionUsageStats as WireSessionUsageStats, TaskItem, TaskStatus as WireTaskStatus, UsageView,
 };
 use horsie_models::session_api::{
     Ack, CreateSessionRequest, CreateSessionResponse, GetSessionResponse,
@@ -206,13 +206,15 @@ pub async fn get_session(
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
     let status = snapshot.as_ref().map(|s| s.status.clone());
+    let pending_asks = status.as_ref().map(wire_pending_asks).unwrap_or_default();
     let detail = SessionDetail {
         id: id.clone(),
         name: rec.spec.name.clone(),
         status: status.as_ref().map(status_kind),
         created_at: rec.created_at,
         last_error: status.as_ref().and_then(status_reason),
-        pending_question: snapshot.as_ref().and_then(|s| s.pending_question.clone()),
+        pending_question: pending_asks.first().map(|a| a.question.clone()),
+        pending_asks,
         model: rec.spec.agent.model.clone(),
         vendor: rec.spec.vendor.clone(),
         repos: rec
@@ -237,6 +239,34 @@ pub async fn get_session(
             .unwrap_or_default(),
     };
     Ok(Json(GetSessionResponse { session: detail }))
+}
+
+/// `POST /api/sessions/:id/answers` — answer every pending ask at once.
+///
+/// All or nothing: a set that does not cover the pending asks exactly is a 400
+/// and changes nothing. A partially answered park could not resume anyway, and
+/// would leave a `tool_use` on the wire with no result.
+pub async fn answer_asks(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AnswerAsksRequest>,
+) -> Result<impl IntoResponse, Api> {
+    let answers: Vec<AskAnswer> = req
+        .answers
+        .into_iter()
+        .map(|a| AskAnswer {
+            tool_call_id: a.tool_call_id,
+            text: a.text,
+        })
+        .collect();
+    ask(&state, |reply| SessionSupervisorCommand::Answer {
+        id: id.clone(),
+        answers,
+        reply,
+    })
+    .await?
+    .map_err(|e| Api::unprocessable(e.to_string()))?;
+    Ok((StatusCode::ACCEPTED, Json(Ack {})))
 }
 
 /// Query params for `GET /api/sessions/:id/history`.
@@ -409,6 +439,25 @@ pub async fn delete_session(
 /// Map a storage status to its wire kind (re-exported for the SSE layer).
 pub(crate) fn wire_status_kind(s: &SessionStatus) -> SessionStatusKind {
     status_kind(s)
+}
+
+/// Map one pending ask onto the wire.
+pub(crate) fn wire_pending_ask(ask: &PendingAsk) -> PendingAskView {
+    PendingAskView {
+        tool_call_id: ask.tool_call_id.clone(),
+        question: ask.question.clone(),
+    }
+}
+
+/// The pending asks a status carries, or empty when it is not a park.
+pub(crate) fn wire_pending_asks(status: &SessionStatus) -> Vec<PendingAskView> {
+    match status {
+        SessionStatus::AwaitingInput { asks } => asks.iter().map(wire_pending_ask).collect(),
+        SessionStatus::Idle
+        | SessionStatus::Running
+        | SessionStatus::Failed { .. }
+        | SessionStatus::Unrecoverable { .. } => Vec::new(),
+    }
 }
 
 /// Project one tree node onto its wire shape. `output` never crosses here —

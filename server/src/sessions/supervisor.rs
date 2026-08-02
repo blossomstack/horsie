@@ -14,7 +14,8 @@
 use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::events::StampedEvent;
 use crate::sessions::session_actor::{
-    FRAME_BROADCAST_CAPACITY, SessionActor, SessionCommand, SessionSnapshot, SessionUsageStats,
+    AnswerError, AskAnswer, FRAME_BROADCAST_CAPACITY, SessionActor, SessionCommand,
+    SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
@@ -118,6 +119,12 @@ pub enum SessionSupervisorCommand {
     SubAgents {
         id: SessionId,
         reply: oneshot::Sender<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
+    },
+    /// Answer every pending ask of a session at once.
+    Answer {
+        id: SessionId,
+        answers: Vec<AskAnswer>,
+        reply: oneshot::Sender<Result<(), AnswerError>>,
     },
     /// Durable events after `after_seq`, for the SSE stream.
     Events {
@@ -573,6 +580,17 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
+            SessionSupervisorCommand::Answer { id, answers, reply } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    None => {
+                        let _ = reply.send(Err(AnswerError::NothingPending));
+                    }
+                    Some(child) => {
+                        let _ = child.tell(SessionCommand::Answer { answers, reply }).await;
+                    }
+                }
+                CommandEffect::none()
+            }
             SessionSupervisorCommand::Events {
                 id,
                 after_seq,
@@ -917,9 +935,14 @@ mod tests {
             .unwrap();
         let (_, snapshot) = row.expect("the session still exists");
         let snapshot = snapshot.expect("a known session answers with its state");
-        assert_eq!(snapshot.status, SessionStatus::AwaitingInput);
-        assert_eq!(snapshot.pending_ask.as_deref(), Some("call-1"));
-        assert_eq!(snapshot.pending_question.as_deref(), Some("which shape?"));
+        match snapshot.status {
+            SessionStatus::AwaitingInput { asks } => {
+                assert_eq!(asks.len(), 1);
+                assert_eq!(asks[0].tool_call_id.as_deref(), Some("call-1"));
+                assert_eq!(asks[0].question, "which shape?");
+            }
+            other => panic!("expected AwaitingInput, got {other:?}"),
+        }
     }
 
     #[tokio::test]

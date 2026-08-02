@@ -1,8 +1,9 @@
 
+import { HandoffCall } from './handoffCall';
 /**
- * Agent handed off control with structured data
+ * Agent handed off control. A conclusion is always one call; a park (an
  */
 export interface HandoffOutput {
   toolName: string;
-  data: unknown;
+  calls: HandoffCall[];
 }

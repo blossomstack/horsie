@@ -123,6 +123,16 @@ export const api = {
         body: JSON.stringify({ text }),
       }),
 
+    /** Answer every pending ask at once; a partial set is refused by the server. */
+    answerAsks: (
+      id: string,
+      answers: { toolCallId: string; text: string }[],
+    ): Promise<Ack> =>
+      request(`/sessions/${encodeURIComponent(id)}/answers`, {
+        method: "POST",
+        body: JSON.stringify({ answers }),
+      }),
+
     stop: (id: string): Promise<Ack> =>
       request(`/sessions/${encodeURIComponent(id)}/stop`, {
         method: "POST",

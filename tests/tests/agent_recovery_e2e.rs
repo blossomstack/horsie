@@ -235,8 +235,9 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
 
     let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
     agent
-        .tell(AgentCommand::Run {
-            input: "carry on".into(),
+        .tell(AgentCommand::Resume {
+            results: Vec::new(),
+            message: Some("carry on".into()),
         })
         .await
         .unwrap();
@@ -334,9 +335,13 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
 
     let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
     agent
-        .tell(AgentCommand::InjectToolResult {
-            tool_call_id: "ask-1".into(),
-            content: "validate, daemon, job".into(),
+        .tell(AgentCommand::Resume {
+            results: vec![horsie_models::agent::ToolResultInput {
+                tool_call_id: "ask-1".into(),
+                output: "validate, daemon, job".into(),
+                is_error: false,
+            }],
+            message: None,
         })
         .await
         .unwrap();
@@ -353,8 +358,9 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
     // Take another turn: any synthetic result recovery journaled is in the
     // history by now, so this is what every later turn would carry forever.
     agent
-        .tell(AgentCommand::Run {
-            input: "carry on".into(),
+        .tell(AgentCommand::Resume {
+            results: Vec::new(),
+            message: Some("carry on".into()),
         })
         .await
         .unwrap();
@@ -425,8 +431,9 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
 
         let agent = spawn_root(AgentActor::new(ctx, params), journal);
         agent
-            .tell(AgentCommand::Run {
-                input: "start something that wedges".into(),
+            .tell(AgentCommand::Resume {
+                results: Vec::new(),
+                message: Some("start something that wedges".into()),
             })
             .await
             .unwrap();

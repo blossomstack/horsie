@@ -23,15 +23,17 @@ pub(crate) fn map_outcome(outcome: AgentOutcome) -> Option<WorkflowCommand> {
         AgentOutcome::Concluded { session_id, output } => {
             Some(WorkflowCommand::AgentConcluded { session_id, output })
         }
-        AgentOutcome::Asked {
-            session_id,
-            tool_call_id,
-            question,
-        } => Some(WorkflowCommand::AgentAsked {
-            session_id,
-            tool_call_id,
-            question,
-        }),
+        // A workflow agent asks through the *forced* `conclude` tool, which a
+        // turn may only call once, so there is exactly one question here.
+        AgentOutcome::Asked { session_id, asks } => {
+            asks.into_iter()
+                .next()
+                .map(|ask| WorkflowCommand::AgentAsked {
+                    session_id,
+                    tool_call_id: ask.tool_call_id,
+                    question: ask.question,
+                })
+        }
         AgentOutcome::Parked { session_id } => Some(WorkflowCommand::AgentParked { session_id }),
         AgentOutcome::Failed {
             session_id,
@@ -369,8 +371,9 @@ impl WorkflowActor {
         match self.spawn_agent(ctx, &agent_def, session_id).await {
             Ok(child) => {
                 let _ = child
-                    .tell(AgentCommand::Run {
-                        input: input.clone(),
+                    .tell(AgentCommand::Resume {
+                        results: Vec::new(),
+                        message: Some(input.clone()),
                     })
                     .await;
                 self.current_child = Some(child);
@@ -452,8 +455,9 @@ impl WorkflowActor {
                 match self.spawn_agent(ctx, &to_def, to_session).await {
                     Ok(child) => {
                         let _ = child
-                            .tell(AgentCommand::Run {
-                                input: input.clone(),
+                            .tell(AgentCommand::Resume {
+                                results: Vec::new(),
+                                message: Some(input.clone()),
                             })
                             .await;
                         self.current_child = Some(child);
@@ -542,9 +546,13 @@ impl WorkflowActor {
                     }
                 };
                 let _ = child
-                    .tell(AgentCommand::InjectToolResult {
-                        tool_call_id,
-                        content: message,
+                    .tell(AgentCommand::Resume {
+                        results: vec![horsie_models::agent::ToolResultInput {
+                            tool_call_id,
+                            output: message,
+                            is_error: false,
+                        }],
+                        message: None,
                     })
                     .await;
                 // Do NOT persist a transition here: `tell` only enqueues, so a crash
@@ -584,7 +592,12 @@ impl WorkflowActor {
                         }
                     }
                 };
-                let _ = child.tell(AgentCommand::Run { input: message }).await;
+                let _ = child
+                    .tell(AgentCommand::Resume {
+                        results: Vec::new(),
+                        message: Some(message),
+                    })
+                    .await;
                 // Same as the await branch: don't persist `Resumed` optimistically.
                 // Stay `Suspended` until the agent's own outcome persists the next
                 // state, so a crash mid-resume leaves the run resumable.
@@ -631,8 +644,9 @@ impl WorkflowActor {
         match self.spawn_agent(ctx, &agent_def, new_session).await {
             Ok(child) => {
                 let _ = child
-                    .tell(AgentCommand::Run {
-                        input: message.clone(),
+                    .tell(AgentCommand::Resume {
+                        results: Vec::new(),
+                        message: Some(message.clone()),
                     })
                     .await;
                 self.current_child = Some(child);
@@ -887,8 +901,10 @@ mod tests {
         }
         let cmd = map_outcome(AgentOutcome::Asked {
             session_id,
-            tool_call_id: Some("tc".into()),
-            question: "q?".into(),
+            asks: vec![crate::context::AskedQuestion {
+                tool_call_id: Some("tc".into()),
+                question: "q?".into(),
+            }],
         })
         .expect("Asked maps to a command");
         match cmd {

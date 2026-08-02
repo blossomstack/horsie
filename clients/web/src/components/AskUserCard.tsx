@@ -5,11 +5,18 @@ import { askInputOf, composeAnswer, pickedChoices } from "../lib/askUser";
 import { cn } from "../lib/cn";
 
 export interface AskAnswerApi {
-  /** Tool call id of the ask awaiting an answer, or null when none is pending. */
-  pendingId: string | null;
+  /** Tool call ids of every ask awaiting an answer. A turn may ask more than
+   * once, and the run resumes only when all of them have been answered. */
+  pendingIds: string[];
   /** An answer is in flight — the turn it resumes has not reported back yet. */
   submitting: boolean;
-  submit: (text: string) => void;
+  /** The answer collected so far for each pending ask, keyed by call id. */
+  answers: Record<string, string>;
+  setAnswer: (toolCallId: string, text: string) => void;
+  /** Every pending ask has an answer, so the set can be sent. */
+  canSubmit: boolean;
+  /** Send every answer at once. A partial set is refused by the server. */
+  submit: () => void;
 }
 
 const AskAnswerContext = createContext<AskAnswerApi | null>(null);
@@ -30,25 +37,39 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
   // Duplicate labels would make a multi-select join ambiguous.
   const choices = [...new Set(input.choices ?? [])];
   const multiple = input.multiple === true;
-  const pending = api != null && api.pendingId === call.id;
+  const pending = api != null && api.pendingIds.includes(call.id);
   const answer = call.output;
+  // A rejected or abandoned ask has an error result rather than an answer:
+  // it was never put to the user, and it can never be answered now.
+  const superseded = answer !== undefined && call.isError === true;
 
   const [selected, setSelected] = useState<string[]>([]);
   const [text, setText] = useState("");
 
-  const toggle = (c: string) =>
+  // What this card contributes to the turn's answer set. Reported upward on
+  // every change, because the send button belongs to the group, not the card.
+  const report = (picks: string[], free: string) => {
+    api?.setAnswer(call.id, composeAnswer(picks, free));
+  };
+
+  const toggle = (c: string) => {
     setSelected((prev) => {
-      if (prev.includes(c)) return prev.filter((x) => x !== c);
-      return multiple ? [...prev, c] : [c];
+      const next = prev.includes(c)
+        ? prev.filter((x) => x !== c)
+        : multiple
+          ? [...prev, c]
+          : [c];
+      report(next, text);
+      return next;
     });
+  };
 
   const picked = answer !== undefined ? pickedChoices(answer, choices) : null;
-  const canSend =
-    pending && !api.submitting && (selected.length > 0 || text.trim().length > 0);
+  const canSend = pending && !api.submitting && api.canSubmit;
 
   const send = () => {
     if (!canSend) return;
-    api.submit(composeAnswer(selected, text));
+    api.submit();
   };
 
   return (
@@ -87,12 +108,22 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
             </div>
           )}
 
+          {pending && api.pendingIds.length > 1 && (
+            <p className="mt-1 text-xs text-faint">
+              One of {api.pendingIds.length} questions — all of them are sent
+              together.
+            </p>
+          )}
+
           {pending && (
             <div className="mt-2 flex items-end gap-2">
               <input
                 data-testid="ask-user-text"
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => {
+                  setText(e.target.value);
+                  report(selected, e.target.value);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
@@ -110,7 +141,11 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                 data-testid="ask-user-send"
                 onClick={send}
                 disabled={!canSend}
-                aria-label="Send answer"
+                aria-label={
+                  api != null && api.pendingIds.length > 1
+                    ? "Send all answers"
+                    : "Send answer"
+                }
                 className="btn-primary shrink-0 !px-2.5 !py-1"
               >
                 {api.submitting ? (
@@ -124,10 +159,13 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
 
           {answer !== undefined && (
             <p
-              data-testid="ask-user-answer"
-              className="mt-1.5 whitespace-pre-wrap text-muted"
+              data-testid={superseded ? "ask-user-superseded" : "ask-user-answer"}
+              className={cn(
+                "mt-1.5 whitespace-pre-wrap",
+                superseded ? "text-faint italic" : "text-muted",
+              )}
             >
-              {answer}
+              {superseded ? `Not answered — ${answer}` : answer}
             </p>
           )}
         </div>

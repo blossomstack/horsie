@@ -54,14 +54,36 @@ struct QueuedMessage {
     at_ms: u64,
 }
 
+/// One question the agent is parked on. `tool_call_id` is what an answer is
+/// addressed to; it is absent only for a question journaled before call ids
+/// were recorded, which can be read but not answered
+struct PendingAskView {
+    tool_call_id: Option<String>,
+    question: String,
+}
+
+/// Answers to every pending ask of a session, delivered together
+struct AnswerAsksRequest {
+    answers: Vec<AskAnswerInput>,
+}
+
+struct AskAnswerInput {
+    tool_call_id: String,
+    text: String,
+}
+
 struct SessionDetail {
     id: String,
     name: Option<String>,
     status: Option<SessionStatusKind>,
     created_at: u64,
     last_error: Option<String>,
-    /// The question the agent is awaiting an answer to (status AwaitingInput).
+    /// The first question the agent is awaiting an answer to (status
+    /// AwaitingInput). Kept for clients that show a single question.
     pending_question: Option<String>,
+    /// Every question the agent is awaiting an answer to, oldest first. All of
+    /// them must be answered in one request before the turn can resume.
+    pending_asks: Vec<PendingAskView>,
     model: String,
     vendor: String,
     /// Clone URLs of the session's provisioned repos (empty when none).
@@ -96,7 +118,13 @@ struct TurnCompletedEvent { iterations: u32, usage: Usage }
 struct InboxChangedEvent { queued: Vec<QueuedMessage> }
 /// Live status transition. Sent without an SSE id (the session detail endpoint
 /// is the durable source for status).
-struct StatusChangedEvent { status: SessionStatusKind, reason: Option<String> }
+/// `pending_asks` rides along so a client learns what to answer the moment the
+/// agent parks, without refetching the session
+struct StatusChangedEvent {
+    status: SessionStatusKind,
+    reason: Option<String>,
+    pending_asks: Vec<PendingAskView>,
+}
 struct ErrorEvent { message: String }
 /// Streaming text delta — live only, never journaled, never carries an SSE id.
 struct DeltaEvent { text: String }

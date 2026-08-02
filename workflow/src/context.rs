@@ -80,17 +80,26 @@ impl WorkflowRuntimeContext {
     }
 }
 
+/// One question an agent parked on, and the call that asked it.
+#[derive(Debug, Clone)]
+pub struct AskedQuestion {
+    /// `None` only for a pre-#62 journal, where the call id was not recorded.
+    pub tool_call_id: Option<String>,
+    pub question: String,
+}
+
 /// A terminal outcome an [`AgentActor`](crate::AgentActor) reports to whoever
 /// spawned it — the workflow that orchestrates it, or an interactive session.
 #[derive(Debug, Clone)]
 pub enum AgentOutcome {
     /// The agent produced its output (structured, or its final text).
     Concluded { session_id: Uuid, output: Value },
-    /// The agent paused to ask the user a question.
+    /// The agent paused to ask the user. A turn may ask more than once — each
+    /// question is its own tool call, and they are answered together, since the
+    /// run cannot resume while any of them is still missing a result.
     Asked {
         session_id: Uuid,
-        tool_call_id: Option<String>,
-        question: String,
+        asks: Vec<AskedQuestion>,
     },
     /// The agent parked itself awaiting its timers.
     Parked { session_id: Uuid },
