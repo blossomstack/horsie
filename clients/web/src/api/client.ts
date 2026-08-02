@@ -1,5 +1,6 @@
 import type {
   ApiError,
+  AuthStatus,
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
@@ -11,6 +12,7 @@ import type {
   GitHubRepoList,
   GitHubStatus,
   ListSessionsResponse,
+  LoginRequest,
   McpAuthorizeUrl,
   McpConnectResult,
   McpServerInput,
@@ -27,6 +29,7 @@ import type {
   ModelCardUpdate,
   PluginDefaultInput,
   PluginInstallInput,
+  PasswordChangeRequest,
   PluginView,
   Ack,
   SessionAck,
@@ -78,6 +81,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* non-JSON error body — keep the status line */
     }
+    // A session that expired mid-use should land on the login page, not on a
+    // wall of failed queries. The gate listens for this.
+    if (res.status === 401) {
+      window.dispatchEvent(new Event("horsie:unauthorized"));
+    }
     throw new ApiRequestError(res.status, code, message);
   }
 
@@ -88,6 +96,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: (): Promise<{ ok: boolean }> => request("/health"),
+
+  auth: {
+    status: (): Promise<AuthStatus> => request("/auth/status"),
+
+    login: (password: string): Promise<AuthStatus> =>
+      request("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ password } satisfies LoginRequest),
+      }),
+
+    logout: (): Promise<AuthStatus> =>
+      request("/auth/logout", { method: "POST", body: "{}" }),
+
+    changePassword: (body: PasswordChangeRequest): Promise<AuthStatus> =>
+      request("/auth/password", { method: "POST", body: JSON.stringify(body) }),
+  },
 
   sessions: {
     list: (): Promise<ListSessionsResponse> => request("/sessions"),
@@ -184,7 +208,8 @@ export const api = {
     /** Browser navigation target (not fetch) — starts the OAuth flow. */
     authUrl: (): string => `${BASE}/github/auth`,
 
-    appConfig: (): Promise<GitHubAppConfigView> => request("/github/app-config"),
+    appConfig: (): Promise<GitHubAppConfigView> =>
+      request("/github/app-config"),
 
     saveAppConfig: (body: GitHubAppConfigInput): Promise<GitHubAppConfigView> =>
       request("/github/app-config", {
@@ -199,9 +224,7 @@ export const api = {
       request(`/github/repos${refresh ? "?refresh=1" : ""}`),
 
     branches: (repo: string): Promise<GitHubBranchList> =>
-      request(
-        `/github/repos/branches?repo=${encodeURIComponent(repo)}`,
-      ),
+      request(`/github/repos/branches?repo=${encodeURIComponent(repo)}`),
   },
 
   plugins: {

@@ -1,4 +1,11 @@
-import { Boxes, Brain, Cpu, Plug, SlidersHorizontal } from "lucide-react";
+import {
+  Boxes,
+  Brain,
+  Cpu,
+  Plug,
+  SlidersHorizontal,
+  UserCog,
+} from "lucide-react";
 import { Outlet } from "react-router-dom";
 import { SettingsNav, type NavItem } from "../../components/SettingsNav";
 import { SettingsDirtyProvider } from "./dirty";
@@ -9,6 +16,7 @@ const ITEMS: NavItem[] = [
   { to: "skills", label: "Skills", icon: Boxes },
   { to: "memory", label: "Memory", icon: Brain },
   { to: "integrations", label: "Integrations", icon: Plug },
+  { to: "account", label: "Account", icon: UserCog },
 ];
 
 export function SettingsLayout() {
