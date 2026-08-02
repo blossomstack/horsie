@@ -609,6 +609,33 @@ mod tests {
         assert_eq!(workspaces[0].name, "main");
     }
 
+    /// A cancel is the one relayed message that draws no reply, so nothing
+    /// upstream fails if it silently goes nowhere. The only other assertion that
+    /// it reaches the vendor lives in an `#[ignore]`d e2e (the `POST /stop` port
+    /// gap), which would leave the one-way branch of the relay uncovered.
+    #[tokio::test]
+    async fn a_cancel_reaches_the_vendor_as_a_one_way_relay() {
+        let agent = FakeRuntimeVendor::builder("test-agent")
+            .serve_in_process()
+            .await
+            .expect("agent");
+        let transport =
+            crate::runtime_vendor::RuntimeVendorTransport::new(agent.link(), "rt-1".to_string());
+        transport.cancel("call-7").await.expect("cancel must send");
+
+        // One-way by protocol: the send returns before the agent has read it.
+        for _ in 0..100 {
+            if agent.cancelled_calls() == vec!["call-7".to_string()] {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!(
+            "the cancel never reached the vendor (saw {:?})",
+            agent.cancelled_calls()
+        );
+    }
+
     #[tokio::test]
     async fn fake_agent_records_lifecycle_signals_in_order() {
         let agent = FakeRuntimeVendor::builder("test-agent")
