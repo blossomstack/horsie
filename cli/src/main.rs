@@ -28,7 +28,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Manage the shared plugin library (skills + SessionStart hooks for all jobs).
+    /// Manage the shared plugin library (skills + SessionStart hooks for runtimes).
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
