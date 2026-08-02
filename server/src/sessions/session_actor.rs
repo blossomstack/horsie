@@ -11,9 +11,10 @@
 
 use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
-use crate::sessions::events::SessionEventSink;
+use crate::sessions::events::{QuietEventSink, SessionEventSink};
+use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
-use crate::sessions::subagents::{SubAgentParent, SubAgentTree};
+use crate::sessions::subagents::{MAX_SUBAGENT_DEPTH, SubAgentParent, SubAgentTree};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
 use crate::sessions::{SessionFrame, UserMessageError};
@@ -119,6 +120,17 @@ pub enum SessionCommand {
         caller: SubAgentParent,
         id: Option<Uuid>,
         reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Internal: the spawn's `SubAgentSpawned` write came back — only now
+    /// does the child actor exist (persist-then-spawn). A failed write spawns
+    /// nothing and the tool gets the error.
+    FinishSpawnSubAgent {
+        id: Uuid,
+        caller: SubAgentParent,
+        label: String,
+        task: String,
+        reply: oneshot::Sender<Result<Uuid, String>>,
+        persisted: Result<(), horsie_actor::JournalError>,
     },
 }
 
@@ -249,9 +261,11 @@ pub struct SessionActor {
     /// The session's primary agent, resident for as long as this actor is
     /// loaded. Spawned once, on recovery; `None` only in the instant before.
     main_agent: Option<ActorRef<AgentCommand>>,
-    /// Additional agents this session hosts. Empty today — the seam sub-agents
-    /// will grow into, and the reason the session and agent stayed two actors.
-    sub_agents: HashMap<String, ActorRef<AgentCommand>>,
+    /// The subagents this session hosts, keyed by their node id in the
+    /// persisted tree. Resident for the session's loaded lifetime, exactly
+    /// like the main agent — the reason the session and agent stayed two
+    /// actors.
+    sub_agents: HashMap<Uuid, ActorRef<AgentCommand>>,
     /// The main agent's context provider, kept so [`Self::cancel_run`] can
     /// reach the runtime client the run already acquired instead of asking
     /// the manager for a fresh one.
@@ -360,6 +374,7 @@ impl SessionActor {
             memory: self.deps.memory.clone(),
             settings: self.spec.agent.clone(),
             session_id: self.id,
+            kind: SessionAgentKind::Main,
             session: ctx.self_ref(),
             frames: self.frames.clone(),
             last_client: Mutex::new(None),
@@ -385,6 +400,51 @@ impl SessionActor {
             session_id: self.id,
         };
         self.main_agent = Some(ctx.spawn(AgentActor::new(agent_ctx, params)));
+    }
+
+    /// Spawn a resident subagent actor — journal replay only; the caller
+    /// decides whether a run starts (spawn) or not (recovery).
+    fn spawn_sub_agent_actor(
+        &mut self,
+        ctx: &ActorContext<Self>,
+        id: Uuid,
+    ) -> ActorRef<AgentCommand> {
+        let context_provider = Arc::new(SessionContextProvider {
+            runtimes: self
+                .deps
+                .runtimes
+                .provider(self.id.to_string(), self.spec.vendor.clone()),
+            registry: self.deps.provider_registry.clone(),
+            mcp: self.deps.mcp.clone(),
+            memory: self.deps.memory.clone(),
+            settings: self.spec.agent.clone(),
+            session_id: self.id,
+            kind: SessionAgentKind::Sub(id),
+            session: ctx.self_ref(),
+            frames: self.frames.clone(),
+            last_client: Mutex::new(None),
+        });
+        let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
+        params.interactive = true;
+        // No handoff tool: a subagent ends its turn with plain text, which
+        // becomes the output its parent is notified with.
+        params.thinking_effort = self
+            .spec
+            .agent
+            .thinking_effort
+            .as_deref()
+            .and_then(horsie_agentcore::ThinkingEffort::parse);
+        let agent_ctx = AgentRuntimeContext {
+            context_provider,
+            event_sink: Arc::new(QuietEventSink),
+            parent: Arc::new(SessionParent {
+                target: ctx.self_ref(),
+            }),
+            session_id: id,
+        };
+        let actor = ctx.spawn(AgentActor::new(agent_ctx, params));
+        self.sub_agents.insert(id, actor.clone());
+        actor
     }
 
     fn agent(&self) -> Option<&ActorRef<AgentCommand>> {
@@ -709,6 +769,24 @@ async fn build_memory_layer(
     Ok((toolbox, index))
 }
 
+/// Which of a session's agents a [`SessionContextProvider`] serves. The kind
+/// decides the toolbox layers (session-metadata tools are main-only) and
+/// whether preparation progress is broadcast (main-only — subagents are
+/// quiet).
+#[derive(Clone, Copy)]
+enum SessionAgentKind {
+    Main,
+    Sub(Uuid),
+}
+
+/// Appended to a subagent's system prompt: its place in the tree and how its
+/// result travels. Deliberately short — the tools carry their own docs.
+const SUBAGENT_PROMPT_SUFFIX: &str = "\n\n# Subagent role\n\
+You are a subagent, spawned to work on one task. Your final message is your report: \
+it is delivered to the agent that spawned you — make it self-contained. You may spawn \
+your own subagents with spawn_agent and check on them with subagent_status. You cannot \
+ask the user or rename the session; if you are blocked, report that instead.";
+
 /// Per-run context for a session's agent, resolved on the run's own task.
 ///
 /// It asks the [`RuntimeClientProvider`] for a client each run rather than
@@ -721,7 +799,8 @@ struct SessionContextProvider {
     memory: Option<Arc<crate::memory::MemoryService>>,
     settings: AgentSettings,
     session_id: Uuid,
-    /// The owning session's mailbox — routes the server-owned title tool.
+    kind: SessionAgentKind,
+    /// The owning session's mailbox — routes the server-owned tools.
     session: ActorRef<SessionCommand>,
     frames: broadcast::Sender<SessionFrame>,
     /// The client the most recent `provide()` resolved. Cheap to keep — cloning
@@ -757,8 +836,12 @@ impl ContextProvider for SessionContextProvider {
         let provider = self.llm_provider()?;
         let def = session_run_def(settings);
         let use_plugins = settings.use_plugins.unwrap_or(true);
+        // Preparation progress is main-only: subagents are quiet by design.
+        let broadcast = matches!(self.kind, SessionAgentKind::Main);
 
-        emit_progress(&self.frames, "acquiring_runtime", None);
+        if broadcast {
+            emit_progress(&self.frames, "acquiring_runtime", None);
+        }
         let runtime_client = self.runtimes.get().await.map_err(|e| match e {
             // The one failure the session can never retry: the vendor is alive
             // and says the runtime is gone. A vendor that is merely offline
@@ -773,7 +856,9 @@ impl ContextProvider for SessionContextProvider {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
 
-        emit_progress(&self.frames, "scanning_workspace", None);
+        if broadcast {
+            emit_progress(&self.frames, "scanning_workspace", None);
+        }
         let (ws, shared_scan) = scan_workspace(&runtime_client, None, use_plugins).await;
         let shared = if use_plugins {
             let bootstrap = match runtime_client.run_session_start().await {
@@ -791,7 +876,9 @@ impl ContextProvider for SessionContextProvider {
         let mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
             Vec::new()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
-            emit_progress(&self.frames, "connecting_tools", None);
+            if broadcast {
+                emit_progress(&self.frames, "connecting_tools", None);
+            }
             mcp_svc
                 .toolboxes_for(&settings.mcp_servers)
                 .await
@@ -812,17 +899,39 @@ impl ContextProvider for SessionContextProvider {
         );
         let (with_memory, memory_index) =
             build_memory_layer(base, self.memory.clone(), settings).await?;
-        let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_memory));
-        let toolbox: Arc<dyn Toolbox> =
-            Arc::new(SessionTitleToolbox::new(inner, self.session.clone()));
+        let caller = match self.kind {
+            SessionAgentKind::Main => SubAgentParent::Main,
+            SessionAgentKind::Sub(id) => SubAgentParent::SubAgent(id),
+        };
+        let with_spawn: Arc<dyn Toolbox> = Arc::new(SubAgentToolbox::new(
+            with_memory,
+            self.session.clone(),
+            caller,
+        ));
+        let toolbox: Arc<dyn Toolbox> = match self.kind {
+            SessionAgentKind::Main => {
+                let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
+                Arc::new(SessionTitleToolbox::new(inner, self.session.clone()))
+            }
+            SessionAgentKind::Sub(_) => with_spawn,
+        };
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
+        let system_prompt = match self.kind {
+            SessionAgentKind::Main => system_prompt,
+            SessionAgentKind::Sub(_) => Some(match system_prompt {
+                Some(p) => format!("{p}{SUBAGENT_PROMPT_SUFFIX}"),
+                None => SUBAGENT_PROMPT_SUFFIX.trim_start().to_string(),
+            }),
+        };
         let system_prompt = match (system_prompt, memory_index.is_empty()) {
             (Some(p), false) => Some(format!("{p}\n\n{memory_index}")),
             (Some(p), true) => Some(p),
             (None, false) => Some(memory_index),
             (None, true) => None,
         };
-        emit_progress(&self.frames, "ready", None);
+        if broadcast {
+            emit_progress(&self.frames, "ready", None);
+        }
         Ok(Contexts {
             provider,
             toolbox,
@@ -925,7 +1034,7 @@ impl EventSourcedActor for SessionActor {
         &mut self,
         state: &SessionState,
         cmd: SessionCommand,
-        _ctx: &mut ActorContext<Self>,
+        ctx: &mut ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             SessionCommand::UserMessage { text, reply } => {
@@ -1008,12 +1117,85 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(result);
                 CommandEffect::none()
             }
-            SessionCommand::SpawnSubAgent { reply, .. } => {
-                let _ = reply.send(Err("subagent spawning is not available yet".to_string()));
+            SessionCommand::SpawnSubAgent {
+                caller,
+                label,
+                task,
+                reply,
+            } => {
+                let Some(parent_depth) = state.subagents.depth_of(caller) else {
+                    let _ = reply.send(Err("caller is not a known agent".to_string()));
+                    return CommandEffect::none();
+                };
+                if parent_depth >= MAX_SUBAGENT_DEPTH {
+                    let _ =
+                        reply.send(Err(format!("max subagent depth {MAX_SUBAGENT_DEPTH} reached")));
+                    return CommandEffect::none();
+                }
+                let max = self.spec.agent.max_subagents();
+                if state.subagents.active_count() >= max {
+                    let _ = reply.send(Err(format!("{max} subagents already active")));
+                    return CommandEffect::none();
+                }
+                // Persist first, spawn second: a crash between the two replays
+                // as a Running node with no actor, which recovery reconciles
+                // to failed — never an untracked agent.
+                let id = Uuid::new_v4();
+                let spawned = SessionDomainEvent::SubAgentSpawned {
+                    id,
+                    parent: caller,
+                    label: label.clone(),
+                    task: task.clone(),
+                    depth: parent_depth + 1,
+                };
+                let (tx, rx) = oneshot::channel();
+                let self_ref = ctx.self_ref();
+                tokio::spawn(async move {
+                    let persisted = rx.await.unwrap_or_else(|_| {
+                        Err(horsie_actor::JournalError::Backend(
+                            "spawn ack channel closed".to_string(),
+                        ))
+                    });
+                    let _ = self_ref
+                        .tell(SessionCommand::FinishSpawnSubAgent {
+                            id,
+                            caller,
+                            label,
+                            task,
+                            reply,
+                            persisted,
+                        })
+                        .await;
+                });
+                CommandEffect::persist(vec![spawned]).and_ack(tx)
+            }
+            SessionCommand::FinishSpawnSubAgent {
+                id,
+                label,
+                task,
+                reply,
+                persisted,
+                ..
+            } => {
+                if let Err(e) = persisted {
+                    let _ = reply.send(Err(format!("persist subagent: {e}")));
+                    return CommandEffect::none();
+                }
+                let agent = self.spawn_sub_agent_actor(ctx, id);
+                let _ = agent.tell(AgentCommand::Run { input: task }).await;
+                emit_progress(&self.frames, "subagent_spawned", Some(format!("\"{label}\" ({id})")));
+                let _ = reply.send(Ok(id));
                 CommandEffect::none()
             }
-            SessionCommand::SubAgentStatus { reply, .. } => {
-                let _ = reply.send(Err("subagent status is not available yet".to_string()));
+            SessionCommand::SubAgentStatus { caller, id, reply } => {
+                let rendered = match id {
+                    Some(id) => state
+                        .subagents
+                        .render_node(&id)
+                        .ok_or_else(|| format!("no such subagent: {id}")),
+                    None => Ok(state.subagents.render_subtree(caller)),
+                };
+                let _ = reply.send(rendered);
                 CommandEffect::none()
             }
         }
@@ -1631,5 +1813,230 @@ mod tests {
             .await
             .unwrap();
         rx.await.unwrap();
+    }
+
+    /// A provider whose every call immediately ends the turn with plain text.
+    struct EchoProvider;
+
+    #[async_trait]
+    impl LlmProvider for EchoProvider {
+        fn model_id(&self) -> &str {
+            "mock"
+        }
+        async fn complete(
+            &self,
+            _request: horsie_agentcore::CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn horsie_agentcore::EventSink,
+        ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::Text(
+                    horsie_agentcore::TextPart {
+                        text: "sub answer".to_string(),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::EndTurn,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        }
+    }
+
+    async fn spawn_session_with_provider(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (
+        ActorFixture,
+        ActorRef<SessionCommand>,
+        Uuid,
+        Arc<dyn horsie_actor::Journal>,
+    ) {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "mock", &actor_spec_fixture())
+            .await
+            .expect("create");
+        f.deps
+            .provider_registry
+            .write()
+            .unwrap()
+            .insert("mock".to_string(), provider);
+        let parent = spawn_deaf_supervisor();
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(id, actor_spec_fixture(), f.deps.clone(), parent),
+            journal.clone(),
+        );
+        (f, session, id, journal)
+    }
+
+    /// Poll the session's folded state until the tree satisfies `pred` (2s
+    /// cap). Subagent progress is journal-first, so the fold is the honest
+    /// thing to wait on.
+    async fn wait_for_tree(
+        journal: &Arc<dyn horsie_actor::Journal>,
+        session_id: Uuid,
+        pred: impl Fn(&crate::sessions::subagents::SubAgentTree) -> bool,
+    ) {
+        for _ in 0..200 {
+            let state = crate::sessions::events::fold_session_state(journal, session_id).await;
+            if pred(&state.subagents) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("tree condition not met within 2s");
+    }
+
+    async fn spawn_sub(session: &ActorRef<SessionCommand>, label: &str, task: &str) -> Uuid {
+        session
+            .ask(|reply| SessionCommand::SpawnSubAgent {
+                caller: crate::sessions::subagents::SubAgentParent::Main,
+                label: label.into(),
+                task: task.into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn spawn_records_a_running_subagent_in_the_tree() {
+        // Completion routing lands with outcome handling (next task); here the
+        // spawn itself is what must be durable and attributed.
+        let gate = BlockingProvider::new();
+        let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
+        let sub = spawn_sub(&session, "research", "dig into it").await;
+        wait_for_tree(&journal, id, |t| {
+            t.get(&sub).is_some_and(|r| {
+                r.status == crate::sessions::subagents::SubAgentStatus::Running
+            })
+        })
+        .await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        let rec = state.subagents.get(&sub).unwrap();
+        assert_eq!(rec.depth, 1);
+        assert_eq!(rec.parent, crate::sessions::subagents::SubAgentParent::Main);
+        assert_eq!(rec.label, "research");
+        assert_eq!(rec.task, "dig into it");
+    }
+
+    #[tokio::test]
+    async fn spawn_beyond_depth_four_is_rejected() {
+        // A hanging provider keeps every spawned node Running, so the chain
+        // builds deterministically: Main → d1 → d2 → d3 → d4, and d4's spawn
+        // is refused.
+        let gate = BlockingProvider::new();
+        let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
+        let mut parent = crate::sessions::subagents::SubAgentParent::Main;
+        for _ in 0..4 {
+            let id_child = session
+                .ask(|reply| SessionCommand::SpawnSubAgent {
+                    caller: parent,
+                    label: "w".into(),
+                    task: "t".into(),
+                    reply,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            wait_for_tree(&journal, id, |t| t.has_active()).await;
+            parent = crate::sessions::subagents::SubAgentParent::SubAgent(id_child);
+        }
+        let res = session
+            .ask(|reply| SessionCommand::SpawnSubAgent {
+                caller: parent,
+                label: "x".into(),
+                task: "y".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.unwrap_err(), "max subagent depth 4 reached");
+    }
+
+    #[tokio::test]
+    async fn spawn_beyond_the_concurrency_cap_is_rejected() {
+        let gate = BlockingProvider::new();
+        let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
+        for _ in 0..8 {
+            let _ = spawn_sub(&session, "w", "t").await;
+        }
+        wait_for_tree(&journal, id, |t| t.active_count() == 8).await;
+        let res = session
+            .ask(|reply| SessionCommand::SpawnSubAgent {
+                caller: crate::sessions::subagents::SubAgentParent::Main,
+                label: "x".into(),
+                task: "y".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.unwrap_err(), "8 subagents already active");
+    }
+
+    #[tokio::test]
+    async fn spawn_from_an_unknown_caller_is_rejected() {
+        let (_f, session, _id, _journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let res = session
+            .ask(|reply| SessionCommand::SpawnSubAgent {
+                caller: crate::sessions::subagents::SubAgentParent::SubAgent(Uuid::new_v4()),
+                label: "x".into(),
+                task: "y".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.unwrap_err(), "caller is not a known agent");
+    }
+
+    #[tokio::test]
+    async fn subagent_toolbox_strips_session_metadata_tools() {
+        let (f, session, id, _journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+
+        let build = |kind: SessionAgentKind| SessionContextProvider {
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings: actor_spec_fixture().agent,
+            session_id: id,
+            kind,
+            session: session.clone(),
+            frames: broadcast::channel(8).0,
+            last_client: Mutex::new(None),
+        };
+
+        let main = build(SessionAgentKind::Main).provide().await.unwrap();
+        let main_tools: Vec<String> = main.toolbox.specs().into_iter().map(|s| s.name).collect();
+        for t in [
+            "spawn_agent",
+            "subagent_status",
+            "set_session_title",
+            "ask_user",
+        ] {
+            assert!(main_tools.contains(&t.to_string()), "main lacks {t}");
+        }
+
+        let sub_id = Uuid::new_v4();
+        let sub = build(SessionAgentKind::Sub(sub_id))
+            .provide()
+            .await
+            .unwrap();
+        let sub_tools: Vec<String> = sub.toolbox.specs().into_iter().map(|s| s.name).collect();
+        for t in ["spawn_agent", "subagent_status"] {
+            assert!(sub_tools.contains(&t.to_string()), "sub lacks {t}");
+        }
+        for t in ["set_session_title", "ask_user"] {
+            assert!(!sub_tools.contains(&t.to_string()), "sub must not have {t}");
+        }
+        assert!(
+            sub.system_prompt.unwrap().contains("# Subagent role"),
+            "the subagent prompt must explain its role"
+        );
     }
 }
