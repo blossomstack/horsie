@@ -557,6 +557,22 @@ impl SessionActor {
         events
     }
 
+    /// Everything deliverable at a turn boundary: wake idle subagent parents
+    /// whose children have results, then start the main agent's turn if one
+    /// is owed. Every turn boundary routes through here — without that, a
+    /// result owed to a subagent parent strands the moment no further
+    /// subagent outcome can arrive (every node terminal), since an outcome
+    /// was previously the only flush trigger.
+    async fn flush_then_drain(&mut self, state: &SessionState) -> Vec<SessionDomainEvent> {
+        let mut events = self.flush_owed(state).await;
+        let next = events
+            .iter()
+            .cloned()
+            .fold(state.clone(), Self::apply_event);
+        events.extend(self.drain(&next).await);
+        events
+    }
+
     /// Wake every idle subagent parent whose children have results it has not
     /// been sent. The main agent is deliberately excluded: its owed results
     /// merge into its next turn inside `drain`.
@@ -619,7 +635,7 @@ impl SessionActor {
         // persist — same fold the runtime will apply, just one step early.
         let next = Self::apply_event(state.clone(), queued.clone());
         let mut events = vec![queued];
-        events.extend(self.drain(&next).await);
+        events.extend(self.flush_then_drain(&next).await);
         self.publish_inbox(state, &events);
         CommandEffect::persist(events)
     }
@@ -719,7 +735,7 @@ impl SessionActor {
             for e in &events {
                 next = Self::apply_event(next, e.clone());
             }
-            events.extend(self.drain(&next).await);
+            events.extend(self.flush_then_drain(&next).await);
         }
         self.publish_inbox(state, &events);
         CommandEffect::persist(events)
@@ -778,14 +794,11 @@ impl SessionActor {
             AgentOutcome::UsageRecorded { .. } => unreachable!("handled above"),
         };
         let mut events = vec![terminal];
-        let mut next = events
+        let next = events
             .iter()
             .cloned()
             .fold(state.clone(), Self::apply_event);
-        let flushed = self.flush_owed(&next).await;
-        next = flushed.iter().cloned().fold(next, Self::apply_event);
-        events.extend(flushed);
-        events.extend(self.drain(&next).await);
+        events.extend(self.flush_then_drain(&next).await);
         CommandEffect::persist(events)
     }
 
@@ -1186,7 +1199,7 @@ impl EventSourcedActor for SessionActor {
                 // Stop is a turn boundary like any other, so anything the user
                 // queued while the cancelled turn ran starts the next one.
                 let next = Self::apply_event(state.clone(), SessionDomainEvent::TurnStopped);
-                events.extend(self.drain(&next).await);
+                events.extend(self.flush_then_drain(&next).await);
                 self.publish_inbox(state, &events);
                 CommandEffect::persist(events)
             }
@@ -2451,6 +2464,107 @@ mod tests {
                     && t.contains("[subagent \"research\" completed]")),
             "the notification rides with the user's answer: {results:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_stranded_grandchild_result_flushes_at_the_next_turn_boundary() {
+        use crate::sessions::subagents::{SubAgentParent, SubAgentStatus};
+        // Fold a crashed-session state straight into the journal: P completed
+        // and its parent was told; P's child C died mid-run and was reconciled
+        // to failed. Every node is terminal, so no subagent outcome will ever
+        // arrive again — C's result is owed to P forever unless a turn
+        // boundary delivers it.
+        let p = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let pid = SessionActor::persistence_id_for(id);
+        let events: Vec<Vec<u8>> = [
+            SessionDomainEvent::SubAgentSpawned {
+                id: p,
+                parent: SubAgentParent::Main,
+                label: "parent".into(),
+                task: "parent task".into(),
+                depth: 1,
+            },
+            SessionDomainEvent::SubAgentCompleted {
+                id: p,
+                output: "parent first answer".into(),
+            },
+            SessionDomainEvent::SubAgentNotified { id: p },
+            SessionDomainEvent::SubAgentSpawned {
+                id: c,
+                parent: SubAgentParent::SubAgent(p),
+                label: "child".into(),
+                task: "child task".into(),
+                depth: 2,
+            },
+            SessionDomainEvent::SubAgentFailed {
+                id: c,
+                error: crate::sessions::subagents::INTERRUPTED_ERROR.into(),
+            },
+        ]
+        .iter()
+        .map(|e| serde_json::to_vec(e).unwrap())
+        .collect();
+        journal.persist(&pid, &events).await.unwrap();
+
+        // Loading must start no runs: C stays owed until someone acts.
+        let parent = spawn_deaf_supervisor();
+        let session2 = horsie_actor::spawn_root(
+            SessionActor::new(id, actor_spec_fixture(), _f.deps.clone(), parent),
+            journal.clone(),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert!(!state.subagents.get(&c).unwrap().notified);
+        assert_eq!(
+            state.subagents.get(&p).unwrap().status,
+            SubAgentStatus::Completed
+        );
+
+        // The next turn boundary wakes P with C's failure; P concludes again
+        // and its new output is owed to the main agent.
+        session2
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "hi".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        // P's re-completion and its notification to the main agent persist in
+        // one effect, so don't wait on a `!notified` window — C delivered and
+        // P re-concluded are the durable facts.
+        wait_for_tree(&journal, id, |t| {
+            t.get(&c).is_some_and(|r| r.notified)
+                && t.get(&p).is_some_and(|r| {
+                    r.status == SubAgentStatus::Completed
+                        && r.output.as_deref() == Some("sub answer")
+                })
+        })
+        .await;
+        let page = session2
+            .ask(|reply| SessionCommand::History {
+                agent_id: Some(p.to_string()),
+                query: horsie_workflow::HistoryQuery {
+                    before: None,
+                    limit: 20,
+                },
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("P's transcript");
+        let texts = user_texts(&page);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("[subagent \"child\" failed]")
+                    && t.contains("interrupted by restart")),
+            "P must be woken with C's result: {texts:?}"
+        );
+        let _ = session;
     }
 
     #[tokio::test]
