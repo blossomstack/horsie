@@ -1,5 +1,20 @@
 # Runtime working-directory and environment tools
 
+> **Amended before merge.** This document describes the caller identity as an
+> optional `session_id`; what shipped is a **required `agent_id`**. Two reasons:
+> an optional id creates a shared default bucket that callers silently fall into
+> — the exact isolation failure the field exists to prevent — and the server
+> already had an agent identity to reuse (`session_actor`'s `agent_id`, and the
+> `agent/<session-uuid>` journal key) rather than a parallel session-scoped one.
+> The stamped value is unchanged (the session UUID), so this is naming and
+> nullability, not behaviour. Note the id is *not* `MAIN_AGENT_ID` (`"main"`),
+> which is a within-session label and would collide across sessions sharing a
+> runtime.
+>
+> Also changed: an explicit `workspace` now takes precedence over the sticky cwd
+> (see #94 for why that mechanism should shrink further). The rest of the design
+> below holds; `session_id` reads as `agent_id` throughout.
+
 ## Context
 
 The runtime's tool set (`bash`, `read_file`, `write_file`, `find_and_replace`,
