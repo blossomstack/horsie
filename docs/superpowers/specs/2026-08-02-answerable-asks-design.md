@@ -146,9 +146,11 @@ hands a clone to each `SessionActor` it spawns. `forget` keeps an entry while
 
 Offloading a watched session then leaves its SSE streams connected and silent —
 correct, since nothing can happen while unloaded — and frames resume when anything
-reloads it. `Subscribe` is answered from the registry without loading the session:
-a broadcast channel is transport, not state the actor owns, and no journal is read
-to hand one out.
+reloads it. `Subscribe` itself is answered from the registry without loading the
+session — a broadcast channel is transport, not state the actor owns, and no
+journal is read to hand one out. Opening a stream still loads the session, because
+the cursor and replay beside it are actor commands (Fix 6); the point is that it
+loads *once* per connection instead of every 180 seconds forever.
 
 ### Fix 5 — answering is atomic (server + web)
 
