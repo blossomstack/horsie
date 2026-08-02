@@ -1,128 +1,30 @@
 use crate::error::CliError;
-use horsie_agentcore::{LlmProvider, Secret};
-use horsie_anthropic::AnthropicProvider;
-use horsie_openai::OpenAiProvider;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-/// CLI-owned policy (hand-written serde — NOT a fluorite protocol type). The
-/// workflow file stays a pure `WorkflowDefinition`, reusable across server/CLI.
+/// CLI-owned policy (hand-written serde — NOT a fluorite protocol type).
 ///
 /// All fields default, so `HorsieConfig::default()` is a valid empty config
-/// (no providers, no models, default storage/sandbox/runtime). An empty config
-/// is a legal state — `validate` is what rejects workflows that reference models
-/// the config doesn't define.
+/// (default storage/runtime). Old config files written for the daemon (with
+/// providers/models/sandbox/hackamore/...) still parse: serde ignores unknown
+/// JSON fields.
 #[derive(Debug, Default, Deserialize)]
 pub struct HorsieConfig {
-    #[serde(default)]
-    pub providers: HashMap<String, ProviderConfig>,
-    #[serde(default)]
-    pub models: HashMap<String, ModelConfig>,
-    #[serde(default)]
-    pub sandbox: SandboxConfig,
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
-    /// Optional hackamore server location. Present → a job submitted with a per-run
-    /// `--hackamore-policy` mints a policy-bound proxy token at spawn (fail closed).
-    /// Absent, or a job with no policy → jobs run exactly as they do today, with
-    /// no hackamore env or grants.
-    #[serde(default)]
-    pub hackamore: Option<HackamoreConfig>,
-    /// Optional velos remote runtime vendor for the session server. Present → a
-    /// `"velos"` vendor is registered and sessions may set `"vendor": "velos"` to
-    /// run in a remote container. Absent → local-only, unchanged behaviour.
-    #[serde(default)]
-    pub velos: Option<VelosVendorConfig>,
-    /// Vendor a session-create request defaults to when it omits `vendor`.
-    /// Defaults to `"local"`; set to `"velos"` (with a `velos` section) to make
-    /// remote sandboxes the default.
-    ///
-    /// NOTE: only the job daemon reads this. The session server (`horsie serve`)
-    /// keeps the default vendor in its settings database, not here.
-    #[serde(default)]
-    pub default_vendor: Option<String>,
-    /// Address the shared local-runtime-vendor listener binds (session
-    /// server only) — user-launched `horsie-runtime --endpoint ws://...`
-    /// daemons dial back here so any number of sessions can share one
-    /// already-running, already-open directory. Absent → the shared local
-    /// vendor is disabled (no listener bound, no `"local"` vendor kind ever
-    /// registered).
-    #[serde(default)]
-    pub local_runtime_listen: Option<String>,
-    /// Where the session server persists its runtime-editable settings
-    /// (providers, models, default vendor). Deployment config; never overlaps
-    /// with those settings.
-    #[serde(default)]
-    pub database: DatabaseConfig,
-}
-
-/// Session-server settings database location (hand-written serde — deployment
-/// config). Absent → a SQLite file under the server data dir. Set `url` to a
-/// `sqlite://…` path today, or a `postgres://…` URL once that backend lands.
-#[derive(Debug, Default, Deserialize)]
-pub struct DatabaseConfig {
-    #[serde(default)]
-    pub url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum ProviderConfig {
-    /// An Anthropic-API provider. The key is taken from `api_key` (inline) if set,
-    /// else read from the env var named by `api_key_env`; if neither is set the
-    /// client is built without auth, for a local mock server or proxy via `base_url`.
-    /// Prefer `api_key_env` — it keeps the secret out of the config file.
-    Anthropic {
-        #[serde(default)]
-        api_key: Option<Secret>,
-        #[serde(default)]
-        api_key_env: Option<String>,
-        #[serde(default)]
-        base_url: Option<String>,
-    },
-    /// An OpenAI-compatible `/v1/chat/completions` provider — OpenAI itself, or
-    /// Ollama, vLLM, llama.cpp, OpenRouter, DeepSeek via `base_url`. Key
-    /// resolution matches `Anthropic`: inline `api_key`, else the env var named
-    /// by `api_key_env`, else unauthenticated (for a local server).
-    Openai {
-        #[serde(default)]
-        api_key: Option<Secret>,
-        #[serde(default)]
-        api_key_env: Option<String>,
-        #[serde(default)]
-        base_url: Option<String>,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ModelConfig {
-    pub provider: String,
-    pub model_id: String,
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct SandboxConfig {
-    /// Capability file that fully defines the sandbox, replacing the built-in default.
-    /// A `--capabilities` CLI flag overrides this. Absent → built-in default.
-    #[serde(default)]
-    pub capabilities_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {
-    /// Ephemeral runtime state: the daemon control socket, pidfile, log, and
-    /// per-job capability files. Defaults to `$XDG_STATE_HOME/horsie`, else
+    /// Ephemeral runtime state: the shared local-runtime-vendor socket and
+    /// pidfile. Defaults to `$XDG_STATE_HOME/horsie`, else
     /// `$HOME/.local/state/horsie` (same path on macOS and Linux).
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
-    /// Durable job history: the event-sourcing journal replayed to resume
-    /// interrupted jobs. Defaults to `$XDG_DATA_HOME/horsie`, else
+    /// Durable data: the shared plugin library (`plugins_dir`) and the shared
+    /// clones (`<data_dir>/sources`). Defaults to `$XDG_DATA_HOME/horsie`, else
     /// `$HOME/.local/share/horsie` (same path on macOS and Linux).
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -143,125 +45,17 @@ impl Default for StorageConfig {
     }
 }
 
-/// Daemon-local hackamore *server location* (hand-written serde — NOT a fluorite
-/// protocol type; this never crosses a module boundary, the daemon consumes it
-/// in place). hackamore is a policy-governed credential-injecting reverse proxy.
-///
-/// Only the deployment-global addresses live here. The policy a token is bound
-/// to, and its TTL, are a per-run resource supplied by the `job run`
-/// `--hackamore-policy` flag — not global config.
-#[derive(Debug, Deserialize)]
-pub struct HackamoreConfig {
-    /// Base URL of hackamore's admin API (daemon-only; serves `POST /mint`).
-    pub admin_url: String,
-    /// Base URL of hackamore's proxy listener — the one address the sandboxed job
-    /// may reach; injected into the runtime child as `HACKAMORE_URL`.
-    pub proxy_url: String,
-}
-
 #[derive(Debug, Default, Deserialize)]
 pub struct RuntimeConfig {
-    /// Path to the `horsie-runtime` binary the daemon spawns per job. Absent →
-    /// the sibling `horsie-runtime` next to the running CLI executable.
+    /// Path to the `horsie-runtime` binary `horsie connect` spawns per session.
+    /// Absent → the sibling `horsie-runtime` next to the running CLI executable.
     #[serde(default)]
     pub bin: Option<PathBuf>,
     /// Directories prepended to PATH when running plugin hooks (e.g. the node bin
-    /// dir). Absent → auto-discover `node` from the daemon's environment. These dirs
-    /// are also granted read access in the sandbox.
+    /// dir). Absent → auto-discover `node` from the environment. These dirs are
+    /// also granted read access in the sandbox.
     #[serde(default)]
     pub hook_path: Option<Vec<PathBuf>>,
-}
-
-/// Configuration for the velos-backed remote runtime vendor (hand-written serde
-/// — daemon-local policy, never a wire type). Only `server_url`, `image`, and
-/// `advertise_host` are required; the rest default.
-#[derive(Debug, Deserialize)]
-pub struct VelosVendorConfig {
-    /// velos server base URL, e.g. `http://velos.internal:8080`.
-    pub server_url: String,
-    /// Bearer token inline. Prefer `token_env` to keep the secret out of the file.
-    #[serde(default)]
-    pub token: Option<Secret>,
-    /// Env var to read the bearer token from.
-    #[serde(default)]
-    pub token_env: Option<String>,
-    /// OCI image bundling `horsie-runtime` (Linux, built without the sandbox
-    /// feature — the container is the isolation boundary).
-    pub image: String,
-    /// Path to `horsie-runtime` inside the image.
-    #[serde(default = "default_container_runtime_bin")]
-    pub runtime_bin: String,
-    /// In-container root under which each workspace directory is created.
-    #[serde(default = "default_workspace_root")]
-    pub workspace_root: String,
-    /// Host/IP the container dials back to. Must be routable from the velos
-    /// worker's container network to this server's reverse-dial listener.
-    pub advertise_host: String,
-    /// Address the reverse-dial listener binds. Port `0` (the default) picks an
-    /// ephemeral port, advertised as `ws://<advertise_host>:<port>`.
-    #[serde(default = "default_velos_listen")]
-    pub listen: String,
-    /// CPU cores requested per container.
-    #[serde(default = "default_velos_cpu")]
-    pub cpu: u32,
-    /// Memory requested per container, in MiB.
-    #[serde(default = "default_velos_memory_mib")]
-    pub memory_mib: u64,
-    /// How long to wait for a scheduled container's runtime to dial back.
-    #[serde(default = "default_velos_connect_timeout_secs")]
-    pub connect_timeout_secs: u64,
-}
-
-pub(crate) fn default_container_runtime_bin() -> String {
-    "horsie-runtime".to_string()
-}
-pub(crate) fn default_workspace_root() -> String {
-    "/workspace".to_string()
-}
-pub(crate) fn default_velos_listen() -> String {
-    "0.0.0.0:0".to_string()
-}
-pub(crate) fn default_velos_cpu() -> u32 {
-    2
-}
-pub(crate) fn default_velos_memory_mib() -> u64 {
-    1024
-}
-pub(crate) fn default_velos_connect_timeout_secs() -> u64 {
-    60
-}
-
-impl VelosVendorConfig {
-    /// Resolve the bearer token: inline first, then env var, else none (an
-    /// unauthenticated velos server). A configured-but-empty value fails here,
-    /// before the vendor is built.
-    pub fn resolve_token(&self) -> Result<Option<Secret>, CliError> {
-        match (&self.token, &self.token_env) {
-            (Some(t), _) => {
-                if t.is_empty() {
-                    return Err(CliError::Config("velos inline token is empty".to_string()));
-                }
-                Ok(Some(t.clone()))
-            }
-            (None, Some(var)) => {
-                let key = std::env::var(var).map_err(|_| {
-                    CliError::Config(format!("velos token env var '{var}' is not set"))
-                })?;
-                if key.is_empty() {
-                    return Err(CliError::Config(format!(
-                        "velos token env var '{var}' is empty"
-                    )));
-                }
-                Ok(Some(Secret::from(key)))
-            }
-            (None, None) => Ok(None),
-        }
-    }
-
-    /// Memory request in bytes (from the MiB knob).
-    pub fn memory_bytes(&self) -> u64 {
-        self.memory_mib.saturating_mul(1024 * 1024)
-    }
 }
 
 impl HorsieConfig {
@@ -325,9 +119,9 @@ fn user_config_path_from(
     Some(config_dir.join("horsie").join("config.json"))
 }
 
-/// Default state dir for ephemeral runtime files (control socket, pidfile, log,
-/// per-job capability files): `$XDG_STATE_HOME/horsie` if set, else
-/// `$HOME/.local/state/horsie`. Same path on macOS and Linux.
+/// Default state dir for ephemeral runtime files (control socket, pidfile):
+/// `$XDG_STATE_HOME/horsie` if set, else `$HOME/.local/state/horsie`. Same path
+/// on macOS and Linux.
 fn default_state_dir() -> PathBuf {
     storage_dir_from(
         std::env::var_os("XDG_STATE_HOME"),
@@ -337,8 +131,9 @@ fn default_state_dir() -> PathBuf {
     )
 }
 
-/// Default data dir for the durable job journal: `$XDG_DATA_HOME/horsie` if set,
-/// else `$HOME/.local/share/horsie`. Same path on macOS and Linux.
+/// Default data dir for durable data (plugin library, shared clones):
+/// `$XDG_DATA_HOME/horsie` if set, else `$HOME/.local/share/horsie`. Same path
+/// on macOS and Linux.
 fn default_data_dir() -> PathBuf {
     storage_dir_from(
         std::env::var_os("XDG_DATA_HOME"),
@@ -372,241 +167,33 @@ fn storage_dir_from(
     }
 }
 
-/// Build the provider registry keyed by **model key** (matches `WorkflowAgentDef.model`)
-/// from the file config. Thin wrapper over [`build_registry_from`].
-pub fn build_registry(
-    cfg: &HorsieConfig,
-) -> Result<HashMap<String, Arc<dyn LlmProvider>>, CliError> {
-    build_registry_from(&cfg.providers, &cfg.models)
-}
-
-/// Build the provider registry keyed by **model key** from provider/model maps
-/// (file config for the daemon, or the settings DB for the session server). The
-/// key is resolved inline-then-env-then-none; a configured-but-missing/empty key
-/// fails here, before any runtime is spawned.
-pub fn build_registry_from(
-    providers: &HashMap<String, ProviderConfig>,
-    models: &HashMap<String, ModelConfig>,
-) -> Result<HashMap<String, Arc<dyn LlmProvider>>, CliError> {
-    let mut reg: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
-    for (model_key, mc) in models {
-        let pc = providers.get(&mc.provider).ok_or_else(|| {
-            CliError::Config(format!(
-                "model '{model_key}' references unknown provider '{}'",
-                mc.provider
-            ))
-        })?;
-        // Resolve the key once: inline first, then env var, else no auth. Both
-        // kinds share this — only the construction below differs.
-        let (api_key, api_key_env, base_url) = match pc {
-            ProviderConfig::Anthropic {
-                api_key,
-                api_key_env,
-                base_url,
-            }
-            | ProviderConfig::Openai {
-                api_key,
-                api_key_env,
-                base_url,
-            } => (api_key, api_key_env, base_url),
-        };
-        let resolved_key = match (api_key, api_key_env) {
-            (Some(k), _) => {
-                if k.is_empty() {
-                    return Err(CliError::Config(format!(
-                        "inline api_key for provider '{}' is empty",
-                        mc.provider
-                    )));
-                }
-                Some(k.clone())
-            }
-            (None, Some(var)) => {
-                let key = std::env::var(var).map_err(|_| {
-                    CliError::Config(format!(
-                        "env var '{var}' for provider '{}' is not set",
-                        mc.provider
-                    ))
-                })?;
-                if key.is_empty() {
-                    return Err(CliError::Config(format!(
-                        "env var '{var}' for provider '{}' is empty",
-                        mc.provider
-                    )));
-                }
-                Some(Secret::from(key))
-            }
-            (None, None) => None,
-        };
-
-        let provider: Arc<dyn LlmProvider> = match pc {
-            ProviderConfig::Anthropic { .. } => {
-                let mut p = match resolved_key {
-                    Some(k) => AnthropicProvider::with_api_key(k)
-                        .map_err(|e| CliError::Provider(e.to_string()))?,
-                    None => {
-                        AnthropicProvider::new().map_err(|e| CliError::Provider(e.to_string()))?
-                    }
-                };
-                p = p.with_model(&mc.model_id).with_max_tokens(mc.max_tokens);
-                if let Some(u) = base_url {
-                    p = p.with_base_url(u);
-                }
-                Arc::new(p)
-            }
-            ProviderConfig::Openai { .. } => {
-                let mut p = match resolved_key {
-                    Some(k) => OpenAiProvider::with_api_key(k)
-                        .map_err(|e| CliError::Provider(e.to_string()))?,
-                    None => OpenAiProvider::new().map_err(|e| CliError::Provider(e.to_string()))?,
-                };
-                p = p.with_model(&mc.model_id).with_max_tokens(mc.max_tokens);
-                if let Some(u) = base_url {
-                    p = p.with_base_url(u);
-                }
-                Arc::new(p)
-            }
-        };
-        reg.insert(model_key.clone(), provider);
-    }
-    Ok(reg)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_sample_config() {
-        let json = r#"{
-            "providers": { "anthropic": { "type": "anthropic", "api_key_env": "ANTHROPIC_API_KEY", "base_url": "https://api.anthropic.com" } },
-            "models": { "sonnet": { "provider": "anthropic", "model_id": "claude-sonnet-4-6", "max_tokens": 8192 } },
-            "sandbox": { "capabilities_file": null },
-            "storage": { "state_dir": "/var/state", "data_dir": "/var/data" }
-        }"#;
-        let cfg: HorsieConfig = serde_json::from_str(json).unwrap();
-        assert!(cfg.providers.contains_key("anthropic"));
-        assert_eq!(cfg.models["sonnet"].model_id, "claude-sonnet-4-6");
-        assert_eq!(cfg.storage.state_dir, PathBuf::from("/var/state"));
-        assert_eq!(cfg.storage.data_dir, PathBuf::from("/var/data"));
+    fn default_config_is_empty_but_valid() {
+        let cfg = HorsieConfig::default();
+        // State and data resolve to distinct dirs (different XDG bases / leaves).
+        assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
+        assert_eq!(cfg.storage.plugins_dir, cfg.storage.data_dir.join("plugins"));
     }
 
     #[test]
-    fn parses_openai_provider_and_builds_registry() {
-        // A local Ollama-style provider: type "openai", no key, base_url set.
-        let json = r#"{
-            "providers": { "local": { "type": "openai", "base_url": "http://127.0.0.1:11434" } },
-            "models": { "qwen": { "provider": "local", "model_id": "qwen2.5", "max_tokens": 4096 } },
-            "sandbox": { "capabilities_file": null },
-            "storage": { "state_dir": "/var/state", "data_dir": "/var/data" }
-        }"#;
-        let cfg: HorsieConfig = serde_json::from_str(json).unwrap();
-        assert!(matches!(
-            cfg.providers["local"],
-            ProviderConfig::Openai { .. }
-        ));
-        let reg = build_registry_from(&cfg.providers, &cfg.models).unwrap();
-        assert!(reg.contains_key("qwen"));
-    }
-
-    #[test]
-    fn inline_api_key_builds_registry_without_env() {
-        // Inline key path needs no env var and no network — just constructs providers.
-        let cfg: HorsieConfig = serde_json::from_str(
-            r#"{
-                "providers": { "p": { "type": "anthropic", "api_key": "sk-inline", "base_url": "http://localhost:1" } },
-                "models": { "m": { "provider": "p", "model_id": "id" } }
-            }"#,
-        )
-        .unwrap();
-        let reg = build_registry(&cfg).expect("inline key should build");
-        assert!(reg.contains_key("m"));
-    }
-
-    #[test]
-    fn empty_inline_api_key_is_rejected() {
-        let cfg: HorsieConfig = serde_json::from_str(
-            r#"{
-                "providers": { "p": { "type": "anthropic", "api_key": "" } },
-                "models": { "m": { "provider": "p", "model_id": "id" } }
-            }"#,
-        )
-        .unwrap();
-        assert!(build_registry(&cfg).is_err());
-    }
-
-    #[test]
-    fn debug_formatting_config_never_leaks_inline_api_key() {
-        let cfg: HorsieConfig = serde_json::from_str(
-            r#"{
-                "providers": { "p": { "type": "anthropic", "api_key": "sk-live-do-not-leak" } },
-                "models": { "m": { "provider": "p", "model_id": "id" } }
-            }"#,
-        )
-        .unwrap();
-        assert!(!format!("{cfg:?}").contains("sk-live-do-not-leak"));
-    }
-
-    #[test]
-    fn parses_sandbox_capabilities_file() {
+    fn unknown_fields_are_ignored() {
+        // An old daemon config (providers/models/sandbox/hackamore) still parses.
         let cfg: HorsieConfig = serde_json::from_str(
             r#"{
                 "providers": { "p": { "type": "anthropic", "base_url": "http://localhost:1" } },
                 "models": { "m": { "provider": "p", "model_id": "id" } },
-                "sandbox": { "capabilities_file": "/etc/horsie/caps.json" }
+                "sandbox": { "capabilities_file": "/etc/horsie/caps.json" },
+                "storage": { "state_dir": "/var/state", "data_dir": "/var/data" }
             }"#,
         )
         .unwrap();
-        assert_eq!(
-            cfg.sandbox.capabilities_file,
-            Some(PathBuf::from("/etc/horsie/caps.json"))
-        );
-    }
-
-    #[test]
-    fn capabilities_file_defaults_to_none() {
-        let cfg: HorsieConfig = serde_json::from_str(
-            r#"{
-                "providers": { "p": { "type": "anthropic", "base_url": "http://localhost:1" } },
-                "models": { "m": { "provider": "p", "model_id": "id" } }
-            }"#,
-        )
-        .unwrap();
-        assert!(cfg.sandbox.capabilities_file.is_none());
-    }
-
-    #[test]
-    fn parses_hackamore_section() {
-        // The global section is just the deployment server location now — the
-        // policy and TTL are per-run (`--hackamore-policy`).
-        let cfg: HorsieConfig = serde_json::from_str(
-            r#"{
-                "hackamore": {
-                    "admin_url": "http://127.0.0.1:9091",
-                    "proxy_url": "http://127.0.0.1:9090"
-                }
-            }"#,
-        )
-        .unwrap();
-        let h = cfg.hackamore.expect("hackamore section should parse");
-        assert_eq!(h.admin_url, "http://127.0.0.1:9091");
-        assert_eq!(h.proxy_url, "http://127.0.0.1:9090");
-    }
-
-    #[test]
-    fn hackamore_section_defaults_to_absent() {
-        let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
-        assert!(cfg.hackamore.is_none());
-        assert!(HorsieConfig::default().hackamore.is_none());
-    }
-
-    #[test]
-    fn hackamore_section_missing_required_field_is_rejected() {
-        // A hackamore section without an admin_url cannot mint — reject at parse
-        // time rather than failing every spawn.
-        let res =
-            serde_json::from_str::<HorsieConfig>(r#"{ "hackamore": { "proxy_url": "http://p" } }"#);
-        assert!(res.is_err());
+        assert_eq!(cfg.storage.state_dir, PathBuf::from("/var/state"));
+        assert_eq!(cfg.storage.data_dir, PathBuf::from("/var/data"));
     }
 
     #[test]
@@ -624,111 +211,6 @@ mod tests {
     fn runtime_bin_defaults_to_none() {
         let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.runtime.bin.is_none());
-    }
-
-    #[test]
-    fn parses_velos_section_with_defaults() {
-        let cfg: HorsieConfig = serde_json::from_str(
-            r#"{
-                "velos": {
-                    "server_url": "http://velos:8080",
-                    "image": "ghcr.io/x/horsie-runtime:latest",
-                    "advertise_host": "10.0.0.5"
-                }
-            }"#,
-        )
-        .unwrap();
-        let v = cfg.velos.expect("velos section should parse");
-        assert_eq!(v.server_url, "http://velos:8080");
-        assert_eq!(v.image, "ghcr.io/x/horsie-runtime:latest");
-        assert_eq!(v.advertise_host, "10.0.0.5");
-        assert_eq!(v.runtime_bin, "horsie-runtime");
-        assert_eq!(v.workspace_root, "/workspace");
-        assert_eq!(v.listen, "0.0.0.0:0");
-        assert_eq!(v.cpu, 2);
-        assert_eq!(v.memory_mib, 1024);
-        assert_eq!(v.memory_bytes(), 1024 * 1024 * 1024);
-        assert_eq!(v.connect_timeout_secs, 60);
-    }
-
-    #[test]
-    fn velos_and_default_vendor_absent_by_default() {
-        let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
-        assert!(cfg.velos.is_none());
-        assert!(cfg.default_vendor.is_none());
-        assert!(HorsieConfig::default().velos.is_none());
-    }
-
-    #[test]
-    fn parses_default_vendor() {
-        let cfg: HorsieConfig = serde_json::from_str(r#"{ "default_vendor": "velos" }"#).unwrap();
-        assert_eq!(cfg.default_vendor.as_deref(), Some("velos"));
-    }
-
-    #[test]
-    fn parses_local_runtime_listen() {
-        let cfg: HorsieConfig =
-            serde_json::from_str(r#"{ "local_runtime_listen": "0.0.0.0:7080" }"#).unwrap();
-        assert_eq!(cfg.local_runtime_listen.as_deref(), Some("0.0.0.0:7080"));
-    }
-
-    #[test]
-    fn local_runtime_listen_absent_by_default() {
-        let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
-        assert!(cfg.local_runtime_listen.is_none());
-        assert!(HorsieConfig::default().local_runtime_listen.is_none());
-    }
-
-    #[test]
-    fn velos_token_resolves_inline_env_and_none() {
-        let base = r#"{"velos":{"server_url":"http://v","image":"i","advertise_host":"h""#;
-        // Inline token.
-        let cfg: HorsieConfig =
-            serde_json::from_str(&format!(r#"{base},"token":"secret"}}}}"#)).unwrap();
-        assert_eq!(
-            cfg.velos
-                .unwrap()
-                .resolve_token()
-                .unwrap()
-                .as_ref()
-                .map(Secret::expose),
-            Some("secret")
-        );
-        // Empty inline token is rejected.
-        let cfg: HorsieConfig = serde_json::from_str(&format!(r#"{base},"token":""}}}}"#)).unwrap();
-        assert!(cfg.velos.unwrap().resolve_token().is_err());
-        // No token → None (unauthenticated velos).
-        let cfg: HorsieConfig = serde_json::from_str(&format!(r#"{base}}}}}"#)).unwrap();
-        assert_eq!(cfg.velos.unwrap().resolve_token().unwrap(), None);
-    }
-
-    #[test]
-    fn velos_missing_required_field_is_rejected() {
-        // `image` omitted → parse error, before any vendor is built.
-        assert!(
-            serde_json::from_str::<HorsieConfig>(
-                r#"{"velos":{"server_url":"http://v","advertise_host":"h"}}"#
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn default_config_is_empty_but_valid() {
-        let cfg = HorsieConfig::default();
-        assert!(cfg.providers.is_empty());
-        assert!(cfg.models.is_empty());
-        // State and data resolve to distinct dirs (different XDG bases / leaves).
-        assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
-        assert!(cfg.sandbox.capabilities_file.is_none());
-    }
-
-    #[test]
-    fn parses_config_with_no_providers_or_models() {
-        // A file present but missing providers/models parses to empty maps.
-        let cfg: HorsieConfig = serde_json::from_str("{}").unwrap();
-        assert!(cfg.providers.is_empty());
-        assert!(cfg.models.is_empty());
     }
 
     #[test]
@@ -756,13 +238,9 @@ mod tests {
     fn resolve_loads_explicit_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cfg.json");
-        std::fs::write(
-            &path,
-            r#"{ "providers": {}, "models": { "m": { "provider": "p", "model_id": "id" } } }"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{ "storage": { "state_dir": "/s" } }"#).unwrap();
         let cfg = HorsieConfig::resolve(Some(&path)).unwrap();
-        assert!(cfg.models.contains_key("m"));
+        assert_eq!(cfg.storage.state_dir, PathBuf::from("/s"));
     }
 
     #[test]
@@ -776,38 +254,20 @@ mod tests {
     fn resolve_with_loads_existing_user_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("user.json");
-        std::fs::write(
-            &path,
-            r#"{ "models": { "u": { "provider": "p", "model_id": "id" } } }"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{ "runtime": { "bin": "/b" } }"#).unwrap();
         let cfg = HorsieConfig::resolve_with(None, Some(path)).unwrap();
-        assert!(cfg.models.contains_key("u"));
+        assert_eq!(cfg.runtime.bin, Some(PathBuf::from("/b")));
     }
 
     #[test]
     fn resolve_with_defaults_when_user_config_absent() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.json");
-        // No flag and the user config does not exist → empty default config.
         let cfg = HorsieConfig::resolve_with(None, Some(missing)).unwrap();
-        assert!(cfg.providers.is_empty());
-        assert!(cfg.models.is_empty());
+        assert!(cfg.runtime.bin.is_none());
 
         let cfg = HorsieConfig::resolve_with(None, None).unwrap();
-        assert!(cfg.models.is_empty());
-    }
-
-    #[test]
-    fn storage_and_sandbox_default_when_absent() {
-        let json = r#"{
-            "providers": { "m": { "type": "anthropic", "base_url": "http://localhost:1" } },
-            "models": { "x": { "provider": "m", "model_id": "id" } }
-        }"#;
-        let cfg: HorsieConfig = serde_json::from_str(json).unwrap();
-        assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
-        assert!(cfg.sandbox.capabilities_file.is_none());
-        assert!(cfg.models["x"].max_tokens.is_none());
+        assert!(cfg.runtime.bin.is_none());
     }
 
     #[test]
