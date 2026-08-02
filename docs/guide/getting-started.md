@@ -61,6 +61,6 @@ Building the CLI from source instead of the install script:
   `horsie connect` (or a velos vendor) is connected and that a model is set.
   See [Runtime vendors](runtime-vendors.md).
 - **Your runtime doesn't appear in Settings** — confirm the `horsie connect`
-  process is still running (registrations are in-memory only: a server restart
-  drops them, and the daemon exits rather than reconnecting, so rerun
-  `horsie connect` after restarting the server).
+  process is still running. Registrations are in-memory only, so a server
+  restart drops them; the agent reconnects on its own within about half a
+  minute, and prints each attempt to its terminal.
