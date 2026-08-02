@@ -51,29 +51,6 @@ pub(crate) fn render_output(o: ToolOutput) -> Result<Value, ToolCallError> {
     Ok(Value::String(text))
 }
 
-/// Inject the standard optional `workspace` property into a tool's input schema. The
-/// runtime resolves the name → root (defaulting to the sole workspace when omitted).
-pub(crate) fn with_workspace(mut schema: Value) -> Value {
-    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-        props.insert(
-            "workspace".to_string(),
-            serde_json::json!({
-                "type": "string",
-                "description": "Which workspace to act in (see '# Workspaces'). Required when there is more than one workspace."
-            }),
-        );
-    }
-    schema
-}
-
-/// Extract the optional `workspace` argument from a tool-call input object.
-pub(crate) fn workspace_arg(input: &Value) -> Option<String> {
-    input
-        .get("workspace")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
 /// Add all runtime-backed tools to an existing ToolboxImpl.
 pub fn add_runtime_tools(toolbox: ToolboxImpl, client: RuntimeClient) -> ToolboxImpl {
     toolbox
@@ -87,4 +64,34 @@ pub fn add_runtime_tools(toolbox: ToolboxImpl, client: RuntimeClient) -> Toolbox
         .add(GrepTool::new(client.clone()))
         .add(SetWorkingDirTool::new(client.clone()))
         .add(SetEnvTool::new(client))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::testkit::MockTransport;
+    use horsie_agentcore::Toolbox;
+
+    /// The runtime resolves a tool's base directory itself — the caller's sticky
+    /// working directory, else the first workspace — and an absolute path reaches
+    /// anywhere else. A `workspace` property would be a second addressing scheme
+    /// sent to the model on every request, so no runtime tool may grow one back.
+    #[test]
+    fn no_runtime_tool_advertises_a_workspace_property() {
+        let client = RuntimeClient::new(MockTransport::ok(""), "test-agent");
+        let toolbox = add_runtime_tools(ToolboxImpl::default(), client);
+        for spec in toolbox.specs() {
+            let has_workspace = spec
+                .input_schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|p| p.contains_key("workspace"));
+            assert!(
+                !has_workspace,
+                "tool '{}' still advertises a workspace property",
+                spec.name
+            );
+        }
+    }
 }

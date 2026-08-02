@@ -447,11 +447,11 @@ impl Toolbox for AgentToolbox {
                     ));
                 }
                 let (_, shared) = crate::workspace::scan(&self.runtime_client, None, true).await;
-                return match shared.get(requested) {
-                    Some(skill) => Ok(Value::String(shared_skill_body(skill))),
+                return match shared.skills.get(requested) {
+                    Some(skill) => Ok(Value::String(skill_body(skill))),
                     None => Err(ToolCallError::InvalidInput(format!(
                         "unknown shared skill '{requested}'; available: {}",
-                        shared.names().join(", ")
+                        shared.skills.names().join(", ")
                     ))),
                 };
             }
@@ -464,7 +464,7 @@ impl Toolbox for AgentToolbox {
                 )));
             };
             return match info.skills.get(requested) {
-                Some(skill) => Ok(Value::String(skill.body.clone())),
+                Some(skill) => Ok(Value::String(skill_body(skill))),
                 None => Err(ToolCallError::InvalidInput(format!(
                     "unknown skill '{requested}' in workspace '{ws_name}'; available: {}",
                     info.skills.names().join(", ")
@@ -485,7 +485,10 @@ impl Toolbox for AgentToolbox {
                     ));
                 }
                 let (_, shared) = crate::workspace::scan(&self.runtime_client, None, true).await;
-                return Ok(Value::String(crate::workspace::shared_inspect(&shared)));
+                return Ok(Value::String(crate::workspace::shared_inspect(
+                    &shared.skills,
+                    shared.root.as_deref(),
+                )));
             }
             let (ws, shared) =
                 crate::workspace::scan(&self.runtime_client, filter.clone(), self.use_plugins)
@@ -494,7 +497,10 @@ impl Toolbox for AgentToolbox {
             // Append the shared library when listing everything for an opted-in agent.
             if self.use_plugins && filter.is_none() {
                 out.push_str("\n\n");
-                out.push_str(&crate::workspace::shared_inspect(&shared));
+                out.push_str(&crate::workspace::shared_inspect(
+                    &shared.skills,
+                    shared.root.as_deref(),
+                ));
             }
             return Ok(Value::String(out));
         }
@@ -502,18 +508,17 @@ impl Toolbox for AgentToolbox {
     }
 }
 
-/// A shared skill's body plus a hint pointing at its directory under `horsie_shared`
-/// so the agent can read sibling resources with the filesystem tools.
-fn shared_skill_body(skill: &crate::workspace::Skill) -> String {
-    match &skill.rel_dir {
+/// A skill's body plus, when its directory is known, a hint pointing at it so the
+/// agent can read sibling resources with the filesystem tools. The path is
+/// absolute because that is the only addressing those tools take — and because a
+/// shared skill's directory is not under any workspace, so nothing else would
+/// resolve it.
+fn skill_body(skill: &crate::workspace::Skill) -> String {
+    match &skill.dir {
         Some(dir) => format!(
-            "{}\n\n[resources] This skill's files are under workspace \"{}\" at {}/. \
-             Read one with read_file(workspace=\"{}\", path=\"{}/<file>\").",
-            skill.body,
-            crate::workspace::SHARED_WORKSPACE,
-            dir,
-            crate::workspace::SHARED_WORKSPACE,
-            dir,
+            "{}\n\n[resources] This skill's files are in {}/. \
+             Read one with read_file(path=\"{}/<file>\").",
+            skill.body, dir, dir,
         ),
         None => skill.body.clone(),
     }
@@ -581,8 +586,9 @@ mod tests {
             path: format!("/ws/{name}"),
             is_git_repo: false,
             instructions: None,
+            // Absolute, as the runtime's glob produces it.
             skills: vec![horsie_models::runtime::ScannedFile {
-                path: ".claude/skills/git-bisect/SKILL.md".into(),
+                path: format!("/ws/{name}/.claude/skills/git-bisect/SKILL.md"),
                 content: content.into(),
             }],
             platform: None,
@@ -717,7 +723,16 @@ mod tests {
             .execute(SKILL_TOOL, json!({ "name": "git-bisect" }))
             .await
             .unwrap();
-        assert_eq!(body, json!("Step 1..."));
+        // A workspace skill carries its directory too, so the agent can read
+        // sibling resources without guessing the layout.
+        assert_eq!(
+            body,
+            json!(
+                "Step 1...\n\n[resources] This skill's files are in \
+                 /ws/october/.claude/skills/git-bisect/. Read one with \
+                 read_file(path=\"/ws/october/.claude/skills/git-bisect/<file>\")."
+            )
+        );
 
         let err = tb
             .execute(SKILL_TOOL, json!({ "name": "nope" }))
@@ -728,7 +743,11 @@ mod tests {
         let listed = tb.execute(INSPECT_WORKSPACE_TOOL, json!({})).await.unwrap();
         let text = listed.as_str().unwrap();
         assert!(text.contains("## october — /ws/october"));
-        assert!(text.contains("- git-bisect: find bad commit"));
+        // Directory relative to the workspace root named in the header above.
+        assert!(
+            text.contains("- git-bisect — .claude/skills/git-bisect/: find bad commit"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -772,7 +791,9 @@ mod tests {
     #[tokio::test]
     async fn shared_skill_loads_with_resource_hint_when_opted_in() {
         let client = RuntimeClient::new(
-            MockTransport::ok("").with_shared_skills(vec![shared_skill()]),
+            MockTransport::ok("")
+                .with_shared_skills(vec![shared_skill()])
+                .with_shared_root("/opt/plugins"),
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
@@ -791,8 +812,13 @@ mod tests {
             .unwrap();
         let text = body.as_str().unwrap();
         assert!(text.contains("Do it."));
-        assert!(text.contains("workspace=\"horsie_shared\""));
-        assert!(text.contains("sp/skills/brainstorming"));
+        // The library is not a workspace, so the hint must be an absolute path —
+        // there is no `workspace` argument left to name it with.
+        assert!(
+            text.contains("read_file(path=\"/opt/plugins/sp/skills/brainstorming/<file>\")"),
+            "{text}"
+        );
+        assert!(!text.contains("workspace="), "{text}");
     }
 
     #[tokio::test]

@@ -164,6 +164,7 @@ mod tests {
                         let resp = RuntimeOutboundMessage::ScanResult(
                             horsie_models::runtime::ScanResponse {
                                 shared_skills: vec![],
+                                shared_root: None,
                                 call_id: req.call_id,
                                 workspaces: vec![horsie_models::runtime::WorkspaceScan {
                                     name: "october".into(),
@@ -198,7 +199,6 @@ mod tests {
         ToolCall::Bash(BashInput {
             command: "x".into(),
             timeout_secs: None,
-            workspace: None,
         })
     }
 
@@ -212,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn scan_correlates_response() {
         let (t, _dir) = paired().await;
-        let (scan, _shared) = t
+        let resp = t
             .scan_workspace(
                 "s1",
                 None,
@@ -222,8 +222,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(scan.len(), 1);
-        assert_eq!(scan[0].instructions.as_ref().unwrap().content, "ctx");
+        assert_eq!(resp.workspaces.len(), 1);
+        assert_eq!(
+            resp.workspaces[0].instructions.as_ref().unwrap().content,
+            "ctx"
+        );
     }
 
     #[tokio::test]

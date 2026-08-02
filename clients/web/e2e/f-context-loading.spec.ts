@@ -34,9 +34,24 @@ test("F1: workspace AGENTS.md + workspace skill load into the system prompt", as
   mock,
 }) => {
   await runTurnAndCapture(page, appBase, mock);
-  // AGENTS.md is inlined verbatim; the workspace skill contributes a listing line.
+  // AGENTS.md is inlined verbatim; the workspace skill contributes a listing line
+  // carrying its directory, relative to the workspace root in the header above it.
   expect(await mock.capturedContains("E2E_AGENTS_MARKER")).toBe(true);
-  expect(await mock.capturedContains("- e2e-skill: E2E_SKILL_DESC")).toBe(true);
+  expect(
+    await mock.capturedContains("- e2e-skill — .claude/skills/e2e-skill/: E2E_SKILL_DESC"),
+  ).toBe(true);
+});
+
+test("F1b: the prompt states the working directory instead of a workspace argument", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await runTurnAndCapture(page, appBase, mock);
+  // The tools take no `workspace` argument, so the block says where relative
+  // paths land rather than how to name a root.
+  expect(await mock.capturedContains("Your working directory starts at ")).toBe(true);
+  expect(await mock.capturedContains("`workspace` argument")).toBe(false);
 });
 
 test("F2: shared plugin-library skill loads into the system prompt", async ({
@@ -45,8 +60,14 @@ test("F2: shared plugin-library skill loads into the system prompt", async ({
   mock,
 }) => {
   await runTurnAndCapture(page, appBase, mock);
-  expect(await mock.capturedContains("# Shared skills")).toBe(true);
-  expect(await mock.capturedContains("- e2e-shared-skill: E2E_SHARED_DESC")).toBe(true);
+  // The library is not a workspace, so its header carries the absolute root the
+  // per-skill relative paths hang off — the agent's only handle on those files.
+  expect(await mock.capturedContains("# Shared skills — ")).toBe(true);
+  expect(
+    await mock.capturedContains(
+      "- e2e-shared-skill — e2e-plugin/skills/e2e-shared-skill/: E2E_SHARED_DESC",
+    ),
+  ).toBe(true);
 });
 
 test("F3: SessionStart hook output loads as the session bootstrap", async ({

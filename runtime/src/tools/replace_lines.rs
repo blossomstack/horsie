@@ -75,7 +75,6 @@ mod tests {
                 start_line: 3,
                 end_line: 4,
                 replacement: "X\nY".into(),
-                workspace: None,
             },
         )
         .await;
@@ -104,7 +103,6 @@ mod tests {
                 start_line: 2,
                 end_line: 2,
                 replacement: "X".into(),
-                workspace: None,
             },
         )
         .await;
@@ -135,7 +133,6 @@ mod tests {
                 start_line: 10,
                 end_line: 150,
                 replacement,
-                workspace: None,
             },
         )
         .await;
@@ -158,7 +155,6 @@ mod tests {
                 start_line: 2,
                 end_line: 3,
                 replacement: "X\nY".into(),
-                workspace: None,
             },
         )
         .await;

@@ -616,6 +616,7 @@ mod tests {
         use crate::runtime::{RuntimeOutboundMessage, ScanResponse, ScannedFile, WorkspaceScan};
         let msg = RuntimeOutboundMessage::ScanResult(ScanResponse {
             shared_skills: vec![],
+            shared_root: None,
             call_id: "c1".into(),
             workspaces: vec![WorkspaceScan {
                 name: "october".into(),

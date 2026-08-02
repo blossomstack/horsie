@@ -203,7 +203,6 @@ mod tests {
             replace: replace.to_string(),
             regex: None,
             replace_all: None,
-            workspace: None,
         }
     }
 

@@ -102,7 +102,6 @@ mod tests {
                 path: None,
                 file_pattern: None,
                 max_results: None,
-                workspace: None,
             },
         )
         .await;
@@ -137,7 +136,6 @@ mod tests {
                 path: None,
                 file_pattern: None,
                 max_results: None,
-                workspace: None,
             },
         )
         .await;
@@ -166,7 +164,6 @@ mod tests {
                 path: None,
                 file_pattern: None,
                 max_results: None,
-                workspace: None,
             },
         )
         .await;

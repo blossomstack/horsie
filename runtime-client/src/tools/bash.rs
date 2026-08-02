@@ -25,14 +25,14 @@ impl Tool for BashTool {
                 except when a consumer closes early (`| head`), which is not a failure. \
                 On timeout, output captured so far is returned with the error."
                 .to_string(),
-            input_schema: crate::tools::with_workspace(json!({
+            input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
                     "timeout_secs": { "type": "integer" }
                 },
                 "required": ["command"]
-            })),
+            }),
         }
     }
 
@@ -42,12 +42,10 @@ impl Tool for BashTool {
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'command'".into()))?
             .to_string();
         let timeout_secs = input["timeout_secs"].as_u64();
-        let workspace = crate::tools::workspace_arg(&input);
         self.client
             .invoke(ToolCall::Bash(BashInput {
                 command,
                 timeout_secs,
-                workspace,
             }))
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))

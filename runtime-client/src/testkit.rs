@@ -104,6 +104,7 @@ pub struct MockTransport {
     result: ToolResult,
     scan: Vec<WorkspaceScan>,
     shared: Vec<PluginSkill>,
+    shared_root: Option<String>,
     session_context: String,
     /// When set, `invoke` waits on this gate before answering.
     invoke_gate: Option<Arc<Notify>>,
@@ -121,6 +122,7 @@ impl MockTransport {
             result,
             scan: Vec::new(),
             shared: Vec::new(),
+            shared_root: None,
             session_context: String::new(),
             invoke_gate: None,
             prep_gate: None,
@@ -227,6 +229,14 @@ impl MockTransport {
         self
     }
 
+    /// Override the canned shared plugin library root, reported alongside the
+    /// shared skills when `include_shared` is set.
+    #[must_use]
+    pub fn with_shared_root(mut self, root: &str) -> Self {
+        self.shared_root = Some(root.to_string());
+        self
+    }
+
     /// Override the canned `SessionStart` context.
     #[must_use]
     pub fn with_session_context(mut self, context: impl Into<String>) -> Self {
@@ -298,15 +308,16 @@ impl RuntimeTransport for MockTransport {
                 if let Some(gate) = &self.prep_gate {
                     gate.notified().await;
                 }
-                let shared = if req.include_shared {
-                    self.shared.clone()
+                let (shared, shared_root) = if req.include_shared {
+                    (self.shared.clone(), self.shared_root.clone())
                 } else {
-                    Vec::new()
+                    (Vec::new(), None)
                 };
                 Ok(RuntimeOutboundMessage::ScanResult(ScanResponse {
                     call_id: req.call_id,
                     workspaces: self.scan.clone(),
                     shared_skills: shared,
+                    shared_root,
                 }))
             }
             RuntimeInboundMessage::SessionStart(req) => {
@@ -355,7 +366,6 @@ mod tests {
         ToolCall::Bash(BashInput {
             command: cmd.to_string(),
             timeout_secs: None,
-            workspace: None,
         })
     }
 

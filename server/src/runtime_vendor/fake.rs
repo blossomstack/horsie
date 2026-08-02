@@ -523,6 +523,7 @@ async fn run_agent<S>(
                                 platform: Some("linux-x86_64".to_string()),
                             }],
                             shared_skills: vec![],
+                            shared_root: None,
                         }))
                     }
                     RuntimeInboundMessage::SessionStart(req) => Some(
@@ -612,7 +613,7 @@ mod tests {
             .expect("agent");
         let transport =
             crate::runtime_vendor::RuntimeVendorTransport::new(agent.link(), "rt-1".to_string());
-        let (workspaces, shared) = transport
+        let resp = transport
             .scan_workspace(
                 "scan-1",
                 None,
@@ -622,9 +623,9 @@ mod tests {
             )
             .await
             .expect("scan must be answered, not hang");
-        assert!(shared.is_empty());
-        assert_eq!(workspaces.len(), 1);
-        assert_eq!(workspaces[0].name, "main");
+        assert!(resp.shared_skills.is_empty());
+        assert_eq!(resp.workspaces.len(), 1);
+        assert_eq!(resp.workspaces[0].name, "main");
     }
 
     /// A cancel is the one relayed message that draws no reply, so nothing
@@ -652,7 +653,6 @@ mod tests {
             .invoke(ToolCall::Bash(BashInput {
                 command: "true".to_string(),
                 timeout_secs: None,
-                workspace: None,
             }))
             .await
             .expect("tool call");
@@ -665,7 +665,6 @@ mod tests {
             .invoke(ToolCall::Bash(BashInput {
                 command: "true".to_string(),
                 timeout_secs: None,
-                workspace: None,
             }))
             .await
             .expect("subagent tool call");

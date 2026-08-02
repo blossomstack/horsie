@@ -1,6 +1,7 @@
 use horsie_models::runtime::{PluginSkill, ScannedFile, WorkspaceScan};
 use horsie_runtime_client::RuntimeClient;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Instruction filenames tried in order at the workdir root; first found wins.
@@ -15,7 +16,20 @@ pub const SHARED_WORKSPACE: &str = "horsie_shared";
 #[derive(Clone, Default)]
 pub struct SharedContext {
     pub skills: Arc<SkillSet>,
+    /// Absolute path of the library root, when the runtime reported one. Named in
+    /// the prompt's shared-skills header so the agent can reach a skill's files
+    /// with the ordinary filesystem tools — the library is not a workspace, so an
+    /// absolute path is its only handle.
+    pub root: Option<String>,
     pub bootstrap: Option<String>,
+}
+
+/// The shared plugin library as scanned: its skills and its absolute root. The
+/// root is what turns each skill's `rel_dir` into an absolute [`Skill::dir`].
+#[derive(Default)]
+pub struct SharedScan {
+    pub skills: SkillSet,
+    pub root: Option<String>,
 }
 
 impl SharedContext {
@@ -71,9 +85,11 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub body: String,
-    /// For a shared (plugin) skill: its directory relative to the `horsie_shared`
-    /// root, so the agent can read sibling resources. `None` for workspace skills.
-    pub rel_dir: Option<String>,
+    /// The skill's own directory, absolute, so the agent can read sibling
+    /// resources with the filesystem tools. `None` only when the scan did not
+    /// carry enough to compute one — a shared skill whose library root the
+    /// runtime did not report.
+    pub dir: Option<String>,
 }
 
 impl SkillSet {
@@ -110,7 +126,7 @@ pub async fn scan(
     client: &RuntimeClient,
     workspace: Option<String>,
     include_shared: bool,
-) -> (WorkspaceContext, SkillSet) {
+) -> (WorkspaceContext, SharedScan) {
     let candidates = INSTRUCTION_CANDIDATES
         .iter()
         .map(|s| s.to_string())
@@ -124,17 +140,21 @@ pub async fn scan(
         )
         .await
     {
-        Ok((raw, shared)) => (interpret(raw), interpret_shared(shared)),
+        Ok(resp) => {
+            let shared = interpret_shared(resp.shared_skills, resp.shared_root.as_deref());
+            (interpret(resp.workspaces), shared)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "workspace scan failed; continuing without it");
-            (WorkspaceContext::default(), SkillSet::default())
+            (WorkspaceContext::default(), SharedScan::default())
         }
     }
 }
 
-/// Interpret the shared plugin library's skills: parse frontmatter, attach each
-/// skill's `rel_dir`, dedupe by name (kept-first across plugins, with a warning).
-fn interpret_shared(raw: Vec<PluginSkill>) -> SkillSet {
+/// Interpret the shared plugin library's skills: parse frontmatter, resolve each
+/// skill's directory against `root`, dedupe by name (kept-first across plugins,
+/// with a warning).
+fn interpret_shared(raw: Vec<PluginSkill>, root: Option<&str>) -> SharedScan {
     let mut skills = BTreeMap::new();
     for ps in raw {
         let scanned = ScannedFile {
@@ -143,7 +163,7 @@ fn interpret_shared(raw: Vec<PluginSkill>) -> SkillSet {
         };
         match parse_skill(&scanned) {
             Some(mut skill) => {
-                skill.rel_dir = Some(ps.rel_dir);
+                skill.dir = root.map(|r| Path::new(r).join(&ps.rel_dir).display().to_string());
                 if skills.contains_key(&skill.name) {
                     tracing::warn!(plugin = %ps.plugin, name = %skill.name, "duplicate shared skill name; keeping first");
                 } else {
@@ -155,7 +175,10 @@ fn interpret_shared(raw: Vec<PluginSkill>) -> SkillSet {
             }
         }
     }
-    SkillSet { skills }
+    SharedScan {
+        skills: SkillSet { skills },
+        root: root.map(str::to_string),
+    }
 }
 
 fn interpret(raw: Vec<WorkspaceScan>) -> WorkspaceContext {
@@ -174,7 +197,13 @@ fn interpret_one(raw: WorkspaceScan) -> WorkspaceInfo {
     let mut skills = BTreeMap::new();
     for file in raw.skills {
         match parse_skill(&file) {
-            Some(skill) => {
+            Some(mut skill) => {
+                // The runtime globs skills with an absolute pattern, so the
+                // scanned path is absolute and its parent is the skill's own
+                // directory — where any sibling resources live.
+                skill.dir = Path::new(&file.path)
+                    .parent()
+                    .map(|p| p.display().to_string());
                 if skills.contains_key(&skill.name) {
                     tracing::warn!(workspace = %raw.name, name = %skill.name, "duplicate skill name; keeping first");
                 } else {
@@ -217,7 +246,7 @@ fn parse_skill(file: &ScannedFile) -> Option<Skill> {
         name: name?,
         description: description?,
         body: body.trim().to_string(),
-        rel_dir: None,
+        dir: None,
     })
 }
 
@@ -278,8 +307,15 @@ pub fn compose_system_prompt(
         sections.push(environment_section(p));
     }
     if !ws.workspaces.is_empty() {
-        let mut block = String::from(
-            "# Workspaces\nFilesystem, bash, and skill tools take a `workspace` argument naming one of these (omit it only when there is exactly one).",
+        // Where a relative path lands. The runtime resolves a tool call against
+        // the agent's `set_working_dir` override, else the first workspace — so
+        // this is the one directory the agent starts from, and the reason the
+        // tools need no `workspace` argument.
+        let default_root = ws.workspaces.first().map_or("", |w| w.path.as_str());
+        let mut block = format!(
+            "# Workspaces\nYour working directory starts at {default_root}. Filesystem \
+             and bash tools resolve relative paths against it; use an absolute path to \
+             reach another workspace, or set_working_dir to move."
         );
         for w in &ws.workspaces {
             block.push_str(&format!(
@@ -297,7 +333,7 @@ pub fn compose_system_prompt(
                 block.push_str(&format!(
                     "\n### Skills (load with the skill tool, workspace=\"{}\")\n{}",
                     w.name,
-                    skills_listing(&w.skills)
+                    skills_listing(&w.skills, Some(&w.path))
                 ));
             }
         }
@@ -306,10 +342,18 @@ pub fn compose_system_prompt(
     if let Some(s) = shared
         && !s.skills.is_empty()
     {
+        // The library is not a workspace, so it has no `## name — path` header of
+        // its own; its root goes here or the agent never learns where its skills
+        // keep their files.
+        let header = match &s.root {
+            Some(root) => format!("# Shared skills — {root}"),
+            None => "# Shared skills".to_string(),
+        };
         sections.push(format!(
-            "# Shared skills (load with the skill tool, workspace=\"{}\")\n{}",
+            "{header}\nShared across all workspaces. Load with the skill tool, \
+             workspace=\"{}\".\n{}",
             SHARED_WORKSPACE,
-            skills_listing(&s.skills)
+            skills_listing(&s.skills, s.root.as_deref())
         ));
     }
     if sections.is_empty() {
@@ -336,26 +380,47 @@ fn environment_section(platform: &str) -> String {
 
 /// The `inspect_workspace` view of the shared plugin library: its skills (name +
 /// description), or a note when empty.
-pub(crate) fn shared_inspect(skills: &SkillSet) -> String {
+pub(crate) fn shared_inspect(skills: &SkillSet, root: Option<&str>) -> String {
     if skills.is_empty() {
         return format!("## {SHARED_WORKSPACE}\nskills: none");
     }
+    let header = match root {
+        Some(r) => format!("## {SHARED_WORKSPACE} — {r}"),
+        None => format!("## {SHARED_WORKSPACE}"),
+    };
     format!(
-        "## {}\nskills ({}):\n{}",
-        SHARED_WORKSPACE,
+        "{header}\nskills ({}):\n{}",
         skills.len(),
-        skills_listing(skills)
+        skills_listing(skills, root)
     )
 }
 
-/// Render skills as sorted `- name: description` lines. Shared by the prompt's
-/// `# Available skills` block and the `list_skills` tool result.
-fn skills_listing(skills: &SkillSet) -> String {
+/// Render skills as sorted `- name — <dir>/: description` lines, each directory
+/// relative to `root`. The section header above the listing already names the
+/// root, so repeating a long absolute prefix on every line of a twenty-skill
+/// plugin library would be pure waste. Falls back to `- name: description` when
+/// a skill has no directory or sits outside the root.
+fn skills_listing(skills: &SkillSet, root: Option<&str>) -> String {
     skills
         .iter()
-        .map(|s| format!("- {}: {}", s.name, s.description))
+        .map(|s| match relative_dir(s, root) {
+            Some(rel) => format!("- {} — {}/: {}", s.name, rel, s.description),
+            None => format!("- {}: {}", s.name, s.description),
+        })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A skill's directory relative to `root`, or `None` when either is absent or the
+/// skill does not sit under the root.
+fn relative_dir(skill: &Skill, root: Option<&str>) -> Option<String> {
+    let dir = skill.dir.as_deref()?;
+    let root = root?;
+    Path::new(dir)
+        .strip_prefix(root)
+        .ok()
+        .map(|p| p.display().to_string())
+        .filter(|p| !p.is_empty())
 }
 
 /// The `inspect_workspace` tool result: the live catalog for the scanned workspaces —
@@ -387,7 +452,7 @@ pub(crate) fn inspect_result(ws: &WorkspaceContext) -> String {
             out.push_str(&format!(
                 "\nskills ({}):\n{}",
                 w.skills.len(),
-                skills_listing(&w.skills)
+                skills_listing(&w.skills, Some(&w.path))
             ));
         }
     }
@@ -592,27 +657,67 @@ mod tests {
     }
 
     #[test]
-    fn interpret_shared_sets_rel_dir_and_dedupes() {
-        let set = interpret_shared(vec![
-            plugin_skill("brainstorming", "sp/skills/brainstorming", "explore"),
-            plugin_skill("brainstorming", "other/skills/brainstorming", "dup"),
-        ]);
-        assert_eq!(set.names(), vec!["brainstorming".to_string()]);
-        let s = set.get("brainstorming").unwrap();
+    fn interpret_shared_sets_dir_and_dedupes() {
+        let scan = interpret_shared(
+            vec![
+                plugin_skill("brainstorming", "sp/skills/brainstorming", "explore"),
+                plugin_skill("brainstorming", "other/skills/brainstorming", "dup"),
+            ],
+            Some("/opt/plugins"),
+        );
+        assert_eq!(scan.skills.names(), vec!["brainstorming".to_string()]);
+        let s = scan.skills.get("brainstorming").unwrap();
         assert_eq!(s.description, "explore"); // kept-first
-        assert_eq!(s.rel_dir.as_deref(), Some("sp/skills/brainstorming"));
+        assert_eq!(
+            s.dir.as_deref(),
+            Some("/opt/plugins/sp/skills/brainstorming")
+        );
+        assert_eq!(scan.root.as_deref(), Some("/opt/plugins"));
+    }
+
+    /// An older runtime reports no library root; the skill still loads, it just
+    /// carries no path to its siblings.
+    #[test]
+    fn interpret_shared_leaves_dir_unset_without_a_root() {
+        let scan = interpret_shared(
+            vec![plugin_skill(
+                "brainstorming",
+                "sp/skills/brainstorming",
+                "d",
+            )],
+            None,
+        );
+        assert!(scan.skills.get("brainstorming").unwrap().dir.is_none());
+        assert!(scan.root.is_none());
+    }
+
+    #[test]
+    fn workspace_skill_dir_is_its_own_directory() {
+        let ctx = interpret(vec![WorkspaceScan {
+            name: "api".into(),
+            path: "/ws/api".into(),
+            is_git_repo: true,
+            instructions: None,
+            skills: vec![ScannedFile {
+                path: "/ws/api/.claude/skills/deploy/SKILL.md".into(),
+                content: "---\nname: deploy\ndescription: Ship it\n---\nbody".into(),
+            }],
+            platform: None,
+        }]);
+        let skill = ctx.workspaces[0].skills.get("deploy").unwrap();
+        assert_eq!(skill.dir.as_deref(), Some("/ws/api/.claude/skills/deploy"));
     }
 
     #[test]
     fn compose_prepends_bootstrap_and_appends_shared_skills() {
         let ctx = WorkspaceContext::default();
-        let skills = interpret_shared(vec![plugin_skill(
-            "tdd",
-            "sp/skills/tdd",
-            "write tests first",
-        )]);
+        let scan = interpret_shared(
+            vec![plugin_skill("tdd", "sp/skills/tdd", "write tests first")],
+            Some("/opt/plugins"),
+        );
         let shared = SharedContext {
-            skills: Arc::new(skills),
+            skills: Arc::new(scan.skills),
+            root: scan.root,
             bootstrap: Some("USE SKILLS".into()),
         };
         let prompt = compose_system_prompt(Some("You are a coder."), &ctx, Some(&shared)).unwrap();
@@ -622,15 +727,26 @@ mod tests {
         assert!(boot < role && role < shared_hdr);
         assert!(prompt.contains("USE SKILLS"));
         assert!(prompt.contains("workspace=\"horsie_shared\""));
-        assert!(prompt.contains("- tdd: write tests first"));
+        // The header names the library root, so the per-skill path can be relative.
+        assert!(
+            prompt.contains("# Shared skills — /opt/plugins"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("- tdd — sp/skills/tdd/: write tests first"),
+            "{prompt}"
+        );
     }
 
     #[test]
     fn shared_inspect_lists_or_reports_empty() {
-        assert!(shared_inspect(&SkillSet::default()).contains("skills: none"));
-        let skills = interpret_shared(vec![plugin_skill("tdd", "sp/skills/tdd", "d")]);
-        let out = shared_inspect(&skills);
-        assert!(out.contains("## horsie_shared"));
-        assert!(out.contains("- tdd: d"));
+        assert!(shared_inspect(&SkillSet::default(), None).contains("skills: none"));
+        let scan = interpret_shared(
+            vec![plugin_skill("tdd", "sp/skills/tdd", "d")],
+            Some("/opt/plugins"),
+        );
+        let out = shared_inspect(&scan.skills, scan.root.as_deref());
+        assert!(out.contains("## horsie_shared — /opt/plugins"), "{out}");
+        assert!(out.contains("- tdd — sp/skills/tdd/: d"), "{out}");
     }
 }

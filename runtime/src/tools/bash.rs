@@ -210,7 +210,6 @@ mod tests {
             BashInput {
                 command: "echo before-timeout; sleep 5".to_string(),
                 timeout_secs: Some(1),
-                workspace: None,
             },
         )
         .await;
@@ -236,7 +235,6 @@ mod tests {
             BashInput {
                 command: "sleep 30 & echo started".to_string(),
                 timeout_secs: Some(1),
-                workspace: None,
             },
         )
         .await;
@@ -260,7 +258,6 @@ mod tests {
             BashInput {
                 command: "sleep 60 & echo started; sleep 30".to_string(),
                 timeout_secs: Some(1),
-                workspace: None,
             },
         )
         .await;
@@ -283,7 +280,6 @@ mod tests {
             BashInput {
                 command: "echo to-stdout; echo to-stderr >&2; sleep 5".to_string(),
                 timeout_secs: Some(1),
-                workspace: None,
             },
         )
         .await;
@@ -307,7 +303,6 @@ mod tests {
             BashInput {
                 command: "seq 1 200000 | head -3".to_string(),
                 timeout_secs: Some(30),
-                workspace: None,
             },
         )
         .await;
@@ -329,7 +324,6 @@ mod tests {
             BashInput {
                 command: "false | true".to_string(),
                 timeout_secs: None,
-                workspace: None,
             },
         )
         .await;
@@ -348,7 +342,6 @@ mod tests {
             BashInput {
                 command: "echo hello".to_string(),
                 timeout_secs: None,
-                workspace: None,
             },
         )
         .await;
@@ -367,7 +360,6 @@ mod tests {
             BashInput {
                 command: "exit 42".to_string(),
                 timeout_secs: None,
-                workspace: None,
             },
         )
         .await;
@@ -387,7 +379,6 @@ mod tests {
             BashInput {
                 command: "cat sentinel.txt".to_string(),
                 timeout_secs: None,
-                workspace: None,
             },
         )
         .await;
@@ -406,7 +397,6 @@ mod tests {
             BashInput {
                 command: "sleep 5".to_string(),
                 timeout_secs: Some(1),
-                workspace: None,
             },
         )
         .await;
@@ -433,7 +423,6 @@ mod tests {
             BashInput {
                 command: "echo $HORSIE_TEST_VAR".to_string(),
                 timeout_secs: None,
-                workspace: None,
             },
         )
         .await;

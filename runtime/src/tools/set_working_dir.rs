@@ -10,27 +10,16 @@ pub fn exec(
     input: SetWorkingDirInput,
 ) -> ToolResult {
     match &input.path {
-        Some(path) => set(registry, state, agent, &input.workspace, path),
-        None => reset(registry, state, agent, &input.workspace),
+        Some(path) => set(registry, state, agent, path),
+        None => reset(registry, state, agent),
     }
 }
 
 /// Point the agent's cwd at `path` — absolute, or relative to its current
 /// effective cwd. A bad target is an error and changes nothing.
-///
-/// Naming a `workspace` restarts from that workspace's root instead of
-/// chaining off the current cwd, matching how the other tools read an explicit
-/// workspace: as the base, not a hint.
-fn set(
-    registry: &WorkspaceRegistry,
-    state: &RuntimeState,
-    agent: &str,
-    workspace: &Option<String>,
-    path: &str,
-) -> ToolResult {
-    let base = match registry.resolve(workspace) {
-        Ok(root) if workspace.is_none() => state.effective_dir(agent, &root),
-        Ok(root) => root,
+fn set(registry: &WorkspaceRegistry, state: &RuntimeState, agent: &str, path: &str) -> ToolResult {
+    let base = match registry.default_root() {
+        Ok(root) => state.effective_dir(agent, &root),
         Err(reason) => return ToolResult::Err(ToolError { reason }),
     };
     // Path::join discards the base when `path` is absolute — exactly cd semantics.
@@ -52,16 +41,11 @@ fn set(
     ok(dir.display().to_string())
 }
 
-/// Clear the agent's override, returning to per-call workspace resolution.
-/// The target workspace is validated first so a typo doesn't silently drop
-/// the override.
-fn reset(
-    registry: &WorkspaceRegistry,
-    state: &RuntimeState,
-    agent: &str,
-    workspace: &Option<String>,
-) -> ToolResult {
-    let root = match registry.resolve(workspace) {
+/// Clear the agent's override, returning to the default working directory, and
+/// report where that leaves it. Resolved before clearing so a runtime with no
+/// workspaces errors instead of silently dropping the override.
+fn reset(registry: &WorkspaceRegistry, state: &RuntimeState, agent: &str) -> ToolResult {
+    let root = match registry.default_root() {
         Ok(r) => r,
         Err(reason) => return ToolResult::Err(ToolError { reason }),
     };
@@ -99,10 +83,9 @@ mod tests {
         (dir, registry, RuntimeState::new())
     }
 
-    fn input(path: Option<&str>, workspace: Option<&str>) -> SetWorkingDirInput {
+    fn input(path: Option<&str>) -> SetWorkingDirInput {
         SetWorkingDirInput {
             path: path.map(str::to_string),
-            workspace: workspace.map(str::to_string),
         }
     }
 
@@ -110,7 +93,7 @@ mod tests {
     fn relative_path_resolves_against_current_cwd_and_chains() {
         let (dir, registry, state) = fixture();
         std::fs::create_dir(dir.path().join("sub/deep")).unwrap();
-        let r = exec(&registry, &state, "a", input(Some("sub"), None));
+        let r = exec(&registry, &state, "a", input(Some("sub")));
         match r {
             ToolResult::Ok(o) => assert_eq!(
                 o.stdout,
@@ -124,7 +107,7 @@ mod tests {
             ToolResult::Err(e) => panic!("{}", e.reason),
         }
         // A second relative set chains off the first.
-        let r = exec(&registry, &state, "a", input(Some("deep"), None));
+        let r = exec(&registry, &state, "a", input(Some("deep")));
         assert!(matches!(r, ToolResult::Ok(_)));
         assert_eq!(
             state.effective_dir("a", dir.path()),
@@ -136,14 +119,14 @@ mod tests {
     fn absolute_path_is_used_as_is() {
         let (dir, registry, state) = fixture();
         let abs = dir.path().join("sub").display().to_string();
-        let r = exec(&registry, &state, "a", input(Some(&abs), None));
+        let r = exec(&registry, &state, "a", input(Some(&abs)));
         assert!(matches!(r, ToolResult::Ok(_)));
     }
 
     #[test]
     fn nonexistent_target_errors_and_preserves_state() {
         let (dir, registry, state) = fixture();
-        let r = exec(&registry, &state, "a", input(Some("nope"), None));
+        let r = exec(&registry, &state, "a", input(Some("nope")));
         assert!(matches!(r, ToolResult::Err(_)));
         assert_eq!(state.effective_dir("a", dir.path()), dir.path());
     }
@@ -152,7 +135,7 @@ mod tests {
     fn a_file_is_not_a_directory() {
         let (dir, registry, state) = fixture();
         std::fs::write(dir.path().join("f.txt"), "x").unwrap();
-        let r = exec(&registry, &state, "a", input(Some("f.txt"), None));
+        let r = exec(&registry, &state, "a", input(Some("f.txt")));
         match r {
             ToolResult::Err(e) => assert!(e.reason.contains("not a directory"), "{}", e.reason),
             ToolResult::Ok(_) => panic!("expected error"),
@@ -160,20 +143,27 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_the_override() {
+    fn reset_clears_the_override_and_reports_the_default_root() {
         let (dir, registry, state) = fixture();
-        let _ = exec(&registry, &state, "a", input(Some("sub"), None));
-        let r = exec(&registry, &state, "a", input(None, None));
-        assert!(matches!(r, ToolResult::Ok(_)));
+        let _ = exec(&registry, &state, "a", input(Some("sub")));
+        match exec(&registry, &state, "a", input(None)) {
+            ToolResult::Ok(o) => assert_eq!(o.stdout, dir.path().display().to_string()),
+            ToolResult::Err(e) => panic!("{}", e.reason),
+        }
         assert_eq!(state.effective_dir("a", dir.path()), dir.path());
     }
 
+    /// With nothing to fall back to, the override is left alone rather than
+    /// dropped into a directory the runtime cannot name.
     #[test]
-    fn reset_with_unknown_workspace_errors_and_keeps_the_override() {
+    fn reset_errors_with_no_workspaces_and_keeps_the_override() {
         let (dir, registry, state) = fixture();
-        let _ = exec(&registry, &state, "a", input(Some("sub"), None));
-        let r = exec(&registry, &state, "a", input(None, Some("zzz")));
-        assert!(matches!(r, ToolResult::Err(_)));
+        let _ = exec(&registry, &state, "a", input(Some("sub")));
+        let empty = WorkspaceRegistry::new(vec![]);
+        assert!(matches!(
+            exec(&empty, &state, "a", input(None)),
+            ToolResult::Err(_)
+        ));
         assert_eq!(
             state.effective_dir("a", dir.path()),
             dir.path().join("sub").canonicalize().unwrap()

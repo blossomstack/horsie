@@ -1,7 +1,5 @@
 use crate::transport::{RuntimeTransport, TransportError};
-use horsie_models::runtime::{
-    PluginSkill, ToolCall, ToolError, ToolOutput, ToolResult, WorkspaceScan,
-};
+use horsie_models::runtime::{ScanResponse, ToolCall, ToolError, ToolOutput, ToolResult};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -188,7 +186,7 @@ impl RuntimeClient {
         instruction_candidates: Vec<String>,
         skills_glob: String,
         include_shared: bool,
-    ) -> Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), RuntimeCallError> {
+    ) -> Result<ScanResponse, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.inner
             .scan_workspace(
@@ -228,7 +226,6 @@ mod tests {
         ToolCall::Bash(horsie_models::runtime::BashInput {
             command: "true".into(),
             timeout_secs: None,
-            workspace: None,
         })
     }
 
@@ -350,7 +347,6 @@ mod tests {
             .invoke(ToolCall::Bash(BashInput {
                 command: "echo hello".into(),
                 timeout_secs: None,
-                workspace: None,
             }))
             .await
             .unwrap();
@@ -364,7 +360,6 @@ mod tests {
             .invoke(ToolCall::Bash(BashInput {
                 command: "bad".into(),
                 timeout_secs: None,
-                workspace: None,
             }))
             .await
             .unwrap_err();
@@ -386,7 +381,7 @@ mod tests {
             platform: None,
         };
         let client = RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan]), "test-agent");
-        let (out, shared) = client
+        let resp = client
             .scan_workspace(
                 None,
                 vec!["AGENTS.md".into()],
@@ -395,8 +390,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].instructions.as_ref().unwrap().content, "hi");
-        assert!(shared.is_empty());
+        assert_eq!(resp.workspaces.len(), 1);
+        assert_eq!(
+            resp.workspaces[0].instructions.as_ref().unwrap().content,
+            "hi"
+        );
+        assert!(resp.shared_skills.is_empty());
+        assert!(resp.shared_root.is_none());
     }
 }
