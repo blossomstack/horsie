@@ -57,5 +57,10 @@ struct SendMessageRequest { text: String }
 /// optimistic bubble to the queued message the server now owes an answer for.
 struct SessionAck { message_id: String }
 
+/// Acknowledges an action with nothing to report — stop, delete. Its own type
+/// rather than a `SessionAck` carrying an empty id, which read on the wire as a
+/// message the client should be able to match and never could.
+struct Ack {}
+
 /// Uniform HTTP error envelope.
 struct ApiError { code: String, message: String }

@@ -21,7 +21,7 @@ use horsie_models::session::{
     TaskStatus as WireTaskStatus, UsageView,
 };
 use horsie_models::session_api::{
-    CreateSessionRequest, CreateSessionResponse, GetSessionResponse, GetSessionUsageResponse,
+    Ack, CreateSessionRequest, CreateSessionResponse, GetSessionResponse, GetSessionUsageResponse,
     HistoryPage, ListSessionsResponse, SendMessageRequest, SessionAck,
 };
 use horsie_workflow::{AgentHistoryPage, HistoryQuery, TaskStatus as AgentTaskStatus};
@@ -397,9 +397,7 @@ pub async fn stop_session(
 ) -> Result<impl IntoResponse, Api> {
     let result = ask(&state, |reply| SessionSupervisorCommand::Stop { id, reply }).await?;
     match result {
-        Ok(()) => Ok(Json(SessionAck {
-            message_id: String::new(),
-        })),
+        Ok(()) => Ok(Json(Ack {})),
         Err(msg) => Err(Api::not_found(msg)),
     }
 }
@@ -414,9 +412,7 @@ pub async fn delete_session(
     })
     .await?;
     match result {
-        Ok(()) => Ok(Json(SessionAck {
-            message_id: String::new(),
-        })),
+        Ok(()) => Ok(Json(Ack {})),
         Err(msg) => Err(Api::not_found(msg)),
     }
 }

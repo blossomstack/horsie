@@ -28,6 +28,7 @@ import type {
   PluginDefaultInput,
   PluginInstallInput,
   PluginView,
+  Ack,
   SessionAck,
   SettingsUpdate,
   SettingsView,
@@ -113,7 +114,7 @@ export const api = {
     create: (body: CreateSessionRequest): Promise<CreateSessionResponse> =>
       request("/sessions", { method: "POST", body: JSON.stringify(body) }),
 
-    remove: (id: string): Promise<SessionAck> =>
+    remove: (id: string): Promise<Ack> =>
       request(`/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
     send: (id: string, text: string): Promise<SessionAck> =>
@@ -122,7 +123,7 @@ export const api = {
         body: JSON.stringify({ text }),
       }),
 
-    stop: (id: string): Promise<SessionAck> =>
+    stop: (id: string): Promise<Ack> =>
       request(`/sessions/${encodeURIComponent(id)}/stop`, {
         method: "POST",
         body: "{}",
