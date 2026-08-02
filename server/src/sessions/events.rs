@@ -119,6 +119,39 @@ pub(crate) fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
     }
 }
 
+/// Fold a session's own journal into its [`SessionState`] — **tests only**.
+///
+/// Production reads a session's state by asking its actor, which is the only
+/// thing allowed to read that journal. A test asserting on what was journaled
+/// has no actor to ask (and often deliberately none running), so it folds
+/// directly; `cfg(test)` is what keeps that from becoming a production path
+/// again. See docs/superpowers/specs/2026-08-02-answerable-asks-design.md.
+#[cfg(test)]
+pub(in crate::sessions) async fn fold_session_state(
+    journal: &std::sync::Arc<dyn horsie_actor::Journal>,
+    session_id: uuid::Uuid,
+) -> crate::sessions::session_actor::SessionState {
+    use futures_util::StreamExt;
+    use horsie_actor::EventSourcedActor;
+
+    let pid = crate::sessions::session_actor::SessionActor::persistence_id_for(session_id);
+    let mut state = crate::sessions::session_actor::SessionState::default();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only inspection of a journal, with no actor running to ask"
+    )]
+    let mut stream = journal.replay(&pid, 0).await;
+    while let Some(item) = stream.next().await {
+        let Ok(bytes) = item else { break };
+        if let Ok(event) =
+            serde_json::from_slice::<crate::sessions::session_actor::SessionDomainEvent>(&bytes)
+        {
+            state = crate::sessions::session_actor::SessionActor::apply_event(state, event);
+        }
+    }
+    state
+}
+
 fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
     match status {
         AgentTaskStatus::Pending => WireTaskStatus::Pending,

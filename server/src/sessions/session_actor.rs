@@ -2236,7 +2236,13 @@ mod tests {
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), f.deps.clone(), parent),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                parent,
+                test_frames(),
+            ),
             journal.clone(),
         );
         (f, session, id, journal)
@@ -2269,6 +2275,10 @@ mod tests {
         use futures_util::StreamExt;
         let pid = SessionActor::persistence_id_for(session_id);
         let mut count = 0u64;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only inspection: counts what was journaled, which no actor reports"
+        )]
         let mut stream = journal.replay(&pid, 0).await;
         while let Some(item) = stream.next().await {
             if item.is_ok() {
@@ -2741,7 +2751,13 @@ mod tests {
         // Loading must start no runs: C stays owed until someone acts.
         let parent = spawn_deaf_supervisor();
         let session2 = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), _f.deps.clone(), parent),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                _f.deps.clone(),
+                parent,
+                test_frames(),
+            ),
             journal.clone(),
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2813,7 +2829,13 @@ mod tests {
         // Second incarnation on the same journal.
         let parent = spawn_deaf_supervisor();
         let session2 = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), f.deps.clone(), parent),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                parent,
+                test_frames(),
+            ),
             journal.clone(),
         );
         wait_for_tree(&journal, id, |t| {
