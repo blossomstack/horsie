@@ -11,6 +11,9 @@
 //! concurrent sessions on one agent share those files.
 
 use crate::error::CliError;
+use horsie_models::capabilities::{
+    Access, BlockNetwork, CapabilitySpec, Grant, NetworkPolicy, WorkingDirGrant,
+};
 use horsie_runtime_vendor::{
     ConnectedRuntimeRegistry, FixedWorkspaces, ProcessRuntimeProvider, RuntimeEndpoint,
     RuntimeListenerServer, RuntimeVendor, SandboxPolicy, serve_runtime_connections,
@@ -138,6 +141,52 @@ fn shared_directory_notice(workspaces: &HashMap<String, PathBuf>) -> String {
     )
 }
 
+/// Exit-status classification of a `horsie-runtime probe` run: 0 proves the
+/// sandbox applied on this host; anything else (3 = unsupported, other codes,
+/// a signal) cannot prove confinement, so startup is refused.
+fn probe_verdict(exit: Option<i32>) -> Result<(), CliError> {
+    match exit {
+        Some(0) => Ok(()),
+        Some(_) | None => Err(CliError::Validation(
+            "the nono sandbox is not supported on this host; re-run with \
+             `--no-sandbox` to spawn unsandboxed runtimes"
+                .to_string(),
+        )),
+    }
+}
+
+/// Prove the sandbox works on this host before serving sessions: run the
+/// runtime's own `probe` subcommand against a minimal spec (the state dir as
+/// the working dir, network blocked). The probed binary is the same one the
+/// agent spawns per session, so this exercises the production path in
+/// milliseconds — no endpoint, no connect-retry budget. It proves nono can
+/// apply a spec here; it does not pre-validate the specs the server will send.
+fn probe_sandbox_support(runtime_bin: &Path, state_dir: &Path) -> Result<(), CliError> {
+    let spec = CapabilitySpec {
+        network: NetworkPolicy::Block(BlockNetwork {}),
+        grants: vec![Grant::WorkingDir(WorkingDirGrant {
+            access: Access::ReadWrite,
+        })],
+        unsafe_seatbelt_rules: None,
+    };
+    let caps = state_dir.join("probe-capabilities.json");
+    let bytes = serde_json::to_vec(&spec)
+        .map_err(|e| CliError::Validation(format!("encode probe capability spec: {e}")))?;
+    std::fs::write(&caps, bytes).map_err(|e| CliError::Io(e.to_string()))?;
+    let status = std::process::Command::new(runtime_bin)
+        .arg("probe")
+        .arg("--workspace")
+        .arg(format!("probe={}", state_dir.display()))
+        .arg("--sandbox-caps")
+        .arg(&caps)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| CliError::Executor(format!("spawn sandbox probe: {e}")))?;
+    probe_verdict(status.code())
+}
+
 /// Run this machine as a vendor agent until the socket closes or the process is
 /// interrupted.
 #[allow(clippy::too_many_arguments)]
@@ -169,6 +218,9 @@ pub async fn run(
     }
 
     std::fs::create_dir_all(state_dir).map_err(|e| CliError::Io(e.to_string()))?;
+    if sandbox {
+        probe_sandbox_support(runtime_bin, state_dir)?;
+    }
     let socket = state_dir.join("vendor-runtimes.sock");
     // A stale socket from a previous run would make bind fail.
     let _ = std::fs::remove_file(&socket);
@@ -278,6 +330,15 @@ fn install_signal_handler() -> Result<impl std::future::Future<Output = ()> + Se
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_verdict_accepts_only_exit_zero() {
+        assert!(probe_verdict(Some(0)).is_ok());
+        for exit in [Some(3), Some(2), Some(1), None] {
+            let err = probe_verdict(exit).expect_err("only exit 0 proves confinement");
+            assert!(format!("{err}").contains("--no-sandbox"), "{err}");
+        }
+    }
 
     #[test]
     fn server_url_becomes_the_vendor_connect_endpoint() {

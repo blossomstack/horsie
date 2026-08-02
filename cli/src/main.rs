@@ -57,10 +57,11 @@ enum Command {
         /// "local", matching the server's default vendor pickup.
         #[arg(long, alias = "runtime-id", default_value = "local")]
         name: String,
-        /// Apply the server's sandbox policy to every runtime this agent
-        /// spawns. Off by default: the machine is already your own.
+        /// Do not sandbox the runtimes this agent spawns: the server's
+        /// capability spec is ignored and runtimes inherit the ambient
+        /// environment. Sandboxing is on by default.
         #[arg(long)]
-        sandbox: bool,
+        no_sandbox: bool,
         /// Removed: run the agent under a process manager instead.
         #[arg(long, hide = true)]
         background: bool,
@@ -303,7 +304,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             server,
             workspace,
             name,
-            sandbox,
+            no_sandbox,
             background,
             config,
         } => {
@@ -331,7 +332,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 background,
                 &cfg.storage.state_dir,
                 plugins,
-                sandbox,
+                !no_sandbox,
             )
             .await
         }
