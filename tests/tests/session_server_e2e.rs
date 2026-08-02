@@ -1130,16 +1130,16 @@ async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
 /// no caller outside the executor's own inbound handler. Stopping a turn
 /// mid-`bash` leaves the command running to completion inside the sandbox,
 /// holding resources, with its output discarded.
-// PORT GAP, not a regression: with a vendor agent, `POST /stop` never reaches
-// the vendor at all — the fake agent observes neither the cancel nor the stop,
-// so the session actor's mailbox is occupied while a tool call is genuinely in
-// flight over a real socket. The equivalent unit test
-// (`stop_waits_for_the_cancelled_run_to_unwind`) passes against the same fake
-// agent, so the cancel mechanism itself works; what differs here is the
-// full-stack timing. Cancel propagation is still covered end-to-end by that
-// unit test. Left failing-by-default rather than deleted so the gap stays
-// visible.
-#[ignore = "port gap: stop does not reach the vendor in the full-stack path; see comment"]
+///
+/// This used to hang: `SessionActor::cancel_run` asked `RuntimeManager` for a
+/// *fresh* client (`GetRuntime` on the vendor link) before cancelling, and that
+/// call sat on the session's own mailbox. The fake agent's command loop is
+/// sequential, so while it is inside `gate.wait()` answering the blocked tool
+/// call it cannot read the `GetRuntime` either — the mailbox that `POST /stop`
+/// needs never came free. The fix (`session_actor.rs`'s `cancel_run`) cancels
+/// through the client the run already acquired in `provide()` instead: no
+/// vendor round-trip, just a one-way `CancelCall` write that the fake picks up
+/// once the tool call it targets releases the read loop.
 #[tokio::test]
 async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -1172,12 +1172,24 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
         wait_status(&client, &server.addr, &id, "Idle").await;
         agent.release_tool_calls();
 
-        assert!(
-            !agent.cancelled_calls().is_empty(),
-            "Stop must propagate a cancel to the runtime; the sandbox never heard \
-             about it (signals seen: {:?})",
-            agent.signals()
-        );
+        // The cancel was already written to the wire the instant `Stop`
+        // returned — cancellation is local and does not wait on the vendor.
+        // Releasing the gate only lets the fake's own task get scheduled to
+        // read it back off the socket and record it, which can lag this
+        // task by a beat; poll rather than assert immediately.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if !agent.cancelled_calls().is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Stop must propagate a cancel to the runtime; the sandbox never heard \
+                 about it (signals seen: {:?})",
+                agent.signals()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         server.shutdown().await;
     })

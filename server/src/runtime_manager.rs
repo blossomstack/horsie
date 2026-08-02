@@ -427,6 +427,77 @@ mod tests {
         assert_eq!(sent.workspaces, vec!["main".to_string()]);
     }
 
+    /// Mints a distinct token every call, so a test can prove credentials are
+    /// never reused across a session's lifetime.
+    struct CountingMinter {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingMinter {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::github::GithubTokenMinter for CountingMinter {
+        async fn mint_for(&self, _repo_urls: &[String]) -> Result<Option<String>, String> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(format!("token-{n}")))
+        }
+    }
+
+    #[tokio::test]
+    async fn create_assembles_env_fresh_each_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = FakeRuntimeVendor::builder("v")
+            .serve_in_process()
+            .await
+            .unwrap();
+        let minter = CountingMinter::new();
+        let m = Arc::new(RuntimeManager::new(RuntimeDeps {
+            vendors: published(&agent, "v"),
+            state_dir: tmp.path().to_path_buf(),
+            github_tokens: Some(minter.clone() as Arc<dyn crate::github::GithubTokenMinter>),
+            plugins: None,
+        }));
+        let mut spec = session_spec("v");
+        spec.provision
+            .push(crate::sessions::spec::ProvisionStepSpec {
+                name: "checkout".into(),
+                uses: "git_checkout".into(),
+                with: vec![("url".into(), "https://example.com/repo.git".into())],
+            });
+
+        m.create("s1", "v", &spec).await.expect("first create");
+        let first_token = agent
+            .last_create_request()
+            .expect("create request")
+            .env
+            .iter()
+            .find(|e| e.name == horsie_models::ENV_GITHUB_TOKEN)
+            .map(|e| e.value.clone())
+            .expect("a minted token must be on the wire");
+
+        m.create("s1", "v", &spec).await.expect("second create");
+        let second_token = agent
+            .last_create_request()
+            .expect("create request")
+            .env
+            .iter()
+            .find(|e| e.name == horsie_models::ENV_GITHUB_TOKEN)
+            .map(|e| e.value.clone())
+            .expect("a minted token must be on the wire");
+
+        assert_ne!(
+            first_token, second_token,
+            "credentials are short-lived and must be re-minted on every create, never cached"
+        );
+        assert_eq!(minter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn provider_is_a_thin_handle_over_the_same_calls() {
         let tmp = tempfile::tempdir().unwrap();

@@ -217,8 +217,10 @@ Everything under "Still owed" above is now done:
 
 ### Still owed
 
-- Coverage the rewrite dropped: `drain()` and `PrepareOffload`'s refuse-if-running branch have no unit test, and `create_assembles_env_fresh_each_time` (Task 2 step 3) was never written.
-- `stopping_a_turn_cancels_the_in_flight_tool_call` is still `#[ignore]`d, and its comment still claims cancel is covered by a unit test that no longer exists. Un-ignoring it hangs: with `block_tool_calls`, the fake agent's sequential command loop cannot answer the `GetRuntime` that `cancel_run` issues before cancelling, so Stop waits on the session mailbox forever. The real agent dispatches per command and would answer — but `cancel_run` awaiting a vendor round-trip on the mailbox is the design smell to fix, most likely by cancelling only through a client the manager already holds.
+Both items above are now done.
+
+- **Coverage the rewrite dropped** — `SessionActor` unit tests now spawn the actor directly (a `DeafSupervisor` stand-in for the parent) and cover `drain()`'s four branches (empty inbox, run in flight, terminal session, merged consume-and-answer) plus `PrepareOffload`'s refuse-if-running branch, driven with a `BlockingProvider` that holds a real turn open. `create_assembles_env_fresh_each_time` mints through a `CountingMinter` and asserts two distinct `GITHUB_TOKEN` values reached the fake vendor's wire requests.
+- **`stopping_a_turn_cancels_the_in_flight_tool_call`** is un-ignored and green. The design smell was real: `cancel_run` called `RuntimeManager::get` for a fresh client, which is a `GetRuntime` round-trip on the session's own mailbox — the fake's sequential command loop can't answer it until the very tool call being cancelled resolves. Fixed by caching the client `provide()` already resolved on `SessionContextProvider` (shared in-flight tracking via `RuntimeClient::clone`) and cancelling through that instead — `cancel_in_flight` is a one-way write, not a round-trip, so it no longer touches the mailbox at all. The e2e test itself had a second, unrelated race (asserting on the fake's recorder synchronously right after releasing its gate, with no `.await` giving the fake's task a chance to run); it now polls with a deadline like the file's other `wait_*` helpers.
 
 ## Self-review notes
 

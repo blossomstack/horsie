@@ -19,6 +19,7 @@ use crate::sessions::{SessionFrame, UserMessageError};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
+use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
     AgentRunDef, AgentRuntimeContext, AgentUsageSnapshot, ContextError, ContextProvider, Contexts,
@@ -27,7 +28,7 @@ use horsie_workflow::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
@@ -217,6 +218,10 @@ pub struct SessionActor {
     /// Additional agents this session hosts. Empty today — the seam sub-agents
     /// will grow into, and the reason the session and agent stayed two actors.
     sub_agents: HashMap<String, ActorRef<AgentCommand>>,
+    /// The main agent's context provider, kept so [`Self::cancel_run`] can
+    /// reach the runtime client the run already acquired instead of asking
+    /// the manager for a fresh one.
+    context_provider: Option<Arc<SessionContextProvider>>,
 }
 
 impl SessionActor {
@@ -235,6 +240,7 @@ impl SessionActor {
             frames,
             main_agent: None,
             sub_agents: HashMap::new(),
+            context_provider: None,
         }
     }
 
@@ -322,7 +328,9 @@ impl SessionActor {
             session_id: self.id,
             session: ctx.self_ref(),
             frames: self.frames.clone(),
+            last_client: Mutex::new(None),
         });
+        self.context_provider = Some(context_provider.clone());
         let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
         params.interactive = true;
         params.optional_handoff_tool = Some(ASK_USER_TOOL.to_string());
@@ -578,12 +586,15 @@ impl SessionActor {
             return;
         };
         // Tell the sandbox to abandon what it is running first, so the wait
-        // below is over an already-cancelled call rather than a live one.
-        if let Ok(client) = self
-            .deps
-            .runtimes
-            .get(&self.id.to_string(), &self.spec.vendor)
-            .await
+        // below is over an already-cancelled call rather than a live one. Uses
+        // the client the run itself already acquired in `provide()` — asking
+        // the manager for a fresh one would round-trip the vendor on this very
+        // mailbox, and a vendor mid-tool-call cannot answer a lifecycle
+        // request until the tool call it is relaying resolves.
+        if let Some(client) = self
+            .context_provider
+            .as_ref()
+            .and_then(|cp| cp.cached_client())
         {
             client.cancel_in_flight().await;
         }
@@ -679,6 +690,10 @@ struct SessionContextProvider {
     /// The owning session's mailbox — routes the server-owned title tool.
     session: ActorRef<SessionCommand>,
     frames: broadcast::Sender<SessionFrame>,
+    /// The client the most recent `provide()` resolved. Cheap to keep — cloning
+    /// shares the same in-flight-call tracking — and it is what lets
+    /// [`SessionActor::cancel_run`] cancel without a fresh vendor round-trip.
+    last_client: Mutex<Option<RuntimeClient>>,
 }
 
 impl SessionContextProvider {
@@ -690,6 +705,14 @@ impl SessionContextProvider {
         reg.get(&self.settings.model)
             .cloned()
             .ok_or_else(|| format!("no provider registered for model '{}'", self.settings.model))
+    }
+
+    /// The client the run currently in flight already acquired, if any.
+    fn cached_client(&self) -> Option<RuntimeClient> {
+        self.last_client
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -711,6 +734,10 @@ impl ContextProvider for SessionContextProvider {
                 ContextError::retryable(other.to_string())
             }
         })?;
+        *self
+            .last_client
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
 
         emit_progress(&self.frames, "scanning_workspace", None);
         let (ws, shared_scan) = scan_workspace(&runtime_client, None, use_plugins).await;
@@ -1119,5 +1146,295 @@ mod tests {
         let title = derive_title(&long).unwrap();
         assert!(title.ends_with('…'));
         assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1);
+    }
+
+    // ── Actor-level coverage: `drain()` and `PrepareOffload`'s refuse-if-running
+    // branch. The rewrite that introduced the durable inbox dropped both.
+
+    fn actor_spec_fixture() -> SessionSpec {
+        use crate::sessions::spec::WorkspaceDef;
+        use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
+        SessionSpec {
+            name: Some("test".into()),
+            agent: AgentSettings {
+                model: "mock".into(),
+                allowed_tools: None,
+                use_plugins: None,
+                max_iterations: None,
+                max_retries: 0,
+                mcp_servers: vec![],
+                memory_spaces: vec![],
+                thinking_effort: None,
+            },
+            workspaces: vec![WorkspaceDef {
+                name: "main".into(),
+            }],
+            provision: vec![],
+            capabilities: CapabilitySpec {
+                network: NetworkPolicy::Block(BlockNetwork {}),
+                grants: vec![],
+                unsafe_seatbelt_rules: None,
+            },
+            vendor: "mock".into(),
+            plugins: vec![],
+        }
+    }
+
+    struct ActorFixture {
+        deps: ServerDeps,
+        agent: crate::runtime_vendor::fake::FakeRuntimeVendor,
+        _tmp: tempfile::TempDir,
+    }
+
+    async fn actor_fixture() -> ActorFixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        let mut vendors = HashMap::new();
+        vendors.insert("mock".to_string(), agent.link());
+        let vendors = Arc::new(std::sync::RwLock::new(vendors));
+        let deps = ServerDeps {
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
+            provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            vendors,
+            state_dir: tmp.path().to_path_buf(),
+            github_tokens: None,
+            mcp: None,
+            plugins: None,
+            memory: None,
+        };
+        ActorFixture {
+            deps,
+            agent,
+            _tmp: tmp,
+        }
+    }
+
+    /// A supervisor stand-in for tests that spawn a bare `SessionActor`: it
+    /// answers nothing, and exists only so `report()`'s `.tell()` has a live
+    /// mailbox to land in.
+    struct DeafSupervisor;
+
+    #[async_trait]
+    impl EventSourcedActor for DeafSupervisor {
+        type Command = SessionSupervisorCommand;
+        type Event = ();
+        type State = ();
+
+        fn persistence_id(&self) -> PersistenceId {
+            PersistenceId::new("test", "deaf-supervisor")
+        }
+        fn initial_state() {}
+        fn apply_event((): (), (): ()) {}
+        async fn handle_command(
+            &mut self,
+            (): &(),
+            _cmd: SessionSupervisorCommand,
+            _ctx: &mut ActorContext<Self>,
+        ) -> CommandEffect<()> {
+            CommandEffect::none()
+        }
+    }
+
+    fn spawn_deaf_supervisor() -> ActorRef<SessionSupervisorCommand> {
+        horsie_actor::spawn_root(
+            DeafSupervisor,
+            Arc::new(horsie_actor::InMemoryJournal::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn drain_does_nothing_when_the_inbox_is_empty() {
+        let f = actor_fixture().await;
+        let parent = spawn_deaf_supervisor();
+        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let events = actor.drain(&SessionState::default()).await;
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_does_nothing_while_a_turn_is_already_running() {
+        let f = actor_fixture().await;
+        let parent = spawn_deaf_supervisor();
+        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let state = fold(vec![
+            queued("m1", "one"),
+            SessionDomainEvent::TurnBegan {
+                consumed: vec!["m1".into()],
+                answering: None,
+            },
+            queued("m2", "queued while running"),
+        ]);
+        let events = actor.drain(&state).await;
+        assert!(
+            events.is_empty(),
+            "a run in flight must never be drained into a second one"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_refuses_once_the_session_is_unrecoverable() {
+        let f = actor_fixture().await;
+        let parent = spawn_deaf_supervisor();
+        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let state = fold(vec![
+            queued("m1", "one"),
+            SessionDomainEvent::SessionFailed {
+                reason: "runtime gone".into(),
+            },
+        ]);
+        let events = actor.drain(&state).await;
+        assert!(
+            events.is_empty(),
+            "a terminal session must never start another turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_consumes_the_whole_inbox_and_starts_a_turn() {
+        let f = actor_fixture().await;
+        let parent = spawn_deaf_supervisor();
+        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let state = fold(vec![queued("m1", "one"), queued("m2", "two")]);
+        let events = actor.drain(&state).await;
+        assert_eq!(events.len(), 1);
+        let SessionDomainEvent::TurnBegan {
+            consumed,
+            answering,
+        } = &events[0]
+        else {
+            panic!("expected TurnBegan, got {:?}", events[0]);
+        };
+        assert_eq!(consumed, &vec!["m1".to_string(), "m2".to_string()]);
+        assert!(answering.is_none());
+    }
+
+    #[tokio::test]
+    async fn drain_delivers_a_merged_message_as_the_pending_asks_answer() {
+        let f = actor_fixture().await;
+        let parent = spawn_deaf_supervisor();
+        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let state = fold(vec![
+            SessionDomainEvent::AskRecorded {
+                tool_call_id: Some("call-1".into()),
+                question: "which?".into(),
+            },
+            queued("m1", "main"),
+        ]);
+        let events = actor.drain(&state).await;
+        assert_eq!(events.len(), 1);
+        let SessionDomainEvent::TurnBegan {
+            consumed,
+            answering,
+        } = &events[0]
+        else {
+            panic!("expected TurnBegan, got {:?}", events[0]);
+        };
+        assert_eq!(consumed, &vec!["m1".to_string()]);
+        assert_eq!(answering.as_deref(), Some("call-1"));
+    }
+
+    /// An `LlmProvider` that hangs until released, so a test can hold a run
+    /// genuinely `Running` for as long as it needs to.
+    struct BlockingProvider {
+        gate: tokio::sync::Notify,
+    }
+
+    impl BlockingProvider {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                gate: tokio::sync::Notify::new(),
+            })
+        }
+        fn release(&self) {
+            self.gate.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for BlockingProvider {
+        fn model_id(&self) -> &str {
+            "mock"
+        }
+        async fn complete(
+            &self,
+            _request: horsie_agentcore::CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn horsie_agentcore::EventSink,
+        ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+            self.gate.notified().await;
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::Text(
+                    horsie_agentcore::TextPart {
+                        text: "done".to_string(),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::EndTurn,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_offload_refuses_while_a_run_is_in_flight() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "mock", &actor_spec_fixture())
+            .await
+            .expect("create");
+        let provider = BlockingProvider::new();
+        f.deps
+            .provider_registry
+            .write()
+            .unwrap()
+            .insert("mock".to_string(), provider.clone() as Arc<dyn LlmProvider>);
+
+        let parent = spawn_deaf_supervisor();
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(id, actor_spec_fixture(), f.deps.clone(), parent),
+            journal,
+        );
+
+        session
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "go".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        let offloadable = session
+            .ask(|reply| SessionCommand::PrepareOffload { reply })
+            .await
+            .unwrap();
+        assert!(
+            !offloadable,
+            "a run in flight must never be offloaded out from under itself"
+        );
+        assert!(
+            f.agent
+                .signals()
+                .iter()
+                .all(|s| !s.starts_with("hibernate:")),
+            "refusing must not touch the runtime: {:?}",
+            f.agent.signals()
+        );
+
+        // Refusing must leave the actor exactly as it was, still answering
+        // commands normally rather than having torn itself down.
+        provider.release();
+        let (tx, rx) = oneshot::channel();
+        session
+            .tell(SessionCommand::UsageStats { reply: tx })
+            .await
+            .unwrap();
+        rx.await.unwrap();
     }
 }
