@@ -1,0 +1,25 @@
+[package]
+name = "horsie-support"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/blossomstack/horsie"
+description = "Shared host-side helpers for horsie: plugin manifests, skills, marketplaces"
+version = "0.1.6"
+edition = "2024"
+
+[features]
+default = []
+# Git helpers shell out to `git`; only the CLI and server need them. The runtime
+# ships into the sandbox and only reads already-materialised trees.
+git = []
+
+[dependencies]
+horsie-models = { version = "0.1.6", path = "../models" }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+sha2       = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
