@@ -5,10 +5,14 @@
 //! the config store's `SqlitePool`.
 
 pub mod password;
+mod service;
 mod store;
 mod throttle;
 mod token;
 
+pub use service::{
+    ADMIN_USERNAME, AuthDeps, AuthService, INITIAL_PASSWORD_FILE, LoginError, VerifiedToken,
+};
 pub use store::{AuthStore, TokenRow, UserRow};
 pub use throttle::Throttle;
 pub use token::{GeneratedToken, Principal, TokenKind, generate, hash_secret, parse};
