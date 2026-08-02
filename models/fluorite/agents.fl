@@ -1,0 +1,57 @@
+/// Named agent presets: a saved session configuration (runtime vendor, model,
+/// repos, skills, MCP servers, memory spaces, thinking effort) that is invoked
+/// with a message to create a session.
+package agents;
+
+use session.SessionSummary;
+use session_api.RepoConfig;
+
+/// An agent preset as shown to clients.
+struct AgentView {
+    /// Slug; the id of record, used in API paths and CLI invocations.
+    name: String,
+    description: String,
+    /// Runtime vendor name; absent → the server's default vendor at invoke.
+    vendor: Option<String>,
+    /// Configured model alias.
+    model: String,
+    /// Repositories cloned into the session workspace at provision time.
+    repos: Vec<RepoConfig>,
+    /// Selected plugin-bundle (skill) names.
+    plugins: Vec<String>,
+    /// Enabled MCP server names.
+    mcp_servers: Vec<String>,
+    /// Memory spaces the session may read and write.
+    memory_spaces: Vec<String>,
+    /// Canonical thinking effort; absent → the model's configured default.
+    thinking_effort: Option<String>,
+    /// Unix epoch seconds.
+    created_at: String,
+    updated_at: String,
+}
+
+/// Create or fully replace an agent preset. Omitted list fields default to
+/// empty; `description` defaults to "".
+struct AgentInput {
+    name: String,
+    description: Option<String>,
+    vendor: Option<String>,
+    model: String,
+    repos: Option<Vec<RepoConfig>>,
+    plugins: Option<Vec<String>>,
+    mcp_servers: Option<Vec<String>>,
+    memory_spaces: Option<Vec<String>>,
+    thinking_effort: Option<String>,
+}
+
+/// Invoke a preset: create a session from it and queue a first message.
+struct AgentInvokeRequest {
+    /// First user message; queued immediately after the session is created.
+    message: String,
+    /// Optional session title.
+    name: Option<String>,
+}
+
+struct AgentInvokeResponse {
+    session: SessionSummary,
+}
