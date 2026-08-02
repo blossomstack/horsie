@@ -26,6 +26,31 @@ pub struct TokenRow {
     pub last_used_at: Option<i64>,
 }
 
+/// A row of `auth_device_codes`, addressed by the hash of the device code the
+/// CLI holds. `user_code` is the short string the human types.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceCodeRow {
+    pub user_code: String,
+    pub principal: Option<Principal>,
+    pub expires_at: i64,
+    pub approved_at: Option<i64>,
+    pub denied_at: Option<i64>,
+    pub consumed_at: Option<i64>,
+    pub last_polled_at: Option<i64>,
+}
+
+/// A token row as seen by reuse detection: revoked rows included, so a
+/// presented-but-dead credential can be told apart from one that never existed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RawTokenRow {
+    pub id: String,
+    pub kind: TokenKind,
+    pub principal: Principal,
+    pub chain_id: Option<String>,
+    pub expires_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+}
+
 pub struct AuthStore {
     pool: SqlitePool,
 }
@@ -211,6 +236,170 @@ impl AuthStore {
             .await
             .map_err(|e| e.to_string())?;
         Ok(true)
+    }
+    // --- device codes ---
+
+    pub async fn insert_device_code(
+        &self,
+        device_hash: &[u8],
+        user_code: &str,
+        now: i64,
+        expires_at: i64,
+    ) -> Result<(), String> {
+        sqlx::query(
+            "INSERT INTO auth_device_codes \
+             (device_code_hash, user_code, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(device_hash)
+        .bind(user_code)
+        .bind(now)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The row as stored. Expiry is *not* filtered here: the poll endpoint has
+    /// to tell an expired code (`expired_token`) from an unknown one, and both
+    /// answers come from this one read.
+    pub async fn get_device_code(
+        &self,
+        device_hash: &[u8],
+    ) -> Result<Option<DeviceCodeRow>, String> {
+        let row = sqlx::query(
+            "SELECT user_code, principal, expires_at, approved_at, denied_at, \
+             consumed_at, last_polled_at FROM auth_device_codes WHERE device_code_hash = ?",
+        )
+        .bind(device_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let Some(row) = row else { return Ok(None) };
+        let principal: Option<String> = row.try_get("principal").map_err(|e| e.to_string())?;
+        Ok(Some(DeviceCodeRow {
+            user_code: row.try_get("user_code").map_err(|e| e.to_string())?,
+            principal: principal.as_deref().map(Principal::from_db).transpose()?,
+            expires_at: row.try_get("expires_at").map_err(|e| e.to_string())?,
+            approved_at: row.try_get("approved_at").map_err(|e| e.to_string())?,
+            denied_at: row.try_get("denied_at").map_err(|e| e.to_string())?,
+            consumed_at: row.try_get("consumed_at").map_err(|e| e.to_string())?,
+            last_polled_at: row.try_get("last_polled_at").map_err(|e| e.to_string())?,
+        }))
+    }
+
+    /// Returns whether a live, unanswered code was actually approved — `false`
+    /// for an unknown, expired, or already-answered user code, which is what
+    /// the browser needs in order to say "that code is no longer valid".
+    pub async fn approve_device_code(
+        &self,
+        user_code: &str,
+        principal: &Principal,
+        now: i64,
+    ) -> Result<bool, String> {
+        let res = sqlx::query(
+            "UPDATE auth_device_codes SET approved_at = ?, principal = ? \
+             WHERE user_code = ? AND expires_at > ? \
+             AND approved_at IS NULL AND denied_at IS NULL",
+        )
+        .bind(now)
+        .bind(principal.to_db())
+        .bind(user_code)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn deny_device_code(&self, user_code: &str, now: i64) -> Result<bool, String> {
+        let res = sqlx::query(
+            "UPDATE auth_device_codes SET denied_at = ? \
+             WHERE user_code = ? AND expires_at > ? \
+             AND approved_at IS NULL AND denied_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_code)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn mark_device_polled(&self, device_hash: &[u8], now: i64) -> Result<(), String> {
+        sqlx::query("UPDATE auth_device_codes SET last_polled_at = ? WHERE device_code_hash = ?")
+            .bind(now)
+            .bind(device_hash)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn consume_device_code(&self, device_hash: &[u8], now: i64) -> Result<(), String> {
+        sqlx::query("UPDATE auth_device_codes SET consumed_at = ? WHERE device_code_hash = ?")
+            .bind(now)
+            .bind(device_hash)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Housekeeping, called whenever a code is issued. Device codes are
+    /// short-lived and never read after expiry, so nothing is lost.
+    pub async fn purge_expired_device_codes(&self, now: i64) -> Result<(), String> {
+        sqlx::query("DELETE FROM auth_device_codes WHERE expires_at <= ?")
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // --- token chains ---
+
+    /// Look a token up regardless of revocation or expiry. Only refresh-reuse
+    /// detection should call this; everything else wants `lookup_token`.
+    pub async fn lookup_token_including_revoked(
+        &self,
+        hash: &[u8],
+    ) -> Result<Option<RawTokenRow>, String> {
+        let row = sqlx::query(
+            "SELECT id, kind, principal, chain_id, expires_at, revoked_at \
+             FROM auth_tokens WHERE token_hash = ?",
+        )
+        .bind(hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let Some(row) = row else { return Ok(None) };
+        let kind: String = row.try_get("kind").map_err(|e| e.to_string())?;
+        let principal: String = row.try_get("principal").map_err(|e| e.to_string())?;
+        Ok(Some(RawTokenRow {
+            id: row.try_get("id").map_err(|e| e.to_string())?,
+            kind: TokenKind::from_db(&kind)
+                .ok_or_else(|| format!("unknown token kind {kind:?}"))?,
+            principal: Principal::from_db(&principal)?,
+            chain_id: row.try_get("chain_id").map_err(|e| e.to_string())?,
+            expires_at: row.try_get("expires_at").map_err(|e| e.to_string())?,
+            revoked_at: row.try_get("revoked_at").map_err(|e| e.to_string())?,
+        }))
+    }
+
+    /// Revoke every live token sharing a rotation chain — the response to a
+    /// replayed refresh token.
+    pub async fn revoke_chain(&self, chain_id: &str, now: i64) -> Result<(), String> {
+        sqlx::query(
+            "UPDATE auth_tokens SET revoked_at = ? WHERE chain_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(chain_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 
@@ -423,5 +612,150 @@ mod tests {
         assert!(!s.touch_token("id", Some(1000), 1030).await.unwrap());
         // Past the minute: written.
         assert!(s.touch_token("id", Some(1000), 1061).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_device_code_is_created_then_approved_then_consumed() {
+        let (s, _tmp) = store().await;
+        s.insert_device_code(b"dhash", "BCDF-GHJK", 1000, 1600)
+            .await
+            .unwrap();
+
+        let row = s.get_device_code(b"dhash").await.unwrap().unwrap();
+        assert_eq!(row.user_code, "BCDF-GHJK");
+        assert_eq!(row.expires_at, 1600);
+        assert!(row.principal.is_none());
+        assert!(row.approved_at.is_none());
+
+        // Approval by user code, which is what the browser sends.
+        assert!(
+            s.approve_device_code("BCDF-GHJK", &Principal::User(1), 1100)
+                .await
+                .unwrap()
+        );
+        let row = s.get_device_code(b"dhash").await.unwrap().unwrap();
+        assert_eq!(row.principal, Some(Principal::User(1)));
+        assert_eq!(row.approved_at, Some(1100));
+
+        // Consuming marks it used, so a second poll cannot mint a second pair.
+        s.consume_device_code(b"dhash", 1200).await.unwrap();
+        let row = s.get_device_code(b"dhash").await.unwrap().unwrap();
+        assert_eq!(row.consumed_at, Some(1200));
+    }
+
+    #[tokio::test]
+    async fn approving_or_denying_an_unknown_user_code_reports_it() {
+        let (s, _tmp) = store().await;
+        assert!(
+            !s.approve_device_code("NOPE-NOPE", &Principal::User(1), 1000)
+                .await
+                .unwrap()
+        );
+        assert!(!s.deny_device_code("NOPE-NOPE", 1000).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn denial_and_poll_marking_are_recorded() {
+        let (s, _tmp) = store().await;
+        s.insert_device_code(b"d2", "AAAA-BBBB", 1000, 1600)
+            .await
+            .unwrap();
+        s.mark_device_polled(b"d2", 1050).await.unwrap();
+        assert_eq!(
+            s.get_device_code(b"d2")
+                .await
+                .unwrap()
+                .unwrap()
+                .last_polled_at,
+            Some(1050)
+        );
+        assert!(s.deny_device_code("AAAA-BBBB", 1060).await.unwrap());
+        assert_eq!(
+            s.get_device_code(b"d2").await.unwrap().unwrap().denied_at,
+            Some(1060)
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_device_codes_are_purged() {
+        let (s, _tmp) = store().await;
+        s.insert_device_code(b"old", "OLDC-ODEE", 100, 200)
+            .await
+            .unwrap();
+        s.insert_device_code(b"new", "NEWC-ODEE", 1000, 1600)
+            .await
+            .unwrap();
+        s.purge_expired_device_codes(1000).await.unwrap();
+        assert!(s.get_device_code(b"old").await.unwrap().is_none());
+        assert!(s.get_device_code(b"new").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_revoked_token_is_still_findable_for_reuse_detection() {
+        let (s, _tmp) = store().await;
+        let t = generate(TokenKind::Refresh);
+        s.insert_token(
+            "r1",
+            TokenKind::Refresh,
+            &Principal::User(1),
+            &t.hash,
+            None,
+            Some("chain-a"),
+            None,
+            1000,
+        )
+        .await
+        .unwrap();
+        s.revoke_token("r1", 1100).await.unwrap();
+
+        // The ordinary lookup hides it...
+        assert!(s.lookup_token(&t.hash, 1200).await.unwrap().is_none());
+        // ...but reuse detection needs to tell "revoked" from "never existed".
+        let found = s
+            .lookup_token_including_revoked(&t.hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "r1");
+        assert_eq!(found.chain_id.as_deref(), Some("chain-a"));
+        assert!(found.revoked_at.is_some());
+        assert!(
+            s.lookup_token_including_revoked(b"never")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_chain_takes_every_token_in_it() {
+        let (s, _tmp) = store().await;
+        let (a, b, other) = (
+            generate(TokenKind::Access),
+            generate(TokenKind::Refresh),
+            generate(TokenKind::Access),
+        );
+        for (id, kind, tok, chain) in [
+            ("a", TokenKind::Access, &a, "chain-a"),
+            ("b", TokenKind::Refresh, &b, "chain-a"),
+            ("c", TokenKind::Access, &other, "chain-b"),
+        ] {
+            s.insert_token(
+                id,
+                kind,
+                &Principal::User(1),
+                &tok.hash,
+                None,
+                Some(chain),
+                None,
+                1000,
+            )
+            .await
+            .unwrap();
+        }
+        s.revoke_chain("chain-a", 2000).await.unwrap();
+        assert!(s.lookup_token(&a.hash, 2001).await.unwrap().is_none());
+        assert!(s.lookup_token(&b.hash, 2001).await.unwrap().is_none());
+        assert!(s.lookup_token(&other.hash, 2001).await.unwrap().is_some());
     }
 }
