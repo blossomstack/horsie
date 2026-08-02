@@ -11,7 +11,9 @@ mod throttle;
 mod token;
 
 pub use service::{
-    ADMIN_USERNAME, AuthDeps, AuthService, INITIAL_PASSWORD_FILE, LoginError, VerifiedToken,
+    ACCESS_TOKEN_TTL_SECS, ADMIN_USERNAME, AuthDeps, AuthService, DEVICE_CODE_TTL_SECS,
+    DEVICE_POLL_INTERVAL_SECS, DeviceAuthorization, DeviceError, INITIAL_PASSWORD_FILE,
+    IssuedTokens, LoginError, USER_CODE_ALPHABET, VerifiedToken,
 };
 pub use store::{AuthStore, DeviceCodeRow, RawTokenRow, TokenRow, UserRow};
 pub use throttle::Throttle;
