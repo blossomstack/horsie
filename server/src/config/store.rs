@@ -223,7 +223,7 @@ impl ConfigStore for DbConfigStore {
                     ));
                 }
                 sqlx::query(
-                    "INSERT INTO models (alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO models (alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(alias)
                 .bind(&m.provider)
@@ -233,6 +233,7 @@ impl ConfigStore for DbConfigStore {
                 .bind(encode_efforts(m.thinking_efforts.as_ref()))
                 .bind(m.thinking_effort.clone())
                 .bind(m.thinking_dialect.clone())
+                .bind(i64::from(m.forced_tools_disable_thinking.unwrap_or(false)))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -302,6 +303,7 @@ struct ModelRow {
     thinking_efforts: Option<String>,
     thinking_effort: Option<String>,
     thinking_dialect: Option<String>,
+    forced_tools_disable_thinking: bool,
 }
 
 fn default_context_window(model_id: &str) -> Option<u32> {
@@ -311,7 +313,7 @@ fn default_context_window(model_id: &str) -> Option<u32> {
         ("gpt-4.1", 1_000_000),
         ("o1", 200_000),
         ("o3", 200_000),
-        ("deepseek", 128_000),
+        ("deepseek", 1_048_576),
     ];
     TABLE
         .iter()
@@ -349,12 +351,16 @@ fn build_registry(providers: &[ProviderRow], models: &[ModelRow]) -> Result<Regi
                 p.keep_thinking_signature,
                 dialect,
             )?,
+            // Only the OpenAI wire takes the forced-tools flag: Anthropic
+            // accepts a pinned tool_choice with thinking enabled, so there is
+            // nothing to reconcile there.
             "openai" => build_openai(
                 p.base_url.as_deref(),
                 p.api_key.as_deref(),
                 &m.model_id,
                 max_tokens,
                 dialect,
+                m.forced_tools_disable_thinking,
             )?,
             other => {
                 return Err(format!(
@@ -402,6 +408,7 @@ fn build_openai(
     model_id: &str,
     max_tokens: Option<u32>,
     thinking_dialect: ThinkingDialect,
+    forced_tools_disable_thinking: bool,
 ) -> Result<Arc<dyn LlmProvider>, String> {
     let key: Option<Secret> = match api_key {
         Some(k) if !k.is_empty() => Some(Secret::from(k)),
@@ -415,7 +422,8 @@ fn build_openai(
     p = p
         .with_model(model_id)
         .with_max_tokens(max_tokens)
-        .with_thinking_dialect(thinking_dialect);
+        .with_thinking_dialect(thinking_dialect)
+        .with_forced_tools_disable_thinking(forced_tools_disable_thinking);
     if let Some(u) = base_url {
         p = p.with_base_url(u);
     }
@@ -471,6 +479,7 @@ fn model_view(r: &ModelRow) -> ModelView {
         thinking_efforts: decode_efforts(r.thinking_efforts.as_deref()),
         thinking_effort: r.thinking_effort.clone(),
         thinking_dialect: r.thinking_dialect.clone(),
+        forced_tools_disable_thinking: Some(r.forced_tools_disable_thinking),
     }
 }
 
@@ -527,13 +536,15 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     let rows = sqlx::query(
-        "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect FROM models ORDER BY alias",
+        "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking FROM models ORDER BY alias",
     )
     .fetch_all(ex)
     .await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ModelRow {
+            forced_tools_disable_thinking: r.try_get::<i64, _>("forced_tools_disable_thinking")?
+                != 0,
             alias: r.try_get("alias")?,
             provider: r.try_get("provider")?,
             model_id: r.try_get("model_id")?,
@@ -590,6 +601,45 @@ mod tests {
         .unwrap()
     }
 
+    /// The flag has to survive the save→read→build round trip, because it is
+    /// what keeps a forced-handoff agent from 400ing on DeepSeek.
+    #[tokio::test]
+    async fn forced_tools_flag_persists_through_a_settings_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await.store;
+
+        store
+            .update(SettingsUpdate {
+                providers: Some(vec![ProviderInput {
+                    name: "deepseek".into(),
+                    kind: "openai".into(),
+                    base_url: Some("https://api.deepseek.com".into()),
+                    api_key: Some("k".into()),
+                    keep_thinking_signature: None,
+                }]),
+                models: Some(vec![ModelInput {
+                    alias: "ds".into(),
+                    provider: "deepseek".into(),
+                    model_id: "deepseek-v4-flash".into(),
+                    max_tokens: Some(393_216),
+                    context_window: None,
+                    thinking_efforts: Some(vec!["none".into(), "high".into()]),
+                    thinking_effort: Some("high".into()),
+                    thinking_dialect: Some("openai_effort".into()),
+                    forced_tools_disable_thinking: Some(true),
+                }]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update succeeds");
+
+        let view = store.view().await.expect("view");
+        let m = view.models.iter().find(|m| m.alias == "ds").expect("model");
+        assert_eq!(m.forced_tools_disable_thinking, Some(true));
+        // The built-in default for a "deepseek" model id is the real window.
+        assert_eq!(m.context_window, Some(1_048_576));
+    }
+
     fn provider(name: &str, key: Option<&str>) -> ProviderInput {
         ProviderInput {
             name: name.into(),
@@ -610,6 +660,7 @@ mod tests {
             thinking_efforts: None,
             thinking_effort: None,
             thinking_dialect: None,
+            forced_tools_disable_thinking: None,
         }
     }
 
@@ -649,6 +700,7 @@ mod tests {
                         thinking_efforts: None,
                         thinking_effort: None,
                         thinking_dialect: None,
+                        forced_tools_disable_thinking: None,
                     },
                     ModelInput {
                         alias: "custom".into(),
@@ -659,6 +711,7 @@ mod tests {
                         thinking_efforts: None,
                         thinking_effort: None,
                         thinking_dialect: None,
+                        forced_tools_disable_thinking: None,
                     },
                 ]),
                 default_vendor: None,

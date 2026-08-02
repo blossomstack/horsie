@@ -36,6 +36,9 @@ struct ModelView {
     thinking_efforts: Option<Vec<String>>,
     /// Default applied when a session does not choose one.
     thinking_effort: Option<String>,
+    /// This backend rejects a pinned `tool_choice` while thinking is enabled,
+    /// so thinking is disabled for those requests. Absent means false.
+    forced_tools_disable_thinking: Option<bool>,
     /// Wire encoding for this model's thinking control.
     thinking_dialect: Option<String>,
 }
@@ -115,6 +118,9 @@ struct ModelInput {
     thinking_efforts: Option<Vec<String>>,
     thinking_effort: Option<String>,
     thinking_dialect: Option<String>,
+    /// This backend rejects a pinned `tool_choice` while thinking is enabled,
+    /// so thinking is disabled for those requests. Absent means false.
+    forced_tools_disable_thinking: Option<bool>,
 }
 
 /// Replace the runtime-editable settings. Each present field fully replaces
