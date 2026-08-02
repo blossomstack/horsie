@@ -1304,7 +1304,9 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(true);
                 CommandEffect::stop()
             }
-            SessionCommand::AgentOutcome(outcome) => self.on_agent_outcome(state, outcome, ctx).await,
+            SessionCommand::AgentOutcome(outcome) => {
+                self.on_agent_outcome(state, outcome, ctx).await
+            }
             SessionCommand::SubAgentTree { reply } => {
                 let tree = state
                     .subagents
@@ -1861,7 +1863,10 @@ mod tests {
             },
             queued("m2", "queued while running"),
         ];
-        let bytes: Vec<Vec<u8>> = prior.iter().map(|e| serde_json::to_vec(e).unwrap()).collect();
+        let bytes: Vec<Vec<u8>> = prior
+            .iter()
+            .map(|e| serde_json::to_vec(e).unwrap())
+            .collect();
         journal
             .persist(&SessionActor::persistence_id_for(id), &bytes)
             .await
@@ -2152,7 +2157,10 @@ mod tests {
 
     /// Entry count of the session's own journal (`session/<id>`), not the
     /// agent's.
-    async fn session_journal_len(journal: &Arc<dyn horsie_actor::Journal>, session_id: Uuid) -> u64 {
+    async fn session_journal_len(
+        journal: &Arc<dyn horsie_actor::Journal>,
+        session_id: Uuid,
+    ) -> u64 {
         use futures_util::StreamExt;
         let pid = SessionActor::persistence_id_for(session_id);
         let mut count = 0u64;
@@ -2332,8 +2340,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_zero_subagent_cap_hides_the_spawn_tools() {
-        let (f, session, id, _journal) =
-            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let mut settings = actor_spec_fixture().agent;
         settings.max_concurrent_subagents = Some(0);
         let provider = SessionContextProvider {
@@ -2594,8 +2601,7 @@ mod tests {
         // boundary delivers it.
         let p = Uuid::new_v4();
         let c = Uuid::new_v4();
-        let (_f, session, id, journal) =
-            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let pid = SessionActor::persistence_id_for(id);
         let events: Vec<Vec<u8>> = [
             SessionDomainEvent::SubAgentSpawned {

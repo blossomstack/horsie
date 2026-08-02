@@ -82,10 +82,16 @@ pub struct SubAgentTree {
 pub fn notification_text(label: &str, output: Option<&str>, error: Option<&str>) -> String {
     match (output, error) {
         (Some(output), _) => {
-            format!("[subagent \"{label}\" completed]\n\n{}", truncate_result(output))
+            format!(
+                "[subagent \"{label}\" completed]\n\n{}",
+                truncate_result(output)
+            )
         }
         (None, Some(error)) => {
-            format!("[subagent \"{label}\" failed]\n\n{}", truncate_result(error))
+            format!(
+                "[subagent \"{label}\" failed]\n\n{}",
+                truncate_result(error)
+            )
         }
         (None, None) => format!("[subagent \"{label}\" completed]"),
     }
