@@ -1494,6 +1494,7 @@ dependencies = [
  "horsie-runtime-client",
  "horsie-runtime-vendor",
  "horsie-supervisor",
+ "horsie-support",
  "horsie-workflow",
  "reqwest 0.12.28",
  "reqwest-eventsource",
@@ -1624,6 +1625,7 @@ dependencies = [
  "hackamore-agent",
  "horsie-models",
  "horsie-runtime-vendor",
+ "horsie-support",
  "libc",
  "nono",
  "regex",
@@ -1663,6 +1665,7 @@ dependencies = [
  "horsie-models",
  "horsie-runtime-client",
  "horsie-server",
+ "horsie-support",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
@@ -1689,6 +1692,7 @@ dependencies = [
  "horsie-openai",
  "horsie-runtime-client",
  "horsie-runtime-vendor",
+ "horsie-support",
  "horsie-workflow",
  "hyper",
  "hyper-util",
@@ -1735,6 +1739,17 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "horsie-support"
+version = "0.1.6"
+dependencies = [
+ "horsie-models",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

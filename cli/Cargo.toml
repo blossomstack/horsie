@@ -20,6 +20,7 @@ horsie-runtime-client = { version = "0.1.6", path = "../runtime-client" }
 horsie-workflow = { version = "0.1.6", path = "../workflow" }
 horsie-supervisor = { version = "0.1.6", path = "../supervisor" }
 horsie-models = { version = "0.1.6", path = "../models" }
+horsie-support = { version = "0.1.6", path = "../support", features = ["git"] }
 clap            = { version = "4", features = ["derive"] }
 serde           = { workspace = true }
 serde_json      = { workspace = true }

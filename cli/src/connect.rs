@@ -104,6 +104,9 @@ pub fn plugins_summary(plugins_dir: &Path, count: usize) -> String {
 /// The resolved host plugin library served to every runtime this agent spawns.
 pub struct PluginLibrary {
     pub dir: PathBuf,
+    /// Root of the clones `dir`'s symlinks point into; granted to the sandbox
+    /// alongside the library itself.
+    pub sources: Option<PathBuf>,
     pub hook_path: Vec<PathBuf>,
 }
 
@@ -211,7 +214,7 @@ pub async fn run(
         ),
     });
     if let Some(p) = &plugins {
-        agent = agent.with_host_library(p.dir.clone(), p.hook_path.clone());
+        agent = agent.with_host_library(p.dir.clone(), p.sources.clone(), p.hook_path.clone());
     }
 
     println!("{}", connection_summary(server, vendor_name, &normalized));

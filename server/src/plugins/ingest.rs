@@ -19,14 +19,6 @@ pub struct Ingested {
     pub hash: String,
 }
 
-struct PluginInfo {
-    name: Option<String>,
-    version: Option<String>,
-    description: Option<String>,
-    skill_count: u32,
-    has_hooks: bool,
-}
-
 /// Clone `url` (optionally at `git_ref`), validate it is a plugin, and pack it.
 /// Synchronous (shells `git`, walks the fs); callers run it on a blocking task.
 pub fn ingest_git(url: &str, git_ref: Option<&str>) -> Result<Ingested, String> {
@@ -52,70 +44,28 @@ pub fn ingest_git(url: &str, git_ref: Option<&str>) -> Result<Ingested, String> 
         ));
     }
 
-    let info = inspect_plugin_dir(&dest)?;
-    if info.skill_count == 0 {
-        return Err("not a plugin bundle: no SKILL.md found".to_string());
+    let root = horsie_support::plugin::PluginRoot::inspect(&dest)?;
+    if !root.is_installable() {
+        return Err(format!("not a plugin bundle: {}", root.rejection()));
     }
-    let name = info.name.clone().unwrap_or_else(|| repo_basename(url));
-    let version = info.version.clone().or_else(|| git_head_sha(&dest));
+    let name = root.name(&repo_basename(url));
+    let version = root
+        .version()
+        .map(str::to_string)
+        .or_else(|| horsie_support::git::head_sha(&dest));
+    let description = root.description().map(str::to_string);
+    let skill_count = u32::try_from(root.skill_dirs.len()).unwrap_or(u32::MAX);
+    let has_hooks = dest.join("hooks").join("hooks.json").is_file();
     let zip_bytes = zip_dir(&dest)?;
     let hash = sha256_hex(&zip_bytes);
     Ok(Ingested {
         name,
         version,
-        description: info.description,
-        skill_count: info.skill_count,
-        has_hooks: info.has_hooks,
-        zip_bytes,
-        hash,
-    })
-}
-
-/// Read `.claude-plugin/plugin.json` (if any), count `<skills-loc>/*/SKILL.md`,
-/// and detect a `SessionStart` hook. Honors a manifest `skills` override
-/// (string or array), matching the shared-plugins discovery convention.
-fn inspect_plugin_dir(root: &Path) -> Result<PluginInfo, String> {
-    let manifest_path = root.join(".claude-plugin").join("plugin.json");
-    let manifest: Option<serde_json::Value> = if manifest_path.is_file() {
-        let txt = std::fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
-        Some(serde_json::from_str(&txt).map_err(|e| format!("plugin.json: {e}"))?)
-    } else {
-        None
-    };
-    let field = |k: &str| {
-        manifest
-            .as_ref()
-            .and_then(|m| m.get(k))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-    };
-    let locations: Vec<String> = match manifest.as_ref().and_then(|m| m.get("skills")) {
-        Some(serde_json::Value::String(s)) => vec![s.clone()],
-        Some(serde_json::Value::Array(a)) => a
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        _ => vec!["skills".to_string()],
-    };
-    let mut skill_count = 0u32;
-    for loc in &locations {
-        if let Ok(entries) = std::fs::read_dir(root.join(loc)) {
-            for entry in entries.flatten() {
-                if entry.path().join("SKILL.md").is_file() {
-                    skill_count += 1;
-                }
-            }
-        }
-    }
-    let has_hooks = std::fs::read_to_string(root.join("hooks").join("hooks.json"))
-        .map(|c| c.contains("SessionStart"))
-        .unwrap_or(false);
-    Ok(PluginInfo {
-        name: field("name"),
-        version: field("version"),
-        description: field("description"),
+        description,
         skill_count,
         has_hooks,
+        zip_bytes,
+        hash,
     })
 }
 
@@ -165,19 +115,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
-}
-
-fn git_head_sha(dir: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn repo_basename(url: &str) -> String {
@@ -231,10 +168,83 @@ mod tests {
     fn inspect_reads_manifest_and_counts_skills() {
         let tmp = tempfile::tempdir().unwrap();
         write_plugin_tree(tmp.path());
-        let info = inspect_plugin_dir(tmp.path()).unwrap();
-        assert_eq!(info.name.as_deref(), Some("demo"));
-        assert_eq!(info.skill_count, 2);
-        assert!(info.has_hooks);
+        let root = horsie_support::plugin::PluginRoot::inspect(tmp.path()).unwrap();
+        assert_eq!(root.name("fallback"), "demo");
+        assert_eq!(root.skill_dirs.len(), 2);
+        assert!(root.is_installable());
+    }
+
+    /// `has_hooks` used to be a substring match for `"SessionStart"` in the raw
+    /// manifest, so it reported `false` for every plugin whose hooks are
+    /// `PreToolUse`-only — wrong for a field the UI renders as a generic badge.
+    #[test]
+    fn has_hooks_covers_non_session_start_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("src");
+        std::fs::create_dir_all(repo.join("skills/a")).unwrap();
+        std::fs::write(repo.join("skills/a/SKILL.md"), "---\nname: a\n---\nb").unwrap();
+        std::fs::create_dir_all(repo.join("hooks")).unwrap();
+        std::fs::write(
+            repo.join("hooks/hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[]}]}}"#,
+        )
+        .unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+
+        let ing = ingest_git(&format!("file://{}", repo.display()), None).unwrap();
+        assert!(ing.has_hooks, "PreToolUse-only hooks must count as hooks");
+    }
+
+    /// A repo whose skills live where the manifest says, not where convention
+    /// says — the shape that used to be rejected outright.
+    #[test]
+    fn manifest_declared_skills_root_is_ingested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("src");
+        let cp = repo.join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("plugin.json"),
+            r#"{"name":"impeccable","version":"4.0.4","skills":"./.claude/skills/"}"#,
+        )
+        .unwrap();
+        let s = repo.join(".claude/skills/impeccable");
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("SKILL.md"), "---\nname: impeccable\n---\nb").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+
+        let ing = ingest_git(&format!("file://{}", repo.display()), None).unwrap();
+        assert_eq!(ing.name, "impeccable");
+        assert_eq!(ing.skill_count, 1);
+    }
+
+    #[test]
+    fn a_repo_with_no_skills_is_rejected_with_where_it_looked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("src");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("README.md"), "hi").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+
+        // `.err().unwrap()` rather than `.unwrap_err()`: `Ingested` holds the
+        // zip bytes and deliberately isn't `Debug`.
+        let err = ingest_git(&format!("file://{}", repo.display()), None)
+            .err()
+            .unwrap();
+        assert!(err.contains("SKILL.md"), "err: {err}");
+        assert!(err.contains("skills"), "must name where it looked: {err}");
     }
 
     #[test]

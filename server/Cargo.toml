@@ -12,6 +12,7 @@ test-util = ["horsie-runtime-client/test-util"]
 
 [dependencies]
 horsie-models          = { path = "../models" }
+horsie-support         = { path = "../support", features = ["git"] }
 horsie-actor           = { path = "../actor", features = ["file-journal"] }
 horsie-agentcore       = { path = "../agentcore" }
 horsie-anthropic       = { path = "../providers/anthropic" }

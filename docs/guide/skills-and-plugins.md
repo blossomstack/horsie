@@ -56,6 +56,28 @@ Every session on that runtime then sees the library's skills, and plugin
 `SessionStart` hooks run on your machine when a session starts. Installs and
 updates are picked up on the next session scan — no reconnect needed.
 
+### Where horsie looks for skills
+
+horsie reads the repository's own plugin packaging rather than guessing:
+
+- `.claude-plugin/plugin.json` — its `skills` field (a path or a list of paths)
+  says where the skills live; without it, the conventional `skills/` directory
+  is used.
+- `.claude-plugin/marketplace.json` — when a repository publishes its plugin
+  from a subdirectory, this says which one.
+
+A repository whose marketplace lists *several* plugins cannot be installed by
+URL alone, because there is no way to tell which one you meant. Install the
+plugin from its own repository instead; the error lists the available names.
+
+### How the library is stored
+
+Installed plugins are symlinks into a shared clone under `<data-dir>/sources`,
+one clone per repository and ref. So `horsie plugin update` is a fast-forward
+pull rather than a fresh clone, and two plugins published from one repository
+share a single working copy. `horsie plugin remove` deletes the link and drops
+the clone once nothing else points at it.
+
 This is all-or-none: the whole library applies to every session on the runtime,
 independently of the server's bundle library (the Skills page remains
 velos-only).

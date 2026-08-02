@@ -32,68 +32,40 @@ fn plugin_dirs(plugins_dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Parse `<plugin>/.claude-plugin/plugin.json`, if present and valid.
-fn read_manifest(plugin_root: &Path) -> Option<Value> {
-    let path = plugin_root.join(".claude-plugin").join("plugin.json");
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-/// The plugin's display name: manifest `name`, else the directory name.
-fn plugin_name(plugin_root: &Path, manifest: Option<&Value>) -> String {
-    manifest
-        .and_then(|m| m.get("name"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            plugin_root
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        })
-}
-
-/// Skill-directory roots for a plugin: manifest `skills` override (string or array),
-/// else the default `skills/`.
-fn skills_locations(plugin_root: &Path, manifest: Option<&Value>) -> Vec<PathBuf> {
-    match manifest.and_then(|m| m.get("skills")) {
-        Some(Value::String(s)) => vec![plugin_root.join(s)],
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(Value::as_str)
-            .map(|s| plugin_root.join(s))
-            .collect(),
-        _ => vec![plugin_root.join("skills")],
-    }
-}
-
 /// Enumerate every installed plugin's skills. `rel_dir` is each skill's directory
 /// relative to `plugins_dir` so the agent can read sibling resources via the
 /// filesystem tools against `horsie_shared`.
 pub fn discover_skills(plugins_dir: &Path) -> Vec<PluginSkill> {
     let mut out = Vec::new();
     for plugin_root in plugin_dirs(plugins_dir) {
-        let manifest = read_manifest(&plugin_root);
-        let name = plugin_name(&plugin_root, manifest.as_ref());
-        for loc in skills_locations(&plugin_root, manifest.as_ref()) {
-            let pattern = format!("{}/*/SKILL.md", loc.display());
-            let Ok(paths) = glob::glob(&pattern) else {
+        // Best-effort: a plugin with a malformed manifest contributes nothing
+        // rather than failing the whole scan.
+        let root = match horsie_support::plugin::PluginRoot::inspect(&plugin_root) {
+            Ok(root) => root,
+            Err(e) => {
+                tracing::warn!(
+                    plugin = %plugin_root.display(),
+                    error = %e,
+                    "skipping plugin with unreadable manifest"
+                );
+                continue;
+            }
+        };
+        let fallback = plugin_root
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = root.name(&fallback);
+        for dir in &root.skill_dirs {
+            let Ok(rel) = dir.strip_prefix(plugins_dir) else {
                 continue;
             };
-            for skill_md in paths.flatten() {
-                let Some(dir) = skill_md.parent() else {
-                    continue;
-                };
-                let Ok(rel) = dir.strip_prefix(plugins_dir) else {
-                    continue;
-                };
-                if let Ok(content) = std::fs::read_to_string(&skill_md) {
-                    out.push(PluginSkill {
-                        plugin: name.clone(),
-                        rel_dir: rel.to_string_lossy().into_owned(),
-                        content,
-                    });
-                }
+            if let Ok(content) = std::fs::read_to_string(dir.join("SKILL.md")) {
+                out.push(PluginSkill {
+                    plugin: name.clone(),
+                    rel_dir: rel.to_string_lossy().into_owned(),
+                    content,
+                });
             }
         }
     }
@@ -293,6 +265,27 @@ mod tests {
         assert_eq!(skills.len(), 2);
         assert_eq!(skills[0].rel_dir, "p/a/skills/one");
         assert_eq!(skills[1].rel_dir, "p/b/skills/two");
+    }
+
+    /// The CLI installs plugins as symlinks into a shared clone. Discovery must
+    /// follow the link but keep `rel_dir` relative to the library root — i.e.
+    /// nothing in this path may canonicalise.
+    #[test]
+    #[cfg(unix)]
+    fn discovers_skills_through_a_symlinked_plugin_dir() {
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("sources/abc/plugin");
+        write(
+            &real.join("skills/impeccable/SKILL.md"),
+            "---\nname: impeccable\ndescription: d\n---\nbody",
+        );
+        let library = dir.path().join("plugins");
+        fs::create_dir_all(&library).unwrap();
+        std::os::unix::fs::symlink(&real, library.join("impeccable")).unwrap();
+
+        let skills = discover_skills(&library);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].rel_dir, "impeccable/skills/impeccable");
     }
 
     #[test]

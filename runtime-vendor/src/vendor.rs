@@ -132,6 +132,10 @@ pub struct RuntimeVendor {
     /// The host plugin library this agent serves, resolved agent-side by the
     /// CLI. Never sent by the server — it is a property of this machine.
     host_library: Option<PathBuf>,
+    /// Root of the shared clones the host library's symlinks point into. The
+    /// sandbox resolves through symlinks, so this must be granted alongside the
+    /// library itself or the runtime cannot read any installed plugin.
+    host_sources: Option<PathBuf>,
     hook_path: Vec<PathBuf>,
     /// How this agent's runtimes fetch server-managed bundles: the base URL
     /// that reaches the server from where they run, the directory they unpack
@@ -171,6 +175,7 @@ impl RuntimeVendor {
             state_dir,
             sandbox: false,
             host_library: None,
+            host_sources: None,
             hook_path: Vec::new(),
             bundles: None,
             backoff: Backoff::default(),
@@ -202,9 +207,18 @@ impl RuntimeVendor {
     }
 
     /// Serve a host plugin library to every runtime this agent spawns.
+    ///
+    /// `sources` is the root the library's symlinks point into; both it and the
+    /// library are added to the sandbox capability spec this agent writes.
     #[must_use]
-    pub fn with_host_library(mut self, dir: PathBuf, hook_path: Vec<PathBuf>) -> Self {
+    pub fn with_host_library(
+        mut self,
+        dir: PathBuf,
+        sources: Option<PathBuf>,
+        hook_path: Vec<PathBuf>,
+    ) -> Self {
         self.host_library = Some(dir);
+        self.host_sources = sources;
         self.hook_path = hook_path;
         self
     }
@@ -493,17 +507,7 @@ impl RuntimeVendor {
 
         // The sandbox spec arrives inline; a provider needs it as a file.
         let caps_file = match (&request.sandbox_capabilities, self.sandbox) {
-            (Some(spec), true) => {
-                let path = self.caps_path(runtime_id);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("create runtime state dir: {e}"))?;
-                }
-                let bytes = serde_json::to_vec_pretty(spec)
-                    .map_err(|e| format!("encode capability spec: {e}"))?;
-                std::fs::write(&path, bytes).map_err(|e| format!("write capability file: {e}"))?;
-                Some(path)
-            }
+            (Some(spec), true) => Some(self.write_caps_file(runtime_id, spec)?),
             (None, _) | (Some(_), false) => None,
         };
 
@@ -582,6 +586,36 @@ impl RuntimeVendor {
             .map(|r| r.transport.clone())
     }
 
+    /// Persist the effective capability spec for a runtime and return its path.
+    ///
+    /// The server authors the spec but cannot know this machine's plugin
+    /// library, so the grants for it are injected here. Without them a
+    /// sandboxed runtime is handed a `--plugins-dir` it has no capability to
+    /// read — the library is agent-side knowledge, like the library path itself.
+    fn write_caps_file(
+        &self,
+        runtime_id: &str,
+        spec: &horsie_models::capabilities::CapabilitySpec,
+    ) -> Result<PathBuf, String> {
+        let mut spec = spec.clone();
+        let sources: Vec<PathBuf> = self.host_sources.iter().cloned().collect();
+        spec.grants
+            .extend(horsie_support::plugin::grants::plugin_library_grants(
+                self.host_library.as_deref(),
+                &sources,
+                &self.hook_path,
+            ));
+        let path = self.caps_path(runtime_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create runtime state dir: {e}"))?;
+        }
+        let bytes =
+            serde_json::to_vec_pretty(&spec).map_err(|e| format!("encode capability spec: {e}"))?;
+        std::fs::write(&path, bytes).map_err(|e| format!("write capability file: {e}"))?;
+        Ok(path)
+    }
+
     /// Where this agent writes a runtime's sandbox capability file. Public so
     /// the process provider can be pointed at the same path.
     #[must_use]
@@ -646,6 +680,100 @@ mod tests {
             std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(60),
         ))
+    }
+
+    /// The server authors the capability spec and cannot know this machine's
+    /// plugin library, so the agent must inject the grants for it. Without this
+    /// a sandboxed runtime is handed a `--plugins-dir` it has no capability to
+    /// read — and since installed plugins are symlinks into `sources/`, the
+    /// target root has to be granted too or every read still fails.
+    #[test]
+    fn the_written_caps_file_grants_the_host_plugin_library_and_its_sources() {
+        use horsie_models::capabilities::{
+            BlockNetwork, CapabilitySpec, Grant, NetworkPolicy, WorkingDirGrant,
+        };
+
+        let state = tempfile::tempdir().expect("tempdir");
+        let agent = RuntimeVendor::new(
+            "test-vendor".to_string(),
+            false,
+            Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
+            Arc::new(ConnectedRuntimeRegistry::new()),
+            Arc::new(FixedWorkspaces::new(HashMap::new())),
+            state.path().to_path_buf(),
+        )
+        .with_host_library(
+            PathBuf::from("/data/plugins"),
+            Some(PathBuf::from("/data/sources")),
+            vec![PathBuf::from("/opt/node/bin")],
+        );
+
+        // A spec as the server would send it: no knowledge of this machine.
+        let spec = CapabilitySpec {
+            network: NetworkPolicy::Block(BlockNetwork {}),
+            grants: vec![Grant::WorkingDir(WorkingDirGrant {
+                access: horsie_models::capabilities::Access::ReadWrite,
+            })],
+            unsafe_seatbelt_rules: None,
+        };
+
+        let path = agent.write_caps_file("rt-1", &spec).expect("write caps");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read caps")).expect("parse caps");
+        // The grant union is fluorite-tagged: `{"type":"Dir","value":{"path":…}}`.
+        let granted: Vec<&str> = written["grants"]
+            .as_array()
+            .expect("grants array")
+            .iter()
+            .filter_map(|g| {
+                g.get("value")
+                    .and_then(|v| v.get("path"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect();
+
+        assert!(granted.contains(&"/data/plugins"), "granted: {granted:?}");
+        assert!(granted.contains(&"/data/sources"), "granted: {granted:?}");
+        assert!(granted.contains(&"/opt/node/bin"), "granted: {granted:?}");
+        // The server's own grants survive.
+        assert_eq!(
+            written["grants"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or_default(),
+            4
+        );
+    }
+
+    /// With no host library there is nothing to grant, and the server's spec is
+    /// written through untouched.
+    #[test]
+    fn the_written_caps_file_is_unchanged_without_a_host_library() {
+        use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
+
+        let state = tempfile::tempdir().expect("tempdir");
+        let agent = RuntimeVendor::new(
+            "test-vendor".to_string(),
+            false,
+            Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
+            Arc::new(ConnectedRuntimeRegistry::new()),
+            Arc::new(FixedWorkspaces::new(HashMap::new())),
+            state.path().to_path_buf(),
+        );
+        let spec = CapabilitySpec {
+            network: NetworkPolicy::Block(BlockNetwork {}),
+            grants: vec![],
+            unsafe_seatbelt_rules: None,
+        };
+        let path = agent.write_caps_file("rt-1", &spec).expect("write caps");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read caps")).expect("parse caps");
+        assert!(
+            written["grants"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or_default()
+        );
     }
 
     #[tokio::test]

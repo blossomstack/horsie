@@ -61,6 +61,8 @@ struct Daemon {
     default_caps: CapabilitySpec,
     /// Shared plugin library root (`horsie_shared`), `None` when none is installed.
     plugins_dir: Option<PathBuf>,
+    /// Root of the shared clones the library's symlinks point into.
+    sources_dir: PathBuf,
     /// Hook interpreter dirs, resolved once at startup (config override else `node`).
     hook_path: Vec<PathBuf>,
     /// Shared journal, used to replay a job's history for `logs`.
@@ -129,6 +131,9 @@ pub async fn serve(cfg: HorsieConfig) -> Result<(), CliError> {
         &cfg.storage.plugins_dir,
         cfg.runtime.hook_path.clone(),
     );
+    // Installed plugins are symlinks into this root; the sandbox resolves through
+    // symlinks, so the target must be granted too.
+    let sources_dir = cfg.storage.data_dir.join("sources");
 
     let sock = socket_path(&state_dir);
     // Remove a stale socket so bind() succeeds after an unclean shutdown.
@@ -142,6 +147,7 @@ pub async fn serve(cfg: HorsieConfig) -> Result<(), CliError> {
         supervisor,
         default_caps,
         plugins_dir,
+        sources_dir,
         hook_path,
         journal,
         started: Instant::now(),
@@ -191,6 +197,7 @@ async fn handle_conn(stream: UnixStream, daemon: Arc<Daemon>) {
                         .unwrap_or_else(|| daemon.default_caps.clone()),
                 ),
                 daemon.plugins_dir.as_deref(),
+                Some(&daemon.sources_dir),
                 &daemon.hook_path,
             ));
             // Derive a unique name per workspace path (server-side, the single place).
