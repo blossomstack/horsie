@@ -202,6 +202,24 @@ Landed on `feat/actor-lifecycle-redesign`, workspace green (`cargo fmt`, `clippy
 - **Agent-side gaps from Task 4**: `run_id` still needs to replace the internal staleness check, and the tool-call repair is still recomputed per turn rather than journaled once (`repair_unanswered_tool_calls` rename not yet applied).
 - **Vendor conformance against the real agent loop**: the four tests run against `FakeRuntimeVendor`. The per-id `lifecycle_locks` in `runtime-vendor/src/vendor.rs` are unexercised by them.
 
+## Status as of 2026-08-02
+
+Rebased onto `origin/main` (`5104fc8`), which is what let CI run on the PR at all — it had been `CONFLICTING`, so GitHub could not build a merge ref and no checks existed. The `session_actor.rs` conflict was #100's `last_error` clearing, kept on `TurnBegan`.
+
+Everything under "Still owed" above is now done:
+
+- **Task 7 remainder** — `QueuedMessage`, `SessionDetail.inbox` folded from the session journal, `InboxChanged` on the SSE union (one frame per command, carrying the whole queue), `SessionEvent::Asked` deleted, both TS trees regenerated.
+- **Task 8** — statuses reduced to the five that exist, `null` status renders as an em dash, the composer is live in every state but `Unrecoverable` (Stop sits *beside* Send while Running), the `askLocked` latch is gone, queued messages render as unread bubbles reconciled against this tab's optimistic echoes by server id, and `Unrecoverable` shows a terminal banner. Web e2e updated; 44 pass.
+- **Task 9** — queue-and-merge, crash-keeps-the-inbox, `Gone`-terminal vs `Unavailable`-retryable, and the idle clock through the full HTTP stack.
+- **Agent-side gaps** — `RunReport` carries a `run_id` and a superseded run's report is dropped; the tool-call repair is journaled at cancel and at recovery (`repair_unanswered_tool_calls` / `…_except`).
+- **Vendor conformance** — `runtime-vendor/tests/vendor_conformance.rs` drives the real `RuntimeVendor::run` over a real WebSocket; removing the per-id lock makes its fourth test fail, so `lifecycle_locks` is now genuinely exercised.
+- **Warts** — `RUNTIME_GONE_PREFIX` replaced by a typed `ContextError { message, terminal }` carried through `AgentOutcome::Failed`; stop/delete answer with their own `Ack {}`.
+
+### Still owed
+
+- Coverage the rewrite dropped: `drain()` and `PrepareOffload`'s refuse-if-running branch have no unit test, and `create_assembles_env_fresh_each_time` (Task 2 step 3) was never written.
+- `stopping_a_turn_cancels_the_in_flight_tool_call` is still `#[ignore]`d, and its comment still claims cancel is covered by a unit test that no longer exists. Un-ignoring it hangs: with `block_tool_calls`, the fake agent's sequential command loop cannot answer the `GetRuntime` that `cancel_run` issues before cancelling, so Stop waits on the session mailbox forever. The real agent dispatches per command and would answer — but `cancel_run` awaiting a vendor round-trip on the mailbox is the design smell to fix, most likely by cancelling only through a client the manager already holds.
+
 ## Self-review notes
 
 - Spec sections map to tasks: components/tiers → 2, 5; lifecycle invariants → 5, 6; state machine → 3; RuntimeManager → 2; vendor contract → 1; agent actor → 4; deletions → spread across 1, 3, 4, 5, 7; wire/client → 7, 8; testing → every task plus 9.
