@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1
 #
 # Container image for the horsie **session server** (`horsie-server`): the HTTP +
-# SSE API plus the bundled web UI. Pairs with docker/runtime.Dockerfile, which
-# builds the horsie-runtime image this server schedules onto velos workers.
+# SSE API plus the bundled web UI. It schedules nothing itself: runtime vendor
+# agents dial in and manage runtimes on its behalf. See
+# docker/velos-runtime.Dockerfile (the velos vendor agent) and
+# docker/runtime.Dockerfile (the sandbox that agent schedules).
 #
 # Build from the horsie workspace ROOT (the whole workspace is the build context):
 #   docker build -f docker/server.Dockerfile -t ghcr.io/blossomstack/horsie:latest .
 #
 # CI (.github/workflows/docker.yml) builds this multi-arch and publishes it to
-# GHCR alongside the runtime image.
+# GHCR alongside the runtime and velos vendor agent images.
 
 # ---- Stage 1: build the web UI (clients/web -> dist) -------------------------
 # The generated fluorite types are committed under clients/web/src/generated, so
@@ -50,9 +52,9 @@ USER horsie
 # /data holds the session journal + state (mount a volume here); config is
 # bind-mounted at /etc/horsie/config.json by the deploy stack.
 WORKDIR /data
-# 3789 = HTTP API + web UI; 3790 = the velos reverse-dial listener (containers
-# dial ws://<advertise_host>:3790). The stack publishes both.
-EXPOSE 3789 3790
+# 3789 is the only port: HTTP API, web UI, and the WebSocket routes agents and
+# clients dial. The reverse-dial listeners moved out with the vendor agents.
+EXPOSE 3789
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:3789/api/health || exit 1
 ENTRYPOINT ["horsie-server"]

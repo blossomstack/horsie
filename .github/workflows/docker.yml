@@ -1,9 +1,10 @@
 name: Docker
 
-# Builds and publishes the two horsie images to GitHub Container Registry on
+# Builds and publishes the three horsie images to GitHub Container Registry on
 # every push to main and every v* release tag:
-#   - ghcr.io/<owner>/horsie          (session server: `horsie serve` + web UI)
-#   - ghcr.io/<owner>/horsie-runtime  (remote runtime scheduled onto velos)
+#   - ghcr.io/<owner>/horsie                (session server: HTTP/SSE API + web UI)
+#   - ghcr.io/<owner>/horsie-runtime        (sandbox scheduled onto velos)
+#   - ghcr.io/<owner>/horsie-velos-runtime  (the vendor agent doing the scheduling)
 #
 # Mirrors the velos pipeline: auth via the workflow's OIDC-minted GITHUB_TOKEN
 # (no stored registry secret); OIDC also backs the keyless cosign signature and
@@ -26,7 +27,7 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  # PR gate: build both images (single-arch, no push) so a broken Dockerfile is
+  # PR gate: build every image (single-arch, no push) so a broken Dockerfile is
   # caught before merge. The publish jobs below are skipped on pull_request.
   validate:
     name: Validate build (${{ matrix.image }})
@@ -38,8 +39,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { image: horsie,         dockerfile: docker/server.Dockerfile }
-          - { image: horsie-runtime, dockerfile: docker/runtime.Dockerfile }
+          - { image: horsie,               dockerfile: docker/server.Dockerfile }
+          - { image: horsie-runtime,       dockerfile: docker/runtime.Dockerfile }
+          - { image: horsie-velos-runtime, dockerfile: docker/velos-runtime.Dockerfile }
     steps:
       - uses: actions/checkout@v7
       - name: Set up Docker Buildx
@@ -76,10 +78,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { key: server,  image: horsie,         dockerfile: docker/server.Dockerfile,  platform: linux/amd64, runner: ubuntu-latest }
-          - { key: server,  image: horsie,         dockerfile: docker/server.Dockerfile,  platform: linux/arm64, runner: ubuntu-24.04-arm }
-          - { key: runtime, image: horsie-runtime, dockerfile: docker/runtime.Dockerfile, platform: linux/amd64, runner: ubuntu-latest }
-          - { key: runtime, image: horsie-runtime, dockerfile: docker/runtime.Dockerfile, platform: linux/arm64, runner: ubuntu-24.04-arm }
+          - { key: server,  image: horsie,               dockerfile: docker/server.Dockerfile,        platform: linux/amd64, runner: ubuntu-latest }
+          - { key: server,  image: horsie,               dockerfile: docker/server.Dockerfile,        platform: linux/arm64, runner: ubuntu-24.04-arm }
+          - { key: runtime, image: horsie-runtime,       dockerfile: docker/runtime.Dockerfile,       platform: linux/amd64, runner: ubuntu-latest }
+          - { key: runtime, image: horsie-runtime,       dockerfile: docker/runtime.Dockerfile,       platform: linux/arm64, runner: ubuntu-24.04-arm }
+          - { key: velos,   image: horsie-velos-runtime, dockerfile: docker/velos-runtime.Dockerfile, platform: linux/amd64, runner: ubuntu-latest }
+          - { key: velos,   image: horsie-velos-runtime, dockerfile: docker/velos-runtime.Dockerfile, platform: linux/arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v7
 
@@ -115,9 +119,11 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          # `key` (server|runtime) — not `image` (horsie|horsie-runtime) — so the
-          # merge job's download glob can't cross-match (horsie is a prefix of
-          # horsie-runtime). Slashes in the platform would break the name.
+          # `key` (server|runtime|velos) — not `image` (horsie|horsie-runtime|
+          # horsie-velos-runtime) — so the merge job's download glob can't
+          # cross-match (horsie is a prefix of both others). Keys must stay
+          # mutually non-prefixing for the same reason. Slashes in the platform
+          # would break the name.
           name: digest-${{ matrix.key }}-${{ strategy.job-index }}
           path: /tmp/digests/*
           if-no-files-found: error
@@ -139,6 +145,7 @@ jobs:
         include:
           - { key: server,  image: horsie }
           - { key: runtime, image: horsie-runtime }
+          - { key: velos,   image: horsie-velos-runtime }
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4

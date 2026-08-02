@@ -1,9 +1,11 @@
 # Container image for the horsie **runtime** as a velos remote sandbox.
 #
-# The velos vendor schedules this image and overrides its command with the full
-# dial-back invocation:
+# The velos vendor agent (docker/velos-runtime.Dockerfile) schedules this image
+# and overrides its command with the full dial-back invocation:
 #   /bin/sh -c "mkdir -p /workspace/<name> && exec horsie-runtime \
-#       --endpoint ws://<server>:<port> --runtime-id <id> --workspace <name>=..."
+#       --endpoint ws://<agent-advertise>:<port> --runtime-id <id> --workspace <name>=..."
+# The endpoint is the *agent's* advertised listener, not the session server: the
+# server is never on the container's path.
 #
 # The container itself is the isolation boundary, so the runtime is built WITHOUT
 # the `sandbox` (nono) feature — no `--sandbox-caps` is ever passed.
@@ -11,7 +13,7 @@
 # Build from the horsie workspace ROOT (the whole workspace is the build context):
 #   docker build -f docker/runtime.Dockerfile -t ghcr.io/you/horsie-runtime:latest .
 #
-# Then point the vendor at it via config: `velos.image = "ghcr.io/you/horsie-runtime:latest"`.
+# Then point the agent at it: `horsie-velos-runtime --image ghcr.io/you/horsie-runtime:latest`.
 
 FROM rust:1-bookworm AS build
 WORKDIR /src
@@ -30,7 +32,7 @@ RUN apt-get update \
  && mkdir -p /workspace
 COPY --from=build /src/target/release/horsie-runtime /usr/local/bin/horsie-runtime
 WORKDIR /workspace
-# The runtime needs outbound reachability to the horsie server's advertised
-# reverse-dial address (velos gives containers outbound NAT). The vendor supplies
+# The runtime needs outbound reachability to the vendor agent's advertised
+# address (velos gives containers outbound NAT). The vendor supplies
 # the command; this entrypoint is just a sane default for manual runs.
 ENTRYPOINT ["horsie-runtime"]
