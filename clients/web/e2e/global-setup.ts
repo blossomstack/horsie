@@ -111,6 +111,9 @@ export default async function globalSetup(): Promise<void> {
         data_dir: path.join(tmpDir, "data"),
         plugins_dir: path.join(tmpDir, "plugins"),
       },
+      // The suite drives the API and the UI without signing in. Authentication
+      // has its own spec, which brings up its own server with it enabled.
+      auth: { enabled: false },
     }),
   );
 
