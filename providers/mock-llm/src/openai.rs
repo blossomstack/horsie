@@ -139,6 +139,33 @@ fn tool_call_chunks(
     out
 }
 
+/// Parallel tool use on the OpenAI wire: one assistant message whose
+/// `tool_calls` array carries every call, each at its own index.
+fn tool_calls_chunks(id: &str, calls: &[(String, serde_json::Value)]) -> Vec<(String, String)> {
+    let tool_calls: Vec<serde_json::Value> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (name, input))| {
+            serde_json::json!({
+                "index": index,
+                "id": format!("call_{}", uuid::Uuid::new_v4()),
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": serde_json::to_string(input).unwrap_or_default(),
+                }
+            })
+        })
+        .collect();
+    let mut out = vec![chunk(
+        id,
+        serde_json::json!({ "role": "assistant", "tool_calls": tool_calls }),
+        None,
+    )];
+    out.extend(final_chunk(id, "tool_calls", 10));
+    out
+}
+
 pub(crate) async fn handle_chat_completions(
     State(state): State<Arc<MockState>>,
     _headers: HeaderMap,
@@ -176,6 +203,7 @@ pub(crate) async fn handle_chat_completions(
         Some(MockResponse::ToolCall { name, input }) => {
             sse_from_pairs(tool_call_chunks(&id, &call_id, &name, &input))
         }
+        Some(MockResponse::ToolCalls { calls }) => sse_from_pairs(tool_calls_chunks(&id, &calls)),
         Some(MockResponse::ToolCallStream {
             name,
             id: tid,

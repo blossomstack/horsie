@@ -1,4 +1,5 @@
 
+import { PendingAskView } from './pendingAskView';
 import { QueuedMessage } from './queuedMessage';
 import { SessionStatusKind } from './sessionStatusKind';
 export interface SessionDetail {
@@ -8,9 +9,13 @@ export interface SessionDetail {
   createdAt: number;
   lastError?: string;
   /**
-   * The question the agent is awaiting an answer to (status AwaitingInput).
+   * The first question the agent is awaiting an answer to (status
    */
   pendingQuestion?: string;
+  /**
+   * Every question the agent is awaiting an answer to, oldest first. All of
+   */
+  pendingAsks: PendingAskView[];
   model: string;
   vendor: string;
   /**

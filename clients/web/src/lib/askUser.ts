@@ -1,4 +1,3 @@
-import type { RenderedMessage } from "../hooks/useSessionStream";
 
 /** The server's dedicated "ask the user" tool for sessions — kept in sync with
  * `ASK_USER_TOOL` in `server/src/sessions/ask_tool.rs`. */
@@ -33,18 +32,4 @@ export function pickedChoices(answer: string, choices: string[]): Set<string> {
   const head = answer.split("\n\n")[0] ?? "";
   const parts = new Set(head.split(", "));
   return new Set(choices.filter((c) => parts.has(c)));
-}
-
-/** The tool call id of the ask awaiting an answer, or null. `ask_user` is
- * terminal, so only the newest ask can be pending: an older one without a
- * result belongs to an abandoned turn and must stay read-only. */
-export function findPendingAsk(messages: RenderedMessage[]): string | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const calls = messages[i].toolCalls;
-    for (let j = calls.length - 1; j >= 0; j--) {
-      if (calls[j].name !== ASK_USER_TOOL) continue;
-      return calls[j].output === undefined ? calls[j].id : null;
-    }
-  }
-  return null;
 }

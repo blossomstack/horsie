@@ -194,6 +194,19 @@ function applyOptimisticTitle(client: QueryClient, id: string, text: string) {
   );
 }
 
+/** Answer a session's pending asks. All of them, in one request. */
+export function useAnswerAsks() {
+  return useMutation({
+    mutationFn: ({
+      id,
+      answers,
+    }: {
+      id: string;
+      answers: { toolCallId: string; text: string }[];
+    }) => api.sessions.answerAsks(id, answers),
+  });
+}
+
 export function useSendMessage() {
   const client = useQueryClient();
   return useMutation({

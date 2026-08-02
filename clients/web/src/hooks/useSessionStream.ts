@@ -7,6 +7,7 @@ import {
   type ContentPart,
   type HistoryPage,
   type Message,
+  type PendingAskView,
   type QueuedMessage,
   type SessionEvent,
   type TaskItem,
@@ -48,6 +49,9 @@ export interface SessionStream {
   orphanTools: RenderedToolCall[];
   usage: { input: number; output: number };
   liveStatus: SessionStatusKind | null;
+  /** The asks the live status says are waiting, or null when no status frame
+   * has arrived yet — in which case the session detail is the answer. */
+  livePendingAsks: PendingAskView[] | null;
   /** Incremented on every `StatusChanged` frame — including one that reports
    * the *same* status. The server reports without deduping, so this is how a
    * consumer observes "the session said something about its state" rather than
@@ -92,6 +96,7 @@ interface State {
   streaming: string;
   usage: { input: number; output: number };
   liveStatus: SessionStatusKind | null;
+  livePendingAsks: PendingAskView[] | null;
   statusSeq: number;
   statusReason: string | null;
   streamError: string | null;
@@ -112,6 +117,7 @@ const INITIAL: State = {
   streaming: "",
   usage: { input: 0, output: 0 },
   liveStatus: null,
+  livePendingAsks: null,
   statusSeq: 0,
   statusReason: null,
   streamError: null,
@@ -365,6 +371,7 @@ function reducer(state: State, action: Action): State {
           return {
             ...state,
             liveStatus: ev.value.status,
+            livePendingAsks: ev.value.pendingAsks,
             statusSeq: state.statusSeq + 1,
             statusReason: ev.value.reason ?? null,
             // A turn that has started supersedes the previous turn's error.
@@ -590,6 +597,7 @@ export function useSessionStream(sessionId: string | undefined): {
       orphanTools,
       usage: state.usage,
       liveStatus: state.liveStatus,
+      livePendingAsks: state.livePendingAsks,
       statusSeq: state.statusSeq,
       statusReason: state.statusReason,
       streamError: state.streamError,
