@@ -48,6 +48,9 @@ tempfile          = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tower    = { version = "0.4", features = ["util"] }
+# MockProvider/scripted completions for subagent routing tests; production
+# builds never see the testkit.
+horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -340,6 +340,7 @@ pub async fn get_history(
     };
     let page = ask(&state, |reply| SessionSupervisorCommand::History {
         id: id.clone(),
+        agent_id: None,
         query,
         reply,
     })

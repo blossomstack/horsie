@@ -86,10 +86,13 @@ pub enum SessionCommand {
     Subscribe {
         reply: oneshot::Sender<broadcast::Receiver<SessionFrame>>,
     },
-    /// Read a window of conversation history from the resident agent.
+    /// Read a window of conversation history from one of the session's
+    /// agents: `agent_id` absent or `"main"` for the primary agent, otherwise
+    /// a subagent id. `None` answers "no such agent".
     History {
+        agent_id: Option<String>,
         query: HistoryQuery,
-        reply: oneshot::Sender<AgentHistoryPage>,
+        reply: oneshot::Sender<Option<AgentHistoryPage>>,
     },
     /// Read this session's aggregated usage.
     UsageStats {
@@ -451,25 +454,6 @@ impl SessionActor {
         self.main_agent.as_ref()
     }
 
-    /// Read history from the resident agent's in-memory state. Touches no
-    /// journal directly and acquires no runtime, which is what makes opening a
-    /// session to read it free of sandbox cost.
-    async fn read_history(&self, query: HistoryQuery) -> AgentHistoryPage {
-        let empty = AgentHistoryPage {
-            messages: Vec::new(),
-            has_more: false,
-            tasks: None,
-            usage: None,
-        };
-        let Some(agent) = self.agent() else {
-            return empty;
-        };
-        agent
-            .ask(|reply| AgentCommand::GetHistory { query, reply })
-            .await
-            .unwrap_or(empty)
-    }
-
     /// Aggregated usage. Totals come from this session's own durable record;
     /// only the live context size is asked of the agent.
     async fn read_usage(&self, state: &SessionState) -> SessionUsageStats {
@@ -509,23 +493,27 @@ impl SessionActor {
     /// ending, a stop) — never on load, which is what keeps opening a session
     /// free of side effects.
     async fn drain(&mut self, state: &SessionState) -> Vec<SessionDomainEvent> {
-        if state.inbox.is_empty() || state.status == SessionStatus::Running {
+        // Owed subagent results ride every turn the main agent starts; with an
+        // empty inbox they can also *start* one, but only from Idle — never
+        // answering a pending ask, never chasing a failure.
+        let owed = state.subagents.owed_for(SubAgentParent::Main);
+        if state.inbox.is_empty() && (owed.is_empty() || state.status != SessionStatus::Idle) {
             return Vec::new();
         }
-        if matches!(state.status, SessionStatus::Unrecoverable { .. }) {
+        if matches!(
+            state.status,
+            SessionStatus::Running | SessionStatus::Unrecoverable { .. }
+        ) {
             return Vec::new();
         }
         let consumed: Vec<String> = state.inbox.iter().map(|m| m.id.clone()).collect();
+        let answering = state.pending_ask.clone();
         // One user message, not several: Anthropic requires alternating roles,
         // so consecutive user turns are not portable. Provenance survives in
         // the `MessageQueued` events.
-        let merged = state
-            .inbox
-            .iter()
-            .map(|m| m.text.as_str())
-            .collect::<Vec<_>>()
-            .join(MERGE_SEPARATOR);
-        let answering = state.pending_ask.clone();
+        let mut parts: Vec<&str> = state.inbox.iter().map(|m| m.text.as_str()).collect();
+        parts.extend(owed.iter().map(|(_, text)| text.as_str()));
+        let merged = parts.join(MERGE_SEPARATOR);
 
         if let Some(agent) = self.agent() {
             let cmd = match &answering {
@@ -538,10 +526,44 @@ impl SessionActor {
             let _ = agent.tell(cmd).await;
         }
         self.report(SessionStatus::Running).await;
-        vec![SessionDomainEvent::TurnBegan {
+        let mut events = vec![SessionDomainEvent::TurnBegan {
             consumed,
             answering,
-        }]
+        }];
+        events.extend(
+            owed.iter()
+                .map(|(child, _)| SessionDomainEvent::SubAgentNotified { id: *child }),
+        );
+        events
+    }
+
+    /// Wake every idle subagent parent whose children have results it has not
+    /// been sent. The main agent is deliberately excluded: its owed results
+    /// merge into its next turn inside `drain`.
+    async fn flush_owed(&mut self, state: &SessionState) -> Vec<SessionDomainEvent> {
+        let mut events = Vec::new();
+        for (parent_id, owed) in state.subagents.owed_by_sub_parent() {
+            if state.subagents.is_running(&parent_id) {
+                continue;
+            }
+            let Some(agent) = self.sub_agents.get(&parent_id).cloned() else {
+                continue;
+            };
+            let input = owed
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>()
+                .join(MERGE_SEPARATOR);
+            if agent.tell(AgentCommand::Run { input }).await.is_err() {
+                continue;
+            }
+            events.push(SessionDomainEvent::SubAgentRunning { id: parent_id });
+            events.extend(
+                owed.iter()
+                    .map(|(child, _)| SessionDomainEvent::SubAgentNotified { id: *child }),
+            );
+        }
+        events
     }
 
     async fn on_user_message(
@@ -587,6 +609,16 @@ impl SessionActor {
         state: &SessionState,
         outcome: AgentOutcome,
     ) -> CommandEffect<SessionDomainEvent> {
+        let outcome_session = match &outcome {
+            AgentOutcome::Concluded { session_id, .. }
+            | AgentOutcome::Asked { session_id, .. }
+            | AgentOutcome::Parked { session_id }
+            | AgentOutcome::Failed { session_id, .. }
+            | AgentOutcome::UsageRecorded { session_id, .. } => *session_id,
+        };
+        if outcome_session != self.id {
+            return self.on_sub_agent_outcome(state, outcome_session, outcome).await;
+        }
         // Usage is always recorded: the tokens were spent whatever became of
         // the turn that spent them.
         if let AgentOutcome::UsageRecorded { usage_total, .. } = outcome {
@@ -668,6 +700,70 @@ impl SessionActor {
             events.extend(self.drain(&next).await);
         }
         self.publish_inbox(state, &events);
+        CommandEffect::persist(events)
+    }
+
+    /// A subagent's outcome: record it in the tree, then deliver every result
+    /// owed to idle parents — wakes for subagent parents, a turn (via
+    /// `drain`) when the main agent is owed and idle.
+    async fn on_sub_agent_outcome(
+        &mut self,
+        state: &SessionState,
+        id: Uuid,
+        outcome: AgentOutcome,
+    ) -> CommandEffect<SessionDomainEvent> {
+        if let AgentOutcome::UsageRecorded { usage_total, .. } = outcome {
+            return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
+                agent_id: id.to_string(),
+                usage_total,
+            }]);
+        }
+        let Some(rec) = state.subagents.get(&id).cloned() else {
+            tracing::warn!(subagent = %id, "outcome from an unknown subagent; ignored");
+            return CommandEffect::none();
+        };
+        let terminal = match outcome {
+            AgentOutcome::Concluded { output, .. } => {
+                let text = output
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| output.to_string());
+                emit_progress(
+                    &self.frames,
+                    "subagent_completed",
+                    Some(format!("\"{}\" ({id})", rec.label)),
+                );
+                SessionDomainEvent::SubAgentCompleted { id, output: text }
+            }
+            AgentOutcome::Failed { error, .. } => {
+                emit_progress(
+                    &self.frames,
+                    "subagent_failed",
+                    Some(format!("\"{}\" ({id})", rec.label)),
+                );
+                SessionDomainEvent::SubAgentFailed { id, error }
+            }
+            // Defensive: a subagent has no ask or timer tools, so neither
+            // outcome should ever occur.
+            AgentOutcome::Asked { .. } => SessionDomainEvent::SubAgentFailed {
+                id,
+                error: "subagent asked the user; not supported".to_string(),
+            },
+            AgentOutcome::Parked { .. } => SessionDomainEvent::SubAgentFailed {
+                id,
+                error: "subagent parked; timers are not supported in sessions".to_string(),
+            },
+            AgentOutcome::UsageRecorded { .. } => unreachable!("handled above"),
+        };
+        let mut events = vec![terminal];
+        let mut next = events
+            .iter()
+            .cloned()
+            .fold(state.clone(), Self::apply_event);
+        let flushed = self.flush_owed(&next).await;
+        next = flushed.iter().cloned().fold(next, Self::apply_event);
+        events.extend(flushed);
+        events.extend(self.drain(&next).await);
         CommandEffect::persist(events)
     }
 
@@ -1070,8 +1166,27 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(self.frames.subscribe());
                 CommandEffect::none()
             }
-            SessionCommand::History { query, reply } => {
-                let page = self.read_history(query).await;
+            SessionCommand::History {
+                agent_id,
+                query,
+                reply,
+            } => {
+                let agent = match agent_id.as_deref() {
+                    None | Some("main") => self.main_agent.clone(),
+                    Some(raw) => Uuid::parse_str(raw)
+                        .ok()
+                        .and_then(|id| self.sub_agents.get(&id).cloned()),
+                };
+                // Read history from the resident actor's in-memory state. No
+                // journal access, no runtime — opening a session to read it
+                // stays free of sandbox cost.
+                let page = match agent {
+                    Some(agent) => agent
+                        .ask(|reply| AgentCommand::GetHistory { query, reply })
+                        .await
+                        .ok(),
+                    None => None,
+                };
                 let _ = reply.send(page);
                 CommandEffect::none()
             }
@@ -2037,6 +2152,200 @@ mod tests {
         assert!(
             sub.system_prompt.unwrap().contains("# Subagent role"),
             "the subagent prompt must explain its role"
+        );
+    }
+
+    fn user_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+        page.messages
+            .iter()
+            .filter(|m| m.role == horsie_agentcore::Role::User)
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                horsie_agentcore::ContentPart::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::AgentHistoryPage {
+        session
+            .ask(|reply| SessionCommand::History {
+                agent_id: None,
+                query: horsie_workflow::HistoryQuery {
+                    before: None,
+                    limit: 50,
+                },
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("main agent history")
+    }
+
+    #[tokio::test]
+    async fn a_completed_subagent_notifies_an_idle_main_agent() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let sub = spawn_sub(&session, "research", "dig").await;
+        // Owed, then delivered: the tree's notified flag flips exactly once.
+        wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
+        let texts = user_texts(&main_history(&session).await);
+        assert!(
+            texts.iter().any(|t| t.contains("[subagent \"research\" completed]")
+                && t.contains("sub answer")),
+            "the main agent must be told the result: {texts:?}"
+        );
+    }
+
+    /// Fails any completion whose conversation contains `needle`; answers
+    /// everything else with plain text. Distinguishes the subagent's run from
+    /// the main agent's when both share one provider.
+    struct FailOnNeedleProvider {
+        needle: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FailOnNeedleProvider {
+        fn model_id(&self) -> &str {
+            "mock"
+        }
+        async fn complete(
+            &self,
+            request: horsie_agentcore::CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn horsie_agentcore::EventSink,
+        ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+            let hit = request
+                .messages
+                .iter()
+                .flat_map(|m| m.parts.iter())
+                .any(|p| matches!(p, horsie_agentcore::ContentPart::Text(t) if t.text.contains(&self.needle)));
+            if hit {
+                return Err(horsie_agentcore::LlmError::ApiError {
+                    status: 401,
+                    message: "bad key".to_string(),
+                });
+            }
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::Text(
+                    horsie_agentcore::TextPart {
+                        text: "fine".to_string(),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::EndTurn,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_subagent_reports_the_error_to_its_parent() {
+        let provider = FailOnNeedleProvider {
+            needle: "doomed task".to_string(),
+        };
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(provider)).await;
+        let sub = spawn_sub(&session, "risky", "doomed task").await;
+        wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        let rec = state.subagents.get(&sub).unwrap();
+        assert_eq!(rec.status, crate::sessions::subagents::SubAgentStatus::Failed);
+        assert!(rec.error.as_deref().unwrap().contains("bad key"));
+        let texts = user_texts(&main_history(&session).await);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("[subagent \"risky\" failed]")),
+            "the parent must hear the failure: {texts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_notification_waits_out_an_awaiting_input_session() {
+        use horsie_agentcore::StopReason;
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        // Main's first call asks the user; every later call (the subagent's
+        // run, then the main agent's answer turn) ends with plain text.
+        let provider = MockProvider::scripted(
+            Script::of([Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                    horsie_agentcore::ToolCallPart {
+                        id: "ask-1".into(),
+                        name: "ask_user".into(),
+                        input: serde_json::json!({"question": "which one?"}),
+                    },
+                )],
+                stop_reason: StopReason::ToolUse,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })])
+            .then_repeating_with(|| {
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::Text(
+                        horsie_agentcore::TextPart {
+                            text: "sub answer".to_string(),
+                        },
+                    )],
+                    stop_reason: StopReason::EndTurn,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                })
+            }),
+        );
+        let (_f, session, id, journal) = spawn_session_with_provider(provider).await;
+
+        // Park the session on the ask.
+        session
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "start".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..200 {
+            let state = crate::sessions::events::fold_session_state(&journal, id).await;
+            if state.status == crate::sessions::spec::SessionStatus::AwaitingInput {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // A subagent completes while the session is AwaitingInput.
+        let sub = spawn_sub(&session, "research", "dig").await;
+        wait_for_tree(&journal, id, |t| {
+            t.get(&sub).is_some_and(|r| {
+                r.status == crate::sessions::subagents::SubAgentStatus::Completed && !r.notified
+            })
+        })
+        .await;
+        // The ask is still pending — the notification must not have answered it.
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert_eq!(state.status, crate::sessions::spec::SessionStatus::AwaitingInput);
+
+        // The user's reply carries the notification along in the same input.
+        session
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "the first one".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
+        // The answer went in as the pending ask's tool result, so look there:
+        // one result must carry both the user's reply and the notification.
+        let page = main_history(&session).await;
+        let results: Vec<String> = page
+            .messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                horsie_agentcore::ContentPart::ToolResult(r) => Some(r.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            results.iter().any(|t| t.contains("the first one")
+                && t.contains("[subagent \"research\" completed]")),
+            "the notification rides with the user's answer: {results:?}"
         );
     }
 }
