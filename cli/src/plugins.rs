@@ -19,6 +19,10 @@ pub struct PluginEntry {
     pub git_ref: Option<String>,
     pub version: Option<String>,
     pub sha: Option<String>,
+    /// Names the shared clone under `sources/` this plugin is symlinked into.
+    /// Absent for entries installed before the shared-clone layout.
+    #[serde(default)]
+    pub source_key: Option<String>,
 }
 
 /// The `plugins.json` lockfile.
@@ -109,158 +113,208 @@ fn name_from_url(url: &str) -> String {
         .to_string()
 }
 
-/// Read `.claude-plugin/plugin.json` `name`/`version`, if present.
-fn read_manifest_meta(plugin_dir: &Path) -> (Option<String>, Option<String>) {
-    let path = plugin_dir.join(".claude-plugin").join("plugin.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return (None, None);
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return (None, None);
-    };
-    let s = |k: &str| {
-        json.get(k)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-    };
-    (s("name"), s("version"))
+/// The two directories the plugin library spans: the symlink farm the runtime
+/// reads, and the clones those links point into.
+#[derive(Debug, Clone)]
+pub struct PluginPaths {
+    /// `storage.plugins_dir` — one symlink per installed plugin.
+    pub plugins: PathBuf,
+    /// `<data_dir>/sources` — one clone per `(url, ref)`, shared by every
+    /// plugin resolved out of it.
+    pub sources: PathBuf,
 }
 
-/// `true` if the plugin dir exposes at least one `SKILL.md` (best-effort, default and
-/// common custom locations).
-fn has_skills(plugin_dir: &Path) -> bool {
-    for loc in ["skills", "."] {
-        let base = plugin_dir.join(loc);
-        if let Ok(rd) = std::fs::read_dir(&base) {
-            for entry in rd.flatten() {
-                if entry.path().join("SKILL.md").is_file() {
-                    return true;
-                }
-            }
-        }
-    }
-    plugin_dir.join("SKILL.md").is_file()
-}
-
-fn git(args: &[&str]) -> Result<std::process::Output, CliError> {
-    Command::new("git")
-        .args(args)
-        .output()
-        .map_err(|e| CliError::Executor(format!("git: {e}")))
-}
-
-fn current_sha(plugin_dir: &Path) -> Option<String> {
-    let out = git(&["-C", &plugin_dir.to_string_lossy(), "rev-parse", "HEAD"]).ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// `horsie plugin install <url>`: clone into `<plugins_dir>/<name>` and record it.
+/// `horsie plugin install <url>`: clone into the shared sources dir, resolve the
+/// plugin root (honouring `marketplace.json`), and symlink it into the library.
 pub fn install(
-    plugins_dir: &Path,
+    paths: &PluginPaths,
     url: &str,
     name: Option<String>,
     git_ref: Option<String>,
     force: bool,
 ) -> Result<String, CliError> {
-    std::fs::create_dir_all(plugins_dir).map_err(|e| CliError::Io(e.to_string()))?;
-    let name = name.unwrap_or_else(|| name_from_url(url));
-    let target = plugins_dir.join(&name);
-    if target.exists() {
+    std::fs::create_dir_all(&paths.plugins).map_err(|e| CliError::Io(e.to_string()))?;
+    std::fs::create_dir_all(&paths.sources).map_err(|e| CliError::Io(e.to_string()))?;
+
+    let key = horsie_support::plugin::source_key(url, git_ref.as_deref());
+    let clone_dir = paths.sources.join(&key);
+    if !clone_dir.exists() {
+        horsie_support::git::clone(url, git_ref.as_deref(), &clone_dir).map_err(|e| {
+            // Do not leave a half-clone behind for the next attempt to trip over.
+            let _ = std::fs::remove_dir_all(&clone_dir);
+            CliError::Executor(e)
+        })?;
+    }
+
+    let (root_dir, entry_name) = resolve_plugin_root(&clone_dir, url)?;
+    let root = horsie_support::plugin::PluginRoot::inspect(&root_dir).map_err(CliError::Config)?;
+    if !root.is_installable() {
+        gc_clone(paths, &key);
+        return Err(CliError::Config(format!(
+            "'{url}' is not a skills plugin: {}",
+            root.rejection()
+        )));
+    }
+
+    let fallback = entry_name.unwrap_or_else(|| name_from_url(url));
+    let install_name = name.unwrap_or_else(|| root.name(&fallback));
+    let link = paths.plugins.join(&install_name);
+    if link.symlink_metadata().is_ok() {
         if !force {
             return Err(CliError::Config(format!(
-                "plugin '{name}' is already installed (use --force to reinstall)"
+                "plugin '{install_name}' is already installed (use --force to reinstall)"
             )));
         }
-        std::fs::remove_dir_all(&target).map_err(|e| CliError::Io(e.to_string()))?;
+        remove_link(&link)?;
     }
+    symlink_dir(&root_dir, &link)?;
 
-    let target_str = target.to_string_lossy().into_owned();
-    let mut args = vec!["clone", "--depth", "1"];
-    if let Some(r) = &git_ref {
-        args.push("--branch");
-        args.push(r);
-    }
-    args.push(url);
-    args.push(&target_str);
-    let out = git(&args)?;
-    if !out.status.success() {
-        return Err(CliError::Executor(format!(
-            "git clone failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-
-    if !has_skills(&target) {
-        let _ = std::fs::remove_dir_all(&target);
-        return Err(CliError::Config(format!(
-            "'{url}' does not expose any SKILL.md; not a skills plugin"
-        )));
-    }
-
-    let (manifest_name, version) = read_manifest_meta(&target);
-    let mut lock = load_lock(plugins_dir);
-    lock.plugins.retain(|p| p.name != name);
+    let mut lock = load_lock(&paths.plugins);
+    lock.plugins.retain(|p| p.name != install_name);
     lock.plugins.push(PluginEntry {
-        name: manifest_name.unwrap_or_else(|| name.clone()),
+        name: install_name.clone(),
         source: url.to_string(),
         git_ref,
-        version,
-        sha: current_sha(&target),
+        version: root.version().map(str::to_string),
+        // Resolves through the symlink into the real clone.
+        sha: horsie_support::git::head_sha(&link),
+        source_key: Some(key),
     });
-    save_lock(plugins_dir, &lock)?;
-    Ok(name)
+    save_lock(&paths.plugins, &lock)?;
+    Ok(install_name)
+}
+
+/// The plugin root inside a clone: the marketplace-declared entry when the repo
+/// is a marketplace, else the repo root. Returns the entry name when a
+/// marketplace named it.
+fn resolve_plugin_root(clone_dir: &Path, url: &str) -> Result<(PathBuf, Option<String>), CliError> {
+    let market =
+        horsie_support::plugin::Marketplace::read(clone_dir).map_err(CliError::Config)?;
+    let Some(market) = market else {
+        return Ok((clone_dir.to_path_buf(), None));
+    };
+    for why in &market.skipped {
+        tracing::warn!(marketplace = %url, "skipping unreadable marketplace {why}");
+    }
+    match market.plugins.as_slice() {
+        [only] => match &only.source {
+            horsie_support::plugin::PluginSource::Path(p) => {
+                Ok((clone_dir.join(p), Some(only.name.clone())))
+            }
+            // Resolving an external source needs the marketplace registry, which
+            // lands with `horsie marketplace add` (issue #105, PR2).
+            horsie_support::plugin::PluginSource::Git { url: u, .. } => Err(CliError::Config(
+                format!("'{}' is published from another repo ({u}); install it from there directly", only.name),
+            )),
+        },
+        [] => Ok((clone_dir.to_path_buf(), None)),
+        many => Err(CliError::Config(format!(
+            "'{url}' is a marketplace listing {} plugins; install one directly by its own repo URL. Available: {}",
+            many.len(),
+            market.names().join(", ")
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn symlink_dir(target: &Path, link: &Path) -> Result<(), CliError> {
+    std::os::unix::fs::symlink(target, link).map_err(|e| CliError::Io(e.to_string()))
+}
+
+#[cfg(windows)]
+fn symlink_dir(target: &Path, link: &Path) -> Result<(), CliError> {
+    std::os::windows::fs::symlink_dir(target, link).map_err(|e| CliError::Io(e.to_string()))
+}
+
+/// Remove an installed plugin's library entry, whether it is a symlink (current
+/// layout) or a real directory (installed before this change).
+fn remove_link(link: &Path) -> Result<(), CliError> {
+    let Ok(meta) = link.symlink_metadata() else {
+        return Ok(());
+    };
+    let r = if meta.file_type().is_symlink() {
+        std::fs::remove_file(link)
+    } else {
+        std::fs::remove_dir_all(link)
+    };
+    r.map_err(|e| CliError::Io(e.to_string()))
+}
+
+/// Delete a clone once no lockfile entry references it.
+fn gc_clone(paths: &PluginPaths, key: &str) {
+    let still_used = load_lock(&paths.plugins)
+        .plugins
+        .iter()
+        .any(|p| p.source_key.as_deref() == Some(key));
+    if !still_used {
+        let _ = std::fs::remove_dir_all(paths.sources.join(key));
+    }
 }
 
 /// `horsie plugin list`: the installed plugins, from the lockfile.
-pub fn list(plugins_dir: &Path) -> Vec<PluginEntry> {
-    load_lock(plugins_dir).plugins
+pub fn list(paths: &PluginPaths) -> Vec<PluginEntry> {
+    load_lock(&paths.plugins).plugins
 }
 
-/// `horsie plugin update <name>`: `git pull` (or re-checkout the recorded ref) and
-/// refresh the lockfile's sha.
-pub fn update(plugins_dir: &Path, name: &str) -> Result<(), CliError> {
-    let target = plugins_dir.join(name);
-    if !target.is_dir() {
-        return Err(CliError::Config(format!(
-            "plugin '{name}' is not installed"
-        )));
-    }
-    let target_str = target.to_string_lossy().into_owned();
-    let out = git(&["-C", &target_str, "pull", "--ff-only"])?;
-    if !out.status.success() {
-        return Err(CliError::Executor(format!(
-            "git pull failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    let (_, version) = read_manifest_meta(&target);
-    let mut lock = load_lock(plugins_dir);
-    if let Some(entry) = lock.plugins.iter_mut().find(|p| p.name == name) {
-        entry.sha = current_sha(&target);
+/// `horsie plugin update <name>`: fast-forward the backing clone and refresh the
+/// lockfile. Re-points the symlink in case the plugin's declared root moved.
+pub fn update(paths: &PluginPaths, name: &str) -> Result<(), CliError> {
+    let mut lock = load_lock(&paths.plugins);
+    let entry = lock
+        .plugins
+        .iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| CliError::Config(format!("plugin '{name}' is not installed")))?
+        .clone();
+    let key = entry.source_key.clone().ok_or_else(|| {
+        CliError::Config(format!(
+            "plugin '{name}' predates the shared-clone layout; reinstall it with --force"
+        ))
+    })?;
+    let clone_dir = paths.sources.join(&key);
+    horsie_support::git::pull_ff_only(&clone_dir).map_err(CliError::Executor)?;
+
+    let (root_dir, _) = resolve_plugin_root(&clone_dir, &entry.source)?;
+    let link = paths.plugins.join(name);
+    remove_link(&link)?;
+    symlink_dir(&root_dir, &link)?;
+
+    let root = horsie_support::plugin::PluginRoot::inspect(&root_dir).map_err(CliError::Config)?;
+    let version = root.version().map(str::to_string);
+    let sha = horsie_support::git::head_sha(&link);
+    if let Some(e) = lock.plugins.iter_mut().find(|p| p.name == name) {
+        e.sha = sha;
         if version.is_some() {
-            entry.version = version;
+            e.version = version;
         }
     }
-    save_lock(plugins_dir, &lock)
+    save_lock(&paths.plugins, &lock)
 }
 
-/// `horsie plugin remove <name>`: delete the dir and drop the lockfile entry.
-pub fn remove(plugins_dir: &Path, name: &str) -> Result<(), CliError> {
-    let target = plugins_dir.join(name);
-    if target.is_dir() {
-        std::fs::remove_dir_all(&target).map_err(|e| CliError::Io(e.to_string()))?;
-    }
-    let mut lock = load_lock(plugins_dir);
+/// `horsie plugin remove <name>`: drop the library entry and the lockfile row,
+/// then garbage-collect the backing clone if nothing else uses it.
+pub fn remove(paths: &PluginPaths, name: &str) -> Result<(), CliError> {
+    let mut lock = load_lock(&paths.plugins);
     let before = lock.plugins.len();
+    let key = lock
+        .plugins
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| p.source_key.clone());
     lock.plugins.retain(|p| p.name != name);
-    if lock.plugins.len() == before && !target.exists() {
+    let link = paths.plugins.join(name);
+    let existed = link.symlink_metadata().is_ok();
+    remove_link(&link)?;
+    if lock.plugins.len() == before && !existed {
         return Err(CliError::Config(format!(
             "plugin '{name}' is not installed"
         )));
     }
-    save_lock(plugins_dir, &lock)
+    save_lock(&paths.plugins, &lock)?;
+    if let Some(k) = key {
+        gc_clone(paths, &k);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -332,6 +386,7 @@ mod tests {
                 git_ref: Some("main".into()),
                 version: Some("5.1.0".into()),
                 sha: Some("abc".into()),
+                source_key: Some("deadbeefdeadbeef".into()),
             }],
         };
         save_lock(dir.path(), &lock).unwrap();
@@ -341,19 +396,171 @@ mod tests {
         assert_eq!(back.plugins[0].git_ref.as_deref(), Some("main"));
     }
 
+    fn git_run(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    fn commit_all(dir: &Path) {
+        git_run(dir, &["init", "-q", "-b", "main"]);
+        git_run(dir, &["config", "user.email", "t@example.com"]);
+        git_run(dir, &["config", "user.name", "t"]);
+        git_run(dir, &["add", "-A"]);
+        git_run(dir, &["commit", "-qm", "init"]);
+    }
+
+    /// A repo whose plugin root is a subdirectory declared by a marketplace,
+    /// with a manifest pointing skills outside the default location — the
+    /// impeccable shape, which the old filesystem-only gate rejected.
+    fn impeccable_fixture(dir: &Path) {
+        let cp = dir.join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("marketplace.json"),
+            r#"{"name":"impeccable","plugins":[{"name":"impeccable","source":"./plugin"}]}"#,
+        )
+        .unwrap();
+        let pcp = dir.join("plugin/.claude-plugin");
+        std::fs::create_dir_all(&pcp).unwrap();
+        std::fs::write(
+            pcp.join("plugin.json"),
+            r#"{"name":"impeccable","version":"4.0.4","skills":"./skills/"}"#,
+        )
+        .unwrap();
+        let s = dir.join("plugin/skills/impeccable");
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("SKILL.md"), "---\nname: impeccable\n---\nbody").unwrap();
+        commit_all(dir);
+    }
+
+    fn paths(root: &Path) -> PluginPaths {
+        PluginPaths {
+            plugins: root.join("plugins"),
+            sources: root.join("sources"),
+        }
+    }
+
+    fn file_url(dir: &Path) -> String {
+        format!("file://{}", dir.display())
+    }
+
     #[test]
-    fn has_skills_detects_default_layout() {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("p");
-        std::fs::create_dir_all(p.join("skills/x")).unwrap();
-        assert!(!has_skills(&p));
-        std::fs::write(p.join("skills/x/SKILL.md"), "x").unwrap();
-        assert!(has_skills(&p));
+    #[cfg(unix)]
+    fn installs_a_marketplace_subdir_plugin_as_a_symlink() {
+        let src = TempDir::new().unwrap();
+        impeccable_fixture(src.path());
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+
+        let name = install(&p, &file_url(src.path()), None, None, false).unwrap();
+        assert_eq!(name, "impeccable");
+
+        let link = p.plugins.join("impeccable");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(link.join("skills/impeccable/SKILL.md").is_file());
+
+        let entry = list(&p).into_iter().next().unwrap();
+        assert_eq!(entry.name, "impeccable");
+        assert_eq!(entry.version.as_deref(), Some("4.0.4"));
+        assert!(entry.source_key.is_some());
+        assert!(entry.sha.is_some(), "sha resolves through the symlink");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn update_pulls_and_remove_cleans_up_the_clone() {
+        let src = TempDir::new().unwrap();
+        impeccable_fixture(src.path());
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        install(&p, &file_url(src.path()), None, None, false).unwrap();
+
+        update(&p, "impeccable").unwrap();
+        assert!(
+            p.plugins
+                .join("impeccable/skills/impeccable/SKILL.md")
+                .is_file()
+        );
+
+        remove(&p, "impeccable").unwrap();
+        assert!(p.plugins.join("impeccable").symlink_metadata().is_err());
+        assert!(list(&p).is_empty());
+        assert!(
+            std::fs::read_dir(&p.sources)
+                .map(|rd| rd.flatten().count() == 0)
+                .unwrap_or(true),
+            "orphaned clone left behind"
+        );
+    }
+
+    #[test]
+    fn rejects_a_repo_with_no_skills_and_says_where_it_looked() {
+        let src = TempDir::new().unwrap();
+        std::fs::write(src.path().join("README.md"), "hi").unwrap();
+        commit_all(src.path());
+
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        let err = install(&p, &file_url(src.path()), None, None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SKILL.md"), "err: {err}");
+        assert!(
+            err.contains("skills"),
+            "error must name where it looked: {err}"
+        );
+        // A rejected install leaves neither a link nor a clone behind.
+        assert!(!p.plugins.join("src").exists());
+        assert!(
+            std::fs::read_dir(&p.sources)
+                .map(|rd| rd.flatten().count() == 0)
+                .unwrap_or(true)
+        );
+    }
+
+    /// A marketplace listing several plugins is ambiguous; the error must name
+    /// them rather than guessing.
+    #[test]
+    fn multi_plugin_marketplace_errors_with_the_available_names() {
+        let src = TempDir::new().unwrap();
+        let cp = src.path().join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("marketplace.json"),
+            r#"{"plugins":[{"name":"alpha","source":"./a"},{"name":"beta","source":"./b"}]}"#,
+        )
+        .unwrap();
+        commit_all(src.path());
+
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        let err = install(&p, &file_url(src.path()), None, None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("alpha"), "err: {err}");
+        assert!(err.contains("beta"), "err: {err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn duplicate_install_needs_force() {
+        let src = TempDir::new().unwrap();
+        impeccable_fixture(src.path());
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        let url = file_url(src.path());
+        install(&p, &url, None, None, false).unwrap();
+        assert!(install(&p, &url, None, None, false).is_err());
+        install(&p, &url, None, None, true).unwrap();
     }
 
     #[test]
     fn remove_missing_errors() {
         let dir = TempDir::new().unwrap();
-        assert!(remove(dir.path(), "nope").is_err());
+        assert!(remove(&paths(dir.path()), "nope").is_err());
     }
 }

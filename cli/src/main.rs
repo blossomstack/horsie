@@ -146,9 +146,14 @@ enum PluginAction {
     },
 }
 
-/// Resolve the shared plugin library dir from config (`storage.plugins_dir`).
-fn resolve_plugins_dir(config: Option<&Path>) -> Result<PathBuf, CliError> {
-    Ok(HorsieConfig::resolve(config)?.storage.plugins_dir)
+/// Resolve the plugin library paths from config: the symlink farm
+/// (`storage.plugins_dir`) and the shared clones (`<data_dir>/sources`).
+fn resolve_plugin_paths(config: Option<&Path>) -> Result<horsie::plugins::PluginPaths, CliError> {
+    let cfg = HorsieConfig::resolve(config)?;
+    Ok(horsie::plugins::PluginPaths {
+        sources: cfg.storage.data_dir.join("sources"),
+        plugins: cfg.storage.plugins_dir,
+    })
 }
 
 #[derive(Subcommand)]
@@ -541,14 +546,17 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 force,
                 config,
             } => {
-                let dir = resolve_plugins_dir(config.as_deref())?;
-                let installed = horsie::plugins::install(&dir, &url, name, git_ref, force)?;
-                println!("installed plugin '{installed}' into {}", dir.display());
+                let paths = resolve_plugin_paths(config.as_deref())?;
+                let installed = horsie::plugins::install(&paths, &url, name, git_ref, force)?;
+                println!(
+                    "installed plugin '{installed}' into {}",
+                    paths.plugins.display()
+                );
                 Ok(0)
             }
             PluginAction::List { config } => {
-                let dir = resolve_plugins_dir(config.as_deref())?;
-                let plugins = horsie::plugins::list(&dir);
+                let paths = resolve_plugin_paths(config.as_deref())?;
+                let plugins = horsie::plugins::list(&paths);
                 if plugins.is_empty() {
                     println!("no plugins installed");
                 } else {
@@ -565,14 +573,14 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 Ok(0)
             }
             PluginAction::Update { name, config } => {
-                let dir = resolve_plugins_dir(config.as_deref())?;
-                horsie::plugins::update(&dir, &name)?;
+                let paths = resolve_plugin_paths(config.as_deref())?;
+                horsie::plugins::update(&paths, &name)?;
                 println!("updated plugin '{name}'");
                 Ok(0)
             }
             PluginAction::Remove { name, config } => {
-                let dir = resolve_plugins_dir(config.as_deref())?;
-                horsie::plugins::remove(&dir, &name)?;
+                let paths = resolve_plugin_paths(config.as_deref())?;
+                horsie::plugins::remove(&paths, &name)?;
                 println!("removed plugin '{name}'");
                 Ok(0)
             }
