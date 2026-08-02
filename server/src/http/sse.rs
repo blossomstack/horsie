@@ -169,6 +169,9 @@ pub async fn session_events(
                     let se = SessionEvent::StatusChanged(StatusChangedEvent {
                         status: wire_status_kind(&status),
                         reason: crate::sessions::spec::status_reason(&status),
+                        // A park says what it is waiting for, so a watching
+                        // client can answer without refetching the session.
+                        pending_asks: crate::http::handlers::wire_pending_asks(&status),
                     });
                     if let Some(ev) = live(&se)
                         && tx.send(Ok(ev)).await.is_err()

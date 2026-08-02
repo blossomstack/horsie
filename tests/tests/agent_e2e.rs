@@ -482,9 +482,10 @@ async fn test_agent_handoff() {
         .unwrap();
 
     match output.result {
-        AgentResult::Handoff(HandoffOutput { tool_name, data }) => {
+        AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
             assert_eq!(tool_name, "delegate");
-            assert_eq!(data["task"], "summarise");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].data["task"], "summarise");
         }
         other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
     }

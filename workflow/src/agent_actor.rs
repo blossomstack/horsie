@@ -1,12 +1,12 @@
 use crate::context::{
-    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL,
+    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, CONCLUDE_TOOL,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
-    EventSinkError, LlmProvider, Message, Role, Toolbox, Usage,
+    EventSinkError, HandoffCall, LlmProvider, Message, Role, Toolbox, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,12 +92,16 @@ impl AgentParams {
 
 /// Commands accepted by an [`AgentActor`].
 pub enum AgentCommand {
-    /// Begin a turn with fresh user input.
-    Run { input: String },
-    /// Resume a paused agent, supplying the user's reply as the pending tool result.
-    InjectToolResult {
-        tool_call_id: String,
-        content: String,
+    /// Start a turn. `results` are tool results to record first — the answers to
+    /// a park, or the results an abandoned park still owes the wire — and
+    /// `message` is the user message that starts it.
+    ///
+    /// With no `message`, the results themselves are the turn's input, which is
+    /// how an answered park resumes. With no `results`, it is an ordinary turn.
+    /// At least one of the two must be present.
+    Resume {
+        results: Vec<horsie_models::agent::ToolResultInput>,
+        message: Option<String>,
     },
     /// Cancel an in-flight run. `ack`, if given, fires once the run has actually
     /// terminated — immediately when none is in flight — so a caller that must
@@ -411,10 +415,9 @@ enum RunOutcome {
     Completed {
         text: String,
     },
-    /// Agent called the `conclude` tool; `data` is its raw input.
+    /// Agent called its handoff tool; `calls` are the raw inputs, one per call.
     Concluded {
-        data: Value,
-        tool_call_id: Option<String>,
+        calls: Vec<HandoffCall>,
     },
     Cancelled,
     Failed {
@@ -701,8 +704,8 @@ impl AgentActor {
                 // reads, and nothing has to replay a journal to answer either.
                 CommandEffect::none()
             }
-            RunOutcome::Concluded { data, tool_call_id } => {
-                match self.interpret(data, tool_call_id) {
+            RunOutcome::Concluded { calls } => {
+                match self.interpret(calls) {
                     Conclusion::Output(output) => {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
@@ -715,10 +718,7 @@ impl AgentActor {
                             .await;
                         CommandEffect::none()
                     }
-                    Conclusion::Ask {
-                        tool_call_id,
-                        question,
-                    } => {
+                    Conclusion::Ask(asks) => {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
                                 session_id,
@@ -726,11 +726,7 @@ impl AgentActor {
                             })
                             .await;
                         parent
-                            .deliver(AgentOutcome::Asked {
-                                session_id,
-                                tool_call_id,
-                                question,
-                            })
+                            .deliver(AgentOutcome::Asked { session_id, asks })
                             .await;
                         // Stay alive — InjectToolResult resumes this same session.
                         // Snapshot to compact the incrementally-persisted log
@@ -797,24 +793,34 @@ impl AgentActor {
     /// `has_output_schema`/`allow_ask_user`-based branching entirely, which
     /// exists only to disambiguate the workflow crate's multi-purpose `conclude`
     /// payload shape.
-    fn interpret(&self, data: Value, tool_call_id: Option<String>) -> Conclusion {
+    fn interpret(&self, calls: Vec<HandoffCall>) -> Conclusion {
         if self.params.optional_handoff_tool.is_some() {
-            let question = data
-                .get("question")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            return Conclusion::Ask {
-                tool_call_id,
-                question,
-            };
+            return Conclusion::Ask(
+                calls
+                    .into_iter()
+                    .map(|call| AskedQuestion {
+                        tool_call_id: Some(call.tool_call_id),
+                        question: call
+                            .data
+                            .get("question")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    })
+                    .collect(),
+            );
         }
+        // A forced handoff is one conclusion, and `validate_handoff` rejects a
+        // turn that calls it twice — so there is exactly one call here.
+        let Some(call) = calls.into_iter().next() else {
+            return Conclusion::Output(Value::Null);
+        };
         classify_conclusion(
             self.params.has_output_schema,
             self.params.allow_ask_user,
             self.params.allow_timers,
-            data,
-            tool_call_id,
+            call.data,
+            Some(call.tool_call_id),
         )
     }
 
@@ -932,10 +938,10 @@ fn classify_conclusion(
         let kind = data.get("kind").and_then(Value::as_str).unwrap_or("submit");
         return match kind {
             "park" => Conclusion::Park,
-            "ask" => Conclusion::Ask {
+            "ask" => Conclusion::Ask(vec![AskedQuestion {
                 tool_call_id,
                 question: extract_question(&data),
-            },
+            }]),
             _ => Conclusion::Output(data.get("output").cloned().unwrap_or(Value::Null)),
         };
     }
@@ -944,10 +950,10 @@ fn classify_conclusion(
         (true, true) => {
             let kind = data.get("kind").and_then(Value::as_str).unwrap_or("submit");
             if kind == "ask" {
-                Conclusion::Ask {
+                Conclusion::Ask(vec![AskedQuestion {
                     tool_call_id,
                     question: extract_question(&data),
-                }
+                }])
             } else {
                 Conclusion::Output(data.get("output").cloned().unwrap_or(Value::Null))
             }
@@ -955,10 +961,10 @@ fn classify_conclusion(
         // Output only: the payload is the output.
         (true, false) => Conclusion::Output(data),
         // Ask only: the payload is a question.
-        (false, true) => Conclusion::Ask {
+        (false, true) => Conclusion::Ask(vec![AskedQuestion {
             tool_call_id,
             question: extract_question(&data),
-        },
+        }]),
         // No conclude tool registered — shouldn't be reached via a handoff.
         (false, false) => Conclusion::Output(data),
     }
@@ -967,10 +973,8 @@ fn classify_conclusion(
 #[derive(Debug)]
 enum Conclusion {
     Output(Value),
-    Ask {
-        tool_call_id: Option<String>,
-        question: String,
-    },
+    /// One or more questions, all parked on together.
+    Ask(Vec<AskedQuestion>),
     Park,
 }
 
@@ -1042,43 +1046,48 @@ impl EventSourcedActor for AgentActor {
         ctx: &mut ActorContext<Self>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            AgentCommand::Run { input } => {
-                if let Some(reason) = self.reject_if_running("Run") {
+            AgentCommand::Resume { results, message } => {
+                if let Some(reason) = self.reject_if_running("Resume") {
                     return reason;
                 }
-                let agent_input = AgentInput::user_message(new_message_id(), input);
+                if results.is_empty() && message.is_none() {
+                    tracing::warn!("Resume with neither results nor a message; ignoring");
+                    return CommandEffect::none();
+                }
+                // The ids answered here are not dangling, whatever the recovered
+                // history says: their results are in this very input.
+                let answering: std::collections::HashSet<String> =
+                    results.iter().map(|r| r.tool_call_id.clone()).collect();
+                // Sanitize on every turn start: a history recovered from a
+                // mid-turn crash may carry dangling tool calls (a no-op when
+                // well-formed).
+                let mut history =
+                    repair_unanswered_tool_calls_except(state.messages.clone(), &answering);
+
+                // Results that precede a user message belong to the history, not
+                // to the input: the turn is started by what the user said.
+                let mut events = Vec::new();
+                let agent_input = match message {
+                    Some(text) => {
+                        if !results.is_empty() {
+                            let recorded = AgentInput::tool_results(results).to_message();
+                            events.push(AgentDomainEvent::InputMessage {
+                                message: recorded.clone(),
+                            });
+                            history.push(recorded);
+                        }
+                        AgentInput::user_message(new_message_id(), text)
+                    }
+                    None => AgentInput::tool_results(results),
+                };
                 // Persist the input message here (not via the streaming sink), so a
                 // turn-restarting provider retry that re-emits it can never
                 // double-persist it into two consecutive user messages.
-                let input_event = AgentDomainEvent::InputMessage {
+                events.push(AgentDomainEvent::InputMessage {
                     message: agent_input.to_message(),
-                };
-                // Sanitize on every turn start: a history recovered from a mid-turn
-                // crash may carry dangling tool calls (a no-op when well-formed).
-                self.start_run(
-                    agent_input,
-                    ctx,
-                    repair_unanswered_tool_calls(state.messages.clone()),
-                );
-                CommandEffect::persist(vec![input_event])
-            }
-            AgentCommand::InjectToolResult {
-                tool_call_id,
-                content,
-            } => {
-                if let Some(reason) = self.reject_if_running("InjectToolResult") {
-                    return reason;
-                }
-                let agent_input = AgentInput::tool_result(tool_call_id.clone(), content, false);
-                let input_event = AgentDomainEvent::InputMessage {
-                    message: agent_input.to_message(),
-                };
-                self.start_run(
-                    agent_input,
-                    ctx,
-                    repair_unanswered_tool_calls_except(state.messages.clone(), &tool_call_id),
-                );
-                CommandEffect::persist(vec![input_event])
+                });
+                self.start_run(agent_input, ctx, history);
+                CommandEffect::persist(events)
             }
             AgentCommand::PersistProgress { events, ack } => {
                 CommandEffect::persist(events).and_ack(ack)
@@ -1583,20 +1592,27 @@ fn missing_tool_results(messages: &[Message], handoff_tools: &[String]) -> Vec<M
 /// the one thing that must never reach a provider, and costs one pass over an
 /// in-memory history.
 fn repair_unanswered_tool_calls(messages: Vec<Message>) -> Vec<Message> {
-    repair_dangling(messages, None)
+    repair_dangling(messages, &std::collections::HashSet::new())
 }
 
 /// [`repair_unanswered_tool_calls`] for the resume-from-ask path, where
-/// `answering` is the tool call this very command is injecting a result for
-/// (e.g. `ask_user`). That call is about to be answered for real, so it is not
+/// `answering` are the tool calls this very command is supplying results for
+/// (e.g. every `ask_user` of a parked turn). They are about to be answered for
+/// real, so they are not
 /// dangling: repairing it too would put *two* results on one `tool_use_id` — the
 /// duplicate shape stricter providers reject outright, and pure noise for the
 /// ones that don't.
-fn repair_unanswered_tool_calls_except(messages: Vec<Message>, answering: &str) -> Vec<Message> {
-    repair_dangling(messages, Some(answering))
+fn repair_unanswered_tool_calls_except(
+    messages: Vec<Message>,
+    answering: &std::collections::HashSet<String>,
+) -> Vec<Message> {
+    repair_dangling(messages, answering)
 }
 
-fn repair_dangling(messages: Vec<Message>, answering: Option<&str>) -> Vec<Message> {
+fn repair_dangling(
+    messages: Vec<Message>,
+    answering: &std::collections::HashSet<String>,
+) -> Vec<Message> {
     let mut answered: std::collections::HashSet<String> = messages
         .iter()
         .flat_map(|m| m.parts.iter())
@@ -1605,9 +1621,7 @@ fn repair_dangling(messages: Vec<Message>, answering: Option<&str>) -> Vec<Messa
             ContentPart::Text(_) | ContentPart::ToolCall(_) | ContentPart::Thinking(_) => None,
         })
         .collect();
-    if let Some(id) = answering {
-        answered.insert(id.to_string());
-    }
+    answered.extend(answering.iter().cloned());
 
     // Insertion index → the call ids needing a synthetic result there.
     let mut repairs: std::collections::BTreeMap<usize, Vec<String>> =
@@ -1660,33 +1674,6 @@ fn repair_dangling(messages: Vec<Message>, answering: Option<&str>) -> Vec<Messa
 fn synthetic_results(ids: Vec<String>) -> impl Iterator<Item = Message> {
     ids.into_iter()
         .map(|id| Message::tool_result(id, INTERRUPTED_RESULT, true))
-}
-
-/// Find the tool-call id of the handoff tool by scanning captured assistant messages.
-fn find_tool_call_id(events: &[AgentEvent], tool_name: &str) -> Option<String> {
-    events.iter().rev().find_map(|e| match e {
-        AgentEvent::MessageComplete(mc) => mc.message.parts.iter().find_map(|p| match p {
-            ContentPart::ToolCall(tc) if tc.name == tool_name => Some(tc.id.clone()),
-            ContentPart::ToolCall(_)
-            | ContentPart::Text(_)
-            | ContentPart::ToolResult(_)
-            | ContentPart::Thinking(_) => None,
-        }),
-        AgentEvent::InputMessage(_)
-        | AgentEvent::MessageStart(_)
-        | AgentEvent::MessageStop(_)
-        | AgentEvent::TextBlockStart(_)
-        | AgentEvent::TextChunk(_)
-        | AgentEvent::ThinkingBlockStart(_)
-        | AgentEvent::ThinkingChunk(_)
-        | AgentEvent::ThinkingSignatureChunk(_)
-        | AgentEvent::ToolCallStart(_)
-        | AgentEvent::ToolCallInputDelta(_)
-        | AgentEvent::ContentBlockStop(_)
-        | AgentEvent::ToolExecuting(_)
-        | AgentEvent::ToolComplete(_)
-        | AgentEvent::RunComplete(_) => None,
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1743,13 +1730,7 @@ async fn run_with_retries(
             Ok(output) => {
                 return match output.result {
                     AgentResult::Completed(c) => RunOutcome::Completed { text: c.text },
-                    AgentResult::Handoff(h) => {
-                        let tool_call_id = find_tool_call_id(&captured, &h.tool_name);
-                        RunOutcome::Concluded {
-                            data: h.data,
-                            tool_call_id,
-                        }
-                    }
+                    AgentResult::Handoff(h) => RunOutcome::Concluded { calls: h.calls },
                 };
             }
             Err(AgentError::Cancelled) => return RunOutcome::Cancelled,
@@ -2072,7 +2053,8 @@ mod tests {
             },
         ];
 
-        let fixed = repair_unanswered_tool_calls_except(history.clone(), "ask1");
+        let answering = std::collections::HashSet::from(["ask1".to_string()]);
+        let fixed = repair_unanswered_tool_calls_except(history.clone(), &answering);
         assert_eq!(fixed.len(), history.len(), "nothing is repaired: {fixed:?}");
 
         // Without the exclusion it *is* repaired — the bug this guards.
@@ -2896,8 +2878,9 @@ mod fence_tests {
 
         // Run 0 starts and hangs in `provide`, so it is genuinely in flight.
         agent
-            .tell(AgentCommand::Run {
-                input: "first".into(),
+            .tell(AgentCommand::Resume {
+                results: Vec::new(),
+                message: Some("first".into()),
             })
             .await
             .unwrap();
@@ -2918,8 +2901,9 @@ mod fence_tests {
         // held. Without it, `running` would have been cleared and this would
         // start a second background loop against the same journal.
         agent
-            .tell(AgentCommand::Run {
-                input: "second".into(),
+            .tell(AgentCommand::Resume {
+                results: Vec::new(),
+                message: Some("second".into()),
             })
             .await
             .unwrap();

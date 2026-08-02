@@ -199,10 +199,22 @@ impl agent::AgentInput {
         })
     }
 
+    /// Several results delivered as one input. Empty is meaningless — there is
+    /// nothing to resume with — so callers pass at least one.
+    pub fn tool_results(results: Vec<agent::ToolResultInput>) -> Self {
+        Self::ToolResults(agent::ToolResultsInput { results })
+    }
+
+    /// The id of the message this input becomes. For a batch of results it is
+    /// the first one's, which keeps it stable and unique per turn boundary.
     pub fn message_id(&self) -> String {
         match self {
             Self::UserMessage(u) => u.id.clone(),
             Self::ToolResult(t) => format!("result:{}", t.tool_call_id),
+            Self::ToolResults(t) => match t.results.first() {
+                Some(first) => format!("result:{}", first.tool_call_id),
+                None => "result:none".to_string(),
+            },
         }
     }
 
@@ -223,6 +235,24 @@ impl agent::AgentInput {
                     output: t.output.clone(),
                     is_error: t.is_error,
                 })],
+            },
+            // One message carrying every result: Anthropic takes it as a user
+            // message with N `tool_result` blocks, and the OpenAI wire splits it
+            // back into one `role: "tool"` message per result.
+            Self::ToolResults(t) => agent::Message {
+                id: self.message_id(),
+                role: agent::Role::Tool,
+                parts: t
+                    .results
+                    .iter()
+                    .map(|r| {
+                        agent::ContentPart::ToolResult(agent::ToolResultPart {
+                            tool_call_id: r.tool_call_id.clone(),
+                            output: r.output.clone(),
+                            is_error: r.is_error,
+                        })
+                    })
+                    .collect(),
             },
         }
     }

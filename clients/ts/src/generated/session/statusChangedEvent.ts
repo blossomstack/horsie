@@ -1,4 +1,5 @@
 
+import { PendingAskView } from './pendingAskView';
 import { SessionStatusKind } from './sessionStatusKind';
 /**
  * Live status transition. Sent without an SSE id (the session detail endpoint
@@ -6,4 +7,5 @@ import { SessionStatusKind } from './sessionStatusKind';
 export interface StatusChangedEvent {
   status: SessionStatusKind;
   reason?: string;
+  pendingAsks: PendingAskView[];
 }

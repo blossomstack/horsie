@@ -82,11 +82,18 @@ struct ToolResultInput {
     is_error: bool,
 }
 
+/// One or more tool results delivered together — every parked call of a turn is
+/// answered at once, so no `tool_use` ever reaches a provider without a result
+struct ToolResultsInput {
+    results: Vec<ToolResultInput>,
+}
+
 /// The only valid inputs to Agent::run
 #[type_tag = "type"]
 union AgentInput {
     UserMessage(UserMessageInput),
     ToolResult(ToolResultInput),
+    ToolResults(ToolResultsInput),
 }
 
 /// Agent completed with a final text response
@@ -94,10 +101,18 @@ struct CompletedOutput {
     text: String,
 }
 
-/// Agent handed off control with structured data
+/// One call to the handoff tool
+struct HandoffCall {
+    tool_call_id: String,
+    data: Any,
+}
+
+/// Agent handed off control. A conclusion is always one call; a park (an
+/// optional handoff, e.g. `ask_user`) may be several issued in the same turn,
+/// and all of them are answered together
 struct HandoffOutput {
     tool_name: String,
-    data: Any,
+    calls: Vec<HandoffCall>,
 }
 
 /// The outcome of an agent run

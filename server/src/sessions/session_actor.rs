@@ -13,7 +13,7 @@ use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::{QuietEventSink, SessionEventSink, StampedEvent, wire_event};
 use crate::sessions::spawn_tool::SubAgentToolbox;
-use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
+use crate::sessions::spec::{AgentSettings, PendingAsk, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::subagents::{
     INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent, SubAgentTree,
 };
@@ -23,6 +23,7 @@ use crate::sessions::{SessionFrame, UserMessageError};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
+use horsie_models::agent::ToolResultInput;
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
@@ -31,7 +32,7 @@ use horsie_workflow::{
     compose_system_prompt, scan_workspace,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
@@ -47,6 +48,11 @@ const MAIN_AGENT_ID: &str = "main";
 /// Cancellation is prompt (milliseconds); this is a backstop so a wedged run
 /// can never hold the mailbox — and with it the Stop button — hostage.
 const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What an abandoned ask records as its result: the user was asked, chose to
+/// say something else, and the call still needs an answer for the wire to stay
+/// valid.
+const ABANDONED_ASK_RESULT: &str = "not answered — the user sent a new message instead";
 
 /// Separator between messages merged into one turn. Blank line, because the
 /// model is reading them as one message and paragraph breaks are what a human
@@ -95,6 +101,11 @@ pub enum SessionCommand {
     /// Read this session's aggregated usage.
     UsageStats {
         reply: oneshot::Sender<SessionUsageStats>,
+    },
+    /// Answer every pending ask at once, resuming the turn.
+    Answer {
+        answers: Vec<AskAnswer>,
+        reply: oneshot::Sender<Result<(), AnswerError>>,
     },
     /// Read this session's recovered state: status, pending ask, inbox.
     Snapshot {
@@ -168,7 +179,13 @@ pub enum SessionDomainEvent {
     /// the window replays to the same place.
     TurnBegan {
         consumed: Vec<String>,
+        /// The single ask this turn answered. Kept for journals written before
+        /// a turn could answer several; new turns write `answered`.
         answering: Option<String>,
+        /// Every ask this turn answered. Empty when the turn abandoned them or
+        /// there were none.
+        #[serde(default)]
+        answered: Vec<String>,
     },
     /// The agent asked the user something and is parked on it.
     AskRecorded {
@@ -224,6 +241,42 @@ pub enum SessionDomainEvent {
     },
 }
 
+/// One answer to one pending ask.
+#[derive(Debug, Clone)]
+pub struct AskAnswer {
+    pub tool_call_id: String,
+    pub text: String,
+}
+
+/// Why a set of answers was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerError {
+    /// The session is not parked on anything answerable.
+    NothingPending,
+    /// The answers did not cover the pending asks exactly.
+    Incomplete {
+        missing: Vec<String>,
+        unexpected: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for AnswerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NothingPending => write!(f, "this session is not waiting on an answer"),
+            Self::Incomplete {
+                missing,
+                unexpected,
+            } => write!(
+                f,
+                "every pending question must be answered together (missing: [{}]; not pending: [{}])",
+                missing.join(", "),
+                unexpected.join(", ")
+            ),
+        }
+    }
+}
+
 /// One accepted-but-undelivered user message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InboxMessage {
@@ -236,9 +289,11 @@ pub struct InboxMessage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionState {
     pub status: SessionStatus,
-    /// The ask awaiting an answer (status `AwaitingInput`).
-    pub pending_ask: Option<String>,
-    pub pending_question: Option<String>,
+    /// Every ask awaiting an answer (status `AwaitingInput`), oldest first. A
+    /// turn may ask several questions at once, and the run cannot resume until
+    /// all of them have a result.
+    #[serde(default)]
+    pub pending_asks: Vec<PendingAsk>,
     /// Accepted user messages not yet delivered to a turn. The client shows
     /// these as unread; they go in with whatever turn starts next.
     #[serde(default)]
@@ -263,9 +318,8 @@ pub struct AgentUsageEntry {
 /// the same answers as a loaded one — it just has to be loaded to give them.
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
+    /// Carries the pending asks when the session is parked on questions.
     pub status: SessionStatus,
-    pub pending_ask: Option<String>,
-    pub pending_question: Option<String>,
     pub inbox: Vec<InboxMessage>,
 }
 
@@ -546,23 +600,34 @@ impl SessionActor {
             return Vec::new();
         }
         let consumed: Vec<String> = state.inbox.iter().map(|m| m.id.clone()).collect();
-        let answering = state.pending_ask.clone();
         // One user message, not several: Anthropic requires alternating roles,
         // so consecutive user turns are not portable. Provenance survives in
         // the `MessageQueued` events.
         let mut parts: Vec<&str> = state.inbox.iter().map(|m| m.text.as_str()).collect();
         parts.extend(owed.iter().map(|(_, text)| text.as_str()));
         let merged = parts.join(MERGE_SEPARATOR);
+        // A message sent while the agent is waiting on questions abandons them:
+        // "never mind, do this instead". Every parked call still gets a result,
+        // so nothing dangles — answering them for real goes through `Answer`,
+        // which requires all of them at once.
+        let abandoned: Vec<ToolResultInput> = state
+            .pending_asks
+            .iter()
+            .filter_map(|ask| ask.tool_call_id.clone())
+            .map(|tool_call_id| ToolResultInput {
+                tool_call_id,
+                output: ABANDONED_ASK_RESULT.to_string(),
+                is_error: true,
+            })
+            .collect();
 
         if let Some(agent) = self.agent() {
-            let cmd = match &answering {
-                Some(tool_call_id) => AgentCommand::InjectToolResult {
-                    tool_call_id: tool_call_id.clone(),
-                    content: merged,
-                },
-                None => AgentCommand::Run { input: merged },
-            };
-            let _ = agent.tell(cmd).await;
+            let _ = agent
+                .tell(AgentCommand::Resume {
+                    results: abandoned,
+                    message: Some(merged),
+                })
+                .await;
         }
         self.report(SessionStatus::Running).await;
         // Tell-then-persist, like the user messages this turn also carries:
@@ -573,7 +638,8 @@ impl SessionActor {
         // exception, because an untracked agent is worse than a duplicate.
         let mut events = vec![SessionDomainEvent::TurnBegan {
             consumed,
-            answering,
+            answering: None,
+            answered: Vec::new(),
         }];
         events.extend(
             owed.iter()
@@ -629,7 +695,14 @@ impl SessionActor {
                 .map(|(_, text)| text.as_str())
                 .collect::<Vec<_>>()
                 .join(MERGE_SEPARATOR);
-            if agent.tell(AgentCommand::Run { input }).await.is_err() {
+            if agent
+                .tell(AgentCommand::Resume {
+                    results: Vec::new(),
+                    message: Some(input),
+                })
+                .await
+                .is_err()
+            {
                 continue;
             }
             events.push(SessionDomainEvent::SubAgentRunning { id: parent_id });
@@ -639,6 +712,63 @@ impl SessionActor {
             );
         }
         events
+    }
+
+    /// Answer every pending ask at once and resume the turn. A set that does not
+    /// cover the pending asks exactly is refused and nothing is journaled: a
+    /// half-answered park would leave the run unable to resume and the wire
+    /// holding a `tool_use` with no result.
+    async fn on_answer(
+        &mut self,
+        state: &SessionState,
+        answers: Vec<AskAnswer>,
+        reply: oneshot::Sender<Result<(), AnswerError>>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        let pending: HashSet<String> = state
+            .pending_asks
+            .iter()
+            .filter_map(|a| a.tool_call_id.clone())
+            .collect();
+        if pending.is_empty() {
+            let _ = reply.send(Err(AnswerError::NothingPending));
+            return CommandEffect::none();
+        }
+        let answered: HashSet<String> = answers.iter().map(|a| a.tool_call_id.clone()).collect();
+        if answered != pending {
+            let mut missing: Vec<String> = pending.difference(&answered).cloned().collect();
+            let mut unexpected: Vec<String> = answered.difference(&pending).cloned().collect();
+            missing.sort();
+            unexpected.sort();
+            let _ = reply.send(Err(AnswerError::Incomplete {
+                missing,
+                unexpected,
+            }));
+            return CommandEffect::none();
+        }
+
+        let results: Vec<ToolResultInput> = answers
+            .iter()
+            .map(|a| ToolResultInput {
+                tool_call_id: a.tool_call_id.clone(),
+                output: a.text.clone(),
+                is_error: false,
+            })
+            .collect();
+        if let Some(agent) = self.agent() {
+            let _ = agent
+                .tell(AgentCommand::Resume {
+                    results,
+                    message: None,
+                })
+                .await;
+        }
+        self.report(SessionStatus::Running).await;
+        let _ = reply.send(Ok(()));
+        CommandEffect::persist(vec![SessionDomainEvent::TurnBegan {
+            consumed: Vec::new(),
+            answering: None,
+            answered: answers.into_iter().map(|a| a.tool_call_id).collect(),
+        }])
     }
 
     async fn on_user_message(
@@ -712,17 +842,24 @@ impl SessionActor {
                 self.report(SessionStatus::Idle).await;
                 (vec![SessionDomainEvent::TurnEnded], true)
             }
-            AgentOutcome::Asked {
-                tool_call_id,
-                question,
-                ..
-            } => {
-                self.report(SessionStatus::AwaitingInput).await;
+            AgentOutcome::Asked { asks, .. } => {
+                self.report(SessionStatus::AwaitingInput {
+                    asks: asks
+                        .iter()
+                        .map(|a| PendingAsk {
+                            tool_call_id: a.tool_call_id.clone(),
+                            question: a.question.clone(),
+                        })
+                        .collect(),
+                })
+                .await;
                 (
-                    vec![SessionDomainEvent::AskRecorded {
-                        tool_call_id,
-                        question,
-                    }],
+                    asks.into_iter()
+                        .map(|a| SessionDomainEvent::AskRecorded {
+                            tool_call_id: a.tool_call_id,
+                            question: a.question,
+                        })
+                        .collect::<Vec<_>>(),
                     // An ask is a turn boundary too: a message queued while the
                     // agent was working becomes the answer.
                     true,
@@ -1152,16 +1289,13 @@ impl EventSourcedActor for SessionActor {
             SessionDomainEvent::MessageQueued { id, text, at_ms } => {
                 state.inbox.push(InboxMessage { id, text, at_ms });
             }
-            SessionDomainEvent::TurnBegan {
-                consumed,
-                answering,
-            } => {
+            SessionDomainEvent::TurnBegan { consumed, .. } => {
                 state.status = SessionStatus::Running;
                 state.inbox.retain(|m| !consumed.contains(&m.id));
-                if answering.is_some() {
-                    state.pending_ask = None;
-                    state.pending_question = None;
-                }
+                // A turn beginning ends the park either way: the asks were
+                // answered, or the user moved on and they were abandoned. Both
+                // record a result for every call before the turn starts.
+                state.pending_asks.clear();
                 // The previous turn's failure is history once a new turn is
                 // under way; leaving it set makes the detail endpoint report a
                 // stale error for the rest of the session's life.
@@ -1171,9 +1305,13 @@ impl EventSourcedActor for SessionActor {
                 tool_call_id,
                 question,
             } => {
-                state.status = SessionStatus::AwaitingInput;
-                state.pending_ask = tool_call_id;
-                state.pending_question = Some(question);
+                state.pending_asks.push(PendingAsk {
+                    tool_call_id,
+                    question,
+                });
+                state.status = SessionStatus::AwaitingInput {
+                    asks: state.pending_asks.clone(),
+                };
             }
             SessionDomainEvent::TurnEnded
             | SessionDomainEvent::TurnStopped
@@ -1329,11 +1467,12 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(head);
                 CommandEffect::none()
             }
+            SessionCommand::Answer { answers, reply } => {
+                self.on_answer(state, answers, reply).await
+            }
             SessionCommand::Snapshot { reply } => {
                 let _ = reply.send(SessionSnapshot {
                     status: state.status.clone(),
-                    pending_ask: state.pending_ask.clone(),
-                    pending_question: state.pending_question.clone(),
                     inbox: state.inbox.clone(),
                 });
                 CommandEffect::none()
@@ -1466,7 +1605,12 @@ impl EventSourcedActor for SessionActor {
                     return CommandEffect::none();
                 }
                 let agent = self.spawn_sub_agent_actor(ctx, id);
-                let _ = agent.tell(AgentCommand::Run { input: task }).await;
+                let _ = agent
+                    .tell(AgentCommand::Resume {
+                        results: Vec::new(),
+                        message: Some(task),
+                    })
+                    .await;
                 emit_progress(
                     &self.frames,
                     "subagent_spawned",
@@ -1563,6 +1707,7 @@ mod tests {
             SessionDomainEvent::TurnBegan {
                 consumed: vec!["m1".into()],
                 answering: None,
+                answered: Vec::new(),
             },
             queued("m3", "three"),
         ]);
@@ -1577,6 +1722,8 @@ mod tests {
 
     #[test]
     fn a_turn_that_answers_an_ask_clears_it() {
+        // `answering` is how turns before multi-ask recorded it; a journal
+        // written then must still fold to the same place.
         let s = fold(vec![
             SessionDomainEvent::AskRecorded {
                 tool_call_id: Some("call-1".into()),
@@ -1586,11 +1733,43 @@ mod tests {
             SessionDomainEvent::TurnBegan {
                 consumed: vec!["m1".into()],
                 answering: Some("call-1".into()),
+                answered: Vec::new(),
             },
         ]);
         assert_eq!(s.status, SessionStatus::Running);
-        assert!(s.pending_ask.is_none(), "the ask was answered");
-        assert!(s.pending_question.is_none());
+        assert!(s.pending_asks.is_empty(), "the ask was answered");
+    }
+
+    #[test]
+    fn two_asks_in_one_turn_are_both_pending_until_a_turn_begins() {
+        let asked = |id: &str, q: &str| SessionDomainEvent::AskRecorded {
+            tool_call_id: Some(id.to_string()),
+            question: q.to_string(),
+        };
+        let s = fold(vec![
+            asked("call-1", "which branch?"),
+            asked("call-2", "which model?"),
+        ]);
+        let SessionStatus::AwaitingInput { asks } = &s.status else {
+            panic!("expected AwaitingInput, got {:?}", s.status);
+        };
+        assert_eq!(asks.len(), 2, "the status carries what must be answered");
+        assert_eq!(asks[0].question, "which branch?");
+        assert_eq!(asks[1].question, "which model?");
+        assert_eq!(s.pending_asks.len(), 2);
+
+        // Answered together, or abandoned together — either way the turn that
+        // begins is the end of the park.
+        let s = SessionActor::apply_event(
+            s,
+            SessionDomainEvent::TurnBegan {
+                consumed: Vec::new(),
+                answering: None,
+                answered: vec!["call-1".into(), "call-2".into()],
+            },
+        );
+        assert_eq!(s.status, SessionStatus::Running);
+        assert!(s.pending_asks.is_empty());
     }
 
     #[test]
@@ -1604,8 +1783,13 @@ mod tests {
             },
             queued("m1", "main"),
         ]);
-        assert_eq!(s.status, SessionStatus::AwaitingInput);
-        assert_eq!(s.pending_ask.as_deref(), Some("call-1"));
+        assert!(matches!(s.status, SessionStatus::AwaitingInput { .. }));
+        assert_eq!(
+            s.pending_asks
+                .first()
+                .and_then(|a| a.tool_call_id.as_deref()),
+            Some("call-1")
+        );
         assert_eq!(s.inbox.len(), 1, "the answer is still owed");
     }
 
@@ -1620,6 +1804,7 @@ mod tests {
                 SessionDomainEvent::TurnBegan {
                     consumed: vec!["m1".into()],
                     answering: None,
+                    answered: Vec::new(),
                 },
                 queued("m2", "queued while running"),
                 boundary,
@@ -1655,6 +1840,7 @@ mod tests {
             SessionDomainEvent::TurnBegan {
                 consumed: vec![],
                 answering: None,
+                answered: Vec::new(),
             },
         );
         assert_eq!(s.status, SessionStatus::Running);
@@ -1886,6 +2072,7 @@ mod tests {
             SessionDomainEvent::TurnBegan {
                 consumed: vec!["m1".into()],
                 answering: None,
+                answered: Vec::new(),
             },
             queued("m2", "queued while running"),
         ]);
@@ -1937,6 +2124,7 @@ mod tests {
             SessionDomainEvent::TurnBegan {
                 consumed: vec!["m1".into()],
                 answering: None,
+                answered: Vec::new(),
             },
             queued("m2", "queued while running"),
         ];
@@ -2007,6 +2195,7 @@ mod tests {
             SessionDomainEvent::TurnBegan {
                 consumed: vec!["m1".into()],
                 answering: None,
+                answered: Vec::new(),
             },
             queued("m2", "queued while running"),
         ]);
@@ -2036,19 +2225,14 @@ mod tests {
         let state = fold(vec![queued("m1", "one"), queued("m2", "two")]);
         let events = actor.drain(&state).await;
         assert_eq!(events.len(), 1);
-        let SessionDomainEvent::TurnBegan {
-            consumed,
-            answering,
-        } = &events[0]
-        else {
+        let SessionDomainEvent::TurnBegan { consumed, .. } = &events[0] else {
             panic!("expected TurnBegan, got {:?}", events[0]);
         };
         assert_eq!(consumed, &vec!["m1".to_string(), "m2".to_string()]);
-        assert!(answering.is_none());
     }
 
     #[tokio::test]
-    async fn drain_delivers_a_merged_message_as_the_pending_asks_answer() {
+    async fn drain_abandons_pending_asks_rather_than_answering_them() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
         let mut actor = SessionActor::new(
@@ -2068,14 +2252,155 @@ mod tests {
         let events = actor.drain(&state).await;
         assert_eq!(events.len(), 1);
         let SessionDomainEvent::TurnBegan {
-            consumed,
-            answering,
+            consumed, answered, ..
         } = &events[0]
         else {
             panic!("expected TurnBegan, got {:?}", events[0]);
         };
         assert_eq!(consumed, &vec!["m1".to_string()]);
-        assert_eq!(answering.as_deref(), Some("call-1"));
+        assert!(
+            answered.is_empty(),
+            "a plain message abandons the question rather than answering it — \
+             answers come through `Answer`, which requires all of them at once"
+        );
+    }
+
+    /// A session parked on two questions, with an actor to answer them on.
+    async fn parked_on_two_asks() -> (SessionActor, SessionState) {
+        let f = actor_fixture().await;
+        let parent = spawn_deaf_supervisor();
+        let actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            test_frames(),
+        );
+        let state = fold(vec![
+            SessionDomainEvent::AskRecorded {
+                tool_call_id: Some("call-1".into()),
+                question: "which branch?".into(),
+            },
+            SessionDomainEvent::AskRecorded {
+                tool_call_id: Some("call-2".into()),
+                question: "which model?".into(),
+            },
+        ]);
+        (actor, state)
+    }
+
+    fn answer(id: &str, text: &str) -> AskAnswer {
+        AskAnswer {
+            tool_call_id: id.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_partial_answer_set_is_refused_and_journals_nothing() {
+        // Resuming on half the answers would send the provider a `tool_use` with
+        // no result, which is exactly the 400 this whole change exists to stop.
+        let (mut actor, state) = parked_on_two_asks().await;
+        let (tx, rx) = oneshot::channel();
+
+        let effect = actor
+            .on_answer(&state, vec![answer("call-1", "main")], tx)
+            .await;
+
+        assert!(
+            effect.events().is_empty(),
+            "a refused answer set changes nothing"
+        );
+        match rx.await.unwrap() {
+            Err(AnswerError::Incomplete {
+                missing,
+                unexpected,
+            }) => {
+                assert_eq!(missing, vec!["call-2".to_string()]);
+                assert!(unexpected.is_empty());
+            }
+            other => panic!("expected Incomplete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_for_a_call_that_is_not_pending_is_refused() {
+        let (mut actor, state) = parked_on_two_asks().await;
+        let (tx, rx) = oneshot::channel();
+
+        let effect = actor
+            .on_answer(
+                &state,
+                vec![
+                    answer("call-1", "main"),
+                    answer("call-2", "kimi"),
+                    answer("call-9", "who asked?"),
+                ],
+                tx,
+            )
+            .await;
+
+        assert!(effect.events().is_empty());
+        match rx.await.unwrap() {
+            Err(AnswerError::Incomplete { unexpected, .. }) => {
+                assert_eq!(unexpected, vec!["call-9".to_string()]);
+            }
+            other => panic!("expected Incomplete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_complete_answer_set_begins_a_turn_naming_every_ask() {
+        let (mut actor, state) = parked_on_two_asks().await;
+        let (tx, rx) = oneshot::channel();
+
+        let effect = actor
+            .on_answer(
+                &state,
+                vec![answer("call-1", "main"), answer("call-2", "kimi")],
+                tx,
+            )
+            .await;
+
+        assert!(rx.await.unwrap().is_ok());
+        let events = effect.events();
+        assert_eq!(events.len(), 1);
+        let SessionDomainEvent::TurnBegan {
+            consumed, answered, ..
+        } = &events[0]
+        else {
+            panic!("expected TurnBegan, got {:?}", events[0]);
+        };
+        assert!(consumed.is_empty(), "an answer consumes no queued message");
+        let mut answered = answered.clone();
+        answered.sort();
+        assert_eq!(answered, vec!["call-1".to_string(), "call-2".to_string()]);
+
+        // And the park is over: folding the event clears every pending ask.
+        let next = SessionActor::apply_event(state, events[0].clone());
+        assert!(next.pending_asks.is_empty());
+        assert_eq!(next.status, SessionStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn answering_a_session_that_is_not_parked_is_refused() {
+        let f = actor_fixture().await;
+        let parent = spawn_deaf_supervisor();
+        let mut actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            test_frames(),
+        );
+        let (tx, rx) = oneshot::channel();
+
+        let effect = actor
+            .on_answer(&SessionState::default(), vec![answer("call-1", "main")], tx)
+            .await;
+
+        assert!(effect.events().is_empty());
+        assert_eq!(rx.await.unwrap(), Err(AnswerError::NothingPending));
     }
 
     /// An `LlmProvider` that hangs until released, so a test can hold a run
@@ -2652,7 +2977,10 @@ mod tests {
             .unwrap();
         for _ in 0..200 {
             let state = crate::sessions::events::fold_session_state(&journal, id).await;
-            if state.status == crate::sessions::spec::SessionStatus::AwaitingInput {
+            if matches!(
+                state.status,
+                crate::sessions::spec::SessionStatus::AwaitingInput { .. }
+            ) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -2668,10 +2996,10 @@ mod tests {
         .await;
         // The ask is still pending — the notification must not have answered it.
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        assert_eq!(
+        assert!(matches!(
             state.status,
-            crate::sessions::spec::SessionStatus::AwaitingInput
-        );
+            crate::sessions::spec::SessionStatus::AwaitingInput { .. }
+        ));
 
         // The user's reply carries the notification along in the same input.
         session
@@ -2683,26 +3011,33 @@ mod tests {
             .unwrap()
             .unwrap();
         wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
-        // The answer went in as the pending ask's tool result, so look there:
-        // one result must carry both the user's reply and the notification.
+        // A plain message does not answer the question — it abandons it and
+        // starts a fresh turn — so the reply and the notification ride in the
+        // *user message*, while the abandoned ask gets a result of its own.
         let page = main_history(&session).await;
-        let results: Vec<String> = page
-            .messages
-            .iter()
-            .flat_map(|m| m.parts.iter())
-            .filter_map(|p| match p {
-                horsie_agentcore::ContentPart::ToolResult(r) => Some(r.output.clone()),
-                horsie_agentcore::ContentPart::Text(_)
-                | horsie_agentcore::ContentPart::ToolCall(_)
-                | horsie_agentcore::ContentPart::Thinking(_) => None,
-            })
-            .collect();
+        let (results, texts): (Vec<String>, Vec<String>) = {
+            let mut results = Vec::new();
+            let mut texts = Vec::new();
+            for part in page.messages.iter().flat_map(|m| m.parts.iter()) {
+                match part {
+                    horsie_agentcore::ContentPart::ToolResult(r) => results.push(r.output.clone()),
+                    horsie_agentcore::ContentPart::Text(t) => texts.push(t.text.clone()),
+                    horsie_agentcore::ContentPart::ToolCall(_)
+                    | horsie_agentcore::ContentPart::Thinking(_) => {}
+                }
+            }
+            (results, texts)
+        };
         assert!(
-            results
+            texts
                 .iter()
                 .any(|t| t.contains("the first one")
                     && t.contains("[subagent \"research\" completed]")),
-            "the notification rides with the user's answer: {results:?}"
+            "the notification rides with the user's message: {texts:?}"
+        );
+        assert!(
+            results.iter().any(|r| r.contains("not answered")),
+            "the abandoned ask still gets a result, so nothing dangles: {results:?}"
         );
     }
 
