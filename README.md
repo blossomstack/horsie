@@ -1,106 +1,121 @@
 # horsie
 
-**Sandboxed orchestration for LLM agent graphs.**
+**Self-hosted LLM agent sessions, in your browser.**
 
-horsie orchestrates LLM agents as arbitrary graphs that collaborate on a task.
-Each agent runs in its own [nono](https://github.com/always-further/nono)-sandboxed
-`horsie-runtime` child process under an explicit, per-job capability grant. A
-background daemon runs jobs in parallel, journals their progress durably, and
-auto-resumes anything still in flight after a restart.
+`horsie-server` is a web app for running LLM agents as durable chat **sessions**.
+You open it in a browser, pick a model, and chat with an agent that runs its
+tools in a **runtime** — a daemon on your own machine, or an ephemeral container
+the server provisions. Every session is journaled server-side and streams live
+to the browser, so you can close the tab, reconnect, and pick up a run already
+in flight.
 
-## How it works
+![The horsie web UI: a live session streaming an agent's work, with the session list, per-turn token usage, and the agent's task list](docs/assets/horsie-server.png)
 
-The CLI is two binaries:
+## Highlights
 
-- **`horsie`** — the user-facing CLI and the daemon (the `horsie` crate, in `cli/`).
-- **`horsie-runtime`** — the sandboxed child the daemon spawns once per job (the
-  `horsie-runtime` crate, in `runtime/`). It is the only process that talks to the model and touches the
-  workdir, and it runs under a nono sandbox restricted to the capabilities you grant.
+- **Durable, event-sourced sessions** — the whole transcript is journaled and
+  replayed on reconnect. Stop a turn mid-run; nothing is lost.
+- **Your models, your keys** — Anthropic and OpenAI-compatible providers,
+  configured from the Settings UI.
+- **Tools run where you want** — the `local` runtime dials back from your own
+  machine and works in the directories you expose, or let `velos` provision a
+  managed container per session.
+- **Real repositories** — connect a GitHub App once, then launch sessions with
+  repos checked out into the runtime.
+- **Extensible** — remote MCP servers and git-installed skill/plugin bundles,
+  enabled per session.
 
-A job carries a **workflow** (a graph of agents, e.g. `planner → coder → reviewer →
-pr`) and a **capability spec** (the files, directories, and network the sandbox may
-reach). The daemon streams agent events back over a unix socket, journals every step,
-and lets you list, tail, cancel, resume, and remove jobs.
+## Quick start
 
-Wire/protocol types are generated with [fluorite](https://github.com/zhxiaogg/fluorite)
-from the schemas under `models/fluorite/`; see `CLAUDE.md` for the design conventions.
-
-## Build & install
-
-Requires a recent Rust toolchain. From the workspace root:
-
-```bash
-make build-cli      # build `horsie` + `horsie-runtime` (release)
-make install-cli    # install both into ~/.local/bin (override with PREFIX=/BINDIR=)
-```
-
-Other useful targets: `make build` (whole workspace), `make test`, `make check`
-(the pre-PR gate: fmt + clippy + tests), `make help`.
-
-## Usage
-
-Start the daemon, then submit a workflow as a job:
+Start the server (from a checkout of this repo):
 
 ```bash
-horsie daemon start --background
-
-horsie job run \
-  --workflow examples/dev-workflow.json \
-  --capabilities examples/dev-workflow-capabilities.json \
-  --workdir /path/to/a/checkout \
-  --input "Add a --version flag to the CLI."
+docker compose -f docker/docker-compose.yml up -d
 ```
 
-Inspect and manage work:
+That brings up the server and web UI on port 3789, with no external database and
+no config file to write; data persists in a `horsie-data` Docker volume. Open
+<http://localhost:3789> and add a provider + model under **Settings → Models** —
+a fresh server has none, and sessions can't run a turn without one.
+
+Then give sessions somewhere to run tools. On the machine holding the code you
+want the agent to work on:
 
 ```bash
-horsie daemon status              # pid, uptime, job counts
-horsie job list                   # all known jobs
-horsie job status <id>            # per-agent workflow progress with timing
-horsie job logs <id> --follow     # tail a job's live output
-horsie job stop <id>              # cancel (job becomes resumable)
-horsie job resume <id> -m "..."   # answer a job awaiting input
-horsie job remove <id>            # drop a finished/failed job
+curl -fsSL https://get.horsie.dev | sh          # installs the `horsie` binary
+
+horsie connect --server http://localhost:3789 --workspace .
 ```
 
-`horsie validate --workflow <file>` checks a workflow against your config without
-running anything. Stopping the daemon leaves in-progress jobs `Running`; they
-auto-resume on the next `daemon start`.
+This registers the current directory as a workspace and holds a connection to
+the server, spawning one runtime process per session. Keep it running for as
+long as you want that machine reachable. (Alternatively, configure a **velos**
+vendor in Settings and skip the local daemon entirely.)
 
-## Configuration
+Back in the UI: **New** → pick a model → **Create**, and start chatting.
 
-Config is read from `$XDG_CONFIG_HOME/horsie/config.json` (else
-`~/.config/horsie/config.json`), or pass `--config <path>`. It defines model
-providers, models, and sandbox defaults; an absent config is treated as empty.
-State (the daemon control socket, per-job capability files) lives under
-`$XDG_STATE_HOME/horsie`, and the durable job journal under `$XDG_DATA_HOME/horsie`.
+## How the pieces fit
 
-A worked configuration and capability file are in [`examples/`](examples/README.md).
+```
+ Browser (web UI)
+    │  HTTP + SSE
+    ▼
+ horsie-server ──────────────► settings database (providers, models,
+    │                          vendors, GitHub, MCP, skill bundles)
+    │  runs each session's tools in a…
+    ▼
+ Runtime vendor
+    ├─ local  — a `horsie connect` agent on your own machine, dialing back
+    └─ velos  — a managed, ephemeral container the server provisions for you
+```
 
-## horsie server
+Configuration is split in two, and the halves never overlap:
 
-`horsie-server` is a separate binary — a self-hosted web app for running LLM
-agents as recoverable, event-sourced chat **sessions**. It's independent of the
-CLI above. Build it with `make build-server` (or the container image in
-[`docker/server.Dockerfile`](docker/server.Dockerfile)) and run it:
+- **`config.json`** — deployment/bootstrap only: where data lives, which
+  database, whether the local runtime is allowed. Edited by hand;
+  `docker/docker-compose.yml` seeds it for you.
+- **The settings database** (SQLite) — everything you tune day to day: providers
+  and models, runtime vendors, GitHub, MCP servers, skill bundles. Edited from
+  the **Settings** page in the UI.
+
+> **No built-in authentication.** The server has no login or access control.
+> Bind it to a trusted network only, or front it with your own auth proxy.
+
+## Documentation
+
+📖 **[Full user guide](docs/guide/README.md)** — running the server, runtime
+vendors, sessions, GitHub, MCP, and skill bundles.
+
+| Guide | For |
+| --- | --- |
+| [Getting started](docs/guide/getting-started.md) | Install the CLI, connect, run your first session |
+| [Self-hosting](docs/guide/self-hosting.md) | Docker compose; building the image or binary yourself |
+| [Runtime vendors](docs/guide/runtime-vendors.md) | Local daemon vs. velos; enabling each; picking one per session |
+| [Sessions](docs/guide/sessions.md) | The chat view and per-session options |
+| [GitHub](docs/guide/github.md) | Connect a GitHub App; run sessions against repos |
+| [MCP servers](docs/guide/mcp-servers.md) | Connect remote MCP servers |
+| [Skills & plugins](docs/guide/skills-and-plugins.md) | Install bundles; select them per session |
+| [Settings reference](docs/guide/settings-reference.md) | `config.json` vs. the settings database; every field |
+
+## Building from source
+
+Requires a recent Rust toolchain (and Node for the web client).
+
+```bash
+make build-server     # ./target/release/horsie-server
+make install-server   # install it into ~/.local/bin
+make web-build        # build the web UI into clients/web/dist
+```
+
+Run the binary directly with:
 
 ```bash
 horsie-server --addr 0.0.0.0:3789 --web clients/web/dist
 ```
 
-Then open `http://<host>:3789`. Each session runs its tools in a **runtime
-vendor**: the `local` runtime, a daemon you run on your own machine that dials
-back to the server, or `velos`, managed ephemeral containers the server
-provisions for you.
-Providers, models, runtime vendors, GitHub, MCP servers, and skill bundles are
-all configured from the **Settings** page in the UI (stored in a SQLite settings
-database); `config.json` holds only deployment settings (storage paths and the
-database location).
-
-📖 **Full user guide: [`docs/guide/`](docs/guide/README.md)** — installing and
-running the server, runtime vendors, sessions, GitHub, MCP, and skill bundles.
-
-> There is no built-in authentication — bind `0.0.0.0` only on a trusted network.
+`make build-cli` / `make install-cli` build the `horsie` binary (the vendor agent
+behind `horsie connect`) and its sandboxed `horsie-runtime` child. `make help`
+lists every target.
 
 ## Development
 
@@ -112,9 +127,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
-Production code denies `unwrap`, `expect`, `panic`, and wildcard match arms; tests
-opt out per-file. See `CLAUDE.md` for the full design philosophy and contribution
-conventions.
+Wire/protocol types are generated with
+[fluorite](https://github.com/zhxiaogg/fluorite) from the schemas under
+`models/fluorite/`. Production code denies `unwrap`, `expect`, `panic`, and
+wildcard match arms; tests opt out per-file. See `CLAUDE.md` for the full design
+philosophy and contribution conventions.
 
 ## License
 
