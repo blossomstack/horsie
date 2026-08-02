@@ -127,6 +127,7 @@ fn resolve_plugin_paths(config: Option<&Path>) -> Result<horsie::plugins::Plugin
     let cfg = HorsieConfig::resolve(config)?;
     Ok(horsie::plugins::PluginPaths {
         sources: cfg.storage.data_dir.join("sources"),
+        marketplaces: cfg.storage.data_dir.join("marketplaces"),
         plugins: cfg.storage.plugins_dir,
     })
 }

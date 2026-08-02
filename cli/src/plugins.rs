@@ -122,6 +122,9 @@ pub struct PluginPaths {
     /// `<data_dir>/sources` — one clone per `(url, ref)`, shared by every
     /// plugin resolved out of it.
     pub sources: PathBuf,
+    /// `<data_dir>/marketplaces` — the registry lockfile and nothing else; the
+    /// clones themselves live in `sources`, like every other checkout.
+    pub marketplaces: PathBuf,
 }
 
 /// `horsie plugin install <url>`: clone into the shared sources dir, resolve the
@@ -149,7 +152,7 @@ pub fn install(
     let (root_dir, entry_name) = resolve_plugin_root(&clone_dir, url)?;
     let root = horsie_support::plugin::PluginRoot::inspect(&root_dir).map_err(CliError::Config)?;
     if !root.is_installable() {
-        gc_clone(paths, &key);
+        gc_checkout(paths, &key);
         return Err(CliError::Config(format!(
             "'{url}' is not a skills plugin: {}",
             root.rejection()
@@ -243,13 +246,20 @@ fn remove_link(link: &Path) -> Result<(), CliError> {
     r.map_err(|e| CliError::Io(e.to_string()))
 }
 
-/// Delete a clone once no lockfile entry references it.
-fn gc_clone(paths: &PluginPaths, key: &str) {
-    let still_used = load_lock(&paths.plugins)
+/// Delete a checkout once neither an installed plugin nor a registered
+/// marketplace references it.
+///
+/// `pub(crate)` because removing a marketplace releases its claim through here
+/// too — the two registries share one `sources/` root.
+pub(crate) fn gc_checkout(paths: &PluginPaths, key: &str) {
+    let claimed_by_plugin = load_lock(&paths.plugins)
         .plugins
         .iter()
         .any(|p| p.source_key.as_deref() == Some(key));
-    if !still_used {
+    let claimed_by_marketplace = crate::marketplace::list(paths)
+        .iter()
+        .any(|m| m.source_key == key);
+    if !claimed_by_plugin && !claimed_by_marketplace {
         let _ = std::fs::remove_dir_all(paths.sources.join(key));
     }
 }
@@ -315,7 +325,7 @@ pub fn remove(paths: &PluginPaths, name: &str) -> Result<(), CliError> {
     }
     save_lock(&paths.plugins, &lock)?;
     if let Some(k) = key {
-        gc_clone(paths, &k);
+        gc_checkout(paths, &k);
     }
     Ok(())
 }
@@ -444,6 +454,7 @@ mod tests {
         PluginPaths {
             plugins: root.join("plugins"),
             sources: root.join("sources"),
+            marketplaces: root.join("marketplaces"),
         }
     }
 
