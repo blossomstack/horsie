@@ -14,7 +14,9 @@ use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::{QuietEventSink, SessionEventSink};
 use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
-use crate::sessions::subagents::{MAX_SUBAGENT_DEPTH, SubAgentParent, SubAgentTree};
+use crate::sessions::subagents::{
+    INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent, SubAgentTree,
+};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
 use crate::sessions::{SessionFrame, UserMessageError};
@@ -124,6 +126,10 @@ pub enum SessionCommand {
         id: Option<Uuid>,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Internal: post-recovery reconciliation of subagents the process died
+    /// under (tree nodes still `Running`). Their runs are over; the parents
+    /// are owed the failure like any other terminal result.
+    ReconcileSubAgents,
     /// Internal: the spawn's `SubAgentSpawned` write came back — only now
     /// does the child actor exist (persist-then-spawn). A failed write spawns
     /// nothing and the tool gets the error.
@@ -806,6 +812,9 @@ impl SessionActor {
             .into_iter()
             .chain(self.sub_agents.drain().map(|(_, a)| a))
         {
+            // Cancel first: a stopped mailbox makes the run task's next persist
+            // fail, but an in-flight tool call would run to completion first.
+            let _ = agent.tell(AgentCommand::Cancel { ack: None }).await;
             let _ = agent.tell(AgentCommand::Shutdown).await;
         }
     }
@@ -1199,8 +1208,8 @@ impl EventSourcedActor for SessionActor {
                 // A run started while the supervisor was deciding: refuse, and
                 // let the idle clock start again. This is the invariant that
                 // keeps a forty-minute tool call from being unloaded out from
-                // under itself.
-                if state.status == SessionStatus::Running {
+                // under itself — the main agent's run, or any subagent's.
+                if state.status == SessionStatus::Running || state.subagents.has_active() {
                     let _ = reply.send(false);
                     return CommandEffect::none();
                 }
@@ -1216,6 +1225,21 @@ impl EventSourcedActor for SessionActor {
                 CommandEffect::stop()
             }
             SessionCommand::AgentOutcome(outcome) => self.on_agent_outcome(state, outcome).await,
+            SessionCommand::ReconcileSubAgents => {
+                let interrupted = state.subagents.interrupted();
+                if interrupted.is_empty() {
+                    return CommandEffect::none();
+                }
+                CommandEffect::persist(
+                    interrupted
+                        .into_iter()
+                        .map(|id| SessionDomainEvent::SubAgentFailed {
+                            id,
+                            error: INTERRUPTED_ERROR.to_string(),
+                        })
+                        .collect(),
+                )
+            }
             SessionCommand::ReconcileInterrupted => {
                 if state.status == SessionStatus::Running {
                     self.report(SessionStatus::Idle).await;
@@ -1322,6 +1346,15 @@ impl EventSourcedActor for SessionActor {
     /// the next turn the user starts.
     async fn on_recovery_complete(&mut self, state: &SessionState, ctx: &mut ActorContext<Self>) {
         self.spawn_main_agent(ctx);
+        // Resident subagent actors — journal replay only. No runs start here:
+        // nodes the process died under are reconciled to failed, and results
+        // owed to parents flush at the next turn boundary, never on load.
+        for id in state.subagents.ids() {
+            self.spawn_sub_agent_actor(ctx, id);
+        }
+        if !state.subagents.interrupted().is_empty() {
+            let _ = ctx.self_ref().tell(SessionCommand::ReconcileSubAgents).await;
+        }
         if state.status == SessionStatus::Running {
             let _ = ctx
                 .self_ref()
@@ -2347,5 +2380,75 @@ mod tests {
                 && t.contains("[subagent \"research\" completed]")),
             "the notification rides with the user's answer: {results:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_respawns_subagents_and_fails_interrupted_ones() {
+        // First incarnation: a hanging provider keeps the subagent mid-run.
+        let gate = BlockingProvider::new();
+        let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
+        let sub = spawn_sub(&session, "w", "t").await;
+        wait_for_tree(&journal, id, |t| {
+            t.get(&sub).is_some_and(|r| {
+                r.status == crate::sessions::subagents::SubAgentStatus::Running
+            })
+        })
+        .await;
+        // Simulate process death: the last ref drops, the journal lives on.
+        drop(session);
+
+        // Second incarnation on the same journal.
+        let parent = spawn_deaf_supervisor();
+        let session2 = horsie_actor::spawn_root(
+            SessionActor::new(id, actor_spec_fixture(), f.deps.clone(), parent),
+            journal.clone(),
+        );
+        wait_for_tree(&journal, id, |t| {
+            t.get(&sub).is_some_and(|r| {
+                r.status == crate::sessions::subagents::SubAgentStatus::Failed
+            })
+        })
+        .await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert_eq!(
+            state.subagents.get(&sub).unwrap().error.as_deref(),
+            Some(crate::sessions::subagents::INTERRUPTED_ERROR)
+        );
+        // The transcript stays pageable: the resident actor answers history.
+        let page = session2
+            .ask(|reply| SessionCommand::History {
+                agent_id: Some(sub.to_string()),
+                query: horsie_workflow::HistoryQuery {
+                    before: None,
+                    limit: 10,
+                },
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(page.is_some(), "a reloaded subagent must answer history");
+        gate.release();
+    }
+
+    #[tokio::test]
+    async fn prepare_offload_refuses_with_an_active_subagent() {
+        let gate = BlockingProvider::new();
+        let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
+        let _sub = spawn_sub(&session, "w", "t").await;
+        wait_for_tree(&journal, id, |t| t.has_active()).await;
+
+        let offloadable = session
+            .ask(|reply| SessionCommand::PrepareOffload { reply })
+            .await
+            .unwrap();
+        assert!(!offloadable, "an active subagent must block offload");
+        assert!(
+            f.agent
+                .signals()
+                .iter()
+                .all(|s| !s.starts_with("hibernate:")),
+            "refusing must not touch the runtime"
+        );
+        gate.release();
     }
 }
