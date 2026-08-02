@@ -73,6 +73,20 @@ impl AgentParams {
             None
         }
     }
+
+    /// Every tool name a call to which *parks* this agent rather than running.
+    ///
+    /// A handoff tool is never executed: the run ends on the call and its result
+    /// arrives later as an `InjectToolResult` (the user's answer to `ask_user`,
+    /// a timer firing). So a dangling call to one is the normal shape of a
+    /// parked agent, not the wreckage of an interrupted one — see
+    /// [`missing_tool_results`], which must not journal a repair for it.
+    fn handoff_tools(&self) -> Vec<String> {
+        self.handoff_tool()
+            .into_iter()
+            .chain(self.optional_handoff_tool.clone())
+            .collect()
+    }
 }
 
 /// Commands accepted by an [`AgentActor`].
@@ -684,10 +698,11 @@ impl AgentActor {
                 // recomputing it on a clone at the top of every later turn. The
                 // journal is then a faithful record of what the model was shown,
                 // and a mid-history dangle can no longer accumulate.
-                let mut events: Vec<AgentDomainEvent> = missing_tool_results(&state.messages)
-                    .into_iter()
-                    .map(|message| AgentDomainEvent::InputMessage { message })
-                    .collect();
+                let mut events: Vec<AgentDomainEvent> =
+                    missing_tool_results(&state.messages, &self.params.handoff_tools())
+                        .into_iter()
+                        .map(|message| AgentDomainEvent::InputMessage { message })
+                        .collect();
                 events.push(AgentDomainEvent::RunCancelled);
                 // Snapshot to compact the incrementally-persisted log on cancel
                 // (never in interactive mode: cursors must stay stable).
@@ -1129,7 +1144,7 @@ impl EventSourcedActor for AgentActor {
         // Record the repair once, here, where it still belongs at the end of the
         // transcript — recomputing it per turn instead is what let it drift into
         // the middle of a history nobody could then repair in place.
-        let repairs = missing_tool_results(&state.messages);
+        let repairs = missing_tool_results(&state.messages, &self.params.handoff_tools());
         if !repairs.is_empty() {
             let (ack, _) = tokio::sync::oneshot::channel();
             let _ = ctx
@@ -1442,7 +1457,19 @@ const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded";
 /// and a recovery — so the repair is recorded where it belongs, at the end of
 /// the transcript as it stands. Nothing else needs to journal it: a call that is
 /// still in flight is not missing a result, it just does not have one yet.
-fn missing_tool_results(messages: &[Message]) -> Vec<Message> {
+///
+/// A call to one of `handoff_tools` is exempt. Those park the agent — the run
+/// ends on the call and the result comes later via `InjectToolResult` — so from
+/// a journal alone a parked `ask_user` is indistinguishable from a call the dead
+/// process was running, and recovery used to "repair" it. The user's answer was
+/// then appended to a synthetic result already bearing the same `tool_use_id`,
+/// and every later turn 400d on the duplicate. Idle offload made that routine:
+/// any ask left unanswered past the idle timeout unloads and reloads.
+///
+/// Not journaling the repair is safe because [`repair_unanswered_tool_calls`]
+/// still patches the history put on the wire, so an abandoned park can never
+/// reach a provider dangling.
+fn missing_tool_results(messages: &[Message], handoff_tools: &[String]) -> Vec<Message> {
     let answered: std::collections::HashSet<&str> = messages
         .iter()
         .flat_map(|m| m.parts.iter())
@@ -1456,7 +1483,11 @@ fn missing_tool_results(messages: &[Message]) -> Vec<Message> {
         .filter(|m| m.role == Role::Assistant)
         .flat_map(|m| m.parts.iter())
         .filter_map(|p| match p {
-            ContentPart::ToolCall(tc) if !answered.contains(tc.id.as_str()) => Some(tc.id.clone()),
+            ContentPart::ToolCall(tc)
+                if !answered.contains(tc.id.as_str()) && !handoff_tools.contains(&tc.name) =>
+            {
+                Some(tc.id.clone())
+            }
             ContentPart::ToolCall(_)
             | ContentPart::Text(_)
             | ContentPart::ToolResult(_)
@@ -1901,6 +1932,89 @@ mod tests {
 
         // Without the exclusion it *is* repaired — the bug this guards.
         assert_eq!(repair_unanswered_tool_calls(history).len(), 3);
+    }
+
+    /// The history an agent parked on an `ask_user` recovers from: the call is
+    /// dangling because the user has not answered *yet*, not because anything
+    /// died. Journaling a repair for it here is what put a synthetic
+    /// "interrupted" result and the real answer on one `tool_use_id` — the
+    /// duplicate every later turn then 400s on.
+    fn parked_on_ask() -> Vec<Message> {
+        vec![
+            user_msg("what should I remove?"),
+            Message {
+                id: "a1".into(),
+                role: Role::Assistant,
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "ask1".into(),
+                    name: "ask_user".into(),
+                    input: serde_json::json!({ "question": "which?" }),
+                })],
+            },
+        ]
+    }
+
+    #[test]
+    fn recovery_does_not_repair_the_ask_the_session_is_parked_on() {
+        let handoff = vec!["ask_user".to_string()];
+        assert!(
+            missing_tool_results(&parked_on_ask(), &handoff).is_empty(),
+            "a parked ask is awaiting its answer, not interrupted"
+        );
+        // Without the exemption it *is* repaired — the bug this guards, which
+        // bricked every session offloaded while awaiting an answer.
+        assert_eq!(missing_tool_results(&parked_on_ask(), &[]).len(), 1);
+    }
+
+    #[test]
+    fn an_interactive_sessions_ask_tool_is_a_handoff_tool() {
+        // The wiring the recovery exemption depends on: the server sets
+        // `ask_user` here, and nothing else tells the agent that call parks it.
+        let mut params = AgentParams::from_def(&def_fixture());
+        params.optional_handoff_tool = Some("ask_user".to_string());
+        assert_eq!(params.handoff_tools(), vec!["ask_user".to_string()]);
+    }
+
+    #[test]
+    fn a_timer_parked_agent_exempts_its_conclude_call() {
+        let mut def = def_fixture();
+        def.allow_timers = Some(true);
+        assert_eq!(
+            AgentParams::from_def(&def).handoff_tools(),
+            vec![CONCLUDE_TOOL.to_string()]
+        );
+    }
+
+    #[test]
+    fn recovery_still_repairs_a_real_tool_call_left_dangling_beside_a_park() {
+        let mut history = parked_on_ask();
+        history.insert(1, assistant_call("a0", "died"));
+        let repairs = missing_tool_results(&history, &["ask_user".to_string()]);
+        let ids: Vec<String> = repairs
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                ContentPart::ToolResult(r) => Some(r.tool_call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["died".to_string()],
+            "only the dead call is repaired"
+        );
+    }
+
+    #[test]
+    fn a_park_is_never_journaled_as_interrupted_but_is_still_repaired_on_the_wire() {
+        // The safety net that makes not journaling the repair safe: an ask that
+        // really is abandoned still reaches the provider well-formed.
+        let history = parked_on_ask();
+        assert!(missing_tool_results(&history, &["ask_user".to_string()]).is_empty());
+        assert!(
+            unmatched_tool_uses(&repair_unanswered_tool_calls(history)).is_empty(),
+            "the wire history must never carry a dangling tool_use"
+        );
     }
 
     /// Every `tool_use` id in `messages` that has no matching `tool_result`
