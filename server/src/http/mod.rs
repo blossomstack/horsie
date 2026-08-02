@@ -17,7 +17,7 @@ use crate::config::ConfigStore;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Router;
 use axum::routing::{get, post, put};
-use horsie_actor::{ActorRef, Journal};
+use horsie_actor::ActorRef;
 use horsie_models::session::GlobalSessionEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,7 +38,6 @@ pub(crate) fn request_base(headers: &axum::http::HeaderMap) -> String {
 #[derive(Clone)]
 pub struct AppState {
     pub supervisor: ActorRef<SessionSupervisorCommand>,
-    pub journal: Arc<dyn Journal>,
     pub global_events: broadcast::Sender<GlobalSessionEvent>,
     /// Reads and mutates the runtime-editable configuration (models, providers,
     /// default vendor). Also the source of the default vendor a create request
@@ -181,7 +180,7 @@ mod tests {
     use crate::sessions::supervisor::SessionSupervisor;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use horsie_actor::{InMemoryJournal, spawn_root};
+    use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use horsie_models::session_api::{CreateSessionResponse, ListSessionsResponse};
     use std::collections::HashMap;
     use tower::util::ServiceExt;
@@ -251,7 +250,6 @@ mod tests {
         let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
         AppState {
             supervisor,
-            journal,
             global_events: gtx,
             config_store: opened.store,
             model_cards,

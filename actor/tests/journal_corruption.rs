@@ -1,3 +1,5 @@
+// The journal itself is under test here, so it is called directly.
+#![allow(clippy::disallowed_methods)]
 //! #61 item 13: mid-file journal corruption silently truncates replay.
 //!
 //! `decode_after` treats an undecodable line as a stop condition and `break`s

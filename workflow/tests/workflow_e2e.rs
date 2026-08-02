@@ -1,3 +1,5 @@
+// Journal contents are the assertion here, so these tests read them directly.
+#![allow(clippy::disallowed_methods)]
 //! End-to-end workflow tests.
 //!
 //! Each test spins up the real actor runtime with an in-memory journal, a

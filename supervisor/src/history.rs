@@ -77,6 +77,10 @@ pub async fn workflow_events(journal: &Arc<dyn Journal>, job_id: &str) -> Vec<Wo
     let pid = WorkflowActor::persistence_id_for(job_id);
     let seq = snapshot_seq(journal, &pid).await;
     let mut out = Vec::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "offline history rendering: no actor is running to ask"
+    )]
     let mut stream = journal.replay(&pid, seq).await;
     while let Some(item) = stream.next().await {
         if let Ok(bytes) = item
@@ -101,6 +105,10 @@ async fn agent_session_lines(journal: &Arc<dyn Journal>, session_id: Uuid) -> Ve
         state = snap;
         seq = s;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "offline history rendering: no actor is running to ask"
+    )]
     let mut stream = journal.replay(&pid, seq).await;
     while let Some(item) = stream.next().await {
         if let Ok(bytes) = item

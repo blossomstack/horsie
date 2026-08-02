@@ -1,3 +1,6 @@
+// This crate implements the journal, so it is the one place that calls
+// `Journal::replay` freely; everywhere else the clippy.toml opt-out applies.
+#![allow(clippy::disallowed_methods)]
 //! Generic, domain-free event-sourced actor runtime.
 //!
 //! An [`EventSourcedActor`] rebuilds its state by replaying persisted events,

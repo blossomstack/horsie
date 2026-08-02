@@ -475,6 +475,10 @@ impl AgentActor {
         let pid = Self::persistence_id_for(self.ctx.session_id);
         let mut out = Vec::new();
         let mut seq = 0u64;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this actor owns this journal — the rule is that nothing else reads it"
+        )]
         let mut stream = ctx.journal().replay(&pid, 0).await;
         while let Some(item) = stream.next().await {
             let bytes = match item {

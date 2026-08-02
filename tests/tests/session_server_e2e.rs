@@ -151,7 +151,6 @@ async fn start_server_with(
     ));
     let state = AppState {
         supervisor: supervisor.clone(),
-        journal,
         global_events: gtx,
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
@@ -283,7 +282,6 @@ async fn start_server_with_live_vendors(
     ));
     let state = AppState {
         supervisor: supervisor.clone(),
-        journal,
         global_events: gtx,
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
@@ -374,8 +372,8 @@ async fn get_status(client: &reqwest::Client, addr: &SocketAddr, id: &str) -> Op
         return None;
     }
     let v: serde_json::Value = res.json().await.unwrap();
-    // `null` means the session is known but not loaded, so the server has no
-    // status to report rather than a guess.
+    // `null` only if the session's actor could not answer; reading a session
+    // loads it, and a loaded session always has a status.
     Some(
         v["session"]["status"]
             .as_str()
@@ -875,7 +873,7 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
 }
 
 #[tokio::test]
-async fn restart_leaves_status_unknown_until_loaded_and_never_resumes() {
+async fn restart_reconciles_the_interrupted_turn_and_never_resumes() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
     let agent = FakeRuntimeVendor::builder("mock")
@@ -896,19 +894,19 @@ async fn restart_leaves_status_unknown_until_loaded_and_never_resumes() {
     // Crash: stop the server core without letting the turn finish.
     server.shutdown().await;
 
-    // New incarnation on the SAME journal. The registry comes back, but the
-    // session is not loaded, so the server reports no status rather than
-    // guessing — and calls no vendor.
+    // New incarnation on the SAME journal. Reading the session loads it, which
+    // reconciles the turn the old process died in — it does not resume it, and
+    // calls no vendor.
     let signals_before = agent.signals();
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    wait_status(&client, &server2.addr, &id, "Unknown").await;
+    wait_status(&client, &server2.addr, &id, "Idle").await;
     assert_eq!(
         agent.signals(),
         signals_before,
         "recovery must not emit vendor signals (lazy)"
     );
 
-    // A message loads it, repairs the interrupted turn to Idle, and runs.
+    // A message then runs a fresh turn on the repaired history.
     mock.queue_response("resumed answer");
     assert_eq!(
         send_message(&client, &server2.addr, &id, "continue")
@@ -1505,9 +1503,9 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
 
     let signals_before = agent.signals();
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    wait_status(&client, &server2.addr, &id, "Unknown").await;
-    // The queue survived — the detail endpoint folds it from the journal
-    // without loading the session, which is also why no vendor call happened.
+    wait_status(&client, &server2.addr, &id, "Idle").await;
+    // The queue survived: the session actor recovers it from its journal, and
+    // recovering acquires no runtime.
     wait_inbox(&client, &server2.addr, &id, &["still owed an answer"]).await;
     assert_eq!(
         agent.signals(),
@@ -1671,8 +1669,9 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
         "an idle session is unloaded and its runtime hibernated: {:?}",
         agent.signals()
     );
-    // Unloaded, so the server has no status to report until it is opened again.
-    wait_status(&client, &server.addr, &id, "Unknown").await;
+    // Unloading loses nothing a reader can see: opening the session again
+    // reports the status its journal recorded.
+    wait_status(&client, &server.addr, &id, "Idle").await;
 
     assert_eq!(
         send_message(&client, &server.addr, &id, "two")

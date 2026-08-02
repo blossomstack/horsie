@@ -1,0 +1,12 @@
+# A journal belongs to the actor that owns it, and nothing else may read it.
+# Two bugs came out of ignoring that: a session's status vanished when it
+# unloaded because the detail endpoint folded the journal itself instead of
+# asking the actor, and the SSE stream re-read the agent journal on every frame.
+# See docs/superpowers/specs/2026-08-02-answerable-asks-design.md.
+#
+# The owning actor still has to call this, so it is an opt-out rather than a
+# ban: write `#[expect(clippy::disallowed_methods, reason = "...")]` at the call
+# site, and the justification shows up in the diff next to it.
+disallowed-methods = [
+    { path = "horsie_actor::Journal::replay", reason = "read a journal through the actor that owns it" },
+]
