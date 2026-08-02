@@ -36,5 +36,6 @@ pub use workflow_actor::{
     WorkflowStatus,
 };
 pub use workspace::{
-    SharedContext, Skill, SkillSet, WorkspaceContext, compose_system_prompt, scan as scan_workspace,
+    SharedContext, SharedScan, Skill, SkillSet, WorkspaceContext, compose_system_prompt,
+    scan as scan_workspace,
 };

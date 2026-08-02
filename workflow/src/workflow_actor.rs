@@ -276,7 +276,7 @@ impl WorkflowActor {
         // loadable). The workspace names are handed to the toolbox for its skill/inspect
         // tools — the runtime still owns name→path resolution. `include_shared` also
         // pulls the shared plugin library's skills when this agent is opted in.
-        let (ws, shared_skills) =
+        let (ws, shared_scan) =
             crate::workspace::scan(&self.rt.runtime_client, None, use_plugins).await;
         // For an opted-in agent, run the plugins' SessionStart hooks once to obtain the
         // bootstrap context (best-effort; an error or relay transport yields none).
@@ -286,7 +286,8 @@ impl WorkflowActor {
                 _ => None,
             };
             Some(crate::workspace::SharedContext {
-                skills: std::sync::Arc::new(shared_skills),
+                skills: std::sync::Arc::new(shared_scan.skills),
+                root: shared_scan.root,
                 bootstrap,
             })
         } else {

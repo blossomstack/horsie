@@ -956,14 +956,15 @@ impl ContextProvider for SessionContextProvider {
         let def = session_run_def(settings);
         let use_plugins = settings.use_plugins.unwrap_or(true);
         emit_progress(&self.frames, "scanning_workspace", None);
-        let (ws, shared_skills) = scan_workspace(&self.runtime_client, None, use_plugins).await;
+        let (ws, shared_scan) = scan_workspace(&self.runtime_client, None, use_plugins).await;
         let shared = if use_plugins {
             let bootstrap = match self.runtime_client.run_session_start().await {
                 Ok(context) if !context.trim().is_empty() => Some(context),
                 Ok(_) | Err(_) => None,
             };
             Some(SharedContext {
-                skills: Arc::new(shared_skills),
+                skills: Arc::new(shared_scan.skills),
+                root: shared_scan.root,
                 bootstrap,
             })
         } else {

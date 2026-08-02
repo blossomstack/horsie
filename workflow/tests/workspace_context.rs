@@ -37,8 +37,9 @@ fn scan_payload() -> WorkspaceScan {
             path: "AGENTS.md".into(),
             content: "Project rules.".into(),
         }),
+        // Absolute, as the runtime's glob produces it.
         skills: vec![ScannedFile {
-            path: ".claude/skills/git-bisect/SKILL.md".into(),
+            path: "/ws/october/.claude/skills/git-bisect/SKILL.md".into(),
             content:
                 "---\nname: git-bisect\ndescription: Find the bad commit\n---\nRun git bisect."
                     .into(),
@@ -61,7 +62,18 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
     assert!(prompt.contains("# Workspaces"));
     assert!(prompt.contains("## october — /ws/october (git)"));
     assert!(prompt.contains("Project rules."));
-    assert!(prompt.contains("- git-bisect: Find the bad commit"));
+    // The intro states where relative paths land instead of advertising a
+    // `workspace` argument the tools no longer take.
+    assert!(
+        prompt.contains("Your working directory starts at /ws/october."),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("`workspace` argument"), "{prompt}");
+    // Each skill carries its directory, relative to the root in its header.
+    assert!(
+        prompt.contains("- git-bisect — .claude/skills/git-bisect/: Find the bad commit"),
+        "{prompt}"
+    );
 
     // Toolbox fetches skills live: skill + inspect_workspace present (even with
     // allowed_tools=["bash"]); skill(name) serves the body from a fresh scan, and with
@@ -75,7 +87,14 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
         .execute("skill", serde_json::json!({ "name": "git-bisect" }))
         .await
         .unwrap();
-    assert_eq!(body, serde_json::json!("Run git bisect."));
+    assert_eq!(
+        body,
+        serde_json::json!(
+            "Run git bisect.\n\n[resources] This skill's files are in \
+             /ws/october/.claude/skills/git-bisect/. Read one with \
+             read_file(path=\"/ws/october/.claude/skills/git-bisect/<file>\")."
+        )
+    );
 }
 
 #[tokio::test]
