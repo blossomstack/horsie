@@ -988,7 +988,11 @@ impl ContextProvider for SessionContextProvider {
         };
         let base: Arc<dyn Toolbox> = DefaultToolboxFactory.for_agent(
             &def,
-            self.runtime_client.clone(),
+            // Stamp the session identity so the runtime keys this agent's
+            // cwd/env state by it — sessions sharing one runtime stay isolated.
+            self.runtime_client
+                .clone()
+                .with_session_id(self.session_id.to_string()),
             ws.names(),
             use_plugins,
             mcp,

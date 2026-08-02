@@ -28,6 +28,9 @@ impl std::error::Error for RuntimeCallError {}
 #[derive(Clone)]
 pub struct RuntimeClient {
     inner: Arc<dyn RuntimeTransport>,
+    /// Caller identity stamped on every invoke; the runtime keys its
+    /// per-caller cwd/env state by it. `None` = the shared default bucket.
+    session_id: Option<String>,
     /// Cleared the first time the transport reports [`TransportError::Disconnected`].
     ///
     /// A disconnect is terminal for this client: the socket is gone, and every
@@ -51,6 +54,7 @@ impl RuntimeClient {
     pub fn new(transport: impl RuntimeTransport + 'static) -> Self {
         Self {
             inner: Arc::new(transport),
+            session_id: None,
             connected: Arc::new(AtomicBool::new(true)),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -62,8 +66,19 @@ impl RuntimeClient {
     pub fn from_arc(transport: Arc<dyn RuntimeTransport>) -> Self {
         Self {
             inner: transport,
+            session_id: None,
             connected: Arc::new(AtomicBool::new(true)),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Stamp every invoke with this caller identity; the runtime keys its
+    /// per-caller cwd/env state by it. Cheap — shares the inner Arcs.
+    #[must_use]
+    pub fn with_session_id(self, session_id: String) -> Self {
+        Self {
+            session_id: Some(session_id),
+            ..self
         }
     }
 
@@ -86,7 +101,10 @@ impl RuntimeClient {
     pub async fn invoke(&self, call: ToolCall) -> Result<ToolOutput, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.track(&call_id);
-        let outcome = self.inner.invoke(&call_id, call).await;
+        let outcome = self
+            .inner
+            .invoke(&call_id, self.session_id.as_deref(), call)
+            .await;
         self.untrack(&call_id);
         match outcome {
             Ok(ToolResult::Ok(output)) => Ok(output),
@@ -285,6 +303,23 @@ mod tests {
     use super::*;
     use crate::testkit::MockTransport;
     use horsie_models::runtime::BashInput;
+
+    #[tokio::test]
+    async fn session_id_is_stamped_on_invokes() {
+        let probe = crate::testkit::TransportProbe::new();
+        let client = RuntimeClient::new(MockTransport::ok("").observed_by(&probe))
+            .with_session_id("sess-1".into());
+        client.invoke(probe_call()).await.unwrap();
+        assert_eq!(probe.session_ids(), vec![Some("sess-1".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn an_unstamped_client_sends_no_session_id() {
+        let probe = crate::testkit::TransportProbe::new();
+        let client = RuntimeClient::new(MockTransport::ok("").observed_by(&probe));
+        client.invoke(probe_call()).await.unwrap();
+        assert_eq!(probe.session_ids(), vec![None]);
+    }
 
     #[tokio::test]
     async fn client_returns_ok_output() {

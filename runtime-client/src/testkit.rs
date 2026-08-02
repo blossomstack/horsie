@@ -63,6 +63,7 @@ impl Default for BlockHandle {
 pub struct TransportProbe {
     cancels: Arc<Mutex<Vec<String>>>,
     invocations: Arc<Mutex<Vec<ToolCall>>>,
+    sessions: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl TransportProbe {
@@ -87,6 +88,14 @@ impl TransportProbe {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    /// The session id each observed invoke carried, in order.
+    pub fn session_ids(&self) -> Vec<Option<String>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// Mock transport: a canned result by default, a [`Script`] of outcomes on demand.
@@ -102,6 +111,7 @@ pub struct MockTransport {
     prep_gate: Option<Arc<Notify>>,
     cancels: Arc<Mutex<Vec<String>>>,
     invocations: Arc<Mutex<Vec<ToolCall>>>,
+    sessions: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl MockTransport {
@@ -116,6 +126,7 @@ impl MockTransport {
             prep_gate: None,
             cancels: Arc::new(Mutex::new(Vec::new())),
             invocations: Arc::new(Mutex::new(Vec::new())),
+            sessions: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -124,6 +135,7 @@ impl MockTransport {
     pub fn observed_by(mut self, probe: &TransportProbe) -> Self {
         self.cancels = probe.cancels.clone();
         self.invocations = probe.invocations.clone();
+        self.sessions = probe.sessions.clone();
         self
     }
 
@@ -237,6 +249,14 @@ impl MockTransport {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    /// The session id each invoke carried, in order.
+    pub fn session_ids(&self) -> Vec<Option<String>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -251,6 +271,10 @@ impl RuntimeTransport for MockTransport {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(req.call.clone());
+                self.sessions
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(req.session_id.clone());
                 if let Some(gate) = &self.invoke_gate {
                     gate.notified().await;
                 }
@@ -338,13 +362,13 @@ mod tests {
     #[tokio::test]
     async fn disconnect_after_serves_then_fails_forever() {
         let t = MockTransport::disconnect_after(1);
-        assert!(t.invoke("c1", bash("echo 1")).await.is_ok());
+        assert!(t.invoke("c1", None, bash("echo 1")).await.is_ok());
         assert!(matches!(
-            t.invoke("c2", bash("echo 2")).await,
+            t.invoke("c2", None, bash("echo 2")).await,
             Err(TransportError::Disconnected)
         ));
         assert!(matches!(
-            t.invoke("c3", bash("echo 3")).await,
+            t.invoke("c3", None, bash("echo 3")).await,
             Err(TransportError::Disconnected)
         ));
     }
@@ -352,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn records_invocations_and_cancels() {
         let t = MockTransport::ok("done");
-        let _ = t.invoke("c1", bash("ls")).await;
+        let _ = t.invoke("c1", None, bash("ls")).await;
         let _ = t.cancel("c1").await;
         assert_eq!(t.invocations().len(), 1);
         assert_eq!(t.cancels(), vec!["c1".to_string()]);
@@ -365,7 +389,7 @@ mod tests {
         let probe = TransportProbe::new();
         let first = MockTransport::ok("").observed_by(&probe);
         let second = MockTransport::ok("").observed_by(&probe);
-        let _ = first.invoke("c1", bash("a")).await;
+        let _ = first.invoke("c1", None, bash("a")).await;
         let _ = second.cancel("c2").await;
         assert_eq!(probe.invocations().len(), 1);
         assert_eq!(probe.cancels(), vec!["c2".to_string()]);
@@ -377,7 +401,7 @@ mod tests {
         let t = Arc::new(MockTransport::gated_invoke(&gate));
         let call = {
             let t = t.clone();
-            tokio::spawn(async move { t.invoke("c1", bash("slow")).await })
+            tokio::spawn(async move { t.invoke("c1", None, bash("slow")).await })
         };
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!call.is_finished(), "invoke must block on the gate");
@@ -423,7 +447,7 @@ mod tests {
                 exit_code: 0,
             },
         ))]));
-        assert!(t.invoke("c1", bash("a")).await.is_ok());
-        assert!(t.invoke("c2", bash("b")).await.is_err());
+        assert!(t.invoke("c1", None, bash("a")).await.is_ok());
+        assert!(t.invoke("c2", None, bash("b")).await.is_err());
     }
 }

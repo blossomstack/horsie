@@ -19,6 +19,16 @@ struct ListFilesInput { path: String, workspace: Option<String> }
 struct GlobInput { pattern: String, path: Option<String>, max_results: Option<u64>, workspace: Option<String> }
 struct GrepInput { pattern: String, path: Option<String>, file_pattern: Option<String>, max_results: Option<u64>, workspace: Option<String> }
 
+// Set the caller's working directory for all future tool calls. `path` may be
+// absolute or relative to the current effective cwd; omit it to reset to
+// per-workspace resolution (`workspace` then names the reset target).
+struct SetWorkingDirInput { path: Option<String>, workspace: Option<String> }
+
+// Set (`value` present) or unset (`value` absent) an env var for the caller's
+// future bash commands. Keyed by ToolCallRequest.session_id like the cwd
+// override, so callers sharing one runtime stay isolated.
+struct SetEnvInput { name: String, value: Option<String> }
+
 /// One variant per tool. The tag doubles as the tool name seen by the LLM.
 #[type_tag = "tool"]
 union ToolCall {
@@ -30,6 +40,8 @@ union ToolCall {
     ListFiles(ListFilesInput),
     Glob(GlobInput),
     Grep(GrepInput),
+    SetWorkingDir(SetWorkingDirInput),
+    SetEnv(SetEnvInput),
 }
 
 // --- Workspace scan ---
@@ -82,7 +94,8 @@ struct SessionStartResponse { call_id: String, context: String }
 
 // --- Inbound (executor → runtime) ---
 
-struct ToolCallRequest  { call_id: String, call: ToolCall }
+// session_id keys the runtime's per-caller cwd/env state; absent = default bucket.
+struct ToolCallRequest  { call_id: String, session_id: Option<String>, call: ToolCall }
 struct CancelCallRequest { call_id: String }
 
 #[type_tag = "type"]
