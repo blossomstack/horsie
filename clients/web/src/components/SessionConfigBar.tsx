@@ -412,6 +412,11 @@ function LockedControls({ detail }: { detail: SessionDetail }) {
           {detail.memorySpaces.join(", ")}
         </LockedChip>
       )}
+      {detail.thinkingEffort && (
+        <LockedChip icon={<Lightbulb size={13} />} testId="config-thinking">
+          {detail.thinkingEffort}
+        </LockedChip>
+      )}
       <div className="ml-auto">
         <LockedChip icon={<Cpu size={13} />} testId="config-model">
           {detail.model}

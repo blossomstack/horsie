@@ -1076,6 +1076,107 @@ async fn session_detail_echoes_full_config() {
 }
 
 #[tokio::test]
+async fn session_detail_echoes_thinking_effort() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    // The mock model is not in the settings store by default, and the server
+    // only accepts a session thinking effort that the model offers — so
+    // configure it through the same PUT /api/config path settings uses.
+    let res = client
+        .put(format!("http://{}/api/config", server.addr))
+        .json(&serde_json::json!({
+            "providers": [{
+                "name": "mock",
+                "kind": "anthropic",
+                "baseUrl": mock.url(),
+                "apiKey": "test-key"
+            }],
+            "models": [{
+                "alias": "mock",
+                "provider": "mock",
+                "modelId": "mock-model",
+                "thinkingEfforts": ["low", "high"],
+                "thinkingEffort": "high"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+
+    // An explicit choice rides through to the detail endpoint...
+    let body = serde_json::json!({
+        "agent": {"model": "mock", "thinkingEffort": "low"},
+        "vendor": "mock"
+    });
+    let res = client
+        .post(format!("http://{}/api/sessions", server.addr))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201);
+    let id = res.json::<serde_json::Value>().await.unwrap()["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{}/api/sessions/{id}", server.addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        detail["session"]["thinkingEffort"],
+        serde_json::json!("low"),
+        "explicit choice must appear on the session detail"
+    );
+
+    // ...and an omitted choice freezes the model's configured default.
+    let body = serde_json::json!({
+        "agent": {"model": "mock"},
+        "vendor": "mock"
+    });
+    let res = client
+        .post(format!("http://{}/api/sessions", server.addr))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201);
+    let id = res.json::<serde_json::Value>().await.unwrap()["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{}/api/sessions/{id}", server.addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        detail["session"]["thinkingEffort"],
+        serde_json::json!("high"),
+        "model default must be frozen onto the session detail"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let mock = MockLlmServer::builder().build().await;

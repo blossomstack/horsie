@@ -249,6 +249,7 @@ pub async fn get_session(
         mcp_servers: rec.spec.agent.mcp_servers.clone(),
         memory_spaces: rec.spec.agent.memory_spaces.clone(),
         use_plugins: rec.spec.agent.use_plugins.unwrap_or(false),
+        thinking_effort: rec.spec.agent.thinking_effort.clone(),
         inbox: folded.inbox.into_iter().map(wire_queued_message).collect(),
     };
     Ok(Json(GetSessionResponse { session: detail }))
