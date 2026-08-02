@@ -161,7 +161,6 @@ mod tests {
         ToolCall::Bash(BashInput {
             command: "echo hi".to_string(),
             timeout_secs: None,
-            workspace: None,
         })
     }
 

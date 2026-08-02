@@ -29,40 +29,56 @@ const MAX_STREAM_BYTES: usize = 50_000;
 /// path in the call replaces it outright (`Path::join` discards the base), which
 /// is how a call reaches another workspace or the shared plugin library. That is
 /// the only addressing mechanism, so there is no precedence to arbitrate.
+///
+/// Spelled out one arm per tool rather than routed through a shared helper: the
+/// alternative needs either a wildcard arm (lint-denied) or a nested match with
+/// an unreachable branch, and neither is worth the saved lines.
 pub async fn dispatch(
     registry: &WorkspaceRegistry,
     state: &RuntimeState,
     agent: &str,
     call: ToolCall,
 ) -> ToolResult {
-    // The state tools take no base directory, so they answer before one is
-    // resolved — a session with no workspaces can still set an env var.
-    let call = match call {
-        ToolCall::SetWorkingDir(i) => return set_working_dir::exec(registry, state, agent, i),
-        ToolCall::SetEnv(i) => return set_env::exec(state, agent, i),
-        other => other,
-    };
-    let dir = match registry.default_root() {
-        Ok(root) => state.effective_dir(agent, &root),
-        Err(reason) => return ToolResult::Err(ToolError { reason }),
-    };
+    // Resolved once, for every tool that needs it: the state tools take no base
+    // directory, so a session with no workspaces can still set an env var.
+    let dir = registry
+        .default_root()
+        .map(|root| state.effective_dir(agent, &root));
     let result = match call {
-        ToolCall::Bash(i) => bash::exec(&dir, &state.env_overlay(agent), i).await,
-        ToolCall::ReadFile(i) => read_file::exec(&dir, i).await,
-        ToolCall::WriteFile(i) => write_file::exec(&dir, i).await,
-        ToolCall::FindAndReplace(i) => find_and_replace::exec(&dir, i).await,
-        ToolCall::ReplaceLines(i) => replace_lines::exec(&dir, i).await,
-        ToolCall::ListFiles(i) => list_files::exec(&dir, i).await,
-        ToolCall::Glob(i) => glob::exec(&dir, i).await,
-        ToolCall::Grep(i) => grep::exec(&dir, i).await,
-        // Both returned above. Spelled out rather than wildcarded so adding a
-        // tool is a compile error here, which is the point of the exhaustive
-        // match (a wildcard arm is lint-denied besides).
-        ToolCall::SetWorkingDir(_) | ToolCall::SetEnv(_) => {
-            return ToolResult::Err(ToolError {
-                reason: "internal error: state tool reached directory dispatch".to_string(),
-            });
-        }
+        ToolCall::SetWorkingDir(i) => set_working_dir::exec(registry, state, agent, i),
+        ToolCall::SetEnv(i) => set_env::exec(state, agent, i),
+        ToolCall::Bash(i) => match dir {
+            Ok(d) => bash::exec(&d, &state.env_overlay(agent), i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::ReadFile(i) => match dir {
+            Ok(d) => read_file::exec(&d, i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::WriteFile(i) => match dir {
+            Ok(d) => write_file::exec(&d, i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::FindAndReplace(i) => match dir {
+            Ok(d) => find_and_replace::exec(&d, i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::ReplaceLines(i) => match dir {
+            Ok(d) => replace_lines::exec(&d, i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::ListFiles(i) => match dir {
+            Ok(d) => list_files::exec(&d, i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::Glob(i) => match dir {
+            Ok(d) => glob::exec(&d, i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::Grep(i) => match dir {
+            Ok(d) => grep::exec(&d, i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
     };
 
     match result {

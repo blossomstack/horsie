@@ -183,7 +183,6 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
                 call: ToolCall::Bash(BashInput {
                     command: "cat marker.txt".to_string(),
                     timeout_secs: None,
-                    workspace: None,
                 }),
             }),
         }),

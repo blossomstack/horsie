@@ -45,10 +45,14 @@ workspace in registry order. Registry order is preserved end to end (`derive_wor
 → `WorkspaceDef` → `--workspace` flags), so `workspaces[0]` is a stable primary. No
 workspaces configured stays an error.
 
-`resolve(&Option<String>)` collapses to a no-argument `default_root() -> Result<PathBuf,
-String>`; the `Some(name)` branch and the `multiple workspaces; specify one of:` error
-disappear. `base()` collapses to `state.effective_dir(agent, &registry.default_root()?)`
-— with one addressing mechanism left there is nothing for a precedence rule to arbitrate.
+The tool path stops calling `resolve(&Option<String>)` and calls a new no-argument
+`default_root() -> Result<PathBuf, String>` instead, so the `multiple workspaces; specify
+one of:` error disappears from every tool call. `base()` — the precedence rule — is
+deleted outright: with one addressing mechanism left there is nothing to arbitrate.
+
+`resolve` itself stays. `runtime/src/steps.rs:109` uses it to resolve a provision step's
+`workspace` param, which is operator-authored config rather than a model input; there a
+loud "name one of these" error is the right answer to an ambiguous config.
 
 `set_working_dir` is included even though #94 lists only the eight path tools. Its `set`
 arm used `workspace` as a base, which an absolute path expresses; its `reset` arm only
@@ -129,7 +133,7 @@ was already reachable.
 
 - `models/fluorite/runtime.fl` — drop `workspace` from nine input structs; add the
   shared root to `ScanResponse`.
-- `runtime/src/workspace.rs` — `resolve` → `default_root`; `select` and
+- `runtime/src/workspace.rs` — add `default_root`; `resolve`, `select`, and
   `SHARED_WORKSPACE` unchanged.
 - `runtime/src/tools/mod.rs` — delete `workspace_of` and the `base` precedence rule.
 - `runtime/src/tools/set_working_dir.rs` — drop the parameter from both arms.
