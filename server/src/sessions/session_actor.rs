@@ -915,3 +915,181 @@ impl EventSourcedActor for SessionActor {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn queued(id: &str, text: &str) -> SessionDomainEvent {
+        SessionDomainEvent::MessageQueued {
+            id: id.to_string(),
+            text: text.to_string(),
+            at_ms: 0,
+        }
+    }
+
+    fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
+        events
+            .into_iter()
+            .fold(SessionState::default(), SessionActor::apply_event)
+    }
+
+    #[test]
+    fn a_fresh_session_is_idle_with_an_empty_inbox() {
+        let s = SessionState::default();
+        assert_eq!(s.status, SessionStatus::Idle);
+        assert!(s.inbox.is_empty());
+    }
+
+    #[test]
+    fn queued_messages_accumulate_without_changing_status() {
+        let s = fold(vec![queued("m1", "one"), queued("m2", "two")]);
+        assert_eq!(s.status, SessionStatus::Idle, "queueing is not running");
+        assert_eq!(s.inbox.len(), 2);
+    }
+
+    #[test]
+    fn a_turn_consumes_exactly_the_messages_it_names() {
+        let s = fold(vec![
+            queued("m1", "one"),
+            queued("m2", "two"),
+            SessionDomainEvent::TurnBegan {
+                consumed: vec!["m1".into()],
+                answering: None,
+            },
+            queued("m3", "three"),
+        ]);
+        assert_eq!(s.status, SessionStatus::Running);
+        let ids: Vec<&str> = s.inbox.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["m2", "m3"],
+            "a message that arrived after the turn began must still be owed an answer"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_answers_an_ask_clears_it() {
+        let s = fold(vec![
+            SessionDomainEvent::AskRecorded {
+                tool_call_id: Some("call-1".into()),
+                question: "which branch?".into(),
+            },
+            queued("m1", "main"),
+            SessionDomainEvent::TurnBegan {
+                consumed: vec!["m1".into()],
+                answering: Some("call-1".into()),
+            },
+        ]);
+        assert_eq!(s.status, SessionStatus::Running);
+        assert!(s.pending_ask.is_none(), "the ask was answered");
+        assert!(s.pending_question.is_none());
+    }
+
+    #[test]
+    fn an_ask_survives_a_crash_so_the_answer_is_not_re_asked() {
+        // TurnBegan is what clears the ask, and it is journaled with the
+        // consumption in one step: a crash before it replays to "still asking".
+        let s = fold(vec![
+            SessionDomainEvent::AskRecorded {
+                tool_call_id: Some("call-1".into()),
+                question: "which branch?".into(),
+            },
+            queued("m1", "main"),
+        ]);
+        assert_eq!(s.status, SessionStatus::AwaitingInput);
+        assert_eq!(s.pending_ask.as_deref(), Some("call-1"));
+        assert_eq!(s.inbox.len(), 1, "the answer is still owed");
+    }
+
+    #[test]
+    fn stop_and_interrupt_both_land_idle_and_keep_the_inbox() {
+        for boundary in [
+            SessionDomainEvent::TurnStopped,
+            SessionDomainEvent::TurnInterrupted,
+        ] {
+            let s = fold(vec![
+                queued("m1", "one"),
+                SessionDomainEvent::TurnBegan {
+                    consumed: vec!["m1".into()],
+                    answering: None,
+                },
+                queued("m2", "queued while running"),
+                boundary,
+            ]);
+            assert_eq!(s.status, SessionStatus::Idle);
+            assert_eq!(
+                s.inbox.len(),
+                1,
+                "an accepted message is a promise; a stop cancels the turn, not the promise"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_turn_is_sticky_but_not_terminal() {
+        let s = fold(vec![SessionDomainEvent::TurnFailed {
+            error: "provider exploded".into(),
+        }]);
+        assert!(matches!(s.status, SessionStatus::Failed { .. }));
+        assert_eq!(s.last_error.as_deref(), Some("provider exploded"));
+
+        // The next turn moves it straight back to Running.
+        let s = SessionActor::apply_event(
+            s,
+            SessionDomainEvent::TurnBegan {
+                consumed: vec![],
+                answering: None,
+            },
+        );
+        assert_eq!(s.status, SessionStatus::Running);
+        // The detail endpoint reports `last_error`, so a turn that has just
+        // started must not still be advertising the previous turn's failure.
+        assert_eq!(s.last_error, None);
+    }
+
+    #[test]
+    fn a_gone_runtime_is_terminal() {
+        let s = fold(vec![SessionDomainEvent::SessionFailed {
+            reason: "vendor has no runtime".into(),
+        }]);
+        assert!(matches!(s.status, SessionStatus::Unrecoverable { .. }));
+    }
+
+    #[test]
+    fn usage_is_recorded_per_agent() {
+        let s = fold(vec![SessionDomainEvent::UsageRecorded {
+            agent_id: MAIN_AGENT_ID.to_string(),
+            usage_total: UsageTotal {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+            },
+        }]);
+        assert_eq!(s.agent_usage.get(MAIN_AGENT_ID).unwrap().input_tokens, 10);
+    }
+
+    #[test]
+    fn merging_joins_in_arrival_order_with_a_blank_line() {
+        let s = fold(vec![queued("m1", "one"), queued("m2", "two")]);
+        let merged = s
+            .inbox
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join(MERGE_SEPARATOR);
+        assert_eq!(merged, "one\n\ntwo");
+    }
+
+    #[test]
+    fn a_title_is_derived_from_the_first_line_only() {
+        assert_eq!(derive_title("hello\nworld").as_deref(), Some("hello"));
+        assert!(derive_title("   \n").is_none());
+        let long = "x".repeat(TITLE_MAX_CHARS + 10);
+        let title = derive_title(&long).unwrap();
+        assert!(title.ends_with('…'));
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1);
+    }
+}
