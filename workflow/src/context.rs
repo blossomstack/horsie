@@ -94,11 +94,15 @@ pub enum AgentOutcome {
     },
     /// The agent parked itself awaiting its timers.
     Parked { session_id: Uuid },
-    /// The agent run failed.
+    /// The agent run failed. `recoverable` is about the *run* — whether trying
+    /// it again could work — while `terminal` is about the agent's owner: its
+    /// sandbox is gone and no later message can bring it back. A provider `401`
+    /// is neither recoverable nor terminal; fix the key and the next turn runs.
     Failed {
         session_id: Uuid,
         error: String,
         recoverable: bool,
+        terminal: bool,
     },
     /// A run completed successfully, carrying this agent's freshly-updated
     /// cumulative usage. Delivered alongside `Concluded`/`Asked` (never
@@ -147,7 +151,50 @@ pub struct Contexts {
 /// runtime.
 #[async_trait]
 pub trait ContextProvider: Send + Sync {
-    async fn provide(&self) -> Result<Contexts, String>;
+    async fn provide(&self) -> Result<Contexts, ContextError>;
+}
+
+/// Why a run's contexts could not be produced.
+///
+/// `terminal` is the whole point of the type: it says the owner can never run
+/// this agent again — its sandbox is gone for good — as opposed to the ordinary
+/// case of a setup that failed this time and may well work on the next message.
+/// Classifying that by matching on the message text is how it was done before,
+/// and it made every reworded error a silent behaviour change.
+#[derive(Debug, Clone)]
+pub struct ContextError {
+    pub message: String,
+    pub terminal: bool,
+}
+
+impl ContextError {
+    /// A failure the caller may retry — the default reading of any error.
+    pub fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            terminal: false,
+        }
+    }
+
+    /// A failure that ends this agent's owner for good.
+    pub fn terminal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            terminal: true,
+        }
+    }
+}
+
+impl From<String> for ContextError {
+    fn from(message: String) -> Self {
+        Self::retryable(message)
+    }
+}
+
+impl std::fmt::Display for ContextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 /// A [`ContextProvider`] that hands back the same contexts every time — built
@@ -162,7 +209,7 @@ pub struct FixedContextProvider {
 
 #[async_trait]
 impl ContextProvider for FixedContextProvider {
-    async fn provide(&self) -> Result<Contexts, String> {
+    async fn provide(&self) -> Result<Contexts, ContextError> {
         Ok(Contexts {
             provider: self.provider.clone(),
             toolbox: self.toolbox.clone(),

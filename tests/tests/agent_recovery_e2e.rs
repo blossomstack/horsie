@@ -244,7 +244,9 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
     struct HangingContextProvider;
     #[async_trait]
     impl horsie_workflow::ContextProvider for HangingContextProvider {
-        async fn provide(&self) -> Result<horsie_workflow::Contexts, String> {
+        async fn provide(
+            &self,
+        ) -> Result<horsie_workflow::Contexts, horsie_workflow::ContextError> {
             std::future::pending().await
         }
     }

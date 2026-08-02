@@ -128,6 +128,7 @@ impl FakeRuntimeVendor {
             bash_stdout: "ok".to_string(),
             faults: Faults::default(),
             block: false,
+            resume: None,
         }
     }
 
@@ -221,9 +222,25 @@ pub struct FakeRuntimeVendorBuilder {
     bash_stdout: String,
     faults: Faults,
     block: bool,
+    /// Runtime state carried over from a previous agent process — see
+    /// [`FakeRuntimeVendorBuilder::resuming`].
+    resume: Option<Arc<Recorder>>,
 }
 
 impl FakeRuntimeVendorBuilder {
+    /// Come back as the same vendor, remembering the runtimes `prior` created.
+    ///
+    /// A real vendor's runtimes outlive its agent process — that is the whole
+    /// point of hibernate — so a reconnecting agent still owns them. Without
+    /// this, a fresh fake reports every runtime `Gone`, which is a truthful
+    /// answer to a *different* question and turns "the vendor came back" into
+    /// "the vendor lost everything".
+    #[must_use]
+    pub fn resuming(mut self, prior: &FakeRuntimeVendor) -> Self {
+        self.resume = Some(prior.recorder.clone());
+        self
+    }
+
     #[must_use]
     pub fn supports_provisioning(mut self, value: bool) -> Self {
         self.supports_provisioning = value;
@@ -281,7 +298,10 @@ impl FakeRuntimeVendorBuilder {
         let (ws, _) = tokio_tungstenite::connect_async(url)
             .await
             .map_err(|e| format!("dial {url}: {e}"))?;
-        let recorder = Arc::new(Recorder::default());
+        let recorder = self
+            .resume
+            .clone()
+            .unwrap_or_else(|| Arc::new(Recorder::default()));
         let gate = if self.block {
             Gate::closed()
         } else {
@@ -315,7 +335,10 @@ impl FakeRuntimeVendorBuilder {
         let (a, b) = tokio::io::duplex(256 * 1024);
         let server = WebSocketStream::from_raw_socket(a, Role::Server, None).await;
         let agent = WebSocketStream::from_raw_socket(b, Role::Client, None).await;
-        let recorder = Arc::new(Recorder::default());
+        let recorder = self
+            .resume
+            .clone()
+            .unwrap_or_else(|| Arc::new(Recorder::default()));
         let gate = if self.block {
             Gate::closed()
         } else {
@@ -368,6 +391,7 @@ async fn run_agent<S>(
         bash_stdout,
         faults,
         block: _,
+        resume: _,
     } = config;
     *recorder
         .gone_on_get

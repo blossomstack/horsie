@@ -20,7 +20,7 @@ pub use agent_actor::{
     AgentUsageSnapshot, HistoryQuery, UsageTotal,
 };
 pub use context::{
-    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL,
+    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL, ContextError,
     ContextProvider, Contexts, DefaultToolboxFactory, FixedContextProvider, INSPECT_WORKSPACE_TOOL,
     SKILL_TOOL, ToolboxFactory, WorkflowRuntimeContext, conclude_tool_spec,
 };

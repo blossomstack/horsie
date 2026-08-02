@@ -489,8 +489,9 @@ impl AgentActor {
                     parent
                         .deliver(AgentOutcome::Failed {
                             session_id,
-                            error,
+                            error: error.message,
                             recoverable: true,
+                            terminal: error.terminal,
                         })
                         .await;
                     let _ = self_ref
@@ -655,6 +656,9 @@ impl AgentActor {
                         session_id,
                         error,
                         recoverable,
+                        // A run that failed inside the loop says nothing about
+                        // whether the sandbox still exists.
+                        terminal: false,
                     })
                     .await;
                 // The partial conversation was already journaled incrementally, so the
@@ -715,6 +719,7 @@ impl AgentActor {
                     error: "agent parked with no active timers — nothing would ever wake it"
                         .to_string(),
                     recoverable: false,
+                    terminal: false,
                 })
                 .await;
             return CommandEffect::stop();

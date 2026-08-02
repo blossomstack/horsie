@@ -21,8 +21,11 @@ use horsie_server::http::{AppState, app};
 use horsie_server::runtime_manager::{RuntimeDeps, RuntimeManager};
 use horsie_server::runtime_vendor::RuntimeVendorLink;
 use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
+use horsie_server::sessions::clock::TestClock;
 use horsie_server::sessions::spec::ServerDeps;
-use horsie_server::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand};
+use horsie_server::sessions::supervisor::{
+    SessionSupervisor, SessionSupervisorCommand, SupervisorConfig,
+};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -72,6 +75,18 @@ async fn start_server(
     vendor: Arc<RuntimeVendorLink>,
     mock_url: &str,
 ) -> Server {
+    start_server_with(journal_dir, vendor, mock_url, None).await
+}
+
+/// As [`start_server`], but with the supervisor's idle policy under the test's
+/// control: a clock that only moves when told, and no background ticker, so
+/// offload happens exactly when the test sends `Tick` and never by surprise.
+async fn start_server_with(
+    journal_dir: &Path,
+    vendor: Arc<RuntimeVendorLink>,
+    mock_url: &str,
+    clock: Option<Arc<TestClock>>,
+) -> Server {
     let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
     providers.insert("mock".into(), provider_at(mock_url));
     let mut vendors: HashMap<String, Arc<RuntimeVendorLink>> = HashMap::new();
@@ -94,7 +109,21 @@ async fn start_server(
     };
     let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
     let (gtx, _) = tokio::sync::broadcast::channel(256);
-    let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
+    let supervisor = match clock {
+        Some(clock) => spawn_root(
+            SessionSupervisor::with_config(
+                deps,
+                gtx.clone(),
+                SupervisorConfig {
+                    clock,
+                    idle_timeout: Duration::from_secs(180),
+                    tick_interval: None,
+                },
+            ),
+            journal.clone(),
+        ),
+        None => spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone()),
+    };
     // A real (empty) settings store backs `/api/config`; the session flow uses the
     // custom `mock` registry/vendor above, so the store's own registry is unused.
     let db = journal_dir.join("config.db");
@@ -1210,6 +1239,299 @@ async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
         1,
         "one runtime for one session"
     );
+}
+
+/// The promise a `202` makes: every accepted message is answered, and messages
+/// accepted during one turn go in together as the next one.
+#[tokio::test]
+async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    let block = mock.blocking_response("first");
+    send_message(&client, &server.addr, &id, "one").await;
+    block.wait_until_received().await;
+
+    for text in ["two", "three"] {
+        assert_eq!(
+            send_message(&client, &server.addr, &id, text)
+                .await
+                .as_u16(),
+            202,
+            "a message sent during a run is accepted, never refused"
+        );
+    }
+    wait_inbox(&client, &server.addr, &id, &["two", "three"]).await;
+
+    mock.queue_response("second");
+    block.release();
+    wait_inbox(&client, &server.addr, &id, &[]).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    // One turn, one user message: consecutive user turns are not portable
+    // across providers, so the queue is joined with a blank line instead.
+    let page: serde_json::Value = client
+        .get(format!(
+            "http://{}/api/sessions/{id}/history?limit=100",
+            server.addr
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_texts: Vec<String> = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "User")
+        .map(|m| {
+            m["parts"][0]["value"]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(user_texts, vec!["one", "two\n\nthree"], "{page}");
+
+    server.shutdown().await;
+}
+
+/// A message is durable the moment it is accepted, so a crash mid-turn owes the
+/// user an answer to it — and owes them no turn they did not start.
+#[tokio::test]
+async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    let block = mock.blocking_response("never delivered");
+    send_message(&client, &server.addr, &id, "the turn that dies").await;
+    block.wait_until_received().await;
+    send_message(&client, &server.addr, &id, "still owed an answer").await;
+    wait_inbox(&client, &server.addr, &id, &["still owed an answer"]).await;
+
+    // Crash mid-turn, with the queue non-empty.
+    server.shutdown().await;
+
+    let signals_before = agent.signals();
+    let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    wait_status(&client, &server2.addr, &id, "Unknown").await;
+    // The queue survived — the detail endpoint folds it from the journal
+    // without loading the session, which is also why no vendor call happened.
+    wait_inbox(&client, &server2.addr, &id, &["still owed an answer"]).await;
+    assert_eq!(
+        agent.signals(),
+        signals_before,
+        "reading a session must acquire no runtime"
+    );
+
+    // And nothing ran on its own: the queued message is still queued, waiting
+    // for the user to come back rather than being answered behind their back.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_inbox(&client, &server2.addr, &id, &["still owed an answer"]).await;
+
+    server2.shutdown().await;
+}
+
+/// The two runtime failures the design draws a hard line between: a vendor that
+/// says the runtime is gone ends the session, while a vendor that is merely
+/// unreachable fails one turn.
+#[tokio::test]
+async fn a_gone_runtime_is_terminal_while_an_unreachable_vendor_is_not() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    // The agent creates happily and then reports the runtime gone on every get.
+    let agent = FakeRuntimeVendor::builder("mock")
+        .gone_on_get(true)
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    mock.queue_response("never reached");
+    send_message(&client, &server.addr, &id, "hello").await;
+    wait_status(&client, &server.addr, &id, "Unrecoverable").await;
+
+    // Terminal means terminal: further messages are refused rather than
+    // silently rebuilding a workspace the user believes they still have.
+    let res = client
+        .post(format!("http://{}/api/sessions/{id}/messages", server.addr))
+        .json(&serde_json::json!({ "text": "try again" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status().as_u16(),
+        409,
+        "a dead session refuses messages"
+    );
+    assert_eq!(
+        agent
+            .signals()
+            .iter()
+            .filter(|s| s.starts_with("create:"))
+            .count(),
+        1,
+        "never a second create: {:?}",
+        agent.signals()
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::new();
+
+    let (server, _local) = start_server_with_live_vendors(tmp.path(), &mock.url()).await;
+    let url = format!("ws://{}/api/vendor/connect", server.addr);
+    let agent = FakeRuntimeVendor::builder("agent-3")
+        .connect(&url)
+        .await
+        .expect("agent connects");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let id = create_session_for_vendor(&client, &server.addr, "agent-3").await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    // The vendor goes away between turns. Its runtime is not gone — nobody can
+    // say either way — so the turn fails and the session stays usable.
+    agent.disconnect();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    mock.queue_response("never reached");
+    send_message(&client, &server.addr, &id, "while the vendor is down").await;
+    wait_status(&client, &server.addr, &id, "Failed").await;
+
+    // The vendor comes back, still owning the runtimes it created — a real
+    // vendor's sandboxes outlive its agent process.
+    let agent2 = FakeRuntimeVendor::builder("agent-3")
+        .resuming(&agent)
+        .connect(&url)
+        .await
+        .expect("agent reconnects");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    mock.queue_response("back in business");
+    assert_eq!(
+        send_message(&client, &server.addr, &id, "and now?")
+            .await
+            .as_u16(),
+        202
+    );
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    let signals = agent2.signals();
+    assert!(
+        signals.iter().any(|s| s == &format!("get:{id}")),
+        "the recovered turn resumes the same runtime: {signals:?}"
+    );
+    assert_eq!(
+        signals.iter().filter(|s| s.starts_with("create:")).count(),
+        1,
+        "resuming must never provision a second runtime: {signals:?}"
+    );
+}
+
+/// The idle clock, through the full HTTP stack: a session left alone is
+/// unloaded and its runtime hibernated, and the next message resumes that same
+/// runtime rather than building another.
+#[tokio::test]
+async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("first");
+    mock.queue_response("second");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let clock = Arc::new(TestClock::new());
+    let server =
+        start_server_with(tmp.path(), agent.link(), &mock.url(), Some(clock.clone())).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    send_message(&client, &server.addr, &id, "one").await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    // Nothing happens on its own — the clock has not moved.
+    let _ = server.supervisor.tell(SessionSupervisorCommand::Tick).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !agent.signals().contains(&format!("hibernate:{id}")),
+        "a session inside its idle window must stay loaded: {:?}",
+        agent.signals()
+    );
+
+    clock.advance(Duration::from_secs(600));
+    let _ = server.supervisor.tell(SessionSupervisorCommand::Tick).await;
+    for _ in 0..100 {
+        if agent.signals().contains(&format!("hibernate:{id}")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        agent.signals().contains(&format!("hibernate:{id}")),
+        "an idle session is unloaded and its runtime hibernated: {:?}",
+        agent.signals()
+    );
+    // Unloaded, so the server has no status to report until it is opened again.
+    wait_status(&client, &server.addr, &id, "Unknown").await;
+
+    assert_eq!(
+        send_message(&client, &server.addr, &id, "two")
+            .await
+            .as_u16(),
+        202
+    );
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    assert_eq!(
+        agent
+            .signals()
+            .iter()
+            .filter(|s| s.starts_with("create:"))
+            .count(),
+        1,
+        "a resumed session reuses its runtime; it is created exactly once: {:?}",
+        agent.signals()
+    );
+    assert!(
+        agent
+            .signals()
+            .iter()
+            .filter(|s| *s == &format!("get:{id}"))
+            .count()
+            >= 2,
+        "the resumed turn asked for the same runtime: {:?}",
+        agent.signals()
+    );
+
+    server.shutdown().await;
 }
 
 /// Stopping one session must not disturb another on the same agent — the

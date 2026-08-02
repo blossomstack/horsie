@@ -37,6 +37,9 @@ pub(crate) fn map_outcome(outcome: AgentOutcome) -> Option<WorkflowCommand> {
             session_id,
             error,
             recoverable,
+            // Workflows have no runtime of their own to lose: the sandbox
+            // belongs to the workflow, which fails the step either way.
+            terminal: _,
         } => Some(WorkflowCommand::AgentFailed {
             session_id,
             error,
@@ -861,6 +864,7 @@ mod tests {
             session_id,
             error: "boom".into(),
             recoverable: true,
+            terminal: false,
         })
         .expect("Failed maps to a command");
         match cmd {

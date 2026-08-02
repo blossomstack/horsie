@@ -21,7 +21,7 @@ use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, Per
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
-    AgentRunDef, AgentRuntimeContext, AgentUsageSnapshot, ContextProvider, Contexts,
+    AgentRunDef, AgentRuntimeContext, AgentUsageSnapshot, ContextError, ContextProvider, Contexts,
     DefaultToolboxFactory, HistoryQuery, SharedContext, ToolboxFactory, UsageTotal,
     compose_system_prompt, scan_workspace,
 };
@@ -515,7 +515,9 @@ impl SessionActor {
                     true,
                 )
             }
-            AgentOutcome::Failed { error, .. } => {
+            AgentOutcome::Failed {
+                error, terminal, ..
+            } => {
                 let _ = self.frames.send(SessionFrame::Error {
                     message: error.clone(),
                 });
@@ -524,13 +526,15 @@ impl SessionActor {
                 // workspace the user believes they still have. Everything else
                 // — provider errors, tool errors, a vendor that is merely
                 // offline — is a failed turn they can retry.
-                if let Some(reason) = error.strip_prefix(RUNTIME_GONE_PREFIX) {
-                    let reason = reason.to_string();
+                if terminal {
                     self.report(SessionStatus::Unrecoverable {
-                        reason: reason.clone(),
+                        reason: error.clone(),
                     })
                     .await;
-                    (vec![SessionDomainEvent::SessionFailed { reason }], false)
+                    (
+                        vec![SessionDomainEvent::SessionFailed { reason: error }],
+                        false,
+                    )
                 } else {
                     self.report(SessionStatus::Failed {
                         reason: error.clone(),
@@ -691,7 +695,7 @@ impl SessionContextProvider {
 
 #[async_trait]
 impl ContextProvider for SessionContextProvider {
-    async fn provide(&self) -> Result<Contexts, String> {
+    async fn provide(&self) -> Result<Contexts, ContextError> {
         let settings = &self.settings;
         let provider = self.llm_provider()?;
         let def = session_run_def(settings);
@@ -699,11 +703,12 @@ impl ContextProvider for SessionContextProvider {
 
         emit_progress(&self.frames, "acquiring_runtime", None);
         let runtime_client = self.runtimes.get().await.map_err(|e| match e {
-            // Marked so the session can tell a terminal failure from a
-            // retryable one without matching on message text.
-            RuntimeError::Gone(m) => format!("{RUNTIME_GONE_PREFIX}{m}"),
+            // The one failure the session can never retry: the vendor is alive
+            // and says the runtime is gone. A vendor that is merely offline
+            // (`Unavailable`) says nothing about the runtime's existence.
+            RuntimeError::Gone(m) => ContextError::terminal(m),
             other @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_)) => {
-                other.to_string()
+                ContextError::retryable(other.to_string())
             }
         })?;
 
@@ -764,11 +769,6 @@ impl ContextProvider for SessionContextProvider {
         })
     }
 }
-
-/// Marks a run failure whose cause is a runtime that cannot be produced. The
-/// session turns exactly this into the one terminal state; everything else is
-/// a failed turn the user can retry.
-const RUNTIME_GONE_PREFIX: &str = "runtime-gone: ";
 
 #[async_trait]
 impl EventSourcedActor for SessionActor {
