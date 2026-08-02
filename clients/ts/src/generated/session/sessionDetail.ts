@@ -34,6 +34,10 @@ export interface SessionDetail {
    */
   usePlugins: boolean;
   /**
+   * The session&#x27;s frozen thinking effort, chosen at creation or inherited
+   */
+  thinkingEffort?: string;
+  /**
    * Messages accepted but not yet carried into a turn, oldest first (empty
    */
   inbox: QueuedMessage[];

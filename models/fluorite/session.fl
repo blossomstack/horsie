@@ -71,6 +71,10 @@ struct SessionDetail {
     memory_spaces: Vec<String>,
     /// Whether the runtime's plugin/skill machinery is enabled for this session.
     use_plugins: bool,
+    /// The session's frozen thinking effort, chosen at creation or inherited
+    /// from the model's default. Absent → the model exposes no thinking
+    /// control.
+    thinking_effort: Option<String>,
     /// Messages accepted but not yet carried into a turn, oldest first (empty
     /// when nothing is owed).
     inbox: Vec<QueuedMessage>,
