@@ -61,12 +61,40 @@ one. Three existing seams carry the whole feature:
 Agents, commands and `.mcp.json` (Phases 2–4 of #105); a permission system;
 context compaction; changing where runtimes are sandboxed.
 
+## What the ecosystem actually does
+
+Sizing this by Claude Code's documented surface alone would overbuild it. Every
+harness with hooks has its own vocabulary, and none implements all 31:
+
+| Harness | Events | Naming | Declared in |
+| --- | ---: | --- | --- |
+| Claude Code | 31 | `PreToolUse` | plugin `hooks/hooks.json` |
+| OpenCode | ~28 | `tool.execute.before` | JS/TS plugin code |
+| Cursor | ~21 | `preToolUse` | `.cursor/hooks.json` |
+| Codex CLI | 11 | `PreToolUse` — identical to Claude's | `.codex/hooks.json` |
+| Grok Build | Claude's | Claude-compatible | reads Claude's directly |
+| Gemini, Kiro, Pi, Qoder, Rovo Dev, Mistral Vibe, Copilot, Antigravity | none documented | — | — |
+
+Plugin authors do not rely on graceful degradation across these — impeccable
+generates four separate hook manifests, one per vocabulary. Codex is the closest
+precedent for horsie: it borrows Claude's exact event names and implements 11 of
+the 31, which has proven sufficient for a real plugin ecosystem.
+
+Demand is narrower still. Across *every* plugin in the official marketplace,
+only six distinct events are declared anywhere:
+
+```
+3  Stop              2  PostToolUse
+3  SessionStart      1  PreToolUse
+2  UserPromptSubmit  1  UserPromptExpansion
+```
+
+The supported set below is therefore drawn from measured demand plus the two
+subagent events Codex and Cursor both ship, rather than from "the seam exists".
+
 ## The event inventory
 
-Claude Code documents **31** hook events. They divide by whether horsie has the
-concept, not by whether they are useful.
-
-### A. Implementable on seams that exist (15) — this phase
+### A. Supported (8) — this phase
 
 | Event | Seam |
 | --- | --- |
@@ -74,17 +102,27 @@ concept, not by whether they are useful.
 | `SessionEnd` | `delete_session` (`server/src/http/handlers.rs:406`) |
 | `UserPromptSubmit` | session actor, before the agent run |
 | `PreToolUse` | `HookedToolbox`, before `inner.execute` |
-| `PostToolUse` | `HookedToolbox`, after a successful `execute` |
-| `PostToolUseFailure` | `HookedToolbox`, after `execute` returns `Err` |
-| `PostToolBatch` | agent loop already runs a turn's calls as one batch |
+| `PostToolUse` | `HookedToolbox`, after `inner.execute` |
 | `Stop` | session actor, `AgentOutcome::Concluded` |
-| `StopFailure` | session actor, `AgentOutcome::Failed` |
 | `SubagentStart` / `SubagentStop` | `workflow/src/workflow_actor.rs` `spawn_agent` |
-| `TaskCreated` / `TaskCompleted` | `workflow/src/task_list.rs`, the `task_list` tool |
-| `Notification` | session actor progress frames |
-| `CwdChanged` | the `set_working_dir` tool |
 
-### B. Needs a horsie feature that does not exist (9) — hard failure
+Five of these are the five in-the-wild events horsie can run; the sixth in the
+wild, `UserPromptExpansion`, needs slash commands (Phase 3 of #105). The
+subagent pair is added because Codex and Cursor both ship it and Phase 2 of #105
+makes session subagents real.
+
+### B. Deferred — the seam exists, nothing uses it (7)
+
+`PostToolUseFailure`, `PostToolBatch`, `StopFailure`, `Notification`,
+`TaskCreated`, `TaskCompleted`, `CwdChanged`.
+
+horsie could implement each of these today, and each is declared by exactly zero
+published plugins. Building them now would be speculative code exercised only by
+its own tests. They fail like any other unsupported event, but with an error
+that says horsie has not implemented them *yet* and invites an issue — as
+opposed to groups C and D, which say horsie has no such concept.
+
+### C. Needs a horsie feature that does not exist (9)
 
 `UserPromptExpansion` (no slash commands — Phase 3 of #105),
 `PermissionRequest`, `PermissionDenied` (no permission model), `PreCompact`,
@@ -92,10 +130,13 @@ concept, not by whether they are useful.
 `ConfigChange` (no in-session config reload), `DirectoryAdded` (workspaces are
 fixed at session start), `Setup` (no init mode).
 
-### C. No horsie concept at all (7) — hard failure
+### D. No horsie concept at all (7)
 
 `MessageDisplay`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`,
 `Elicitation`, `ElicitationResult`, `InstructionsLoaded`.
+
+8 + 7 + 9 + 7 = 31. Groups B, C and D all fail; the distinction is only in what
+the error tells the user to do about it.
 
 ## Design
 
@@ -150,7 +191,7 @@ applies, which defeats the manifest.
 `horsie-support::plugin::hooks` gains:
 
 ```rust
-pub enum HookEvent { SessionStart, PreToolUse, /* … all 15 supported … */ }
+pub enum HookEvent { SessionStart, PreToolUse, /* … the 8 supported … */ }
 
 pub struct HookDecl {
     pub event: HookEvent,
@@ -159,19 +200,31 @@ pub struct HookDecl {
     pub timeout: Option<u64>,
 }
 
+/// Why an event cannot run, which decides what the error tells the user.
+pub enum Unsupported {
+    /// Group B: horsie has the seam, no published plugin uses it.
+    NotImplemented,
+    /// Groups C and D: horsie has no such concept.
+    NoConcept,
+    /// Not a documented Claude Code event at all.
+    Unknown,
+}
+
 pub struct PluginHooks {
     pub decls: Vec<HookDecl>,
-    /// Event names this build cannot run, verbatim as declared.
-    pub unsupported: Vec<String>,
+    /// Event names this build cannot run, verbatim as declared, with the reason.
+    pub unsupported: Vec<(String, Unsupported)>,
 }
 
 pub fn read(plugin_root: &Path) -> Result<PluginHooks, String>;
 ```
 
 `HookEvent::parse` recognises all 31 documented names. A name in group A becomes
-a variant; a name in group B or C, or any unrecognised string, lands in
-`unsupported`. Collecting rather than erroring lets the caller report *every*
-unsupported event at once instead of one per attempt.
+a variant; anything else lands in `unsupported` with its reason. Collecting
+rather than erroring lets the caller report *every* unsupported event at once
+instead of one per attempt, and lets the message differ: "horsie does not
+implement `PostToolBatch` yet" reads very differently from "horsie has no
+worktree concept".
 
 Per-hook `timeout` is honoured (impeccable declares 5s and 30s); absent means the
 existing 30s default.
@@ -313,27 +366,27 @@ those hooks run, not *what* they can reach.
 
 ## Staging
 
-Three stacked PRs. Every event in group A lands; each PR is independently
-reviewable.
+Two stacked PRs.
 
-**PR1 — dispatch layer and tool events.** The reader with all 31 event names,
-tool-name aliasing, matcher evaluation, the manifest and `RunHook` protocol, the
-runtime-side executor and control-protocol parser, the `HookedToolbox`
-decorator, and the unsupported-event failure at both gates. Wires `PreToolUse`,
-`PostToolUse` and `PostToolUseFailure`.
+**PR1 — dispatch layer and tool events.** The reader with all 31 event names
+classified, tool-name aliasing, matcher evaluation, the manifest and `RunHook`
+protocol, the runtime-side executor and control-protocol parser, the
+`HookedToolbox` decorator, and the unsupported-event failure at both gates.
+Wires `PreToolUse` and `PostToolUse` — the two events that need the decorator,
+and the two that carry blocking and mutation.
 
-**PR2 — turn events.** `UserPromptSubmit`, `Stop`, `StopFailure`,
-`PostToolBatch`, `SessionEnd`, `Notification`, and the migration of
-`SessionStart` onto the new dispatch.
-
-**PR3 — subagent, task and cwd events.** `SubagentStart`, `SubagentStop`,
-`TaskCreated`, `TaskCompleted`, `CwdChanged`.
+**PR2 — session, turn and subagent events.** `SessionEnd`, `UserPromptSubmit`,
+`Stop`, `SubagentStart`, `SubagentStop`, and the migration of `SessionStart`
+onto the new dispatch.
 
 ## Testing
 
 - `horsie-support` unit tests: every one of the 31 names parses to either a
-  supported variant or an `unsupported` entry, with a test that asserts the
-  counts (15 / 16) so adding a variant cannot silently change the contract.
+  supported variant or an unsupported entry carrying its group, with a test that
+  asserts the counts (8 supported / 7 deferred / 16 absent) so adding a variant
+  cannot silently change the contract.
+- A test that each unsupported group produces its own guidance — "not
+  implemented yet" for group B versus "no such concept" for C and D.
 - Matcher tests using the three real-world matchers, asserting
   `Edit|Write|MultiEdit|NotebookEdit` matches `write_file` and
   `find_and_replace` and does not match `bash`.
@@ -351,10 +404,19 @@ decorator, and the unsupported-event failure at both gates. Wires `PreToolUse`,
 
 ## Consequences
 
-- A plugin declaring any group B or C event becomes uninstallable. That is the
-  point of the failure rule, but it makes horsie brittle against Claude Code
-  adding events: a plugin adopting a new one fails until horsie learns it. The
-  error names the event, so the diagnosis is immediate.
+- A plugin declaring any group B, C or D event becomes uninstallable. Measured
+  against the official marketplace today, that rejects exactly one pattern:
+  `UserPromptExpansion`, used by `claude-security`. The exposure is therefore
+  much smaller than the raw count of unsupported events suggests.
+- No other harness hard-fails this way — Cursor, Codex and OpenCode all appear
+  to ignore what they do not recognise, which is how impeccable ships one
+  payload to fifteen harnesses. horsie is deliberately stricter: it should never
+  claim to run a guard it silently drops. The cost is brittleness against Claude
+  Code adding events, since a plugin adopting a new one fails until horsie
+  learns it. The error names the event, so diagnosis is immediate.
+- `PostToolUseFailure` is nearly free to add later — the `HookedToolbox` already
+  distinguishes `Err` from `Ok` — so if a plugin ever needs it, promoting it out
+  of group B is a small change rather than new machinery.
 - `PreToolUse` adds a runtime round-trip per matching tool call. Sessions whose
   plugins declare no matching hook are unaffected.
 - Hooks can now change what a tool does. A buggy hook can corrupt a tool call in
