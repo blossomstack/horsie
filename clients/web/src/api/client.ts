@@ -1,4 +1,6 @@
 import type {
+  AgentPresetInput,
+  AgentView,
   ApiError,
   AuthStatus,
   CreateSessionRequest,
@@ -167,6 +169,27 @@ export const api = {
      * context-size snapshot. */
     usage: (id: string): Promise<GetSessionUsageResponse> =>
       request(`/sessions/${encodeURIComponent(id)}/usage`),
+  },
+
+  agents: {
+    /** All agent presets. */
+    list: (): Promise<AgentView[]> => request("/agents"),
+
+    get: (name: string): Promise<AgentView> =>
+      request(`/agents/${encodeURIComponent(name)}`),
+
+    create: (body: AgentPresetInput): Promise<AgentView> =>
+      request("/agents", { method: "POST", body: JSON.stringify(body) }),
+
+    /** Full replace; the path is the id of record. */
+    update: (name: string, body: AgentPresetInput): Promise<AgentView> =>
+      request(`/agents/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    remove: (name: string): Promise<void> =>
+      request(`/agents/${encodeURIComponent(name)}`, { method: "DELETE" }),
   },
 
   config: {
