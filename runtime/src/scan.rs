@@ -22,9 +22,7 @@ pub fn shared_root(registry: &WorkspaceRegistry, include_shared: bool) -> Option
     if !include_shared {
         return None;
     }
-    registry
-        .plugins_dir()
-        .map(|dir| dir.display().to_string())
+    registry.plugins_dir().map(|dir| dir.display().to_string())
 }
 
 /// Scan the selected workspaces. `req.workspace` filters which roots to scan (`None`
@@ -125,8 +123,7 @@ mod tests {
     #[test]
     fn shared_root_tracks_the_include_shared_gate() {
         let plugins = TempDir::new().unwrap();
-        let registry =
-            reg(&[]).with_plugins(Some(plugins.path().to_path_buf()), Vec::new());
+        let registry = reg(&[]).with_plugins(Some(plugins.path().to_path_buf()), Vec::new());
         assert_eq!(
             shared_root(&registry, true).as_deref(),
             Some(plugins.path().display().to_string().as_str())

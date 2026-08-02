@@ -37,9 +37,7 @@ impl Tool for SetWorkingDirTool {
     async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
         let path = input["path"].as_str().map(str::to_string);
         self.client
-            .invoke(ToolCall::SetWorkingDir(SetWorkingDirInput {
-                path,
-            }))
+            .invoke(ToolCall::SetWorkingDir(SetWorkingDirInput { path }))
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)

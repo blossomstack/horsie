@@ -668,7 +668,10 @@ mod tests {
         assert_eq!(scan.skills.names(), vec!["brainstorming".to_string()]);
         let s = scan.skills.get("brainstorming").unwrap();
         assert_eq!(s.description, "explore"); // kept-first
-        assert_eq!(s.dir.as_deref(), Some("/opt/plugins/sp/skills/brainstorming"));
+        assert_eq!(
+            s.dir.as_deref(),
+            Some("/opt/plugins/sp/skills/brainstorming")
+        );
         assert_eq!(scan.root.as_deref(), Some("/opt/plugins"));
     }
 
@@ -677,7 +680,11 @@ mod tests {
     #[test]
     fn interpret_shared_leaves_dir_unset_without_a_root() {
         let scan = interpret_shared(
-            vec![plugin_skill("brainstorming", "sp/skills/brainstorming", "d")],
+            vec![plugin_skill(
+                "brainstorming",
+                "sp/skills/brainstorming",
+                "d",
+            )],
             None,
         );
         assert!(scan.skills.get("brainstorming").unwrap().dir.is_none());
@@ -721,7 +728,10 @@ mod tests {
         assert!(prompt.contains("USE SKILLS"));
         assert!(prompt.contains("workspace=\"horsie_shared\""));
         // The header names the library root, so the per-skill path can be relative.
-        assert!(prompt.contains("# Shared skills — /opt/plugins"), "{prompt}");
+        assert!(
+            prompt.contains("# Shared skills — /opt/plugins"),
+            "{prompt}"
+        );
         assert!(
             prompt.contains("- tdd — sp/skills/tdd/: write tests first"),
             "{prompt}"

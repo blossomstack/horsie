@@ -39,10 +39,7 @@ impl Tool for WriteFileTool {
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'content'".into()))?
             .to_string();
         self.client
-            .invoke(ToolCall::WriteFile(WriteFileInput {
-                path,
-                content,
-            }))
+            .invoke(ToolCall::WriteFile(WriteFileInput { path, content }))
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)
