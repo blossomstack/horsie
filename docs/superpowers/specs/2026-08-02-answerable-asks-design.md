@@ -85,13 +85,22 @@ pub struct HandoffOutput {
 For a forced handoff `calls.len() == 1` always. This replaces workflow's
 `find_tool_call_id` event scan, which could only ever recover one id.
 
-### Fix 2 — status is durable (server)
+### Fix 2 — read status from its source of truth (server)
 
-`fold_session_state` (server/src/sessions/events.rs) replays the session's *domain*
-journal — `TurnBegan`, `AskRecorded`, `MessageQueued`, `TurnEnded`; a handful of
-events per turn, not the message history — through the same `apply_event` the live
-actor uses. `get_session` already calls it on every request and uses only
-`pending_question`.
+Status is fully journaled: `TurnBegan` → Running, `TurnEnded`/`TurnStopped`/
+`TurnInterrupted` → Idle, `AskRecorded` → AwaitingInput, `TurnFailed { error }` →
+Failed, `SessionFailed { reason }` → Unrecoverable. So `SessionActor::apply_event`
+reconstructs it, reason included, and there is one fold with two callers: the
+actor, when the framework replays its journal on load, and `fold_session_state`
+(server/src/sessions/events.rs), for a reader that wants the same answer without
+loading the actor. It replays only the session's *domain* journal — a handful of
+events per turn, not the message history.
+
+The supervisor's `self.status` map is neither of those: it is a **cache**, warmed
+by `report()` and dropped by `forget()`. The defect is that `Get` reads the cache
+and reports a miss as "no status" instead of falling back to the source — the same
+fallback `get_session` already performs for `pending_question`, which is why that
+field survives offload today and `status` does not.
 
 - `get_session` reports `folded.status` when the supervisor has no cached status,
   preferring the cache when the session is loaded (authoritative for a running
@@ -101,8 +110,10 @@ actor uses. `get_session` already calls it on every request and uses only
 - `on_recovery_complete` reports the folded status when the actor loads, warming
   the supervisor cache and pushing a `StatusChanged` to any open page.
 
-Neither path spawns an actor. `list_sessions` is unchanged — folding every
-session's journal on every list call is not worth a badge.
+Reading a status never spawns an actor; the second bullet runs inside a load
+something else already asked for. `list_sessions` keeps reading the cache alone —
+it is the one caller where the cache earns its keep, since falling back there
+means folding every unloaded session's journal on every poll.
 
 ### Fix 3 — the status carries what you need to act on it
 
