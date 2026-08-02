@@ -1690,6 +1690,7 @@ dependencies = [
  "horsie-openai",
  "horsie-runtime-client",
  "horsie-runtime-vendor",
+ "horsie-support",
  "horsie-workflow",
  "hyper",
  "hyper-util",
