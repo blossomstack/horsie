@@ -1624,6 +1624,7 @@ dependencies = [
  "hackamore-agent",
  "horsie-models",
  "horsie-runtime-vendor",
+ "horsie-support",
  "libc",
  "nono",
  "regex",
