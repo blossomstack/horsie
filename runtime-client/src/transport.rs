@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use horsie_models::runtime::{
-    CancelCallRequest, PluginSkill, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest,
-    SessionStartRequest, ToolCall, ToolCallRequest, ToolResult, WorkspaceScan,
+    CancelCallRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
+    SessionStartRequest, ToolCall, ToolCallRequest, ToolResult,
 };
 use thiserror::Error;
 
@@ -73,7 +73,7 @@ pub trait RuntimeTransport: Send + Sync {
     /// reading the first existing instruction candidate (in order) and every file
     /// matching `skills_glob` per root, returning raw contents. Name→path resolution
     /// happens runtime-side against its workspace registry. When `include_shared` is
-    /// set, the shared plugin library's skills are returned as the second tuple element.
+    /// set, the shared plugin library's skills come back alongside its absolute root.
     async fn scan_workspace(
         &self,
         call_id: &str,
@@ -81,7 +81,7 @@ pub trait RuntimeTransport: Send + Sync {
         instruction_candidates: Vec<String>,
         skills_glob: String,
         include_shared: bool,
-    ) -> Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), TransportError> {
+    ) -> Result<ScanResponse, TransportError> {
         let reply = self
             .relay(RuntimeInboundMessage::ScanWorkspace(ScanRequest {
                 call_id: call_id.to_string(),
@@ -92,7 +92,7 @@ pub trait RuntimeTransport: Send + Sync {
             }))
             .await?;
         match reply {
-            RuntimeOutboundMessage::ScanResult(resp) => Ok((resp.workspaces, resp.shared_skills)),
+            RuntimeOutboundMessage::ScanResult(resp) => Ok(resp),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::Provisioning(_)
             | RuntimeOutboundMessage::ProvisionFailed(_)

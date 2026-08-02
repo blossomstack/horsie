@@ -56,7 +56,6 @@ mod tests {
                 path: "f.txt".into(),
                 start_line: None,
                 end_line: None,
-                workspace: None,
             },
         )
         .await;
@@ -76,7 +75,6 @@ mod tests {
                 path: "f.txt".into(),
                 start_line: Some(2),
                 end_line: Some(3),
-                workspace: None,
             },
         )
         .await;

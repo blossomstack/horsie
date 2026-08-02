@@ -429,11 +429,14 @@ async fn run_loop<S>(
                             let workspaces = horsie_runtime::scan::exec(&registry, req);
                             let shared_skills =
                                 horsie_runtime::scan::shared_skills(&registry, include_shared);
+                            let shared_root =
+                                horsie_runtime::scan::shared_root(&registry, include_shared);
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ScanResult(ScanResponse {
                                     call_id: call_id.clone(),
                                     workspaces,
                                     shared_skills,
+                                    shared_root,
                                 }),
                             );
                             if let Ok(json) = response {

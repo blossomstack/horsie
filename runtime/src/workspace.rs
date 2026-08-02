@@ -62,9 +62,21 @@ impl WorkspaceRegistry {
         &self.workspaces
     }
 
-    /// Resolve a tool's `workspace` field to a root path. `None` defaults to the sole
-    /// workspace, or errors when there are several (the model must name one). An
-    /// unknown name errors with the available list.
+    /// The base directory for a tool call, which names no workspace of its own: the
+    /// first workspace in registry order. Registry order is the order the session
+    /// declared its workspaces, so the first is a stable primary. The shared plugin
+    /// library is deliberately not a candidate — it is reached by absolute path.
+    pub fn default_root(&self) -> Result<PathBuf, String> {
+        match self.workspaces.first() {
+            Some(first) => Ok(first.path.clone()),
+            None => Err("no workspaces configured".to_string()),
+        }
+    }
+
+    /// Resolve a provision step's `workspace` field to a root path. `None` defaults to
+    /// the sole workspace, or errors when there are several (operator config must name
+    /// one). An unknown name errors with the available list. Tool calls do not come
+    /// through here — see [`Self::default_root`].
     pub fn resolve(&self, workspace: &Option<String>) -> Result<PathBuf, String> {
         match workspace {
             Some(name) if name == SHARED_WORKSPACE => self.plugins_dir.clone().ok_or_else(|| {
@@ -163,6 +175,25 @@ mod tests {
             path: PathBuf::from("/x"),
         }]);
         assert_eq!(r.resolve(&None).unwrap(), PathBuf::from("/x"));
+    }
+
+    #[test]
+    fn default_root_is_the_first_workspace() {
+        assert_eq!(reg().default_root().unwrap(), PathBuf::from("/ws/api"));
+    }
+
+    #[test]
+    fn default_root_errors_with_no_workspaces() {
+        assert!(WorkspaceRegistry::new(vec![]).default_root().is_err());
+    }
+
+    /// The shared plugin library never becomes the implicit tool target, even when
+    /// it is the only root configured.
+    #[test]
+    fn default_root_ignores_the_shared_library() {
+        let r = WorkspaceRegistry::new(vec![])
+            .with_plugins(Some(PathBuf::from("/opt/plugins")), vec![]);
+        assert!(r.default_root().is_err());
     }
 
     #[test]

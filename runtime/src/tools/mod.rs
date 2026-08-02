@@ -13,7 +13,6 @@ pub mod write_file;
 use crate::state::RuntimeState;
 use crate::workspace::WorkspaceRegistry;
 use horsie_models::runtime::{ToolCall, ToolError, ToolResult};
-use std::path::PathBuf;
 
 /// Per-stream output budget. Tool output rides along in the agent's conversation
 /// history and is re-sent to the model on every turn, so an unbounded `cat`, build
@@ -25,54 +24,45 @@ const MAX_STREAM_BYTES: usize = 50_000;
 /// Run a tool call, then clamp its output.
 ///
 /// The two state-mutating tools act on the agent's own state. Every other tool
-/// resolves a base directory first — the single name→path translation site —
-/// and an unresolvable `workspace` (missing with several workspaces, or an
-/// unknown name) comes back to the model as a `ToolError`.
-///
-/// Spelled out one arm per tool rather than routed through a shared helper: the
-/// alternative needs either a wildcard arm (lint-denied) or a nested match with
-/// an unreachable branch, and neither is worth the saved lines.
+/// runs in the agent's working directory — its `set_working_dir` override if it
+/// has one, else the first workspace. Relative paths join onto that; an absolute
+/// path in the call replaces it outright (`Path::join` discards the base), which
+/// is how a call reaches another workspace or the shared plugin library. That is
+/// the only addressing mechanism, so there is no precedence to arbitrate.
 pub async fn dispatch(
     registry: &WorkspaceRegistry,
     state: &RuntimeState,
     agent: &str,
     call: ToolCall,
 ) -> ToolResult {
+    // The state tools take no base directory, so they answer before one is
+    // resolved — a session with no workspaces can still set an env var.
+    let call = match call {
+        ToolCall::SetWorkingDir(i) => return set_working_dir::exec(registry, state, agent, i),
+        ToolCall::SetEnv(i) => return set_env::exec(state, agent, i),
+        other => other,
+    };
+    let dir = match registry.default_root() {
+        Ok(root) => state.effective_dir(agent, &root),
+        Err(reason) => return ToolResult::Err(ToolError { reason }),
+    };
     let result = match call {
-        ToolCall::SetWorkingDir(i) => set_working_dir::exec(registry, state, agent, i),
-        ToolCall::SetEnv(i) => set_env::exec(state, agent, i),
-        ToolCall::Bash(i) => match base(registry, state, agent, &i.workspace) {
-            Ok(dir) => bash::exec(&dir, &state.env_overlay(agent), i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
-        },
-        ToolCall::ReadFile(i) => match base(registry, state, agent, &i.workspace) {
-            Ok(dir) => read_file::exec(&dir, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
-        },
-        ToolCall::WriteFile(i) => match base(registry, state, agent, &i.workspace) {
-            Ok(dir) => write_file::exec(&dir, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
-        },
-        ToolCall::FindAndReplace(i) => match base(registry, state, agent, &i.workspace) {
-            Ok(dir) => find_and_replace::exec(&dir, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
-        },
-        ToolCall::ReplaceLines(i) => match base(registry, state, agent, &i.workspace) {
-            Ok(dir) => replace_lines::exec(&dir, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
-        },
-        ToolCall::ListFiles(i) => match base(registry, state, agent, &i.workspace) {
-            Ok(dir) => list_files::exec(&dir, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
-        },
-        ToolCall::Glob(i) => match base(registry, state, agent, &i.workspace) {
-            Ok(dir) => glob::exec(&dir, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
-        },
-        ToolCall::Grep(i) => match base(registry, state, agent, &i.workspace) {
-            Ok(dir) => grep::exec(&dir, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
-        },
+        ToolCall::Bash(i) => bash::exec(&dir, &state.env_overlay(agent), i).await,
+        ToolCall::ReadFile(i) => read_file::exec(&dir, i).await,
+        ToolCall::WriteFile(i) => write_file::exec(&dir, i).await,
+        ToolCall::FindAndReplace(i) => find_and_replace::exec(&dir, i).await,
+        ToolCall::ReplaceLines(i) => replace_lines::exec(&dir, i).await,
+        ToolCall::ListFiles(i) => list_files::exec(&dir, i).await,
+        ToolCall::Glob(i) => glob::exec(&dir, i).await,
+        ToolCall::Grep(i) => grep::exec(&dir, i).await,
+        // Both returned above. Spelled out rather than wildcarded so adding a
+        // tool is a compile error here, which is the point of the exhaustive
+        // match (a wildcard arm is lint-denied besides).
+        ToolCall::SetWorkingDir(_) | ToolCall::SetEnv(_) => {
+            return ToolResult::Err(ToolError {
+                reason: "internal error: state tool reached directory dispatch".to_string(),
+            });
+        }
     };
 
     match result {
@@ -83,28 +73,6 @@ pub async fn dispatch(
         }
         ToolResult::Err(e) => ToolResult::Err(e),
     }
-}
-
-/// Resolve a call's base directory.
-///
-/// An explicit `workspace` names the base outright, the way an absolute path
-/// does, and so wins over the agent's sticky working directory; only a call
-/// that names no workspace inherits it. Letting the override win
-/// unconditionally would silently redirect a call that asked for workspace B
-/// into workspace A — a wrong-file read, or worse a wrong-file write, with
-/// nothing in the output to show it happened.
-fn base(
-    registry: &WorkspaceRegistry,
-    state: &RuntimeState,
-    agent: &str,
-    workspace: &Option<String>,
-) -> Result<PathBuf, String> {
-    let root = registry.resolve(workspace)?;
-    Ok(if workspace.is_none() {
-        state.effective_dir(agent, &root)
-    } else {
-        root
-    })
 }
 
 /// Clamp a single output stream to [`MAX_STREAM_BYTES`], keeping the head and tail
@@ -177,7 +145,6 @@ mod tests {
             ToolCall::Bash(BashInput {
                 command: "head -c 80000 < /dev/zero | tr '\\0' a".to_string(),
                 timeout_secs: None,
-                workspace: None,
             }),
         )
         .await;
@@ -190,27 +157,49 @@ mod tests {
         }
     }
 
+    /// Several workspaces is no longer ambiguous: the call lands in the first,
+    /// where it used to be refused because the model had named none.
     #[tokio::test]
-    async fn dispatch_errors_when_workspace_ambiguous() {
+    async fn dispatch_defaults_to_the_first_workspace() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        std::fs::write(first.path().join("marker.txt"), "first").unwrap();
         let registry = WorkspaceRegistry::new(vec![
             Workspace {
                 name: "a".into(),
-                path: "/a".into(),
+                path: first.path().to_path_buf(),
             },
             Workspace {
                 name: "b".into(),
-                path: "/b".into(),
+                path: second.path().to_path_buf(),
             },
         ]);
-        // No `workspace` with several workspaces → a ToolError, never silent.
         let result = dispatch(
             &registry,
+            &RuntimeState::new(),
+            "agent-1",
+            ToolCall::ReadFile(horsie_models::runtime::ReadFileInput {
+                path: "marker.txt".into(),
+                start_line: None,
+                end_line: None,
+            }),
+        )
+        .await;
+        match result {
+            ToolResult::Ok(o) => assert_eq!(o.stdout, "first"),
+            ToolResult::Err(e) => panic!("{}", e.reason),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_errors_with_no_workspaces() {
+        let result = dispatch(
+            &WorkspaceRegistry::new(vec![]),
             &RuntimeState::new(),
             "a",
             ToolCall::Bash(BashInput {
                 command: "echo hi".to_string(),
                 timeout_secs: None,
-                workspace: None,
             }),
         )
         .await;
@@ -233,7 +222,6 @@ mod tests {
             "a",
             ToolCall::SetWorkingDir(horsie_models::runtime::SetWorkingDirInput {
                 path: Some("sub".into()),
-                workspace: None,
             }),
         )
         .await;
@@ -246,7 +234,6 @@ mod tests {
                 path: "f.txt".into(),
                 start_line: None,
                 end_line: None,
-                workspace: None,
             }),
         )
         .await;
@@ -256,13 +243,14 @@ mod tests {
         }
     }
 
-    /// An explicit `workspace` must win over the sticky cwd. Before the base
-    /// was made workspace-aware, the override was applied unconditionally, so
-    /// this call read (and `write_file` would have written) inside workspace
-    /// `a` while the model had asked for `b` — silently, with a plausible
-    /// result and nothing in the output to reveal it.
+    /// An absolute path must win over the sticky cwd. This is the same scenario
+    /// that once made an explicit `workspace` argument necessary: with a cwd set
+    /// in workspace `a`, a call meant for `b` read — and `write_file` would have
+    /// written — inside `a`, silently, with a plausible result and nothing in the
+    /// output to reveal it. `Path::join` discarding the base is what makes the
+    /// bug unrepresentable now.
     #[tokio::test]
-    async fn a_named_workspace_is_not_hijacked_by_the_sticky_cwd() {
+    async fn an_absolute_path_is_not_hijacked_by_the_sticky_cwd() {
         let a = TempDir::new().unwrap();
         let b = TempDir::new().unwrap();
         std::fs::create_dir(a.path().join("sub")).unwrap();
@@ -288,7 +276,6 @@ mod tests {
             "agent-1",
             ToolCall::SetWorkingDir(horsie_models::runtime::SetWorkingDirInput {
                 path: Some("sub".into()),
-                workspace: Some("a".into()),
             }),
         )
         .await;
@@ -299,17 +286,16 @@ mod tests {
             &state,
             "agent-1",
             ToolCall::ReadFile(horsie_models::runtime::ReadFileInput {
-                path: "shared.txt".into(),
+                path: b.path().join("shared.txt").display().to_string(),
                 start_line: None,
                 end_line: None,
-                workspace: Some("b".into()),
             }),
         )
         .await;
         match r {
             ToolResult::Ok(o) => assert_eq!(
                 o.stdout, "from b",
-                "a call naming workspace 'b' must read from 'b', not from the cwd set in 'a'"
+                "an absolute path into 'b' must read from 'b', not from the cwd set in 'a'"
             ),
             ToolResult::Err(e) => panic!("{}", e.reason),
         }
@@ -331,7 +317,6 @@ mod tests {
             "a",
             ToolCall::SetWorkingDir(horsie_models::runtime::SetWorkingDirInput {
                 path: Some("sub".into()),
-                workspace: None,
             }),
         )
         .await;
@@ -346,7 +331,6 @@ mod tests {
                 path: "root.txt".into(),
                 start_line: None,
                 end_line: None,
-                workspace: None,
             }),
         )
         .await;

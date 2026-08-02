@@ -13,6 +13,20 @@ pub fn shared_skills(registry: &WorkspaceRegistry, include_shared: bool) -> Vec<
     }
 }
 
+/// The shared plugin library's absolute root, reported alongside its skills so the
+/// client can turn each `PluginSkill::rel_dir` into a path the agent can pass to the
+/// filesystem tools. `None` when the caller did not ask for shared skills or no
+/// library is configured — the same gate `shared_skills` uses, so the two never
+/// disagree.
+pub fn shared_root(registry: &WorkspaceRegistry, include_shared: bool) -> Option<String> {
+    if !include_shared {
+        return None;
+    }
+    registry
+        .plugins_dir()
+        .map(|dir| dir.display().to_string())
+}
+
 /// Scan the selected workspaces. `req.workspace` filters which roots to scan (`None`
 /// → all; `Some(name)` → just that one, or none if unknown). For each root, gather the
 /// first existing instruction candidate (in order) and every file matching
@@ -106,6 +120,19 @@ mod tests {
         assert_eq!(scans[0].name, "a");
         assert_eq!(scans[0].instructions.as_ref().unwrap().content, "a-rules");
         assert!(scans[1].instructions.is_none());
+    }
+
+    #[test]
+    fn shared_root_tracks_the_include_shared_gate() {
+        let plugins = TempDir::new().unwrap();
+        let registry =
+            reg(&[]).with_plugins(Some(plugins.path().to_path_buf()), Vec::new());
+        assert_eq!(
+            shared_root(&registry, true).as_deref(),
+            Some(plugins.path().display().to_string().as_str())
+        );
+        assert!(shared_root(&registry, false).is_none());
+        assert!(shared_root(&reg(&[]), true).is_none());
     }
 
     #[test]

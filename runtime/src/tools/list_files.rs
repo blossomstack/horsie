@@ -50,7 +50,6 @@ mod tests {
             dir.path(),
             ListFilesInput {
                 path: ".".into(),
-                workspace: None,
             },
         )
         .await;

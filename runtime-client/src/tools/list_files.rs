@@ -19,11 +19,11 @@ impl Tool for ListFilesTool {
         ToolSpec {
             name: "list_files".to_string(),
             description: "List directory contents.".to_string(),
-            input_schema: crate::tools::with_workspace(json!({
+            input_schema: json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
                 "required": ["path"]
-            })),
+            }),
         }
     }
     async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
@@ -31,9 +31,8 @@ impl Tool for ListFilesTool {
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'path'".into()))?
             .to_string();
-        let workspace = crate::tools::workspace_arg(&input);
         self.client
-            .invoke(ToolCall::ListFiles(ListFilesInput { path, workspace }))
+            .invoke(ToolCall::ListFiles(ListFilesInput { path }))
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)

@@ -3,26 +3,30 @@ package runtime;
 
 // --- Tool inputs ---
 
-struct BashInput { command: String, timeout_secs: Option<u64>, workspace: Option<String> }
-struct ReadFileInput { path: String, start_line: Option<u64>, end_line: Option<u64>, workspace: Option<String> }
-struct WriteFileInput { path: String, content: String, workspace: Option<String> }
+// Paths are absolute, or relative to the caller's working directory — its
+// `set_working_dir` override if it has one, else the first workspace. There is
+// no workspace argument: an absolute path is how a call reaches another
+// workspace or the shared plugin library.
+struct BashInput { command: String, timeout_secs: Option<u64> }
+struct ReadFileInput { path: String, start_line: Option<u64>, end_line: Option<u64> }
+struct WriteFileInput { path: String, content: String }
 
 // Content-based find/replace. `regex` (default false) switches `find` from a
 // literal string to a pattern; `replace_all` (default false) requires the match
 // to be unique and errors otherwise — set it true to change every occurrence.
-struct FindAndReplaceInput { path: String, find: String, replace: String, regex: Option<bool>, replace_all: Option<bool>, workspace: Option<String> }
+struct FindAndReplaceInput { path: String, find: String, replace: String, regex: Option<bool>, replace_all: Option<bool> }
 
 // Positional replacement: swap the 1-based, inclusive line range for `replacement`.
-struct ReplaceLinesInput { path: String, start_line: u64, end_line: u64, replacement: String, workspace: Option<String> }
+struct ReplaceLinesInput { path: String, start_line: u64, end_line: u64, replacement: String }
 
-struct ListFilesInput { path: String, workspace: Option<String> }
-struct GlobInput { pattern: String, path: Option<String>, max_results: Option<u64>, workspace: Option<String> }
-struct GrepInput { pattern: String, path: Option<String>, file_pattern: Option<String>, max_results: Option<u64>, workspace: Option<String> }
+struct ListFilesInput { path: String }
+struct GlobInput { pattern: String, path: Option<String>, max_results: Option<u64> }
+struct GrepInput { pattern: String, path: Option<String>, file_pattern: Option<String>, max_results: Option<u64> }
 
 // Set the caller's working directory for all future tool calls. `path` may be
-// absolute or relative to the current effective cwd; omit it to reset to
-// per-workspace resolution (`workspace` then names the reset target).
-struct SetWorkingDirInput { path: Option<String>, workspace: Option<String> }
+// absolute or relative to the current effective cwd; omit it to reset to the
+// default working directory (the first workspace).
+struct SetWorkingDirInput { path: Option<String> }
 
 // Set (`value` present) or unset (`value` absent) an env var for the caller's
 // future bash commands. Keyed by ToolCallRequest.agent_id like the cwd
@@ -72,8 +76,9 @@ struct WorkspaceScan {
 }
 
 /// A skill discovered in the shared plugin library. `rel_dir` is the skill's
-/// directory relative to the plugins root (the `horsie_shared` workspace), so the
-/// agent can read sibling resources with the filesystem tools.
+/// directory relative to the plugins root, which arrives as
+/// `ScanResponse.shared_root`; joining the two gives the absolute directory the
+/// agent needs to read sibling resources with the filesystem tools.
 struct PluginSkill {
     plugin: String,
     rel_dir: String,
@@ -83,6 +88,10 @@ struct ScanResponse {
     call_id: String,
     workspaces: Vec<WorkspaceScan>,
     shared_skills: Vec<PluginSkill>,
+    /// Absolute path of the shared plugin library root, when one is configured
+    /// and the request asked for it. Optional so an older runtime binary still
+    /// deserializes against a newer server.
+    shared_root: Option<String>,
 }
 
 // --- SessionStart hooks ---
