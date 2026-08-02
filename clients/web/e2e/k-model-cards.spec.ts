@@ -77,4 +77,34 @@ test.describe("model cards", () => {
       "128000",
     );
   });
+
+  test("a DeepSeek card prefills the forced-tools flag but leaves providers alone", async ({
+    page,
+    appBase,
+  }) => {
+    // deepseek-v4-flash is seeded with forcedToolsDisableThinking and a
+    // baseUrl. Picking it must copy the flag onto the model draft and leave
+    // every provider's base URL untouched — prefilling that is out of scope.
+    await page.goto(`${appBase}/settings/models`);
+
+    const providerBaseUrl = page.getByLabel("Base URL (optional)").first();
+    const before = await providerBaseUrl.inputValue();
+
+    await page.getByRole("button", { name: "Add model" }).click();
+    const idInput = page.getByTestId("model-id-input").last();
+    await idInput.fill("deepseek-v4-flash");
+
+    const suggestion = page.getByTestId(
+      "model-card-suggestion-deepseek-v4-flash",
+    );
+    await expect(suggestion).toBeVisible();
+    await suggestion.dispatchEvent("mousedown");
+
+    await expect(idInput).toHaveValue("deepseek-v4-flash");
+    await expect(page.getByTestId("model-forced-tools").last()).toBeChecked();
+    await expect(
+      page.getByLabel("Context window (optional)").last(),
+    ).toHaveValue("1048576");
+    await expect(providerBaseUrl).toHaveValue(before);
+  });
 });
