@@ -69,11 +69,14 @@ mod tests {
 
     #[tokio::test]
     async fn surfaces_stderr_on_success() {
-        let tool = BashTool::new(RuntimeClient::new(MockTransport::output(ToolOutput {
-            stdout: "out".into(),
-            stderr: "a warning".into(),
-            exit_code: 0,
-        })));
+        let tool = BashTool::new(RuntimeClient::new(
+            MockTransport::output(ToolOutput {
+                stdout: "out".into(),
+                stderr: "a warning".into(),
+                exit_code: 0,
+            }),
+            "test-agent",
+        ));
         let v = tool.execute(json!({"command": "x"})).await.unwrap();
         let text = v.as_str().unwrap();
         assert!(text.contains("out"));
@@ -82,11 +85,14 @@ mod tests {
 
     #[tokio::test]
     async fn nonzero_exit_is_reported_as_error() {
-        let tool = BashTool::new(RuntimeClient::new(MockTransport::output(ToolOutput {
-            stdout: String::new(),
-            stderr: "boom".into(),
-            exit_code: 1,
-        })));
+        let tool = BashTool::new(RuntimeClient::new(
+            MockTransport::output(ToolOutput {
+                stdout: String::new(),
+                stderr: "boom".into(),
+                exit_code: 1,
+            }),
+            "test-agent",
+        ));
         let err = tool.execute(json!({"command": "x"})).await.unwrap_err();
         match err {
             ToolCallError::ExecutionFailed(msg) => {

@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn toolbox_includes_conclude_and_filters_runtime_tools() {
-        let client = RuntimeClient::new(MockTransport::ok(""));
+        let client = RuntimeClient::new(MockTransport::ok(""), "test-agent");
         let out = json!({"type": "object"});
         let tb = DefaultToolboxFactory.for_agent(
             &def(Some(vec!["bash".into()]), Some(out), false),
@@ -670,7 +670,7 @@ mod tests {
 
     #[tokio::test]
     async fn conclude_tool_is_not_executable() {
-        let client = RuntimeClient::new(MockTransport::ok(""));
+        let client = RuntimeClient::new(MockTransport::ok(""), "test-agent");
         let out = json!({"type": "object"});
         let tb = DefaultToolboxFactory.for_agent(
             &def(None, Some(out), false),
@@ -685,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn skill_and_inspect_always_present() {
-        let client = RuntimeClient::new(MockTransport::ok("")); // empty scan
+        let client = RuntimeClient::new(MockTransport::ok(""), "test-agent"); // empty scan
         let tb = DefaultToolboxFactory.for_agent(
             &def(None, None, false),
             client,
@@ -700,8 +700,10 @@ mod tests {
 
     #[tokio::test]
     async fn skill_fetches_live_for_single_workspace_default() {
-        let client =
-            RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan_with_skill("october")]));
+        let client = RuntimeClient::new(
+            MockTransport::ok("").with_scan(vec![scan_with_skill("october")]),
+            "test-agent",
+        );
         let tb = DefaultToolboxFactory.for_agent(
             &def(None, None, false),
             client,
@@ -731,8 +733,10 @@ mod tests {
 
     #[tokio::test]
     async fn skill_requires_workspace_when_multiple() {
-        let client =
-            RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan_with_skill("october")]));
+        let client = RuntimeClient::new(
+            MockTransport::ok("").with_scan(vec![scan_with_skill("october")]),
+            "test-agent",
+        );
         let tb = DefaultToolboxFactory.for_agent(
             &def(None, None, false),
             client,
@@ -767,8 +771,10 @@ mod tests {
 
     #[tokio::test]
     async fn shared_skill_loads_with_resource_hint_when_opted_in() {
-        let client =
-            RuntimeClient::new(MockTransport::ok("").with_shared_skills(vec![shared_skill()]));
+        let client = RuntimeClient::new(
+            MockTransport::ok("").with_shared_skills(vec![shared_skill()]),
+            "test-agent",
+        );
         let tb = DefaultToolboxFactory.for_agent(
             &def(None, None, false),
             client,
@@ -791,8 +797,10 @@ mod tests {
 
     #[tokio::test]
     async fn shared_skill_rejected_when_opted_out() {
-        let client =
-            RuntimeClient::new(MockTransport::ok("").with_shared_skills(vec![shared_skill()]));
+        let client = RuntimeClient::new(
+            MockTransport::ok("").with_shared_skills(vec![shared_skill()]),
+            "test-agent",
+        );
         let tb = DefaultToolboxFactory.for_agent(
             &def(None, None, false),
             client,
@@ -812,8 +820,10 @@ mod tests {
 
     #[tokio::test]
     async fn inspect_includes_shared_section_only_when_opted_in() {
-        let client =
-            RuntimeClient::new(MockTransport::ok("").with_shared_skills(vec![shared_skill()]));
+        let client = RuntimeClient::new(
+            MockTransport::ok("").with_shared_skills(vec![shared_skill()]),
+            "test-agent",
+        );
         let tb = DefaultToolboxFactory.for_agent(
             &def(None, None, false),
             client.clone(),

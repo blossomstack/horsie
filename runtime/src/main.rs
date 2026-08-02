@@ -371,6 +371,10 @@ async fn run_loop<S>(
     let in_flight: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // Per-agent cwd/env state, keyed by the agent id stamped on each tool call;
+    // shared by every task this connection spawns.
+    let state = Arc::new(horsie_runtime::state::RuntimeState::new());
+
     while let Some(msg) = stream.next().await {
         match msg {
             Ok(Message::Text(text)) => {
@@ -381,12 +385,17 @@ async fn run_loop<S>(
                 match inbound {
                     RuntimeInboundMessage::ToolCall(req) => {
                         let call_id = req.call_id.clone();
+                        let agent_id = req.agent_id.clone();
                         let registry = registry.clone();
+                        let state = state.clone();
                         let sink_clone = sink.clone();
                         let in_flight_clone = in_flight.clone();
 
                         let handle = tokio::spawn(async move {
-                            let result = horsie_runtime::tools::dispatch(&registry, req.call).await;
+                            let result = horsie_runtime::tools::dispatch(
+                                &registry, &state, &agent_id, req.call,
+                            )
+                            .await;
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
                                     call_id: call_id.clone(),

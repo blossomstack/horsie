@@ -205,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_correlates_response() {
         let (t, _dir) = paired().await;
-        let r = t.invoke("c1", bash()).await.unwrap();
+        let r = t.invoke("c1", "agent-1", bash()).await.unwrap();
         assert!(matches!(r, ToolResult::Ok(o) if o.stdout == "ok"));
     }
 
@@ -234,7 +234,7 @@ mod tests {
         for i in 0..8 {
             let t = t.clone();
             handles.push(tokio::spawn(async move {
-                t.invoke(&format!("c{i}"), bash()).await
+                t.invoke(&format!("c{i}"), "agent-1", bash()).await
             }));
         }
         for h in handles {
@@ -260,7 +260,7 @@ mod tests {
             .unwrap()
             .0;
         let t = SocketRuntimeTransport::new(ws);
-        let err = t.invoke("c1", bash()).await.unwrap_err();
+        let err = t.invoke("c1", "agent-1", bash()).await.unwrap_err();
         assert!(matches!(err, TransportError::Disconnected));
     }
 }

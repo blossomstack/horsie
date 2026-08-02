@@ -85,7 +85,7 @@ impl JobRuntime for TestRuntime {
         let ctx = WorkflowRuntimeContext {
             provider_registry: self.registry.clone(),
             toolbox_factory: Arc::new(DefaultToolboxFactory),
-            runtime_client: RuntimeClient::new(NoopTransport),
+            runtime_client: RuntimeClient::new(NoopTransport, "test-agent"),
             event_sink: Arc::new(NoopSink),
             workflow_events: params.events,
         };

@@ -5,6 +5,8 @@ mod grep;
 mod list_files;
 mod read_file;
 mod replace_lines;
+mod set_env;
+mod set_working_dir;
 mod write_file;
 
 pub use bash::BashTool;
@@ -14,6 +16,8 @@ pub use grep::GrepTool;
 pub use list_files::ListFilesTool;
 pub use read_file::ReadFileTool;
 pub use replace_lines::ReplaceLinesTool;
+pub use set_env::SetEnvTool;
+pub use set_working_dir::SetWorkingDirTool;
 pub use write_file::WriteFileTool;
 
 use crate::client::RuntimeClient;
@@ -80,5 +84,7 @@ pub fn add_runtime_tools(toolbox: ToolboxImpl, client: RuntimeClient) -> Toolbox
         .add(ReplaceLinesTool::new(client.clone()))
         .add(ListFilesTool::new(client.clone()))
         .add(GlobTool::new(client.clone()))
-        .add(GrepTool::new(client))
+        .add(GrepTool::new(client.clone()))
+        .add(SetWorkingDirTool::new(client.clone()))
+        .add(SetEnvTool::new(client))
 }

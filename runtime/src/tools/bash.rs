@@ -1,3 +1,4 @@
+use crate::state::EnvOverlay;
 use horsie_models::runtime::{BashInput, ToolError, ToolOutput, ToolResult};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -28,7 +29,7 @@ const READER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// error, so it is normalized to success.
 const SIGPIPE_EXIT: i32 = 141;
 
-pub async fn exec(working_dir: &Path, input: BashInput) -> ToolResult {
+pub async fn exec(working_dir: &Path, env: &EnvOverlay, input: BashInput) -> ToolResult {
     let timeout = Duration::from_secs(input.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     // pipefail: a failing stage anywhere in a pipeline fails the command, so
     // `cargo test 2>&1 | tail` can't mask a test failure behind tail's exit 0.
@@ -47,6 +48,7 @@ pub async fn exec(working_dir: &Path, input: BashInput) -> ToolResult {
     // output pipes open.
     #[cfg(unix)]
     command.process_group(0);
+    env.apply_to(&mut command);
     let child = command.spawn();
 
     let mut child = match child {
@@ -204,6 +206,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "echo before-timeout; sleep 5".to_string(),
                 timeout_secs: Some(1),
@@ -229,6 +232,7 @@ mod tests {
         let started = std::time::Instant::now();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "sleep 30 & echo started".to_string(),
                 timeout_secs: Some(1),
@@ -252,6 +256,7 @@ mod tests {
         let started = std::time::Instant::now();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "sleep 60 & echo started; sleep 30".to_string(),
                 timeout_secs: Some(1),
@@ -274,6 +279,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "echo to-stdout; echo to-stderr >&2; sleep 5".to_string(),
                 timeout_secs: Some(1),
@@ -297,6 +303,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "seq 1 200000 | head -3".to_string(),
                 timeout_secs: Some(30),
@@ -318,6 +325,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "false | true".to_string(),
                 timeout_secs: None,
@@ -336,6 +344,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "echo hello".to_string(),
                 timeout_secs: None,
@@ -354,6 +363,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "exit 42".to_string(),
                 timeout_secs: None,
@@ -373,6 +383,7 @@ mod tests {
         std::fs::write(dir.path().join("sentinel.txt"), "found").unwrap();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "cat sentinel.txt".to_string(),
                 timeout_secs: None,
@@ -391,6 +402,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = exec(
             dir.path(),
+            &EnvOverlay::default(),
             BashInput {
                 command: "sleep 5".to_string(),
                 timeout_secs: Some(1),
@@ -405,6 +417,29 @@ mod tests {
                 "unexpected error: {}",
                 e.reason
             ),
+        }
+    }
+
+    #[tokio::test]
+    async fn env_overlay_reaches_the_child() {
+        let dir = TempDir::new().unwrap();
+        let overlay = EnvOverlay {
+            sets: vec![("HORSIE_TEST_VAR".to_string(), "hello".to_string())],
+            unsets: vec![],
+        };
+        let result = exec(
+            dir.path(),
+            &overlay,
+            BashInput {
+                command: "echo $HORSIE_TEST_VAR".to_string(),
+                timeout_secs: None,
+                workspace: None,
+            },
+        )
+        .await;
+        match result {
+            ToolResult::Ok(o) => assert_eq!(o.stdout.trim(), "hello"),
+            ToolResult::Err(e) => panic!("{}", e.reason),
         }
     }
 }

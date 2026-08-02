@@ -19,6 +19,16 @@ struct ListFilesInput { path: String, workspace: Option<String> }
 struct GlobInput { pattern: String, path: Option<String>, max_results: Option<u64>, workspace: Option<String> }
 struct GrepInput { pattern: String, path: Option<String>, file_pattern: Option<String>, max_results: Option<u64>, workspace: Option<String> }
 
+// Set the caller's working directory for all future tool calls. `path` may be
+// absolute or relative to the current effective cwd; omit it to reset to
+// per-workspace resolution (`workspace` then names the reset target).
+struct SetWorkingDirInput { path: Option<String>, workspace: Option<String> }
+
+// Set (`value` present) or unset (`value` absent) an env var for the caller's
+// future bash commands. Keyed by ToolCallRequest.agent_id like the cwd
+// override, so agents sharing one runtime stay isolated.
+struct SetEnvInput { name: String, value: Option<String> }
+
 /// One variant per tool. The tag doubles as the tool name seen by the LLM.
 #[type_tag = "tool"]
 union ToolCall {
@@ -30,6 +40,8 @@ union ToolCall {
     ListFiles(ListFilesInput),
     Glob(GlobInput),
     Grep(GrepInput),
+    SetWorkingDir(SetWorkingDirInput),
+    SetEnv(SetEnvInput),
 }
 
 // --- Workspace scan ---
@@ -82,7 +94,15 @@ struct SessionStartResponse { call_id: String, context: String }
 
 // --- Inbound (executor → runtime) ---
 
-struct ToolCallRequest  { call_id: String, call: ToolCall }
+// agent_id keys the runtime's per-agent cwd/env state — one bucket per calling
+// agent, so an agent and its subagents, or sessions sharing a runtime, cannot
+// see each other's cwd or env.
+//
+// Required rather than optional: an unkeyed call would silently share mutable
+// state with every other unkeyed caller, which is the exact failure this field
+// exists to prevent. Today it is the session id, which is also the main agent's
+// journal id (`agent/<session-uuid>`); a subagent stamps its own.
+struct ToolCallRequest  { call_id: String, agent_id: String, call: ToolCall }
 struct CancelCallRequest { call_id: String }
 
 #[type_tag = "type"]

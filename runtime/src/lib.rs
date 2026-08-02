@@ -2,6 +2,7 @@ pub mod plugins;
 pub mod plugins_fetch;
 pub mod provision;
 pub mod scan;
+pub mod state;
 pub mod steps;
 pub mod tools;
 pub mod workspace;
