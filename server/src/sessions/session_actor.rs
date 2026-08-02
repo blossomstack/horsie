@@ -126,6 +126,10 @@ pub enum SessionCommand {
         id: Option<Uuid>,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Read the whole subagent tree (backs `GET /api/sessions/:id/subagents`).
+    SubAgentTree {
+        reply: oneshot::Sender<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>,
+    },
     /// Internal: post-recovery reconciliation of subagents the process died
     /// under (tree nodes still `Running`). Their runs are over; the parents
     /// are owed the failure like any other terminal result.
@@ -1225,6 +1229,16 @@ impl EventSourcedActor for SessionActor {
                 CommandEffect::stop()
             }
             SessionCommand::AgentOutcome(outcome) => self.on_agent_outcome(state, outcome).await,
+            SessionCommand::SubAgentTree { reply } => {
+                let tree = state
+                    .subagents
+                    .ids()
+                    .into_iter()
+                    .filter_map(|id| state.subagents.get(&id).map(|rec| (id, rec.clone())))
+                    .collect();
+                let _ = reply.send(tree);
+                CommandEffect::none()
+            }
             SessionCommand::ReconcileSubAgents => {
                 let interrupted = state.subagents.interrupted();
                 if interrupted.is_empty() {

@@ -10,6 +10,7 @@ use crate::sessions::spec::{
     AgentSettings, ProvisionStepSpec, SessionSpec, SessionStatus, WorkspaceDef, status_kind,
     status_reason,
 };
+use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -21,8 +22,9 @@ use horsie_models::session::{
     TaskStatus as WireTaskStatus, UsageView,
 };
 use horsie_models::session_api::{
-    Ack, CreateSessionRequest, CreateSessionResponse, GetSessionResponse, GetSessionUsageResponse,
-    HistoryPage, ListSessionsResponse, SendMessageRequest, SessionAck,
+    Ack, CreateSessionRequest, CreateSessionResponse, GetSessionResponse,
+    GetSessionSubAgentsResponse, GetSessionUsageResponse, HistoryPage, ListSessionsResponse,
+    SendMessageRequest, SessionAck, SubAgentView,
 };
 use horsie_workflow::{AgentHistoryPage, HistoryQuery, TaskStatus as AgentTaskStatus};
 use serde::Deserialize;
@@ -264,6 +266,9 @@ pub struct HistoryParams {
     /// Max messages; defaults to [`HISTORY_DEFAULT_LIMIT`], capped at
     /// [`HISTORY_MAX_LIMIT`].
     limit: Option<usize>,
+    /// Which agent's transcript to read: absent or `main` for the session's
+    /// primary agent, otherwise a subagent id.
+    agent_id: Option<String>,
 }
 
 fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
@@ -340,7 +345,7 @@ pub async fn get_history(
     };
     let page = ask(&state, |reply| SessionSupervisorCommand::History {
         id: id.clone(),
-        agent_id: None,
+        agent_id: params.agent_id,
         query,
         reply,
     })
@@ -422,4 +427,94 @@ pub async fn delete_session(
 /// Map a storage status to its wire kind (re-exported for the SSE layer).
 pub(crate) fn wire_status_kind(s: &SessionStatus) -> SessionStatusKind {
     status_kind(s)
+}
+
+/// Project one tree node onto its wire shape. `output` never crosses here —
+/// transcripts are read through the history endpoint with an `agent_id`.
+fn to_wire_subagent(id: Uuid, rec: &SubAgentRecord) -> SubAgentView {
+    SubAgentView {
+        id: id.to_string(),
+        parent: match rec.parent {
+            SubAgentParent::Main => None,
+            SubAgentParent::SubAgent(pid) => Some(pid.to_string()),
+        },
+        label: rec.label.clone(),
+        depth: rec.depth,
+        status: match rec.status {
+            SubAgentStatus::Running => "running",
+            SubAgentStatus::Completed => "completed",
+            SubAgentStatus::Failed => "failed",
+        }
+        .to_string(),
+        error: rec.error.clone(),
+    }
+}
+
+/// A session's subagent tree, for client tree rendering. Loading the session
+/// to answer is deliberate and free of sandbox cost — the tree folds from the
+/// session journal, and no agent is asked.
+pub async fn get_subagents(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, Api> {
+    let tree = ask(&state, |reply| SessionSupervisorCommand::SubAgents {
+        id: id.clone(),
+        reply,
+    })
+    .await?
+    .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
+    let subagents = tree
+        .into_iter()
+        .map(|(id, rec)| to_wire_subagent(id, &rec))
+        .collect();
+    Ok(Json(GetSessionSubAgentsResponse { subagents }))
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
+
+    fn record(parent: SubAgentParent, status: SubAgentStatus) -> SubAgentRecord {
+        SubAgentRecord {
+            parent,
+            label: "research".into(),
+            task: "dig".into(),
+            depth: 2,
+            status,
+            output: Some("answer".into()),
+            error: None,
+            notified: true,
+        }
+    }
+
+    #[test]
+    fn wire_subagent_projects_the_record_without_output() {
+        let parent = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let view = to_wire_subagent(
+            id,
+            &record(SubAgentParent::SubAgent(parent), SubAgentStatus::Failed),
+        );
+        assert_eq!(view.id, id.to_string());
+        assert_eq!(view.parent, Some(parent.to_string()));
+        assert_eq!(view.label, "research");
+        assert_eq!(view.depth, 2);
+        assert_eq!(view.status, "failed");
+        // No `output` field exists on the wire type at all — transcripts are
+        // read via the history endpoint, never the tree.
+
+        let root = to_wire_subagent(
+            id,
+            &record(SubAgentParent::Main, SubAgentStatus::Running),
+        );
+        assert_eq!(root.parent, None);
+        assert_eq!(root.status, "running");
+    }
 }

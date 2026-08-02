@@ -49,6 +49,21 @@ struct HistoryPage {
 
 struct GetSessionUsageResponse { usage: SessionUsageStats }
 
+/// One node of a session's subagent tree. `output` is deliberately absent —
+/// transcripts are read through the history endpoint with an agent_id.
+struct SubAgentView {
+    id: String,
+    /// Parent agent id; absent → the session's main agent.
+    parent: Option<String>,
+    label: String,
+    depth: u32,
+    /// "running" | "completed" | "failed".
+    status: String,
+    error: Option<String>,
+}
+
+struct GetSessionSubAgentsResponse { subagents: Vec<SubAgentView> }
+
 struct CreateSessionResponse { session: SessionSummary }
 struct ListSessionsResponse { sessions: Vec<SessionSummary> }
 struct GetSessionResponse { session: SessionDetail }

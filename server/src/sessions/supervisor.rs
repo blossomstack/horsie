@@ -109,6 +109,12 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: oneshot::Sender<Option<SessionUsageStats>>,
     },
+    /// Read a session's subagent tree (`None` when the session is unknown).
+    SubAgents {
+        id: SessionId,
+        reply:
+            oneshot::Sender<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
+    },
     /// Unload every session that has gone idle. Sent by the ticker, or by a
     /// test that has moved its clock.
     Tick,
@@ -494,6 +500,21 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child.tell(SessionCommand::UsageStats { reply: tx }).await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::SubAgents { id, reply } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child.tell(SessionCommand::SubAgentTree { reply: tx }).await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
                         });
