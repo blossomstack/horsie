@@ -233,6 +233,8 @@ function reducer(state: State, action: Action): State {
       return {
         ...state,
         optimistic: [...state.optimistic, { id: action.id, text: action.text }],
+        // The user is starting a new turn — the last one's error is history.
+        streamError: null,
       };
     case "remove-optimistic":
       return {
@@ -314,6 +316,16 @@ function reducer(state: State, action: Action): State {
             liveStatus: ev.value.status,
             statusSeq: state.statusSeq + 1,
             statusReason: ev.value.reason ?? null,
+            // A turn that has started supersedes the previous turn's error.
+            // The optimistic echo already clears it for a message sent from
+            // this view; this also covers turns with no echo of their own —
+            // an answer to a pending ask, or a message sent from another tab.
+            // Safe against ordering: the server reports Running at turn start,
+            // strictly before any `Error` frame that turn can produce.
+            streamError:
+              ev.value.status === SessionStatusKind.Running
+                ? null
+                : state.streamError,
           };
         case "Error":
           return { ...state, streamError: ev.value.message };

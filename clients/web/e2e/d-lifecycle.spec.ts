@@ -75,6 +75,15 @@ test("D4: an LLM error surfaces instead of hanging", async ({ page, appBase, moc
   await expect(page.getByTestId("session-error")).toBeVisible();
   // The turn ended — the session is not stuck Running.
   await expect(page.getByTestId("status-badge")).not.toHaveAttribute("data-status", "Running");
+
+  // The next turn clears the banner: it belongs to the turn that failed, not
+  // to the session, and lingering through later turns looks like the error is
+  // still happening.
+  await mock.queueText("Recovered after the error.");
+  await sendMessage(page, "continue");
+  await expect(page.getByTestId("session-error")).toHaveCount(0);
+  await expect(page.getByTestId("assistant-text")).toContainText("Recovered after the error.");
+  await expect(page.getByTestId("session-error")).toHaveCount(0);
 });
 
 test("D5: transcript is restored from the journal after a reload", async ({
