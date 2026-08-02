@@ -14,7 +14,6 @@
 /// tool calls, and should not have to.
 package runtime_vendor;
 
-use capabilities.CapabilitySpec;
 use executor.EnvVar;
 use executor.ProvisionStep;
 use executor.RuntimeInfo;
@@ -45,9 +44,6 @@ struct RuntimeSpec {
     env: Vec<EnvVar>,
     /// Setup steps the runtime executes before its message loop.
     provision: Vec<ProvisionStep>,
-    /// Sandbox policy, inline rather than as a server-local file path. The
-    /// vendor writes it to its own disk and passes --sandbox-caps.
-    sandbox_capabilities: Option<CapabilitySpec>,
 }
 
 // --- Requests (server -> vendor) ────────────────────────────────────────────

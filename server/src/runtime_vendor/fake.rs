@@ -621,33 +621,15 @@ async fn run_agent<S>(
     }
 }
 
-/// A `RuntimeSpec` with a real capability file on disk, so `CapabilitySpec::load`
-/// succeeds. The temp dir is leaked deliberately: it must outlive the spec, and
-/// tests are short-lived.
+/// A `RuntimeSpec` naming one workspace.
 #[must_use]
 pub fn runtime_spec_fixture(workspace: &str) -> RuntimeSpec {
-    use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
-    let dir = std::env::temp_dir().join(format!("horsie-fake-agent-{}", uuid::Uuid::new_v4()));
-    let path = dir.join("capabilities.json");
-    let spec = CapabilitySpec {
-        network: NetworkPolicy::Block(BlockNetwork {}),
-        grants: vec![],
-        unsafe_seatbelt_rules: None,
-    };
-    let write = std::fs::create_dir_all(&dir)
-        .map_err(|e| e.to_string())
-        .and_then(|()| serde_json::to_vec(&spec).map_err(|e| e.to_string()))
-        .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
-    if let Err(e) = write {
-        tracing::error!(error = %e, "fake agent fixture: could not write capability file");
-    }
     RuntimeSpec {
         workspaces: vec![WorkspaceSpec {
             name: workspace.to_string(),
         }],
         provision: vec![],
         env: vec![],
-        capabilities_file: path,
     }
 }
 

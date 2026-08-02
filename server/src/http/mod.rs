@@ -18,17 +18,11 @@ use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Router;
 use axum::routing::{get, post, put};
 use horsie_actor::{ActorRef, Journal};
-use horsie_models::capabilities::CapabilitySpec;
 use horsie_models::session::GlobalSessionEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
-
-/// Finalizes a request-supplied capability spec (path expansion, plugin grants,
-/// platform seatbelt rules) — injected by the host binary, which owns the
-/// capability-resolution helpers.
-pub type CapsFinalize = Arc<dyn Fn(CapabilitySpec) -> CapabilitySpec + Send + Sync>;
 
 /// "http://host" from the request headers (horsie serves same-origin; a
 /// configured `callback_base` overrides this inside a service). Shared by the
@@ -46,9 +40,6 @@ pub struct AppState {
     pub supervisor: ActorRef<SessionSupervisorCommand>,
     pub journal: Arc<dyn Journal>,
     pub global_events: broadcast::Sender<GlobalSessionEvent>,
-    pub caps_finalize: CapsFinalize,
-    /// Fully-resolved default capability spec for requests that omit one.
-    pub default_caps: CapabilitySpec,
     /// Reads and mutates the runtime-editable configuration (models, providers,
     /// default vendor). Also the source of the default vendor a create request
     /// falls back to when it omits one.
@@ -190,18 +181,9 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use horsie_actor::{InMemoryJournal, spawn_root};
-    use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use horsie_models::session_api::{CreateSessionResponse, ListSessionsResponse};
     use std::collections::HashMap;
     use tower::util::ServiceExt;
-
-    fn block_caps() -> CapabilitySpec {
-        CapabilitySpec {
-            network: NetworkPolicy::Block(BlockNetwork {}),
-            grants: vec![],
-            unsafe_seatbelt_rules: None,
-        }
-    }
 
     fn test_info() -> horsie_models::settings::ServerInfo {
         horsie_models::settings::ServerInfo {
@@ -270,8 +252,6 @@ mod tests {
             supervisor,
             journal,
             global_events: gtx,
-            caps_finalize: Arc::new(|caps| caps),
-            default_caps: block_caps(),
             config_store: opened.store,
             model_cards,
             github,

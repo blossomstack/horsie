@@ -50,8 +50,8 @@ pub trait WorkspaceResolver: Send + Sync + 'static {
 ///
 /// A factory rather than a single shared provider because the sandbox policy is
 /// per-runtime and [`ProcessRuntimeProvider`](crate::ProcessRuntimeProvider)
-/// binds its capability file at construction. `caps_file` is `Some` when the
-/// agent wrote the server-sent spec to disk and sandboxing is enabled.
+/// binds its capability file at construction. `caps_file` is `Some` when
+/// sandboxing is enabled and the agent wrote its baseline spec to disk.
 pub type ProviderFactory =
     Arc<dyn Fn(&str, Option<PathBuf>) -> Arc<dyn RuntimeProvider> + Send + Sync>;
 
@@ -125,9 +125,9 @@ pub struct RuntimeVendor {
     workspaces: Arc<dyn WorkspaceResolver>,
     /// Where per-runtime scratch (the sandbox capability file) is written.
     state_dir: PathBuf,
-    /// Whether to honor the server's sandbox spec. Off by default so the local
-    /// vendor keeps behaving as it does today, where the machine is already the
-    /// user's own; `horsie connect --sandbox` turns it on.
+    /// Whether to sandbox spawned runtimes with the vendor's baseline
+    /// capability spec. The library default is off; `horsie connect` turns it
+    /// on unless started with `--no-sandbox`.
     sandbox: bool,
     /// The host plugin library this agent serves, resolved agent-side by the
     /// CLI. Never sent by the server — it is a property of this machine.
@@ -184,7 +184,7 @@ impl RuntimeVendor {
         }
     }
 
-    /// Honor the server's sandbox capability spec for every runtime.
+    /// Sandbox every runtime with the vendor's baseline capability spec.
     #[must_use]
     pub fn with_sandbox(mut self, enabled: bool) -> Self {
         self.sandbox = enabled;
@@ -505,10 +505,15 @@ impl RuntimeVendor {
         // A previous incarnation may still be live (a re-create after a crash).
         self.halt(runtime_id).await;
 
-        // The sandbox spec arrives inline; a provider needs it as a file.
-        let caps_file = match (&request.sandbox_capabilities, self.sandbox) {
-            (Some(spec), true) => Some(self.write_caps_file(runtime_id, spec)?),
-            (None, _) | (Some(_), false) => None,
+        // The vendor owns the sandbox policy: nothing about confinement
+        // crosses the wire. The provider needs the spec as a file, so the
+        // baseline (plus this machine's plugin-library grants) is written per
+        // runtime — on revive as well, so a recovered runtime never runs
+        // against a stale policy.
+        let caps_file = if self.sandbox {
+            Some(self.write_caps_file(runtime_id)?)
+        } else {
+            None
         };
 
         let mut env = request.env.clone();
@@ -588,16 +593,11 @@ impl RuntimeVendor {
 
     /// Persist the effective capability spec for a runtime and return its path.
     ///
-    /// The server authors the spec but cannot know this machine's plugin
-    /// library, so the grants for it are injected here. Without them a
-    /// sandboxed runtime is handed a `--plugins-dir` it has no capability to
-    /// read — the library is agent-side knowledge, like the library path itself.
-    fn write_caps_file(
-        &self,
-        runtime_id: &str,
-        spec: &horsie_models::capabilities::CapabilitySpec,
-    ) -> Result<PathBuf, String> {
-        let mut spec = spec.clone();
+    /// The spec is this vendor's [`baseline`](crate::baseline) plus read
+    /// grants for the host plugin library — without them a sandboxed runtime
+    /// is handed a `--plugins-dir` it has no capability to read.
+    fn write_caps_file(&self, runtime_id: &str) -> Result<PathBuf, String> {
+        let mut spec = crate::baseline::baseline_capabilities()?;
         let sources: Vec<PathBuf> = self.host_sources.iter().cloned().collect();
         spec.grants
             .extend(horsie_support::plugin::grants::plugin_library_grants(
@@ -682,17 +682,13 @@ mod tests {
         ))
     }
 
-    /// The server authors the capability spec and cannot know this machine's
-    /// plugin library, so the agent must inject the grants for it. Without this
-    /// a sandboxed runtime is handed a `--plugins-dir` it has no capability to
-    /// read — and since installed plugins are symlinks into `sources/`, the
-    /// target root has to be granted too or every read still fails.
+    /// The baseline cannot know this machine's plugin library, so the agent
+    /// must inject the grants for it. Without this a sandboxed runtime is
+    /// handed a `--plugins-dir` it has no capability to read — and since
+    /// installed plugins are symlinks into `sources/`, the target root has to
+    /// be granted too or every read still fails.
     #[test]
     fn the_written_caps_file_grants_the_host_plugin_library_and_its_sources() {
-        use horsie_models::capabilities::{
-            BlockNetwork, CapabilitySpec, Grant, NetworkPolicy, WorkingDirGrant,
-        };
-
         let state = tempfile::tempdir().expect("tempdir");
         let agent = RuntimeVendor::new(
             "test-vendor".to_string(),
@@ -708,16 +704,7 @@ mod tests {
             vec![PathBuf::from("/opt/node/bin")],
         );
 
-        // A spec as the server would send it: no knowledge of this machine.
-        let spec = CapabilitySpec {
-            network: NetworkPolicy::Block(BlockNetwork {}),
-            grants: vec![Grant::WorkingDir(WorkingDirGrant {
-                access: horsie_models::capabilities::Access::ReadWrite,
-            })],
-            unsafe_seatbelt_rules: None,
-        };
-
-        let path = agent.write_caps_file("rt-1", &spec).expect("write caps");
+        let path = agent.write_caps_file("rt-1").expect("write caps");
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read caps")).expect("parse caps");
         // The grant union is fluorite-tagged: `{"type":"Dir","value":{"path":…}}`.
@@ -735,22 +722,14 @@ mod tests {
         assert!(granted.contains(&"/data/plugins"), "granted: {granted:?}");
         assert!(granted.contains(&"/data/sources"), "granted: {granted:?}");
         assert!(granted.contains(&"/opt/node/bin"), "granted: {granted:?}");
-        // The server's own grants survive.
-        assert_eq!(
-            written["grants"]
-                .as_array()
-                .map(|a| a.len())
-                .unwrap_or_default(),
-            4
-        );
+        // The baseline's own grants survive alongside them.
+        assert!(granted.contains(&"/usr"), "granted: {granted:?}");
     }
 
-    /// With no host library there is nothing to grant, and the server's spec is
-    /// written through untouched.
+    /// With no host library there is nothing to merge, and the written file is
+    /// exactly the baseline.
     #[test]
-    fn the_written_caps_file_is_unchanged_without_a_host_library() {
-        use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
-
+    fn the_written_caps_file_is_the_baseline_without_a_host_library() {
         let state = tempfile::tempdir().expect("tempdir");
         let agent = RuntimeVendor::new(
             "test-vendor".to_string(),
@@ -760,19 +739,12 @@ mod tests {
             Arc::new(FixedWorkspaces::new(HashMap::new())),
             state.path().to_path_buf(),
         );
-        let spec = CapabilitySpec {
-            network: NetworkPolicy::Block(BlockNetwork {}),
-            grants: vec![],
-            unsafe_seatbelt_rules: None,
-        };
-        let path = agent.write_caps_file("rt-1", &spec).expect("write caps");
-        let written: serde_json::Value =
+        let path = agent.write_caps_file("rt-1").expect("write caps");
+        let written: horsie_models::capabilities::CapabilitySpec =
             serde_json::from_slice(&std::fs::read(&path).expect("read caps")).expect("parse caps");
-        assert!(
-            written["grants"]
-                .as_array()
-                .map(|a| a.is_empty())
-                .unwrap_or_default()
+        assert_eq!(
+            written,
+            crate::baseline::baseline_capabilities().expect("baseline")
         );
     }
 

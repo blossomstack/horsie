@@ -14,7 +14,6 @@ use horsie_actor::{ActorRef, FileJournal, Journal, spawn_root};
 use horsie_agentcore::LlmProvider;
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
-use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
 use horsie_runtime_vendor::ConnectedRuntimeRegistry;
 use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
@@ -58,14 +57,6 @@ fn provider_at(url: &str) -> Arc<dyn LlmProvider> {
             .with_base_url(url)
             .with_retry_delay_secs(0),
     )
-}
-
-fn block_caps() -> CapabilitySpec {
-    CapabilitySpec {
-        network: NetworkPolicy::Block(BlockNetwork {}),
-        grants: vec![],
-        unsafe_seatbelt_rules: None,
-    }
 }
 
 /// Start a server incarnation on `journal_dir`, with `vendor` under name "mock"
@@ -162,8 +153,6 @@ async fn start_server_with(
         supervisor: supervisor.clone(),
         journal,
         global_events: gtx,
-        caps_finalize: Arc::new(|c| c),
-        default_caps: block_caps(),
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
             opened.pool.clone(),
@@ -296,8 +285,6 @@ async fn start_server_with_live_vendors(
         supervisor: supervisor.clone(),
         journal,
         global_events: gtx,
-        caps_finalize: Arc::new(|c| c),
-        default_caps: block_caps(),
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
             opened.pool.clone(),

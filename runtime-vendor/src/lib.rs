@@ -1,3 +1,4 @@
+mod baseline;
 mod connected_registry;
 mod env_scrub;
 mod error;

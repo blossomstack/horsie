@@ -1161,7 +1161,6 @@ mod tests {
 
     fn actor_spec_fixture() -> SessionSpec {
         use crate::sessions::spec::WorkspaceDef;
-        use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
         SessionSpec {
             name: Some("test".into()),
             agent: AgentSettings {
@@ -1178,11 +1177,6 @@ mod tests {
                 name: "main".into(),
             }],
             provision: vec![],
-            capabilities: CapabilitySpec {
-                network: NetworkPolicy::Block(BlockNetwork {}),
-                grants: vec![],
-                unsafe_seatbelt_rules: None,
-            },
             vendor: "mock".into(),
             plugins: vec![],
         }

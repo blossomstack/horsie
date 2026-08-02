@@ -569,7 +569,6 @@ mod tests {
     use crate::sessions::clock::TestClock;
     use crate::sessions::spec::AgentSettings;
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
-    use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use std::collections::HashMap;
 
     fn spec_fixture() -> SessionSpec {
@@ -587,11 +586,6 @@ mod tests {
             },
             workspaces: vec![],
             provision: vec![],
-            capabilities: CapabilitySpec {
-                network: NetworkPolicy::Block(BlockNetwork {}),
-                grants: vec![],
-                unsafe_seatbelt_rules: None,
-            },
             vendor: "mock".into(),
             plugins: vec![],
         }

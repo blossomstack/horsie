@@ -111,20 +111,6 @@ pub async fn create_session(
     let workspaces = vec![WorkspaceDef {
         name: "main".into(),
     }];
-    // Repo provisioning clones inside the sandbox, so the default capability
-    // spec (which may block the network) gets a network-allow override; an
-    // explicit request-supplied spec always wins untouched.
-    let caps = match req.capabilities {
-        Some(c) => (state.caps_finalize)(c),
-        None if !provision.is_empty() => {
-            let mut c = state.default_caps.clone();
-            c.network = horsie_models::capabilities::NetworkPolicy::Allow(
-                horsie_models::capabilities::AllowNetwork {},
-            );
-            c
-        }
-        None => state.default_caps.clone(),
-    };
     // Selected bundle names (empty → the provisioner falls back to the
     // default-enabled set). Selecting bundles implies plugins are surfaced, so
     // force the agent's opt-in when any are chosen.
@@ -175,7 +161,6 @@ pub async fn create_session(
         agent,
         workspaces,
         provision,
-        capabilities: caps,
         vendor: req
             .vendor
             .unwrap_or_else(|| state.config_store.default_vendor()),

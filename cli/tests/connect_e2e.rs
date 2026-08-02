@@ -124,6 +124,9 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
             workspace.path().to_str().unwrap(),
             "--name",
             "test-vendor",
+            // These tests exercise the vendor chain, not the sandbox, and must
+            // not depend on nono support on the host running them.
+            "--no-sandbox",
             "--config",
         ])
         .arg(&config_path)
@@ -159,7 +162,6 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
                 workspaces: vec!["main".to_string()],
                 env: vec![],
                 provision: vec![],
-                sandbox_capabilities: None,
             },
         }),
     )
@@ -215,7 +217,6 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
                 workspaces: vec!["nope".to_string()],
                 env: vec![],
                 provision: vec![],
-                sandbox_capabilities: None,
             },
         }),
     )
@@ -314,6 +315,7 @@ async fn runtimes_die_with_the_agent() {
             marker_dir.to_str().unwrap(),
             "--name",
             "orphan-probe",
+            "--no-sandbox",
             "--config",
         ])
         .arg(&config_path)
@@ -334,7 +336,6 @@ async fn runtimes_die_with_the_agent() {
                 workspaces: vec!["main".to_string()],
                 env: vec![],
                 provision: vec![],
-                sandbox_capabilities: None,
             },
         }),
     )

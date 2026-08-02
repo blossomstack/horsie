@@ -4,7 +4,6 @@
 
 use crate::runtime_vendor::RuntimeVendorLink;
 use horsie_agentcore::LlmProvider;
-use horsie_models::capabilities::CapabilitySpec;
 use horsie_models::session::SessionStatusKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,9 +77,6 @@ pub struct SessionSpec {
     /// Setup steps run by the runtime at every create/attach (idempotent).
     #[serde(default)]
     pub provision: Vec<ProvisionStepSpec>,
-    /// Already resolved (paths expanded, plugin grants + seatbelt rules applied)
-    /// at creation.
-    pub capabilities: CapabilitySpec,
     /// Runtime vendor name (key into [`ServerDeps::vendors`]).
     pub vendor: String,
     /// Selected plugin-bundle names to provision for this session. Resolved to
@@ -186,7 +182,8 @@ mod tests {
     #[test]
     fn session_spec_reads_old_journal_shape() {
         // Old rows carried now-removed `plugins_dir`/`hook_path` (the legacy
-        // filesystem plugin library); they must still load (ignored).
+        // filesystem plugin library) and `capabilities` (the server-authored
+        // sandbox spec); they must still load (ignored).
         let spec = SessionSpec {
             name: None,
             agent: AgentSettings {
@@ -201,19 +198,16 @@ mod tests {
             },
             workspaces: vec![],
             provision: vec![],
-            capabilities: CapabilitySpec {
-                network: horsie_models::capabilities::NetworkPolicy::Block(
-                    horsie_models::capabilities::BlockNetwork {},
-                ),
-                grants: vec![],
-                unsafe_seatbelt_rules: None,
-            },
             vendor: "mock".into(),
             plugins: vec![],
         };
         let mut row = serde_json::to_value(&spec).unwrap();
         row["plugins_dir"] = serde_json::json!("/home/u/.local/share/horsie/plugins");
         row["hook_path"] = serde_json::json!(["/usr/local/bin"]);
+        row["capabilities"] = serde_json::json!({
+            "network": { "type": "Block", "value": {} },
+            "grants": []
+        });
         let loaded: SessionSpec = serde_json::from_value(row).unwrap();
         assert_eq!(loaded, spec);
     }
