@@ -2,6 +2,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useAuthStatus } from "./hooks/useAuth";
+import { AgentEditPage } from "./pages/agents/AgentEditPage";
+import { AgentsPage } from "./pages/agents/AgentsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NewSessionView } from "./pages/NewSessionView";
 import { SessionsLayout } from "./pages/SessionsLayout";
@@ -46,6 +48,9 @@ export default function App() {
             <Route path="/" element={<SessionsLayout />}>
               <Route index element={<NewSessionView />} />
               <Route path="sessions/:id" element={<SessionView />} />
+              <Route path="agents" element={<AgentsPage />} />
+              <Route path="agents/new" element={<AgentEditPage />} />
+              <Route path="agents/:name/edit" element={<AgentEditPage />} />
               <Route path="settings" element={<SettingsLayout />}>
                 <Route index element={<Navigate to="models" replace />} />
                 <Route path="models" element={<ModelsSettings />} />
