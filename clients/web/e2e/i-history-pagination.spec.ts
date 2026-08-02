@@ -59,7 +59,8 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
   // the first queued mock reply (`answer 1`). The UI navigates as soon as the
   // message is accepted (202), not once the turn completes, so wait for the
   // same count:status settle the API-driven turns below wait for — otherwise
-  // question 2 can 409 against a still-Running turn 1.
+  // question 2 is queued onto the still-Running turn 1 and the two are merged
+  // into a single turn, one message short of the window this test needs.
   const id = await sendMessage(page, "question 1");
   await expect
     .poll(
@@ -77,7 +78,7 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
     .toBe("2:Idle");
 
   // Seed the remaining turns over the API (fast + deterministic); each must
-  // fully finish before the next (a second message 409s mid-turn). Gate on
+  // fully finish before the next (a mid-turn message merges into it). Gate on
   // *both* the reply count reaching 2*i (proving turn i actually ran and
   // produced its answer — which rules out reading the stale pre-Running Idle)
   // and the status settling back to Idle (proving TurnCompleted persisted).

@@ -8,7 +8,7 @@ test.beforeEach(async ({ mock }) => {
   await mock.reset();
 });
 
-test("D1: stop a running turn, then reattach with a new message", async ({
+test("D1: stop a running turn, then run again with a new message", async ({
   page,
   appBase,
   mock,
@@ -20,12 +20,13 @@ test("D1: stop a running turn, then reattach with a new message", async ({
 
   await expectStatus(page, "Running");
   await page.getByTestId("composer-stop").click();
-  await expectStatus(page, "Stopped");
+  // Stop cancels the turn and nothing else — the session is idle, not parked.
+  await expectStatus(page, "Idle");
 
-  // A new message reattaches to the still-connected daemon and completes.
-  await mock.queueText("Reattached and finished.");
+  // A new message runs against the same runtime and completes.
+  await mock.queueText("Ran again and finished.");
   await sendMessage(page, "continue");
-  await expect(page.getByTestId("assistant-text")).toContainText("Reattached and finished.");
+  await expect(page.getByTestId("assistant-text")).toContainText("Ran again and finished.");
   await expectStatus(page, "Idle");
 });
 
@@ -84,6 +85,40 @@ test("D4: an LLM error surfaces instead of hanging", async ({ page, appBase, moc
   await expect(page.getByTestId("session-error")).toHaveCount(0);
   await expect(page.getByTestId("assistant-text")).toContainText("Recovered after the error.");
   await expect(page.getByTestId("session-error")).toHaveCount(0);
+});
+
+test("D6: a message sent during a turn is marked unsent, then answered by the next one", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  // Turn 1: a slow tool keeps it Running while the second message goes out.
+  await mock.queueToolCall("bash", { command: "sleep 3" });
+  await mock.queueText("First turn finished.");
+  await mock.queueText("Answered the queued one.");
+  await createSession(page, appBase);
+  await sendMessage(page, "start something slow");
+  await expectStatus(page, "Running");
+
+  await sendMessage(page, "and also look at this");
+
+  // Accepted, not refused — and shown as owed rather than as part of the
+  // transcript, so the turn it eventually starts does not look self-inflicted.
+  await expect(page.getByTestId("queued-marker")).toBeVisible();
+  await expect(
+    page.locator('[data-testid="message"][data-queued="true"]'),
+  ).toContainText("and also look at this");
+  // The composer stays live while a turn runs: queueing is the point.
+  await expect(page.getByTestId("composer-input")).toBeEnabled();
+  await expect(page.getByTestId("composer-send")).toBeVisible();
+
+  // The next turn carries it out of the queue and the marker goes with it.
+  await expect(page.getByTestId("assistant-text").last()).toContainText(
+    "Answered the queued one.",
+  );
+  await expect(page.getByTestId("queued-marker")).toHaveCount(0);
+  await expectStatus(page, "Idle");
+  expect(await mock.capturedContains("and also look at this")).toBe(true);
 });
 
 test("D5: transcript is restored from the journal after a reload", async ({

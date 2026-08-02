@@ -78,7 +78,7 @@ test("E3: a running tool shows a live status on a multi-item work-group row", as
   await expect(page.getByTestId("work-group-summary")).toHaveText("Running bash…");
 
   await page.getByTestId("composer-stop").click();
-  await expectStatus(page, "Stopped");
+  await expectStatus(page, "Idle");
   // The single evolving row settles into a static summary once no longer live.
   await expect(page.getByTestId("work-group-summary")).toHaveText("Ran 2 tools");
 });

@@ -47,18 +47,19 @@ export function SessionView() {
   const navigate = useNavigate();
   const location = useLocation();
   const { data: detail, isLoading } = useSession(id);
-  const { stream, addOptimisticUser, removeOptimisticUser, loadMore } =
-    useSessionStream(id);
+  const {
+    stream,
+    addOptimisticUser,
+    removeOptimisticUser,
+    ackOptimisticUser,
+    loadMore,
+  } = useSessionStream(id);
   const { data: usageStats } = useSessionUsage(id);
   const send = useSendMessage();
   const stop = useStopSession();
   const del = useDeleteSession();
   const { values: uiSettings } = useUiSettings();
   const [sendError, setSendError] = useState<string | null>(null);
-  const [answering, setAnswering] = useState(false);
-  // The `statusSeq` observed when the answer went out; the latch releases on
-  // the next frame after it.
-  const answerSeq = useRef<number | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -75,7 +76,10 @@ export function SessionView() {
     // echo is left stuck as an unmatched duplicate.
     const optimisticId = addOptimisticUser(text);
     try {
-      await send.mutateAsync({ id: sessionId, text });
+      const ack = await send.mutateAsync({ id: sessionId, text });
+      // From here the server owns the message: the echo is handed its
+      // server-side id so the queue can take it over without duplicating it.
+      ackOptimisticUser(optimisticId, ack.messageId);
     } catch (e) {
       removeOptimisticUser(optimisticId);
       setSendError(
@@ -91,42 +95,14 @@ export function SessionView() {
   const handleAnswer = async (text: string) => {
     if (!id) return;
     setSendError(null);
-    // Answering leaves the session in AwaitingInput for the whole resumed turn
-    // (horsie#61 item 3), so status alone can't tell the composer to stand down
-    // and a second message would inject a duplicate tool_result — bricking the
-    // session with a provider 400. Latch locally until the turn reports back.
-    setAnswering(true);
-    answerSeq.current = stream.statusSeq;
     try {
       await send.mutateAsync({ id, text });
     } catch (e) {
-      answerSeq.current = null;
-      setAnswering(false);
       setSendError(
         e instanceof ApiRequestError ? e.message : "Failed to send your answer.",
       );
     }
   };
-
-  // Release the answer latch on the next status report — the turn concluded, or
-  // the agent asked again (AwaitingInput → AwaitingInput, which `report` still
-  // emits a frame for).
-  useEffect(() => {
-    if (answerSeq.current !== null && stream.statusSeq !== answerSeq.current) {
-      answerSeq.current = null;
-      setAnswering(false);
-    }
-  }, [stream.statusSeq]);
-
-  // Release the latch on a stream error too. The failed turn does report Idle
-  // right after the error, but the `Error` frame arrives first — releasing here
-  // means the composer comes back without waiting on frame ordering.
-  useEffect(() => {
-    if (stream.streamError) {
-      answerSeq.current = null;
-      setAnswering(false);
-    }
-  }, [stream.streamError]);
 
   const focusPendingAsk = () => {
     document
@@ -153,7 +129,14 @@ export function SessionView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, isLoading]);
 
-  const status = stream.liveStatus ?? detail?.status ?? SessionStatusKind.Idle;
+  // `null` is a real answer, not a missing one: a session the server has not
+  // loaded since it started has no status to report, and guessing `Idle` would
+  // dress that up as knowledge.
+  const status = stream.liveStatus ?? detail?.status ?? null;
+  const terminal =
+    status === SessionStatusKind.Unrecoverable
+      ? (stream.statusReason ?? detail?.lastError ?? "This session cannot run again.")
+      : null;
   const totalTokens = stream.usage.input + stream.usage.output;
 
   const pendingAskId = useMemo(
@@ -214,15 +197,17 @@ export function SessionView() {
   };
 
   const title = sessionTitle(detail?.name);
-  const stoppable =
-    status !== SessionStatusKind.Stopped &&
-    status !== SessionStatusKind.Failed &&
-    status !== SessionStatusKind.Provisioning &&
-    status !== SessionStatusKind.Running;
+  // The composer grows its own Stop button while a turn runs; the header one is
+  // for stopping a turn you have scrolled away from.
+  const stoppable = status === SessionStatusKind.Running;
 
   return (
     <AskAnswerProvider
-      value={{ pendingId: pendingAskId, submitting: answering, submit: handleAnswer }}
+      value={{
+        pendingId: pendingAskId,
+        submitting: send.isPending,
+        submit: handleAnswer,
+      }}
     >
       <div className="flex h-full">
         <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -250,7 +235,7 @@ export function SessionView() {
                   className="btn-ghost !px-2.5 text-xs"
                   onClick={handleStop}
                   disabled={stop.isPending}
-                  title="Stop the session (preserves the runtime)"
+                  title="Stop this turn (queued messages are kept)"
                   data-testid="session-stop"
                 >
                   <Square size={14} />
@@ -356,17 +341,39 @@ export function SessionView() {
             </div>
           )}
 
+          {/* Terminal: the runtime is gone and no message can bring it back. */}
+          {terminal && (
+            <div className="mx-auto w-full max-w-3xl px-4">
+              <div
+                data-testid="session-terminal"
+                className="flex items-start gap-2 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error"
+              >
+                <CircleAlert size={16} className="mt-0.5 shrink-0" />
+                <div className="min-w-0">
+                  <p>This session can no longer run: {terminal}</p>
+                  <button
+                    type="button"
+                    className="mt-1 underline underline-offset-2 hover:no-underline"
+                    onClick={() => navigate("/")}
+                    data-testid="session-terminal-new"
+                  >
+                    Start a new session
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {detail && <SessionConfigBar mode="locked" detail={detail} />}
 
           {/* Composer */}
           <Composer
             status={status}
             busy={send.isPending}
-            askLocked={pendingAskId !== null || answering}
-            showStop={answering}
             onSend={(text) => handleSend(id, text)}
             onStop={handleStop}
             onFocusAsk={focusPendingAsk}
+            askPending={pendingAskId !== null}
           />
         </div>
 
