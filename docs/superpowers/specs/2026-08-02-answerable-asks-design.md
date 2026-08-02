@@ -41,7 +41,7 @@ durable `AwaitingInput` is never republished. Same hole after any server restart
 ### 3. The ask's identity never reaches the client
 
 `SessionState.pending_ask` holds the ask's tool-call id durably, and
-`get_session` already folds it. Only the question *text* is on the wire, so the
+`get_session` already reads it. Only the question *text* is on the wire, so the
 client reverse-engineers which card is answerable by scanning the transcript
 (`findPendingAsk`) under a "only the newest ask can be pending" heuristic.
 
@@ -85,35 +85,39 @@ pub struct HandoffOutput {
 For a forced handoff `calls.len() == 1` always. This replaces workflow's
 `find_tool_call_id` event scan, which could only ever recover one id.
 
-### Fix 2 — read status from its source of truth (server)
+### Fix 2 — the actor answers for its own session (server)
 
 Status is fully journaled: `TurnBegan` → Running, `TurnEnded`/`TurnStopped`/
 `TurnInterrupted` → Idle, `AskRecorded` → AwaitingInput, `TurnFailed { error }` →
-Failed, `SessionFailed { reason }` → Unrecoverable. So `SessionActor::apply_event`
-reconstructs it, reason included, and there is one fold with two callers: the
-actor, when the framework replays its journal on load, and `fold_session_state`
-(server/src/sessions/events.rs), for a reader that wants the same answer without
-loading the actor. It replays only the session's *domain* journal — a handful of
-events per turn, not the message history.
+Failed, `SessionFailed { reason }` → Unrecoverable. `SessionActor::apply_event`
+reconstructs all of it, reason included, when the framework replays the journal on
+load. Nothing else needs to read that journal.
 
-The supervisor's `self.status` map is neither of those: it is a **cache**, warmed
-by `report()` and dropped by `forget()`. The defect is that `Get` reads the cache
-and reports a miss as "no status" instead of falling back to the source — the same
-fallback `get_session` already performs for `pending_question`, which is why that
-field survives offload today and `status` does not.
+Today something else does. `get_session` calls `fold_session_state`
+(server/src/sessions/events.rs) to replay the journal *itself*, because
+`SessionSupervisorCommand::Get` only reads the supervisor's in-memory `status`
+cache and an unloaded session isn't in it. That bypass is the actual defect: a
+second reader of state the actor owns, which answers `pending_question` and
+`inbox` but was never extended to `status`.
 
-- `get_session` reports `folded.status` when the supervisor has no cached status,
-  preferring the cache when the session is loaded (authoritative for a running
-  turn). A journaled `Running` on an *unloaded* session is a dead turn, which
-  `ReconcileInterrupted` already resolves to `Idle` at load, so it reports `Idle`
-  rather than growing a Stop button for a session that cannot be running.
-- `on_recovery_complete` reports the folded status when the actor loads, warming
-  the supervisor cache and pushing a `StatusChanged` to any open page.
+So:
 
-Reading a status never spawns an actor; the second bullet runs inside a load
-something else already asked for. `list_sessions` keeps reading the cache alone —
-it is the one caller where the cache earns its keep, since falling back there
-means folding every unloaded session's journal on every poll.
+- `Get` goes through `ensure_loaded` and asks the actor for a snapshot of its
+  state — status, pending asks, pending question, inbox, last error — exactly as
+  `History` and `UsageStats` already do. Opening a session page recovers its actor,
+  which is the expected behaviour anyway.
+- `fold_session_state` and its only caller are deleted. It is the last journal
+  reader outside the actor.
+- `on_recovery_complete` reports the recovered status to the supervisor cache and
+  the frame channel, so a page open before the load sees a `StatusChanged` rather
+  than silence.
+- A journaled `Running` found at load is a dead turn; `ReconcileInterrupted`
+  already resolves it to `Idle` before anyone reads it.
+
+`list_sessions` keeps reading the cache alone and loads nothing: it is the one
+caller where the cache earns its keep, since asking each actor would load every
+session in the list. Unloaded sessions therefore still badge as "—" there, which
+is honest — nobody has asked for them.
 
 ### Fix 3 — the status carries what you need to act on it
 
@@ -200,7 +204,8 @@ putting the rejection text where an answer goes.
 - agentcore: an optional handoff alongside other tools runs them and parks; a
   forced handoff alongside other tools is still rejected; a rejection records a
   result for every call in the turn; several asks in one turn park together.
-- server: folded status for an unloaded session; `AwaitingInput` carrying ask ids
+- server: `Get` on an unloaded session loads its actor and reports the recovered
+  status; `AwaitingInput` carrying ask ids
   on both `SessionDetail` and `StatusChanged`; a partial answer set is a 400; a
   full set resumes the turn; a composer message abandons pending asks; a frame
   channel survives offload with a live subscriber.
@@ -210,5 +215,5 @@ putting the rejection text where an answer goes.
 
 ## Out of scope
 
-- Status on the session *list* (would fold every journal per call).
+- Status on the session *list* (would load every session in the list).
 - Changing idle offload itself — Fix 4 removes the reason to.
