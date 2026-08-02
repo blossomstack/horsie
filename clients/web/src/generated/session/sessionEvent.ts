@@ -1,7 +1,7 @@
 
-import { AskedEvent } from './askedEvent';
 import { DeltaEvent } from './deltaEvent';
 import { ErrorEvent } from './errorEvent';
+import { InboxChangedEvent } from './inboxChangedEvent';
 import { MessageEvent } from './messageEvent';
 import { ProgressionEvent } from './progressionEvent';
 import { StatusChangedEvent } from './statusChangedEvent';
@@ -13,7 +13,7 @@ export type SessionEvent =
   | { type: "Message"; value: MessageEvent }
   | { type: "ToolResult"; value: ToolOutputEvent }
   | { type: "TurnCompleted"; value: TurnCompletedEvent }
-  | { type: "Asked"; value: AskedEvent }
+  | { type: "InboxChanged"; value: InboxChangedEvent }
   | { type: "StatusChanged"; value: StatusChangedEvent }
   | { type: "Error"; value: ErrorEvent }
   | { type: "Delta"; value: DeltaEvent }

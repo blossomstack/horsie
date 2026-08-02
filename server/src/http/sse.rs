@@ -8,7 +8,7 @@
 
 use crate::http::AppState;
 use crate::http::error::Api;
-use crate::http::handlers::wire_status_kind;
+use crate::http::handlers::{wire_queued_message, wire_status_kind};
 use crate::sessions::SessionFrame;
 use crate::sessions::events::{journal_head_seq, replay_session_events};
 use crate::sessions::supervisor::SessionSupervisorCommand;
@@ -17,7 +17,8 @@ use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use horsie_models::session::{
-    DeltaEvent, ErrorEvent, ProgressionEvent, SessionEvent, StatusChangedEvent, ToolStartEvent,
+    DeltaEvent, ErrorEvent, InboxChangedEvent, ProgressionEvent, SessionEvent, StatusChangedEvent,
+    ToolStartEvent,
 };
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -141,6 +142,16 @@ pub async fn session_events(
                     let se = SessionEvent::StatusChanged(StatusChangedEvent {
                         status: wire_status_kind(&status),
                         reason: crate::sessions::spec::status_reason(&status),
+                    });
+                    if let Some(ev) = live(&se)
+                        && tx.send(Ok(ev)).await.is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(SessionFrame::InboxChanged { queued }) => {
+                    let se = SessionEvent::InboxChanged(InboxChangedEvent {
+                        queued: queued.into_iter().map(wire_queued_message).collect(),
                     });
                     if let Some(ev) = live(&se)
                         && tx.send(Ok(ev)).await.is_err()

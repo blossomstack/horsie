@@ -27,6 +27,11 @@ pub enum SessionFrame {
     Status { status: spec::SessionStatus },
     /// A turn failed (id-less; also recorded as `last_error`).
     Error { message: String },
+    /// The queue of accepted-but-unanswered messages, whole (id-less; the
+    /// detail endpoint is the durable source, folded from the session journal).
+    InboxChanged {
+        queued: Vec<session_actor::InboxMessage>,
+    },
     /// A resource-preparation progression (id-less live signal; also journaled
     /// by the session for audit).
     Progression {

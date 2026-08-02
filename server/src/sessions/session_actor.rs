@@ -257,6 +257,31 @@ impl SessionActor {
             .await;
     }
 
+    /// Publish the queue as it stands once `events` fold onto `state`.
+    ///
+    /// One frame per command, carrying the whole queue — never an intermediate.
+    /// A message that is accepted and immediately drained therefore publishes
+    /// an empty inbox once, rather than "queued" followed by "gone", which a
+    /// client would render as a flicker. A no-op when nothing touched the queue,
+    /// so callers may call it unconditionally.
+    fn publish_inbox(&self, state: &SessionState, events: &[SessionDomainEvent]) {
+        if !events.iter().any(|e| {
+            matches!(
+                e,
+                SessionDomainEvent::MessageQueued { .. } | SessionDomainEvent::TurnBegan { .. }
+            )
+        }) {
+            return;
+        }
+        let next = events
+            .iter()
+            .cloned()
+            .fold(state.clone(), Self::apply_event);
+        let _ = self
+            .frames
+            .send(SessionFrame::InboxChanged { queued: next.inbox });
+    }
+
     /// Persist a session title through the supervisor, then publish it.
     async fn rename_session(&mut self, title: String) -> Result<String, String> {
         let id = self.id.to_string();
@@ -451,6 +476,7 @@ impl SessionActor {
         let next = Self::apply_event(state.clone(), queued.clone());
         let mut events = vec![queued];
         events.extend(self.drain(&next).await);
+        self.publish_inbox(state, &events);
         CommandEffect::persist(events)
     }
 
@@ -535,6 +561,7 @@ impl SessionActor {
             }
             events.extend(self.drain(&next).await);
         }
+        self.publish_inbox(state, &events);
         CommandEffect::persist(events)
     }
 
@@ -835,6 +862,7 @@ impl EventSourcedActor for SessionActor {
                 // queued while the cancelled turn ran starts the next one.
                 let next = Self::apply_event(state.clone(), SessionDomainEvent::TurnStopped);
                 events.extend(self.drain(&next).await);
+                self.publish_inbox(state, &events);
                 CommandEffect::persist(events)
             }
             SessionCommand::Delete { reply } => {

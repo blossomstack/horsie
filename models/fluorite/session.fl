@@ -42,6 +42,15 @@ struct SessionSummary {
     last_error: Option<String>,
 }
 
+/// A user message the server has accepted but not yet answered. It rides on
+/// the detail endpoint and on `InboxChanged` so a client can render it as
+/// still-unanswered rather than as part of the transcript.
+struct QueuedMessage {
+    id: String,
+    text: String,
+    at_ms: u64,
+}
+
 struct SessionDetail {
     id: String,
     name: Option<String>,
@@ -62,6 +71,9 @@ struct SessionDetail {
     memory_spaces: Vec<String>,
     /// Whether the runtime's plugin/skill machinery is enabled for this session.
     use_plugins: bool,
+    /// Messages accepted but not yet carried into a turn, oldest first (empty
+    /// when nothing is owed).
+    inbox: Vec<QueuedMessage>,
 }
 
 // --- SSE event payloads ---
@@ -71,7 +83,10 @@ struct SessionDetail {
 struct MessageEvent { message: Message }
 struct ToolOutputEvent { tool_call_id: String, output: String, is_error: bool }
 struct TurnCompletedEvent { iterations: u32, usage: Usage }
-struct AskedEvent { question: String }
+/// The queue as it stands now, sent whole on every change — never a delta.
+/// Emitted when a message is accepted and again when a turn carries messages
+/// out of the queue, so a second tab needs no reload to stay honest.
+struct InboxChangedEvent { queued: Vec<QueuedMessage> }
 /// Live status transition. Sent without an SSE id (the session detail endpoint
 /// is the durable source for status).
 struct StatusChangedEvent { status: SessionStatusKind, reason: Option<String> }
@@ -143,7 +158,7 @@ union SessionEvent {
     Message(MessageEvent),
     ToolResult(ToolOutputEvent),
     TurnCompleted(TurnCompletedEvent),
-    Asked(AskedEvent),
+    InboxChanged(InboxChangedEvent),
     StatusChanged(StatusChangedEvent),
     Error(ErrorEvent),
     Delta(DeltaEvent),

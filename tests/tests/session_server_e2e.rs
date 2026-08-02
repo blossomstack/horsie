@@ -313,6 +313,41 @@ async fn send_message(
         .status()
 }
 
+async fn get_detail(client: &reqwest::Client, addr: &SocketAddr, id: &str) -> serde_json::Value {
+    client
+        .get(format!("http://{addr}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// Poll the detail endpoint until the inbox holds exactly `want` texts.
+async fn wait_inbox(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &[&str]) {
+    let deadline = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        let detail = get_detail(client, addr, id).await;
+        let got: Vec<String> = detail["session"]["inbox"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m["text"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if got == want {
+            return;
+        }
+        if start.elapsed() > deadline {
+            panic!("timed out waiting for inbox {want:?}; last = {got:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+}
+
 async fn get_status(client: &reqwest::Client, addr: &SocketAddr, id: &str) -> Option<String> {
     let res = client
         .get(format!("http://{addr}/api/sessions/{id}"))
@@ -486,6 +521,74 @@ async fn create_message_sse_roundtrip() {
         vec![format!("create:{id}"), format!("get:{id}")],
         "one create at session creation, then a get for the turn that ran"
     );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    // A turn that hangs inside the provider call, so the session is genuinely
+    // Running when the second message arrives.
+    let block = mock.blocking_response("first");
+    send_message(&client, &server.addr, &id, "one").await;
+    block.wait_until_received().await;
+
+    // Subscribe while the turn is in flight — this stands in for a second tab,
+    // which must learn about the queue without reloading the page.
+    let url = format!("http://{}/api/sessions/{id}/events", server.addr);
+    let client2 = client.clone();
+    let sse = tokio::spawn(async move {
+        collect_sse(&client2, &url, None, |evs| {
+            evs.iter().any(|e| e.kind == "InboxChanged")
+        })
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(
+        send_message(&client, &server.addr, &id, "two")
+            .await
+            .as_u16(),
+        202,
+        "a message sent during a run is accepted, not refused"
+    );
+
+    // The detail endpoint is the durable source of the queue.
+    let detail = get_detail(&client, &server.addr, &id).await;
+    let inbox = detail["session"]["inbox"].as_array().unwrap();
+    assert_eq!(inbox.len(), 1, "{detail}");
+    assert_eq!(inbox[0]["text"], "two");
+    assert!(
+        inbox[0]["id"].as_str().is_some_and(|s| !s.is_empty()),
+        "a queued message carries the id the send acknowledged: {detail}"
+    );
+
+    // ... and the live stream says the same thing.
+    let events = sse.await.unwrap();
+    let queued = events
+        .iter()
+        .find(|e| e.kind == "InboxChanged")
+        .unwrap_or_else(|| panic!("no InboxChanged frame: {:?}", kinds(&events)));
+    let q = queued.data["value"]["queued"].as_array().unwrap();
+    assert_eq!(q.len(), 1, "{}", queued.data);
+    assert_eq!(q[0]["text"], "two");
+
+    // Letting the turn finish carries the message out of the queue.
+    mock.queue_response("second");
+    block.release();
+    wait_inbox(&client, &server.addr, &id, &[]).await;
 
     server.shutdown().await;
 }
