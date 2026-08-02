@@ -5,6 +5,7 @@
 //! `docs/superpowers/specs/2026-08-02-plugin-marketplace-design.md`.
 
 pub mod manifest;
+pub mod skills;
 
 pub use manifest::PluginManifest;
 
