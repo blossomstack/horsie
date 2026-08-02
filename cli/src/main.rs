@@ -28,6 +28,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage marketplaces — repos that index plugins you can install by name.
+    Marketplace {
+        #[command(subcommand)]
+        action: MarketplaceAction,
+    },
     /// Manage the shared plugin library (skills + SessionStart hooks for runtimes).
     Plugin {
         #[command(subcommand)]
@@ -85,11 +90,55 @@ enum SessionAction {
 }
 
 #[derive(Subcommand)]
+enum MarketplaceAction {
+    /// Add a marketplace by cloning its repo and reading its plugin index.
+    Add {
+        /// Git URL of the marketplace repo.
+        url: String,
+        /// Registered name (default: the index's own name, else the repo basename).
+        #[arg(long)]
+        name: Option<String>,
+        /// Git ref/branch to check out.
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+        /// Re-add over an existing marketplace of the same name.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// List added marketplaces.
+    List {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// List the plugins a marketplace offers.
+    Show {
+        name: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Update a marketplace's index (git pull).
+    Update {
+        name: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Remove a marketplace. Plugins installed from it stay installed.
+    Remove {
+        name: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum PluginAction {
     /// Install a plugin by cloning its git repo into the shared library.
     Install {
-        /// Git URL of the plugin repo (e.g. https://github.com/obra/superpowers).
-        url: String,
+        /// Git URL of the plugin repo, or `<plugin>@<marketplace>` to install
+        /// from a marketplace added with `horsie marketplace add`.
+        target: String,
         /// Install name (default: derived from the URL).
         #[arg(long)]
         name: Option<String>,
@@ -127,14 +176,15 @@ fn resolve_plugin_paths(config: Option<&Path>) -> Result<horsie::plugins::Plugin
     let cfg = HorsieConfig::resolve(config)?;
     Ok(horsie::plugins::PluginPaths {
         sources: cfg.storage.data_dir.join("sources"),
+        marketplaces: cfg.storage.data_dir.join("marketplaces"),
         plugins: cfg.storage.plugins_dir,
     })
 }
 
 async fn dispatch(command: Command) -> Result<i32, CliError> {
     match command {
-        Command::Plugin { action } => match action {
-            PluginAction::Install {
+        Command::Marketplace { action } => match action {
+            MarketplaceAction::Add {
                 url,
                 name,
                 git_ref,
@@ -142,7 +192,65 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 config,
             } => {
                 let paths = resolve_plugin_paths(config.as_deref())?;
-                let installed = horsie::plugins::install(&paths, &url, name, git_ref, force)?;
+                let added = horsie::marketplace::add(&paths, &url, name, git_ref, force)?;
+                println!("added marketplace '{added}'");
+                Ok(0)
+            }
+            MarketplaceAction::List { config } => {
+                let paths = resolve_plugin_paths(config.as_deref())?;
+                let markets = horsie::marketplace::list(&paths);
+                if markets.is_empty() {
+                    println!("no marketplaces added");
+                } else {
+                    println!("{:<24} {:>7}  SOURCE", "NAME", "PLUGINS");
+                    for m in markets {
+                        println!("{:<24} {:>7}  {}", m.name, m.plugin_count, m.source);
+                    }
+                }
+                Ok(0)
+            }
+            MarketplaceAction::Show { name, config } => {
+                let paths = resolve_plugin_paths(config.as_deref())?;
+                let plugins = horsie::marketplace::show(&paths, &name)?;
+                if plugins.is_empty() {
+                    println!("marketplace '{name}' offers no plugins");
+                } else {
+                    println!("{:<28} {:<10} DESCRIPTION", "NAME", "VERSION");
+                    for p in plugins {
+                        println!(
+                            "{:<28} {:<10} {}",
+                            p.name,
+                            p.version.as_deref().unwrap_or("-"),
+                            truncate(p.description.as_deref().unwrap_or(""), 60)
+                        );
+                    }
+                }
+                Ok(0)
+            }
+            MarketplaceAction::Update { name, config } => {
+                let paths = resolve_plugin_paths(config.as_deref())?;
+                horsie::marketplace::update(&paths, &name)?;
+                println!("updated marketplace '{name}'");
+                Ok(0)
+            }
+            MarketplaceAction::Remove { name, config } => {
+                let paths = resolve_plugin_paths(config.as_deref())?;
+                horsie::marketplace::remove(&paths, &name)?;
+                println!("removed marketplace '{name}'");
+                Ok(0)
+            }
+        },
+        Command::Plugin { action } => match action {
+            PluginAction::Install {
+                target,
+                name,
+                git_ref,
+                force,
+                config,
+            } => {
+                let paths = resolve_plugin_paths(config.as_deref())?;
+                let target = horsie::plugins::InstallTarget::parse(&target);
+                let installed = horsie::plugins::install(&paths, &target, name, git_ref, force)?;
                 println!(
                     "installed plugin '{installed}' into {}",
                     paths.plugins.display()
@@ -241,4 +349,15 @@ async fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// Clip `s` to `max` display columns, marking elision with an ellipsis. Used for
+/// marketplace descriptions, which routinely run to several hundred characters.
+fn truncate(s: &str, max: usize) -> String {
+    let flat = s.replace(['\n', '\r'], " ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let kept: String = flat.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
 }
