@@ -116,7 +116,11 @@ mailbox. Two tools:
    no `optional_handoff_tool` (plain-text end of turn), and a toolbox composed
    **without** `SessionTitleToolbox`/`AskUserToolbox` but **with**
    `SubAgentToolbox` (caller = the new uuid). Its `AgentOutcomeSink` targets
-   the session, like the main agent's.
+   the session, like the main agent's. Its `RuntimeClient` derives from the
+   session's via `with_agent_id(<uuid>)`: subagents share the sandbox but get
+   their own cwd/env bucket, so `set_working_dir`/`set_env` in one agent
+   never relocates another. A `max_concurrent_subagents` of 0 disables
+   subagents outright — the tools are not advertised at all.
 5. Immediately `AgentCommand::Run { input: task }`; reply the id to the tool.
 6. Emit a quiet `Progression` frame (`stage = "subagent_spawned"`, detail =
    label) on the session stream.
@@ -130,9 +134,14 @@ mailbox. Two tools:
    whole tree) and emits a quiet progression frame
    (`subagent_completed`/`subagent_failed`).
 3. The parent is **notified** with a synthetic message
-   (`[subagent "<label>" completed]\n\n<output>`, or the error text).
-   Delivery is derived, not queued — a terminal, un-notified node is owed to
-   its parent, and each flush point delivers what is owed:
+   (`[subagent "<label>" completed]\n\n<output>`, or the error text; results
+   are capped at 50 KB — the runtime's tool-output bound — with a truncation
+   marker). Delivery is derived, not queued — a terminal, un-notified node
+   is owed to its parent, and every turn boundary (user message, main or
+   subagent outcome, stop) flushes what is owed via `flush_then_drain`.
+   Because *every* boundary flushes, a result owed to a subagent parent can
+   never strand, even once all nodes are terminal and no further outcome
+   can arrive:
    - Subagent parent idle (Completed/Failed) → woken now: `SubAgentRunning`
      + `AgentCommand::Run { input: owed results }`. A woken parent is a
      multi-cycle node: it may conclude again, which re-owes its own parent.
@@ -146,8 +155,13 @@ mailbox. Two tools:
      only drains on user input, so a notification never answers the user's
      pending ask by itself; a `Failed` session is never chased.
    - Every actual send to a parent persists `SubAgentNotified { id }` in the
-     same command effect, so the owed/delivered distinction is durable and
-     exactly-once across offloads and restarts.
+     same command effect, so the owed/delivered distinction is durable.
+     Delivery is at-least-once, not exactly-once: the send happens before
+     the effect persists (same window as user messages), so a crash in
+     between re-delivers the result with the next turn — a parent may see a
+     duplicate, never a loss. `spawn_agent`'s persist-then-spawn is the
+     deliberate stricter exception, because an untracked agent is worse
+     than a duplicate.
 
 ### Sub-spawning
 
@@ -157,17 +171,18 @@ spawn (its would-be children exceed the limit).
 
 ### Recovery
 
-On session load (`on_recovery_complete`): re-spawn a resident `AgentActor`
-(journal replay only, no run) for every node in the tree so transcripts stay
-pageable, re-attributing nothing. Any node still `Running` at crash folds to
+On session load (`on_recovery_complete`): only the main agent is spawned.
+Subagent actors stay cold — a session that spawned hundreds of subagents
+over its life must not replay hundreds of journals and hold hundreds of
+transcripts on every open. A cold node materializes lazily, on first need:
+a history read addressed to it, or an owed-result flush that must wake it.
+Any node still `Running` at crash folds to
 `Failed { "interrupted by restart" }` — recorded via a `SubAgentFailed` event
 sent as a self-command after recovery, so the transition is in the log. This
 matches the session's "an interrupted turn is over" rule; subagents never
 auto-resume. Recovery starts **no** runs: owed results (terminal,
 un-notified nodes — including freshly reconciled failures) flush at the next
 turn boundary, never on load, keeping a session open free of side effects.
-The trade-off: a result owed to an idle subagent parent when the process
-died waits for the session's next activity to be delivered.
 
 ### Offload, stop, delete
 
@@ -177,6 +192,17 @@ died waits for the session's next activity to be delivered.
   continue and their completions stay owed until the next flush point.
 - `Delete`/`stop_agents` cancel-then-stop every agent (main and subs) and
   drain `sub_agents` alongside the main agent.
+
+### Shared sandbox
+
+Every agent in a session shares one sandbox and one working tree. Runtime
+cwd/env state is per-agent (each subagent's client carries its own agent
+id), but the **filesystem is not isolated**: up to
+`max_concurrent_subagents` agents may edit the same checkout concurrently
+and can clobber each other's uncommitted work. This shapes what is safe to
+delegate — parallel research and exploration are safe; parallel edits to
+the same files are not. Worktree-per-subagent isolation is a possible
+future extension, deliberately not built here.
 
 ## API & wire changes
 
@@ -203,8 +229,10 @@ died waits for the session's next activity to be delivered.
 | Journal write fails on spawn | Tool error; no actor spawned (persist-then-spawn) |
 | Subagent run fails (provider/tool) | `SubAgentFailed` node; parent notified with error text; session status unaffected |
 | Crash with subagents running | Nodes fold to `Failed("interrupted by restart")` at load; parents notified at the next turn boundary |
-| Notification owed when the session offloads | Rebuilt from terminal nodes with `notified == false`; delivered with the parent's next turn — exactly once, no replay storm |
+| Notification owed when the session offloads | Rebuilt from terminal nodes with `notified == false`; delivered with the parent's next turn — at-least-once (a crash mid-send may duplicate, never lose), no replay storm |
 | `subagent_status` on unknown id | Tool error listing nothing sensitive: `"no such subagent: <id>"` |
+| `subagent_status` on an out-of-subtree id | Same error as unknown — a subagent sees only itself and its descendants; sibling existence is not confirmed |
+| Huge subagent result | Capped at 50 KB (the runtime's tool-output bound) with a truncation marker, both in parent injection and `subagent_status` rendering |
 
 ## Testing
 
@@ -224,9 +252,10 @@ died waits for the session's next activity to be delivered.
   - `PrepareOffload` refuses with an active subagent;
   - recovery: `Running` nodes become `Failed("interrupted by restart")` and
     parents are notified; terminal nodes reload pageable transcripts;
-  - exactly-once notification: an owed notification (`notified == false`)
-    survives offload + reload and is delivered with the parent's next turn,
-    and a delivered one is never re-sent.
+  - durable notification: an owed notification (`notified == false`)
+    survives offload + reload and is delivered at the next turn boundary;
+    a delivered one is not re-sent on the happy path, and a stranded
+    grandchild result reaches its subagent parent (nested-tree test).
 
 ## Out of scope (future)
 

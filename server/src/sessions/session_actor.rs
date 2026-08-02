@@ -545,6 +545,12 @@ impl SessionActor {
             let _ = agent.tell(cmd).await;
         }
         self.report(SessionStatus::Running).await;
+        // Tell-then-persist, like the user messages this turn also carries:
+        // a crash between the agent's `Run` and this write leaves the result
+        // owed, so the next turn re-delivers it. Delivery is at-least-once in
+        // that window (the parent may see a result twice), never lost —
+        // `spawn_agent`'s stricter persist-then-spawn is the deliberate
+        // exception, because an untracked agent is worse than a duplicate.
         let mut events = vec![SessionDomainEvent::TurnBegan {
             consumed,
             answering,
