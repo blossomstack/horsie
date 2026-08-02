@@ -444,7 +444,7 @@ impl SessionActor {
         }
         let runtime = match mode {
             WakeMode::Create => vendor.create(&id, &rt_spec).await,
-            WakeMode::Attach => vendor.attach(&id, &rt_spec).await,
+            WakeMode::Attach => vendor.get(&id).await,
         }
         .map_err(|e| e.to_string())?;
         self.runtime = Some(runtime);
@@ -847,7 +847,7 @@ impl SessionActor {
             }
         }
         if let Some(runtime) = self.runtime.take() {
-            runtime.handle.stop().await;
+            runtime.handle.hibernate().await;
         }
         self.agent = None;
     }
@@ -1607,7 +1607,7 @@ mod tests {
         let sid = h.id.to_string();
         assert_eq!(
             h.vendor.signals(),
-            vec![format!("create:{sid}"), format!("stop:{sid}")]
+            vec![format!("create:{sid}"), format!("hibernate:{sid}")]
         );
         // Status reports arrived in order: Idle (provisioned) then Stopped.
         assert_eq!(h.statuses.recv().await.unwrap(), SessionStatus::Idle);
@@ -1673,7 +1673,7 @@ mod tests {
             h.vendor.signals(),
             vec![
                 format!("create:{sid}"),
-                format!("stop:{sid}"),
+                format!("hibernate:{sid}"),
                 format!("delete:{sid}")
             ]
         );
@@ -1712,14 +1712,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_on_recovered_session_attaches_and_fails_visibly_on_attach_error() {
+    async fn message_on_recovered_session_fails_visibly_when_the_runtime_is_gone() {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let id = Uuid::new_v4();
         let pid = SessionActor::persistence_id_for(id);
         let events = vec![serde_json::to_vec(&SessionDomainEvent::Provisioned).unwrap()];
         journal.persist(&pid, &events).await.unwrap();
 
-        let mut h = harness_with_id(journal, agent().fail_attach_times(1), id).await;
+        let mut h = harness_with_id(journal, agent().gone_on_get(true), id).await;
         // Idle after recovery; a message triggers attach, which fails once.
         let res = h
             .actor
@@ -1732,12 +1732,12 @@ mod tests {
         assert!(matches!(res, Err(UserMessageError::RecoveryFailed(_))));
         match h.statuses.recv().await.unwrap() {
             SessionStatus::RecoveryFailed { reason } => {
-                assert!(reason.contains("attach failed"));
+                assert!(reason.contains("runtime is gone"));
             }
             other => panic!("expected RecoveryFailed, got {other:?}"),
         }
         let sid = h.id.to_string();
-        assert_eq!(h.vendor.signals(), vec![format!("attach:{sid}")]);
+        assert_eq!(h.vendor.signals(), vec![format!("get:{sid}")]);
     }
 
     #[tokio::test]

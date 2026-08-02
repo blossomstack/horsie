@@ -63,8 +63,8 @@ impl RuntimeTransport for RuntimeVendorTransport {
             RuntimeVendorEvent::Runtime(ev) => Ok(ev.message),
             RuntimeVendorEvent::Ready(_)
             | RuntimeVendorEvent::CreateRuntime(_)
-            | RuntimeVendorEvent::AttachRuntime(_)
-            | RuntimeVendorEvent::StopRuntime(_)
+            | RuntimeVendorEvent::GetRuntime(_)
+            | RuntimeVendorEvent::HibernateRuntime(_)
             | RuntimeVendorEvent::DeleteRuntime(_)
             | RuntimeVendorEvent::QueryRuntimes(_)
             | RuntimeVendorEvent::RequestFailed(_)

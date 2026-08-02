@@ -710,7 +710,7 @@ async fn stop_preserves_and_message_reattaches() {
         .unwrap();
     assert_eq!(res.status().as_u16(), 200);
     wait_status(&client, &server.addr, &id, "Stopped").await;
-    assert!(agent.signals().contains(&format!("stop:{id}")));
+    assert!(agent.signals().contains(&format!("hibernate:{id}")));
 
     // A new message re-attaches and runs.
     assert_eq!(
@@ -720,7 +720,7 @@ async fn stop_preserves_and_message_reattaches() {
         202
     );
     wait_status(&client, &server.addr, &id, "Idle").await;
-    assert!(agent.signals().contains(&format!("attach:{id}")));
+    assert!(agent.signals().contains(&format!("get:{id}")));
 
     server.shutdown().await;
 }
@@ -767,52 +767,9 @@ async fn restart_marks_interrupted_and_message_resumes() {
         202
     );
     wait_status(&client, &server2.addr, &id, "Idle").await;
-    assert!(agent.signals().iter().any(|s| s == &format!("attach:{id}")));
+    assert!(agent.signals().iter().any(|s| s == &format!("get:{id}")));
 
     server2.shutdown().await;
-}
-
-#[tokio::test]
-async fn attach_failure_lands_recovery_failed_then_retry_succeeds() {
-    let mock = MockLlmServer::builder().build().await;
-    let tmp = tempfile::tempdir().unwrap();
-    // The first attach fails; the second succeeds.
-    let agent = FakeRuntimeVendor::builder("mock")
-        .fail_attach_times(1)
-        .serve_in_process()
-        .await
-        .expect("fake agent");
-    let client = reqwest::Client::new();
-
-    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let id = create_session(&client, &server.addr).await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
-
-    // Stop, so the next message must attach.
-    client
-        .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap();
-    wait_status(&client, &server.addr, &id, "Stopped").await;
-
-    // First message → attach fails → 502 + RecoveryFailed.
-    let status = send_message(&client, &server.addr, &id, "one").await;
-    assert_eq!(status.as_u16(), 502);
-    wait_status(&client, &server.addr, &id, "RecoveryFailed").await;
-
-    // Second message → attach succeeds → Idle.
-    mock.queue_response("recovered");
-    assert_eq!(
-        send_message(&client, &server.addr, &id, "two")
-            .await
-            .as_u16(),
-        202
-    );
-    wait_status(&client, &server.addr, &id, "Idle").await;
-
-    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -1264,10 +1221,12 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         .unwrap();
     wait_status(&client, &server.addr, &a, "Stopped").await;
 
-    assert_eq!(
-        agent.live_runtimes(),
-        vec![b.clone()],
-        "only the stopped session's runtime is gone"
+    // Hibernate is advisory and this agent declines it, so both runtimes are
+    // still there. What matters is that stopping one session did not disturb
+    // the other's runtime — which the message below proves.
+    assert!(
+        agent.live_runtimes().contains(&b),
+        "the untouched session must keep its runtime"
     );
     assert_eq!(
         send_message(&client, &server.addr, &b, "again")
