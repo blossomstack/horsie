@@ -107,6 +107,19 @@ pub enum SessionCommand {
         title: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// The `spawn_agent` tool: start a subagent under `caller`.
+    SpawnSubAgent {
+        caller: SubAgentParent,
+        label: String,
+        task: String,
+        reply: oneshot::Sender<Result<Uuid, String>>,
+    },
+    /// The `subagent_status` tool: one node, or the caller's whole subtree.
+    SubAgentStatus {
+        caller: SubAgentParent,
+        id: Option<Uuid>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// Events recording a session's lifecycle. Persisted.
@@ -993,6 +1006,14 @@ impl EventSourcedActor for SessionActor {
                     Err(error) => Err(error.to_string()),
                 };
                 let _ = reply.send(result);
+                CommandEffect::none()
+            }
+            SessionCommand::SpawnSubAgent { reply, .. } => {
+                let _ = reply.send(Err("subagent spawning is not available yet".to_string()));
+                CommandEffect::none()
+            }
+            SessionCommand::SubAgentStatus { reply, .. } => {
+                let _ = reply.send(Err("subagent status is not available yet".to_string()));
                 CommandEffect::none()
             }
         }
