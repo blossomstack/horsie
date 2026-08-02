@@ -143,7 +143,7 @@ Create `server/src/default_capabilities.json` — the union of the retired `cli/
     { "type": "File", "value": { "path": "/dev/random", "access": "Read" } },
     { "type": "File", "value": { "path": "/dev/tty", "access": "ReadWrite" } }
   ],
-  "unsafe_seatbelt_rules": [
+  "unsafeSeatbeltRules": [
     "(allow mach-lookup (global-name \"com.apple.SecurityServer\"))"
   ]
 }

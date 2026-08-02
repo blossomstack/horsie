@@ -1,4 +1,5 @@
 pub mod config;
+pub mod default_capabilities;
 mod error;
 pub mod github;
 pub mod http;

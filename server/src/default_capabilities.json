@@ -9,11 +9,20 @@
     { "type": "Dir", "value": { "path": "/etc", "access": "Read" } },
     { "type": "Dir", "value": { "path": "/opt", "access": "Read" } },
     { "type": "Dir", "value": { "path": "/proc", "access": "Read" } },
+    { "type": "Dir", "value": { "path": "/System", "access": "Read" } },
+    { "type": "Dir", "value": { "path": "/Library", "access": "Read" } },
+    { "type": "Dir", "value": { "path": "/private/etc", "access": "Read" } },
+    { "type": "Dir", "value": { "path": "/var", "access": "Read" } },
+    { "type": "Dir", "value": { "path": "/private/var", "access": "Read" } },
+    { "type": "Dir", "value": { "path": "/dev/fd", "access": "Read" } },
     { "type": "WorkingDir", "value": { "access": "ReadWrite" } },
     { "type": "File", "value": { "path": "/dev/null", "access": "ReadWrite" } },
     { "type": "File", "value": { "path": "/dev/zero", "access": "Read" } },
     { "type": "File", "value": { "path": "/dev/urandom", "access": "Read" } },
     { "type": "File", "value": { "path": "/dev/random", "access": "Read" } },
     { "type": "File", "value": { "path": "/dev/tty", "access": "ReadWrite" } }
+  ],
+  "unsafeSeatbeltRules": [
+    "(allow mach-lookup (global-name \"com.apple.SecurityServer\"))"
   ]
 }
