@@ -13,6 +13,7 @@ use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::SessionEventSink;
 use crate::sessions::spec::{AgentSettings, ServerDeps, SessionSpec, SessionStatus};
+use crate::sessions::subagents::{SubAgentParent, SubAgentTree};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
 use crate::sessions::{SessionFrame, UserMessageError};
@@ -150,6 +151,23 @@ pub enum SessionDomainEvent {
         agent_id: String,
         usage_total: UsageTotal,
     },
+    /// A subagent was spawned by `parent` (the main agent or another
+    /// subagent). Persisted before the child actor exists — a crash between
+    /// the two replays as a node that recovery reconciles to failed.
+    SubAgentSpawned {
+        id: Uuid,
+        parent: SubAgentParent,
+        label: String,
+        task: String,
+        depth: u32,
+    },
+    /// A terminal node started another run, woken to consume child results.
+    SubAgentRunning { id: Uuid },
+    SubAgentCompleted { id: Uuid, output: String },
+    SubAgentFailed { id: Uuid, error: String },
+    /// The node's latest terminal result was sent to its parent. Persisted in
+    /// the same effect as the send, so a reload neither re- nor never-sends.
+    SubAgentNotified { id: Uuid },
 }
 
 /// One accepted-but-undelivered user message.
@@ -174,6 +192,9 @@ pub struct SessionState {
     pub last_error: Option<String>,
     #[serde(default)]
     pub agent_usage: HashMap<String, UsageTotal>,
+    /// The subagent tree — which agent spawned which, and what became of it.
+    #[serde(default)]
+    pub subagents: SubAgentTree,
 }
 
 /// One agent's own usage/context-size snapshot, labeled with the model it ran.
@@ -862,6 +883,27 @@ impl EventSourcedActor for SessionActor {
             } => {
                 state.agent_usage.insert(agent_id, usage_total);
             }
+            SessionDomainEvent::SubAgentSpawned {
+                id,
+                parent,
+                label,
+                task,
+                depth,
+            } => {
+                state.subagents.apply_spawned(id, parent, label, task, depth);
+            }
+            SessionDomainEvent::SubAgentRunning { id } => {
+                state.subagents.apply_running(id);
+            }
+            SessionDomainEvent::SubAgentCompleted { id, output } => {
+                state.subagents.apply_completed(id, output);
+            }
+            SessionDomainEvent::SubAgentFailed { id, error } => {
+                state.subagents.apply_failed(id, error);
+            }
+            SessionDomainEvent::SubAgentNotified { id } => {
+                state.subagents.apply_notified(id);
+            }
         }
         state
     }
@@ -1132,6 +1174,56 @@ mod tests {
             },
         }]);
         assert_eq!(s.agent_usage.get(MAIN_AGENT_ID).unwrap().input_tokens, 10);
+    }
+
+    #[test]
+    fn subagent_events_fold_into_the_tree() {
+        use crate::sessions::subagents::{SubAgentParent, SubAgentStatus};
+        let id = Uuid::new_v4();
+        let s = fold(vec![SessionDomainEvent::SubAgentSpawned {
+            id,
+            parent: SubAgentParent::Main,
+            label: "research".into(),
+            task: "look into it".into(),
+            depth: 1,
+        }]);
+        assert_eq!(s.subagents.active_count(), 1);
+
+        let s = SessionActor::apply_event(
+            s,
+            SessionDomainEvent::SubAgentCompleted {
+                id,
+                output: "answer".into(),
+            },
+        );
+        let rec = s.subagents.get(&id).unwrap();
+        assert_eq!(rec.status, SubAgentStatus::Completed);
+        assert!(!rec.notified);
+
+        let s = SessionActor::apply_event(s, SessionDomainEvent::SubAgentNotified { id });
+        assert!(s.subagents.get(&id).unwrap().notified);
+    }
+
+    #[test]
+    fn a_running_then_failed_subagent_reads_as_interrupted_then_terminal() {
+        use crate::sessions::subagents::SubAgentParent;
+        let id = Uuid::new_v4();
+        let s = fold(vec![SessionDomainEvent::SubAgentSpawned {
+            id,
+            parent: SubAgentParent::Main,
+            label: "w".into(),
+            task: "t".into(),
+            depth: 1,
+        }]);
+        assert_eq!(s.subagents.interrupted(), vec![id]);
+        let s = SessionActor::apply_event(
+            s,
+            SessionDomainEvent::SubAgentFailed {
+                id,
+                error: "interrupted by restart".into(),
+            },
+        );
+        assert!(s.subagents.interrupted().is_empty());
     }
 
     #[test]
