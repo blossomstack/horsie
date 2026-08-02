@@ -78,8 +78,11 @@ Configuration is split in two, and the halves never overlap:
   and models, runtime vendors, GitHub, MCP servers, skill bundles. Edited from
   the **Settings** page in the UI.
 
-> **No built-in authentication.** The server has no login or access control.
-> Bind it to a trusted network only, or front it with your own auth proxy.
+> **Authentication is on by default.** On first boot the server creates an
+> `admin` account, prints a generated password, and writes it to
+> `initial-admin-password` in its state directory. Change it from
+> **Settings → Account**. To run without a password on a trusted network, set
+> `HORSIE_AUTH_ENABLED=false` or `{"auth": {"enabled": false}}` in `config.json`.
 
 ## Documentation
 
