@@ -9,7 +9,9 @@ pub mod ask_tool;
 pub mod clock;
 pub mod events;
 pub mod session_actor;
+pub mod spawn_tool;
 pub mod spec;
+pub mod subagents;
 pub mod supervisor;
 pub mod title_tool;
 

@@ -61,6 +61,18 @@ impl EventSink for SessionEventSink {
     }
 }
 
+/// A subagent's observation sink: quiet by design. A subagent's streaming
+/// events never reach the session broadcast — only the spawn/finish
+/// progression frames the session itself emits surface there.
+pub struct QuietEventSink;
+
+#[async_trait]
+impl EventSink for QuietEventSink {
+    async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
+        Ok(())
+    }
+}
+
 /// A coarse event replayed from the agent journal, with its stable sequence id.
 #[derive(Debug, Clone)]
 pub struct StampedEvent {

@@ -93,3 +93,12 @@ summarizes the user's request. The server may already have set a fallback title
 from the first user message; replace it when you can provide a clearer title.
 You may call the tool again later if the conversation's purpose changes; the
 latest successful call wins.
+
+## Delegating to subagents
+
+Use `spawn_agent` for substantial independent work that can proceed in
+parallel with yours — research, exploration, isolated changes. Spawning is
+asynchronous: you get an id back immediately, and the subagent's final report
+arrives later as a message. Give each subagent a complete, self-contained
+task: it inherits your model and tools but not this conversation. Check
+progress with `subagent_status`. Prefer doing small, quick things yourself.

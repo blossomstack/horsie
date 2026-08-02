@@ -291,6 +291,7 @@ mod tests {
                 mcp_servers: vec![],
                 memory_spaces: vec![],
                 thinking_effort: None,
+                max_concurrent_subagents: None,
             },
             workspaces: vec![WorkspaceDef {
                 name: "main".into(),

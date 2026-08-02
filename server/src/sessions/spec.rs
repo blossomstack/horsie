@@ -48,6 +48,19 @@ pub struct AgentSettings {
     /// so pre-thinking journal rows deserialize.
     #[serde(default)]
     pub thinking_effort: Option<String>,
+    /// Cap on concurrently-active subagents. `#[serde(default)]` so
+    /// pre-subagent journal rows deserialize; `None` resolves to
+    /// [`crate::sessions::subagents::DEFAULT_MAX_CONCURRENT_SUBAGENTS`].
+    #[serde(default)]
+    pub max_concurrent_subagents: Option<u32>,
+}
+
+impl AgentSettings {
+    /// The session's effective concurrency cap.
+    pub fn max_subagents(&self) -> u32 {
+        self.max_concurrent_subagents
+            .unwrap_or(crate::sessions::subagents::DEFAULT_MAX_CONCURRENT_SUBAGENTS)
+    }
 }
 
 /// One session workspace as persisted: just a name — the directory is always
@@ -195,6 +208,7 @@ mod tests {
                 mcp_servers: vec![],
                 memory_spaces: vec![],
                 thinking_effort: None,
+                max_concurrent_subagents: None,
             },
             workspaces: vec![],
             provision: vec![],
@@ -210,6 +224,25 @@ mod tests {
         });
         let loaded: SessionSpec = serde_json::from_value(row).unwrap();
         assert_eq!(loaded, spec);
+    }
+
+    #[test]
+    fn agent_settings_default_max_subagents_and_read_old_rows() {
+        // Pre-subagent journal rows carry no field; they must still load and
+        // resolve to the built-in default.
+        let old = r#"{"model":"m","allowed_tools":null,"use_plugins":null,"max_iterations":null,"max_retries":0}"#;
+        let s: AgentSettings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.max_concurrent_subagents, None);
+        assert_eq!(
+            s.max_subagents(),
+            crate::sessions::subagents::DEFAULT_MAX_CONCURRENT_SUBAGENTS
+        );
+
+        let s = AgentSettings {
+            max_concurrent_subagents: Some(3),
+            ..serde_json::from_str::<AgentSettings>(old).unwrap()
+        };
+        assert_eq!(s.max_subagents(), 3);
     }
 
     #[test]

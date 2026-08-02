@@ -94,9 +94,13 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: oneshot::Sender<Option<broadcast::Receiver<SessionFrame>>>,
     },
-    /// Read a window of a session's conversation history.
+    /// Read a window of a session's conversation history. `agent_id` selects
+    /// the agent: absent or `"main"` for the primary agent, else a subagent
+    /// id. The outer `None` means the session is unknown; an inner `None`
+    /// means the agent is.
     History {
         id: SessionId,
+        agent_id: Option<String>,
         query: horsie_workflow::HistoryQuery,
         reply: oneshot::Sender<Option<horsie_workflow::AgentHistoryPage>>,
     },
@@ -104,6 +108,11 @@ pub enum SessionSupervisorCommand {
     UsageStats {
         id: SessionId,
         reply: oneshot::Sender<Option<SessionUsageStats>>,
+    },
+    /// Read a session's subagent tree (`None` when the session is unknown).
+    SubAgents {
+        id: SessionId,
+        reply: oneshot::Sender<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
     },
     /// Unload every session that has gone idle. Sent by the ticker, or by a
     /// test that has moved its clock.
@@ -459,15 +468,24 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::History { id, query, reply } => {
+            SessionSupervisorCommand::History {
+                id,
+                agent_id,
+                query,
+                reply,
+            } => {
                 match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::History { query, reply: tx })
+                            .tell(SessionCommand::History {
+                                agent_id,
+                                query,
+                                reply: tx,
+                            })
                             .await;
                         tokio::spawn(async move {
-                            let _ = reply.send(rx.await.ok());
+                            let _ = reply.send(rx.await.ok().flatten());
                         });
                     }
                     None => {
@@ -481,6 +499,21 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child.tell(SessionCommand::UsageStats { reply: tx }).await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::SubAgents { id, reply } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child.tell(SessionCommand::SubAgentTree { reply: tx }).await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
                         });
@@ -583,6 +616,7 @@ mod tests {
                 mcp_servers: vec![],
                 memory_spaces: vec![],
                 thinking_effort: None,
+                max_concurrent_subagents: None,
             },
             workspaces: vec![],
             provision: vec![],
