@@ -40,7 +40,7 @@ nono          = { version = "0.66", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile      = "3"
-horsie-executor = { path = "../executor" }
+horsie-runtime-vendor = { path = "../runtime-vendor" }
 tokio-util      = { workspace = true }
 
 [lints]

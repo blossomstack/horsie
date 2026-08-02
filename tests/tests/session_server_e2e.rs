@@ -1,6 +1,6 @@
 //! End-to-end tests for the session server: real axum HTTP + real event-sourced
 //! actors + real FileJournal, driven over HTTP with reqwest. Only the sandbox
-//! runtime (a FakeVendorAgent over a real WebSocket) and the LLM
+//! runtime (a FakeRuntimeVendor over a real WebSocket) and the LLM
 //! (MockLlmServer) are doubled.
 
 #![allow(
@@ -13,15 +13,15 @@
 use horsie_actor::{ActorRef, FileJournal, Journal, spawn_root};
 use horsie_agentcore::LlmProvider;
 use horsie_anthropic::AnthropicProvider;
-use horsie_executor::ConnectedRuntimeRegistry;
 use horsie_mock_llm::MockLlmServer;
 use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
+use horsie_runtime_vendor::ConnectedRuntimeRegistry;
 use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
+use horsie_server::runtime_vendor::RuntimeVendorLink;
+use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand};
-use horsie_server::vendor::VendorLink;
-use horsie_server::vendor::fake_agent::FakeVendorAgent;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -66,10 +66,14 @@ fn block_caps() -> CapabilitySpec {
 
 /// Start a server incarnation on `journal_dir`, with `vendor` under name "mock"
 /// and a single LLM provider "mock" pointing at `mock_url`.
-async fn start_server(journal_dir: &Path, vendor: Arc<VendorLink>, mock_url: &str) -> Server {
+async fn start_server(
+    journal_dir: &Path,
+    vendor: Arc<RuntimeVendorLink>,
+    mock_url: &str,
+) -> Server {
     let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
     providers.insert("mock".into(), provider_at(mock_url));
-    let mut vendors: HashMap<String, Arc<VendorLink>> = HashMap::new();
+    let mut vendors: HashMap<String, Arc<RuntimeVendorLink>> = HashMap::new();
     vendors.insert("mock".into(), vendor);
     let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
     let deps = ServerDeps {
@@ -132,7 +136,7 @@ async fn start_server(journal_dir: &Path, vendor: Arc<VendorLink>, mock_url: &st
         mcp,
         plugins,
         memory,
-        vendor_agents: Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
+        vendor_agents: Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
             shared_vendors,
         )),
         web_dir: None,
@@ -260,7 +264,7 @@ async fn start_server_with_live_vendors(
         mcp,
         plugins,
         memory,
-        vendor_agents: Arc::new(horsie_server::vendor::VendorAgentRegistry::new(
+        vendor_agents: Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
             opened.vendors.clone(),
         )),
         web_dir: None,
@@ -406,7 +410,7 @@ async fn create_message_sse_roundtrip() {
     let mock = MockLlmServer::builder().build().await;
     mock.queue_response("hello from the agent");
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -467,7 +471,7 @@ async fn prep_progressions_stream_during_a_turn() {
     let mock = MockLlmServer::builder().build().await;
     mock.queue_response("done");
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -514,7 +518,7 @@ async fn history_endpoint_returns_windowed_messages() {
     mock.queue_response("first reply");
     mock.queue_response("second reply");
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -601,7 +605,7 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     mock.queue_response("first reply");
     mock.queue_response("second reply");
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -685,7 +689,7 @@ async fn stop_preserves_and_message_reattaches() {
     mock.queue_response("first");
     mock.queue_response("second");
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -725,7 +729,7 @@ async fn stop_preserves_and_message_reattaches() {
 async fn restart_marks_interrupted_and_message_resumes() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -773,7 +777,7 @@ async fn attach_failure_lands_recovery_failed_then_retry_succeeds() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
     // The first attach fails; the second succeeds.
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .fail_attach_times(1)
         .serve_in_process()
         .await
@@ -817,7 +821,7 @@ async fn last_event_id_replay_is_gap_free() {
     mock.queue_response("one");
     mock.queue_response("two");
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -866,7 +870,7 @@ async fn last_event_id_replay_is_gap_free() {
 async fn repos_session_creates_and_reports_repos() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -913,7 +917,7 @@ async fn repos_session_creates_and_reports_repos() {
 async fn session_detail_echoes_full_config() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -955,7 +959,7 @@ async fn session_detail_echoes_full_config() {
 async fn turn_in_flight_conflicts() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
-    let agent = FakeVendorAgent::builder("mock")
+    let agent = FakeRuntimeVendor::builder("mock")
         .serve_in_process()
         .await
         .expect("fake agent");
@@ -1000,7 +1004,7 @@ async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
         let mock = MockLlmServer::builder().build().await;
         let tmp = tempfile::tempdir().unwrap();
         // The agent hangs up on its first tool call, taking the link with it.
-        let agent = FakeVendorAgent::builder("mock")
+        let agent = FakeRuntimeVendor::builder("mock")
             .disconnect_after_tool_calls(0)
             .serve_in_process()
             .await
@@ -1067,7 +1071,7 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
 
         // The agent holds every tool call, so Stop lands while one is genuinely
         // in flight, and records the cancels it receives.
-        let agent = FakeVendorAgent::builder("mock")
+        let agent = FakeRuntimeVendor::builder("mock")
             .block_tool_calls()
             .serve_in_process()
             .await
@@ -1125,7 +1129,7 @@ async fn answering_an_ask_marks_the_session_running_and_rejects_a_concurrent_mes
     tokio::time::timeout(Duration::from_secs(60), async {
         let mock = MockLlmServer::builder().build().await;
         let tmp = tempfile::tempdir().unwrap();
-        let agent = FakeVendorAgent::builder("mock")
+        let agent = FakeRuntimeVendor::builder("mock")
             .serve_in_process()
             .await
             .expect("fake agent");
@@ -1189,7 +1193,7 @@ async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
     let client = reqwest::Client::new();
 
     let (server, _local_addr) = start_server_with_live_vendors(tmp.path(), &mock.url()).await;
-    let agent = horsie_server::vendor::fake_agent::FakeVendorAgent::builder("agent-1")
+    let agent = horsie_server::runtime_vendor::fake::FakeRuntimeVendor::builder("agent-1")
         .supports_provisioning(true)
         .bash_stdout("from-the-agent")
         .connect(&format!("ws://{}/api/vendor/connect", server.addr))
@@ -1234,7 +1238,7 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
     let client = reqwest::Client::new();
 
     let (server, _local_addr) = start_server_with_live_vendors(tmp.path(), &mock.url()).await;
-    let agent = horsie_server::vendor::fake_agent::FakeVendorAgent::builder("agent-2")
+    let agent = horsie_server::runtime_vendor::fake::FakeRuntimeVendor::builder("agent-2")
         .bash_stdout("ok")
         .connect(&format!("ws://{}/api/vendor/connect", server.addr))
         .await

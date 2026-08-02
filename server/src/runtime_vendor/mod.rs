@@ -6,22 +6,22 @@
 //! exactly one explicit vendor signal (`create` / `attach` / `stop` / `delete`),
 //! never an implicit side effect.
 //!
-//! There is one vendor type — [`VendorLink`], the server's end of a connected
+//! There is one vendor type — [`RuntimeVendorLink`], the server's end of a connected
 //! agent's WebSocket. The `RuntimeVendor` trait this module used to define was
 //! pure indirection once the in-process vendors were deleted.
 
-mod agent_registry;
 /// A scriptable vendor agent for tests only — never compiled into a production
 /// build. Available to this crate's own tests (`cfg(test)`) and to external test
 /// crates that opt in via the `test-util` feature.
 #[cfg(any(test, feature = "test-util"))]
-pub mod fake_agent;
+pub mod fake;
 mod link;
+mod registry;
 mod transport;
 
-pub use agent_registry::VendorAgentRegistry;
-pub use link::VendorLink;
-pub use transport::VendorRuntimeTransport;
+pub use link::RuntimeVendorLink;
+pub use registry::RuntimeVendorRegistry;
+pub use transport::RuntimeVendorTransport;
 
 use async_trait::async_trait;
 use horsie_runtime_client::RuntimeClient;

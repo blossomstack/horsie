@@ -5,13 +5,13 @@ use horsie_actor::{
     ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, spawn_root,
 };
 use horsie_agentcore::{AgentEvent, EventSink, EventSinkError};
-use horsie_executor::{
-    ConnectedRuntimeRegistry, ProcessRuntimeProvider, RuntimeEndpoint, RuntimeListenerServer,
-    RuntimeProvider, SandboxPolicy, serve_runtime_connections,
-};
 use horsie_models::daemon::{JobEventFrame, JobStatus};
 use horsie_models::executor::RuntimeConfig;
 use horsie_runtime_client::RuntimeClient;
+use horsie_runtime_vendor::{
+    ConnectedRuntimeRegistry, ProcessRuntimeProvider, RuntimeEndpoint, RuntimeListenerServer,
+    RuntimeProvider, SandboxPolicy, serve_runtime_connections,
+};
 use horsie_workflow::{
     DefaultToolboxFactory, WorkflowActor, WorkflowCommand, WorkflowNotification,
     WorkflowRuntimeContext,
@@ -243,7 +243,7 @@ async fn send_kickoff(
 struct ProcessShutdown {
     /// The runtime's own lifecycle handle, held directly now that there is no
     /// executor client in between.
-    handle: Arc<dyn horsie_executor::RuntimeHandle>,
+    handle: Arc<dyn horsie_runtime_vendor::RuntimeHandle>,
     cancel: CancellationToken,
 }
 

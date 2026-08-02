@@ -5,8 +5,8 @@ pub mod http;
 pub mod mcp;
 pub mod memory;
 pub mod plugins;
+pub mod runtime_vendor;
 pub mod sessions;
-pub mod vendor;
 mod wire_redact;
 
 pub use error::ServerError;

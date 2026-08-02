@@ -1,34 +1,27 @@
 use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use horsie_models::runtime::{
-    CancelCallRequest, PluginSkill, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest,
-    SessionStartRequest, ToolCall, ToolCallRequest, ToolResult, WorkspaceScan,
-};
-use horsie_runtime_client::{RuntimeTransport, TransportError};
+use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
+use horsie_runtime_client::{RuntimeTransport, TransportError, inbound_call_id, outbound_call_id};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Mutex, oneshot};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
-type Reply = Result<ToolResult, TransportError>;
+type Reply = Result<RuntimeOutboundMessage, TransportError>;
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Reply>>>>;
-type ScanReply = Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), TransportError>;
-type PendingScan = Arc<Mutex<HashMap<String, oneshot::Sender<ScanReply>>>>;
-type SessionReply = Result<String, TransportError>;
-type PendingSession = Arc<Mutex<HashMap<String, oneshot::Sender<SessionReply>>>>;
 
-/// Direct tool-call transport over a single accepted runtime link
-/// (`WebSocketStream<S>`, where `S` = `TcpStream` or `UnixStream`). Owns the sink
-/// and `call_id → oneshot` pending maps (one for tool calls, one for scans); a
-/// spawned reader fills them and, on disconnect, resolves every outstanding call
-/// with [`TransportError::Disconnected`].
+/// Direct runtime transport over a single accepted link (`WebSocketStream<S>`,
+/// where `S` = `TcpStream` or `UnixStream`). Owns the sink and one
+/// `call_id → oneshot` pending map; a spawned reader fills it and, on disconnect,
+/// resolves every outstanding request with [`TransportError::Disconnected`].
+///
+/// The map is keyed by correlation id alone, not by request kind — which is what
+/// lets a new runtime message ride this transport without touching it.
 pub struct SocketRuntimeTransport<S> {
     sink: Arc<Mutex<SplitSink<WebSocketStream<S>, Message>>>,
     pending: Pending,
-    pending_scan: PendingScan,
-    pending_session: PendingSession,
 }
 
 /// The unix instantiation used by CLI mode.
@@ -51,108 +44,45 @@ where
         mut stream: SplitStream<WebSocketStream<S>>,
     ) -> (Self, oneshot::Receiver<()>) {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let pending_scan: PendingScan = Arc::new(Mutex::new(HashMap::new()));
-        let pending_session: PendingSession = Arc::new(Mutex::new(HashMap::new()));
         let reader_pending = pending.clone();
-        let reader_pending_scan = pending_scan.clone();
-        let reader_pending_session = pending_session.clone();
         let (closed_tx, closed_rx) = oneshot::channel();
         tokio::spawn(async move {
             while let Some(Ok(Message::Text(text))) = stream.next().await {
-                match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
-                    Ok(RuntimeOutboundMessage::ToolCallResponse(resp)) => {
-                        if let Some(tx) = reader_pending.lock().await.remove(&resp.call_id) {
-                            let _ = tx.send(Ok(resp.result));
-                        }
-                    }
-                    Ok(RuntimeOutboundMessage::ScanResult(resp)) => {
-                        if let Some(tx) = reader_pending_scan.lock().await.remove(&resp.call_id) {
-                            let _ = tx.send(Ok((resp.workspaces, resp.shared_skills)));
-                        }
-                    }
-                    Ok(RuntimeOutboundMessage::SessionStartResult(resp)) => {
-                        if let Some(tx) = reader_pending_session.lock().await.remove(&resp.call_id)
-                        {
-                            let _ = tx.send(Ok(resp.context));
-                        }
-                    }
-                    // Handshake-only messages (Ready / provisioning lifecycle) are
-                    // resolved before the transport takes over the link; ignore here.
-                    Ok(RuntimeOutboundMessage::Ready(_))
-                    | Ok(RuntimeOutboundMessage::Provisioning(_))
-                    | Ok(RuntimeOutboundMessage::ProvisionFailed(_))
-                    | Err(_) => {}
+                let Ok(msg) = serde_json::from_str::<RuntimeOutboundMessage>(&text) else {
+                    continue;
+                };
+                // A reply with no correlation id is a handshake message (Ready /
+                // provisioning lifecycle), resolved before the transport takes
+                // over the link; an unmatched id is a reply to a request that
+                // already gave up.
+                let Some(call_id) = outbound_call_id(&msg) else {
+                    continue;
+                };
+                let waiter = reader_pending.lock().await.remove(call_id);
+                if let Some(tx) = waiter {
+                    let _ = tx.send(Ok(msg));
                 }
             }
-            // Disconnected: fail every outstanding call so no invoke()/scan() hangs
+            // Disconnected: fail every outstanding request so nothing hangs
             // forever, then signal the link is closed.
             let mut map = reader_pending.lock().await;
             for (_, tx) in map.drain() {
                 let _ = tx.send(Err(TransportError::Disconnected));
             }
             drop(map);
-            let mut scan_map = reader_pending_scan.lock().await;
-            for (_, tx) in scan_map.drain() {
-                let _ = tx.send(Err(TransportError::Disconnected));
-            }
-            drop(scan_map);
-            let mut session_map = reader_pending_session.lock().await;
-            for (_, tx) in session_map.drain() {
-                let _ = tx.send(Err(TransportError::Disconnected));
-            }
-            drop(session_map);
             let _ = closed_tx.send(());
         });
         (
             Self {
                 sink: Arc::new(Mutex::new(sink)),
                 pending,
-                pending_scan,
-                pending_session,
             },
             closed_rx,
         )
     }
-}
 
-#[async_trait]
-impl<S> RuntimeTransport for SocketRuntimeTransport<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    async fn invoke(&self, call_id: &str, call: ToolCall) -> Result<ToolResult, TransportError> {
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(call_id.to_string(), tx);
-
-        let msg = RuntimeInboundMessage::ToolCall(ToolCallRequest {
-            call_id: call_id.to_string(),
-            call,
-        });
-        let json = serde_json::to_string(&msg)
-            .map_err(|e| TransportError::Serialization(e.to_string()))?;
-        // The sink guard is released at the end of this statement, before we await
-        // the response — so the reader task is never blocked behind it.
-        if let Err(e) = self
-            .sink
-            .lock()
-            .await
-            .send(Message::Text(json.into()))
-            .await
-        {
-            self.pending.lock().await.remove(call_id);
-            return Err(TransportError::SendFailed(e.to_string()));
-        }
-        match rx.await {
-            Ok(reply) => reply,
-            Err(_) => Err(TransportError::Disconnected),
-        }
-    }
-
-    async fn cancel(&self, call_id: &str) -> Result<(), TransportError> {
-        let msg = RuntimeInboundMessage::CancelCall(CancelCallRequest {
-            call_id: call_id.to_string(),
-        });
-        let json = serde_json::to_string(&msg)
+    async fn write(&self, message: &RuntimeInboundMessage) -> Result<(), TransportError> {
+        let json = serde_json::to_string(message)
             .map_err(|e| TransportError::Serialization(e.to_string()))?;
         self.sink
             .lock()
@@ -161,39 +91,26 @@ where
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))
     }
+}
 
-    async fn scan_workspace(
+#[async_trait]
+impl<S> RuntimeTransport for SocketRuntimeTransport<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    async fn relay(
         &self,
-        call_id: &str,
-        workspace: Option<String>,
-        instruction_candidates: Vec<String>,
-        skills_glob: String,
-        include_shared: bool,
-    ) -> Result<(Vec<WorkspaceScan>, Vec<PluginSkill>), TransportError> {
+        message: RuntimeInboundMessage,
+    ) -> Result<RuntimeOutboundMessage, TransportError> {
+        let call_id = inbound_call_id(&message).to_string();
         let (tx, rx) = oneshot::channel();
-        self.pending_scan
-            .lock()
-            .await
-            .insert(call_id.to_string(), tx);
+        self.pending.lock().await.insert(call_id.clone(), tx);
 
-        let msg = RuntimeInboundMessage::ScanWorkspace(ScanRequest {
-            call_id: call_id.to_string(),
-            workspace,
-            instruction_candidates,
-            skills_glob,
-            include_shared,
-        });
-        let json = serde_json::to_string(&msg)
-            .map_err(|e| TransportError::Serialization(e.to_string()))?;
-        if let Err(e) = self
-            .sink
-            .lock()
-            .await
-            .send(Message::Text(json.into()))
-            .await
-        {
-            self.pending_scan.lock().await.remove(call_id);
-            return Err(TransportError::SendFailed(e.to_string()));
+        // The sink guard is released inside `write`, before we await the reply —
+        // so the reader task is never blocked behind it.
+        if let Err(e) = self.write(&message).await {
+            self.pending.lock().await.remove(&call_id);
+            return Err(e);
         }
         match rx.await {
             Ok(reply) => reply,
@@ -201,32 +118,8 @@ where
         }
     }
 
-    async fn run_session_start(&self, call_id: &str) -> Result<String, TransportError> {
-        let (tx, rx) = oneshot::channel();
-        self.pending_session
-            .lock()
-            .await
-            .insert(call_id.to_string(), tx);
-
-        let msg = RuntimeInboundMessage::SessionStart(SessionStartRequest {
-            call_id: call_id.to_string(),
-        });
-        let json = serde_json::to_string(&msg)
-            .map_err(|e| TransportError::Serialization(e.to_string()))?;
-        if let Err(e) = self
-            .sink
-            .lock()
-            .await
-            .send(Message::Text(json.into()))
-            .await
-        {
-            self.pending_session.lock().await.remove(call_id);
-            return Err(TransportError::SendFailed(e.to_string()));
-        }
-        match rx.await {
-            Ok(reply) => reply,
-            Err(_) => Err(TransportError::Disconnected),
-        }
+    async fn send_oneway(&self, message: RuntimeInboundMessage) -> Result<(), TransportError> {
+        self.write(&message).await
     }
 }
 
@@ -239,7 +132,7 @@ where
 )]
 mod tests {
     use super::*;
-    use horsie_models::runtime::{BashInput, ToolCallResponse, ToolOutput};
+    use horsie_models::runtime::{BashInput, ToolCall, ToolCallResponse, ToolOutput, ToolResult};
     use tokio::net::{UnixListener, UnixStream};
 
     /// A fake runtime on the server side of a paired unix socket that answers every

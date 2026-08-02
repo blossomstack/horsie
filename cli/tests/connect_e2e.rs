@@ -21,10 +21,12 @@
 )]
 
 use futures_util::{SinkExt, StreamExt};
-use horsie_models::runtime::{BashInput, ToolCall, ToolCallRequest, ToolResult};
-use horsie_models::vendor::{
-    VendorCommand, VendorCreateRuntime, VendorEvent, VendorInboundMessage, VendorOutboundMessage,
-    VendorRuntimeRequest, VendorToolCall,
+use horsie_models::runtime::{
+    BashInput, RuntimeInboundMessage, RuntimeOutboundMessage, ToolCall, ToolCallRequest, ToolResult,
+};
+use horsie_models::runtime_vendor::{
+    CreateRuntimeRequest, RuntimeRelayRequest, RuntimeSpec, RuntimeVendorCommand,
+    RuntimeVendorEvent, RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage,
 };
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -56,7 +58,9 @@ async fn accept_vendor_agent(listener: TcpListener) -> WebSocketStream<tokio::ne
         .expect("websocket handshake")
 }
 
-async fn next_event(ws: &mut WebSocketStream<tokio::net::TcpStream>) -> VendorOutboundMessage {
+async fn next_event(
+    ws: &mut WebSocketStream<tokio::net::TcpStream>,
+) -> RuntimeVendorOutboundMessage {
     loop {
         let msg = tokio::time::timeout(Duration::from_secs(30), ws.next())
             .await
@@ -72,9 +76,9 @@ async fn next_event(ws: &mut WebSocketStream<tokio::net::TcpStream>) -> VendorOu
 async fn send_command(
     ws: &mut WebSocketStream<tokio::net::TcpStream>,
     request_id: &str,
-    command: VendorCommand,
+    command: RuntimeVendorCommand,
 ) {
-    let msg = VendorInboundMessage {
+    let msg = RuntimeVendorInboundMessage {
         request_id: request_id.to_string(),
         command,
     };
@@ -134,14 +138,14 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
     // 1. The agent announces itself under the name we gave it.
     let boot = next_event(&mut ws).await;
     match boot.event {
-        VendorEvent::Registered(ev) => {
+        RuntimeVendorEvent::Ready(ev) => {
             assert_eq!(ev.vendor_name, "test-vendor");
             assert!(
                 !ev.capabilities.supports_provisioning,
                 "a fixed user directory provisions nothing"
             );
         }
-        other => panic!("expected Registered, got {other:?}"),
+        other => panic!("expected Ready, got {other:?}"),
     }
 
     // 2. CreateRuntime spawns a real horsie-runtime that dials the agent's own
@@ -149,9 +153,9 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
     send_command(
         &mut ws,
         "req-create",
-        VendorCommand::CreateRuntime(VendorCreateRuntime {
+        RuntimeVendorCommand::CreateRuntime(CreateRuntimeRequest {
             runtime_id: "rt-1".to_string(),
-            request: VendorRuntimeRequest {
+            spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
                 env: vec![],
                 provision: vec![],
@@ -163,7 +167,7 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
     let created = next_event(&mut ws).await;
     assert_eq!(created.request_id, "req-create");
     match created.event {
-        VendorEvent::RuntimeStateChanged(ev) => assert_eq!(ev.runtime_id, "rt-1"),
+        RuntimeVendorEvent::CreateRuntime(ev) => assert_eq!(ev.runtime_id, "rt-1"),
         other => panic!("expected the runtime to come up, got {other:?}"),
     }
 
@@ -171,30 +175,33 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
     send_command(
         &mut ws,
         "req-tool",
-        VendorCommand::ToolCall(VendorToolCall {
+        RuntimeVendorCommand::Runtime(RuntimeRelayRequest {
             runtime_id: "rt-1".to_string(),
-            call: ToolCallRequest {
+            message: RuntimeInboundMessage::ToolCall(ToolCallRequest {
                 call_id: "call-1".to_string(),
                 call: ToolCall::Bash(BashInput {
                     command: "cat marker.txt".to_string(),
                     timeout_secs: None,
                     workspace: None,
                 }),
-            },
+            }),
         }),
     )
     .await;
     let tooled = next_event(&mut ws).await;
     assert_eq!(tooled.request_id, "req-tool");
     match tooled.event {
-        VendorEvent::ToolResult(ev) => match ev.result {
-            ToolResult::Ok(out) => assert!(
-                out.stdout.contains("hello"),
-                "the tool ran in the configured workspace, got {out:?}"
-            ),
-            ToolResult::Err(e) => panic!("tool call failed: {}", e.reason),
+        RuntimeVendorEvent::Runtime(ev) => match ev.message {
+            RuntimeOutboundMessage::ToolCallResponse(resp) => match resp.result {
+                ToolResult::Ok(out) => assert!(
+                    out.stdout.contains("hello"),
+                    "the tool ran in the configured workspace, got {out:?}"
+                ),
+                ToolResult::Err(e) => panic!("tool call failed: {}", e.reason),
+            },
+            other => panic!("expected a tool result, got {other:?}"),
         },
-        other => panic!("expected a tool result, got {other:?}"),
+        other => panic!("expected a relayed runtime reply, got {other:?}"),
     }
 
     // 4. An unknown workspace name fails explicitly rather than silently
@@ -202,9 +209,9 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
     send_command(
         &mut ws,
         "req-bad",
-        VendorCommand::CreateRuntime(VendorCreateRuntime {
+        RuntimeVendorCommand::CreateRuntime(CreateRuntimeRequest {
             runtime_id: "rt-2".to_string(),
-            request: VendorRuntimeRequest {
+            spec: RuntimeSpec {
                 workspaces: vec!["nope".to_string()],
                 env: vec![],
                 provision: vec![],
@@ -216,12 +223,12 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
     let refused = next_event(&mut ws).await;
     assert_eq!(refused.request_id, "req-bad");
     match refused.event {
-        VendorEvent::CommandFailed(ev) => assert!(
+        RuntimeVendorEvent::RequestFailed(ev) => assert!(
             ev.message.contains("nope"),
             "the failure must name the workspace, got {}",
             ev.message
         ),
-        other => panic!("expected CommandFailed, got {other:?}"),
+        other => panic!("expected RequestFailed, got {other:?}"),
     }
 
     let _ = child.kill().await;
@@ -321,9 +328,9 @@ async fn runtimes_die_with_the_agent() {
     send_command(
         &mut ws,
         "req-create",
-        VendorCommand::CreateRuntime(VendorCreateRuntime {
+        RuntimeVendorCommand::CreateRuntime(CreateRuntimeRequest {
             runtime_id: "rt-1".to_string(),
-            request: VendorRuntimeRequest {
+            spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
                 env: vec![],
                 provision: vec![],

@@ -2,7 +2,7 @@
 //! types in `horsie_models::session` — wire formats evolve at the speed of the
 //! API contract, these evolve at the speed of data migrations.
 
-use crate::vendor::VendorLink;
+use crate::runtime_vendor::RuntimeVendorLink;
 use horsie_agentcore::LlmProvider;
 use horsie_models::capabilities::CapabilitySpec;
 use horsie_models::session::SessionStatusKind;
@@ -20,7 +20,7 @@ pub type SharedProviderRegistry = Arc<RwLock<HashMap<String, Arc<dyn LlmProvider
 /// Runtime vendors keyed by name, behind a shared lock so a settings-API vendor
 /// edit can activate/reconfigure/retire a vendor without a restart. Read once
 /// per provision call in [`crate::sessions::session_actor::SessionActor::vendor`].
-pub type SharedVendors = Arc<RwLock<HashMap<String, Arc<VendorLink>>>>;
+pub type SharedVendors = Arc<RwLock<HashMap<String, Arc<RuntimeVendorLink>>>>;
 
 /// A session's unique id (a UUID string). Equals the agent session uuid, so
 /// `session/<id>` and `agent/<id>` journals share the same `<id>`.

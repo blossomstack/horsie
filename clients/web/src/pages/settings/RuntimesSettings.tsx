@@ -78,7 +78,7 @@ export function RuntimesSettings() {
         <p className="mt-0.5 mb-3 text-xs text-faint">
           Agents connected right now. Run <code>horsie connect</code> on a
           machine, or start a vendor agent such as{" "}
-          <code>horsie-vendor-velos</code>, and it appears here.
+          <code>horsie-velos-runtime</code>, and it appears here.
         </p>
         {vendors.length === 0 ? (
           <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">

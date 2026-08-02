@@ -7,7 +7,7 @@
 //! We perform a *raw* WebSocket upgrade (not axum's `WebSocketUpgrade`, whose
 //! `WebSocket` type can't be handed to `tokio_tungstenite`) so the upgraded
 //! connection can be wrapped in a `WebSocketStream` and driven by
-//! [`VendorLink::start`] — the same mechanics `runtime_connect.rs` uses.
+//! [`RuntimeVendorLink::start`] — the same mechanics `runtime_connect.rs` uses.
 
 use crate::http::AppState;
 use axum::extract::State;
@@ -43,7 +43,7 @@ pub async fn vendor_connect(
                 let ws =
                     WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None)
                         .await;
-                match crate::vendor::VendorLink::start(ws).await {
+                match crate::runtime_vendor::RuntimeVendorLink::start(ws).await {
                     Ok(link) => {
                         tracing::info!(vendor = %link.vendor_name(), "vendor agent connected");
                         agents.register(link);

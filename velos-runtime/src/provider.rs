@@ -9,11 +9,11 @@
 
 use crate::velos::{ContainerApi, ContainerLaunchSpec};
 use async_trait::async_trait;
-use horsie_executor::{
+use horsie_models::executor::RuntimeConfig;
+use horsie_runtime_vendor::{
     ConnectedRuntimeRegistry, HealthStatus, RuntimeError, RuntimeHandle, RuntimeProvider,
     WorkspaceResolver,
 };
-use horsie_models::executor::RuntimeConfig;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;

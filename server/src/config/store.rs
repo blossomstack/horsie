@@ -445,7 +445,7 @@ fn trimmed(v: &Option<String>) -> Option<String> {
 // ── projections ──────────────────────────────────────────────────────────────
 
 /// Map a vendor's announced (domain) capabilities to the settings-wire view.
-fn vendor_caps_view(caps: crate::vendor::VendorCapabilities) -> VendorCapabilities {
+fn vendor_caps_view(caps: crate::runtime_vendor::VendorCapabilities) -> VendorCapabilities {
     VendorCapabilities {
         supports_provisioning: caps.supports_provisioning,
     }

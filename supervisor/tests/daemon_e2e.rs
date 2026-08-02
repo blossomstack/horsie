@@ -19,7 +19,7 @@ use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
 use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
 use horsie_models::daemon::JobStatus;
-use horsie_models::runtime::{ToolCall, ToolResult, WorkspaceScan};
+use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
 use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition};
 use horsie_runtime_client::{RuntimeClient, RuntimeTransport, TransportError};
 use horsie_supervisor::{
@@ -42,26 +42,15 @@ struct NoopTransport;
 
 #[async_trait]
 impl RuntimeTransport for NoopTransport {
-    async fn invoke(&self, _call_id: &str, _call: ToolCall) -> Result<ToolResult, TransportError> {
+    async fn relay(
+        &self,
+        _message: RuntimeInboundMessage,
+    ) -> Result<RuntimeOutboundMessage, TransportError> {
         Err(TransportError::Disconnected)
     }
-    async fn cancel(&self, _call_id: &str) -> Result<(), TransportError> {
-        Ok(())
-    }
-    async fn scan_workspace(
-        &self,
-        _call_id: &str,
-        _workspace: Option<String>,
-        _instruction_candidates: Vec<String>,
-        _skills_glob: String,
-        _include_shared: bool,
-    ) -> Result<(Vec<WorkspaceScan>, Vec<horsie_models::runtime::PluginSkill>), TransportError>
-    {
-        Ok((Vec::new(), Vec::new()))
-    }
 
-    async fn run_session_start(&self, _call_id: &str) -> Result<String, TransportError> {
-        Ok(String::new())
+    async fn send_oneway(&self, _message: RuntimeInboundMessage) -> Result<(), TransportError> {
+        Ok(())
     }
 }
 

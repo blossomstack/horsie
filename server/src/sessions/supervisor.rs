@@ -466,9 +466,9 @@ impl EventSourcedActor for SessionSupervisor {
 )]
 mod tests {
     use super::*;
+    use crate::runtime_vendor::RuntimeVendorLink;
+    use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::spec::AgentSettings;
-    use crate::vendor::VendorLink;
-    use crate::vendor::fake_agent::FakeVendorAgent;
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use horsie_models::capabilities::{BlockNetwork, CapabilitySpec, NetworkPolicy};
     use horsie_models::session::SessionStatusKind;
@@ -501,8 +501,8 @@ mod tests {
     }
 
     async fn test_deps(tmp: &tempfile::TempDir) -> ServerDeps {
-        let mut vendors: HashMap<String, Arc<VendorLink>> = HashMap::new();
-        let mock_agent = FakeVendorAgent::builder("mock")
+        let mut vendors: HashMap<String, Arc<RuntimeVendorLink>> = HashMap::new();
+        let mock_agent = FakeRuntimeVendor::builder("mock")
             .serve_in_process()
             .await
             .expect("fake agent");
