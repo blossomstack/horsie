@@ -19,7 +19,7 @@ proxy / auth layer — all still work exactly as before:
 
 **Build the image:**
 
-    docker build -f docker/server.Dockerfile -t horsie-server:latest .
+    docker build -f docker/horsie.Dockerfile --target server -t horsie-server:latest .
 
 **Or build the binary from source** (needs a recent Rust toolchain):
 

@@ -11,10 +11,12 @@ name: Docker
 # the build-provenance attestation. Tags are immutable: sha-<shortsha> on every
 # build, plus <version>/v<version> on release tags. No moving tags.
 #
-# Multi-arch is built on native runners (no QEMU): each (image, arch) builds and
-# pushes by digest, then a per-image merge job assembles the manifest list and
-# applies the tags. The runtime image's arm64 variant is the one velos schedules
-# onto the Apple-Containerization Mac workers.
+# Multi-arch is built on native runners (no QEMU): ONE job per architecture
+# builds ALL THREE images from docker/horsie.Dockerfile's shared build stage
+# (the later build-push steps resolve it CACHED locally), pushes each by
+# digest, then a per-image merge job assembles the manifest lists and applies
+# the tags. The runtime image's arm64 variant is the one velos schedules onto
+# the Apple-Containerization Mac workers.
 on:
   push:
     branches: [main]
@@ -29,32 +31,45 @@ env:
 jobs:
   # PR gate: build every image (single-arch, no push) so a broken Dockerfile is
   # caught before merge. The publish jobs below are skipped on pull_request.
+  # cache-from only: PR builds get warm starts but never write cache, so they
+  # can't evict main's cache entries.
   validate:
-    name: Validate build (${{ matrix.image }})
+    name: Validate build
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { image: horsie,               dockerfile: docker/server.Dockerfile }
-          - { image: horsie-runtime,       dockerfile: docker/runtime.Dockerfile }
-          - { image: horsie-velos-runtime, dockerfile: docker/velos-runtime.Dockerfile }
     steps:
       - uses: actions/checkout@v7
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Build (no push)
+      - name: Build server (no push)
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: docker/horsie.Dockerfile
+          target: server
           platforms: linux/amd64
           push: false
-          cache-from: type=gha,scope=${{ matrix.image }}-linux/amd64
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-linux/amd64
+          cache-from: type=gha,scope=docker-linux/amd64
+      - name: Build runtime (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/horsie.Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=docker-linux/amd64
+      - name: Build velos (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/horsie.Dockerfile
+          target: velos
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=docker-linux/amd64
 
   compose-validate:
     name: Validate docker-compose.yml
@@ -67,8 +82,12 @@ jobs:
       - name: docker compose config
         run: docker compose -f docker/docker-compose.yml config
 
+  # One leg per arch. The server step builds the shared `build` stage (all
+  # three binaries) + web stage; the runtime and velos steps reuse it CACHED
+  # from this job's local buildkit instance, so deps compile once per arch
+  # instead of three times.
   build:
-    name: Build ${{ matrix.image }} (${{ matrix.platform }})
+    name: Build (${{ matrix.platform }})
     if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -78,12 +97,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { key: server,  image: horsie,               dockerfile: docker/server.Dockerfile,        platform: linux/amd64, runner: ubuntu-latest }
-          - { key: server,  image: horsie,               dockerfile: docker/server.Dockerfile,        platform: linux/arm64, runner: ubuntu-24.04-arm }
-          - { key: runtime, image: horsie-runtime,       dockerfile: docker/runtime.Dockerfile,       platform: linux/amd64, runner: ubuntu-latest }
-          - { key: runtime, image: horsie-runtime,       dockerfile: docker/runtime.Dockerfile,       platform: linux/arm64, runner: ubuntu-24.04-arm }
-          - { key: velos,   image: horsie-velos-runtime, dockerfile: docker/velos-runtime.Dockerfile, platform: linux/amd64, runner: ubuntu-latest }
-          - { key: velos,   image: horsie-velos-runtime, dockerfile: docker/velos-runtime.Dockerfile, platform: linux/arm64, runner: ubuntu-24.04-arm }
+          - { platform: linux/amd64, runner: ubuntu-latest }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v7
 
@@ -97,35 +112,79 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push by digest
-        id: build
+      - name: Build and push server by digest
+        id: build-server
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: docker/horsie.Dockerfile
+          target: server
           platforms: ${{ matrix.platform }}
           # Push by digest only; the merge job applies the human-readable tags to
           # the combined manifest list.
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/horsie,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=docker-${{ matrix.platform }}
 
-      - name: Export digest
+      - name: Build and push runtime by digest
+        id: build-runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/horsie.Dockerfile
+          target: runtime
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/horsie-runtime,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=docker-${{ matrix.platform }}
+
+      - name: Build and push velos by digest
+        id: build-velos
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/horsie.Dockerfile
+          target: velos
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/horsie-velos-runtime,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=docker-${{ matrix.platform }}
+          # Single cache writer per scope, after all targets are built:
+          # mode=max exports the shared build stage including cache mounts.
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.platform }}
+
+      - name: Export digests
         run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          mkdir -p /tmp/digests/server /tmp/digests/runtime /tmp/digests/velos
+          server_digest="${{ steps.build-server.outputs.digest }}"
+          runtime_digest="${{ steps.build-runtime.outputs.digest }}"
+          velos_digest="${{ steps.build-velos.outputs.digest }}"
+          touch "/tmp/digests/server/${server_digest#sha256:}"
+          touch "/tmp/digests/runtime/${runtime_digest#sha256:}"
+          touch "/tmp/digests/velos/${velos_digest#sha256:}"
 
-      - name: Upload digest
+      # `key` (server|runtime|velos) — not `image` (horsie|horsie-runtime|
+      # horsie-velos-runtime) — so the merge job's download glob can't
+      # cross-match (horsie is a prefix of both others). Keys must stay
+      # mutually non-prefixing for the same reason.
+      - name: Upload server digest
         uses: actions/upload-artifact@v4
         with:
-          # `key` (server|runtime|velos) — not `image` (horsie|horsie-runtime|
-          # horsie-velos-runtime) — so the merge job's download glob can't
-          # cross-match (horsie is a prefix of both others). Keys must stay
-          # mutually non-prefixing for the same reason. Slashes in the platform
-          # would break the name.
-          name: digest-${{ matrix.key }}-${{ strategy.job-index }}
-          path: /tmp/digests/*
+          name: digest-server-${{ strategy.job-index }}
+          path: /tmp/digests/server/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload runtime digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-runtime-${{ strategy.job-index }}
+          path: /tmp/digests/runtime/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload velos digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-velos-${{ strategy.job-index }}
+          path: /tmp/digests/velos/*
           if-no-files-found: error
           retention-days: 1
 

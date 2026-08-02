@@ -98,7 +98,7 @@ token is rejected, rather than letting the first session discover it.
 - Advanced: `--runtime-bin`, `--workspace-root`, `--cpu`, `--memory-mib`,
   `--connect-timeout-secs`.
 
-**Build the runtime image** from `docker/runtime.Dockerfile` and push it where
+**Build the runtime image** from `docker/horsie.Dockerfile` (target `runtime`) and push it where
 velos workers can pull it.
 
 **Ephemeral by design:** velos has no persistent volumes, so a session's
