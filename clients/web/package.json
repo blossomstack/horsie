@@ -12,7 +12,7 @@
     "test:unit": "vitest run",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "generate-types": "fluorite ts -i ../../models/fluorite/agent.fl ../../models/fluorite/capabilities.fl ../../models/fluorite/session.fl ../../models/fluorite/session_api.fl ../../models/fluorite/settings.fl ../../models/fluorite/github.fl ../../models/fluorite/mcp.fl ../../models/fluorite/plugins.fl ../../models/fluorite/model_cards.fl ../../models/fluorite/memory.fl -o src/generated"
+    "generate-types": "fluorite ts -i ../../models/fluorite/agent.fl ../../models/fluorite/capabilities.fl ../../models/fluorite/session.fl ../../models/fluorite/session_api.fl ../../models/fluorite/settings.fl ../../models/fluorite/github.fl ../../models/fluorite/mcp.fl ../../models/fluorite/plugins.fl ../../models/fluorite/model_cards.fl ../../models/fluorite/memory.fl ../../models/fluorite/auth.fl -o src/generated"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.19",
