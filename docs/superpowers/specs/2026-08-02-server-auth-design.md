@@ -192,10 +192,18 @@ cross-site POSTs outright, and cross-site GETs cannot mutate. Bearer-carrying
 requests are immune by construction, since a cross-origin page cannot set the
 header.
 
-Failed logins get per-IP backoff held in memory: after 3 failures, the next
-attempt is refused with `429` and a `Retry-After`, delay doubling from one
-second to a thirty-second ceiling. The generated password is strong; the one
-the operator replaces it with will not be.
+Failed logins are throttled by *delaying the failure*, not by locking the
+account: a counter of consecutive failures, held in memory and reset on any
+success, makes the fourth and later failures sleep `min(2^(n-3), 30)` seconds
+before answering `401`. A correct password is never delayed. The generated
+password is strong; the one the operator replaces it with will not be.
+
+Rejecting the obvious alternative deliberately: per-IP lockout with `429` is
+the textbook answer and is wrong here. Behind a reverse proxy — the homelab
+Caddy, fly.io — every request arrives from the proxy's address, so all callers
+share one bucket and an attacker locks the admin out of their own server by
+guessing wrong on purpose. Delaying failures throttles guessing without ever
+denying the person who knows the password.
 
 Web UI: a login page shown whenever `/api/auth/status` reports enabled and
 unauthenticated, a logout control in the existing settings navigation, and a
@@ -326,7 +334,8 @@ mistaken for something quietly dropped.
   auth-enabled variant of `test_state`): unauthenticated `/api/sessions` is
   `401` while `/api/health` is `200`; login sets a cookie and the cookie then
   works; logout revokes it; a bearer access token works; expired and revoked
-  tokens are rejected; login backoff triggers; device flow happy path, pending,
+  tokens are rejected; a correct password is never delayed while a fourth
+  consecutive failure is; device flow happy path, pending,
   `slow_down`, expiry, and denial; refresh rotation, and reuse revoking the
   chain.
 - **Vendor**: connect without a token fails before the upgrade; a `web` token
