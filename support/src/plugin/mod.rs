@@ -6,10 +6,12 @@
 
 pub mod layout;
 pub mod manifest;
+pub mod marketplace;
 pub mod skills;
 
 pub use layout::PluginRoot;
 pub use manifest::PluginManifest;
+pub use marketplace::{Marketplace, MarketplaceEntry, PluginSource};
 
 use sha2::{Digest, Sha256};
 
