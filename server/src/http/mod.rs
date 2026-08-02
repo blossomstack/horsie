@@ -2,6 +2,7 @@
 //! `SessionSupervisor`. All request/response bodies are fluorite wire types.
 
 mod admin;
+mod auth;
 mod config;
 pub mod error;
 mod github;
@@ -13,6 +14,7 @@ mod plugins;
 mod sse;
 pub mod vendor_connect;
 
+use crate::auth::AuthService;
 use crate::config::ConfigStore;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Router;
@@ -63,6 +65,10 @@ pub struct AppState {
     /// sessions select from. Held here so the connect route can register a
     /// freshly handshaken link.
     pub vendor_agents: Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
+    /// The single admin account, the tokens it issues, and the policy the
+    /// `/api` middleware applies. Disabled deployments get a service whose
+    /// `enabled()` is false and which passes every request through.
+    pub auth: Arc<AuthService>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
@@ -151,6 +157,17 @@ pub fn app(state: AppState) -> Router {
                 .delete(memory::delete_memory),
         )
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
+        .route("/api/auth/status", get(auth::status))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/password", post(auth::change_password))
+        // Guards every route above. The SPA shell and its assets, added below,
+        // are deliberately outside it: the app has to load in order to render a
+        // login page, and the bundle holds no secrets.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ))
         .with_state(state);
 
     match web_dir {
@@ -249,10 +266,21 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = broadcast::channel(64);
         let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
+        // Auth off: every pre-existing test builds unauthenticated requests,
+        // and a disabled deployment is a real supported configuration, not a
+        // test-only escape. `auth_state` turns it on.
+        let auth = Arc::new(crate::auth::AuthService::new(
+            crate::auth::AuthStore::new(opened.pool.clone()),
+            crate::auth::AuthDeps {
+                enabled: false,
+                state_dir: tmp.path().to_path_buf(),
+            },
+        ));
         AppState {
             supervisor,
             journal,
             global_events: gtx,
+            auth,
             config_store: opened.store,
             model_cards,
             github,
@@ -262,6 +290,57 @@ mod tests {
             vendor_agents,
             web_dir: None,
         }
+    }
+
+    /// `test_state` with authentication enabled and the admin account
+    /// bootstrapped. Returns the state and the generated password.
+    ///
+    /// Opens a second pool on the same file `test_state` already created and
+    /// migrated, rather than reaching through the `Arc<dyn ConfigStore>` trait
+    /// object for its pool — the auth tables live in that database, but auth
+    /// has no business widening the config trait to get at them.
+    async fn auth_state(tmp: &tempfile::TempDir) -> (AppState, String) {
+        use std::str::FromStr;
+        let mut state = test_state(tmp).await;
+        let url = format!("sqlite://{}/config.db", tmp.path().display());
+        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
+        let svc = Arc::new(crate::auth::AuthService::new(
+            crate::auth::AuthStore::new(pool),
+            crate::auth::AuthDeps {
+                enabled: true,
+                state_dir: tmp.path().to_path_buf(),
+            },
+        ));
+        let password = svc.bootstrap().await.unwrap().expect("bootstrapped");
+        state.auth = svc;
+        (state, password)
+    }
+
+    /// The `Set-Cookie` session value from a login response.
+    fn session_cookie(res: &axum::response::Response) -> String {
+        let raw = res
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("set-cookie")
+            .to_str()
+            .unwrap();
+        raw.split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches("horsie_session=")
+            .to_string()
+    }
+
+    fn get_with_cookie(uri: &str, cookie: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header("cookie", format!("horsie_session={cookie}"))
+            .body(Body::empty())
+            .unwrap()
     }
 
     fn get(uri: &str) -> Request<Body> {
@@ -950,5 +1029,228 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("agent never registered as a vendor");
+    }
+
+    #[tokio::test]
+    async fn with_auth_disabled_everything_is_reachable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app.oneshot(get("/api/auth/status")).await.unwrap();
+        let status: horsie_models::auth::AuthStatus = read_json(res).await;
+        assert!(!status.enabled);
+        assert!(!status.authenticated);
+    }
+
+    #[tokio::test]
+    async fn with_auth_enabled_the_api_is_closed_but_health_and_status_are_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _pw) = auth_state(&tmp).await;
+        let app = app(state);
+
+        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app.clone().oneshot(get("/api/health")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app.oneshot(get("/api/auth/status")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let status: horsie_models::auth::AuthStatus = read_json(res).await;
+        assert!(status.enabled);
+        assert!(!status.authenticated);
+        // Never leaked to an anonymous caller.
+        assert!(!status.must_change_password);
+    }
+
+    #[tokio::test]
+    async fn login_sets_a_cookie_that_opens_the_api_and_logout_closes_it_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        let app = app(state);
+
+        // Wrong password.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &serde_json::json!({"password": "nope"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        // Right password.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &serde_json::json!({"password": pw}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let raw_cookie = res
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(raw_cookie.contains("HttpOnly"), "{raw_cookie}");
+        assert!(raw_cookie.contains("SameSite=Lax"), "{raw_cookie}");
+        assert!(raw_cookie.contains("Path=/"), "{raw_cookie}");
+        let cookie = session_cookie(&res);
+
+        // The cookie opens the API.
+        let res = app
+            .clone()
+            .oneshot(get_with_cookie("/api/sessions", &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // ...and reports an authenticated status that admits the generated password.
+        let res = app
+            .clone()
+            .oneshot(get_with_cookie("/api/auth/status", &cookie))
+            .await
+            .unwrap();
+        let status: horsie_models::auth::AuthStatus = read_json(res).await;
+        assert!(status.authenticated);
+        assert!(status.must_change_password);
+
+        // Logout revokes it.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header("cookie", format!("horsie_session={cookie}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .oneshot(get_with_cookie("/api/sessions", &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_bearer_token_is_accepted_and_a_bogus_one_is_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        let secret = state.auth.login(&pw).await.unwrap();
+        let app = app(state);
+
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {secret}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", "Bearer hsk_web_notarealtoken")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_the_password_requires_the_current_one_and_then_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        let app = app(state);
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &serde_json::json!({"password": pw}),
+            ))
+            .await
+            .unwrap();
+        let cookie = session_cookie(&res);
+
+        let change = |body: serde_json::Value, cookie: String| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/password")
+                .header("content-type", "application/json")
+                .header("cookie", format!("horsie_session={cookie}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        };
+
+        let res = app
+            .clone()
+            .oneshot(change(
+                serde_json::json!({"currentPassword": "wrong", "newPassword": "a-good-one"}),
+                cookie.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .clone()
+            .oneshot(change(
+                serde_json::json!({"currentPassword": pw, "newPassword": "short"}),
+                cookie.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let res = app
+            .clone()
+            .oneshot(change(
+                serde_json::json!({"currentPassword": pw, "newPassword": "a-good-one"}),
+                cookie.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // The caller's own session survives, and the flag has cleared.
+        let res = app
+            .oneshot(get_with_cookie("/api/auth/status", &cookie))
+            .await
+            .unwrap();
+        let status: horsie_models::auth::AuthStatus = read_json(res).await;
+        assert!(status.authenticated);
+        assert!(!status.must_change_password);
+    }
+
+    #[tokio::test]
+    async fn the_spa_shell_is_reachable_without_a_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(web.join("assets")).unwrap();
+        std::fs::write(web.join("index.html"), "<html>app</html>").unwrap();
+        std::fs::write(web.join("favicon.svg"), "<svg/>").unwrap();
+
+        let (mut state, _pw) = auth_state(&tmp).await;
+        state.web_dir = Some(web);
+        let app = app(state);
+
+        let res = app.oneshot(get("/settings")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 }

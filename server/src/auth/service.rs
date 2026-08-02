@@ -256,7 +256,8 @@ mod tests {
         let url = format!("sqlite://{}/t.db", tmp.path().display());
         let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
             .unwrap()
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
         let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         AuthService::new(

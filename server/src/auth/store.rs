@@ -254,7 +254,8 @@ mod tests {
         let url = format!("sqlite://{}/t.db", tmp.path().display());
         let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
             .unwrap()
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
         let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         (AuthStore::new(pool), tmp)
@@ -266,7 +267,10 @@ mod tests {
         assert_eq!(s.user_count().await.unwrap(), 0);
         assert!(s.get_user("admin").await.unwrap().is_none());
 
-        let id = s.create_user("admin", "phc-hash", true, 1000).await.unwrap();
+        let id = s
+            .create_user("admin", "phc-hash", true, 1000)
+            .await
+            .unwrap();
         assert_eq!(s.user_count().await.unwrap(), 1);
 
         let u = s.get_user("admin").await.unwrap().unwrap();

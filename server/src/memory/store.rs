@@ -331,7 +331,11 @@ mod tests {
         let url = format!("sqlite://{}/t.db", tmp.path().display());
         let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
             .unwrap()
-            .create_if_missing(true);
+            .create_if_missing(true)
+            // Mirrors `config::store::open_pool`. Without it, a write that
+            // lands while another pooled connection holds the database fails
+            // outright, which made this module's tests flaky under load.
+            .busy_timeout(std::time::Duration::from_secs(5));
         let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         (MemoryStore::new(pool), tmp)
