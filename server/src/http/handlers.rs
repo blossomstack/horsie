@@ -77,6 +77,7 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         mcp_servers: w.mcp_servers.unwrap_or_default(),
         memory_spaces: w.memory_spaces.unwrap_or_default(),
         thinking_effort: w.thinking_effort,
+        max_concurrent_subagents: w.max_concurrent_subagents,
     }
 }
 
