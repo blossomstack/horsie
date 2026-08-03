@@ -171,6 +171,10 @@ pub async fn tail(
     );
 
     let client = reqwest::Client::new();
+    // Resolved once: a refresh mid-tail would be a new access token the
+    // reconnect loop could not see anyway, and a tail that outlives its access
+    // token reconnects and re-resolves from the top.
+    let token = crate::auth::resolve_token(server).await?;
     let url = format!(
         "{}/api/sessions/{session_id}/events",
         server.trim_end_matches('/')
@@ -184,6 +188,9 @@ pub async fn tail(
     // stream; `break` reconnects, `return` exits (Ctrl-C, unknown session).
     loop {
         let mut req = client.get(&url);
+        if let Some(t) = &token {
+            req = req.bearer_auth(t);
+        }
         if let Some(seq) = sink.cursor() {
             req = req.header("Last-Event-ID", seq.to_string());
         }
@@ -207,6 +214,16 @@ pub async fn tail(
                     {
                         es.close();
                         return Err(CliError::Server(format!("no such session: {session_id}")));
+                    }
+                    // Reconnecting cannot fix a missing credential, so say what
+                    // to do instead of retrying forever.
+                    Some(Err(reqwest_eventsource::Error::InvalidStatusCode(status, _)))
+                        if status == reqwest::StatusCode::UNAUTHORIZED =>
+                    {
+                        es.close();
+                        return Err(CliError::Server(format!(
+                            "not authorized for {server} — run `horsie auth login --server {server}`"
+                        )));
                     }
                     Some(Err(reqwest_eventsource::Error::StreamEnded)) => break,
                     Some(Err(e)) => {
@@ -260,7 +277,7 @@ fn scan_last_seq(path: &Path) -> Result<Option<u64>, CliError> {
 
 /// `horsie session list` — every session the server knows about.
 pub async fn list(server: &str) -> Result<(), CliError> {
-    let sessions = ServerClient::new(server).list_sessions().await?;
+    let sessions = ServerClient::new(server).await?.list_sessions().await?;
     print!("{}", render_session_table(&sessions, now_ms()));
     Ok(())
 }
@@ -268,7 +285,10 @@ pub async fn list(server: &str) -> Result<(), CliError> {
 /// `horsie session status <id>` — a point-in-time snapshot (live progress is
 /// `session tail`'s job).
 pub async fn status(server: &str, session_id: &str) -> Result<(), CliError> {
-    let detail = ServerClient::new(server).get_session(session_id).await?;
+    let detail = ServerClient::new(server)
+        .await?
+        .get_session(session_id)
+        .await?;
     print!("{}", render_session_detail(&detail, now_ms()));
     Ok(())
 }

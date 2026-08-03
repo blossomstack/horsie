@@ -20,10 +20,50 @@ const MIN_PASSWORD_LEN: usize = 8;
 
 pub const INITIAL_PASSWORD_FILE: &str = "initial-admin-password";
 
+/// CLI access tokens live an hour; the refresh token carries the session.
+pub const ACCESS_TOKEN_TTL_SECS: i64 = 60 * 60;
+const REFRESH_TOKEN_TTL_SECS: i64 = 90 * 24 * 60 * 60;
+/// Long enough to walk to a browser, short enough that a guessed user code is
+/// worthless.
+pub const DEVICE_CODE_TTL_SECS: u32 = 600;
+pub const DEVICE_POLL_INTERVAL_SECS: u32 = 5;
+
+/// No vowels (so no code spells a word), and no `0`/`O`/`1`/`I` (so nothing is
+/// misread off a terminal). 28 symbols over 8 places is ~38 bits, which a
+/// ten-minute expiry and a poll floor make untargetable.
+pub const USER_CODE_ALPHABET: &str = "BCDFGHJKLMNPQRSTVWXZ23456789";
+const USER_CODE_LEN: usize = 8;
+
 #[derive(Debug)]
 pub enum LoginError {
     BadCredentials,
     WeakPassword(String),
+    Internal(String),
+}
+
+/// What `POST /api/auth/device/code` hands the CLI.
+pub struct DeviceAuthorization {
+    pub device_code: String,
+    pub user_code: String,
+    pub expires_in: u32,
+    pub interval: u32,
+}
+
+/// An access/refresh pair. Both are opaque secrets; only their hashes persist.
+pub struct IssuedTokens {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
+}
+
+/// Poll and refresh failures. The names are RFC 8628's because they are
+/// already the right words, even though the wire format here is our own.
+#[derive(Debug)]
+pub enum DeviceError {
+    AuthorizationPending,
+    SlowDown,
+    ExpiredToken,
+    AccessDenied,
     Internal(String),
 }
 
@@ -222,6 +262,215 @@ impl AuthService {
             token_id: row.id,
         }))
     }
+    /// Issue a device code + user code. Expired codes are purged on the way in,
+    /// which is the only cleanup this table needs.
+    pub async fn start_device_authorization(&self) -> Result<DeviceAuthorization, String> {
+        let now = now_secs();
+        self.store.purge_expired_device_codes(now).await?;
+
+        let device = generate(TokenKind::Refresh);
+        let user_code = generate_user_code();
+        self.store
+            .insert_device_code(
+                &device.hash,
+                &user_code,
+                now,
+                now + i64::from(DEVICE_CODE_TTL_SECS),
+            )
+            .await?;
+        Ok(DeviceAuthorization {
+            device_code: device.secret,
+            user_code,
+            expires_in: DEVICE_CODE_TTL_SECS,
+            interval: DEVICE_POLL_INTERVAL_SECS,
+        })
+    }
+
+    /// Approve a pending code on behalf of the logged-in browser. `false` means
+    /// the code is unknown, expired, or already answered.
+    pub async fn approve_device(
+        &self,
+        user_code: &str,
+        principal: &Principal,
+    ) -> Result<bool, String> {
+        self.store
+            .approve_device_code(&normalize_user_code(user_code), principal, now_secs())
+            .await
+    }
+
+    pub async fn deny_device(&self, user_code: &str) -> Result<bool, String> {
+        self.store
+            .deny_device_code(&normalize_user_code(user_code), now_secs())
+            .await
+    }
+
+    /// One poll. Unknown and expired are the same answer deliberately: a caller
+    /// holding a code we have no record of learns nothing by being told which.
+    pub async fn poll_device_token(&self, device_code: &str) -> Result<IssuedTokens, DeviceError> {
+        let now = now_secs();
+        let hash = hash_secret(device_code);
+        let row = self
+            .store
+            .get_device_code(&hash)
+            .await
+            .map_err(DeviceError::Internal)?
+            .ok_or(DeviceError::ExpiredToken)?;
+
+        if row.consumed_at.is_some() || row.expires_at <= now {
+            return Err(DeviceError::ExpiredToken);
+        }
+        if row.denied_at.is_some() {
+            return Err(DeviceError::AccessDenied);
+        }
+
+        // An approved code is served immediately, without the poll floor. Rate
+        // limiting exists to stop a tight loop hammering *while pending*; a
+        // code can only be redeemed once, so delaying the one poll that
+        // succeeds would buy nothing and cost the user a needless wait.
+        if let Some(principal) = row.principal {
+            self.store
+                .consume_device_code(&hash, now)
+                .await
+                .map_err(DeviceError::Internal)?;
+            return self
+                .issue_pair(&principal, &uuid::Uuid::new_v4().to_string(), now)
+                .await
+                .map_err(DeviceError::Internal);
+        }
+
+        if row
+            .last_polled_at
+            .is_some_and(|t| now - t < i64::from(DEVICE_POLL_INTERVAL_SECS))
+        {
+            return Err(DeviceError::SlowDown);
+        }
+        self.store
+            .mark_device_polled(&hash, now)
+            .await
+            .map_err(DeviceError::Internal)?;
+        Err(DeviceError::AuthorizationPending)
+    }
+
+    /// Rotate a refresh token. Presenting one that was already rotated away
+    /// revokes its whole chain — the only signal available that a credential
+    /// file was copied.
+    pub async fn refresh(&self, refresh_token: &str) -> Result<IssuedTokens, DeviceError> {
+        if parse(refresh_token) != Some(TokenKind::Refresh) {
+            return Err(DeviceError::AccessDenied);
+        }
+        let now = now_secs();
+        let hash = hash_secret(refresh_token);
+        let row = self
+            .store
+            .lookup_token_including_revoked(&hash)
+            .await
+            .map_err(DeviceError::Internal)?
+            .ok_or(DeviceError::AccessDenied)?;
+
+        if row.kind != TokenKind::Refresh {
+            return Err(DeviceError::AccessDenied);
+        }
+        if row.revoked_at.is_some() {
+            if let Some(chain) = row.chain_id.as_deref() {
+                self.store
+                    .revoke_chain(chain, now)
+                    .await
+                    .map_err(DeviceError::Internal)?;
+                tracing::warn!(chain, "a rotated refresh token was replayed; chain revoked");
+            }
+            return Err(DeviceError::AccessDenied);
+        }
+        if row.expires_at.is_some_and(|e| e <= now) {
+            return Err(DeviceError::AccessDenied);
+        }
+
+        let chain = row
+            .chain_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Retire the presented token first: a failure after this point costs
+        // the caller a re-login, whereas leaving it live would let the same
+        // secret mint pairs forever.
+        self.store
+            .revoke_token(&row.id, now)
+            .await
+            .map_err(DeviceError::Internal)?;
+        self.issue_pair(&row.principal, &chain, now)
+            .await
+            .map_err(DeviceError::Internal)
+    }
+
+    /// Mint an access/refresh pair on one rotation chain.
+    async fn issue_pair(
+        &self,
+        principal: &Principal,
+        chain_id: &str,
+        now: i64,
+    ) -> Result<IssuedTokens, String> {
+        let access = generate(TokenKind::Access);
+        let refresh = generate(TokenKind::Refresh);
+        self.store
+            .insert_token(
+                &uuid::Uuid::new_v4().to_string(),
+                TokenKind::Access,
+                principal,
+                &access.hash,
+                None,
+                Some(chain_id),
+                Some(now + ACCESS_TOKEN_TTL_SECS),
+                now,
+            )
+            .await?;
+        self.store
+            .insert_token(
+                &uuid::Uuid::new_v4().to_string(),
+                TokenKind::Refresh,
+                principal,
+                &refresh.hash,
+                None,
+                Some(chain_id),
+                Some(now + REFRESH_TOKEN_TTL_SECS),
+                now,
+            )
+            .await?;
+        Ok(IssuedTokens {
+            access_token: access.secret,
+            refresh_token: refresh.secret,
+            expires_in: ACCESS_TOKEN_TTL_SECS,
+        })
+    }
+}
+
+fn generate_user_code() -> String {
+    use rand::Rng;
+    let alphabet: Vec<char> = USER_CODE_ALPHABET.chars().collect();
+    let mut rng = rand::thread_rng();
+    let mut out = String::with_capacity(USER_CODE_LEN + 1);
+    for i in 0..USER_CODE_LEN {
+        if i == USER_CODE_LEN / 2 {
+            out.push('-');
+        }
+        out.push(alphabet[rng.gen_range(0..alphabet.len())]);
+    }
+    out
+}
+
+/// Accept what a human actually types: lowercase, and with or without the dash.
+fn normalize_user_code(input: &str) -> String {
+    let bare: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if bare.len() == USER_CODE_LEN {
+        format!(
+            "{}-{}",
+            &bare[..USER_CODE_LEN / 2],
+            &bare[USER_CODE_LEN / 2..]
+        )
+    } else {
+        bare
+    }
 }
 
 fn now_secs() -> i64 {
@@ -326,12 +575,16 @@ mod tests {
                 Err(LoginError::BadCredentials)
             ));
         }
-        // Failures are now delayed, but the correct password still answers at once.
+        // Further failures would now be delayed...
         assert!(svc.delay_before_failure() > std::time::Duration::ZERO);
-        let started = std::time::Instant::now();
+        // ...but the correct password is still accepted, and clears the delay.
+        //
+        // Deliberately not asserted by timing the call: a successful login also
+        // writes a token row, so under load the measurement is dominated by
+        // argon2 and SQLite rather than by the throttle. That `login` sleeps
+        // only on the failure branch is plain in the code, and the delay
+        // arithmetic itself is covered in `throttle.rs`.
         svc.login(&pw).await.unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        // ...and success cleared the delay.
         assert_eq!(svc.delay_before_failure(), std::time::Duration::ZERO);
     }
 
@@ -387,6 +640,167 @@ mod tests {
         assert!(matches!(
             svc.change_password(&pw, "short", &session).await,
             Err(LoginError::WeakPassword(_))
+        ));
+    }
+
+    #[test]
+    fn user_codes_are_normalized_the_way_people_type_them() {
+        assert_eq!(normalize_user_code("bcdf-ghjk"), "BCDF-GHJK");
+        assert_eq!(normalize_user_code("bcdfghjk"), "BCDF-GHJK");
+        assert_eq!(normalize_user_code(" BCDF GHJK "), "BCDF-GHJK");
+        // Anything not eight characters is passed through for the store to miss.
+        assert_eq!(normalize_user_code("short"), "SHORT");
+    }
+
+    #[tokio::test]
+    async fn a_user_code_is_readable_and_unambiguous() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service(&tmp, true).await;
+        svc.bootstrap().await.unwrap();
+        let d = svc.start_device_authorization().await.unwrap();
+
+        assert_eq!(d.user_code.len(), 9, "XXXX-XXXX");
+        assert_eq!(d.user_code.chars().nth(4), Some('-'));
+        assert!(
+            d.user_code
+                .chars()
+                .filter(|c| *c != '-')
+                .all(|c| USER_CODE_ALPHABET.contains(c)),
+            "{}",
+            d.user_code
+        );
+        // Nothing a human can misread between O/0, I/1, or misspell as a word.
+        for bad in ['O', '0', 'I', '1', 'A', 'E', 'U'] {
+            assert!(!d.user_code.contains(bad), "{} in {}", bad, d.user_code);
+        }
+        assert!(d.device_code.starts_with("hsk_"));
+        assert_eq!(d.interval, DEVICE_POLL_INTERVAL_SECS);
+        assert_eq!(d.expires_in, DEVICE_CODE_TTL_SECS);
+    }
+
+    #[tokio::test]
+    async fn polling_walks_pending_then_approved_then_refuses_a_second_redemption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service(&tmp, true).await;
+        svc.bootstrap().await.unwrap();
+        let d = svc.start_device_authorization().await.unwrap();
+
+        assert!(matches!(
+            svc.poll_device_token(&d.device_code).await,
+            Err(DeviceError::AuthorizationPending)
+        ));
+
+        assert!(
+            svc.approve_device(&d.user_code, &Principal::User(1))
+                .await
+                .unwrap()
+        );
+
+        let issued = svc.poll_device_token(&d.device_code).await.unwrap();
+        assert!(issued.access_token.starts_with("hsk_usr_"));
+        assert!(issued.refresh_token.starts_with("hsk_ref_"));
+        assert_eq!(issued.expires_in, ACCESS_TOKEN_TTL_SECS);
+
+        // The access token authenticates as the approver.
+        let v = svc.verify(&issued.access_token).await.unwrap().unwrap();
+        assert_eq!(v.principal, Principal::User(1));
+        assert_eq!(v.kind, TokenKind::Access);
+
+        // A consumed code cannot mint a second pair.
+        assert!(matches!(
+            svc.poll_device_token(&d.device_code).await,
+            Err(DeviceError::ExpiredToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_denied_code_reports_access_denied_and_an_unknown_one_expires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service(&tmp, true).await;
+        svc.bootstrap().await.unwrap();
+        let d = svc.start_device_authorization().await.unwrap();
+
+        assert!(svc.deny_device(&d.user_code).await.unwrap());
+        assert!(matches!(
+            svc.poll_device_token(&d.device_code).await,
+            Err(DeviceError::AccessDenied)
+        ));
+        // Answering twice is refused.
+        assert!(!svc.deny_device(&d.user_code).await.unwrap());
+        assert!(
+            !svc.approve_device(&d.user_code, &Principal::User(1))
+                .await
+                .unwrap()
+        );
+
+        // An unknown device code is indistinguishable from an expired one.
+        assert!(matches!(
+            svc.poll_device_token("hsk_ref_nosuchcode").await,
+            Err(DeviceError::ExpiredToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn polling_faster_than_the_interval_is_told_to_slow_down() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service(&tmp, true).await;
+        svc.bootstrap().await.unwrap();
+        let d = svc.start_device_authorization().await.unwrap();
+
+        assert!(matches!(
+            svc.poll_device_token(&d.device_code).await,
+            Err(DeviceError::AuthorizationPending)
+        ));
+        // Immediately again: too fast.
+        assert!(matches!(
+            svc.poll_device_token(&d.device_code).await,
+            Err(DeviceError::SlowDown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_rotates_and_replaying_the_old_token_kills_the_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service(&tmp, true).await;
+        svc.bootstrap().await.unwrap();
+        let d = svc.start_device_authorization().await.unwrap();
+        svc.approve_device(&d.user_code, &Principal::User(1))
+            .await
+            .unwrap();
+        let first = svc.poll_device_token(&d.device_code).await.unwrap();
+
+        let second = svc.refresh(&first.refresh_token).await.unwrap();
+        assert_ne!(first.refresh_token, second.refresh_token);
+        assert_ne!(first.access_token, second.access_token);
+        // The rotated-away refresh token is dead.
+        assert!(svc.verify(&first.refresh_token).await.unwrap().is_none());
+        // The new pair works.
+        assert!(svc.verify(&second.access_token).await.unwrap().is_some());
+
+        // Replaying the old refresh token is the only signal available that a
+        // credential file was copied: kill everything it could have produced.
+        assert!(matches!(
+            svc.refresh(&first.refresh_token).await,
+            Err(DeviceError::AccessDenied)
+        ));
+        assert!(svc.verify(&second.access_token).await.unwrap().is_none());
+        assert!(svc.verify(&second.refresh_token).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_anything_that_is_not_a_live_refresh_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service(&tmp, true).await;
+        let pw = svc.bootstrap().await.unwrap().unwrap();
+        let web = svc.login(&pw).await.unwrap();
+
+        assert!(matches!(
+            svc.refresh(&web).await,
+            Err(DeviceError::AccessDenied)
+        ));
+        assert!(matches!(
+            svc.refresh("not-a-token").await,
+            Err(DeviceError::AccessDenied)
         ));
     }
 }

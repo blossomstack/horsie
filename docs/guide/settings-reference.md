@@ -57,6 +57,7 @@ ignored (skill bundles are managed from the UI now).
 | --- | --- |
 | `HORSIE_DATABASE_URL` | Overrides `database.url`. Takes precedence over the config file. |
 | `HORSIE_ARTIFACT_SECRET` | Signing secret for the short-lived tokens runtimes use to fetch skill bundles. Unset → a random per-process secret (fine for a single instance). Set a stable value if you run more than one server instance. |
+| `HORSIE_TOKEN` | Bearer token the CLI sends instead of reading `~/.config/horsie/credentials.json`. For scripts and CI. |
 | `HORSIE_AUTH_ENABLED` | Overrides `auth.enabled`. `false`/`0`/`no` turns authentication off; `true`/`1`/`yes` turns it on. An unrecognised value falls through to the config file rather than silently disabling it. |
 
 ## Settings database (managed in the UI)

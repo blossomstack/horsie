@@ -3,6 +3,7 @@ import type {
   AgentView,
   ApiError,
   AuthStatus,
+  DeviceApprovalRequest,
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
@@ -113,6 +114,18 @@ export const api = {
 
     changePassword: (body: PasswordChangeRequest): Promise<AuthStatus> =>
       request("/auth/password", { method: "POST", body: JSON.stringify(body) }),
+
+    approveDevice: (userCode: string): Promise<void> =>
+      request("/auth/device/approve", {
+        method: "POST",
+        body: JSON.stringify({ userCode } satisfies DeviceApprovalRequest),
+      }),
+
+    denyDevice: (userCode: string): Promise<void> =>
+      request("/auth/device/deny", {
+        method: "POST",
+        body: JSON.stringify({ userCode } satisfies DeviceApprovalRequest),
+      }),
   },
 
   sessions: {

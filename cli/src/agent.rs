@@ -18,13 +18,13 @@ pub fn truncate(s: &str, max: usize) -> String {
 }
 
 pub async fn list(server: &str) -> Result<(), CliError> {
-    let agents = ServerClient::new(server).list_agents().await?;
+    let agents = ServerClient::new(server).await?.list_agents().await?;
     print!("{}", render_agent_table(&agents));
     Ok(())
 }
 
 pub async fn get(server: &str, name: &str) -> Result<(), CliError> {
-    let agent = ServerClient::new(server).get_agent(name).await?;
+    let agent = ServerClient::new(server).await?.get_agent(name).await?;
     print!("{}", render_agent_detail(&agent));
     Ok(())
 }
@@ -37,7 +37,7 @@ pub async fn invoke(
     message: String,
     session_name: Option<String>,
 ) -> Result<(), CliError> {
-    let client = ServerClient::new(server);
+    let client = ServerClient::new(server).await?;
     let res = client
         .invoke_agent(
             name,

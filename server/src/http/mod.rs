@@ -175,6 +175,11 @@ pub fn app(state: AppState) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/password", post(auth::change_password))
+        .route("/api/auth/device/code", post(auth::device_code))
+        .route("/api/auth/device/token", post(auth::device_token))
+        .route("/api/auth/device/approve", post(auth::device_approve))
+        .route("/api/auth/device/deny", post(auth::device_deny))
+        .route("/api/auth/refresh", post(auth::refresh))
         // Guards every route above. The SPA shell and its assets, added below,
         // are deliberately outside it: the app has to load in order to render a
         // login page, and the bundle holds no secrets.
@@ -1471,5 +1476,197 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn the_device_flow_issues_tokens_that_open_the_api() {
+        use horsie_models::auth::{DeviceCodeResponse, TokenPair};
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        let app = app(state);
+
+        // The CLI starts a device authorization without any credential.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/auth/device/code", &serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let device: DeviceCodeResponse = read_json(res).await;
+        assert!(device.verification_uri.ends_with("/auth/device"));
+        assert!(device.verification_uri_complete.contains(&device.user_code));
+
+        // Polling before approval is pending, not an error.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/device/token",
+                &serde_json::json!({"deviceCode": device.device_code}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let err: horsie_models::session_api::ApiError = read_json(res).await;
+        assert_eq!(err.code, "authorization_pending");
+
+        // Approving needs a logged-in browser.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/device/approve",
+                &serde_json::json!({"userCode": device.user_code}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &serde_json::json!({"password": pw}),
+            ))
+            .await
+            .unwrap();
+        let cookie = session_cookie(&res);
+
+        let approve = Request::builder()
+            .method("POST")
+            .uri("/api/auth/device/approve")
+            .header("content-type", "application/json")
+            .header("cookie", format!("horsie_session={cookie}"))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({"userCode": device.user_code})).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(approve).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // The next poll mints the pair immediately: an approved code skips the
+        // poll floor, so this test needs no sleep.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/device/token",
+                &serde_json::json!({"deviceCode": device.device_code}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let pair: TokenPair = read_json(res).await;
+
+        // The access token opens the API as a bearer.
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {}", pair.access_token))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // Refresh rotates, unauthenticated (the refresh token is the credential).
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/refresh",
+                &serde_json::json!({"refreshToken": pair.refresh_token}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let rotated: TokenPair = read_json(res).await;
+        assert_ne!(rotated.refresh_token, pair.refresh_token);
+
+        // Replaying the old refresh token is refused.
+        let res = app
+            .oneshot(post_json(
+                "/api/auth/refresh",
+                &serde_json::json!({"refreshToken": pair.refresh_token}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn denying_a_device_code_reports_access_denied_to_the_poller() {
+        use horsie_models::auth::DeviceCodeResponse;
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        let app = app(state);
+
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/auth/device/code", &serde_json::json!({})))
+            .await
+            .unwrap();
+        let device: DeviceCodeResponse = read_json(res).await;
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &serde_json::json!({"password": pw}),
+            ))
+            .await
+            .unwrap();
+        let cookie = session_cookie(&res);
+
+        let deny = Request::builder()
+            .method("POST")
+            .uri("/api/auth/device/deny")
+            .header("content-type", "application/json")
+            .header("cookie", format!("horsie_session={cookie}"))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({"userCode": device.user_code})).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(deny).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let res = app
+            .oneshot(post_json(
+                "/api/auth/device/token",
+                &serde_json::json!({"deviceCode": device.device_code}),
+            ))
+            .await
+            .unwrap();
+        let err: horsie_models::session_api::ApiError = read_json(res).await;
+        assert_eq!(err.code, "access_denied");
+    }
+
+    #[tokio::test]
+    async fn approving_an_unknown_user_code_is_a_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        let app = app(state);
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &serde_json::json!({"password": pw}),
+            ))
+            .await
+            .unwrap();
+        let cookie = session_cookie(&res);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/device/approve")
+            .header("content-type", "application/json")
+            .header("cookie", format!("horsie_session={cookie}"))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({"userCode": "ZZZZ-ZZZZ"})).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(req).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
     }
 }

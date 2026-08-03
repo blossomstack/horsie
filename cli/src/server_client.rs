@@ -11,14 +11,25 @@ use serde::de::DeserializeOwned;
 pub struct ServerClient {
     base: String,
     http: reqwest::Client,
+    /// Bearer sent with every request. `None` when the user has no credential
+    /// for this server — which is correct against a server running with
+    /// authentication disabled, and produces a 401 with a "run `horsie auth
+    /// login`" message against one that does not.
+    token: Option<String>,
 }
 
 impl ServerClient {
-    pub fn new(server: &str) -> Self {
-        Self {
+    /// Build a client, picking up any stored credential for `server`. Async
+    /// because resolving a credential may refresh an expired access token.
+    /// There is deliberately no un-authenticated constructor: a call site that
+    /// forgets one would fail only against servers with auth on, which is the
+    /// configuration least likely to be exercised while developing.
+    pub async fn new(server: &str) -> Result<Self, CliError> {
+        Ok(Self {
             base: server.trim_end_matches('/').to_string(),
             http: reqwest::Client::new(),
-        }
+            token: crate::auth::resolve_token(server).await?,
+        })
     }
 
     pub fn base(&self) -> &str {
@@ -35,6 +46,9 @@ impl ServerClient {
     ) -> Result<T, CliError> {
         let url = format!("{}{path}", self.base);
         let mut req = self.http.request(method, &url);
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -47,6 +61,14 @@ impl ServerClient {
             .bytes()
             .await
             .map_err(|e| CliError::Server(format!("read response from {url}: {e}")))?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            // Nothing about this request can be fixed by retrying it, so say
+            // what to do instead of relaying "unauthorized".
+            return Err(CliError::Server(format!(
+                "not authorized for {base} — run `horsie auth login --server {base}`",
+                base = self.base
+            )));
+        }
         if !status.is_success() {
             let message = serde_json::from_slice::<ApiError>(&bytes)
                 .map(|e| e.message)

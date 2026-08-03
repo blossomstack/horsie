@@ -749,6 +749,33 @@ mod auth_wire_tests {
         assert_eq!(req.current_password, "a");
         assert_eq!(req.new_password, "b");
     }
+
+    #[test]
+    fn device_flow_types_are_camel_case_on_the_wire() {
+        use crate::auth::{DeviceCodeResponse, DeviceTokenRequest, TokenPair};
+        let json = serde_json::to_string(&DeviceCodeResponse {
+            device_code: "d".into(),
+            user_code: "BCDF-GHJK".into(),
+            verification_uri: "http://x/auth/device".into(),
+            verification_uri_complete: "http://x/auth/device?code=BCDF-GHJK".into(),
+            expires_in: 600,
+            interval: 5,
+        })
+        .unwrap();
+        assert!(json.contains("\"deviceCode\""), "{json}");
+        assert!(json.contains("\"verificationUriComplete\""), "{json}");
+
+        let req: DeviceTokenRequest = serde_json::from_str(r#"{"deviceCode":"d"}"#).unwrap();
+        assert_eq!(req.device_code, "d");
+
+        let pair = serde_json::to_string(&TokenPair {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in: 3600,
+        })
+        .unwrap();
+        assert!(pair.contains("\"accessToken\""), "{pair}");
+    }
 }
 
 #[cfg(test)]
