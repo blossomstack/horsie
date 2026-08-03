@@ -198,6 +198,27 @@ The system is deliberately dense and unrounded. Radii are machined (3/4/6/8px), 
 - A status is always a lamp **and** a word. Never colour alone.
 - Every ink clears WCAG AA against every field colour in both themes.
 
+## Skins
+
+Console, described above, is the **default and the reference world**; everything else in this document describes Console unless a section says otherwise. Three alternate worlds ship alongside it, selected on Settings → Appearance and applied as `data-skin` on `<html>`: **Paper** (editorial calm, no panel borders, Libre Franklin, ink blue commits), **Soft** (elevation instead of borders, 6–14px radii, Manrope, violet commits), and **Slate** (reductive monochrome, no borders or shadows, Archivo, Console's orange retained). They live in `clients/web/src/skins.css`.
+
+**A skin replaces material, never structure.** Same components, same layout, same `data-testid`s, same positions — switching skins changes what things are made of and nothing about where they are or what they do. A change that moves an element is a change to every skin.
+
+**What a skin may vary** reaches the app through the seam declared on `:root` in `index.css`: `--face-sans` / `--face-mono`, the `--r-*` radius scale, the `--legend-*` character set (face, size, tracking, transform, width axis), and `--prose-measure` / `--prose-heading-face`. `@theme inline` resolves the Tailwind aliases through those, so a skin re-roles the whole app by declaring variables. Anything a skin needs to vary that is *not* on that list needs a new seam variable, not a call-site override.
+
+**Four invariants bind every skin, Console included:**
+
+1. Material roles hold across modes by **order**, never brightness — `screen` is always the most recessed surface and `raised` always the most lifted, in light and dark alike.
+2. A status is a lamp **and** a word. No skin may reduce one to colour alone.
+3. Syntax highlighting keeps its own `--code-*` palette, distinct from the semantic four.
+4. AA is **measured**. `clients/web/scripts/contrast.mjs` parses `index.css` and `skins.css` and gates all 8 palettes (4 skins × 2 modes); it reads the shipped CSS rather than restating values, so it cannot drift from what users get.
+
+Each skin declares its **full** palette per mode rather than patching Console's — a half-inherited ramp would be verified against numbers it does not use.
+
+**Rules below marked as Console's are Console's.** "No third font family", "no new radius", "no fifth shadow" bind the Console world; a skin carries its own set. The four invariants above bind all of them.
+
+The two extra faces are lazy-loaded by `useTheme` when their skin is chosen, so Console's initial bundle is unchanged by the existence of the others. Slate deliberately reuses Archivo and costs no fetch.
+
 ## Colors
 
 Two full renditions live in `clients/web/src/index.css`: dark on `:root, [data-theme="dark"]` (the primary rendition — the scene is a dim room at 11pm) and light on `[data-theme="light"]`. The frontmatter above carries the dark values; the light counterparts are declared token-for-token in the same file and are normative there. Tailwind aliases are exposed via `@theme inline` (`bg-panel`, `bg-raised`, `bg-screen`, `text-legend`, `text-dim`, `text-faint`, `text-amber-ink`, `text-red-ink`, `text-lamp-ok`, `border-rule`, …) — use those, never a raw hex or a Tailwind palette colour.
@@ -364,11 +385,13 @@ One authored gesture: things arrive by settling into the panel, and values cross
 - **Do** build from the existing classes — `.key`/`.field`/`.panel`/`.screen`/`.legend`/`.readout`/`.chip`/`.lamp`. A new surface should add layout, not new materials.
 - **Do** reach colour through the semantic Tailwind aliases (`bg-panel`, `bg-raised`, `text-dim`, `text-amber-ink`, `border-rule`). Raw hex and Tailwind's stock palette are both out.
 - **Do** pair every lamp with a word — visible, or `sr-only` when the visual pair is an icon. Follow the `TONE_TEXT` map for status colour.
-- **Do** put machine strings (model aliases, vendor names, paths, commands, IDs) in Martian Mono, and sentences in Archivo.
+- **Do** put machine strings (model aliases, vendor names, paths, commands, IDs) in the mono face via `.item-title` / `.field-mono` / `font-mono`, and sentences in the sans. Reach both through `--font-mono` / `--font-sans`, never by naming a family.
 - **Do** use `.readout` for any number that ticks, and `.legend` for the word that names it. Legend above value, mono both.
 - **Do** put raw machine output on a `.screen`. Tool input, tool output, thinking, code — recessed, never a floating card.
-- **Do** re-run `clients/web/scripts/contrast.mjs` after touching any colour token; every ink must stay ≥ 4.5:1 against all four field colours in both themes.
-- **Do** define new colours in both `:root` and `[data-theme="light"]`, and pick light values by *role*, not by lightening the dark value.
+- **Do** re-run `clients/web/scripts/contrast.mjs` after touching any colour token; it gates all 8 palettes (4 skins × 2 modes) and exits non-zero on a failure. Every ink must stay ≥ 4.5:1 against all four field colours.
+- **Do** define new colours in both `:root` and `[data-theme="light"]` **and in each skin's two blocks**, picking light values by *role* rather than by lightening the dark value.
+- **Do** add a new seam variable when a skin needs to vary something the seam does not cover — never a per-skin override at a call site.
+- **Do** use `.page-title` / `.section-title` / `.item-title` for headings; hard-coding a face and size at a call site pins that heading to Console in every skin.
 - **Do** give a new floating surface `shadow-[var(--panel-lift)]` and a new recessed one `var(--screen-inset)`.
 - **Do** give any new column a below-`md` (or below-`lg`, for a third column) collapse — drawer, strip, or overlay — matching the rail, the settings nav, and the task panel.
 
@@ -378,8 +401,8 @@ One authored gesture: things arrive by settling into the panel, and values cross
 - **Don't** drive syntax highlighting, charts, or any decorative colour from `--orange` or `--amber`. Code has its own `--code-*` palette; anything else needs a new semantic token with a stated meaning.
 - **Don't** convey state with colour alone — no bare coloured dot, no red text with no word, no "the button turns green".
 - **Don't** make a light-theme keycap pale. A keycap is a different material from its panel in both themes; pale-on-pale measured 1.16:1 and destroyed the signature separation.
-- **Don't** introduce a new radius. 3 / 4 / 6 / 8px are the scale; `lamp` (999px), `focus` (2px) and `scrollbar` (1px) are reserved to those three parts and nothing else. No pills, no `rounded-full` on a control.
-- **Don't** add a fifth shadow, a glow, or an elevation scale. Lift or recess, four tokens.
-- **Don't** import a font from a CDN or add a third family. horsie servers run on LANs with no internet route; both faces are self-hosted through `@fontsource-variable`.
+- **Don't** introduce a new radius in Console. 3 / 4 / 6 / 8px are its scale, and a skin sets its own through `--r-*`; `lamp` (999px), `focus` (2px) and `scrollbar` (1px) are reserved to those three parts and nothing else. No pills, no `rounded-full` on a control.
+- **Don't** add a fifth shadow, a glow, or an elevation scale to Console. Lift or recess, four tokens; a skin redefines those four rather than adding to them.
+- **Don't** import a font from a CDN, ever — horsie servers run on LANs with no internet route, so every face is self-hosted through `@fontsource-variable`. Console stays on its two faces; a *skin* may bring one more, lazy-loaded when that skin is chosen.
 - **Don't** replace `--screen-inset` when adding a focus ring — append to it.
 - **Don't** set a transcript-width container to anything but `max-w-[54rem]`, or a settings-width one to anything but `max-w-3xl`. Two column widths, consistently applied, are what make the app read as one instrument.
