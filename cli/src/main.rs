@@ -54,6 +54,12 @@ enum Command {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// List routines and trigger runs on a session server.
+    #[command(name = "routines")]
+    Routine {
+        #[command(subcommand)]
+        action: RoutineAction,
+    },
     /// Dial a session server as this machine's runtime — wraps the standalone
     /// `horsie-runtime --endpoint ...` flow so installing `horsie` is enough.
     Connect {
@@ -180,6 +186,35 @@ enum AgentAction {
         /// Optional session title.
         #[arg(long)]
         session_name: Option<String>,
+        /// Session server base URL. Omitted → the configured default server,
+        /// else `https://auth.horsie.dev`.
+        #[arg(long)]
+        server: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RoutineAction {
+    /// List routines.
+    List {
+        /// Session server base URL. Omitted → the configured default server,
+        /// else `https://auth.horsie.dev`.
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Show one routine.
+    Get {
+        /// Routine name.
+        name: String,
+        /// Session server base URL. Omitted → the configured default server,
+        /// else `https://auth.horsie.dev`.
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Trigger a routine run now, creating an unattended session.
+    Invoke {
+        /// Routine name.
+        name: String,
         /// Session server base URL. Omitted → the configured default server,
         /// else `https://auth.horsie.dev`.
         #[arg(long)]
@@ -486,6 +521,23 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             } => {
                 let server = horsie::config::resolve_server(server, None)?;
                 agent::invoke(&server, &name, message, session_name).await?;
+                Ok(0)
+            }
+        },
+        Command::Routine { action } => match action {
+            RoutineAction::List { server } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                horsie::routines::list(&server).await?;
+                Ok(0)
+            }
+            RoutineAction::Get { name, server } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                horsie::routines::get(&server, &name).await?;
+                Ok(0)
+            }
+            RoutineAction::Invoke { name, server } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                horsie::routines::invoke(&server, &name).await?;
                 Ok(0)
             }
         },
