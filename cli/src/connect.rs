@@ -15,7 +15,7 @@ use horsie_models::capabilities::{
     Access, BlockNetwork, CapabilitySpec, Grant, NetworkPolicy, WorkingDirGrant,
 };
 use horsie_runtime_vendor::{
-    ConnectedRuntimeRegistry, FixedWorkspaces, ProcessRuntimeProvider, RuntimeEndpoint,
+    AgentExit, ConnectedRuntimeRegistry, FixedWorkspaces, ProcessRuntimeProvider, RuntimeEndpoint,
     RuntimeListenerServer, RuntimeVendor, SandboxPolicy, serve_runtime_connections,
 };
 use std::collections::HashMap;
@@ -342,7 +342,16 @@ pub async fn run(
     agent
         .run(&endpoint, credential, cancel.clone())
         .await
-        .map_err(CliError::Executor)?;
+        .map_err(|e| match e {
+            // The only failure an operator can act on from here, so say how:
+            // the name is the one thing they chose and the one thing they can
+            // change.
+            AgentExit::NameRefused(reason) => CliError::Executor(format!(
+                "{reason}. Stop the agent already serving it, or run with \
+                 `--name <label>` to serve under a different one."
+            )),
+            AgentExit::Fatal(reason) => CliError::Executor(reason),
+        })?;
     Ok(0)
 }
 

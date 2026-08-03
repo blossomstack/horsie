@@ -27,6 +27,7 @@ use horsie_models::runtime::{
 use horsie_models::runtime_vendor::{
     CreateRuntimeRequest, RuntimeRelayRequest, RuntimeSpec, RuntimeVendorCommand,
     RuntimeVendorEvent, RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage,
+    VendorRegistered,
 };
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -109,6 +110,21 @@ async fn send_command(
         .expect("send command");
 }
 
+/// Answer the handshake the way the real server does. The agent waits for this
+/// before it serves anything, so a stand-in that stayed silent would look like a
+/// server that never published it.
+async fn confirm_registration(
+    ws: &mut WebSocketStream<tokio::net::TcpStream>,
+    boot: &RuntimeVendorOutboundMessage,
+) {
+    send_command(
+        ws,
+        &boot.request_id,
+        RuntimeVendorCommand::VendorRegistered(VendorRegistered {}),
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
     let Some(runtime_bin) = locate_runtime_bin() else {
@@ -162,6 +178,7 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
 
     // 1. The agent announces itself under the name we gave it.
     let boot = next_event(&mut ws).await;
+    confirm_registration(&mut ws, &boot).await;
     match boot.event {
         RuntimeVendorEvent::Ready(ev) => {
             assert_eq!(ev.vendor_name, "test-vendor");
@@ -314,7 +331,8 @@ async fn a_runtime_survives_restarting_the_agent() {
     let server = tokio::spawn(accept_vendor_agent(listener));
     let mut first = spawn_agent(addr);
     let mut ws = server.await.expect("server task");
-    let _boot = next_event(&mut ws).await;
+    let boot = next_event(&mut ws).await;
+    confirm_registration(&mut ws, &boot).await;
 
     send_command(
         &mut ws,
@@ -363,7 +381,8 @@ async fn a_runtime_survives_restarting_the_agent() {
     let server = tokio::spawn(accept_vendor_agent(listener));
     let mut second = spawn_agent(addr);
     let mut ws = server.await.expect("server task");
-    let _boot = next_event(&mut ws).await;
+    let boot = next_event(&mut ws).await;
+    confirm_registration(&mut ws, &boot).await;
 
     send_command(
         &mut ws,
@@ -505,7 +524,8 @@ async fn runtimes_die_with_the_agent() {
         .expect("spawn horsie connect");
 
     let mut ws = server.await.expect("server task");
-    let _boot = next_event(&mut ws).await;
+    let boot = next_event(&mut ws).await;
+    confirm_registration(&mut ws, &boot).await;
     send_command(
         &mut ws,
         "req-create",

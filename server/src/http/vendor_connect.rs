@@ -105,18 +105,33 @@ pub async fn vendor_connect(
                 match crate::runtime_vendor::RuntimeVendorLink::start(ws, owner).await {
                     Ok(link) => {
                         let name = link.vendor_name().to_string();
-                        match agents.register(link) {
+                        match agents.publish(link.clone()) {
                             Ok(()) => {
-                                tracing::info!(vendor = %name, "vendor agent connected")
+                                if let Err(e) = link.confirm_registration().await {
+                                    tracing::warn!(
+                                        vendor = %name,
+                                        error = %e,
+                                        "could not acknowledge a vendor registration"
+                                    );
+                                }
+                                tracing::info!(
+                                    vendor = %name,
+                                    instance = %link.instance_id(),
+                                    "vendor agent connected"
+                                );
                             }
-                            // Dropping the link closes the socket, which is the
-                            // whole response: the dialer is not entitled to this
-                            // name and nothing about retrying will change that.
-                            Err(e) => tracing::warn!(
-                                vendor = %name,
-                                error = %e,
-                                "refused a vendor agent claiming a name owned by someone else"
-                            ),
+                            // Tell the agent why, then drop the link, which
+                            // closes the socket. The refusal is the whole
+                            // response: this name belongs to a live agent and
+                            // nothing about retrying will change that.
+                            Err(e) => {
+                                link.reject_registration(&e.client_reason(&name)).await;
+                                tracing::warn!(
+                                    vendor = %name,
+                                    error = %e,
+                                    "refused a vendor agent claiming a name already in use"
+                                );
+                            }
                         }
                     }
                     Err(e) => tracing::warn!(error = %e, "vendor agent handshake failed"),

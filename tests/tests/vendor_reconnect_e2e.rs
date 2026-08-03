@@ -20,7 +20,7 @@ use horsie_models::runtime_vendor::{
 };
 use horsie_runtime_client::MockTransport;
 use horsie_runtime_vendor::{
-    Backoff, ConnectedRuntimeRegistry, FixedWorkspaces, HealthStatus, ProviderFactory,
+    AgentExit, Backoff, ConnectedRuntimeRegistry, FixedWorkspaces, HealthStatus, ProviderFactory,
     RuntimeError, RuntimeHandle, RuntimeProvider, RuntimeVendor, no_credential,
 };
 use horsie_server::auth::Principal;
@@ -83,8 +83,18 @@ async fn serve_vendor_connections(registry: Arc<RuntimeVendorRegistry>) -> Socke
                 };
                 if let Ok(link) = RuntimeVendorLink::start(ws, Principal::Anonymous).await {
                     // Auth-disabled shape: one anonymous principal owns every
-                    // name, so a reconnect still replaces its own entry.
-                    let _ = registry.register(link);
+                    // name, so a reconnecting *process* still replaces its own
+                    // entry — and, as of the name-collision gates, a second
+                    // process does not.
+                    match registry.publish(link.clone()) {
+                        Ok(()) => {
+                            let _ = link.confirm_registration().await;
+                        }
+                        Err(e) => {
+                            link.reject_registration(&e.client_reason(link.vendor_name()))
+                                .await;
+                        }
+                    }
                 }
             });
         }
@@ -230,4 +240,93 @@ async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes()
         .expect("cancellation must not have to wait out a backoff delay")
         .expect("the agent task must not panic")
         .expect("a cancelled agent exits cleanly");
+}
+
+/// Two `horsie connect` processes, one name. The second must stop with a
+/// reason instead of joining the flap war it used to start: displace the
+/// incumbent, whose agent re-dials a second later and displaces it back, with
+/// neither process reporting anything and sessions routed to whichever won the
+/// last round.
+#[tokio::test]
+async fn a_second_agent_claiming_a_live_name_is_refused_and_stops() {
+    let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
+    let server =
+        serve_vendor_connections(Arc::new(RuntimeVendorRegistry::new(vendors.clone()))).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let endpoint = format!("ws://{server}/api/vendor/connect");
+    let root = tmp.path().to_path_buf();
+    let build = move |dir: &str| -> RuntimeVendor {
+        let root = root.clone();
+        let connected = Arc::new(ConnectedRuntimeRegistry::new());
+        let provider: ProviderFactory = {
+            let connected = connected.clone();
+            Arc::new(move |_id: &str, _caps: Option<PathBuf>| {
+                Arc::new(StubProvider {
+                    connected: connected.clone(),
+                })
+            })
+        };
+        let workspaces = HashMap::from([("main".to_string(), root.clone())]);
+        RuntimeVendor::new(
+            "horsie-local".to_string(),
+            false,
+            provider,
+            connected,
+            Arc::new(FixedWorkspaces::new(workspaces)),
+            root.join(dir),
+        )
+        .with_backoff(Backoff::new(
+            Duration::from_millis(20),
+            Duration::from_millis(100),
+        ))
+    };
+
+    // Two agent processes, built up front: separate state dirs, separate
+    // instance ids, one name.
+    let first = build("state-1");
+    let second = build("state-2");
+
+    let cancel = CancellationToken::new();
+    let incumbent = tokio::spawn({
+        let endpoint = endpoint.clone();
+        let cancel = cancel.clone();
+        async move { first.run(&endpoint, no_credential(), cancel).await }
+    });
+    let published = await_vendor(&vendors, "horsie-local", "registered", |link| {
+        link.is_connected()
+    })
+    .await;
+
+    // A different process, same name, while the first is plainly alive.
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        second.run(&endpoint, no_credential(), CancellationToken::new()),
+    )
+    .await
+    .expect("a refused agent must stop, not back off and retry")
+    .expect_err("claiming a name in use is an error the operator has to see");
+    assert!(
+        matches!(&err, AgentExit::NameRefused(reason) if reason.contains("already in use")),
+        "a refusal must be its own outcome, not a generic failure: {err:?}"
+    );
+
+    // The incumbent is untouched: same link, still connected, still serving.
+    let held = vendors
+        .read()
+        .unwrap()
+        .get("horsie-local")
+        .cloned()
+        .unwrap();
+    assert!(
+        Arc::ptr_eq(&held, &published),
+        "the refused agent must not have displaced the published link"
+    );
+    assert!(held.is_connected());
+    held.create("rt-1", &runtime_spec_fixture("main"))
+        .await
+        .expect("the incumbent still provisions runtimes");
+
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), incumbent).await;
 }

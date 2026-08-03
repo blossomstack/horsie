@@ -72,6 +72,16 @@ struct DeleteRuntimeRequest { runtime_id: String }
 /// Asked on reconnect so the server can reconcile what survived.
 struct QueryRuntimesRequest {}
 
+/// The handshake was accepted: this agent is published under the name it
+/// announced, and sessions may select it from now on.
+struct VendorRegistered {}
+
+/// The handshake was refused, and no retry can change that. The only reason
+/// today is a name already held by another agent; `reason` is written for the
+/// human who launched the agent and never names the holder, who may be someone
+/// else entirely.
+struct VendorRejected { reason: String }
+
 /// The runtime protocol, addressed to one of this vendor's runtimes and
 /// forwarded verbatim. Tool calls, cancels, workspace scans, and session-start
 /// hooks all travel this way, so adding a runtime capability needs no change
@@ -88,6 +98,8 @@ union RuntimeVendorCommand {
     DeleteRuntime(DeleteRuntimeRequest),
     QueryRuntimes(QueryRuntimesRequest),
     Runtime(RuntimeRelayRequest),
+    VendorRegistered(VendorRegistered),
+    VendorRejected(VendorRejected),
 }
 
 struct RuntimeVendorInboundMessage { request_id: String, command: RuntimeVendorCommand }
@@ -116,7 +128,17 @@ struct RequestFailed { message: String }
 
 /// First message a vendor sends, mirroring `RuntimeReady`. `vendor_name` is
 /// the name sessions select by.
-struct RuntimeVendorReady { vendor_name: String, capabilities: RuntimeVendorCapabilities }
+///
+/// `instance_id` identifies the *process*, not the vendor: one value generated
+/// at startup and repeated on every reconnect. It exists so the server can tell
+/// an agent reclaiming its own name after a dropped socket from a second agent
+/// trying to take that name over, and it is used for nothing else — a vendor is
+/// addressed by name everywhere else in the system.
+struct RuntimeVendorReady {
+    vendor_name: String,
+    instance_id: String,
+    capabilities: RuntimeVendorCapabilities,
+}
 
 /// A runtime changed state on its own — it died, or finished stopping.
 ///

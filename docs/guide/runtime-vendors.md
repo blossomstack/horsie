@@ -85,6 +85,21 @@ agent prints this on startup. If you want isolation per session, use velos.
 processes, so run it under a process manager (systemd, launchd, tmux) where its
 lifetime and logs are managed explicitly.
 
+**One agent per name.** A name belongs to the agent holding it, for as long as
+that agent is connected. Starting a second one on a name already in use stops
+immediately:
+
+```
+vendor name "my-laptop" is already in use by another agent. Stop the agent
+already serving it, or run with `--name <label>` to serve under a different one.
+```
+
+Your own agent reconnecting is not a collision — it reclaims its name straight
+away after a network blip or a server restart. A name is released as soon as its
+agent disconnects, and within 45 seconds if the machine vanishes without
+hanging up (a closed laptop, a dropped VPN); the agent heartbeats every 15
+seconds so the server can tell the two apart.
+
 **What it does not do:** check out GitHub repos, or install server-managed skill
 bundles per session. It *can* load skills from a plugin library you install with
 `horsie plugin install` — see

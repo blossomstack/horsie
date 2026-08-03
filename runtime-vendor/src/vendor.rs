@@ -38,6 +38,7 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 /// Turns a requested workspace name into a path this vendor owns.
 ///
@@ -110,6 +111,57 @@ type Sink = Arc<Mutex<futures_util::stream::SplitSink<Socket, Message>>>;
 
 type Stream = futures_util::stream::SplitStream<Socket>;
 
+/// How often this agent pings the server it is connected to.
+///
+/// The server drops a link that goes quiet for three of these. Nothing waits
+/// for the pong: the ping is this agent reporting that it is alive, not asking
+/// whether the server is — a dead server is already visible as a socket error.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long the server has to accept or refuse a registration before the
+/// attempt is written off and retried.
+const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Why a dial did not produce a serving link.
+enum ConnectError {
+    /// Worth retrying: an unreachable server, a refused socket, a handshake
+    /// that never completed.
+    Transient(String),
+    /// The server refused to publish this agent. Retrying re-runs the identical
+    /// handshake and earns the identical answer.
+    Refused(String),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transient(e) | Self::Refused(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Why an agent stopped for good.
+///
+/// A sum type rather than a string because the two arms want different
+/// handling: `horsie connect` can tell an operator how to resolve a name
+/// collision, and only a caller that knows about flags can say that.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AgentExit {
+    /// The server refused to publish this agent under the name it announced.
+    NameRefused(String),
+    /// Anything else no retry could fix: an undialable server URL, a credential
+    /// the issuer refuses.
+    Fatal(String),
+}
+
+impl std::fmt::Display for AgentExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NameRefused(e) | Self::Fatal(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// How one link to the server ended — the only thing the reconnect loop
 /// branches on.
 enum LinkEnd {
@@ -141,6 +193,13 @@ struct LiveRuntime {
 
 pub struct RuntimeVendor {
     vendor_name: String,
+    /// This process's identity, minted once and presented on every dial.
+    ///
+    /// The server uses it for exactly one decision: whether a dial claiming a
+    /// name already in use is this agent coming back, or a second agent trying
+    /// to take the name. It is never how anything addresses this vendor — that
+    /// is always `vendor_name`.
+    instance_id: String,
     supports_provisioning: bool,
     provider: ProviderFactory,
     connected: Arc<ConnectedRuntimeRegistry>,
@@ -214,6 +273,7 @@ impl RuntimeVendor {
     ) -> Self {
         Self {
             vendor_name,
+            instance_id: Uuid::new_v4().to_string(),
             supports_provisioning,
             provider,
             connected,
@@ -328,11 +388,11 @@ impl RuntimeVendor {
         server_url: &str,
         credential: CredentialProvider,
         cancel: CancellationToken,
-    ) -> Result<(), String> {
+    ) -> Result<(), AgentExit> {
         // Reject an undialable URL before the first attempt — a typo should be
         // an error the operator sees once rather than a retry loop that can
         // never succeed. The token is checked per attempt, below.
-        client_request(server_url, None)?;
+        client_request(server_url, None).map_err(AgentExit::Fatal)?;
 
         let mut backoff = self.backoff;
         let mut failures: u32 = 0;
@@ -346,7 +406,7 @@ impl RuntimeVendor {
                 // and a silent 401 every 30s is the failure mode this whole
                 // change exists to end. Say so and stop.
                 Err(CredentialError::Dead(why)) => {
-                    return Err(format!("credential rejected: {why}"));
+                    return Err(AgentExit::Fatal(format!("credential rejected: {why}")));
                 }
                 // Indistinguishable from the server being unreachable, and
                 // treated the same: the issuer may be back before the next
@@ -380,7 +440,15 @@ impl RuntimeVendor {
                     }
                     Ok(agent.serve(sink, stream, &cancel).await)
                 }
-                Err(e) => {
+                // The name belongs to another live agent. Every retry re-runs
+                // the identical handshake and earns the identical answer, so
+                // stop and say why — silently backing off forever is what made
+                // two agents sharing a name invisible in the first place.
+                Err(ConnectError::Refused(reason)) => {
+                    agent.halt_all().await;
+                    return Err(AgentExit::NameRefused(reason));
+                }
+                Err(ConnectError::Transient(e)) => {
                     failures = failures.saturating_add(1);
                     Err(e)
                 }
@@ -411,18 +479,20 @@ impl RuntimeVendor {
         Ok(())
     }
 
-    /// Dial the server and announce this vendor. Both halves are one step: a
-    /// socket that never got its `Ready` across is no more usable than one that
-    /// never opened, and the reconnect loop treats them identically.
+    /// Dial the server, announce this vendor, and wait to be told it is
+    /// published. All three are one step: a socket that never got its `Ready`
+    /// across, and one whose `Ready` was refused, are both unusable, and only
+    /// the reason for stopping differs.
     async fn connect(
         &self,
         server_url: &str,
         token: Option<&str>,
-    ) -> Result<(Sink, Stream), String> {
-        let (ws, _) = tokio_tungstenite::connect_async(client_request(server_url, token)?)
+    ) -> Result<(Sink, Stream), ConnectError> {
+        let request = client_request(server_url, token).map_err(ConnectError::Transient)?;
+        let (ws, _) = tokio_tungstenite::connect_async(request)
             .await
-            .map_err(|e| format!("connect {server_url}: {e}"))?;
-        let (sink_inner, stream) = ws.split();
+            .map_err(|e| ConnectError::Transient(format!("connect {server_url}: {e}")))?;
+        let (sink_inner, mut stream) = ws.split();
         let sink: Sink = Arc::new(Mutex::new(sink_inner));
         send(
             &sink,
@@ -430,14 +500,73 @@ impl RuntimeVendor {
                 request_id: "boot".to_string(),
                 event: RuntimeVendorEvent::Ready(RuntimeVendorReady {
                     vendor_name: self.vendor_name.clone(),
+                    instance_id: self.instance_id.clone(),
                     capabilities: RuntimeVendorCapabilities {
                         supports_provisioning: self.supports_provisioning,
                     },
                 }),
             },
         )
-        .await?;
+        .await
+        .map_err(ConnectError::Transient)?;
+        Self::await_verdict(&mut stream).await?;
         Ok((sink, stream))
+    }
+
+    /// Read until the server accepts or refuses the registration.
+    ///
+    /// Nothing else can arrive first: commands are addressed to a *published*
+    /// vendor, and this one is not published yet. An unexpected frame is
+    /// therefore skipped rather than treated as fatal — the verdict is what this
+    /// wait is for.
+    async fn await_verdict(stream: &mut Stream) -> Result<(), ConnectError> {
+        let verdict = tokio::time::timeout(REGISTRATION_TIMEOUT, async {
+            loop {
+                let Some(next) = stream.next().await else {
+                    return Err(ConnectError::Transient(
+                        "server closed the link before answering the handshake".to_string(),
+                    ));
+                };
+                let text = match next {
+                    Ok(Message::Text(text)) => text,
+                    Ok(Message::Binary(_))
+                    | Ok(Message::Ping(_))
+                    | Ok(Message::Pong(_))
+                    | Ok(Message::Frame(_)) => continue,
+                    Ok(Message::Close(_)) => {
+                        return Err(ConnectError::Transient(
+                            "server closed the link before answering the handshake".to_string(),
+                        ));
+                    }
+                    Err(e) => return Err(ConnectError::Transient(format!("link failed: {e}"))),
+                };
+                let Ok(inbound) = serde_json::from_str::<RuntimeVendorInboundMessage>(&text) else {
+                    note("vendor agent: undecodable frame while awaiting registration, ignoring");
+                    continue;
+                };
+                match inbound.command {
+                    RuntimeVendorCommand::VendorRegistered(_) => return Ok(()),
+                    RuntimeVendorCommand::VendorRejected(rejected) => {
+                        return Err(ConnectError::Refused(rejected.reason));
+                    }
+                    RuntimeVendorCommand::CreateRuntime(_)
+                    | RuntimeVendorCommand::GetRuntime(_)
+                    | RuntimeVendorCommand::HibernateRuntime(_)
+                    | RuntimeVendorCommand::DeleteRuntime(_)
+                    | RuntimeVendorCommand::QueryRuntimes(_)
+                    | RuntimeVendorCommand::Runtime(_) => {
+                        note("vendor agent: command before registration was answered, ignoring");
+                    }
+                }
+            }
+        })
+        .await;
+        match verdict {
+            Ok(result) => result,
+            Err(_) => Err(ConnectError::Transient(
+                "timed out waiting for the server to answer the handshake".to_string(),
+            )),
+        }
     }
 
     /// Serve commands over one live link until it dies or `cancel` fires.
@@ -447,9 +576,20 @@ impl RuntimeVendor {
         mut stream: Stream,
         cancel: &CancellationToken,
     ) -> LinkEnd {
+        // Ticks immediately, so the server sees this agent alive as soon as it
+        // starts serving rather than one interval later.
+        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return LinkEnd::Cancelled,
+                _ = heartbeat.tick() => {
+                    // A failed write means the socket is gone; let the read
+                    // half report it rather than racing it to a verdict.
+                    if let Err(e) = sink.lock().await.send(Message::Ping(Vec::new().into())).await {
+                        note(&format!("vendor agent: heartbeat failed: {e}"));
+                    }
+                }
                 next = stream.next() => {
                     let Some(next) = next else { return LinkEnd::Disconnected };
                     let text = match next {
@@ -576,6 +716,13 @@ impl RuntimeVendor {
                 // One-way by protocol: the server is not waiting.
                 None => return,
             },
+            // Both are answers to the handshake, consumed before this loop ever
+            // runs. Arriving here means the server sent one twice; there is
+            // nothing to do with it and nothing to reply.
+            RuntimeVendorCommand::VendorRegistered(_) | RuntimeVendorCommand::VendorRejected(_) => {
+                note("vendor agent: a registration verdict arrived on an established link");
+                return;
+            }
         };
 
         let event = match outcome {
@@ -995,7 +1142,123 @@ mod tests {
         .await
         .expect("a URL no attempt could succeed with must fail fast, not back off")
         .expect_err("an unparseable server URL is an operator error, not an outage");
-        assert!(err.contains("invalid server URL"), "{err}");
+        assert!(
+            matches!(&err, AgentExit::Fatal(e) if e.contains("invalid server URL")),
+            "{err:?}"
+        );
+    }
+
+    /// Accept `attempts` dials, answer each `Ready` with `verdict`, and report
+    /// the instance id every dial announced.
+    ///
+    /// The socket is dropped after each verdict, which is what a server does to
+    /// a refused agent and what a network fault looks like to an accepted one —
+    /// so one stub covers both tests.
+    async fn stub_server(
+        attempts: usize,
+        verdict: fn() -> RuntimeVendorCommand,
+    ) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let announced = Arc::new(Mutex::new(Vec::new()));
+        let recorder = announced.clone();
+        tokio::spawn(async move {
+            for _ in 0..attempts {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let Some(Ok(Message::Text(text))) = ws.next().await else {
+                    return;
+                };
+                let msg: RuntimeVendorOutboundMessage = serde_json::from_str(&text).unwrap();
+                if let RuntimeVendorEvent::Ready(ready) = msg.event {
+                    recorder.lock().await.push(ready.instance_id);
+                }
+                let out = RuntimeVendorInboundMessage {
+                    request_id: msg.request_id,
+                    command: verdict(),
+                };
+                let _ = ws
+                    .send(Message::Text(serde_json::to_string(&out).unwrap().into()))
+                    .await;
+            }
+        });
+        (port, announced)
+    }
+
+    fn rejected() -> RuntimeVendorCommand {
+        RuntimeVendorCommand::VendorRejected(horsie_models::runtime_vendor::VendorRejected {
+            reason: "vendor name \"test-vendor\" is already in use by another agent".to_string(),
+        })
+    }
+
+    fn registered() -> RuntimeVendorCommand {
+        RuntimeVendorCommand::VendorRegistered(horsie_models::runtime_vendor::VendorRegistered {})
+    }
+
+    /// The failure this whole change exists to end: a second agent on a name in
+    /// use used to back off and re-dial forever, saying nothing, displacing the
+    /// incumbent every time it won the race.
+    #[tokio::test]
+    async fn a_refused_registration_stops_the_agent_instead_of_retrying() {
+        let (port, _) = stub_server(1, rejected).await;
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            agent().run(
+                &format!("ws://127.0.0.1:{port}/api/vendor/connect"),
+                no_credential(),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a refusal must not be retried — the backoff here is 60s")
+        .expect_err("a refused agent exits non-zero rather than serving nothing");
+        assert!(
+            matches!(&err, AgentExit::NameRefused(reason) if reason.contains("already in use")),
+            "a refusal must be distinguishable from any other fatal exit: {err:?}"
+        );
+    }
+
+    /// The server tells this agent's redial apart from a second agent's dial by
+    /// the instance id, so it has to be the same one every time.
+    #[tokio::test]
+    async fn every_dial_from_one_process_announces_the_same_instance_id() {
+        let (port, announced) = stub_server(2, registered).await;
+        let cancel = CancellationToken::new();
+        let run = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                agent()
+                    // Short enough that the second dial lands inside the test.
+                    .with_backoff(Backoff::new(
+                        std::time::Duration::from_millis(10),
+                        std::time::Duration::from_millis(10),
+                    ))
+                    .run(
+                        &format!("ws://127.0.0.1:{port}/api/vendor/connect"),
+                        no_credential(),
+                        cancel,
+                    )
+                    .await
+            }
+        });
+
+        for _ in 0..200 {
+            if announced.lock().await.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        cancel.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;
+
+        let ids = announced.lock().await.clone();
+        assert_eq!(ids.len(), 2, "expected two dials, got {ids:?}");
+        assert_eq!(ids[0], ids[1], "a reconnect must reclaim its own name");
+        assert!(!ids[0].is_empty(), "an agent must announce an instance id");
     }
 
     #[tokio::test]

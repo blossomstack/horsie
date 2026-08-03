@@ -199,7 +199,10 @@ async fn run(cli: Cli) -> Result<(), String> {
         Box::pin(async move { Ok(token) })
     });
 
-    agent.run(&endpoint, credential, cancel.clone()).await
+    agent
+        .run(&endpoint, credential, cancel.clone())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(unix)]
