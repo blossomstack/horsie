@@ -3,8 +3,8 @@
 
 use crate::error::CliError;
 use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentView};
-use horsie_models::session::{SessionDetail, SessionSummary};
 use horsie_models::routines::{RoutineRunResponse, RoutineView};
+use horsie_models::session::{SessionDetail, SessionSummary};
 use horsie_models::session_api::{ApiError, GetSessionResponse, ListSessionsResponse};
 use serde::Serialize;
 use serde::de::DeserializeOwned;

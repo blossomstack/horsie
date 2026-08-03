@@ -40,11 +40,7 @@ fn schedule_label(schedule: &RoutineSchedule) -> String {
 }
 
 fn enabled_label(enabled: bool) -> &'static str {
-    if enabled {
-        "yes"
-    } else {
-        "no"
-    }
+    if enabled { "yes" } else { "no" }
 }
 
 fn render_routine_table(routines: &[RoutineView], now: u64) -> String {
@@ -113,7 +109,9 @@ mod tests {
             description: "nightly review".into(),
             agent: "reviewer".into(),
             prompt: "Review open PRs.".into(),
-            schedule: RoutineSchedule::Every(EverySchedule { interval_secs: 3600 }),
+            schedule: RoutineSchedule::Every(EverySchedule {
+                interval_secs: 3600,
+            }),
             enabled: true,
             next_run_at_ms: Some(1_000),
             last_run_at_ms: None,
@@ -149,7 +147,9 @@ mod tests {
             "manual"
         );
         assert_eq!(
-            schedule_label(&RoutineSchedule::Every(EverySchedule { interval_secs: 3600 })),
+            schedule_label(&RoutineSchedule::Every(EverySchedule {
+                interval_secs: 3600
+            })),
             "every 3600s"
         );
         assert_eq!(
