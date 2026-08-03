@@ -349,8 +349,19 @@ fn render_session_detail(d: &SessionDetail, now: u64) -> String {
     if let Some(err) = d.last_error.as_deref() {
         out.push_str(&format!("error       {err}\n"));
     }
-    if let Some(q) = d.pending_question.as_deref() {
-        out.push_str(&format!("awaiting    {q}\n"));
+    // Every unanswered ask, not just the first: a turn resumes only once all
+    // of them are answered. `pending_question` is the pre-multi-ask fallback.
+    if d.pending_asks.is_empty() {
+        if let Some(q) = d.pending_question.as_deref() {
+            out.push_str(&format!("awaiting    {q}\n"));
+        }
+    } else {
+        for a in &d.pending_asks {
+            out.push_str(&format!(
+                "awaiting    {}\n",
+                crate::agent::truncate(&a.question, 70)
+            ));
+        }
     }
     if !d.inbox.is_empty() {
         out.push_str(&format!("inbox       {} queued\n", d.inbox.len()));
@@ -600,6 +611,16 @@ mod tests {
             created_at: 0,
             last_error: None,
             pending_question: Some("which file?".into()),
+            pending_asks: vec![
+                horsie_models::session::PendingAskView {
+                    tool_call_id: Some("t1".into()),
+                    question: "which file?".into(),
+                },
+                horsie_models::session::PendingAskView {
+                    tool_call_id: Some("t2".into()),
+                    question: "which branch?".into(),
+                },
+            ],
             model: "sonnet".into(),
             vendor: "local".into(),
             repos: vec![],
@@ -616,6 +637,10 @@ mod tests {
         };
         let out = render_session_detail(&d, 0);
         assert!(out.contains("awaiting    which file?"));
+        assert!(
+            out.contains("awaiting    which branch?"),
+            "every unanswered ask is listed: {out}"
+        );
         assert!(out.contains("inbox       1 queued"));
         assert!(out.contains("· follow up"));
     }
