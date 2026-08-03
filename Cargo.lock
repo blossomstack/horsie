@@ -1598,7 +1598,7 @@ dependencies = [
 name = "horsie-models"
 version = "0.1.6"
 dependencies = [
- "derive-new 0.5.9",
+ "derive-new 0.7.0",
  "fluorite",
  "fluorite_codegen",
  "schemars 1.2.1",
