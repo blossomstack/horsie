@@ -115,8 +115,10 @@ impl<E> CommandEffect<E> {
 pub trait EventSourcedActor: Send + Sized + 'static {
     /// Messages the actor accepts. Not persisted.
     type Command: Send + 'static;
-    /// Facts the actor persists. Replayed on recovery.
-    type Event: Send + Serialize + DeserializeOwned + 'static;
+    /// Facts the actor persists. Replayed on recovery. `Clone` because the
+    /// runtime folds each event into state *and* lends the batch to
+    /// [`on_events_persisted`](Self::on_events_persisted) afterwards.
+    type Event: Send + Clone + Serialize + DeserializeOwned + 'static;
     /// State rebuilt by folding events. Snapshotable. `Sync` because the runtime
     /// lends `&State` to `handle_command` across await points.
     type State: Send + Sync + Serialize + DeserializeOwned + 'static;
@@ -143,4 +145,13 @@ pub trait EventSourcedActor: Send + Sized + 'static {
 
     /// Hook invoked once after recovery completes, before the first live command.
     async fn on_recovery_complete(&mut self, _state: &Self::State, _ctx: &mut ActorContext<Self>) {}
+
+    /// Hook invoked after a batch of events is durably written **and** folded
+    /// into `state` — once per successful persist, never for an empty batch or
+    /// a failed write. So anything published here describes history that really
+    /// exists, which is what lets observers replace journal re-reads.
+    ///
+    /// A best-effort side channel: publish, don't persist. It runs on the
+    /// actor's own mailbox, so it must not block.
+    async fn on_events_persisted(&mut self, _events: &[Self::Event], _state: &Self::State) {}
 }

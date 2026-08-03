@@ -129,36 +129,42 @@ async fn recover<A: EventSourcedActor>(
 }
 
 /// Persist `events`, then fold them into `state`, advancing `seq_nr`. Returns the
-/// (possibly unchanged) state and whether the durable write succeeded. On failure
-/// the events are neither applied nor counted, keeping state consistent with what
-/// was durably written; the error is also logged here. Callers that don't need the
-/// outcome can ignore it (best-effort, as before); `PersistAndAck` forwards it.
+/// (possibly unchanged) state, the batch itself, and whether the durable write
+/// succeeded. On failure the events are neither applied nor counted, keeping state
+/// consistent with what was durably written; the error is also logged here. Callers
+/// that don't need the outcome can ignore it (best-effort, as before);
+/// `PersistAndAck` forwards it. The batch comes back so the caller can hand it to
+/// [`EventSourcedActor::on_events_persisted`] without re-deriving it.
 async fn persist_events<A: EventSourcedActor>(
     pid: &PersistenceId,
     journal: &Arc<dyn Journal>,
     events: Vec<A::Event>,
     mut state: A::State,
     seq_nr: &mut u64,
-) -> (A::State, Result<(), JournalError>) {
+) -> (A::State, Vec<A::Event>, Result<(), JournalError>) {
     let mut encoded = Vec::with_capacity(events.len());
     for event in &events {
         match serde_json::to_vec(event) {
             Ok(bytes) => encoded.push(bytes),
             Err(e) => {
                 tracing::error!(%pid, error = %e, "failed to serialize event; skipping persist");
-                return (state, Err(JournalError::Serialization(e.to_string())));
+                return (
+                    state,
+                    events,
+                    Err(JournalError::Serialization(e.to_string())),
+                );
             }
         }
     }
     if let Err(e) = journal.persist(pid, &encoded).await {
         tracing::error!(%pid, error = %e, "failed to persist events; state left unchanged");
-        return (state, Err(e));
+        return (state, events, Err(e));
     }
-    for event in events {
-        state = A::apply_event(state, event);
+    for event in &events {
+        state = A::apply_event(state, event.clone());
         *seq_nr += 1;
     }
-    (state, Ok(()))
+    (state, events, Ok(()))
 }
 
 /// Snapshot `state` at `seq_nr` and compact the now-redundant event log.
@@ -217,7 +223,16 @@ async fn run_actor<A: EventSourcedActor>(
         // snapshot → ack → stop. The write outcome is folded only on success, so a
         // failed write leaves state consistent and the ack reports the failure.
         let result;
-        (state, result) = persist_events::<A>(&pid, &journal, events, state, &mut seq_nr).await;
+        let persisted;
+        (state, persisted, result) =
+            persist_events::<A>(&pid, &journal, events, state, &mut seq_nr).await;
+
+        // Publish what just became durable. Runs before the ack so an `ask`
+        // caller cannot observe the write landing ahead of the frames it
+        // produced, and before `stop` so a final batch is still announced.
+        if result.is_ok() && !persisted.is_empty() {
+            actor.on_events_persisted(&persisted, &state).await;
+        }
 
         // Snapshot only after a successful write (snapshotting state that diverged
         // from the journal would be unsound). Skipped when stopping — the state is
@@ -257,6 +272,25 @@ mod tests {
         id: String,
         // Lets a test observe the recovered value at startup.
         report: Option<oneshot::Sender<i64>>,
+        // Records the state value seen by each `on_events_persisted` call.
+        persisted: Arc<std::sync::Mutex<Vec<i64>>>,
+    }
+
+    impl Counter {
+        fn new(id: &str) -> Self {
+            Self {
+                id: id.into(),
+                report: None,
+                persisted: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn reporting(id: &str, report: oneshot::Sender<i64>) -> Self {
+            Self {
+                report: Some(report),
+                ..Self::new(id)
+            }
+        }
     }
 
     enum CounterCmd {
@@ -268,7 +302,7 @@ mod tests {
         Stop,
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize, Clone)]
     enum CounterEvent {
         Incremented(i64),
     }
@@ -328,6 +362,13 @@ mod tests {
                 let _ = tx.send(state.value);
             }
         }
+
+        async fn on_events_persisted(&mut self, _events: &[CounterEvent], state: &CounterState) {
+            self.persisted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(state.value);
+        }
     }
 
     async fn current_value(actor: &ActorRef<CounterCmd>) -> i64 {
@@ -339,13 +380,7 @@ mod tests {
     #[tokio::test]
     async fn persists_and_applies_events() {
         let journal = Arc::new(InMemoryJournal::new());
-        let actor = spawn_root(
-            Counter {
-                id: "c1".into(),
-                report: None,
-            },
-            journal,
-        );
+        let actor = spawn_root(Counter::new("c1"), journal);
         actor.tell(CounterCmd::Inc(3)).await.unwrap();
         actor.tell(CounterCmd::Inc(4)).await.unwrap();
         assert_eq!(current_value(&actor).await, 7);
@@ -354,13 +389,7 @@ mod tests {
     #[tokio::test]
     async fn ask_with_persist_and_ack_returns_after_durable_write() {
         let journal = Arc::new(InMemoryJournal::new());
-        let actor = spawn_root(
-            Counter {
-                id: "ack".into(),
-                report: None,
-            },
-            journal,
-        );
+        let actor = spawn_root(Counter::new("ack"), journal);
         // `ask` resolves only when the actor replies, and `PersistAndAck` replies
         // *after* the event is persisted and folded — so the new value is already
         // observable the instant `ask` returns, and the reply reports success. This
@@ -378,13 +407,7 @@ mod tests {
         let journal = Arc::new(
             crate::testkit::FaultyJournal::wrapping(InMemoryJournal::new()).fail_persist_after(0),
         );
-        let actor = spawn_root(
-            Counter {
-                id: "fail".into(),
-                report: None,
-            },
-            journal,
-        );
+        let actor = spawn_root(Counter::new("fail"), journal);
         // The write fails, so the ack carries Err — the asker learns the event was
         // NOT journaled and can abort instead of proceeding on a phantom history.
         let durable = actor.ask(|ack| CounterCmd::IncAck(5, ack)).await.unwrap();
@@ -394,17 +417,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn on_events_persisted_runs_after_the_fold() {
+        let journal = Arc::new(InMemoryJournal::new());
+        let counter = Counter::new("hook");
+        let seen = counter.persisted.clone();
+        let actor = spawn_root(counter, journal);
+        actor.tell(CounterCmd::Inc(3)).await.unwrap();
+        actor.tell(CounterCmd::Inc(4)).await.unwrap();
+        // Forces both commands through the mailbox before we assert.
+        assert_eq!(current_value(&actor).await, 7);
+        // The hook sees state AFTER the fold, so 3 then 7 — never the pre-fold 0.
+        // That ordering is what lets an observer publish durable facts.
+        assert_eq!(*seen.lock().unwrap(), vec![3, 7]);
+    }
+
+    #[tokio::test]
+    async fn on_events_persisted_is_skipped_when_the_write_fails() {
+        let journal = Arc::new(
+            crate::testkit::FaultyJournal::wrapping(InMemoryJournal::new()).fail_persist_after(0),
+        );
+        let counter = Counter::new("hookfail");
+        let seen = counter.persisted.clone();
+        let actor = spawn_root(counter, journal);
+        let durable = actor.ask(|ack| CounterCmd::IncAck(5, ack)).await.unwrap();
+        assert!(durable.is_err(), "the faulty journal must reject the write");
+        // Nothing was journaled, so nothing may be published — otherwise an
+        // observer would announce history that does not exist.
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn recovers_state_from_event_log_after_restart() {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
 
         // First incarnation persists some events, then stops.
-        let a1 = spawn_root(
-            Counter {
-                id: "c2".into(),
-                report: None,
-            },
-            journal.clone(),
-        );
+        let a1 = spawn_root(Counter::new("c2"), journal.clone());
         a1.tell(CounterCmd::Inc(5)).await.unwrap();
         a1.tell(CounterCmd::Inc(10)).await.unwrap();
         // Ensure the increments are processed before we drop and "crash".
@@ -413,13 +460,7 @@ mod tests {
 
         // Second incarnation reuses the same persistence_id and journal.
         let (report_tx, report_rx) = oneshot::channel();
-        let _a2 = spawn_root(
-            Counter {
-                id: "c2".into(),
-                report: Some(report_tx),
-            },
-            journal,
-        );
+        let _a2 = spawn_root(Counter::reporting("c2", report_tx), journal);
         // Recovery folds the two events back to 15.
         assert_eq!(report_rx.await.unwrap(), 15);
     }
@@ -428,13 +469,7 @@ mod tests {
     async fn recovers_from_snapshot_after_compaction() {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
 
-        let a1 = spawn_root(
-            Counter {
-                id: "c3".into(),
-                report: None,
-            },
-            journal.clone(),
-        );
+        let a1 = spawn_root(Counter::new("c3"), journal.clone());
         a1.tell(CounterCmd::Inc(2)).await.unwrap();
         a1.tell(CounterCmd::Inc(2)).await.unwrap();
         a1.tell(CounterCmd::Snapshot).await.unwrap();
@@ -458,13 +493,7 @@ mod tests {
         assert_eq!(count, 1);
 
         let (report_tx, report_rx) = oneshot::channel();
-        let _a2 = spawn_root(
-            Counter {
-                id: "c3".into(),
-                report: Some(report_tx),
-            },
-            journal,
-        );
+        let _a2 = spawn_root(Counter::reporting("c3", report_tx), journal);
         // snapshot (4) + replayed post-snapshot event (1) == 5.
         assert_eq!(report_rx.await.unwrap(), 5);
     }
@@ -504,10 +533,7 @@ mod tests {
             ) -> CommandEffect<()> {
                 match cmd {
                     ParentCmd::Start => {
-                        let child = ctx.spawn(Counter {
-                            id: "child".into(),
-                            report: None,
-                        });
+                        let child = ctx.spawn(Counter::new("child"));
                         child.tell(CounterCmd::Inc(42)).await.unwrap();
                         self.child = Some(child);
                         CommandEffect::none()
