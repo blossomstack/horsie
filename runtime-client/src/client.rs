@@ -1,5 +1,8 @@
 use crate::transport::{RuntimeTransport, TransportError};
-use horsie_models::runtime::{ScanResponse, ToolCall, ToolError, ToolOutput, ToolResult};
+use horsie_models::runtime::{
+    HookManifestResponse, HookOutcomeWire, ScanResponse, ToolCall, ToolError, ToolOutput,
+    ToolResult,
+};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -211,6 +214,35 @@ impl RuntimeClient {
             self.note_transport_error(&e);
             RuntimeCallError::Transport(e)
         })
+    }
+
+    /// What hooks the session's plugins declare.
+    ///
+    /// An `Err` here also means "this runtime predates hook support": the
+    /// protocol carries no version, so the caller reads a failure as hook-less
+    /// rather than as a broken session.
+    pub async fn hook_manifest(&self) -> Result<HookManifestResponse, RuntimeCallError> {
+        let call_id = Uuid::new_v4().to_string();
+        self.inner.hook_manifest(&call_id).await.map_err(|e| {
+            self.note_transport_error(&e);
+            RuntimeCallError::Transport(e)
+        })
+    }
+
+    /// Run every hook matching `event`; `payload` is the event's JSON body.
+    pub async fn run_hook(
+        &self,
+        event: &str,
+        payload: &str,
+    ) -> Result<HookOutcomeWire, RuntimeCallError> {
+        let call_id = Uuid::new_v4().to_string();
+        self.inner
+            .run_hook(&call_id, event, payload)
+            .await
+            .map_err(|e| {
+                self.note_transport_error(&e);
+                RuntimeCallError::Transport(e)
+            })
     }
 }
 

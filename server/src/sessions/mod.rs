@@ -8,6 +8,7 @@
 pub mod ask_tool;
 pub mod clock;
 pub mod events;
+pub mod hooked_toolbox;
 pub mod session_actor;
 pub mod spawn_tool;
 pub mod spec;
