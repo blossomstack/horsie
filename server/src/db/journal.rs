@@ -29,6 +29,33 @@ use std::collections::VecDeque;
 /// borrowed query string) open across the whole stream.
 const REPLAY_PAGE_ROWS: i64 = 1_000;
 
+/// Rows per `INSERT` statement in `persist`.
+///
+/// Both backends cap bind parameters per statement — PostgreSQL at 65 535,
+/// SQLite at 32 766 — and each row binds three. 1 000 rows is 3 000 parameters,
+/// comfortably inside both. Real batches are single digits, so the chunking is
+/// not the point: it exists so a pathological batch degrades into several
+/// statements instead of one error.
+const INSERT_CHUNK_ROWS: usize = 1_000;
+
+/// `INSERT INTO journal_events … VALUES (?, ?, ?), (?, ?, ?), …` for `rows`
+/// rows, in SQLite's placeholder style for [`Db::q`] to translate.
+///
+/// One statement per chunk rather than one per event: inside a transaction each
+/// `execute` is still a round trip, and on PostgreSQL that is a network hop.
+/// A 50-event turn goes from 50 of them to one.
+pub(crate) fn insert_statement(rows: usize) -> String {
+    let mut sql = String::with_capacity(64 + rows * 11);
+    sql.push_str("INSERT INTO journal_events (log_id, seq, payload) VALUES ");
+    for i in 0..rows {
+        if i > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str("(?, ?, ?)");
+    }
+    sql
+}
+
 /// A [`Journal`] over the server's database, on either dialect.
 pub struct SqlJournal {
     db: Db,
@@ -118,17 +145,18 @@ impl Journal for SqlJournal {
             .map_err(backend)?;
         let base = last_seq - events.len() as i64;
 
-        let insert = self
-            .db
-            .q("INSERT INTO journal_events (log_id, seq, payload) VALUES (?, ?, ?)");
-        for (offset, payload) in events.iter().enumerate() {
-            sqlx::query(&insert)
-                .bind(log_id)
-                .bind(base + offset as i64 + 1)
-                .bind(payload.as_slice())
-                .execute(&mut *tx)
-                .await
-                .map_err(backend)?;
+        for (chunk_index, chunk) in events.chunks(INSERT_CHUNK_ROWS).enumerate() {
+            let statement = insert_statement(chunk.len());
+            let insert = self.db.q(&statement);
+            let mut query = sqlx::query(&insert);
+            let chunk_base = base + (chunk_index * INSERT_CHUNK_ROWS) as i64;
+            for (offset, payload) in chunk.iter().enumerate() {
+                query = query
+                    .bind(log_id)
+                    .bind(chunk_base + offset as i64 + 1)
+                    .bind(payload.as_slice());
+            }
+            query.execute(&mut *tx).await.map_err(backend)?;
         }
         tx.commit().await.map_err(backend)
     }
@@ -363,5 +391,37 @@ impl Page {
             self.buffer.push_back((to_u64(seq), payload));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_row_is_a_plain_insert() {
+        assert_eq!(
+            insert_statement(1),
+            "INSERT INTO journal_events (log_id, seq, payload) VALUES (?, ?, ?)"
+        );
+    }
+
+    #[test]
+    fn several_rows_share_one_statement() {
+        assert!(
+            insert_statement(3).ends_with("VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)"),
+            "{}",
+            insert_statement(3)
+        );
+    }
+
+    /// The rows a chunk holds are exactly the rows its statement has slots for.
+    /// A mismatch binds the batch off by a row and sqlx reports it as a type
+    /// error rather than a miscount, so pin it here.
+    #[test]
+    fn a_full_chunks_statement_has_one_slot_per_row() {
+        let sql = insert_statement(INSERT_CHUNK_ROWS);
+        assert_eq!(sql.matches("(?, ?, ?)").count(), INSERT_CHUNK_ROWS);
     }
 }

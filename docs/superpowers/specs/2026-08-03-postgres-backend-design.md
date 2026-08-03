@@ -265,7 +265,7 @@ through `Db::greatest`.
 
 | Method | Implementation |
 | --- | --- |
-| `persist` | One transaction (`BEGIN IMMEDIATE` on SQLite, via `Db::begin_write`, so two writers queue instead of deadlocking on a lock upgrade): upsert the log row, allocate the batch's numbers in one `UPDATE … RETURNING`, insert the events. |
+| `persist` | One transaction (`BEGIN IMMEDIATE` on SQLite, via `Db::begin_write`, so two writers queue instead of deadlocking on a lock upgrade): upsert the log row, allocate the batch's numbers in one `UPDATE … RETURNING`, then insert the events with one multi-row `INSERT` per 1 000 rows — three binds each, inside both PostgreSQL's 65 535 and SQLite's 32 766 parameter caps. |
 | `replay` | Keyset pagination via `futures_util::stream::unfold`: `WHERE log_id = ? AND seq > ? ORDER BY seq LIMIT 1000`, the last `seq` of each page seeding the next. Bounded memory on a 100 000-event log, no borrow of the query string into the stream, and no new dependency. |
 | `save_snapshot` | Upsert on `log_id`, with `last_seq` raised to the snapshot's sequence. |
 | `delete_events_before` | `DELETE … WHERE log_id = ? AND seq <= ?`, leaving `last_seq` alone. |
