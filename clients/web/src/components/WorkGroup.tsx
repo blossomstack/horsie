@@ -2,6 +2,7 @@ import { ChevronRight, Loader2 } from "lucide-react";
 import { useState } from "react";
 import type { WorkItem } from "../lib/transcriptSegments";
 import { cn } from "../lib/cn";
+import { formatDuration } from "../lib/time";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard } from "./ToolCallCard";
 
@@ -33,15 +34,23 @@ function summary(items: WorkItem[]): string {
 /** Renders a `work` segment: a run of thinking blocks + regular tool calls.
  * A single visible item renders bare (no extra chrome); two or more collapse
  * into one summary row that expands into the ordered list. `showThinking`
- * filters out thinking items entirely (not just their content). */
+ * filters out thinking items entirely (not just their content).
+ *
+ * A finished group reports how long it took, from the server's stamps — the
+ * one figure that says whether a collapsed row hides three seconds of work or
+ * three minutes of it. */
 export function WorkGroup({
   items,
   live,
   showThinking,
+  startedAtMs,
+  endedAtMs,
 }: {
   items: WorkItem[];
   live: boolean;
   showThinking: boolean;
+  startedAtMs?: number;
+  endedAtMs?: number;
 }) {
   const [open, setOpen] = useState(false);
   const visibleWithIndices = items
@@ -75,6 +84,10 @@ export function WorkGroup({
             i.kind === "tool" && i.call.running,
         )
     : undefined;
+  const duration =
+    !live && startedAtMs !== undefined && endedAtMs !== undefined
+      ? formatDuration(endedAtMs - startedAtMs)
+      : null;
   const label = live
     ? runningTool
       ? `Running ${runningTool.call.name}…`
@@ -94,6 +107,9 @@ export function WorkGroup({
         />
         {live && <Loader2 size={12} className="animate-spin text-accent" />}
         <span data-testid="work-group-summary">{label}</span>
+        {duration && (
+          <span data-testid="work-group-duration">· {duration}</span>
+        )}
       </button>
       {open && (
         <div className="mt-1 ml-3 space-y-2 border-l pl-3">

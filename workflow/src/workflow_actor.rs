@@ -4,6 +4,7 @@ use crate::context::{
 };
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
+use horsie_models::now_ms;
 use horsie_models::workflow::{WorkflowAgentDef, WorkflowDefinition, WorkflowTransition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -58,15 +59,6 @@ impl AgentOutcomeSink for WorkflowParent {
             let _ = self.0.tell(cmd).await;
         }
     }
-}
-
-/// Wall-clock epoch millis for stamping events on the command path. Saturates
-/// rather than panicking on a pre-epoch clock (prod lints deny panic/unwrap).
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
 }
 
 /// Commands accepted by a [`WorkflowActor`].

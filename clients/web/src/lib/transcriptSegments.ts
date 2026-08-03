@@ -7,7 +7,18 @@ export type WorkItem =
 
 export type Segment =
   | { kind: "text"; key: string; text: string; streaming?: boolean }
-  | { kind: "work"; key: string; items: WorkItem[]; live: boolean }
+  | {
+      kind: "work";
+      key: string;
+      items: WorkItem[];
+      live: boolean;
+      /** Server-stamped span of the work in this group, when known: from the
+       * earliest provider call that produced it to the last tool that
+       * answered. Absent for a group made only of live, not-yet-finalized
+       * items, which have no server stamps yet. */
+      startedAtMs?: number;
+      endedAtMs?: number;
+    }
   | { kind: "ask"; key: string; call: RenderedToolCall }
   | { kind: "pulse"; key: string };
 
@@ -28,12 +39,28 @@ export function buildSegments(
   const segments: Segment[] = [];
   let work: WorkItem[] = [];
   let seq = 0;
+  let workStart: number | undefined;
+  let workEnd: number | undefined;
+
+  const extend = (start?: number, end?: number) => {
+    if (start !== undefined) workStart = Math.min(workStart ?? start, start);
+    if (end !== undefined) workEnd = Math.max(workEnd ?? end, end);
+  };
 
   const flushWork = (isLive: boolean) => {
     if (work.length > 0) {
-      segments.push({ kind: "work", key: `work${seq++}`, items: work, live: isLive });
+      segments.push({
+        kind: "work",
+        key: `work${seq++}`,
+        items: work,
+        live: isLive,
+        startedAtMs: workStart,
+        endedAtMs: workEnd,
+      });
       work = [];
     }
+    workStart = undefined;
+    workEnd = undefined;
   };
 
   const pushToolCall = (call: RenderedToolCall) => {
@@ -42,10 +69,15 @@ export function buildSegments(
       segments.push({ kind: "ask", key: `ask${seq++}`, call });
     } else {
       work.push({ kind: "tool", call });
+      extend(undefined, call.endedAtMs);
     }
   };
 
   for (const m of msgs) {
+    // The message's own span bounds whatever it contributed: thinking happened
+    // during the provider call, and its tool calls were issued at the end of it.
+    const contributes = m.thinking.length > 0 || m.toolCalls.length > 0;
+    if (contributes) extend(m.startedAtMs ?? m.createdAtMs, m.createdAtMs);
     for (const t of m.thinking) work.push({ kind: "thinking", text: t });
     if (m.text) {
       flushWork(false);

@@ -8,6 +8,7 @@ use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
     EventSinkError, HandoffCall, LlmProvider, Message, Role, Toolbox, Usage,
 };
+use horsie_models::now_ms;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -216,6 +217,11 @@ pub enum AgentDomainEvent {
         tool_call_id: String,
         output: String,
         is_error: bool,
+        /// When the tool finished. Journaled rather than re-read at fold time:
+        /// this variant rebuilds its `Message` in `apply_event`, so a recovered
+        /// transcript would otherwise stamp every past tool result with the
+        /// moment of recovery.
+        at_ms: u64,
     },
     RunComplete {
         usage: Usage,
@@ -223,29 +229,38 @@ pub enum AgentDomainEvent {
         /// The last provider call's prompt size alone (not summed across
         /// iterations like `usage`) — what's actually in context now.
         context_tokens: u32,
+        at_ms: u64,
     },
-    RunCancelled,
+    RunCancelled {
+        at_ms: u64,
+    },
     /// A timer was armed.
     TimerArmed {
         record: crate::timers::TimerRecord,
+        at_ms: u64,
     },
     /// One or more timers were cancelled.
     TimerCancelled {
         ids: Vec<crate::timers::TimerId>,
+        at_ms: u64,
     },
     /// A timer fired. `next_fire_at_unix_ms` carries the re-armed fire time for a
     /// recurring timer (so the fold stays pure); `None` removes a one-shot.
     TimerFired {
         id: crate::timers::TimerId,
         next_fire_at_unix_ms: Option<u64>,
+        at_ms: u64,
     },
     /// The agent parked itself awaiting its timers.
-    Parked,
+    Parked {
+        at_ms: u64,
+    },
     /// The task list changed (create/insert/update_status). Carries the full
     /// resulting state, not a delta — mirrors `MessageComplete`/`ToolComplete`,
     /// so replay never needs to re-derive or re-validate a past mutation.
     TaskListChanged {
         snapshot: crate::task_list::TaskListState,
+        at_ms: u64,
     },
 }
 
@@ -752,7 +767,7 @@ impl AgentActor {
                         .into_iter()
                         .map(|message| AgentDomainEvent::InputMessage { message })
                         .collect();
-                events.push(AgentDomainEvent::RunCancelled);
+                events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
                 // Snapshot to compact the incrementally-persisted log on cancel
                 // (never in interactive mode: cursors must stay stable).
                 let eff = CommandEffect::persist(events);
@@ -854,13 +869,13 @@ impl AgentActor {
                 "A timer fired while you were busy — re-check now.".to_string(),
             );
             let input_event = AgentDomainEvent::InputMessage {
-                message: wake.to_message(),
+                message: wake.to_message(now_ms()),
             };
             self.start_run(wake, ctx, state.messages.clone());
             return CommandEffect::persist(vec![input_event]);
         }
         parent.deliver(AgentOutcome::Parked { session_id }).await;
-        let eff = CommandEffect::persist(vec![AgentDomainEvent::Parked]);
+        let eff = CommandEffect::persist(vec![AgentDomainEvent::Parked { at_ms: now_ms() }]);
         if self.params.compact_on_pause() {
             eff.and_snapshot()
         } else {
@@ -882,7 +897,7 @@ impl AgentActor {
             return CommandEffect::none();
         };
         let display_count = record.fire_count + 1;
-        let now = crate::timers::now_unix_ms();
+        let now = now_ms();
         // Re-arm recurring; remove one-shot.
         let next_fire_at_unix_ms = match record.kind {
             crate::timers::TimerKind::Recurring => {
@@ -899,6 +914,7 @@ impl AgentActor {
         let fired = AgentDomainEvent::TimerFired {
             id,
             next_fire_at_unix_ms,
+            at_ms: now,
         };
 
         if self.running.is_some() {
@@ -911,7 +927,7 @@ impl AgentActor {
         // Idle/parked: start a fresh run with the wake message.
         let wake = AgentInput::user_message(new_message_id(), record.wake_message(display_count));
         let input_event = AgentDomainEvent::InputMessage {
-            message: wake.to_message(),
+            message: wake.to_message(now_ms()),
         };
         self.start_run(wake, ctx, state.messages.clone());
         CommandEffect::persist(vec![fired, input_event])
@@ -1004,16 +1020,18 @@ impl EventSourcedActor for AgentActor {
                 tool_call_id,
                 output,
                 is_error,
+                at_ms,
             } => state
                 .messages
-                .push(Message::tool_result(tool_call_id, output, is_error)),
-            AgentDomainEvent::TimerArmed { record } => state.timers.push(record),
-            AgentDomainEvent::TimerCancelled { ids } => {
+                .push(Message::tool_result(tool_call_id, output, is_error, at_ms)),
+            AgentDomainEvent::TimerArmed { record, .. } => state.timers.push(record),
+            AgentDomainEvent::TimerCancelled { ids, .. } => {
                 state.timers.retain(|t| !ids.contains(&t.id));
             }
             AgentDomainEvent::TimerFired {
                 id,
                 next_fire_at_unix_ms,
+                ..
             } => match next_fire_at_unix_ms {
                 Some(next) => {
                     if let Some(t) = state.timers.iter_mut().find(|t| t.id == id) {
@@ -1023,8 +1041,8 @@ impl EventSourcedActor for AgentActor {
                 }
                 None => state.timers.retain(|t| t.id != id),
             },
-            AgentDomainEvent::Parked => state.parked = true,
-            AgentDomainEvent::TaskListChanged { snapshot } => state.task_list = snapshot,
+            AgentDomainEvent::Parked { .. } => state.parked = true,
+            AgentDomainEvent::TaskListChanged { snapshot, .. } => state.task_list = snapshot,
             AgentDomainEvent::RunComplete {
                 usage,
                 context_tokens,
@@ -1034,7 +1052,7 @@ impl EventSourcedActor for AgentActor {
                 state.context_tokens = context_tokens;
                 state.last_turn_usage = Some(usage);
             }
-            AgentDomainEvent::RunCancelled => {}
+            AgentDomainEvent::RunCancelled { .. } => {}
         }
         state
     }
@@ -1070,7 +1088,7 @@ impl EventSourcedActor for AgentActor {
                 let agent_input = match message {
                     Some(text) => {
                         if !results.is_empty() {
-                            let recorded = AgentInput::tool_results(results).to_message();
+                            let recorded = AgentInput::tool_results(results).to_message(now_ms());
                             events.push(AgentDomainEvent::InputMessage {
                                 message: recorded.clone(),
                             });
@@ -1084,7 +1102,7 @@ impl EventSourcedActor for AgentActor {
                 // turn-restarting provider retry that re-emits it can never
                 // double-persist it into two consecutive user messages.
                 events.push(AgentDomainEvent::InputMessage {
-                    message: agent_input.to_message(),
+                    message: agent_input.to_message(now_ms()),
                 });
                 self.start_run(agent_input, ctx, history);
                 CommandEffect::persist(events)
@@ -1116,7 +1134,7 @@ impl EventSourcedActor for AgentActor {
                 after_secs,
                 reply,
             } => {
-                let now = crate::timers::now_unix_ms();
+                let now = now_ms();
                 let record = crate::timers::TimerRecord::arm(
                     label,
                     message,
@@ -1131,10 +1149,13 @@ impl EventSourcedActor for AgentActor {
                     std::time::Duration::from_secs(after_secs),
                 );
                 let _ = reply.send(id);
-                CommandEffect::persist(vec![AgentDomainEvent::TimerArmed { record }])
+                CommandEffect::persist(vec![AgentDomainEvent::TimerArmed {
+                    record,
+                    at_ms: now_ms(),
+                }])
             }
             AgentCommand::ListTimers { reply } => {
-                let now = crate::timers::now_unix_ms();
+                let now = now_ms();
                 let views = state.timers.iter().map(|t| t.view(now)).collect();
                 let _ = reply.send(views);
                 CommandEffect::none()
@@ -1156,7 +1177,10 @@ impl EventSourcedActor for AgentActor {
                 if ids.is_empty() {
                     CommandEffect::none()
                 } else {
-                    CommandEffect::persist(vec![AgentDomainEvent::TimerCancelled { ids }])
+                    CommandEffect::persist(vec![AgentDomainEvent::TimerCancelled {
+                        ids,
+                        at_ms: now_ms(),
+                    }])
                 }
             }
             AgentCommand::TimerFired { id } => self.handle_timer_fired(id, state, ctx).await,
@@ -1169,6 +1193,7 @@ impl EventSourcedActor for AgentActor {
                         let _ = reply.send(Ok(text));
                         CommandEffect::persist(vec![AgentDomainEvent::TaskListChanged {
                             snapshot: next,
+                            at_ms: now_ms(),
                         }])
                     }
                     Err(msg) => {
@@ -1208,7 +1233,7 @@ impl EventSourcedActor for AgentActor {
     async fn on_recovery_complete(&mut self, state: &AgentState, ctx: &mut ActorContext<Self>) {
         // Re-arm every surviving timer with its remaining delay (fires immediately if
         // already due). Do this whether parked or mid-run, so timers keep firing.
-        let now = crate::timers::now_unix_ms();
+        let now = now_ms();
         for t in &state.timers {
             spawn_timer_sleep(ctx.self_ref(), t.id.clone(), t.remaining(now));
         }
@@ -1497,11 +1522,15 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
             tool_call_id: ev.tool_call_id.clone(),
             output: ev.output.clone(),
             is_error: ev.is_error,
+            // Carried on the streaming event, not re-read here: the in-memory
+            // history already holds a message stamped with it.
+            at_ms: ev.at_ms,
         }),
         AgentEvent::RunComplete(ev) => Some(AgentDomainEvent::RunComplete {
             usage: ev.usage.clone(),
             iterations: ev.iterations,
             context_tokens: ev.context_tokens,
+            at_ms: ev.at_ms,
         }),
         AgentEvent::InputMessage(_)
         | AgentEvent::MessageStart(_)
@@ -1673,7 +1702,7 @@ fn repair_dangling(
 
 fn synthetic_results(ids: Vec<String>) -> impl Iterator<Item = Message> {
     ids.into_iter()
-        .map(|id| Message::tool_result(id, INTERRUPTED_RESULT, true))
+        .map(|id| Message::tool_result(id, INTERRUPTED_RESULT, true, now_ms()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1807,6 +1836,8 @@ mod tests {
 
     fn user_msg(text: &str) -> Message {
         Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: "u".into(),
             role: Role::User,
             parts: vec![ContentPart::Text(TextPart { text: text.into() })],
@@ -1930,6 +1961,63 @@ mod tests {
     }
 
     #[test]
+    fn a_replayed_tool_result_keeps_its_original_stamp() {
+        // The stamp is journaled on the event rather than read from the clock
+        // in `apply_event`; folding the same log twice must therefore produce
+        // the same transcript, not one dated by whenever recovery happened.
+        let fold = || {
+            let mut state = AgentActor::initial_state();
+            state = AgentActor::apply_event(
+                state,
+                AgentDomainEvent::ToolComplete {
+                    at_ms: 1_700_000_000_123,
+                    tool_call_id: "tc1".into(),
+                    output: "result".into(),
+                    is_error: false,
+                },
+            );
+            state
+        };
+        let first = fold();
+        let second = fold();
+        assert_eq!(first.messages[0].created_at_ms, 1_700_000_000_123);
+        assert_eq!(
+            first.messages[0].created_at_ms,
+            second.messages[0].created_at_ms
+        );
+    }
+
+    #[test]
+    fn coarse_events_carry_the_stamp_the_agent_recorded() {
+        let tool = coarse_event(&AgentEvent::ToolComplete(
+            horsie_models::events::ToolCompleteEvent {
+                message_id: "result:tc1".into(),
+                tool_call_id: "tc1".into(),
+                output: "ok".into(),
+                is_error: false,
+                at_ms: 42,
+            },
+        ))
+        .expect("ToolComplete is journaled");
+        assert!(
+            matches!(tool, AgentDomainEvent::ToolComplete { at_ms, .. } if at_ms == 42),
+            "the streaming event's stamp must survive into the journal"
+        );
+
+        let run = coarse_event(&AgentEvent::RunComplete(
+            horsie_models::events::RunCompleteEvent {
+                message_id: "run".into(),
+                usage: Usage::without_cache(1, 1),
+                iterations: 1,
+                context_tokens: 1,
+                at_ms: 99,
+            },
+        ))
+        .expect("RunComplete is journaled");
+        assert!(matches!(run, AgentDomainEvent::RunComplete { at_ms, .. } if at_ms == 99));
+    }
+
+    #[test]
     fn apply_event_rebuilds_history_in_order() {
         let mut state = AgentActor::initial_state();
         state = AgentActor::apply_event(
@@ -1942,6 +2030,8 @@ mod tests {
             state,
             AgentDomainEvent::MessageComplete {
                 message: Message {
+                    created_at_ms: 0,
+                    started_at_ms: None,
                     id: "a".into(),
                     role: Role::Assistant,
                     parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -1955,6 +2045,7 @@ mod tests {
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::ToolComplete {
+                at_ms: 0,
                 tool_call_id: "tc1".into(),
                 output: "result".into(),
                 is_error: false,
@@ -1963,6 +2054,7 @@ mod tests {
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::RunComplete {
+                at_ms: 0,
                 usage: Usage::without_cache(1, 1),
                 iterations: 1,
                 context_tokens: 1,
@@ -1996,7 +2088,7 @@ mod tests {
             },
         );
         let before = state.messages.len();
-        state = AgentActor::apply_event(state, AgentDomainEvent::RunCancelled);
+        state = AgentActor::apply_event(state, AgentDomainEvent::RunCancelled { at_ms: 0 });
         assert_eq!(state.messages.len(), before);
     }
 
@@ -2005,6 +2097,8 @@ mod tests {
         let history = vec![
             user_msg("do it"),
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "a".into(),
                 role: Role::Assistant,
                 parts: vec![
@@ -2020,7 +2114,7 @@ mod tests {
                     }),
                 ],
             },
-            Message::tool_result("tc1", "ok", false),
+            Message::tool_result("tc1", "ok", false, 0),
         ];
         let fixed = repair_unanswered_tool_calls(history);
         // tc2 was dangling → an error tool_result is appended at the end.
@@ -2041,8 +2135,10 @@ mod tests {
         // input. Repairing it here would put a synthetic "interrupted" result
         // and the real answer on one tool_use_id.
         let history = vec![
-            Message::user("m1", "pick a color"),
+            Message::user("m1", "pick a color", 0),
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "m2".into(),
                 role: Role::Assistant,
                 parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -2070,6 +2166,8 @@ mod tests {
         vec![
             user_msg("what should I remove?"),
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "a1".into(),
                 role: Role::Assistant,
                 parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -2169,6 +2267,8 @@ mod tests {
 
     fn assistant_call(id: &str, call_id: &str) -> Message {
         Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: id.into(),
             role: Role::Assistant,
             parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -2189,8 +2289,10 @@ mod tests {
             assistant_call("a1", "stopped"), // Stop landed here: no result ever journaled
             user_msg("never mind, do this instead"),
             assistant_call("a2", "tc2"),
-            Message::tool_result("tc2", "ok", false),
+            Message::tool_result("tc2", "ok", false, 0),
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "a3".into(),
                 role: Role::Assistant,
                 parts: vec![ContentPart::Text(TextPart {
@@ -2216,7 +2318,7 @@ mod tests {
             assistant_call("a1", "stopped"),
             user_msg("never mind"),
             assistant_call("a2", "tc2"),
-            Message::tool_result("tc2", "ok", false),
+            Message::tool_result("tc2", "ok", false, 0),
         ];
         let fixed = repair_unanswered_tool_calls(history);
         match &fixed[2].parts[0] {
@@ -2236,6 +2338,8 @@ mod tests {
         let history = vec![
             user_msg("do both"),
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "a1".into(),
                 role: Role::Assistant,
                 parts: vec![
@@ -2251,7 +2355,7 @@ mod tests {
                     }),
                 ],
             },
-            Message::tool_result("tc1", "ok", false),
+            Message::tool_result("tc1", "ok", false, 0),
             user_msg("stop, do something else"),
         ];
         let fixed = repair_unanswered_tool_calls(history);
@@ -2267,6 +2371,8 @@ mod tests {
         let history = vec![
             user_msg("do it"),
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "a".into(),
                 role: Role::Assistant,
                 parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -2275,7 +2381,7 @@ mod tests {
                     input: serde_json::json!({}),
                 })],
             },
-            Message::tool_result("tc1", "ok", false),
+            Message::tool_result("tc1", "ok", false, 0),
         ];
         let before = history.len();
         let fixed = repair_unanswered_tool_calls(history);
@@ -2317,13 +2423,20 @@ mod tests {
         let id = rec.id.clone();
         let mut state = AgentActor::initial_state();
 
-        state = AgentActor::apply_event(state, AgentDomainEvent::TimerArmed { record: rec });
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerArmed {
+                at_ms: 0,
+                record: rec,
+            },
+        );
         assert_eq!(state.timers.len(), 1);
 
         // Recurring fire re-arms in place with a carried next fire time and bumped count.
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::TimerFired {
+                at_ms: 0,
                 id: id.clone(),
                 next_fire_at_unix_ms: Some(120_000),
             },
@@ -2336,6 +2449,7 @@ mod tests {
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::TimerFired {
+                at_ms: 0,
                 id,
                 next_fire_at_unix_ms: None,
             },
@@ -2354,7 +2468,10 @@ mod tests {
                 tasks: vec!["a".to_string(), "b".to_string()],
             })
             .unwrap();
-        state = AgentActor::apply_event(state, AgentDomainEvent::TaskListChanged { snapshot });
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TaskListChanged { at_ms: 0, snapshot },
+        );
         assert!(state.task_list.render().contains("[ ] 1. a"));
 
         // A later snapshot replaces the whole state -- folding is a plain
@@ -2366,7 +2483,10 @@ mod tests {
                 status: crate::task_list::TaskStatus::Completed,
             })
             .unwrap();
-        state = AgentActor::apply_event(state, AgentDomainEvent::TaskListChanged { snapshot });
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TaskListChanged { at_ms: 0, snapshot },
+        );
         assert!(state.task_list.render().contains("Tasks (1/2 done)"));
     }
 
@@ -2376,7 +2496,7 @@ mod tests {
             state = AgentActor::apply_event(
                 state,
                 AgentDomainEvent::MessageComplete {
-                    message: Message::user(*id, "x"),
+                    message: Message::user(*id, "x", 0),
                 },
             );
         }
@@ -2393,6 +2513,7 @@ mod tests {
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::RunComplete {
+                at_ms: 0,
                 usage: Usage::without_cache(4, 2),
                 iterations: 1,
                 context_tokens: 4,
@@ -2441,6 +2562,7 @@ mod tests {
             state = AgentActor::apply_event(
                 state,
                 AgentDomainEvent::RunComplete {
+                    at_ms: 0,
                     usage: Usage::without_cache(input, output),
                     iterations: 1,
                     context_tokens: input,
@@ -2460,6 +2582,7 @@ mod tests {
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::RunComplete {
+                at_ms: 0,
                 usage: Usage {
                     input_tokens: 20,
                     output_tokens: 10,
@@ -2480,6 +2603,7 @@ mod tests {
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::RunComplete {
+                at_ms: 0,
                 usage: Usage {
                     input_tokens: 30,
                     output_tokens: 8,
@@ -2527,7 +2651,7 @@ mod tests {
     #[test]
     fn park_sets_parked_and_input_clears_it() {
         let mut state = AgentActor::initial_state();
-        state = AgentActor::apply_event(state, AgentDomainEvent::Parked);
+        state = AgentActor::apply_event(state, AgentDomainEvent::Parked { at_ms: 0 });
         assert!(state.parked);
         state = AgentActor::apply_event(
             state,
@@ -2558,9 +2682,27 @@ mod tests {
         );
         let (ia, ib) = (a.id.clone(), b.id.clone());
         let mut state = AgentActor::initial_state();
-        state = AgentActor::apply_event(state, AgentDomainEvent::TimerArmed { record: a });
-        state = AgentActor::apply_event(state, AgentDomainEvent::TimerArmed { record: b });
-        state = AgentActor::apply_event(state, AgentDomainEvent::TimerCancelled { ids: vec![ia] });
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerArmed {
+                at_ms: 0,
+                record: a,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerArmed {
+                at_ms: 0,
+                record: b,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerCancelled {
+                at_ms: 0,
+                ids: vec![ia],
+            },
+        );
         assert_eq!(state.timers.len(), 1);
         assert_eq!(state.timers[0].id, ib);
     }

@@ -5,6 +5,7 @@
 use crate::error::CliError;
 use crate::server_client::ServerClient;
 use futures_util::StreamExt;
+use horsie_models::now_ms;
 use horsie_models::session::{SessionDetail, SessionEvent, SessionSummary};
 use reqwest_eventsource::{Event, EventSource};
 use serde::Serialize;
@@ -293,13 +294,6 @@ pub async fn status(server: &str, session_id: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
-}
-
 /// "just now", "5m ago", "3h ago", "2d ago".
 fn relative(now_ms: u64, then_ms: u64) -> String {
     let secs = now_ms.saturating_sub(then_ms) / 1000;
@@ -504,7 +498,7 @@ mod tests {
         let (mut s, _dir, path) = sink(EventsMode::All, None);
         // A MessageEvent for a user message; the SSE id is the journal seq.
         let data = serde_json::to_string(&SessionEvent::Message(MessageEvent {
-            message: horsie_models::agent::Message::user("m1", "hi"),
+            message: horsie_models::agent::Message::user("m1", "hi", 0),
         }))
         .unwrap();
         assert!(s.handle("42", &data).unwrap());
@@ -537,6 +531,7 @@ mod tests {
         let (mut s, _dir, path) = sink(EventsMode::Messages, None);
         let tool = serde_json::to_string(&SessionEvent::ToolResult(
             horsie_models::session::ToolOutputEvent {
+                at_ms: 0,
                 tool_call_id: "t1".into(),
                 output: "ok".into(),
                 is_error: false,
@@ -582,7 +577,7 @@ mod tests {
     #[test]
     fn messages_mode_filters_to_complete_messages_only() {
         let msg = SessionEvent::Message(MessageEvent {
-            message: horsie_models::agent::Message::user("m1", "hi"),
+            message: horsie_models::agent::Message::user("m1", "hi", 0),
         });
         let delta = SessionEvent::Delta(DeltaEvent { text: "h".into() });
         assert!(EventsMode::Messages.allows(&msg));

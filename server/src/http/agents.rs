@@ -13,6 +13,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentPresetInput, AgentView};
+use horsie_models::now_ms;
 use horsie_models::session::AgentSettings as WireAgentSettings;
 
 /// Map the typed service error onto the envelope without string matching.
@@ -128,7 +129,7 @@ pub async fn invoke_agent(
         Some(agent.plugins.clone()),
     )
     .await?;
-    let created_at = handlers::now_ms();
+    let created_at = now_ms();
     let id = handlers::ask(&state, |reply| SessionSupervisorCommand::Create {
         spec: spec.clone(),
         created_at,

@@ -398,6 +398,8 @@ async fn a_slow_provider_gives_up_rather_than_waiting_forever() {
 
 fn user_history() -> Vec<horsie_agentcore::Message> {
     vec![horsie_agentcore::Message {
+        created_at_ms: 0,
+        started_at_ms: None,
         id: "m1".into(),
         role: horsie_agentcore::Role::User,
         parts: vec![horsie_agentcore::ContentPart::Text(

@@ -61,6 +61,12 @@ test("E2: several tool-call steps collapse into one work group", async ({
   await page.getByTestId("work-group-toggle").click();
   await expect(page.locator('[data-testid="tool-call-card"]')).toHaveCount(2);
   await expect(page.getByTestId("thinking-block")).toHaveCount(0);
+
+  // The server's message stamps survive the whole wire — schema, history, SSE,
+  // reducer — and reach the transcript as a clock time on each turn boundary.
+  // The group's own duration is deliberately not asserted: these tools answer
+  // in milliseconds, and a sub-second span renders nothing at all.
+  await expect(page.getByTestId("turn-time").first()).toHaveText(/^\d{1,2}:\d{2}/);
 });
 
 test("E3: a running tool shows a live status on a multi-item work-group row", async ({

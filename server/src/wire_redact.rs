@@ -38,6 +38,8 @@ mod tests {
 
     fn assistant_with_thinking(signature: Option<&str>) -> Message {
         Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: "m1".into(),
             role: Role::Assistant,
             parts: vec![

@@ -760,6 +760,42 @@ async fn history_endpoint_returns_windowed_messages() {
         "tail missing latest: {page}"
     );
 
+    // Every message the endpoint serves is stamped, and a turn's messages run
+    // forward in time — the property a duration readout or a stuck-turn
+    // watchdog is built on.
+    let all = history(100, None).await;
+    let stamps: Vec<u64> = all["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            m["createdAtMs"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("message without a stamp: {m}"))
+        })
+        .collect();
+    assert!(
+        stamps.iter().all(|&t| t > 1_700_000_000_000),
+        "stamps must be real epoch millis, got {stamps:?}"
+    );
+    assert!(
+        stamps.windows(2).all(|w| w[0] <= w[1]),
+        "history must run forward in time, got {stamps:?}"
+    );
+    let assistant = all["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == serde_json::json!("Assistant"))
+        .expect("an assistant reply");
+    let started = assistant["startedAtMs"]
+        .as_u64()
+        .expect("an assistant message reports when its provider call began");
+    assert!(
+        started <= assistant["createdAtMs"].as_u64().unwrap(),
+        "generation cannot end before it began: {assistant}"
+    );
+
     // Scroll back before the oldest returned id → older messages, no tasks/usage.
     let oldest_id = msgs[0]["id"].as_str().unwrap().to_string();
     let older = history(2, Some(oldest_id)).await;

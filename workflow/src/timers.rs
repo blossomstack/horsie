@@ -8,16 +8,7 @@
 use horsie_agentcore::ToolSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-/// Wall-clock milliseconds since the Unix epoch. Used for absolute timer fire
-/// times so a re-armed timer's remaining delay survives a process restart.
-pub fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+use std::time::Duration;
 
 /// Opaque identifier for one armed timer, unique within an agent session.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

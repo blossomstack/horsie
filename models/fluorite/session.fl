@@ -110,8 +110,11 @@ struct SessionDetail {
 /// A complete transcript message (user, assistant, or tool result), replayed
 /// from the durable journal. Carries an SSE id (the journal sequence number).
 struct MessageEvent { message: Message }
-struct ToolOutputEvent { tool_call_id: String, output: String, is_error: bool }
-struct TurnCompletedEvent { iterations: u32, usage: Usage }
+/// `at_ms` is the unix-epoch millisecond the tool finished — the same stamp the
+/// tool-result message carries as its `created_at_ms` on the history endpoint.
+struct ToolOutputEvent { tool_call_id: String, output: String, is_error: bool, at_ms: u64 }
+/// `at_ms` is the unix-epoch millisecond the turn completed.
+struct TurnCompletedEvent { iterations: u32, usage: Usage, at_ms: u64 }
 /// The queue as it stands now, sent whole on every change — never a delta.
 /// Emitted when a message is accepted and again when a turn carries messages
 /// out of the queue, so a second tab needs no reload to stay honest.
