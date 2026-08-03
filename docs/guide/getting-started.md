@@ -28,6 +28,22 @@ and refresh themselves as they age.
 `horsie auth logout --server <url>` forgets one. For scripts and CI, set
 `HORSIE_TOKEN` instead of logging in.
 
+### Default server
+
+The first server you log in to becomes your **default**: from then on,
+commands that talk to a session server — `horsie session …`, `horsie agent …`,
+`horsie connect`, `horsie auth login` — work without `--server`, targeting
+the default. A later login never moves the default on its own; pass
+`--default` to `horsie auth login` to switch it explicitly, or manage it
+directly:
+
+    horsie config set default-server https://horsie.example.com
+    horsie config get default-server
+    horsie config unset default-server
+
+With no default configured, commands fall back to the hosted service at
+`https://auth.horsie.dev` instead of a local `127.0.0.1` address.
+
 ## 3. Connect to a server
 
 Someone (maybe you) runs the horsie server somewhere — see
@@ -39,6 +55,9 @@ address:
     connected to https://horsie.example.com as vendor "local" · workspace "main" -> /Users/shawn/proj
     note: every session on this vendor works in /Users/shawn/proj; concurrent sessions will edit the same files
     open https://horsie.example.com in your browser to start a session
+
+If that server is your default (the first one you logged in to, or set with
+`horsie config set default-server`), `horsie connect --workspace .` works too.
 
 This registers your current directory as workspace `main` and dials the
 server. It uses the login from step 2 — without one, against a server with
