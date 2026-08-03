@@ -92,7 +92,11 @@ export function AppearanceSettings() {
               >
                 <SkinSwatch skin={s.id} mode={mode} />
                 <span className="flex items-center gap-1.5">
-                  <span className="item-title">{s.name}</span>
+                  {/* Not `.item-title` — that is the mono face for machine
+                      strings, and a theme's name is a word, not an id. */}
+                  <span className="text-[13px] font-semibold text-legend">
+                    {s.name}
+                  </span>
                   {skin === s.id && (
                     <Check size={13} className="text-orange" aria-hidden />
                   )}

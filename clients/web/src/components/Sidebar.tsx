@@ -88,10 +88,13 @@ function FooterLink({
       data-testid={`${label.toLowerCase()}-link`}
       className={({ isActive }) =>
         cn(
-          "flex min-w-0 items-center gap-1.5 rounded-[var(--radius-control)] px-1.5 py-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.08em] transition-colors",
+          // `.legend` rather than a hard-coded mono uppercase: these are
+          // engraved labels by role, so they follow whatever the active skin
+          // decided legends look like.
+          "legend flex min-w-0 items-center gap-1.5 rounded-[var(--radius-control)] px-1.5 py-1.5 transition-colors",
           isActive
-            ? "bg-raised text-legend"
-            : "text-faint hover:bg-raised hover:text-legend",
+            ? "bg-raised !text-legend"
+            : "hover:bg-raised hover:!text-legend",
         )
       }
     >
