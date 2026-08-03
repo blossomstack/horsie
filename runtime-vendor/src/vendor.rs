@@ -683,6 +683,33 @@ mod tests {
     use super::*;
     use crate::reconnect::Backoff;
 
+    /// A `wss://` server must be dialable at all: without a TLS feature on
+    /// `tokio-tungstenite`, every dial to an HTTPS-fronted session server dies
+    /// with "TLS support not compiled in" before a single byte of TLS, and the
+    /// reconnect loop retries that forever.
+    ///
+    /// The listener accepts and immediately drops the connection, so the dial
+    /// gets far enough to prove TLS is compiled in (it fails on the handshake,
+    /// not on the URL) without needing a certificate.
+    #[tokio::test]
+    async fn a_wss_url_gets_as_far_as_the_tls_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let err = tokio_tungstenite::connect_async(format!("wss://127.0.0.1:{port}/"))
+            .await
+            .expect_err("a listener that hangs up cannot complete a handshake")
+            .to_string();
+
+        assert!(
+            !err.contains("TLS support not compiled in"),
+            "wss dial rejected before any I/O: {err}"
+        );
+    }
+
     struct NeverProvider;
 
     #[async_trait::async_trait]
