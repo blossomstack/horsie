@@ -6,8 +6,8 @@ import { SessionStatusKind } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
-import { ContextStatsPanel } from "../components/ContextStatsPanel";
-import { SessionConfigBar } from "../components/SessionConfigBar";
+import { ContextGauge } from "../components/ContextGauge";
+import { SessionInfoMenu } from "../components/SessionInfoMenu";
 import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
@@ -231,66 +231,64 @@ export function SessionView() {
     >
       <div className="relative flex h-full">
         <div className="flex h-full min-w-0 flex-1 flex-col">
-          {/* The header strip: what this channel is, what it is doing, and
-              every setting it was launched with — read at a glance, never
-              clicked. */}
-          <header className="border-b bg-panel px-4 pb-2.5 pt-3 sm:px-6">
-            <div className="flex items-center gap-2 sm:gap-3">
-              <RailToggle />
-              <h1
-                data-testid="session-title"
-                className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-legend"
+          {/* One row, at the same 3.25rem as the rail and task-panel headers,
+              so the three columns read as one instrument face. Only live state
+              earns a place here: what this is, what it is doing, and how full
+              its context is. Settled facts sit behind the info key. */}
+          <header className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
+            <RailToggle />
+            <h1
+              data-testid="session-title"
+              className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-legend"
+            >
+              {title}
+            </h1>
+            <StatusBadge status={status} />
+            {/* Durability is the product's whole differentiator, so a dropped
+                feed is a first-class state on the panel — not a transcript
+                that quietly stops moving while the lamp still says Running. */}
+            {!stream.connected && (
+              <span
+                className="flex shrink-0 items-center gap-2 text-amber-ink"
+                data-testid="session-reconnecting"
+                title="Lost the live feed. The run continues on the server; this reconnects and replays anything missed."
               >
-                {title}
-              </h1>
-              <StatusBadge status={status} />
-              {/* Durability is the product's whole differentiator, so a dropped
-                  feed is a first-class state on the panel — not a transcript
-                  that quietly stops moving while the lamp still says Running. */}
-              {!stream.connected && (
-                <span
-                  className="flex shrink-0 items-center gap-2 text-amber-ink"
-                  data-testid="session-reconnecting"
-                  title="Lost the live feed. The run continues on the server; this reconnects and replays anything missed."
-                >
-                  <span className="lamp lamp-live" aria-hidden />
-                  <span className="legend text-current">Reconnecting</span>
+                <span className="lamp lamp-live" aria-hidden />
+                <span className="legend hidden text-current sm:inline">
+                  Reconnecting
                 </span>
-              )}
-              <div className="flex items-center gap-0.5">
-                <SettingsMenu />
-                {stoppable && (
-                  <button
-                    className="key key-stop !px-2.5"
-                    onClick={handleStop}
-                    disabled={stop.isPending}
-                    title="Stop this turn (queued messages are kept)"
-                    data-testid="session-stop"
-                  >
-                    <Square size={11} className="fill-current" aria-hidden />
-                    Stop
-                  </button>
-                )}
-                <button
-                  className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
-                  onClick={handleDelete}
-                  disabled={del.isPending}
-                  title="Delete session"
-                  aria-label="Delete session"
-                  data-testid="session-delete"
-                >
-                  <Trash2 size={15} aria-hidden />
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-2.5 flex flex-wrap items-center gap-x-5 gap-y-2">
-              <ContextStatsPanel
+              </span>
+            )}
+            <div className="flex shrink-0 items-center gap-0.5">
+              <ContextGauge
                 agent={mainAgent}
                 sessionTotal={detail?.usageTotal}
                 totalTokens={totalTokens}
               />
-              {detail && <SessionConfigBar mode="locked" detail={detail} />}
+              {detail && <SessionInfoMenu detail={detail} />}
+              <SettingsMenu />
+              {stoppable && (
+                <button
+                  className="key key-stop !px-2.5"
+                  onClick={handleStop}
+                  disabled={stop.isPending}
+                  title="Stop this turn (queued messages are kept)"
+                  data-testid="session-stop"
+                >
+                  <Square size={11} className="fill-current" aria-hidden />
+                  Stop
+                </button>
+              )}
+              <button
+                className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
+                onClick={handleDelete}
+                disabled={del.isPending}
+                title="Delete session"
+                aria-label="Delete session"
+                data-testid="session-delete"
+              >
+                <Trash2 size={15} aria-hidden />
+              </button>
             </div>
           </header>
 

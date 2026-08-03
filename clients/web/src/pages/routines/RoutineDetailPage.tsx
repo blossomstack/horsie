@@ -1,6 +1,5 @@
-import { CalendarClock, Pencil, Play } from "lucide-react";
+import { Pencil, Play } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
-import { EmptyState } from "../../components/EmptyState";
 import { StatusDot } from "../../components/StatusBadge";
 import { ApiRequestError } from "../../api/client";
 import { useState } from "react";
@@ -24,7 +23,7 @@ export function RoutineDetailPage() {
   }
   if (isError || !routine) {
     return (
-      <p className="px-6 py-4 text-sm text-error">No such routine: {name}.</p>
+      <p className="px-6 py-4 text-sm text-red-ink">No such routine: {name}.</p>
     );
   }
 
@@ -40,7 +39,7 @@ export function RoutineDetailPage() {
   return (
     <div className="flex h-full flex-col" data-testid="routine-detail-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
-        <h1 className="font-mono text-[15px] font-semibold text-text">
+        <h1 className="font-mono text-[15px] font-semibold text-legend">
           {routine.name}
         </h1>
         {!routine.enabled && (
@@ -50,14 +49,14 @@ export function RoutineDetailPage() {
         )}
         <Link
           to={`/routines/${encodeURIComponent(routine.name)}/edit`}
-          className="btn-outline ml-auto !px-2.5 !py-1.5 text-xs"
+          className="key ml-auto !px-2.5 !py-1.5 text-xs"
           data-testid="edit-routine-link"
         >
           <Pencil size={15} />
           Edit
         </Link>
         <button
-          className="btn-primary !px-2.5 !py-1.5 text-xs"
+          className="key key-go !px-2.5 !py-1.5 text-xs"
           onClick={handleRun}
           disabled={run.isPending}
           data-testid="run-routine-button"
@@ -70,12 +69,12 @@ export function RoutineDetailPage() {
       <div className="flex-1 overflow-y-auto px-6 py-4">
         <div className="mx-auto w-full max-w-3xl space-y-5">
           {routine.description && (
-            <p className="text-sm text-muted">{routine.description}</p>
+            <p className="text-sm text-dim">{routine.description}</p>
           )}
 
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
             <dt className="text-faint">Agent</dt>
-            <dd className="text-text">
+            <dd className="text-legend">
               <Link
                 className="hover:underline"
                 to={`/agents/${encodeURIComponent(routine.agent)}/edit`}
@@ -84,9 +83,9 @@ export function RoutineDetailPage() {
               </Link>
             </dd>
             <dt className="text-faint">Runs</dt>
-            <dd className="text-text">{describeSchedule(routine.schedule)}</dd>
+            <dd className="text-legend">{describeSchedule(routine.schedule)}</dd>
             <dt className="text-faint">Next</dt>
-            <dd className="text-text">
+            <dd className="text-legend">
               {routine.nextRunAtMs === undefined ? (
                 <span className="text-faint">not scheduled</span>
               ) : (
@@ -98,15 +97,15 @@ export function RoutineDetailPage() {
           </dl>
 
           <div>
-            <div className="mb-1 text-xs font-medium text-muted">Prompt</div>
-            <pre className="whitespace-pre-wrap rounded-[var(--radius)] border bg-surface-2 px-3 py-2 font-mono text-xs text-text">
+            <div className="mb-1 text-xs font-medium text-dim">Prompt</div>
+            <pre className="whitespace-pre-wrap rounded-[var(--radius-control)] border bg-raised px-3 py-2 font-mono text-xs text-legend">
               {routine.prompt}
             </pre>
           </div>
 
           {(error ?? routine.lastError) && (
             <div
-              className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error"
+              className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2 text-sm text-red-ink"
               data-testid="routine-run-error"
             >
               {error ?? `Last trigger failed: ${routine.lastError}`}
@@ -118,23 +117,24 @@ export function RoutineDetailPage() {
               Runs
             </div>
             {runs && runs.length === 0 && (
-              <EmptyState icon={<CalendarClock size={24} />} title="No runs yet">
-                Runs appear here, not in the sidebar. Each one works from the
-                prompt alone — it has no way to ask you a question.
-              </EmptyState>
+              <p className="screen px-3 py-5 text-center text-sm leading-relaxed text-faint">
+                No runs yet. Runs appear here rather than in the rail, and each
+                works from the prompt alone — it has no way to ask you a
+                question.
+              </p>
             )}
             <div className="space-y-2">
               {(runs ?? []).map((s) => (
                 <Link
                   key={s.id}
                   to={`/sessions/${s.id}`}
-                  className="flex items-center gap-2.5 rounded-[var(--radius)] border px-4 py-3 hover:bg-surface-2"
+                  className="flex items-center gap-2.5 rounded-[var(--radius-control)] border px-4 py-3 hover:bg-raised"
                   data-testid="routine-run-row"
                   data-session-id={s.id}
                 >
                   <StatusDot status={s.status} />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-text">
+                    <div className="truncate text-sm font-medium text-legend">
                       {sessionTitle(s.name)}
                     </div>
                     <div

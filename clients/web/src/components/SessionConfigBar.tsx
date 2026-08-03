@@ -28,9 +28,9 @@ function Readout({
   testId?: string;
 }) {
   return (
-    <span className="flex min-w-0 flex-col" data-testid={testId}>
+    <span className="flex min-w-0 flex-col gap-0.5" data-testid={testId}>
       <span className="legend leading-none">{legend}</span>
-      <span className="max-w-[16rem] truncate font-mono text-[11px] text-legend">
+      <span className="font-mono text-[11px] leading-snug break-words text-legend">
         {children}
       </span>
     </span>
@@ -39,9 +39,11 @@ function Readout({
 
 export function SessionConfigBar(props: Props) {
   if (props.mode === "locked") {
+    // A stacked list, not a strip: locked config now lives inside a narrow
+    // info popover rather than spanning the header.
     return (
       <div
-        className="flex flex-wrap items-center gap-x-5 gap-y-2"
+        className="space-y-2.5"
         data-testid="session-config-bar"
         data-mode="locked"
       >

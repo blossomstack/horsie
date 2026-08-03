@@ -1,6 +1,5 @@
-import { CalendarClock, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
-import { EmptyState } from "../../components/EmptyState";
 import type { RoutineView } from "../../api/types";
 import { relativeTime } from "../../lib/format";
 import { describeSchedule } from "../../lib/schedule";
@@ -22,9 +21,9 @@ export function RoutinesPage() {
   return (
     <div className="flex h-full flex-col" data-testid="routines-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
-        <h1 className="text-[15px] font-semibold text-text">Routines</h1>
+        <h1 className="text-[15px] font-semibold text-legend">Routines</h1>
         <button
-          className="btn-primary ml-auto !px-2.5 !py-1.5 text-xs"
+          className="key key-go ml-auto !px-2.5 !py-1.5 text-xs"
           onClick={() => navigate("/routines/new")}
           data-testid="new-routine-button"
         >
@@ -35,20 +34,24 @@ export function RoutinesPage() {
       <div className="flex-1 overflow-y-auto px-6 py-4">
         {isLoading && <p className="text-sm text-faint">Loading…</p>}
         {isError && (
-          <p className="text-sm text-error">Can’t reach the server.</p>
+          <p className="text-sm text-red-ink">Can’t reach the server.</p>
         )}
         {routines && routines.length === 0 && (
-          <EmptyState icon={<CalendarClock size={24} />} title="No routines yet">
-            A routine runs an agent against a fixed prompt — on a timer, from
-            the API, or whenever you press run. Its sessions live on its own
-            page rather than in the sidebar.
-          </EmptyState>
+          <section className="panel p-4" data-testid="routines-empty">
+            <h2 className="legend">Routine roster</h2>
+            <p className="mt-3 max-w-prose text-sm leading-relaxed text-dim">
+              A routine runs an agent against a fixed prompt — on a timer, from
+              the API, or whenever you press run. Its sessions live on its own
+              page rather than in the rail. Press{" "}
+              <span className="text-legend">New routine</span> to define one.
+            </p>
+          </section>
         )}
         <div className="space-y-2">
           {(routines ?? []).map((r) => (
             <div
               key={r.name}
-              className="flex items-center gap-3 rounded-[var(--radius)] border px-4 py-3"
+              className="flex items-center gap-3 rounded-[var(--radius-control)] border px-4 py-3"
               data-testid="routine-row"
               data-routine-name={r.name}
             >
@@ -57,7 +60,7 @@ export function RoutinesPage() {
                 className="min-w-0 flex-1"
               >
                 <div className="flex items-baseline gap-2">
-                  <span className="font-mono text-sm font-medium text-text">
+                  <span className="font-mono text-sm font-medium text-legend">
                     {r.name}
                   </span>
                   <span className="text-xs text-faint">
@@ -65,7 +68,7 @@ export function RoutinesPage() {
                   </span>
                 </div>
                 {r.description && (
-                  <div className="truncate text-sm text-muted">
+                  <div className="truncate text-sm text-dim">
                     {r.description}
                   </div>
                 )}
@@ -74,12 +77,12 @@ export function RoutinesPage() {
                     <span>ran {relativeTime(r.lastRunAtMs)}</span>
                   )}
                   {r.lastError && (
-                    <span className="text-error">{r.lastError}</span>
+                    <span className="text-red-ink">{r.lastError}</span>
                   )}
                 </div>
               </Link>
               <button
-                className="rounded-[var(--radius-sm)] p-1.5 text-faint hover:bg-surface-2 hover:text-error"
+                className="rounded-[var(--radius-chip)] p-1.5 text-faint hover:bg-raised hover:text-red-ink"
                 title={`Delete ${r.name}`}
                 data-testid={`delete-routine-${r.name}`}
                 onClick={() => {

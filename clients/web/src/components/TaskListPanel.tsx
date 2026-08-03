@@ -58,7 +58,7 @@ export function TaskListPanel({ tasks }: { tasks: TaskItem[] }) {
       className="flex w-64 shrink-0 flex-col border-l bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:shadow-[var(--panel-lift)]"
       data-testid="task-list-panel"
     >
-      <div className="flex items-center gap-2 border-b px-3 py-3">
+      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b px-3">
         <h2 className="legend !text-dim">Plan</h2>
         <span className="readout text-[11px]" data-testid="task-list-progress">
           {done}/{tasks.length} done
