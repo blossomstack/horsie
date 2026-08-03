@@ -6,7 +6,8 @@ use session.SessionSummary;
 use session.SessionDetail;
 use session.TaskItem;
 use session.UsageView;
-use session.SessionUsageStats;
+use session.SubAgentView;
+use agent.Usage;
 use agent.Message;
 
 /// One repository to provision into the session workspace.
@@ -33,33 +34,50 @@ struct CreateSessionRequest {
     plugins: Option<Vec<String>>,
 }
 
-/// One page of a session's conversation history, served from the agent's
-/// in-memory state (not a journal replay). `tasks`/`usage` ride only on the tail
-/// page (the initial `before`-less request); scroll-back pages carry messages
-/// alone. `has_more` reports whether older messages precede this window.
+/// One window of an agent's transcript, served from the agent's in-memory
+/// state — never a journal replay. Messages only: task list and usage are
+/// current values and live on the agent document, so a page means the same
+/// thing whichever cursor produced it.
+///
+/// `before` and `after` are the same cursor space (a message id) read in
+/// opposite directions. `has_more_before`/`has_more_after` say whether more
+/// exists on each side; a backfilling client pages until `has_more_after` is
+/// false.
 struct HistoryPage {
     messages: Vec<Message>,
-    has_more: bool,
-    tasks: Option<Vec<TaskItem>>,
-    usage: Option<UsageView>,
+    has_more_before: bool,
+    has_more_after: bool,
 }
 
-struct GetSessionUsageResponse { usage: SessionUsageStats }
-
-/// One node of a session's subagent tree. `output` is deliberately absent —
-/// transcripts are read through the history endpoint with an agent_id.
-struct SubAgentView {
+/// One agent's current values. The subagent-only fields (`parent`, `label`,
+/// `task`, `output`, `error`) are absent for a session's main agent.
+struct AgentDocument {
     id: String,
     /// Parent agent id; absent → the session's main agent.
     parent: Option<String>,
-    label: String,
+    label: Option<String>,
+    /// The task a subagent was spawned to do.
+    task: Option<String>,
     depth: u32,
     /// "running" | "completed" | "failed".
     status: String,
+    output: Option<String>,
     error: Option<String>,
+    /// The agent's `task_list` tool state.
+    tasks: Vec<TaskItem>,
+    /// Cumulative usage across this agent's completed turns.
+    usage: UsageView,
+    /// The most recently completed turn's own usage. Absent before the first.
+    last_turn_usage: Option<Usage>,
+    /// The last provider call's prompt size — what is loaded in context now.
+    /// Never summed across turns.
+    context_tokens: u32,
+    /// The model's configured context window, when known. Attached by the HTTP
+    /// layer from model config — this one field is not agent state.
+    context_window: Option<u32>,
 }
 
-struct GetSessionSubAgentsResponse { subagents: Vec<SubAgentView> }
+struct GetAgentResponse { agent: AgentDocument }
 
 struct CreateSessionResponse { session: SessionSummary }
 struct ListSessionsResponse { sessions: Vec<SessionSummary> }

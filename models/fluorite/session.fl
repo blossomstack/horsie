@@ -78,9 +78,6 @@ struct SessionDetail {
     status: Option<SessionStatusKind>,
     created_at: u64,
     last_error: Option<String>,
-    /// The first question the agent is awaiting an answer to (status
-    /// AwaitingInput). Kept for clients that show a single question.
-    pending_question: Option<String>,
     /// Every question the agent is awaiting an answer to, oldest first. All of
     /// them must be answered in one request before the turn can resume.
     pending_asks: Vec<PendingAskView>,
@@ -103,16 +100,46 @@ struct SessionDetail {
     /// Messages accepted but not yet carried into a turn, oldest first (empty
     /// when nothing is owed).
     inbox: Vec<QueuedMessage>,
+    /// Token usage summed across every agent this session hosts. Per-agent
+    /// numbers (and context size, which is never summed) are on the agent
+    /// document instead.
+    usage_total: UsageView,
+    /// Every agent this session hosts: the main agent first, then its subagent
+    /// tree. Each is addressable at `/sessions/:id/agents/:agent_id`.
+    agents: Vec<SubAgentView>,
+    /// The resource-preparation stage a turn is currently at, when one is
+    /// spinning up. Live-only history: past stages are not replayable.
+    progression: Option<ProgressionEvent>,
+}
+
+/// One agent this session hosts. The main agent has `parent`/`label` absent
+/// and `depth` 0; subagents carry their spawn metadata. `output` and the full
+/// transcript live on the agent document and its history, not here.
+struct SubAgentView {
+    id: String,
+    /// Parent agent id; absent → the session's main agent.
+    parent: Option<String>,
+    label: Option<String>,
+    depth: u32,
+    /// "running" | "completed" | "failed".
+    status: String,
+    error: Option<String>,
 }
 
 // --- SSE event payloads ---
 
-/// A complete transcript message (user, assistant, or tool result), replayed
-/// from the durable journal. Carries an SSE id (the journal sequence number).
-struct MessageEvent { message: Message }
-/// `at_ms` is the unix-epoch millisecond the tool finished — the same stamp the
-/// tool-result message carries as its `created_at_ms` on the history endpoint.
-struct ToolOutputEvent { tool_call_id: String, output: String, is_error: bool, at_ms: u64 }
+/// One transcript append — a user message, an assistant message, or a tool
+/// result. Carries the SSE id `message.id`, which is also the history cursor:
+/// one vocabulary for the log, whichever way you read it.
+struct AppendedEvent { message: Message }
+
+/// The stream lagged and dropped frames. The client must backfill with
+/// `history?after=<its cursor>` and re-read the documents; the server does not
+/// replay, because a live stream is not a log.
+struct ResyncEvent { }
+
+/// The session's agent roster changed (a subagent spawned, finished, or failed).
+struct AgentTreeEvent { agents: Vec<SubAgentView> }
 /// `at_ms` is the unix-epoch millisecond the turn completed.
 struct TurnCompletedEvent { iterations: u32, usage: Usage, at_ms: u64 }
 /// The queue as it stands now, sent whole on every change — never a delta.
@@ -167,42 +194,32 @@ struct UsageView {
     cache_read_tokens: Option<u64>,
 }
 
-/// One agent's own usage plus its context-size snapshot, labeled with the
-/// model it ran. `context_window`, unlike everything else here, is not agent
-/// state — it's attached by the HTTP layer from the model's configured value.
-struct AgentUsageView {
-    model: String,
-    usage_total: UsageView,
-    /// The most recently completed run's own usage — a per-run cost figure.
-    /// Absent before this agent's first completed run.
-    last_turn_usage: Option<Usage>,
-    /// The most recently completed run's last provider call's prompt size
-    /// alone — what's actually loaded in this agent's context right now.
-    context_tokens: u32,
-    /// The model's configured context window, when known.
-    context_window: Option<u32>,
-}
-
-/// A session's aggregated usage. `session_total` sums every agent this
-/// session hosts (today, just the one); context-size state is never summed
-/// across agents — see `main_agent` for that, kept per-agent on purpose.
-struct SessionUsageStats {
-    session_total: UsageView,
-    main_agent: AgentUsageView,
-}
-
+/// A frame on one agent's stream (`/sessions/:id/agents/:agent_id/events`).
+///
+/// `Appended` is the only frame with an SSE id, because it is the only one that
+/// belongs to a log. The rest are either current values the client re-reads
+/// (`TurnCompleted`, `TaskListChanged`) or ephemeral run noise (`Delta`,
+/// `ToolStart`) that has no meaning outside a live turn.
 #[type_tag = "type"]
-union SessionEvent {
-    Message(MessageEvent),
-    ToolResult(ToolOutputEvent),
+union AgentStreamEvent {
+    Appended(AppendedEvent),
     TurnCompleted(TurnCompletedEvent),
-    InboxChanged(InboxChangedEvent),
-    StatusChanged(StatusChangedEvent),
-    Error(ErrorEvent),
+    TaskListChanged(TaskListEvent),
     Delta(DeltaEvent),
     ToolStart(ToolStartEvent),
-    TaskListChanged(TaskListEvent),
+    Resync(ResyncEvent),
+}
+
+/// A frame on the session stream (`/sessions/:id/events`). Session-scoped
+/// current values only — never a transcript, which is per-agent. None carries
+/// an SSE id: a client re-reads the session document rather than accumulating.
+#[type_tag = "type"]
+union SessionEvent {
+    StatusChanged(StatusChangedEvent),
+    InboxChanged(InboxChangedEvent),
+    Error(ErrorEvent),
     Progressed(ProgressionEvent),
+    AgentTreeChanged(AgentTreeEvent),
 }
 
 /// A status frame on the global `/api/events` stream.
