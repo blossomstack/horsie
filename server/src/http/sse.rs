@@ -136,7 +136,10 @@ pub async fn agent_events(
                     // Only an append is a log entry, so only an append gets an id.
                     let id = match &frame {
                         AgentFrame::Appended { message } => Some(message.id.clone()),
-                        _ => None,
+                        AgentFrame::Delta { .. }
+                        | AgentFrame::ToolStart { .. }
+                        | AgentFrame::TurnCompleted { .. }
+                        | AgentFrame::TaskListChanged { .. } => None,
                     };
                     let wire = wire_agent_frame(frame);
                     if let Some(ev) = encode(id.as_deref(), &wire)

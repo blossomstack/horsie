@@ -2808,6 +2808,10 @@ mod tests {
             self.inner.persist(pid, events).await
         }
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this decorator's whole job is to count the inner journal's replays"
+        )]
         async fn replay(
             &self,
             pid: &horsie_actor::PersistenceId,
@@ -2872,7 +2876,10 @@ mod tests {
             .iter()
             .filter_map(|f| match f {
                 AgentFrame::Appended { message } => Some(message.id.clone()),
-                _ => None,
+                AgentFrame::Delta { .. }
+                | AgentFrame::ToolStart { .. }
+                | AgentFrame::TurnCompleted { .. }
+                | AgentFrame::TaskListChanged { .. } => None,
             })
             .collect()
     }
