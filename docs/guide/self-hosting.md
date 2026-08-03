@@ -11,6 +11,31 @@ Next: open http://localhost:3789 → **Settings** → add a provider + model.
 Then have anyone who'll run sessions against a repo on their machine follow
 [Getting started](getting-started.md) to install the CLI and `horsie connect`.
 
+## Deploying to Fly.io
+
+Fly.io has no browser one-click button (Fly staff have said they don't plan
+to ship one), so this is a handful of `flyctl` commands from a checkout of
+this repo instead of a link:
+
+```bash
+fly launch --no-deploy                          # reads fly.toml, creates the app
+fly postgres create                              # managed Postgres cluster
+fly postgres attach --app <app-name> --variable-name HORSIE_DATABASE_URL
+fly deploy
+```
+
+`fly launch` assigns its own unique app name — the `app` value committed in
+`fly.toml` is only a placeholder it overwrites. `--variable-name
+HORSIE_DATABASE_URL` on `fly postgres attach` sets the secret under the name
+horsie already reads, so nothing needs renaming afterward.
+
+To use an external Postgres instead of a Fly-managed cluster, skip the two
+`fly postgres` commands and set the connection string directly:
+
+```bash
+fly secrets set HORSIE_DATABASE_URL=postgres://user:password@host/horsie
+```
+
 ## Manual / advanced setup
 
 Building the server image or binary yourself instead of using the published
