@@ -37,14 +37,44 @@ function renderLocked(d: SessionDetail) {
 }
 
 describe("SessionConfigBar locked mode", () => {
-  it("shows the frozen thinking effort as a chip", () => {
+  // The locked row is icon-only, so every value lives in the accessible name
+  // rather than in text — that is the contract a screen reader reads too.
+  it("names the frozen thinking effort on its key", () => {
     const { getByTestId } = renderLocked(detail({ thinkingEffort: "high" }));
-    const chip = getByTestId("config-thinking");
-    expect(chip.textContent).toContain("high");
+    expect(getByTestId("config-thinking").getAttribute("aria-label")).toBe(
+      "Thinking — high",
+    );
   });
 
-  it("omits the thinking chip when no effort is set", () => {
+  it("omits the thinking key when no effort is set", () => {
     const { queryByTestId } = renderLocked(detail({ thinkingEffort: undefined }));
     expect(queryByTestId("config-thinking")).toBeNull();
+  });
+
+  it("always names the runtime and the model", () => {
+    const { getByTestId } = renderLocked(detail());
+    expect(getByTestId("config-runtime").getAttribute("aria-label")).toBe(
+      "Runtime — local",
+    );
+    expect(getByTestId("config-model").getAttribute("aria-label")).toBe(
+      "Model — sonnet",
+    );
+  });
+
+  it("omits a workspace channel the session does not have", () => {
+    // A non-provisioning vendor has no repos, and five keys all reading
+    // "None" is a row that says nothing.
+    const { queryByTestId } = renderLocked(detail({ repos: [] }));
+    expect(queryByTestId("config-repos")).toBeNull();
+  });
+
+  it("shows a workspace channel the session does have", () => {
+    const { getByTestId } = renderLocked(
+      detail({ repos: ["https://github.com/acme/widgets.git"] }),
+    );
+    expect(getByTestId("config-repos").getAttribute("aria-label")).toBe(
+      // `basename` keeps the .git suffix, as it always has.
+      "Repos — widgets.git",
+    );
   });
 });

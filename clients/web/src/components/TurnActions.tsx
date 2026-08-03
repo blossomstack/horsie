@@ -66,22 +66,13 @@ export function TurnActions({
   const plainOnly = markdown === undefined;
 
   return (
-    /* `-top-6` lands the row in the 1.75rem gap between turns, so it never
-       overlaps the first line of prose and costs no reserved height. */
+    /* Bottom-left, in the 1.75rem gap below the turn: it reads as belonging
+       to the message it follows, sits where the eye already is at the end of
+       a reply, and costs no reserved height. */
     <div
-      className="turn-actions pointer-events-none absolute -top-6 right-0 z-10 flex items-center gap-1 opacity-0 transition-opacity focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+      className="turn-actions pointer-events-none absolute -bottom-6 left-0 z-10 flex items-center gap-1 opacity-0 transition-opacity focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
       data-testid="turn-actions"
     >
-      {atMs !== undefined && (
-        <span
-          className="readout mr-0.5 text-[10px] tabular-nums"
-          data-testid="turn-time"
-          title={new Date(atMs).toLocaleString()}
-        >
-          {formatTime(atMs)}
-        </span>
-      )}
-
       {!plainOnly && (
         <button
           type="button"
@@ -115,6 +106,16 @@ export function TurnActions({
           <Type size={13} aria-hidden />
         )}
       </button>
+
+      {atMs !== undefined && (
+        <span
+          className="readout ml-0.5 text-[10px] tabular-nums"
+          data-testid="turn-time"
+          title={new Date(atMs).toLocaleString()}
+        >
+          {formatTime(atMs)}
+        </span>
+      )}
 
       {/* The copy result is a colour change on an icon, which says nothing to
           a screen reader; this is the word that goes with the lamp. */}

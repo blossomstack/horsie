@@ -6,6 +6,8 @@ import { useMcpServers } from "../hooks/useMcp";
 import { useMemorySpaces } from "../hooks/useMemory";
 import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
+import type { SessionDetail } from "../api/types";
+import { basename } from "../lib/format";
 import type { ConfigDraft } from "../hooks/useSessionDraft";
 
 /**
@@ -327,4 +329,102 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   }
 
   return pickers;
+}
+
+/**
+ * The same channels for a session that already exists.
+ *
+ * A created session's configuration is frozen, but it is still the thing you
+ * check when something surprises you — so the row keeps its shape and its
+ * position, and each key opens a readout instead of a picker. Nothing here is
+ * editable; `marked` means "this session has one", not "you chose one".
+ */
+export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
+  const value = (items: string[]) =>
+    items.length ? items.join(", ") : "None";
+
+  const readout = (label: string, items: string[]) => () => (
+    <div className="space-y-1.5 px-1 py-0.5">
+      <p className="legend">{label}</p>
+      {items.length === 0 ? (
+        <p className="text-sm text-faint">None</p>
+      ) : (
+        <ul className="space-y-0.5">
+          {items.map((v) => (
+            <li key={v} className="font-mono text-[13px] break-words text-legend">
+              {v}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+
+  // Only the channels this session actually has. The draft row hides the
+  // workspace channels on a vendor that cannot provision one, and `SessionDetail`
+  // does not carry that capability — but an empty list means the same thing
+  // here, and five keys that all read "None" is a row that says nothing.
+  const optional = (
+    key: string,
+    legend: string,
+    icon: ReactNode,
+    width: string,
+    items: string[],
+  ): PickerSpec[] =>
+    items.length === 0
+      ? []
+      : [
+          {
+            key,
+            legend,
+            icon,
+            label: value(items),
+            marked: true,
+            width,
+            testId: `config-${key}`,
+            body: readout(legend, items),
+          },
+        ];
+
+  const channels: PickerSpec[] = [
+    {
+      key: "runtime",
+      legend: "Runtime",
+      icon: <Server size={15} />,
+      label: detail.vendor,
+      marked: true,
+      width: "w-56",
+      testId: "config-runtime",
+      body: readout("Runtime", [detail.vendor]),
+    },
+    ...optional("repos", "Repos", <FolderGit2 size={15} />, "w-80", detail.repos.map(basename)),
+    ...optional("skills", "Skills", <Boxes size={15} />, "w-80", detail.plugins),
+    ...optional("mcp", "MCP", <Plug size={15} />, "w-72", detail.mcpServers),
+    ...optional("memory", "Memory", <Brain size={15} />, "w-72", detail.memorySpaces),
+    {
+      key: "model",
+      legend: "Model",
+      icon: <Cpu size={15} />,
+      label: detail.model,
+      marked: true,
+      width: "w-72",
+      testId: "config-model",
+      body: readout("Model", [detail.model]),
+    },
+  ];
+
+  if (detail.thinkingEffort) {
+    channels.push({
+      key: "thinking",
+      legend: "Thinking",
+      icon: <Lightbulb size={15} />,
+      label: detail.thinkingEffort,
+      marked: true,
+      width: "w-52",
+      testId: "config-thinking",
+      body: readout("Thinking effort", [detail.thinkingEffort]),
+    });
+  }
+
+  return channels;
 }

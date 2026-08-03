@@ -7,7 +7,7 @@ import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
 import { ContextGauge } from "../components/ContextGauge";
-import { SessionInfoMenu } from "../components/SessionInfoMenu";
+import { SessionConfigBar } from "../components/SessionConfigBar";
 import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
@@ -299,7 +299,6 @@ export function SessionView() {
                   </span>
                 )}
               </button>
-              {detail && <SessionInfoMenu detail={detail} />}
               <SettingsMenu />
               <button
                 className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
@@ -431,6 +430,10 @@ export function SessionView() {
           )}
 
           {/* Composer */}
+          {/* The channels this session runs on, in the same place the draft
+              row occupied before it existed. Read-only — each key opens its
+              value rather than a picker. */}
+          {detail && <SessionConfigBar mode="locked" detail={detail} />}
           <Composer
             status={status}
             busy={send.isPending}

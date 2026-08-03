@@ -76,9 +76,18 @@ export function PopoverMenu({
         <button
           type="button"
           className={cn(
-            "key-icon relative",
+            "key-icon",
+            // State is the control's own colour, not a badge stuck on it. A
+            // dot in the corner of a 2rem key is four pixels doing the work of
+            // a whole control, and orange there competes with the one orange
+            // key that actually commits.
+            warn
+              ? "!bg-amber-quiet !text-amber-ink"
+              : marked
+                ? "bg-raised !text-legend"
+                : "!text-faint",
             disabled && "cursor-default opacity-70",
-            open && "bg-raised text-legend",
+            open && "bg-raised !text-legend",
           )}
           onClick={() => !disabled && setOpen((o) => !o)}
           disabled={disabled}
@@ -87,17 +96,9 @@ export function PopoverMenu({
           aria-label={described}
           data-testid={testId}
           data-marked={marked ? "true" : undefined}
+          data-warn={warn ? "true" : undefined}
         >
           {icon}
-          {(marked || warn) && (
-            <span
-              className={cn(
-                "absolute right-1 top-1 h-1.5 w-1.5 rounded-[999px]",
-                warn ? "bg-amber" : "bg-orange",
-              )}
-              aria-hidden
-            />
-          )}
         </button>
       ) : (
         <button
