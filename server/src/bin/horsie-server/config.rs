@@ -25,6 +25,9 @@ pub struct BootConfig {
     /// Where the session server persists its runtime-editable settings.
     #[serde(default)]
     pub database: DatabaseConfig,
+    /// Where actor journals live.
+    #[serde(default)]
+    pub journal: JournalConfig,
     /// Authentication. Enabled unless explicitly turned off — a deployment
     /// reachable from anywhere but localhost should not be open by accident.
     #[serde(default)]
@@ -62,33 +65,16 @@ fn auth_enabled_from(cfg: &BootConfig, env: Option<String>) -> bool {
     }
 }
 
-/// Which durable backend the actor journal uses.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JournalBackend {
-    /// SQLite, sharing the settings database. Real snapshots and compaction.
-    #[default]
-    Sqlite,
-    /// Append-only JSONL files under the data dir. No snapshotting, so every
-    /// recovery is a full replay; kept for the CLI/daemon path, where runs are
-    /// short enough for that to be fine.
-    File,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {
     /// Ephemeral runtime state. Defaults to `$XDG_STATE_HOME/horsie`, else
     /// `$HOME/.local/state/horsie`.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
-    /// Durable session journal. Defaults to `$XDG_DATA_HOME/horsie`, else
-    /// `$HOME/.local/share/horsie`.
+    /// Durable session journal, when `journal.backend` is `file`. Defaults to
+    /// `$XDG_DATA_HOME/horsie`, else `$HOME/.local/share/horsie`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
-    /// Journal backend. A future `postgres` arm lands here rather than in a
-    /// rewrite, which is why this is configuration and not a build choice.
-    #[serde(default)]
-    pub journal: JournalBackend,
 }
 
 impl Default for StorageConfig {
@@ -96,17 +82,60 @@ impl Default for StorageConfig {
         Self {
             state_dir: default_state_dir(),
             data_dir: default_data_dir(),
-            journal: JournalBackend::default(),
         }
     }
 }
 
 /// Absent → a SQLite file under the server data dir. Set `url` to a
-/// `sqlite://…` path today, or a `postgres://…` URL once that backend lands.
+/// `sqlite://…` path or a `postgres://…` URL.
 #[derive(Debug, Default, Deserialize)]
 pub struct DatabaseConfig {
     #[serde(default)]
     pub url: Option<String>,
+    /// Pool size. Settings reads and journal writes share this pool.
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+}
+
+/// Which journal backend to use, and how an absent setting resolves.
+#[derive(Debug, Default, Deserialize)]
+pub struct JournalConfig {
+    #[serde(default)]
+    pub backend: Option<JournalBackend>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JournalBackend {
+    /// Base64 JSONL under `storage.data_dir`. Needs a durable volume.
+    File,
+    /// The `journal_events` / `journal_snapshots` tables in `database.url`.
+    Database,
+}
+
+impl JournalBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JournalBackend::File => "file",
+            JournalBackend::Database => "database",
+        }
+    }
+}
+
+/// The journal backend to use: the configured one, else `database`.
+///
+/// The default does not depend on the dialect. It is tempting to make it
+/// asymmetric — keep `file` on SQLite so an upgrade cannot abandon journals
+/// already on disk — but that ship has sailed: the database journal has been
+/// the default since it landed for SQLite, so defaulting to `file` here would
+/// abandon the journals of every deployment that has upgraded since, which is
+/// the same one-way door pointing the other way. `file` stays available
+/// explicitly, and remains what the CLI uses.
+///
+/// The resolved value is logged at boot and reported in `/api/config`, so it is
+/// never a guess.
+pub fn journal_backend(cfg: &BootConfig) -> JournalBackend {
+    cfg.journal.backend.unwrap_or(JournalBackend::Database)
 }
 
 impl BootConfig {

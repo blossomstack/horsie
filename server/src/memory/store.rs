@@ -1,13 +1,14 @@
-//! SQLite storage for memory spaces and memories, sharing the config store's
-//! pool. No secrets, so this is a plain metadata store (mirrors
+//! Storage for memory spaces and memories, sharing the config store's
+//! database. No secrets, so this is a plain metadata store (mirrors
 //! `plugins::store` without the artifact bookkeeping).
 //!
-//! `memories.space` is not a SQL foreign key -- see `0008_memory.sql` for why.
+//! `memories.space` is not a SQL foreign key -- see `0009_memory.sql` for why.
 //! The relationship is enforced here: `create_memory` checks the space exists,
 //! and `delete_space` / `rename_space` fix up children inside a transaction.
 
+use crate::db::Db;
 use sqlx::Row;
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use sqlx::any::AnyRow;
 
 const SPACE_COLS: &str = "name, description, created_at, updated_at";
 const MEMORY_COLS: &str = "id, space, name, description, content, created_at, updated_at";
@@ -21,8 +22,8 @@ pub struct MemorySpaceRow {
     pub updated_at: String,
 }
 
-/// One row of the `memories` table. `id` is ignored on insert (the column is
-/// AUTOINCREMENT); `create_memory` returns the assigned id.
+/// One row of the `memories` table. `id` is ignored on insert (the column
+/// generates it); `create_memory` returns the assigned id.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryRow {
     pub id: i64,
@@ -35,32 +36,32 @@ pub struct MemoryRow {
 }
 
 pub struct MemoryStore {
-    pool: SqlitePool,
+    db: Db,
 }
 
 impl MemoryStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     // --- spaces ---
 
     pub async fn list_spaces(&self) -> Result<Vec<MemorySpaceRow>, String> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(&self.db.q(&format!(
             "SELECT {SPACE_COLS} FROM memory_spaces ORDER BY name"
-        ))
-        .fetch_all(&self.pool)
+        )))
+        .fetch_all(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         rows.iter().map(row_to_space).collect()
     }
 
     pub async fn get_space(&self, name: &str) -> Result<Option<MemorySpaceRow>, String> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(&self.db.q(&format!(
             "SELECT {SPACE_COLS} FROM memory_spaces WHERE name = ?"
-        ))
+        )))
         .bind(name)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         row.as_ref().map(row_to_space).transpose()
@@ -69,15 +70,15 @@ impl MemoryStore {
     /// Insert a space. Errs when the name is taken (no upsert: a silent
     /// overwrite would discard the existing description).
     pub async fn create_space(&self, row: &MemorySpaceRow) -> Result<(), String> {
-        sqlx::query(
+        sqlx::query(&self.db.q(
             "INSERT INTO memory_spaces (name, description, created_at, updated_at) \
              VALUES (?, ?, ?, ?)",
-        )
+        ))
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.created_at)
         .bind(&row.updated_at)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| format!("create space '{}': {e}", row.name))?;
         Ok(())
@@ -90,14 +91,17 @@ impl MemoryStore {
         description: &str,
         updated_at: &str,
     ) -> Result<bool, String> {
-        let res =
-            sqlx::query("UPDATE memory_spaces SET description = ?, updated_at = ? WHERE name = ?")
-                .bind(description)
-                .bind(updated_at)
-                .bind(name)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        let res = sqlx::query(
+            &self
+                .db
+                .q("UPDATE memory_spaces SET description = ?, updated_at = ? WHERE name = ?"),
+        )
+        .bind(description)
+        .bind(updated_at)
+        .bind(name)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 
@@ -105,10 +109,10 @@ impl MemoryStore {
     /// key, so a bare `UPDATE memory_spaces SET name = ?` would orphan every
     /// memory in it -- all three statements run in one transaction.
     pub async fn rename_space(&self, old: &str, new: &str, updated_at: &str) -> Result<(), String> {
-        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
-        let existing = sqlx::query(&format!(
+        let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
+        let existing = sqlx::query(&self.db.q(&format!(
             "SELECT {SPACE_COLS} FROM memory_spaces WHERE name = ?"
-        ))
+        )))
         .bind(old)
         .fetch_optional(&mut *tx)
         .await
@@ -119,10 +123,10 @@ impl MemoryStore {
             .transpose()?
             .ok_or_else(|| format!("unknown memory space '{old}'"))?;
 
-        sqlx::query(
+        sqlx::query(&self.db.q(
             "INSERT INTO memory_spaces (name, description, created_at, updated_at) \
              VALUES (?, ?, ?, ?)",
-        )
+        ))
         .bind(new)
         .bind(&existing.description)
         .bind(&existing.created_at)
@@ -131,14 +135,14 @@ impl MemoryStore {
         .await
         .map_err(|e| format!("rename to '{new}': {e}"))?;
 
-        sqlx::query("UPDATE memories SET space = ? WHERE space = ?")
+        sqlx::query(&self.db.q("UPDATE memories SET space = ? WHERE space = ?"))
             .bind(new)
             .bind(old)
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
 
-        sqlx::query("DELETE FROM memory_spaces WHERE name = ?")
+        sqlx::query(&self.db.q("DELETE FROM memory_spaces WHERE name = ?"))
             .bind(old)
             .execute(&mut *tx)
             .await
@@ -150,13 +154,13 @@ impl MemoryStore {
     /// Delete a space and every memory in it. Returns false when the space did
     /// not exist.
     pub async fn delete_space(&self, name: &str) -> Result<bool, String> {
-        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
-        sqlx::query("DELETE FROM memories WHERE space = ?")
+        let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
+        sqlx::query(&self.db.q("DELETE FROM memories WHERE space = ?"))
             .bind(name)
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
-        let res = sqlx::query("DELETE FROM memory_spaces WHERE name = ?")
+        let res = sqlx::query(&self.db.q("DELETE FROM memory_spaces WHERE name = ?"))
             .bind(name)
             .execute(&mut *tx)
             .await
@@ -171,18 +175,18 @@ impl MemoryStore {
     pub async fn list_memories(&self, space: Option<&str>) -> Result<Vec<MemoryRow>, String> {
         let rows = match space {
             Some(s) => {
-                sqlx::query(&format!(
+                sqlx::query(&self.db.q(&format!(
                     "SELECT {MEMORY_COLS} FROM memories WHERE space = ? ORDER BY space, name"
-                ))
+                )))
                 .bind(s)
-                .fetch_all(&self.pool)
+                .fetch_all(self.db.pool())
                 .await
             }
             None => {
-                sqlx::query(&format!(
+                sqlx::query(&self.db.q(&format!(
                     "SELECT {MEMORY_COLS} FROM memories ORDER BY space, name"
-                ))
-                .fetch_all(&self.pool)
+                )))
+                .fetch_all(self.db.pool())
                 .await
             }
         }
@@ -201,20 +205,28 @@ impl MemoryStore {
             "SELECT {MEMORY_COLS} FROM memories WHERE space IN ({placeholders}) \
              ORDER BY space, name"
         );
-        let mut q = sqlx::query(&sql);
+        let rewritten = self.db.q(&sql);
+        let mut q = sqlx::query(&rewritten);
         for s in spaces {
             q = q.bind(s);
         }
-        let rows = q.fetch_all(&self.pool).await.map_err(|e| e.to_string())?;
+        let rows = q
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
         rows.iter().map(row_to_memory).collect()
     }
 
     pub async fn get_memory(&self, id: i64) -> Result<Option<MemoryRow>, String> {
-        let row = sqlx::query(&format!("SELECT {MEMORY_COLS} FROM memories WHERE id = ?"))
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let row = sqlx::query(
+            &self
+                .db
+                .q(&format!("SELECT {MEMORY_COLS} FROM memories WHERE id = ?")),
+        )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         row.as_ref().map(row_to_memory).transpose()
     }
 
@@ -223,12 +235,12 @@ impl MemoryStore {
         space: &str,
         name: &str,
     ) -> Result<Option<MemoryRow>, String> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(&self.db.q(&format!(
             "SELECT {MEMORY_COLS} FROM memories WHERE space = ? AND name = ?"
-        ))
+        )))
         .bind(space)
         .bind(name)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         row.as_ref().map(row_to_memory).transpose()
@@ -237,8 +249,8 @@ impl MemoryStore {
     /// Insert a memory, returning its assigned id. Verifies the space exists in
     /// the same transaction as the insert, since there is no FK to do it.
     pub async fn create_memory(&self, row: &MemoryRow) -> Result<i64, String> {
-        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
-        let space = sqlx::query("SELECT name FROM memory_spaces WHERE name = ?")
+        let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
+        let space = sqlx::query(&self.db.q("SELECT name FROM memory_spaces WHERE name = ?"))
             .bind(&row.space)
             .fetch_optional(&mut *tx)
             .await
@@ -246,20 +258,24 @@ impl MemoryStore {
         if space.is_none() {
             return Err(format!("unknown memory space '{}'", row.space));
         }
-        let res = sqlx::query(
+        // `RETURNING id` rather than a follow-up `last_insert_id`: sqlx's Any
+        // driver reports that as NULL on SQLite regardless of the backend.
+        let inserted = sqlx::query(&self.db.q(
             "INSERT INTO memories (space, name, description, content, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
+             VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+        ))
         .bind(&row.space)
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.content)
         .bind(&row.created_at)
         .bind(&row.updated_at)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("create memory '{}/{}': {e}", row.space, row.name))?;
-        let id = res.last_insert_rowid();
+        let id = inserted
+            .try_get::<i64, _>("id")
+            .map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(id)
     }
@@ -273,31 +289,31 @@ impl MemoryStore {
         content: Option<&str>,
         updated_at: &str,
     ) -> Result<bool, String> {
-        let res = sqlx::query(
+        let res = sqlx::query(&self.db.q(
             "UPDATE memories SET description = COALESCE(?, description), \
              content = COALESCE(?, content), updated_at = ? WHERE id = ?",
-        )
+        ))
         .bind(description)
         .bind(content)
         .bind(updated_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 
     pub async fn delete_memory(&self, id: i64) -> Result<bool, String> {
-        let res = sqlx::query("DELETE FROM memories WHERE id = ?")
+        let res = sqlx::query(&self.db.q("DELETE FROM memories WHERE id = ?"))
             .bind(id)
-            .execute(&self.pool)
+            .execute(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 }
 
-fn row_to_space(row: &SqliteRow) -> Result<MemorySpaceRow, String> {
+fn row_to_space(row: &AnyRow) -> Result<MemorySpaceRow, String> {
     let get_s = |c: &str| row.try_get::<String, _>(c).map_err(|e| e.to_string());
     Ok(MemorySpaceRow {
         name: get_s("name")?,
@@ -307,7 +323,7 @@ fn row_to_space(row: &SqliteRow) -> Result<MemorySpaceRow, String> {
     })
 }
 
-fn row_to_memory(row: &SqliteRow) -> Result<MemoryRow, String> {
+fn row_to_memory(row: &AnyRow) -> Result<MemoryRow, String> {
     let get_s = |c: &str| row.try_get::<String, _>(c).map_err(|e| e.to_string());
     Ok(MemoryRow {
         id: row.try_get::<i64, _>("id").map_err(|e| e.to_string())?,
@@ -324,20 +340,10 @@ fn row_to_memory(row: &SqliteRow) -> Result<MemoryRow, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     async fn store() -> (MemoryStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true)
-            // Mirrors `config::store::open_pool`. Without it, a write that
-            // lands while another pooled connection holds the database fails
-            // outright, which made this module's tests flaky under load.
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
+        let pool = crate::db::testing::db().await;
         (MemoryStore::new(pool), tmp)
     }
 

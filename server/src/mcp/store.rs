@@ -1,14 +1,15 @@
-//! SQLite storage for configured remote MCP servers (`mcp_servers`). One row
+//! Storage for configured remote MCP servers (`mcp_servers`). One row
 //! per server, keyed by `name`. A bearer secret is stored plaintext (the DB
 //! file is the trust boundary) and wrapped in [`Secret`] in memory; write-only
 //! inputs follow the settings store's keep/clear/set convention (`None` keeps,
 //! `""` clears, a value sets). `github_app` servers store no token — it is
 //! minted from the GitHub App connection at use time.
 
+use crate::db::Db;
 use horsie_agentcore::Secret;
 use horsie_models::mcp::{McpAuthInput, McpOAuthInput, McpServerInput};
 use sqlx::Row;
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use sqlx::any::AnyRow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How horsie authenticates to a server, as stored (the bearer secret rides
@@ -71,23 +72,23 @@ pub struct McpServerRow {
 
 #[derive(Clone)]
 pub struct McpStore {
-    pool: SqlitePool,
+    db: Db,
 }
 
 impl McpStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// All configured servers, ordered by name.
     pub async fn list(&self) -> Result<Vec<McpServerRow>, String> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(&self.db.q(
             "SELECT name, url, enabled, auth_kind, bearer_token, \
              oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
              tool_count, last_error \
              FROM mcp_servers ORDER BY name",
-        )
-        .fetch_all(&self.pool)
+        ))
+        .fetch_all(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         rows.iter().map(row_to_server).collect()
@@ -95,14 +96,14 @@ impl McpStore {
 
     /// One server by name.
     pub async fn get(&self, name: &str) -> Result<Option<McpServerRow>, String> {
-        let row = sqlx::query(
+        let row = sqlx::query(&self.db.q(
             "SELECT name, url, enabled, auth_kind, bearer_token, \
              oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
              tool_count, last_error \
              FROM mcp_servers WHERE name = ?",
-        )
+        ))
         .bind(name)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         row.as_ref().map(row_to_server).transpose()
@@ -123,7 +124,7 @@ impl McpStore {
         let existing = self.get(name).await?;
         let auth = auth_from_input(&input.auth, existing.as_ref());
         let now = now_secs().to_string();
-        sqlx::query(
+        sqlx::query(&self.db.q(
             "INSERT INTO mcp_servers \
              (name, url, enabled, auth_kind, bearer_token, \
               oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
@@ -139,7 +140,7 @@ impl McpStore {
              oauth_expires_at = excluded.oauth_expires_at, \
              oauth_meta = excluded.oauth_meta, \
              enabled = 0, tool_count = NULL, last_error = NULL, updated_at = excluded.updated_at",
-        )
+        ))
         .bind(name)
         .bind(url)
         .bind(auth.kind())
@@ -152,7 +153,7 @@ impl McpStore {
         .bind(oauth_field(&auth, |o| o.meta.clone()))
         .bind(&now)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         self.get(name)
@@ -161,9 +162,9 @@ impl McpStore {
     }
 
     pub async fn delete(&self, name: &str) -> Result<(), String> {
-        sqlx::query("DELETE FROM mcp_servers WHERE name = ?")
+        sqlx::query(&self.db.q("DELETE FROM mcp_servers WHERE name = ?"))
             .bind(name)
-            .execute(&self.pool)
+            .execute(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -178,16 +179,16 @@ impl McpStore {
         tool_count: Option<u32>,
         last_error: Option<&str>,
     ) -> Result<(), String> {
-        sqlx::query(
+        sqlx::query(&self.db.q(
             "UPDATE mcp_servers SET enabled = ?, tool_count = ?, last_error = ?, updated_at = ? \
              WHERE name = ?",
-        )
+        ))
         .bind(i64::from(enabled))
         .bind(tool_count.map(i64::from))
         .bind(last_error)
         .bind(now_secs().to_string())
         .bind(name)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -202,16 +203,16 @@ impl McpStore {
         client_secret: Option<&str>,
         meta: &str,
     ) -> Result<(), String> {
-        sqlx::query(
+        sqlx::query(&self.db.q(
             "UPDATE mcp_servers SET oauth_client_id = ?, oauth_client_secret = ?, oauth_meta = ?, updated_at = ? \
              WHERE name = ?",
-        )
+        ))
         .bind(client_id)
         .bind(client_secret)
         .bind(meta)
         .bind(now_secs().to_string())
         .bind(name)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -228,27 +229,27 @@ impl McpStore {
     ) -> Result<(), String> {
         match refresh {
             Some(rt) => {
-                sqlx::query(
+                sqlx::query(&self.db.q(
                     "UPDATE mcp_servers SET oauth_access_token = ?, oauth_refresh_token = ?, oauth_expires_at = ?, updated_at = ? WHERE name = ?",
-                )
+                ))
                 .bind(access)
                 .bind(rt)
                 .bind(expires_at)
                 .bind(now_secs().to_string())
                 .bind(name)
-                .execute(&self.pool)
+                .execute(self.db.pool())
                 .await
                 .map_err(|e| e.to_string())?;
             }
             None => {
-                sqlx::query(
+                sqlx::query(&self.db.q(
                     "UPDATE mcp_servers SET oauth_access_token = ?, oauth_expires_at = ?, updated_at = ? WHERE name = ?",
-                )
+                ))
                 .bind(access)
                 .bind(expires_at)
                 .bind(now_secs().to_string())
                 .bind(name)
-                .execute(&self.pool)
+                .execute(self.db.pool())
                 .await
                 .map_err(|e| e.to_string())?;
             }
@@ -328,7 +329,7 @@ fn oauth_secret(auth: &StoredAuth, pick: impl Fn(&OauthState) -> Option<Secret>)
     }
 }
 
-fn row_to_server(row: &SqliteRow) -> Result<McpServerRow, String> {
+fn row_to_server(row: &AnyRow) -> Result<McpServerRow, String> {
     let auth_kind: String = row.try_get("auth_kind").map_err(|e| e.to_string())?;
     let auth = match auth_kind.as_str() {
         "none" => StoredAuth::None,
@@ -357,20 +358,20 @@ fn row_to_server(row: &SqliteRow) -> Result<McpServerRow, String> {
     })
 }
 
-fn opt_string(row: &SqliteRow, col: &str) -> Result<Option<String>, String> {
+fn opt_string(row: &AnyRow, col: &str) -> Result<Option<String>, String> {
     row.try_get::<Option<String>, _>(col)
         .map_err(|e| e.to_string())
 }
 
 /// A stored secret column, treating an empty string as absent.
-fn opt_secret(row: &SqliteRow, col: &str) -> Result<Option<Secret>, String> {
+fn opt_secret(row: &AnyRow, col: &str) -> Result<Option<Secret>, String> {
     Ok(opt_string(row, col)?
         .filter(|s| !s.is_empty())
         .map(Secret::from))
 }
 
 /// A `u32` column round-tripped through SQLite's signed `INTEGER`.
-fn opt_u32(row: &SqliteRow, col: &str) -> Result<Option<u32>, String> {
+fn opt_u32(row: &AnyRow, col: &str) -> Result<Option<u32>, String> {
     let v = row
         .try_get::<Option<i64>, _>(col)
         .map_err(|e| e.to_string())?;
@@ -404,16 +405,10 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use horsie_models::mcp::{McpBearerInput, McpGithubAppAuth, McpNoAuth};
-    use std::str::FromStr;
 
     async fn store() -> (McpStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
+        let pool = crate::db::testing::db().await;
         (McpStore::new(pool), tmp)
     }
 

@@ -61,6 +61,45 @@ jobs:
         continue-on-error: true
         run: cargo test --locked --workspace --all-features --no-fail-fast -- --ignored
 
+  postgres:
+    name: Tests (PostgreSQL)
+    runs-on: ubuntu-latest
+    # The same suite as `check`, against PostgreSQL instead of SQLite. Every
+    # test that touches storage goes through `db::testing::db()`, which picks
+    # its backend from HORSIE_TEST_POSTGRES_URL — so this is a portability run
+    # over the whole suite, not just the tests written with two backends in
+    # mind. A query that works on SQLite and breaks here fails in whichever
+    # test already covers that code path.
+    services:
+      postgres:
+        image: postgres:17@sha256:a426e44bac0b759c95894d68e1a0ac03ecc20b619f498a91aae373bf06d8508d
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: Tests
+        env:
+          # Each test creates its own database on this server, so the suite's
+          # tests stay isolated from one another.
+          HORSIE_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: cargo test --locked --workspace --all-features
+
   cargo-deny:
     name: Supply chain (cargo-deny)
     runs-on: ubuntu-latest

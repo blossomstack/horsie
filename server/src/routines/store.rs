@@ -1,11 +1,12 @@
-//! SQLite storage for routines, sharing the config store's pool.
+//! Storage for routines, sharing the config store's database.
 //!
 //! The schedule is a sum type here and three columns in the table; the mapping
 //! is the only place that knows both shapes. A row that cannot be read back as
 //! a legal schedule is an error, never a silently-defaulted value.
 
+use crate::db::Db;
 use sqlx::Row;
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use sqlx::any::AnyRow;
 
 const COLS: &str = "name, description, agent, prompt, schedule_kind, interval_secs, at_ms, \
                     enabled, next_run_at_ms, last_run_at_ms, last_session_id, last_error, \
@@ -98,40 +99,48 @@ pub struct RoutineRow {
 }
 
 pub struct RoutineStore {
-    pool: SqlitePool,
+    db: Db,
 }
 
 impl RoutineStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     pub async fn list(&self) -> Result<Vec<RoutineRow>, String> {
-        let rows = sqlx::query(&format!("SELECT {COLS} FROM routines ORDER BY name"))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let rows = sqlx::query(
+            &self
+                .db
+                .q(&format!("SELECT {COLS} FROM routines ORDER BY name")),
+        )
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         rows.iter().map(row_to_routine).collect()
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<RoutineRow>, String> {
-        let row = sqlx::query(&format!("SELECT {COLS} FROM routines WHERE name = ?"))
-            .bind(name)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let row = sqlx::query(
+            &self
+                .db
+                .q(&format!("SELECT {COLS} FROM routines WHERE name = ?")),
+        )
+        .bind(name)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         row.as_ref().map(row_to_routine).transpose()
     }
 
     /// Enabled routines whose next run has come due. The scheduler's only read.
     pub async fn due(&self, now_ms: u64) -> Result<Vec<RoutineRow>, String> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(&self.db.q(&format!(
             "SELECT {COLS} FROM routines \
              WHERE enabled = 1 AND next_run_at_ms IS NOT NULL AND next_run_at_ms <= ? \
              ORDER BY next_run_at_ms"
-        ))
+        )))
         .bind(now_ms as i64)
-        .fetch_all(&self.pool)
+        .fetch_all(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         rows.iter().map(row_to_routine).collect()
@@ -139,11 +148,15 @@ impl RoutineStore {
 
     /// Names of the routines configured to run a given agent preset.
     pub async fn using_agent(&self, agent: &str) -> Result<Vec<String>, String> {
-        let rows = sqlx::query("SELECT name FROM routines WHERE agent = ? ORDER BY name")
-            .bind(agent)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let rows = sqlx::query(
+            &self
+                .db
+                .q("SELECT name FROM routines WHERE agent = ? ORDER BY name"),
+        )
+        .bind(agent)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         rows.iter()
             .map(|r| r.try_get::<String, _>("name").map_err(|e| e.to_string()))
             .collect()
@@ -152,9 +165,9 @@ impl RoutineStore {
     /// Insert; errs when the name is taken (no upsert — a silent overwrite
     /// would discard the existing routine).
     pub async fn insert(&self, row: &RoutineRow) -> Result<(), String> {
-        sqlx::query(&format!(
+        sqlx::query(&self.db.q(&format!(
             "INSERT INTO routines ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        ))
+        )))
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.agent)
@@ -169,7 +182,7 @@ impl RoutineStore {
         .bind(&row.last_error)
         .bind(&row.created_at)
         .bind(&row.updated_at)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| format!("create routine '{}': {e}", row.name))?;
         Ok(())
@@ -179,11 +192,11 @@ impl RoutineStore {
     /// name. Run history (`last_*`) is deliberately untouched: editing a
     /// routine does not un-run it.
     pub async fn replace(&self, row: &RoutineRow) -> Result<bool, String> {
-        let res = sqlx::query(
+        let res = sqlx::query(&self.db.q(
             "UPDATE routines SET description = ?, agent = ?, prompt = ?, schedule_kind = ?, \
              interval_secs = ?, at_ms = ?, enabled = ?, next_run_at_ms = ?, updated_at = ? \
              WHERE name = ?",
-        )
+        ))
         .bind(&row.description)
         .bind(&row.agent)
         .bind(&row.prompt)
@@ -194,16 +207,16 @@ impl RoutineStore {
         .bind(row.next_run_at_ms.map(|v| v as i64))
         .bind(&row.updated_at)
         .bind(&row.name)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 
     pub async fn delete(&self, name: &str) -> Result<bool, String> {
-        let res = sqlx::query("DELETE FROM routines WHERE name = ?")
+        let res = sqlx::query(&self.db.q("DELETE FROM routines WHERE name = ?"))
             .bind(name)
-            .execute(&self.pool)
+            .execute(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
@@ -213,12 +226,16 @@ impl RoutineStore {
     /// starting a run, so a run that outlives a tick cannot be picked up as
     /// still-due and started a second time.
     pub async fn arm(&self, name: &str, next_run_at_ms: Option<u64>) -> Result<(), String> {
-        sqlx::query("UPDATE routines SET next_run_at_ms = ? WHERE name = ?")
-            .bind(next_run_at_ms.map(|v| v as i64))
-            .bind(name)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            &self
+                .db
+                .q("UPDATE routines SET next_run_at_ms = ? WHERE name = ?"),
+        )
+        .bind(next_run_at_ms.map(|v| v as i64))
+        .bind(name)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -235,22 +252,22 @@ impl RoutineStore {
             RunOutcome::Started(id) => (Some(id.clone()), None),
             RunOutcome::Failed(msg) => (None, Some(msg.clone())),
         };
-        sqlx::query(
+        sqlx::query(&self.db.q(
             "UPDATE routines SET last_run_at_ms = ?, last_session_id = ?, last_error = ? \
              WHERE name = ?",
-        )
+        ))
         .bind(at_ms as i64)
         .bind(session)
         .bind(error)
         .bind(name)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         Ok(())
     }
 }
 
-fn row_to_routine(row: &SqliteRow) -> Result<RoutineRow, String> {
+fn row_to_routine(row: &AnyRow) -> Result<RoutineRow, String> {
     let get = |c: &str| row.try_get::<String, _>(c).map_err(|e| e.to_string());
     let get_opt = |c: &str| {
         row.try_get::<Option<String>, _>(c)
@@ -281,17 +298,10 @@ fn row_to_routine(row: &SqliteRow) -> Result<RoutineRow, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
-    async fn store() -> (RoutineStore, SqlitePool, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
-        (RoutineStore::new(pool.clone()), pool, tmp)
+    async fn store() -> (RoutineStore, Db) {
+        let db = crate::db::testing::db().await;
+        (RoutineStore::new(db.clone()), db)
     }
 
     fn row(name: &str, schedule: Schedule) -> RoutineRow {
@@ -313,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_schedule_shape_round_trips() {
-        let (s, _p, _t) = store().await;
+        let (s, _db) = store().await;
         for (name, schedule) in [
             ("m", Schedule::Manual),
             ("e", Schedule::Every { interval_secs: 300 }),
@@ -329,14 +339,14 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_insert_is_rejected() {
-        let (s, _p, _t) = store().await;
+        let (s, _db) = store().await;
         s.insert(&row("a", Schedule::Manual)).await.unwrap();
         assert!(s.insert(&row("a", Schedule::Manual)).await.is_err());
     }
 
     #[tokio::test]
     async fn replace_swaps_the_definition_and_keeps_run_history() {
-        let (s, _p, _t) = store().await;
+        let (s, _db) = store().await;
         assert!(!s.replace(&row("ghost", Schedule::Manual)).await.unwrap());
         s.insert(&row("a", Schedule::Manual)).await.unwrap();
         s.record_run("a", 500, &RunOutcome::Started("sess-1".into()))
@@ -360,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_reports_misses() {
-        let (s, _p, _t) = store().await;
+        let (s, _db) = store().await;
         s.insert(&row("a", Schedule::Manual)).await.unwrap();
         assert!(s.delete("a").await.unwrap());
         assert!(!s.delete("a").await.unwrap());
@@ -368,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn due_respects_the_timestamp_and_the_enabled_flag() {
-        let (s, _p, _t) = store().await;
+        let (s, _db) = store().await;
         let mut soon = row("soon", Schedule::Every { interval_secs: 60 });
         soon.next_run_at_ms = Some(1_000);
         let mut later = row("later", Schedule::Every { interval_secs: 60 });
@@ -390,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_run_replaces_the_previous_outcome_and_leaves_the_timer_alone() {
-        let (s, _p, _t) = store().await;
+        let (s, _db) = store().await;
         s.insert(&row("a", Schedule::Every { interval_secs: 60 }))
             .await
             .unwrap();
@@ -419,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn arm_moves_the_timer_and_disarming_takes_it_out_of_due() {
-        let (s, _p, _t) = store().await;
+        let (s, _db) = store().await;
         s.insert(&row("a", Schedule::Every { interval_secs: 60 }))
             .await
             .unwrap();
@@ -437,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn using_agent_finds_every_referencing_routine() {
-        let (s, _p, _t) = store().await;
+        let (s, _db) = store().await;
         let mut other = row("b", Schedule::Manual);
         other.agent = "fixer".into();
         s.insert(&row("a", Schedule::Manual)).await.unwrap();
@@ -450,12 +460,12 @@ mod tests {
     async fn a_schedule_row_missing_its_payload_is_an_error() {
         // Not a defaulted interval: a routine silently running at some other
         // cadence than the one it was saved with is worse than a load failure.
-        let (s, pool, _t) = store().await;
+        let (s, db) = store().await;
         s.insert(&row("a", Schedule::Every { interval_secs: 60 }))
             .await
             .unwrap();
         sqlx::query("UPDATE routines SET interval_secs = NULL WHERE name = 'a'")
-            .execute(&pool)
+            .execute(db.pool())
             .await
             .unwrap();
         let err = s.get("a").await.unwrap_err();

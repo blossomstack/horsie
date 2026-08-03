@@ -23,8 +23,8 @@ use config::{BootConfig, BootError, JournalBackend};
 use horsie_actor::{FileJournal, Journal, spawn_root};
 use horsie_models::settings::ServerInfo;
 use horsie_server::config::{DbConfigStore, StoreDeps, model_cards};
+use horsie_server::db::journal::SqlJournal;
 use horsie_server::http::{AppState, app};
-use horsie_server::journal::SqliteJournal;
 use horsie_server::plugins::{ArtifactStore, PluginService, PluginStore};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::SessionSupervisor;
@@ -75,6 +75,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     std::fs::create_dir_all(&data_dir).map_err(|e| BootError::Io(e.to_string()))?;
 
     let db_url = resolve_db_url(&cfg, &data_dir);
+    let journal_backend = config::journal_backend(&cfg);
     let info = ServerInfo {
         config_path: config_path
             .as_ref()
@@ -85,23 +86,42 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         data_dir: cfg.storage.data_dir.display().to_string(),
         plugins_dir: data_dir.join("plugins").display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        journal_backend: journal_backend.as_str().to_string(),
     };
-    let opened = DbConfigStore::open(&db_url, StoreDeps { info })
-        .await
-        .map_err(BootError::Config)?;
+    let opened = DbConfigStore::open_with(
+        &db_url,
+        cfg.database
+            .max_connections
+            .unwrap_or(horsie_server::config::DEFAULT_MAX_CONNECTIONS),
+        StoreDeps { info },
+    )
+    .await
+    .map_err(BootError::Config)?;
 
-    // Built after the store, because the SQLite backend shares its pool — one
-    // database, one migrator, one set of connections.
-    let journal: Arc<dyn Journal> = match cfg.storage.journal {
-        JournalBackend::Sqlite => Arc::new(SqliteJournal::new(opened.pool.clone())),
+    // Built after the store, because the database backend shares its handle —
+    // one database, one migrator, one set of connections.
+    //
+    // Which journal a deployment gets is load-bearing and partly defaulted, so
+    // say it out loud: switching an existing deployment from `file` to
+    // `database` starts from an empty log and leaves the old sessions on disk.
+    let journal: Arc<dyn Journal> = match journal_backend {
         JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
+        JournalBackend::Database => Arc::new(SqlJournal::new(opened.db.clone())),
     };
+    eprintln!(
+        "journal backend: {} ({})",
+        journal_backend.as_str(),
+        match journal_backend {
+            JournalBackend::File => data_dir.join("actors").display().to_string(),
+            JournalBackend::Database => redact_db_url(&db_url),
+        }
+    );
 
     // Seed the model-card catalog: bundled defaults plus an optional operator
     // file. Seed-file parse/read errors are fatal (operator input should fail
     // loud); DB errors only warn — the admin API stays usable to fix state.
     // Insert-if-missing semantics mean admin edits survive every restart.
-    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(opened.pool.clone()));
+    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(opened.db.clone()));
     let seed_path = cli
         .model_cards_seed
         .clone()
@@ -129,32 +149,32 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     ));
 
     let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(opened.pool.clone()),
+        horsie_server::github::GithubStore::new(opened.db.clone()),
         horsie_server::github::GithubApi::new(),
     ));
     let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.pool.clone()),
+        horsie_server::mcp::McpStore::new(opened.db.clone()),
         github.clone(),
     ));
     let plugins = Arc::new(PluginService::new(
-        PluginStore::new(opened.pool.clone()),
+        PluginStore::new(opened.db.clone()),
         ArtifactStore::new(data_dir.join("plugins")),
         artifact_secret(),
     ));
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(opened.pool.clone()),
+        horsie_server::memory::MemoryStore::new(opened.db.clone()),
     ));
     let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(opened.pool.clone()),
+        horsie_server::agents::AgentStore::new(opened.db.clone()),
         opened.store.clone(),
     ));
     let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(opened.pool.clone()),
+        horsie_server::routines::RoutineStore::new(opened.db.clone()),
         agents.clone(),
     ));
 
     let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.pool.clone()),
+        horsie_server::auth::AuthStore::new(opened.db.clone()),
         horsie_server::auth::AuthDeps {
             enabled: config::auth_enabled(&cfg),
             state_dir: state_dir.clone(),

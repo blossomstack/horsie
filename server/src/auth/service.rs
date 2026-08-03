@@ -549,14 +549,7 @@ mod tests {
     /// The temp dir doubles as the service's state dir, so the generated
     /// password file lands somewhere the test can read.
     async fn service(tmp: &tempfile::TempDir, enabled: bool) -> AuthService {
-        use std::str::FromStr;
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
+        let pool = crate::db::testing::db().await;
         AuthService::new(
             AuthStore::new(pool),
             AuthDeps {

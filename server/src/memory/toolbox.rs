@@ -357,16 +357,10 @@ mod tests {
     use super::*;
     use crate::memory::MemoryStore;
     use horsie_agentcore::EmptyToolbox;
-    use std::str::FromStr;
 
     async fn toolbox(spaces: &[&str]) -> (MemoryToolbox, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
+        let pool = crate::db::testing::db().await;
         let service = Arc::new(MemoryService::new(MemoryStore::new(pool)));
         for s in spaces {
             if *s != "default" {

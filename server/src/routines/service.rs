@@ -313,10 +313,12 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn fixture() -> Fixture {
+        // The temp dir is still handed back for callers that write files next
+        // to the fixture; the database itself comes from `db::testing`, so
+        // these tests run on whichever backend the run selected.
         let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("config.db");
-        let opened = crate::config::DbConfigStore::open(
-            &format!("sqlite://{}", db.display()),
+        let opened = crate::config::DbConfigStore::open_on(
+            crate::db::testing::db().await,
             crate::config::StoreDeps {
                 info: horsie_models::settings::ServerInfo {
                     config_path: String::new(),
@@ -325,6 +327,7 @@ pub(crate) mod tests {
                     data_dir: String::new(),
                     plugins_dir: String::new(),
                     version: "test".into(),
+                    journal_backend: "file".into(),
                 },
             },
         )
@@ -356,7 +359,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let agents = Arc::new(AgentService::new(
-            AgentStore::new(opened.pool.clone()),
+            AgentStore::new(opened.db.clone()),
             opened.store.clone(),
         ));
         agents
@@ -375,7 +378,7 @@ pub(crate) mod tests {
             .unwrap();
         Fixture {
             routines: Arc::new(RoutineService::new(
-                RoutineStore::new(opened.pool.clone()),
+                RoutineStore::new(opened.db.clone()),
                 agents.clone(),
             )),
             agents,

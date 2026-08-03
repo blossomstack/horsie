@@ -206,16 +206,10 @@ fn now_string() -> String {
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::str::FromStr;
 
     async fn service() -> (PluginService, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
+        let pool = crate::db::testing::db().await;
         let artifacts = ArtifactStore::new(tmp.path().join("artifacts"));
         let svc = PluginService::new(PluginStore::new(pool), artifacts, b"secret".to_vec());
         (svc, tmp)

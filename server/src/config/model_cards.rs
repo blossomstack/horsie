@@ -4,9 +4,10 @@
 //! when cards change. Seeded at startup (insert-if-missing), managed via
 //! /api/admin/model-cards, searched via /api/model-cards.
 
+use crate::db::Db;
 use horsie_models::model_cards::{ModelCard, ModelCardInput, ModelCardUpdate};
 use sqlx::Row;
-use sqlx::sqlite::SqlitePool;
+use sqlx::any::AnyRow;
 
 /// Cap on rows returned by the public prefix search.
 pub const SEARCH_LIMIT: i64 = 50;
@@ -24,7 +25,7 @@ pub enum ModelCardError {
 }
 
 pub struct ModelCardStore {
-    pool: SqlitePool,
+    db: Db,
 }
 
 fn validate(
@@ -54,7 +55,7 @@ fn validate(
 
 const COLUMNS: &str = "model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking, created_at, updated_at";
 
-fn row_to_card(r: &sqlx::sqlite::SqliteRow) -> Result<ModelCard, sqlx::Error> {
+fn row_to_card(r: &AnyRow) -> Result<ModelCard, sqlx::Error> {
     let cw: Option<i64> = r.try_get("context_window")?;
     let mt: Option<i64> = r.try_get("max_tokens")?;
     Ok(ModelCard {
@@ -78,16 +79,16 @@ fn row_to_card(r: &sqlx::sqlite::SqliteRow) -> Result<ModelCard, sqlx::Error> {
 }
 
 impl ModelCardStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// Every card, ordered by `model_id`.
     pub async fn list(&self) -> Result<Vec<ModelCard>, ModelCardError> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(&self.db.q(&format!(
             "SELECT {COLUMNS} FROM model_cards ORDER BY model_id"
-        ))
-        .fetch_all(&self.pool)
+        )))
+        .fetch_all(self.db.pool())
         .await
         .map_err(|e| ModelCardError::Db(e.to_string()))?;
         rows.iter()
@@ -104,13 +105,13 @@ impl ModelCardStore {
             .replace('\\', "\\\\")
             .replace('%', "\\%")
             .replace('_', "\\_");
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(&self.db.q(&format!(
             "SELECT {COLUMNS} FROM model_cards WHERE model_id LIKE ? ESCAPE '\\' \
              ORDER BY model_id LIMIT ?"
-        ))
+        )))
         .bind(format!("{escaped}%"))
         .bind(SEARCH_LIMIT)
-        .fetch_all(&self.pool)
+        .fetch_all(self.db.pool())
         .await
         .map_err(|e| ModelCardError::Db(e.to_string()))?;
         rows.iter()
@@ -120,11 +121,11 @@ impl ModelCardStore {
     }
 
     pub async fn get(&self, model_id: &str) -> Result<Option<ModelCard>, ModelCardError> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(&self.db.q(&format!(
             "SELECT {COLUMNS} FROM model_cards WHERE model_id = ?"
-        ))
+        )))
         .bind(model_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.db.pool())
         .await
         .map_err(|e| ModelCardError::Db(e.to_string()))?;
         row.as_ref()
@@ -146,10 +147,10 @@ impl ModelCardStore {
                 input.model_id
             )));
         }
-        sqlx::query(
+        sqlx::query(&self.db.q(
             "INSERT INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
+        ))
         .bind(&input.model_id)
         .bind(&input.name)
         .bind(input.context_window.map(i64::from))
@@ -159,7 +160,7 @@ impl ModelCardStore {
         .bind(input.thinking_dialect.clone())
         .bind(input.base_url.clone())
         .bind(i64::from(input.forced_tools_disable_thinking.unwrap_or(false)))
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| ModelCardError::Db(e.to_string()))?;
         self.get(&input.model_id)
@@ -179,28 +180,30 @@ impl ModelCardStore {
             update.context_window,
             update.max_tokens,
         )?;
-        let res = sqlx::query(
+        let statement = format!(
             "UPDATE model_cards SET name = ?, context_window = ?, max_tokens = ?, \
              thinking_efforts = ?, default_thinking_effort = ?, thinking_dialect = ?, \
              base_url = ?, forced_tools_disable_thinking = ?, \
-             updated_at = datetime('now') WHERE model_id = ?",
-        )
-        .bind(&update.name)
-        .bind(update.context_window.map(i64::from))
-        .bind(update.max_tokens.map(i64::from))
-        .bind(crate::config::store::encode_efforts(
-            update.thinking_efforts.as_ref(),
-        ))
-        .bind(update.default_thinking_effort.clone())
-        .bind(update.thinking_dialect.clone())
-        .bind(update.base_url.clone())
-        .bind(i64::from(
-            update.forced_tools_disable_thinking.unwrap_or(false),
-        ))
-        .bind(model_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ModelCardError::Db(e.to_string()))?;
+             updated_at = {} WHERE model_id = ?",
+            self.db.now_text()
+        );
+        let res = sqlx::query(&self.db.q(&statement))
+            .bind(&update.name)
+            .bind(update.context_window.map(i64::from))
+            .bind(update.max_tokens.map(i64::from))
+            .bind(crate::config::store::encode_efforts(
+                update.thinking_efforts.as_ref(),
+            ))
+            .bind(update.default_thinking_effort.clone())
+            .bind(update.thinking_dialect.clone())
+            .bind(update.base_url.clone())
+            .bind(i64::from(
+                update.forced_tools_disable_thinking.unwrap_or(false),
+            ))
+            .bind(model_id)
+            .execute(self.db.pool())
+            .await
+            .map_err(|e| ModelCardError::Db(e.to_string()))?;
         if res.rows_affected() == 0 {
             return Err(ModelCardError::NotFound(format!(
                 "no model card '{model_id}'"
@@ -212,9 +215,9 @@ impl ModelCardStore {
     }
 
     pub async fn delete(&self, model_id: &str) -> Result<(), ModelCardError> {
-        let res = sqlx::query("DELETE FROM model_cards WHERE model_id = ?")
+        let res = sqlx::query(&self.db.q("DELETE FROM model_cards WHERE model_id = ?"))
             .bind(model_id)
-            .execute(&self.pool)
+            .execute(self.db.pool())
             .await
             .map_err(|e| ModelCardError::Db(e.to_string()))?;
         if res.rows_affected() == 0 {
@@ -232,10 +235,13 @@ impl ModelCardStore {
         let mut inserted = 0usize;
         for c in cards {
             validate(&c.model_id, &c.name, c.context_window, c.max_tokens)?;
-            let res = sqlx::query(
-                "INSERT OR IGNORE INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
+            // `ON CONFLICT DO NOTHING` rather than SQLite's `INSERT OR IGNORE`:
+            // same semantics, and the standard spelling works on both backends.
+            let res = sqlx::query(&self.db.q(
+                "INSERT INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (model_id) DO NOTHING",
+            ))
             .bind(&c.model_id)
             .bind(&c.name)
             .bind(c.context_window.map(i64::from))
@@ -245,7 +251,7 @@ impl ModelCardStore {
             .bind(c.thinking_dialect.clone())
             .bind(c.base_url.clone())
             .bind(i64::from(c.forced_tools_disable_thinking.unwrap_or(false)))
-            .execute(&self.pool)
+            .execute(self.db.pool())
             .await
             .map_err(|e| ModelCardError::Db(e.to_string()))?;
             inserted += res.rows_affected() as usize;
@@ -295,11 +301,8 @@ fn parse_seed(json: &str) -> Result<Vec<ModelCardInput>, String> {
 mod tests {
     use super::*;
 
-    async fn test_store(dir: &std::path::Path) -> ModelCardStore {
-        let pool = crate::config::store::open_pool(&format!("sqlite://{}/t.db", dir.display()))
-            .await
-            .unwrap();
-        ModelCardStore::new(pool)
+    async fn test_store() -> ModelCardStore {
+        ModelCardStore::new(crate::db::testing::db().await)
     }
 
     fn input(model_id: &str, name: &str, cw: Option<u32>, mt: Option<u32>) -> ModelCardInput {
@@ -331,8 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_url_and_forced_tools_flag_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
 
         let mut card = input("ds", "DS", Some(1000), Some(100));
         card.base_url = Some("https://api.deepseek.com".into());
@@ -363,8 +365,7 @@ mod tests {
     /// API clients keep working unchanged.
     #[tokio::test]
     async fn absent_flag_reads_back_as_false() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store
             .insert(&input("plain", "Plain", None, None))
             .await
@@ -376,8 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn crud_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
 
         let card = store
             .insert(&input("gpt-4o", "GPT-4o", Some(128_000), Some(16_384)))
@@ -404,8 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_duplicate_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store.insert(&input("a", "A", None, None)).await.unwrap();
         assert_eq!(
             store
@@ -418,8 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn validation_rejects_empty_ids_and_zero_limits() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         assert!(matches!(
             store
                 .insert(&input("  ", "A", None, None))
@@ -452,8 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn untrimmed_ids_and_names_are_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         assert!(matches!(
             store
                 .insert(&input(" gpt-4o", "GPT-4o", None, None))
@@ -480,8 +477,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_and_delete_of_unknown_card_are_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         assert!(matches!(
             store
                 .update("ghost", &update_of("x", None, None))
@@ -497,8 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefix_search_orders_limits_and_escapes_wildcards() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store
             .insert(&input("gpt-4o", "GPT-4o", None, None))
             .await
@@ -532,8 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn seed_if_missing_never_overwrites_existing_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         let seeds = vec![input("a", "A", Some(1), None), input("b", "B", None, None)];
         assert_eq!(store.seed_if_missing(&seeds).await.unwrap(), 2);
 
@@ -558,13 +552,13 @@ mod tests {
 
     #[tokio::test]
     async fn operator_seed_file_merges_with_same_semantics() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store
             .seed_if_missing(&bundled_seed().unwrap())
             .await
             .unwrap();
 
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extra.json");
         std::fs::write(
             &path,
@@ -642,48 +636,49 @@ mod tests {
     /// It deliberately does not write the replacement cards — those are new
     /// ids, so the bundled seed inserts them everywhere on the next boot.
     #[tokio::test]
+    /// SQLite-only: the last assertion reads `pragma_table_info`. What it
+    /// checks — that the migration adds columns and seeds nothing — is covered
+    /// on PostgreSQL by every other test in this module running against a
+    /// database these same migrations built.
     async fn migration_adds_the_new_columns_and_drops_deepseek_chat() {
-        let dir = tempfile::tempdir().unwrap();
-        let pool =
-            crate::config::store::open_pool(&format!("sqlite://{}/t.db", dir.path().display()))
-                .await
-                .unwrap();
+        let db = crate::db::testing::sqlite().await;
+        let pool = db.pool();
 
-        let stale: Option<String> =
-            sqlx::query_scalar("SELECT model_id FROM model_cards WHERE model_id = 'deepseek-chat'")
-                .fetch_optional(&pool)
-                .await
-                .unwrap();
+        let stale: Option<String> = sqlx::query_scalar(
+            &db.q("SELECT model_id FROM model_cards WHERE model_id = 'deepseek-chat'"),
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap();
         assert!(stale.is_none(), "deepseek-chat must be gone");
 
         // A fresh database is still empty: nothing is seeded from a migration.
-        let cards: i64 = sqlx::query_scalar("SELECT count(*) FROM model_cards")
-            .fetch_one(&pool)
+        let cards: i64 = sqlx::query_scalar(&db.q("SELECT count(*) FROM model_cards"))
+            .fetch_one(pool)
             .await
             .unwrap();
         assert_eq!(cards, 0, "migrations must not seed the catalog");
 
         // The new columns exist and default correctly on both tables.
-        sqlx::query("INSERT INTO model_cards (model_id, name) VALUES ('probe', 'Probe')")
-            .execute(&pool)
+        sqlx::query(&db.q("INSERT INTO model_cards (model_id, name) VALUES ('probe', 'Probe')"))
+            .execute(pool)
             .await
             .expect("insert without the new columns still works");
-        let row = sqlx::query(
+        let row = sqlx::query(&db.q(
             "SELECT base_url, forced_tools_disable_thinking FROM model_cards WHERE model_id = 'probe'",
-        )
-        .fetch_one(&pool)
+        ))
+        .fetch_one(pool)
         .await
         .unwrap();
         assert_eq!(row.get::<Option<String>, _>("base_url"), None);
         assert_eq!(row.get::<i64, _>("forced_tools_disable_thinking"), 0);
 
-        let models_flag: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pragma_table_info('models') \
-             WHERE name = 'forced_tools_disable_thinking'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let models_flag: i64 =
+            sqlx::query_scalar(&db.q("SELECT count(*) FROM pragma_table_info('models') \
+             WHERE name = 'forced_tools_disable_thinking'"))
+            .fetch_one(pool)
+            .await
+            .unwrap();
         assert_eq!(models_flag, 1, "models must carry the flag too");
     }
 
@@ -719,8 +714,7 @@ mod tests {
     /// usable DeepSeek cards, since the migration deliberately seeds nothing.
     #[tokio::test]
     async fn seeding_a_fresh_database_installs_the_deepseek_cards() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store
             .seed_if_missing(&bundled_seed().unwrap())
             .await

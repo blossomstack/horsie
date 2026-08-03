@@ -1,13 +1,14 @@
-//! SQLite storage for the deployment-global GitHub connection: the App config
+//! Storage for the deployment-global GitHub connection: the App config
 //! (single row) and the connected account's OAuth credentials (single row).
 //! Secrets are stored plaintext (the DB file is the trust boundary) and wrapped
 //! in [`Secret`] in memory; write-only inputs follow the settings store's
 //! keep/clear/set convention (`None` keeps, `""` clears, a value sets).
 
+use crate::db::Db;
 use horsie_agentcore::Secret;
 use horsie_models::github::GitHubAppConfigInput;
 use sqlx::Row;
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use sqlx::any::AnyRow;
 
 /// The GitHub App config row (`github_app`, id = 1).
 pub struct AppConfigRow {
@@ -29,20 +30,20 @@ pub struct CredentialsRow {
 }
 
 pub struct GithubStore {
-    pool: SqlitePool,
+    db: Db,
 }
 
 impl GithubStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     pub async fn app_config(&self) -> Result<Option<AppConfigRow>, String> {
-        let row = sqlx::query(
+        let row = sqlx::query(&self.db.q(
             "SELECT client_id, client_secret, app_id, private_key, app_slug, callback_base \
              FROM github_app WHERE id = 1",
-        )
-        .fetch_optional(&self.pool)
+        ))
+        .fetch_optional(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         let Some(row) = row else {
@@ -75,21 +76,21 @@ impl GithubStore {
             &input.private_key,
             existing.as_ref().and_then(|e| e.private_key.as_ref()),
         );
-        sqlx::query(
+        sqlx::query(&self.db.q(
             "INSERT INTO github_app (id, client_id, client_secret, app_id, private_key, app_slug, callback_base) \
              VALUES (1, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET client_id = excluded.client_id, \
              client_secret = excluded.client_secret, app_id = excluded.app_id, \
              private_key = excluded.private_key, app_slug = excluded.app_slug, \
              callback_base = excluded.callback_base",
-        )
+        ))
         .bind(input.client_id.trim())
         .bind(client_secret.as_ref().map(|s| s.expose().to_string()))
         .bind(input.app_id.map(|v| v as i64))
         .bind(private_key.as_ref().map(|s| s.expose().to_string()))
         .bind(trimmed(&input.app_slug))
         .bind(trimmed(&input.callback_base))
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         self.app_config()
@@ -98,11 +99,11 @@ impl GithubStore {
     }
 
     pub async fn credentials(&self) -> Result<Option<CredentialsRow>, String> {
-        let row = sqlx::query(
+        let row = sqlx::query(&self.db.q(
             "SELECT login, access_token, refresh_token, expires_at, installation_id \
              FROM github_credentials WHERE id = 1",
-        )
-        .fetch_optional(&self.pool)
+        ))
+        .fetch_optional(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         let Some(row) = row else {
@@ -123,47 +124,47 @@ impl GithubStore {
     }
 
     pub async fn save_credentials(&self, row: &CredentialsRow) -> Result<(), String> {
-        sqlx::query(
+        sqlx::query(&self.db.q(
             "INSERT INTO github_credentials (id, login, access_token, refresh_token, expires_at, installation_id) \
              VALUES (1, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET login = excluded.login, \
              access_token = excluded.access_token, refresh_token = excluded.refresh_token, \
              expires_at = excluded.expires_at, installation_id = excluded.installation_id",
-        )
+        ))
         .bind(row.login.trim())
         .bind(row.access_token.expose().to_string())
         .bind(row.refresh_token.as_ref().map(|s| s.expose().to_string()))
         .bind(row.expires_at.clone())
         .bind(row.installation_id.map(|v| v as i64))
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub async fn clear_credentials(&self) -> Result<(), String> {
-        sqlx::query("DELETE FROM github_credentials")
-            .execute(&self.pool)
+        sqlx::query(&self.db.q("DELETE FROM github_credentials"))
+            .execute(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
     }
 }
 
-fn opt_string(row: &SqliteRow, col: &str) -> Result<Option<String>, String> {
+fn opt_string(row: &AnyRow, col: &str) -> Result<Option<String>, String> {
     row.try_get::<Option<String>, _>(col)
         .map_err(|e| e.to_string())
 }
 
 /// A stored secret column, treating an empty string as absent.
-fn opt_secret(row: &SqliteRow, col: &str) -> Result<Option<Secret>, String> {
+fn opt_secret(row: &AnyRow, col: &str) -> Result<Option<Secret>, String> {
     Ok(opt_string(row, col)?
         .filter(|s| !s.is_empty())
         .map(Secret::from))
 }
 
 /// A `u64` column round-tripped through SQLite's signed `INTEGER`.
-fn opt_u64(row: &SqliteRow, col: &str) -> Result<Option<u64>, String> {
+fn opt_u64(row: &AnyRow, col: &str) -> Result<Option<u64>, String> {
     let v = row
         .try_get::<Option<i64>, _>(col)
         .map_err(|e| e.to_string())?;
@@ -198,16 +199,10 @@ fn trimmed(v: &Option<String>) -> Option<String> {
 mod tests {
     use super::*;
     use horsie_models::github::GitHubAppConfigInput;
-    use std::str::FromStr;
 
     async fn store() -> (GithubStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
+        let pool = crate::db::testing::db().await;
         (GithubStore::new(pool), tmp)
     }
 

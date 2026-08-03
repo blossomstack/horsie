@@ -1,9 +1,10 @@
-//! SQLite storage for the plugin-bundle library (`plugins` table), sharing the
-//! config store's pool. No secrets — bundles are public artifacts, so this is a
+//! Storage for the plugin-bundle library (`plugins` table), sharing the config
+//! store's database. No secrets — bundles are public artifacts, so this is a
 //! plain metadata store (mirrors `github::store` without the `Secret` wrapping).
 
+use crate::db::Db;
 use sqlx::Row;
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use sqlx::any::AnyRow;
 use std::collections::HashSet;
 
 const COLS: &str = "name, source_kind, source_url, source_ref, version, description, \
@@ -28,26 +29,30 @@ pub struct PluginRow {
 }
 
 pub struct PluginStore {
-    pool: SqlitePool,
+    db: Db,
 }
 
 impl PluginStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     pub async fn list(&self) -> Result<Vec<PluginRow>, String> {
-        let rows = sqlx::query(&format!("SELECT {COLS} FROM plugins ORDER BY name"))
-            .fetch_all(&self.pool)
+        let statement = format!("SELECT {COLS} FROM plugins ORDER BY name");
+        let sql = self.db.q(&statement);
+        let rows = sqlx::query(&sql)
+            .fetch_all(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         rows.iter().map(row_to_plugin).collect()
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<PluginRow>, String> {
-        let row = sqlx::query(&format!("SELECT {COLS} FROM plugins WHERE name = ?"))
+        let statement = format!("SELECT {COLS} FROM plugins WHERE name = ?");
+        let sql = self.db.q(&statement);
+        let row = sqlx::query(&sql)
             .bind(name)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         row.as_ref().map(row_to_plugin).transpose()
@@ -55,7 +60,7 @@ impl PluginStore {
 
     /// Insert or replace a bundle by name.
     pub async fn upsert(&self, row: &PluginRow) -> Result<(), String> {
-        sqlx::query(
+        let sql = self.db.q(
             "INSERT INTO plugins (name, source_kind, source_url, source_ref, version, description, \
              skill_count, has_hooks, artifact_hash, artifact_size, enabled_default, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -65,40 +70,45 @@ impl PluginStore {
              skill_count = excluded.skill_count, has_hooks = excluded.has_hooks, \
              artifact_hash = excluded.artifact_hash, artifact_size = excluded.artifact_size, \
              enabled_default = excluded.enabled_default, updated_at = excluded.updated_at",
-        )
-        .bind(&row.name)
-        .bind(&row.source_kind)
-        .bind(&row.source_url)
-        .bind(&row.source_ref)
-        .bind(&row.version)
-        .bind(&row.description)
-        .bind(i64::from(row.skill_count))
-        .bind(i64::from(row.has_hooks))
-        .bind(&row.artifact_hash)
-        .bind(i64::try_from(row.artifact_size).unwrap_or(i64::MAX))
-        .bind(i64::from(row.enabled_default))
-        .bind(&row.created_at)
-        .bind(&row.updated_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+        );
+        sqlx::query(&sql)
+            .bind(&row.name)
+            .bind(&row.source_kind)
+            .bind(&row.source_url)
+            .bind(&row.source_ref)
+            .bind(&row.version)
+            .bind(&row.description)
+            .bind(i64::from(row.skill_count))
+            .bind(i64::from(row.has_hooks))
+            .bind(&row.artifact_hash)
+            .bind(i64::try_from(row.artifact_size).unwrap_or(i64::MAX))
+            .bind(i64::from(row.enabled_default))
+            .bind(&row.created_at)
+            .bind(&row.updated_at)
+            .execute(self.db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub async fn set_default(&self, name: &str, enabled: bool) -> Result<(), String> {
-        sqlx::query("UPDATE plugins SET enabled_default = ? WHERE name = ?")
+        let sql = self
+            .db
+            .q("UPDATE plugins SET enabled_default = ? WHERE name = ?");
+        sqlx::query(&sql)
             .bind(i64::from(enabled))
             .bind(name)
-            .execute(&self.pool)
+            .execute(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub async fn delete(&self, name: &str) -> Result<(), String> {
-        sqlx::query("DELETE FROM plugins WHERE name = ?")
+        let sql = self.db.q("DELETE FROM plugins WHERE name = ?");
+        sqlx::query(&sql)
             .bind(name)
-            .execute(&self.pool)
+            .execute(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -106,8 +116,9 @@ impl PluginStore {
 
     /// All artifact hashes still referenced by a row (for artifact GC).
     pub async fn referenced_hashes(&self) -> Result<HashSet<String>, String> {
-        let rows = sqlx::query("SELECT artifact_hash FROM plugins")
-            .fetch_all(&self.pool)
+        let sql = self.db.q("SELECT artifact_hash FROM plugins");
+        let rows = sqlx::query(&sql)
+            .fetch_all(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         rows.iter()
@@ -119,7 +130,7 @@ impl PluginStore {
     }
 }
 
-fn row_to_plugin(row: &SqliteRow) -> Result<PluginRow, String> {
+fn row_to_plugin(row: &AnyRow) -> Result<PluginRow, String> {
     let get_s = |c: &str| row.try_get::<String, _>(c).map_err(|e| e.to_string());
     let get_os = |c: &str| {
         row.try_get::<Option<String>, _>(c)
@@ -147,18 +158,7 @@ fn row_to_plugin(row: &SqliteRow) -> Result<PluginRow, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
-
-    async fn store() -> (PluginStore, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
-        (PluginStore::new(pool), tmp)
-    }
+    use crate::db::testing;
 
     fn row(name: &str, hash: &str) -> PluginRow {
         PluginRow {
@@ -180,23 +180,25 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_get_list_default_delete_roundtrip() {
-        let (s, _t) = store().await;
-        assert!(s.list().await.unwrap().is_empty());
-        s.upsert(&row("demo", "h1")).await.unwrap();
-        let got = s.get("demo").await.unwrap().unwrap();
-        assert_eq!(got.skill_count, 2);
-        assert!(got.has_hooks);
-        assert!(!got.enabled_default);
+        {
+            let s = PluginStore::new(testing::db().await);
+            assert!(s.list().await.unwrap().is_empty());
+            s.upsert(&row("demo", "h1")).await.unwrap();
+            let got = s.get("demo").await.unwrap().unwrap();
+            assert_eq!(got.skill_count, 2);
+            assert!(got.has_hooks);
+            assert!(!got.enabled_default);
 
-        s.set_default("demo", true).await.unwrap();
-        assert!(s.get("demo").await.unwrap().unwrap().enabled_default);
+            s.set_default("demo", true).await.unwrap();
+            assert!(s.get("demo").await.unwrap().unwrap().enabled_default);
 
-        s.upsert(&row("other", "h2")).await.unwrap();
-        let hashes = s.referenced_hashes().await.unwrap();
-        assert!(hashes.contains("h1") && hashes.contains("h2"));
+            s.upsert(&row("other", "h2")).await.unwrap();
+            let hashes = s.referenced_hashes().await.unwrap();
+            assert!(hashes.contains("h1") && hashes.contains("h2"));
 
-        s.delete("demo").await.unwrap();
-        assert!(s.get("demo").await.unwrap().is_none());
-        assert_eq!(s.list().await.unwrap().len(), 1);
+            s.delete("demo").await.unwrap();
+            assert!(s.get("demo").await.unwrap().is_none());
+            assert_eq!(s.list().await.unwrap().len(), 1);
+        }
     }
 }

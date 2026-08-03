@@ -1,4 +1,4 @@
-//! SQLite-backed [`ConfigStore`]. Owns the settings database, builds the live
+//! Database-backed [`ConfigStore`]. Owns the settings database, builds the live
 //! provider registry and the runtime vendors from it, and applies edits:
 //! provider/model/default-vendor changes swap the live registry (next turn
 //! sees them); vendor changes reconcile the live vendor map immediately — an
@@ -8,9 +8,11 @@
 //!
 //! Vendors are generic — a `vendors(name, kind, config)` table plus a
 //! kind-tagged config union — so a new vendor kind is a new match arm, not a
-//! schema change. `postgres` is a future driver swap behind the same code.
+//! schema change. The database itself is SQLite or PostgreSQL, selected by
+//! `database.url`; see `crate::db`.
 
 use crate::config::ConfigStore;
+use crate::db::Db;
 use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret, ThinkingDialect, ThinkingEffort};
@@ -21,9 +23,7 @@ use horsie_models::settings::{
 };
 use horsie_openai::OpenAiProvider;
 use sqlx::Row;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 type Registry = HashMap<String, Arc<dyn LlmProvider>>;
@@ -42,11 +42,11 @@ pub struct OpenedConfig {
     pub vendors: SharedVendors,
     /// The migrated connection pool, shared with feature stores (e.g. GitHub)
     /// that persist into the same settings DB.
-    pub pool: SqlitePool,
+    pub db: Db,
 }
 
 pub struct DbConfigStore {
-    pool: SqlitePool,
+    db: Db,
     registry: SharedProviderRegistry,
     /// The name new sessions prefer. A preference, not a validated reference:
     /// the agent that answers to it may connect long after boot.
@@ -61,10 +61,29 @@ impl DbConfigStore {
     /// Open (creating if absent) the database, run migrations, and build the
     /// live registry + vendors from it.
     pub async fn open(db_url: &str, deps: StoreDeps) -> Result<OpenedConfig, String> {
-        let pool = open_pool(db_url).await?;
+        Self::open_with(db_url, DEFAULT_MAX_CONNECTIONS, deps).await
+    }
 
-        let provs = read_providers(&pool).await.map_err(|e| e.to_string())?;
-        let mods = read_models(&pool).await.map_err(|e| e.to_string())?;
+    /// As [`open`](Self::open), with an explicit pool size.
+    pub async fn open_with(
+        db_url: &str,
+        max_connections: u32,
+        deps: StoreDeps,
+    ) -> Result<OpenedConfig, String> {
+        Self::open_on(Db::open(db_url, max_connections).await?, deps).await
+    }
+
+    /// Build the store on an already-open database.
+    ///
+    /// The seam tests use, so they exercise whichever backend the run selected
+    /// rather than a hardcoded SQLite URL.
+    pub async fn open_on(db: Db, deps: StoreDeps) -> Result<OpenedConfig, String> {
+        let provs = read_providers(&db, db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
+        let mods = read_models(&db, db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
         let registry: SharedProviderRegistry =
             Arc::new(RwLock::new(build_registry(&provs, &mods)?));
 
@@ -76,13 +95,13 @@ impl DbConfigStore {
         // Kept as a preference even when no agent has connected yet — an agent
         // announcing this name later makes it take effect, so validating it
         // against the (empty) live map at boot would be wrong.
-        let default_vendor = read_setting(&pool, "default_vendor")
+        let default_vendor = read_setting(&db, db.pool(), "default_vendor")
             .await
             .map_err(|e| e.to_string())?
             .unwrap_or_else(|| "local".into());
 
         let store = Arc::new(Self {
-            pool: pool.clone(),
+            db: db.clone(),
             registry: registry.clone(),
             default_vendor: RwLock::new(default_vendor),
             vendors: vendors.clone(),
@@ -92,15 +111,17 @@ impl DbConfigStore {
             store,
             registry,
             vendors,
-            pool,
+            db,
         })
     }
 
     async fn build_view(&self) -> Result<SettingsView, String> {
-        let provs = read_providers(&self.pool)
+        let provs = read_providers(&self.db, self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
-        let mods = read_models(&self.pool).await.map_err(|e| e.to_string())?;
+        let mods = read_models(&self.db, self.db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
         let default_vendor = self.default_vendor();
         Ok(SettingsView {
             providers: provs.iter().map(provider_view).collect(),
@@ -138,16 +159,18 @@ impl ConfigStore for DbConfigStore {
     }
 
     async fn update(&self, update: SettingsUpdate) -> Result<SettingsView, String> {
-        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
+        let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
 
         if let Some(providers) = &update.providers {
-            let existing = read_providers(&mut *tx).await.map_err(|e| e.to_string())?;
+            let existing = read_providers(&self.db, &mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
             let keep: HashMap<&str, &str> = existing
                 .iter()
                 .filter_map(|r| r.api_key.as_deref().map(|k| (r.name.as_str(), k)))
                 .collect();
             let mut seen = HashSet::new();
-            sqlx::query("DELETE FROM providers")
+            sqlx::query(&self.db.q("DELETE FROM providers"))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -166,9 +189,9 @@ impl ConfigStore for DbConfigStore {
                     return Err(format!("duplicate provider '{name}'"));
                 }
                 let api_key = resolve_secret(&p.api_key, keep.get(name).copied());
-                sqlx::query(
+                sqlx::query(&self.db.q(
                     "INSERT INTO providers (name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?)",
-                )
+                ))
                 .bind(name)
                 .bind(&p.kind)
                 .bind(trimmed(&p.base_url))
@@ -182,7 +205,7 @@ impl ConfigStore for DbConfigStore {
 
         if let Some(models) = &update.models {
             let mut seen = HashSet::new();
-            sqlx::query("DELETE FROM models")
+            sqlx::query(&self.db.q("DELETE FROM models"))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -222,9 +245,9 @@ impl ConfigStore for DbConfigStore {
                         "model '{alias}' default thinking effort '{def}' is not among its offered efforts"
                     ));
                 }
-                sqlx::query(
+                sqlx::query(&self.db.q(
                     "INSERT INTO models (alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                )
+                ))
                 .bind(alias)
                 .bind(&m.provider)
                 .bind(m.model_id.trim())
@@ -248,10 +271,10 @@ impl ConfigStore for DbConfigStore {
             // answering to this name may connect long after the preference is
             // set, and rejecting it here would make the setting unusable
             // before its agent is running.
-            sqlx::query(
+            sqlx::query(&self.db.q(
                 "INSERT INTO settings (key, value) VALUES ('default_vendor', ?) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            )
+            ))
             .bind(dv)
             .execute(&mut *tx)
             .await
@@ -260,8 +283,12 @@ impl ConfigStore for DbConfigStore {
 
         // Validate providers/models by building the registry from the new state
         // before committing — a bad edit rolls back untouched.
-        let provs = read_providers(&mut *tx).await.map_err(|e| e.to_string())?;
-        let mods = read_models(&mut *tx).await.map_err(|e| e.to_string())?;
+        let provs = read_providers(&self.db, &mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mods = read_models(&self.db, &mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
         let new_registry = build_registry(&provs, &mods)?;
 
         tx.commit().await.map_err(|e| e.to_string())?;
@@ -495,44 +522,21 @@ pub(crate) fn encode_efforts(list: Option<&Vec<String>>) -> Option<String> {
 
 // ── connection + row reads ───────────────────────────────────────────────────
 
-pub(crate) async fn open_pool(url: &str) -> Result<SqlitePool, String> {
-    let opts = SqliteConnectOptions::from_str(url)
-        .map_err(|e| format!("invalid database url '{url}': {e}"))?
-        .create_if_missing(true)
-        // Wait for a contended write rather than failing it. The pool hands out
-        // several connections, and authentication put a (throttled) token write
-        // on the path of every API request — without this, a write that lands
-        // while another connection holds the database surfaces as an immediate
-        // `database is locked` instead of a short wait.
-        .busy_timeout(std::time::Duration::from_secs(5))
-        // WAL, because this database also carries the actor journal. The default
-        // (`DELETE`) takes an exclusive lock over the whole file for every write,
-        // which would serialize session writes against the token write on every
-        // authenticated request. WAL lets readers run through a write.
-        .journal_mode(SqliteJournalMode::Wal)
-        // FULL matches the durability the file journal gets from `sync_all` per
-        // batch, which is what `CommandEffect::PersistAndAck` promises its
-        // callers: the ack means the event is on disk, not merely in the WAL.
-        .synchronous(SqliteSynchronous::Full);
-    let pool = SqlitePool::connect_with(opts)
-        .await
-        .map_err(|e| format!("open database '{url}': {e}"))?;
-    sqlx::migrate!()
-        .run(&pool)
-        .await
-        .map_err(|e| format!("run migrations: {e}"))?;
-    Ok(pool)
-}
+/// Default pool size. Sized for one server process sharing the pool between
+/// settings reads and journal writes.
+pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 
-async fn read_providers<'e, E>(ex: E) -> Result<Vec<ProviderRow>, sqlx::Error>
+// These take the `Db` for its dialect and the executor separately, because the
+// caller is sometimes a pool and sometimes an open transaction — the dialect is
+// a property of the database, not of whichever handle is running the statement.
+async fn read_providers<'e, E>(db: &Db, ex: E) -> Result<Vec<ProviderRow>, sqlx::Error>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
-    let rows = sqlx::query(
+    let sql = db.q(
         "SELECT name, kind, base_url, api_key, keep_thinking_signature FROM providers ORDER BY name",
-    )
-    .fetch_all(ex)
-    .await?;
+    );
+    let rows = sqlx::query(&sql).fetch_all(ex).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ProviderRow {
@@ -546,15 +550,14 @@ where
     Ok(out)
 }
 
-async fn read_models<'e, E>(ex: E) -> Result<Vec<ModelRow>, sqlx::Error>
+async fn read_models<'e, E>(db: &Db, ex: E) -> Result<Vec<ModelRow>, sqlx::Error>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
-    let rows = sqlx::query(
+    let sql = db.q(
         "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking FROM models ORDER BY alias",
-    )
-    .fetch_all(ex)
-    .await?;
+    );
+    let rows = sqlx::query(&sql).fetch_all(ex).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ModelRow {
@@ -573,11 +576,12 @@ where
     Ok(out)
 }
 
-async fn read_setting(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
-    let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
-        .bind(key)
-        .fetch_optional(pool)
-        .await?;
+async fn read_setting<'e, E>(db: &Db, ex: E, key: &str) -> Result<Option<String>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
+    let sql = db.q("SELECT value FROM settings WHERE key = ?");
+    let row = sqlx::query(&sql).bind(key).fetch_optional(ex).await?;
     match row {
         Some(r) => Ok(Some(r.try_get("value")?)),
         None => Ok(None),
@@ -603,43 +607,23 @@ mod tests {
             data_dir: String::new(),
             plugins_dir: String::new(),
             version: "test".into(),
+            journal_backend: "file".into(),
         }
     }
 
-    // `_sqlx_migrations.version` is the primary key, so two migration files that
-    // share a numeric prefix make *every* migration run fail on the second one —
-    // including a first-boot one against an empty database. Two branches that each
-    // took the next free number independently is all it takes, and the resulting
-    // error names the constraint rather than the files, so catch it by name here.
-    #[test]
-    fn migration_versions_are_unique() {
-        let mut seen: std::collections::HashMap<i64, &str> = std::collections::HashMap::new();
-        for m in sqlx::migrate!().iter() {
-            if let Some(other) = seen.insert(m.version, &m.description) {
-                panic!(
-                    "migration version {} is used twice: '{}' and '{}' — renumber the later one",
-                    m.version, other, m.description
-                );
-            }
-        }
-    }
-
-    async fn open(dir: &std::path::Path) -> OpenedConfig {
-        let _ = dir; // kept for signature symmetry with other test helpers in this crate
-        DbConfigStore::open(
-            &format!("sqlite://{}/t.db", dir.display()),
-            StoreDeps { info: info() },
-        )
-        .await
-        .unwrap()
+    // The migration-version uniqueness check that used to live here now covers
+    // both dialect directories, in `crate::db::tests`.
+    async fn open() -> OpenedConfig {
+        DbConfigStore::open_on(crate::db::testing::db().await, StoreDeps { info: info() })
+            .await
+            .unwrap()
     }
 
     /// The flag has to survive the save→read→build round trip, because it is
     /// what keeps a forced-handoff agent from 400ing on DeepSeek.
     #[tokio::test]
     async fn forced_tools_flag_persists_through_a_settings_update() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open(dir.path()).await.store;
+        let store = open().await.store;
 
         store
             .update(SettingsUpdate {
@@ -699,8 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_persists_and_swaps_registry() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let view = o
             .store
             .update(SettingsUpdate {
@@ -717,8 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_window_defaults_for_known_models_and_stays_editable() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let view = o
             .store
             .update(SettingsUpdate {
@@ -763,8 +745,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_preserves_inline_key_when_omitted() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         o.store
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("sk-secret"))]),
@@ -788,8 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_rejects_unknown_provider_and_rolls_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         o.store
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("k"))]),
@@ -827,8 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_provider_kind_is_accepted() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let view = o
             .store
             .update(SettingsUpdate {
@@ -847,8 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_provider_kind_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let err = o
             .store
             .update(SettingsUpdate {
@@ -862,14 +840,14 @@ mod tests {
         assert!(err.contains("cohere"), "error names the kind: {err}");
     }
 
+    /// SQLite-only: it asserts on `pragma_table_info`, and it exists because
+    /// SQLite's `DROP COLUMN` is recent enough to be worth pinning. The
+    /// PostgreSQL mirror of 0006 is plain standard DDL with nothing to pin.
     #[tokio::test]
     async fn migration_0006_drops_api_key_env_and_preserves_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/old.db", dir.path().display());
-        let opts = SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = SqlitePool::connect_with(opts).await.unwrap();
+        // Deliberately unmigrated: the point is to build the pre-0006 schema
+        // by hand and then apply exactly that one migration to it.
+        let pool = &crate::db::testing::unmigrated_sqlite().await;
 
         // Mirror the pre-0006 `providers` shape (0001_init.sql).
         sqlx::query(
@@ -877,24 +855,26 @@ mod tests {
                 name TEXT PRIMARY KEY, kind TEXT NOT NULL, base_url TEXT,
                 api_key_env TEXT, api_key TEXT)",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
         sqlx::query(
             "INSERT INTO providers (name, kind, base_url, api_key_env, api_key) \
              VALUES ('p', 'anthropic', NULL, 'OLD_ENV_VAR', 'sk-inline')",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
 
-        sqlx::query(include_str!("../../migrations/0006_drop_api_key_env.sql"))
-            .execute(&pool)
-            .await
-            .expect("DROP COLUMN should succeed on the bundled sqlite");
+        sqlx::query(include_str!(
+            "../../migrations/sqlite/0006_drop_api_key_env.sql"
+        ))
+        .execute(pool)
+        .await
+        .expect("DROP COLUMN should succeed on the bundled sqlite");
 
         let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('providers')")
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
             .unwrap()
             .iter()
@@ -903,7 +883,7 @@ mod tests {
         assert!(!cols.iter().any(|c| c == "api_key_env"));
 
         let row = sqlx::query("SELECT name, api_key FROM providers WHERE name = 'p'")
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
             .unwrap();
         assert_eq!(row.try_get::<String, _>("name").unwrap(), "p");
@@ -917,8 +897,7 @@ mod tests {
 
     #[tokio::test]
     async fn keep_thinking_signature_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
 
         // Defaults off for a fresh provider.
         let view = o
@@ -949,8 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_thinking_config_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let mut m = model("m", "p");
         m.thinking_efforts = Some(vec!["none".into(), "low".into(), "high".into()]);
         m.thinking_effort = Some("high".into());
@@ -975,8 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_thinking_config_defaults_to_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let view = o
             .store
             .update(SettingsUpdate {
@@ -993,8 +970,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_rejects_effort_outside_its_menu() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let mut m = model("m", "p");
         m.thinking_efforts = Some(vec!["low".into()]);
         m.thinking_effort = Some("max".into());
@@ -1016,8 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_rejects_unknown_dialect() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let mut m = model("m", "p");
         m.thinking_dialect = Some("telepathy".into());
         let err = o
@@ -1032,26 +1007,6 @@ mod tests {
         assert!(err.contains("telepathy"), "error should name it: {err}");
     }
 
-    /// A pragma that silently fails to apply is exactly the failure this guards
-    /// against: journal writes would land in `DELETE` mode and lock the whole
-    /// database against every authenticated request's token write.
-    #[tokio::test]
-    async fn the_pool_runs_in_wal_mode_with_full_sync() {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/pragmas.db", dir.path().display());
-        let pool = open_pool(&url).await.unwrap();
-
-        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(mode.to_lowercase(), "wal");
-
-        // 2 == FULL. SQLite reports the numeric level, not the keyword.
-        let sync: i64 = sqlx::query_scalar("PRAGMA synchronous")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(sync, 2, "the ack must mean the write reached the disk");
-    }
+    // The WAL/synchronous pragmas moved to `Db::open`'s `after_connect` hook,
+    // and so did the test that guards them: `crate::db::tests`.
 }
