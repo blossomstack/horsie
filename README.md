@@ -54,6 +54,17 @@ vendor in Settings and skip the local daemon entirely.)
 
 Back in the UI: **New** → pick a model → **Create**, and start chatting.
 
+### Or deploy the server to the cloud
+
+No machine to run Docker on? Deploy the server with a managed Postgres
+database instead of a local volume:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/blossomstack/horsie)
+
+Point `horsie connect` at the deployed URL to give it somewhere to run tools.
+See [Self-hosting](docs/guide/self-hosting.md#deploying-to-render) for using
+an external Postgres instead of the button's managed database.
+
 ## How the pieces fit
 
 ```

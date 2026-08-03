@@ -11,6 +11,20 @@ Next: open http://localhost:3789 → **Settings** → add a provider + model.
 Then have anyone who'll run sessions against a repo on their machine follow
 [Getting started](getting-started.md) to install the CLI and `horsie connect`.
 
+## Deploying to Render
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/blossomstack/horsie)
+
+Runs the published image (`render.yaml` at the repo root) with a managed
+Render Postgres database wired in as `HORSIE_DATABASE_URL` — no volume needed,
+since both the settings store and the session journal live in that database.
+
+To use a different Postgres instance (Neon, Supabase, RDS, or any other
+`postgres://`-compatible provider) instead of the one the button provisions,
+edit the `HORSIE_DATABASE_URL` environment variable on the Render service after
+deploy, or fork `render.yaml` and drop the `databases:` block entirely. Any
+connection string works as-is, including one with `?sslmode=require`.
+
 ## Deploying to Fly.io
 
 Fly.io has no browser one-click button (Fly staff have said they don't plan
