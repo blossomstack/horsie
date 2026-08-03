@@ -739,6 +739,7 @@ mod tests {
             provision: vec![],
             vendor: "mock".into(),
             plugins: vec![],
+            origin: crate::sessions::spec::SessionOrigin::User,
         }
     }
 

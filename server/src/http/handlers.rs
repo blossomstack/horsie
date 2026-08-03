@@ -172,6 +172,7 @@ pub(crate) async fn build_session_spec(
         provision,
         vendor: vendor.unwrap_or_else(|| state.config_store.default_vendor()),
         plugins,
+        origin: crate::sessions::spec::SessionOrigin::User,
     })
 }
 

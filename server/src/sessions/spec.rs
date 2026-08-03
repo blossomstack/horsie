@@ -80,6 +80,20 @@ pub struct ProvisionStepSpec {
     pub with: Vec<(String, String)>,
 }
 
+/// What asked for a session to exist. More than a label: it decides whether
+/// the session appears in the session list, whose run list it appears in
+/// instead, and — because a routine's runs have nobody watching them — whether
+/// the agent is offered the `ask_user` tool at all. Keeping all three answers
+/// on one value is what stops them disagreeing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SessionOrigin {
+    /// Created by a person, through the UI or the sessions API.
+    #[default]
+    User,
+    /// Created by a routine trigger — timer, run endpoint, or the UI button.
+    Routine { routine: String },
+}
+
 /// Persisted, self-contained description of one session (lives in the
 /// supervisor journal, like the daemon's `JobSpec`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +111,26 @@ pub struct SessionSpec {
     /// runtime fetches them into its plugins dir before scanning.
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// What asked for this session. `#[serde(default)]` so every pre-routines
+    /// journal row loads as [`SessionOrigin::User`].
+    #[serde(default)]
+    pub origin: SessionOrigin,
+}
+
+impl SessionSpec {
+    /// The routine this session is a run of, if any.
+    pub fn routine(&self) -> Option<&str> {
+        match &self.origin {
+            SessionOrigin::User => None,
+            SessionOrigin::Routine { routine } => Some(routine),
+        }
+    }
+
+    /// Whether nobody is watching this session. An unattended session is not
+    /// offered `ask_user`: a question it asked would park the run forever.
+    pub fn is_unattended(&self) -> bool {
+        self.routine().is_some()
+    }
 }
 
 /// One question the agent is parked on, and the tool call that asked it.
@@ -229,6 +263,7 @@ mod tests {
             provision: vec![],
             vendor: "mock".into(),
             plugins: vec![],
+            origin: SessionOrigin::User,
         };
         let mut row = serde_json::to_value(&spec).unwrap();
         row["plugins_dir"] = serde_json::json!("/home/u/.local/share/horsie/plugins");
@@ -239,6 +274,50 @@ mod tests {
         });
         let loaded: SessionSpec = serde_json::from_value(row).unwrap();
         assert_eq!(loaded, spec);
+    }
+
+    #[test]
+    fn a_row_without_an_origin_loads_as_a_user_session() {
+        // Every session journaled before routines existed carries no origin.
+        // It must load as a user session — the alternative is a restart that
+        // hides every pre-existing session from the session list.
+        let row = r#"{"name":null,"agent":{"model":"m","allowed_tools":null,
+            "use_plugins":null,"max_iterations":null,"max_retries":0},
+            "workspaces":[],"vendor":"mock"}"#;
+        let spec: SessionSpec = serde_json::from_str(row).unwrap();
+        assert_eq!(spec.origin, SessionOrigin::User);
+        assert_eq!(spec.routine(), None);
+        assert!(!spec.is_unattended());
+    }
+
+    #[test]
+    fn a_routine_origin_round_trips_and_reads_unattended() {
+        let spec = SessionSpec {
+            name: None,
+            agent: AgentSettings {
+                model: "m".into(),
+                allowed_tools: None,
+                use_plugins: None,
+                max_iterations: None,
+                max_retries: 0,
+                mcp_servers: vec![],
+                memory_spaces: vec![],
+                thinking_effort: None,
+                max_concurrent_subagents: None,
+            },
+            workspaces: vec![],
+            provision: vec![],
+            vendor: "mock".into(),
+            plugins: vec![],
+            origin: SessionOrigin::Routine {
+                routine: "nightly".into(),
+            },
+        };
+        let loaded: SessionSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(loaded, spec);
+        assert_eq!(loaded.routine(), Some("nightly"));
+        assert!(loaded.is_unattended());
     }
 
     #[test]
