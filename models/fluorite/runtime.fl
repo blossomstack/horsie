@@ -101,6 +101,57 @@ struct ScanResponse {
 struct SessionStartRequest { call_id: String }
 struct SessionStartResponse { call_id: String, context: String }
 
+// --- Plugin hooks ---
+
+/// One hook a plugin declares, as advertised to the server. The command itself
+/// never crosses the wire: it runs runtime-side, where the plugin files are.
+struct HookDeclWire { event: String, matcher: Option<String> }
+
+/// Ask the runtime what hooks the session's plugins declare.
+///
+/// Answering this is also how a runtime announces it supports hooks at all: the
+/// protocol carries no version, so a runtime that cannot answer is treated as
+/// hook-less and the server falls back to SessionStart alone.
+struct HookManifestRequest  { call_id: String }
+struct HookManifestResponse {
+    call_id: String,
+    entries: Vec<HookDeclWire>,
+    /// Events the plugins declared that horsie cannot run, each already
+    /// rendered as a sentence naming the event and why.
+    unsupported: Vec<String>,
+}
+
+/// Run every hook matching `event`, in stable plugin order.
+struct RunHookRequest {
+    call_id: String,
+    event: String,
+    /// The event payload, JSON-encoded, fed to each hook on stdin.
+    payload: String,
+}
+
+/// The merged result of every hook that ran for one event.
+struct HookOutcomeWire {
+    /// A hook blocked the action: exit 2, `decision: "block"`, or
+    /// `permissionDecision: "deny"`.
+    blocked: bool,
+    reason: Option<String>,
+    additional_context: Option<String>,
+    /// Replacement tool input and output, JSON-encoded.
+    updated_input: Option<String>,
+    updated_tool_output: Option<String>,
+    system_message: Option<String>,
+    /// `continue: false` — the caller should end the turn.
+    stop: bool,
+    stop_reason: Option<String>,
+    /// A hook could not be run to completion: spawn failure, timeout, or a
+    /// non-zero exit other than 2. Distinct from `blocked` because the caller
+    /// treats intent and outage differently — PreToolUse denies on both, and
+    /// every other event proceeds on a failure.
+    failed: bool,
+}
+
+struct RunHookResponse { call_id: String, outcome: HookOutcomeWire }
+
 // --- Inbound (executor → runtime) ---
 
 // agent_id keys the runtime's per-agent cwd/env state — one bucket per calling
@@ -120,6 +171,8 @@ union RuntimeInboundMessage {
     CancelCall(CancelCallRequest),
     ScanWorkspace(ScanRequest),
     SessionStart(SessionStartRequest),
+    HookManifest(HookManifestRequest),
+    RunHook(RunHookRequest),
 }
 
 // --- Outbound (runtime → executor) ---
@@ -153,4 +206,6 @@ union RuntimeOutboundMessage {
     ToolCallResponse(ToolCallResponse),
     ScanResult(ScanResponse),
     SessionStartResult(SessionStartResponse),
+    HookManifestResult(HookManifestResponse),
+    RunHookResult(RunHookResponse),
 }

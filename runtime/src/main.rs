@@ -12,7 +12,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
     RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeProvisionFailed, RuntimeProvisioning,
-    RuntimeReady, ScanResponse, SessionStartResponse, ToolCallResponse, ToolError, ToolResult,
+    HookManifestResponse, RunHookResponse, RuntimeReady, ScanResponse, SessionStartResponse,
+    ToolCallResponse, ToolError, ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -489,6 +490,79 @@ async fn run_loop<S>(
                                 &RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
                                     call_id: call_id.clone(),
                                     context,
+                                }),
+                            );
+                            if let Ok(json) = response {
+                                let _ = sink_clone
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(json.into()))
+                                    .await;
+                            }
+                            in_flight_clone.lock().await.remove(&call_id);
+                        });
+
+                        in_flight.lock().await.insert(map_id, handle.abort_handle());
+                    }
+                    RuntimeInboundMessage::HookManifest(req) => {
+                        let call_id = req.call_id.clone();
+                        let map_id = req.call_id.clone();
+                        let registry = registry.clone();
+                        let sink_clone = sink.clone();
+                        let in_flight_clone = in_flight.clone();
+
+                        let handle = tokio::spawn(async move {
+                            let (entries, unsupported) = match registry.plugins_dir() {
+                                Some(dir) => horsie_runtime::hooks::manifest(dir),
+                                None => (Vec::new(), Vec::new()),
+                            };
+                            let response = serde_json::to_string(
+                                &RuntimeOutboundMessage::HookManifestResult(
+                                    HookManifestResponse {
+                                        call_id: call_id.clone(),
+                                        entries,
+                                        unsupported,
+                                    },
+                                ),
+                            );
+                            if let Ok(json) = response {
+                                let _ = sink_clone
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(json.into()))
+                                    .await;
+                            }
+                            in_flight_clone.lock().await.remove(&call_id);
+                        });
+
+                        in_flight.lock().await.insert(map_id, handle.abort_handle());
+                    }
+                    RuntimeInboundMessage::RunHook(req) => {
+                        let call_id = req.call_id.clone();
+                        let map_id = req.call_id.clone();
+                        let registry = registry.clone();
+                        let sink_clone = sink.clone();
+                        let in_flight_clone = in_flight.clone();
+
+                        let handle = tokio::spawn(async move {
+                            let outcome = match registry.plugins_dir() {
+                                Some(dir) => {
+                                    horsie_runtime::hooks::run(
+                                        dir,
+                                        registry.hook_path(),
+                                        &req.event,
+                                        &req.payload,
+                                    )
+                                    .await
+                                }
+                                // No library means no hooks; an all-clear
+                                // outcome, not a failure.
+                                None => horsie_runtime::hooks::clear_outcome(),
+                            };
+                            let response = serde_json::to_string(
+                                &RuntimeOutboundMessage::RunHookResult(RunHookResponse {
+                                    call_id: call_id.clone(),
+                                    outcome,
                                 }),
                             );
                             if let Ok(json) = response {

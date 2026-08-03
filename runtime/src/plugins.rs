@@ -19,7 +19,7 @@ const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Plugin directories under `plugins_dir`, sorted for stable ordering. Best-effort:
 /// an unreadable `plugins_dir` yields an empty list.
-fn plugin_dirs(plugins_dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn plugin_dirs(plugins_dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(plugins_dir) else {
         return Vec::new();
     };
@@ -114,10 +114,29 @@ fn extract_context(stdout: &str) -> String {
     ctx.chars().take(HOOK_OUTPUT_CLAMP).collect()
 }
 
-/// Run one hook command via `sh -c` with the plugin dir as cwd, `CLAUDE_PLUGIN_ROOT`
-/// set, and `hook_path` prepended to PATH. Returns its injected context, or `None`
-/// on spawn/timeout/non-zero-exit (logged, non-fatal).
-async fn run_hook(plugin_root: &Path, command: &str, hook_path: &[PathBuf]) -> Option<String> {
+/// What one hook process produced. `code` is `None` when it could not be run to
+/// completion — spawn failure or timeout — which callers treat as an outage
+/// rather than as a decision.
+pub(crate) struct HookRun {
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run one hook command via `sh -c` with the plugin dir as cwd,
+/// `CLAUDE_PLUGIN_ROOT` set, `hook_path` prepended to PATH, and `payload` on
+/// stdin.
+///
+/// Returns the raw result rather than an interpretation: `SessionStart` wants
+/// only injected context, while the general hook dispatcher needs the exit code
+/// and stderr to tell a block from an outage.
+pub(crate) async fn run_hook_raw(
+    plugin_root: &Path,
+    command: &str,
+    hook_path: &[PathBuf],
+    payload: &str,
+    timeout: Duration,
+) -> HookRun {
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
 
@@ -135,7 +154,16 @@ async fn run_hook(plugin_root: &Path, command: &str, hook_path: &[PathBuf]) -> O
         };
     }
 
-    let mut child = Command::new("sh")
+    let failed = |why: &str| {
+        tracing::warn!(command, why, "plugin hook did not run");
+        HookRun {
+            code: None,
+            stdout: String::new(),
+            stderr: why.to_string(),
+        }
+    };
+
+    let spawned = Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(plugin_root)
@@ -144,33 +172,48 @@ async fn run_hook(plugin_root: &Path, command: &str, hook_path: &[PathBuf]) -> O
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| tracing::warn!(error = %e, "plugin hook spawn failed"))
-        .ok()?;
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => return failed(&format!("spawn failed: {e}")),
+    };
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin
-            .write_all(br#"{"hook_event_name":"SessionStart","source":"startup"}"#)
-            .await;
+        let _ = stdin.write_all(payload.as_bytes()).await;
         // drop closes stdin → the hook sees EOF
     }
 
-    let output = match tokio::time::timeout(HOOK_TIMEOUT, child.wait_with_output()).await {
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "plugin hook failed");
-            return None;
-        }
-        Err(_) => {
-            tracing::warn!("plugin hook timed out");
-            return None;
-        }
+        Ok(Err(e)) => return failed(&format!("wait failed: {e}")),
+        Err(_) => return failed("timed out"),
     };
-    if !output.status.success() {
-        tracing::warn!(status = ?output.status, "plugin hook exited non-zero");
+    let clamp = |s: std::borrow::Cow<'_, str>| -> String {
+        s.chars().take(HOOK_OUTPUT_CLAMP).collect()
+    };
+    HookRun {
+        code: output.status.code(),
+        stdout: clamp(String::from_utf8_lossy(&output.stdout)),
+        stderr: clamp(String::from_utf8_lossy(&output.stderr)),
+    }
+}
+
+/// Run one `SessionStart` hook and return its injected context, or `None` when
+/// it could not run or exited non-zero (logged, non-fatal).
+async fn run_hook(plugin_root: &Path, command: &str, hook_path: &[PathBuf]) -> Option<String> {
+    let run = run_hook_raw(
+        plugin_root,
+        command,
+        hook_path,
+        r#"{"hook_event_name":"SessionStart","source":"startup"}"#,
+        HOOK_TIMEOUT,
+    )
+    .await;
+    if run.code != Some(0) {
+        tracing::warn!(code = ?run.code, "plugin hook exited non-zero");
         return None;
     }
-    Some(extract_context(&String::from_utf8_lossy(&output.stdout)))
+    Some(extract_context(&run.stdout))
 }
 
 /// Run every installed plugin's `SessionStart` hooks (in stable plugin order) and

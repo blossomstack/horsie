@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use horsie_models::runtime::{
-    CancelCallRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
+    CancelCallRequest, HookManifestRequest, HookManifestResponse, HookOutcomeWire,
+    RunHookRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
     SessionStartRequest, ToolCall, ToolCallRequest, ToolResult,
 };
 use thiserror::Error;
@@ -58,7 +59,9 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::Provisioning(_)
             | RuntimeOutboundMessage::ProvisionFailed(_)
             | RuntimeOutboundMessage::ScanResult(_)
-            | RuntimeOutboundMessage::SessionStartResult(_) => Err(wrong_reply("a tool call")),
+            | RuntimeOutboundMessage::SessionStartResult(_)
+            | RuntimeOutboundMessage::HookManifestResult(_)
+            | RuntimeOutboundMessage::RunHookResult(_) => Err(wrong_reply("a tool call")),
         }
     }
 
@@ -97,7 +100,9 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::Provisioning(_)
             | RuntimeOutboundMessage::ProvisionFailed(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
-            | RuntimeOutboundMessage::SessionStartResult(_) => Err(wrong_reply("a workspace scan")),
+            | RuntimeOutboundMessage::SessionStartResult(_)
+            | RuntimeOutboundMessage::HookManifestResult(_)
+            | RuntimeOutboundMessage::RunHookResult(_) => Err(wrong_reply("a workspace scan")),
         }
     }
 
@@ -115,7 +120,59 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::Provisioning(_)
             | RuntimeOutboundMessage::ProvisionFailed(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
-            | RuntimeOutboundMessage::ScanResult(_) => Err(wrong_reply("a session start")),
+            | RuntimeOutboundMessage::ScanResult(_)
+            | RuntimeOutboundMessage::HookManifestResult(_)
+            | RuntimeOutboundMessage::RunHookResult(_) => Err(wrong_reply("a session start")),
+        }
+    }
+
+    /// What hooks the session's plugins declare.
+    ///
+    /// A runtime that does not implement this message answers with an error,
+    /// which the caller reads as "this runtime has no hook support" rather than
+    /// as a failure — the protocol carries no version, so this call is also the
+    /// negotiation.
+    async fn hook_manifest(&self, call_id: &str) -> Result<HookManifestResponse, TransportError> {
+        let reply = self
+            .relay(RuntimeInboundMessage::HookManifest(HookManifestRequest {
+                call_id: call_id.to_string(),
+            }))
+            .await?;
+        match reply {
+            RuntimeOutboundMessage::HookManifestResult(resp) => Ok(resp),
+            RuntimeOutboundMessage::Ready(_)
+            | RuntimeOutboundMessage::Provisioning(_)
+            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ToolCallResponse(_)
+            | RuntimeOutboundMessage::ScanResult(_)
+            | RuntimeOutboundMessage::SessionStartResult(_)
+            | RuntimeOutboundMessage::RunHookResult(_) => Err(wrong_reply("a hook manifest")),
+        }
+    }
+
+    /// Run every hook matching `event` and return their merged outcome.
+    async fn run_hook(
+        &self,
+        call_id: &str,
+        event: &str,
+        payload: &str,
+    ) -> Result<HookOutcomeWire, TransportError> {
+        let reply = self
+            .relay(RuntimeInboundMessage::RunHook(RunHookRequest {
+                call_id: call_id.to_string(),
+                event: event.to_string(),
+                payload: payload.to_string(),
+            }))
+            .await?;
+        match reply {
+            RuntimeOutboundMessage::RunHookResult(resp) => Ok(resp.outcome),
+            RuntimeOutboundMessage::Ready(_)
+            | RuntimeOutboundMessage::Provisioning(_)
+            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ToolCallResponse(_)
+            | RuntimeOutboundMessage::ScanResult(_)
+            | RuntimeOutboundMessage::SessionStartResult(_)
+            | RuntimeOutboundMessage::HookManifestResult(_) => Err(wrong_reply("a hook run")),
         }
     }
 }
@@ -138,6 +195,8 @@ pub fn inbound_call_id(message: &RuntimeInboundMessage) -> &str {
         RuntimeInboundMessage::CancelCall(req) => &req.call_id,
         RuntimeInboundMessage::ScanWorkspace(req) => &req.call_id,
         RuntimeInboundMessage::SessionStart(req) => &req.call_id,
+        RuntimeInboundMessage::HookManifest(req) => &req.call_id,
+        RuntimeInboundMessage::RunHook(req) => &req.call_id,
     }
 }
 
@@ -149,6 +208,8 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
         RuntimeOutboundMessage::ToolCallResponse(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::ScanResult(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::SessionStartResult(resp) => Some(&resp.call_id),
+        RuntimeOutboundMessage::HookManifestResult(resp) => Some(&resp.call_id),
+        RuntimeOutboundMessage::RunHookResult(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::Ready(_)
         | RuntimeOutboundMessage::Provisioning(_)
         | RuntimeOutboundMessage::ProvisionFailed(_) => None,
