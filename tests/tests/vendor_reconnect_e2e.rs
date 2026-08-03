@@ -190,7 +190,7 @@ async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes()
     let cancel = CancellationToken::new();
     let endpoint = format!("ws://{}/api/vendor/connect", wire.addr);
     let agent_cancel = cancel.clone();
-    let agent_task = tokio::spawn(async move { agent.run(&endpoint, agent_cancel).await });
+    let agent_task = tokio::spawn(async move { agent.run(&endpoint, None, agent_cancel).await });
 
     let first = await_vendor(&vendors, "test-vendor", "registered", |_| true).await;
     first

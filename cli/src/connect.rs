@@ -201,6 +201,10 @@ pub async fn run(
     sandbox: bool,
 ) -> Result<i32, CliError> {
     let endpoint = server_to_endpoint(server)?;
+    // Reuse whatever `horsie auth login` stored for this server. `None` against
+    // a server with authentication off, which is what keeps that setup working
+    // untouched.
+    let token = crate::auth::resolve_token(server).await?;
     let normalized: Vec<String> = workspaces
         .iter()
         .map(|w| normalize_workspace_arg(w))
@@ -299,7 +303,7 @@ pub async fn run(
     });
 
     agent
-        .run(&endpoint, cancel.clone())
+        .run(&endpoint, token.as_deref(), cancel.clone())
         .await
         .map_err(CliError::Executor)?;
     Ok(0)

@@ -41,6 +41,11 @@ struct Cli {
     /// velos API token. Prefer `HORSIE_VELOS_TOKEN` over passing it on argv.
     #[arg(long, env = "HORSIE_VELOS_TOKEN")]
     velos_token: String,
+    /// Machine token for the horsie server (Settings → Account → Machine
+    /// tokens). Prefer `HORSIE_TOKEN` over argv, so the secret stays out of
+    /// process listings. Omit against a server with authentication disabled.
+    #[arg(long, env = "HORSIE_TOKEN")]
+    token: Option<String>,
     /// `host:port` this agent's runtime listener is reachable at *from velos's
     /// container network*.
     #[arg(long)]
@@ -185,7 +190,9 @@ async fn run(cli: Cli) -> Result<(), String> {
         signal_cancel.cancel();
     });
 
-    agent.run(&endpoint, cancel.clone()).await
+    agent
+        .run(&endpoint, cli.token.as_deref(), cancel.clone())
+        .await
 }
 
 #[cfg(unix)]

@@ -150,7 +150,7 @@ async fn start_agent(gate: Option<tokio::sync::watch::Receiver<bool>>) -> Agent 
     tokio::spawn({
         let cancel = cancel.clone();
         async move {
-            let _ = agent.run(&url, cancel).await;
+            let _ = agent.run(&url, None, cancel).await;
         }
     });
 
