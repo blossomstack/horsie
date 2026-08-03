@@ -462,7 +462,6 @@ mod tests {
         assert_eq!(h.decls[0].command, "real");
     }
 
-    #[test]
     /// impeccable's real `hooks/hooks.json`, verbatim. It is the plugin that
     /// motivated all of #105, so its exact shape is worth pinning: one event
     /// horsie runs today and one it defers, with a matcher that only selects
