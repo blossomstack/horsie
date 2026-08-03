@@ -136,6 +136,17 @@ Wire/protocol types are generated with
 wildcard match arms; tests opt out per-file. See `CLAUDE.md` for the full design
 philosophy and contribution conventions.
 
+## Contributing
+
+Pull requests are welcome. Contributors sign a [CLA](CLA.md) so the project can
+keep offering horsie under both licences below and adjust its licensing later if
+it needs to. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in horsie by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
