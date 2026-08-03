@@ -606,6 +606,24 @@ mod tests {
         }
     }
 
+    // `_sqlx_migrations.version` is the primary key, so two migration files that
+    // share a numeric prefix make *every* migration run fail on the second one —
+    // including a first-boot one against an empty database. Two branches that each
+    // took the next free number independently is all it takes, and the resulting
+    // error names the constraint rather than the files, so catch it by name here.
+    #[test]
+    fn migration_versions_are_unique() {
+        let mut seen: std::collections::HashMap<i64, &str> = std::collections::HashMap::new();
+        for m in sqlx::migrate!().iter() {
+            if let Some(other) = seen.insert(m.version, &m.description) {
+                panic!(
+                    "migration version {} is used twice: '{}' and '{}' — renumber the later one",
+                    m.version, other, m.description
+                );
+            }
+        }
+    }
+
     async fn open(dir: &std::path::Path) -> OpenedConfig {
         let _ = dir; // kept for signature symmetry with other test helpers in this crate
         DbConfigStore::open(
