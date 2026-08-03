@@ -4,11 +4,9 @@
 use crate::http::AppState;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
+use crate::sessions::builder::build_session_spec;
 use crate::sessions::session_actor::{AskAnswer, InboxMessage};
-use crate::sessions::spec::{
-    AgentSettings, PendingAsk, ProvisionStepSpec, SessionSpec, SessionStatus, WorkspaceDef,
-    status_kind, status_reason,
-};
+use crate::sessions::spec::{PendingAsk, SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
@@ -17,13 +15,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::now_ms;
 use horsie_models::session::{
-    AgentSettings as WireAgentSettings, AnswerAsksRequest, PendingAskView, QueuedMessage,
-    SessionDetail, SessionStatusKind, SessionSummary, SubAgentView, UsageView,
+    AnswerAsksRequest, PendingAskView, QueuedMessage, SessionDetail, SessionStatusKind,
+    SessionSummary, SubAgentView, UsageView,
 };
 use horsie_models::session_api::{
     Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, GetAgentResponse,
-    GetSessionResponse, HistoryPage, ListSessionsResponse, RepoConfig, SendMessageRequest,
-    SessionAck,
+    GetSessionResponse, HistoryPage, ListSessionsResponse, SendMessageRequest, SessionAck,
 };
 use horsie_workflow::{AgentHistoryPage, HistoryQuery};
 use serde::Deserialize;
@@ -64,21 +61,6 @@ where
         .map_err(|_| Api::internal("session supervisor unavailable"))
 }
 
-/// Storage `AgentSettings` from the wire request, applying defaults.
-fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
-    AgentSettings {
-        model: w.model,
-        allowed_tools: w.allowed_tools,
-        use_plugins: w.use_plugins,
-        max_iterations: w.max_iterations,
-        max_retries: w.max_retries.unwrap_or(0),
-        mcp_servers: w.mcp_servers.unwrap_or_default(),
-        memory_spaces: w.memory_spaces.unwrap_or_default(),
-        thinking_effort: w.thinking_effort,
-        max_concurrent_subagents: w.max_concurrent_subagents,
-    }
-}
-
 pub(crate) fn summary(
     id: &str,
     rec: &SessionRecord,
@@ -93,100 +75,18 @@ pub(crate) fn summary(
     }
 }
 
-/// Assemble a [`SessionSpec`] from the pieces every creation path supplies.
-/// Shared by `create_session` and the agent-preset invoke endpoint so the two
-/// can never drift on provisioning, plugin, or thinking-effort semantics.
-pub(crate) async fn build_session_spec(
-    state: &AppState,
-    name: Option<String>,
-    agent: WireAgentSettings,
-    vendor: Option<String>,
-    repos: Vec<RepoConfig>,
-    plugins: Option<Vec<String>>,
-) -> Result<SessionSpec, Api> {
-    // The workspace is always vendor-allocated; `repos` (when the vendor
-    // supports provisioning) become git-checkout provision steps that clone
-    // into it. The UI only sends repos to a provisioning-capable vendor; a
-    // vendor that can't provision rejects them at `create()`.
-    let provision: Vec<ProvisionStepSpec> = horsie_models::provision_from_repos(&repos)
-        .map_err(|e| Api::unprocessable(format!("invalid repos: {e}")))?
-        .into_iter()
-        .map(|s| ProvisionStepSpec {
-            name: s.name,
-            uses: s.uses,
-            with: s.with.into_iter().map(|p| (p.key, p.value)).collect(),
-        })
-        .collect();
-    let workspaces = vec![WorkspaceDef {
-        name: "main".into(),
-    }];
-    // Selected bundle names (empty → the provisioner falls back to the
-    // default-enabled set). Selecting bundles implies plugins are surfaced, so
-    // force the agent's opt-in when any are chosen.
-    let plugins = plugins.unwrap_or_default();
-    let mut agent = settings_from_wire(agent);
-    if !plugins.is_empty() {
-        agent.use_plugins = Some(true);
-    }
-    // Resolve the effective thinking effort once, here: session choice wins,
-    // else the model's configured default, else nothing. Effort is fixed for a
-    // session's lifetime (changing it mid-conversation invalidates the prompt
-    // cache), so freezing it at creation is deliberate. A requested value must
-    // be canonical AND offered by the model — otherwise it reaches the provider
-    // as an opaque 400.
-    {
-        let model_row = state
-            .config_store
-            .view()
-            .await
-            .map_err(Api::internal)?
-            .models
-            .into_iter()
-            .find(|m| m.alias == agent.model);
-        match agent.thinking_effort.as_deref() {
-            Some(requested) => {
-                let effort =
-                    horsie_agentcore::ThinkingEffort::parse(requested).ok_or_else(|| {
-                        Api::unprocessable(format!("unknown thinking effort '{requested}'"))
-                    })?;
-                let offered = model_row
-                    .as_ref()
-                    .and_then(|m| m.thinking_efforts.clone())
-                    .unwrap_or_default();
-                if !offered.iter().any(|e| e == effort.as_str()) {
-                    return Err(Api::unprocessable(format!(
-                        "model '{}' does not offer thinking effort '{requested}'",
-                        agent.model
-                    )));
-                }
-            }
-            None => {
-                agent.thinking_effort = model_row.and_then(|m| m.thinking_effort);
-            }
-        }
-    }
-    Ok(SessionSpec {
-        name,
-        agent,
-        workspaces,
-        provision,
-        vendor: vendor.unwrap_or_else(|| state.config_store.default_vendor()),
-        plugins,
-        origin: crate::sessions::spec::SessionOrigin::User,
-    })
-}
-
 pub async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, Api> {
     let spec = build_session_spec(
-        &state,
+        &state.config_store,
         req.name,
         req.agent,
         req.vendor,
         req.repos.unwrap_or_default(),
         req.plugins,
+        SessionOrigin::User,
     )
     .await?;
     let created_at = now_ms();

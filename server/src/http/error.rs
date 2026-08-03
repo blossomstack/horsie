@@ -43,6 +43,16 @@ impl Api {
     }
 }
 
+/// A spec that could not be assembled: the caller's fault is a 422, ours a 500.
+impl From<crate::sessions::builder::SpecError> for Api {
+    fn from(e: crate::sessions::builder::SpecError) -> Self {
+        match e {
+            crate::sessions::builder::SpecError::Invalid(m) => Self::unprocessable(m),
+            crate::sessions::builder::SpecError::Internal(m) => Self::internal(m),
+        }
+    }
+}
+
 impl IntoResponse for Api {
     fn into_response(self) -> Response {
         (self.0, Json(self.1)).into_response()

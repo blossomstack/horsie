@@ -7,7 +7,8 @@ use super::error::Api;
 use super::handlers;
 use crate::agents::AgentError;
 use crate::sessions::UserMessageError;
-use crate::sessions::spec::SessionStatus;
+use crate::sessions::builder::build_session_spec;
+use crate::sessions::spec::{SessionOrigin, SessionStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
 use axum::extract::{Path, State};
@@ -120,13 +121,14 @@ pub async fn invoke_agent(
         thinking_effort: agent.thinking_effort.clone(),
         max_concurrent_subagents: None,
     };
-    let spec = handlers::build_session_spec(
-        &state,
+    let spec = build_session_spec(
+        &state.config_store,
         req.name,
         wire,
         Some(vendor),
         agent.repos.clone(),
         Some(agent.plugins.clone()),
+        SessionOrigin::User,
     )
     .await?;
     let created_at = now_ms();
