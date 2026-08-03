@@ -2,7 +2,6 @@ use crate::context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, CONCLUDE_TOOL,
 };
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
@@ -57,13 +56,6 @@ impl AgentParams {
             interactive: false,
             optional_handoff_tool: None,
         }
-    }
-
-    /// Whether a pause (ask/park/cancel) may snapshot-compact the journal.
-    /// Interactive sessions never compact: their journal sequence numbers are
-    /// the SSE cursor space and must stay stable across reconnects.
-    fn compact_on_pause(&self) -> bool {
-        !self.interactive
     }
 
     /// The agent's handoff tool — the synthesized `conclude` tool when it has an
@@ -166,41 +158,44 @@ pub enum AgentCommand {
     GetUsage {
         reply: tokio::sync::oneshot::Sender<AgentUsageSnapshot>,
     },
-    /// Replay this agent's journal after `after_seq`, stamping each entry with
-    /// its position. Backs the SSE stream, which needs ids that stay stable
-    /// across reconnects — and this actor is the only thing that reads this
-    /// journal.
-    ReplayEvents {
-        after_seq: u64,
-        reply: tokio::sync::oneshot::Sender<Vec<(u64, AgentDomainEvent)>>,
-    },
-    /// The journal's current head position, for a stream that wants only what
-    /// happens from now on.
-    HeadSeq {
-        reply: tokio::sync::oneshot::Sender<u64>,
+    /// Read this agent's current values — task list plus usage — for the agent
+    /// document. Distinct from `GetHistory`, which returns transcript appends:
+    /// these are values a client re-reads rather than accumulates.
+    GetState {
+        reply: tokio::sync::oneshot::Sender<AgentStateView>,
     },
 }
 
 /// A windowed history request over the agent's message log.
+///
+/// The two cursors are the same space — a message id — read in opposite
+/// directions, and they are mutually exclusive: `after` wins if both are set.
+/// Because `state.messages` is append-only and never truncated, a cursor stays
+/// valid for the life of the session, which is what lets a live stream resume
+/// from one without any journal involvement.
 #[derive(Debug, Clone, Default)]
 pub struct HistoryQuery {
     /// Return the `limit` messages immediately *before* this message id. `None`
     /// requests the latest (tail) window — the initial view.
     pub before: Option<String>,
+    /// Return up to `limit` messages immediately *after* this message id — the
+    /// forward page a reconnecting stream backfills with.
+    pub after: Option<String>,
     /// Maximum messages to return.
     pub limit: usize,
 }
 
-/// One page of conversation history. `tasks`/`usage` ride only on the tail
-/// window (`before = None`): the initial view seeds the task widget and usage
-/// readout, while scroll-back pages carry messages alone.
+/// One page of conversation history — messages alone. Current values (task
+/// list, usage) are a different category and live on the agent document, so a
+/// page means exactly one thing regardless of which cursor produced it.
 #[derive(Debug, Clone)]
 pub struct AgentHistoryPage {
     pub messages: Vec<Message>,
     /// Whether older messages exist before the returned window.
-    pub has_more: bool,
-    pub tasks: Option<Vec<crate::task_list::TaskRecord>>,
-    pub usage: Option<UsageTotal>,
+    pub has_more_before: bool,
+    /// Whether newer messages exist after the returned window — how a forward
+    /// backfill learns it must ask for another page.
+    pub has_more_after: bool,
 }
 
 /// Coarse events that alter persisted agent state. Streaming observation events
@@ -369,28 +364,71 @@ pub struct AgentUsageSnapshot {
     pub context_tokens: u32,
 }
 
+/// One agent's current values: the task list and its usage/context numbers.
+/// Everything here is a value the client re-reads, never a log it accumulates —
+/// which is why none of it rides on a history page.
+#[derive(Debug, Clone, Default)]
+pub struct AgentStateView {
+    pub tasks: Vec<crate::task_list::TaskRecord>,
+    pub usage_total: UsageTotal,
+    pub last_turn_usage: Option<Usage>,
+    pub context_tokens: u32,
+}
+
 impl AgentState {
-    /// Answer a windowed [`HistoryQuery`] from the in-memory message log. The
-    /// window is `[start, end)` of `messages`; `end` is just before `before`'s
-    /// message (or the log end for the tail), `start` is `limit` back from
-    /// `end`. `has_more` reports whether anything precedes `start`. Task list and
-    /// usage ride only on the tail window.
+    /// This agent's current values, for the agent document.
+    pub fn state_view(&self) -> AgentStateView {
+        AgentStateView {
+            tasks: self.task_list.tasks().to_vec(),
+            usage_total: self.usage_total,
+            last_turn_usage: self.last_turn_usage.clone(),
+            context_tokens: self.context_tokens,
+        }
+    }
+
+    /// Answer a windowed [`HistoryQuery`] from the in-memory message log,
+    /// returning the half-open window `[start, end)` of `messages`.
+    ///
+    /// - `after`: forward from just past that message, up to `limit`.
+    /// - `before`: the `limit` messages ending just before that message.
+    /// - neither: the tail, the last `limit` messages.
+    ///
+    /// An unresolvable `after` cursor yields an empty window with nothing owed
+    /// in either direction, which is the honest answer: the caller asked to
+    /// continue from a message this log does not contain, so it must re-seed
+    /// from the tail rather than be handed a silently wrong window. An
+    /// unresolvable `before` falls back to the tail, preserving the existing
+    /// scroll-back behaviour.
     pub fn history_page(&self, query: &HistoryQuery) -> AgentHistoryPage {
-        let end = match &query.before {
-            None => self.messages.len(),
-            Some(id) => self
-                .messages
-                .iter()
-                .position(|m| &m.id == id)
-                .unwrap_or(self.messages.len()),
+        let len = self.messages.len();
+        let position = |id: &String| self.messages.iter().position(|m| &m.id == id);
+        let (start, end) = match (&query.after, &query.before) {
+            (Some(id), _) => match position(id) {
+                Some(pos) => {
+                    let start = pos + 1;
+                    (start, start.saturating_add(query.limit).min(len))
+                }
+                // Unresolvable: report nothing owed in *either* direction rather
+                // than letting `start == len` imply a backward page the caller
+                // never asked for.
+                None => {
+                    return AgentHistoryPage {
+                        messages: Vec::new(),
+                        has_more_before: false,
+                        has_more_after: false,
+                    };
+                }
+            },
+            (None, Some(id)) => {
+                let end = position(id).unwrap_or(len);
+                (end.saturating_sub(query.limit), end)
+            }
+            (None, None) => (len.saturating_sub(query.limit), len),
         };
-        let start = end.saturating_sub(query.limit);
-        let is_tail = query.before.is_none();
         AgentHistoryPage {
             messages: self.messages[start..end].to_vec(),
-            has_more: start > 0,
-            tasks: is_tail.then(|| self.task_list.tasks().to_vec()),
-            usage: is_tail.then_some(self.usage_total),
+            has_more_before: start > 0,
+            has_more_after: end < len,
         }
     }
 
@@ -444,6 +482,20 @@ enum RunOutcome {
     AlreadyReported,
 }
 
+/// Observer of an agent's durable history, notified once per event that is both
+/// journaled and folded into state.
+///
+/// This is how a live stream learns what happened without reading the journal:
+/// the actor is the only thing that touches its own log, and this is the seam it
+/// publishes through. Implementations must not block — they run on the actor's
+/// mailbox — and must treat delivery as best-effort.
+pub trait AgentObserver: Send + Sync {
+    /// `state` is the state *after* `event` was folded, so an observer that needs
+    /// the resulting message can read `state.messages.last()` rather than
+    /// re-deriving it from the event.
+    fn publish(&self, event: &AgentDomainEvent, state: &AgentState);
+}
+
 /// An agent run, modelled as an event-sourced actor. Each `Run`/`InjectToolResult`
 /// drives a background `horsie_agentcore::Agent` loop; coarse events are journaled
 /// incrementally so a crashed session recovers its conversation and continues.
@@ -451,6 +503,9 @@ pub struct AgentActor {
     ctx: AgentRuntimeContext,
     params: AgentParams,
     running: Option<RunHandle>,
+    /// Where durable history is published, when anyone is listening. `None` for
+    /// workflow agents, which have no live stream.
+    observer: Option<Arc<dyn AgentObserver>>,
     /// Id of the next run to start. Monotonic for this actor's loaded lifetime,
     /// which is all the fence needs — a report can only be stale within it.
     next_run_id: u64,
@@ -469,9 +524,23 @@ impl AgentActor {
             ctx,
             params,
             running: None,
+            observer: None,
             next_run_id: 0,
             pending_wake: false,
             cancel_acks: Vec::new(),
+        }
+    }
+
+    /// Same actor, publishing its durable history to `observer` — what a session
+    /// agent needs and a workflow agent does not.
+    pub fn with_observer(
+        ctx: AgentRuntimeContext,
+        params: AgentParams,
+        observer: Arc<dyn AgentObserver>,
+    ) -> Self {
+        Self {
+            observer: Some(observer),
+            ..Self::new(ctx, params)
         }
     }
 
@@ -479,45 +548,6 @@ impl AgentActor {
     /// UUID. Centralizes the kind so the workflow (e.g. fork) and the actor agree.
     pub fn persistence_id_for(session_id: uuid::Uuid) -> PersistenceId {
         PersistenceId::new("agent", session_id.to_string())
-    }
-
-    /// Replay this agent's journal, advancing the position for *every* entry —
-    /// including any that no longer decodes — so an id is always an exact
-    /// journal position and a reconnecting client's cursor still means what it
-    /// meant. Returns the decodable events after `after_seq`, and the head.
-    async fn replay_journal(
-        &self,
-        after_seq: u64,
-        ctx: &ActorContext<Self>,
-    ) -> (Vec<(u64, AgentDomainEvent)>, u64) {
-        let pid = Self::persistence_id_for(self.ctx.session_id);
-        let mut out = Vec::new();
-        let mut seq = 0u64;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "this actor owns this journal — the rule is that nothing else reads it"
-        )]
-        let mut stream = ctx.journal().replay(&pid, 0).await;
-        while let Some(item) = stream.next().await {
-            let bytes = match item {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!(%pid, error = %e, "journal replay error; truncating");
-                    break;
-                }
-            };
-            seq += 1;
-            if seq <= after_seq {
-                continue;
-            }
-            match serde_json::from_slice::<AgentDomainEvent>(&bytes) {
-                Ok(event) => out.push((seq, event)),
-                Err(e) => {
-                    tracing::warn!(%pid, seq, error = %e, "undecodable journal event; skipping");
-                }
-            }
-        }
-        (out, seq)
     }
 
     /// Refuse to begin a turn while one is already in flight.
@@ -744,13 +774,10 @@ impl AgentActor {
                             .deliver(AgentOutcome::Asked { session_id, asks })
                             .await;
                         // Stay alive — InjectToolResult resumes this same session.
-                        // Snapshot to compact the incrementally-persisted log
-                        // (never in interactive mode: cursors must stay stable).
-                        if self.params.compact_on_pause() {
-                            CommandEffect::snapshot()
-                        } else {
-                            CommandEffect::none()
-                        }
+                        // Snapshot to compact the incrementally-persisted log.
+                        // Unconditional now that no cursor is a journal position:
+                        // history and streams read state, so compaction is invisible.
+                        CommandEffect::snapshot()
                     }
                     Conclusion::Park => self.park_or_resume(state, ctx, session_id, parent).await,
                 }
@@ -768,14 +795,8 @@ impl AgentActor {
                         .map(|message| AgentDomainEvent::InputMessage { message })
                         .collect();
                 events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
-                // Snapshot to compact the incrementally-persisted log on cancel
-                // (never in interactive mode: cursors must stay stable).
-                let eff = CommandEffect::persist(events);
-                if self.params.compact_on_pause() {
-                    eff.and_snapshot()
-                } else {
-                    eff
-                }
+                // Snapshot to compact the incrementally-persisted log on cancel.
+                CommandEffect::persist(events).and_snapshot()
             }
             RunOutcome::Failed { error, recoverable } => {
                 parent
@@ -875,12 +896,7 @@ impl AgentActor {
             return CommandEffect::persist(vec![input_event]);
         }
         parent.deliver(AgentOutcome::Parked { session_id }).await;
-        let eff = CommandEffect::persist(vec![AgentDomainEvent::Parked { at_ms: now_ms() }]);
-        if self.params.compact_on_pause() {
-            eff.and_snapshot()
-        } else {
-            eff
-        }
+        CommandEffect::persist(vec![AgentDomainEvent::Parked { at_ms: now_ms() }]).and_snapshot()
     }
 
     /// A timer's sleep elapsed. Re-arm a recurring timer, then resume the agent with
@@ -1210,14 +1226,8 @@ impl EventSourcedActor for AgentActor {
                 let _ = reply.send(state.usage_snapshot());
                 CommandEffect::none()
             }
-            AgentCommand::ReplayEvents { after_seq, reply } => {
-                let (events, _) = self.replay_journal(after_seq, ctx).await;
-                let _ = reply.send(events);
-                CommandEffect::none()
-            }
-            AgentCommand::HeadSeq { reply } => {
-                let (_, head) = self.replay_journal(u64::MAX, ctx).await;
-                let _ = reply.send(head);
+            AgentCommand::GetState { reply } => {
+                let _ = reply.send(state.state_view());
                 CommandEffect::none()
             }
             AgentCommand::Shutdown => CommandEffect::stop(),
@@ -1230,6 +1240,18 @@ impl EventSourcedActor for AgentActor {
     /// loop with a synthetic continuation message. That continuation is
     /// intentionally not persisted as a new turn boundary: if we crash again
     /// before progress, recovery simply re-synthesizes it.
+    /// Publish what just became durable. This is the whole reason a live stream
+    /// no longer reads the journal: by the time this runs the events are written
+    /// and folded, so `state` already contains the messages they appended.
+    async fn on_events_persisted(&mut self, events: &[AgentDomainEvent], state: &AgentState) {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        for event in events {
+            observer.publish(event, state);
+        }
+    }
+
     async fn on_recovery_complete(&mut self, state: &AgentState, ctx: &mut ActorContext<Self>) {
         // Re-arm every surviving timer with its remaining delay (fires immediately if
         // already due). Do this whether parked or mid-run, so timers keep firing.
@@ -1861,24 +1883,24 @@ mod tests {
         assert!(!AgentParams::from_def(&def_fixture()).interactive);
     }
 
+    /// The observer replaces journal replay: it must see every durable event,
+    /// after the fold, with the resulting message already in state.
     #[tokio::test]
-    async fn an_agent_replays_its_own_journal_after_a_cursor() {
-        // The SSE stream needs durable events with stable ids, and the only
-        // thing allowed to read this journal is the actor that owns it.
-        use crate::context::{ContextError, ContextProvider, Contexts};
-        use horsie_actor::{InMemoryJournal, Journal, PersistenceId, spawn_root};
+    async fn an_observer_sees_durable_appends_with_folded_state() {
+        use crate::{ContextError, ContextProvider, Contexts};
+        use horsie_actor::{InMemoryJournal, Journal, spawn_root};
 
         struct NoContext;
         #[async_trait]
         impl ContextProvider for NoContext {
             async fn provide(&self) -> Result<Contexts, ContextError> {
-                std::future::pending().await
+                Err(ContextError::retryable("no context"))
             }
         }
         struct NoopSink;
         #[async_trait]
         impl EventSink for NoopSink {
-            async fn emit(&self, _: AgentEvent) -> Result<(), horsie_agentcore::EventSinkError> {
+            async fn emit(&self, _: horsie_agentcore::AgentEvent) -> Result<(), EventSinkError> {
                 Ok(())
             }
         }
@@ -1888,26 +1910,33 @@ mod tests {
             async fn deliver(&self, _: AgentOutcome) {}
         }
 
+        /// Records `(event, message-count-at-publish)` so the test can prove the
+        /// fold already happened when the observer ran.
+        #[derive(Default)]
+        struct Recorder {
+            seen: std::sync::Mutex<Vec<(String, usize)>>,
+        }
+        impl AgentObserver for Recorder {
+            fn publish(&self, event: &AgentDomainEvent, state: &AgentState) {
+                let label = match event {
+                    AgentDomainEvent::InputMessage { message } => {
+                        format!("input:{}", message.id)
+                    }
+                    AgentDomainEvent::MessageComplete { message } => {
+                        format!("complete:{}", message.id)
+                    }
+                    other => format!("other:{other:?}"),
+                };
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((label, state.messages.len()));
+            }
+        }
+
         let session_id = uuid::Uuid::new_v4();
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let pid: PersistenceId = AgentActor::persistence_id_for(session_id);
-        journal
-            .persist(
-                &pid,
-                &[
-                    serde_json::to_vec(&AgentDomainEvent::InputMessage {
-                        message: user_msg("one"),
-                    })
-                    .unwrap(),
-                    serde_json::to_vec(&AgentDomainEvent::MessageComplete {
-                        message: user_msg("two"),
-                    })
-                    .unwrap(),
-                ],
-            )
-            .await
-            .unwrap();
-
+        let recorder = Arc::new(Recorder::default());
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(NoContext),
             event_sink: Arc::new(NoopSink),
@@ -1915,32 +1944,38 @@ mod tests {
             session_id,
         };
         let agent = spawn_root(
-            AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+            AgentActor::with_observer(ctx, AgentParams::from_def(&def_fixture()), recorder.clone()),
             journal,
         );
 
-        let all = agent
-            .ask(|reply| AgentCommand::ReplayEvents {
-                after_seq: 0,
-                reply,
+        let one = user_msg("one");
+        let two = user_msg("two");
+        let (ack, ack_rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::PersistProgress {
+                events: vec![
+                    AgentDomainEvent::InputMessage {
+                        message: one.clone(),
+                    },
+                    AgentDomainEvent::MessageComplete {
+                        message: two.clone(),
+                    },
+                ],
+                ack,
             })
             .await
             .unwrap();
-        assert_eq!(
-            all.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
-            vec![1, 2],
-            "ids are journal positions"
-        );
+        ack_rx.await.unwrap().unwrap();
 
-        let tail = agent
-            .ask(|reply| AgentCommand::ReplayEvents {
-                after_seq: 1,
-                reply,
-            })
-            .await
-            .unwrap();
-        assert_eq!(tail.len(), 1, "a cursor skips what the client already has");
-        assert_eq!(tail[0].0, 2);
+        let seen = recorder.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                (format!("input:{}", one.id), 2),
+                (format!("complete:{}", two.id), 2),
+            ],
+            "both events publish once, and state is already folded when they do"
+        );
     }
 
     #[test]
@@ -1950,14 +1985,6 @@ mod tests {
                 .optional_handoff_tool
                 .is_none()
         );
-    }
-
-    #[test]
-    fn interactive_pause_does_not_compact() {
-        let mut params = AgentParams::from_def(&def_fixture());
-        assert!(params.compact_on_pause());
-        params.interactive = true;
-        assert!(!params.compact_on_pause());
     }
 
     #[test]
@@ -2508,8 +2535,91 @@ mod tests {
     }
 
     #[test]
-    fn history_tail_returns_last_limit_with_tasks_and_usage() {
-        let mut state = with_messages(&["a", "b", "c", "d"]);
+    fn history_tail_returns_the_last_window() {
+        let state = with_messages(&["a", "b", "c", "d"]);
+        let page = state.history_page(&HistoryQuery {
+            before: None,
+            after: None,
+            limit: 2,
+        });
+        assert_eq!(page_ids(&page), ["c", "d"]);
+        assert!(page.has_more_before, "a and b precede this window");
+        assert!(!page.has_more_after, "d is the newest message");
+    }
+
+    #[test]
+    fn history_before_cursor_pages_backward() {
+        let state = with_messages(&["a", "b", "c", "d"]);
+        let page = state.history_page(&HistoryQuery {
+            before: Some("c".into()),
+            after: None,
+            limit: 2,
+        });
+        // Two messages immediately before "c": "a", "b".
+        assert_eq!(page_ids(&page), ["a", "b"]);
+        assert!(!page.has_more_before);
+        assert!(page.has_more_after, "c and d follow this window");
+    }
+
+    #[test]
+    fn history_after_cursor_pages_forward() {
+        let state = with_messages(&["a", "b", "c", "d"]);
+        let page = state.history_page(&HistoryQuery {
+            before: None,
+            after: Some("b".into()),
+            limit: 2,
+        });
+        assert_eq!(page_ids(&page), ["c", "d"]);
+        assert!(page.has_more_before);
+        assert!(!page.has_more_after, "the window reaches the head");
+    }
+
+    #[test]
+    fn history_after_cursor_reports_more_when_the_window_is_full() {
+        let state = with_messages(&["a", "b", "c", "d"]);
+        let page = state.history_page(&HistoryQuery {
+            before: None,
+            after: Some("a".into()),
+            limit: 2,
+        });
+        assert_eq!(page_ids(&page), ["b", "c"]);
+        assert!(
+            page.has_more_after,
+            "d is still owed — backfill must page on"
+        );
+    }
+
+    /// A cursor naming a message this log does not have cannot be honoured, and
+    /// guessing a window would hand the caller a silently wrong transcript.
+    #[test]
+    fn history_after_unknown_cursor_owes_nothing() {
+        let state = with_messages(&["a", "b"]);
+        let page = state.history_page(&HistoryQuery {
+            before: None,
+            after: Some("ghost".into()),
+            limit: 10,
+        });
+        assert!(page.messages.is_empty());
+        assert!(!page.has_more_after);
+        assert!(!page.has_more_before);
+    }
+
+    #[test]
+    fn history_tail_shorter_than_limit_has_no_more() {
+        let state = with_messages(&["a", "b"]);
+        let page = state.history_page(&HistoryQuery {
+            before: None,
+            after: None,
+            limit: 10,
+        });
+        assert_eq!(page_ids(&page), ["a", "b"]);
+        assert!(!page.has_more_before);
+        assert!(!page.has_more_after);
+    }
+
+    #[test]
+    fn state_view_carries_tasks_and_usage() {
+        let mut state = with_messages(&["a"]);
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::RunComplete {
@@ -2519,39 +2629,10 @@ mod tests {
                 context_tokens: 4,
             },
         );
-        let page = state.history_page(&HistoryQuery {
-            before: None,
-            limit: 2,
-        });
-        assert_eq!(page_ids(&page), ["c", "d"]);
-        assert!(page.has_more);
-        assert!(page.tasks.is_some());
-        assert_eq!(page.usage.unwrap().input_tokens, 4);
-    }
-
-    #[test]
-    fn history_before_cursor_pages_backward_without_tasks() {
-        let state = with_messages(&["a", "b", "c", "d"]);
-        let page = state.history_page(&HistoryQuery {
-            before: Some("c".into()),
-            limit: 2,
-        });
-        // Two messages immediately before "c": "a", "b".
-        assert_eq!(page_ids(&page), ["a", "b"]);
-        assert!(!page.has_more);
-        assert!(page.tasks.is_none());
-        assert!(page.usage.is_none());
-    }
-
-    #[test]
-    fn history_tail_shorter_than_limit_has_no_more() {
-        let state = with_messages(&["a", "b"]);
-        let page = state.history_page(&HistoryQuery {
-            before: None,
-            limit: 10,
-        });
-        assert_eq!(page_ids(&page), ["a", "b"]);
-        assert!(!page.has_more);
+        let view = state.state_view();
+        assert_eq!(view.usage_total.input_tokens, 4);
+        assert_eq!(view.context_tokens, 4);
+        assert!(view.tasks.is_empty());
     }
 
     #[test]
@@ -3055,6 +3136,7 @@ mod fence_tests {
             .tell(AgentCommand::GetHistory {
                 query: HistoryQuery {
                     before: None,
+                    after: None,
                     limit: 50,
                 },
                 reply,
