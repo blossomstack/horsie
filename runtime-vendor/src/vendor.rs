@@ -156,6 +156,27 @@ pub struct RuntimeVendor {
     lifecycle_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
+/// The WS upgrade request, carrying the bearer when there is one. Built in one
+/// place so the fail-fast validation in `run` and the real dial cannot diverge.
+fn client_request(
+    server_url: &str,
+    token: Option<&str>,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, String> {
+    let mut request = server_url
+        .into_client_request()
+        .map_err(|e| format!("invalid server URL '{server_url}': {e}"))?;
+    if let Some(t) = token {
+        let value = format!("Bearer {t}")
+            .parse()
+            .map_err(|e| format!("token is not a valid header value: {e}"))?;
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+            value,
+        );
+    }
+    Ok(request)
+}
+
 impl RuntimeVendor {
     #[must_use]
     pub fn new(
@@ -241,13 +262,19 @@ impl RuntimeVendor {
     ///
     /// The only `Err` is fail-fast: a `server_url` no attempt could ever dial.
     /// Dial, handshake and transport failures are retried indefinitely.
-    pub async fn run(self, server_url: &str, cancel: CancellationToken) -> Result<(), String> {
-        // Reject an undialable URL before the first attempt, so a typo is an
-        // error the operator sees once rather than a retry loop that can never
-        // succeed.
-        server_url
-            .into_client_request()
-            .map_err(|e| format!("invalid server URL '{server_url}': {e}"))?;
+    /// `token` is the bearer this agent presents on every dial. `None` is
+    /// correct against a server running with authentication disabled; against
+    /// one that requires it, the dial is refused with a 401 the operator sees.
+    pub async fn run(
+        self,
+        server_url: &str,
+        token: Option<&str>,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        // Reject an undialable URL, or a token that cannot be a header, before
+        // the first attempt — a typo should be an error the operator sees once
+        // rather than a retry loop that can never succeed.
+        client_request(server_url, token)?;
 
         let mut backoff = self.backoff;
         let mut failures: u32 = 0;
@@ -255,7 +282,7 @@ impl RuntimeVendor {
         let agent = Arc::new(self);
 
         loop {
-            let ended = match agent.connect(server_url).await {
+            let ended = match agent.connect(server_url, token).await {
                 Ok((sink, stream)) => {
                     connections = connections.saturating_add(1);
                     failures = 0;
@@ -304,8 +331,12 @@ impl RuntimeVendor {
     /// Dial the server and announce this vendor. Both halves are one step: a
     /// socket that never got its `Ready` across is no more usable than one that
     /// never opened, and the reconnect loop treats them identically.
-    async fn connect(&self, server_url: &str) -> Result<(Sink, Stream), String> {
-        let (ws, _) = tokio_tungstenite::connect_async(server_url)
+    async fn connect(
+        &self,
+        server_url: &str,
+        token: Option<&str>,
+    ) -> Result<(Sink, Stream), String> {
+        let (ws, _) = tokio_tungstenite::connect_async(client_request(server_url, token)?)
             .await
             .map_err(|e| format!("connect {server_url}: {e}"))?;
         let (sink_inner, stream) = ws.split();
@@ -754,6 +785,7 @@ mod tests {
             std::time::Duration::from_secs(5),
             agent().run(
                 "ws://not a host/api/vendor/connect",
+                None,
                 CancellationToken::new(),
             ),
         )
@@ -772,7 +804,7 @@ mod tests {
             let cancel = cancel.clone();
             async move {
                 agent()
-                    .run("ws://127.0.0.1:1/api/vendor/connect", cancel)
+                    .run("ws://127.0.0.1:1/api/vendor/connect", None, cancel)
                     .await
             }
         });
@@ -783,5 +815,29 @@ mod tests {
             .expect("the backoff sleep must give way to cancellation")
             .expect("the agent task must not panic")
             .expect("a cancelled agent exits cleanly");
+    }
+
+    #[test]
+    fn the_dial_request_carries_the_bearer_when_there_is_one() {
+        use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+
+        let bare = client_request("ws://localhost:3789/api/vendor/connect", None).unwrap();
+        assert!(bare.headers().get(AUTHORIZATION).is_none());
+
+        let with =
+            client_request("ws://localhost:3789/api/vendor/connect", Some("hsk_agt_x")).unwrap();
+        assert_eq!(
+            with.headers().get(AUTHORIZATION).unwrap(),
+            "Bearer hsk_agt_x"
+        );
+    }
+
+    #[test]
+    fn an_undialable_url_or_an_unusable_token_fails_before_any_attempt() {
+        assert!(client_request("ws://not a host/api/vendor/connect", None).is_err());
+        // A newline in a token would smuggle a header; reject it at the door.
+        assert!(
+            client_request("ws://localhost:3789/api/vendor/connect", Some("bad\nvalue")).is_err()
+        );
     }
 }

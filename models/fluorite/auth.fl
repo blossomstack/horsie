@@ -62,3 +62,27 @@ struct DeviceApprovalRequest {
 struct RefreshRequest {
     refresh_token: String,
 }
+
+/// A machine token as listed in Settings. The secret itself appears exactly
+/// once, in `AgentTokenCreated` — only its hash is stored, so there is nothing
+/// to show later even if we wanted to.
+struct AgentTokenView {
+    id: String,
+    label: String,
+    /// Unix epoch seconds.
+    created_at: String,
+    /// Unix epoch seconds, absent until the token is first used.
+    last_used_at: Option<String>,
+}
+
+struct AgentTokenCreateInput {
+    /// Which machine this token is for. Required: a wall of unlabelled secrets
+    /// is unrevokable in practice.
+    label: String,
+}
+
+struct AgentTokenCreated {
+    /// Shown once and never again.
+    token: String,
+    view: AgentTokenView,
+}

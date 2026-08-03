@@ -25,6 +25,7 @@ use horsie_runtime_vendor::{
     ConnectedRuntimeRegistry, FixedWorkspaces, HealthStatus, RuntimeHandle, RuntimeProvider,
     RuntimeVendor,
 };
+use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, VendorError, WorkspaceSpec};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -117,7 +118,10 @@ async fn start_agent(gate: Option<tokio::sync::watch::Receiver<bool>>) -> Agent 
         let ws = tokio_tungstenite::accept_async(stream)
             .await
             .expect("websocket upgrade");
-        let link = RuntimeVendorLink::start(ws).await.expect("handshake");
+        // Auth-disabled shape: every principal is anonymous.
+        let link = RuntimeVendorLink::start(ws, Principal::Anonymous)
+            .await
+            .expect("handshake");
         let _ = link_tx.send(link);
     });
 
@@ -146,7 +150,7 @@ async fn start_agent(gate: Option<tokio::sync::watch::Receiver<bool>>) -> Agent 
     tokio::spawn({
         let cancel = cancel.clone();
         async move {
-            let _ = agent.run(&url, cancel).await;
+            let _ = agent.run(&url, None, cancel).await;
         }
     });
 

@@ -91,6 +91,7 @@ impl RuntimeTransport for RuntimeVendorTransport {
 )]
 mod tests {
     use super::*;
+    use crate::auth::Principal;
     use futures_util::{SinkExt, StreamExt};
     use horsie_models::runtime::{
         BashInput, ToolCall, ToolCallResponse, ToolError, ToolOutput, ToolResult,
@@ -154,7 +155,9 @@ mod tests {
                     .unwrap();
             }
         });
-        RuntimeVendorLink::start(server).await.unwrap()
+        RuntimeVendorLink::start(server, Principal::Anonymous)
+            .await
+            .unwrap()
     }
 
     fn bash() -> ToolCall {

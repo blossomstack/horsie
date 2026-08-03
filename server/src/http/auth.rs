@@ -15,8 +15,9 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use horsie_models::auth::{
-    AuthStatus, DeviceApprovalRequest, DeviceCodeResponse, DeviceTokenRequest, LoginRequest,
-    PasswordChangeRequest, RefreshRequest, TokenPair,
+    AgentTokenCreateInput, AgentTokenCreated, AgentTokenView, AuthStatus, DeviceApprovalRequest,
+    DeviceCodeResponse, DeviceTokenRequest, LoginRequest, PasswordChangeRequest, RefreshRequest,
+    TokenPair,
 };
 
 pub const COOKIE_NAME: &str = "horsie_session";
@@ -334,6 +335,61 @@ fn device_error(e: DeviceError) -> Api {
             message: message.to_string(),
         },
     )
+}
+
+/// `GET /api/auth/tokens` — the machine tokens this deployment has minted.
+pub async fn list_agent_tokens(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<AgentTokenView>>, Api> {
+    let tokens = state
+        .auth
+        .list_agent_tokens()
+        .await
+        .map_err(Api::internal)?;
+    Ok(Json(tokens.into_iter().map(token_view).collect()))
+}
+
+/// `POST /api/auth/tokens` — mint one. The secret comes back exactly once.
+pub async fn create_agent_token(
+    State(state): State<AppState>,
+    axum::Extension(principal): axum::Extension<Principal>,
+    Json(body): Json<AgentTokenCreateInput>,
+) -> Result<(StatusCode, Json<AgentTokenCreated>), Api> {
+    let (token, summary) = state
+        .auth
+        .mint_agent_token(&body.label, &principal)
+        .await
+        .map_err(Api::unprocessable)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(AgentTokenCreated {
+            token,
+            view: token_view(summary),
+        }),
+    ))
+}
+
+/// `DELETE /api/auth/tokens/:id` — revoke. Idempotent: revoking an already-dead
+/// token is the state the caller asked for.
+pub async fn delete_agent_token(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, Api> {
+    state
+        .auth
+        .revoke_agent_token(&id)
+        .await
+        .map_err(Api::internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn token_view(t: crate::auth::TokenSummary) -> AgentTokenView {
+    AgentTokenView {
+        id: t.id,
+        label: t.label.unwrap_or_default(),
+        created_at: t.created_at.to_string(),
+        last_used_at: t.last_used_at.map(|v| v.to_string()),
+    }
 }
 
 fn to_api(e: LoginError) -> Api {

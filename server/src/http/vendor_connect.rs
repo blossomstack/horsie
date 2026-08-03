@@ -9,6 +9,7 @@
 //! connection can be wrapped in a `WebSocketStream` and driven by
 //! [`RuntimeVendorLink::start`] — the same mechanics `runtime_connect.rs` uses.
 
+use crate::auth::{Principal, TokenKind};
 use crate::http::AppState;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
@@ -19,10 +20,68 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
 
+/// Resolve the credential on a vendor dial.
+///
+/// Only `access` and `agent` kinds are accepted: a `web` cookie or a `refresh`
+/// token verifies perfectly well but has no business driving a machine link,
+/// and accepting one would let a stolen browser session become a runtime.
+/// Read the bearer out of the headers. Separate from [`authenticate`] and
+/// synchronous on purpose: `Request<Body>` is not `Sync`, so holding a
+/// reference to it across an await would make the handler future non-`Send`
+/// and it would stop being an axum handler at all.
+fn bearer_of(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+}
+
+async fn authenticate(state: &AppState, bearer: Option<String>) -> Result<Principal, Response> {
+    if !state.auth.enabled() {
+        return Ok(Principal::Anonymous);
+    }
+    let refused = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(horsie_models::session_api::ApiError {
+                code: "unauthorized".to_string(),
+                message: "a vendor agent must present an access or machine token".to_string(),
+            }),
+        )
+            .into_response()
+    };
+    let Some(secret) = bearer else {
+        return Err(refused());
+    };
+    match state.auth.verify(&secret).await {
+        Ok(Some(v)) if matches!(v.kind, TokenKind::Access | TokenKind::Agent) => Ok(v.principal),
+        Ok(_) => Err(refused()),
+        Err(e) => {
+            tracing::error!(error = %e, "verifying a vendor credential failed");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not verify the credential",
+            )
+                .into_response())
+        }
+    }
+}
+
 pub async fn vendor_connect(
     State(state): State<AppState>,
     mut req: axum::extract::Request,
 ) -> Response {
+    // Authenticate before anything else, and answer 401 rather than completing
+    // the upgrade and closing: an upgrade that opens and dies looks to the
+    // agent like a transport fault worth retrying, whereas a 401 is a fact it
+    // can report to whoever launched it.
+    let owner = match authenticate(&state, bearer_of(req.headers())).await {
+        Ok(p) => p,
+        Err(response) => return response,
+    };
     let Some(key) = req
         .headers()
         .get(header::SEC_WEBSOCKET_KEY)
@@ -43,10 +102,22 @@ pub async fn vendor_connect(
                 let ws =
                     WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None)
                         .await;
-                match crate::runtime_vendor::RuntimeVendorLink::start(ws).await {
+                match crate::runtime_vendor::RuntimeVendorLink::start(ws, owner).await {
                     Ok(link) => {
-                        tracing::info!(vendor = %link.vendor_name(), "vendor agent connected");
-                        agents.register(link);
+                        let name = link.vendor_name().to_string();
+                        match agents.register(link) {
+                            Ok(()) => {
+                                tracing::info!(vendor = %name, "vendor agent connected")
+                            }
+                            // Dropping the link closes the socket, which is the
+                            // whole response: the dialer is not entitled to this
+                            // name and nothing about retrying will change that.
+                            Err(e) => tracing::warn!(
+                                vendor = %name,
+                                error = %e,
+                                "refused a vendor agent claiming a name owned by someone else"
+                            ),
+                        }
                     }
                     Err(e) => tracing::warn!(error = %e, "vendor agent handshake failed"),
                 }

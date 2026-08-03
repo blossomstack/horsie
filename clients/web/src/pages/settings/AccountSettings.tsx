@@ -1,8 +1,122 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiRequestError, api } from "../../api/client";
 import { AUTH_STATUS_KEY, useAuthStatus } from "../../hooks/useAuth";
 import { SettingsHeader } from "./SettingsHeader";
+
+/** Long-lived tokens for headless vendor agents: a container, a CI runner, a
+ *  machine with nobody to approve a device code. */
+function MachineTokens() {
+  const qc = useQueryClient();
+  const [label, setLabel] = useState("");
+  const [fresh, setFresh] = useState<string | null>(null);
+
+  const tokens = useQuery({
+    queryKey: ["auth", "tokens"],
+    queryFn: () => api.auth.listTokens(),
+  });
+  const create = useMutation({
+    mutationFn: () => api.auth.createToken(label),
+    onSuccess: (created) => {
+      setLabel("");
+      // Shown once: only the hash is stored, so there is nothing to show later.
+      setFresh(created.token);
+      void qc.invalidateQueries({ queryKey: ["auth", "tokens"] });
+    },
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.auth.deleteToken(id),
+    onSuccess: () =>
+      void qc.invalidateQueries({ queryKey: ["auth", "tokens"] }),
+  });
+
+  const error =
+    create.error instanceof ApiRequestError ? create.error.message : null;
+
+  return (
+    <section
+      className="card max-w-2xl space-y-3 p-4"
+      data-testid="machine-tokens"
+    >
+      <div>
+        <h2 className="text-sm font-semibold text-text">Machine tokens</h2>
+        <p className="mt-0.5 text-xs text-faint">
+          For runtime vendor agents that run unattended. On your own machine,
+          <code className="mx-1">horsie auth login</code> is enough — use a
+          token where nobody is there to approve one.
+        </p>
+      </div>
+
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          create.mutate();
+        }}
+      >
+        <input
+          className="input flex-1"
+          data-testid="token-label"
+          placeholder="What machine is this for?"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+        />
+        <button
+          type="submit"
+          className="btn-primary shrink-0"
+          data-testid="token-create"
+          disabled={!label.trim() || create.isPending}
+        >
+          Create
+        </button>
+      </form>
+      {error && (
+        <p data-testid="token-error" className="text-xs text-error">
+          {error}
+        </p>
+      )}
+
+      {fresh && (
+        <div className="space-y-1" data-testid="token-secret">
+          <p className="text-xs text-success">
+            Copy this now — it will not be shown again.
+          </p>
+          <code className="block break-all rounded-[var(--radius)] border p-2 font-mono text-xs">
+            {fresh}
+          </code>
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        {tokens.data?.length === 0 && (
+          <p className="text-xs text-faint">No machine tokens yet.</p>
+        )}
+        {tokens.data?.map((t) => (
+          <div
+            key={t.id}
+            className="flex items-center justify-between gap-3 rounded-[var(--radius)] border px-3 py-2"
+            data-testid={`token-row-${t.label}`}
+          >
+            <div className="min-w-0">
+              <div className="truncate text-sm text-text">{t.label}</div>
+              <div className="text-[11px] text-faint">
+                {t.lastUsedAt ? "in use" : "never used"}
+              </div>
+            </div>
+            <button
+              className="btn-outline shrink-0 text-xs"
+              data-testid={`token-revoke-${t.label}`}
+              onClick={() => remove.mutate(t.id)}
+              disabled={remove.isPending}
+            >
+              Revoke
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 /** Password change and sign-out for the single admin account. */
 export function AccountSettings() {
@@ -116,6 +230,7 @@ export function AccountSettings() {
         >
           Sign out
         </button>
+        <MachineTokens />
       </div>
     </div>
   );

@@ -26,6 +26,25 @@ The project ships two agents:
 > **Out of the box there is no vendor.** A session can be created, but it cannot
 > run a turn until an agent connects. Set one up below.
 
+## Authorizing an agent
+
+A vendor agent has to prove who it is before the server will publish it — a
+name like `local` is owned by whoever claimed it, so nobody else can take it
+over and start receiving your tool calls.
+
+On a machine you sit at, a normal login is enough:
+
+    horsie auth login --server https://SERVER-HOST
+
+For an agent that runs unattended — a container, a CI runner, anything with
+nobody to approve a code — mint a **machine token** in
+**Settings → Account → Machine tokens** and pass it as `HORSIE_TOKEN`. The
+secret is shown once; only its hash is stored, so there is nothing to recover
+if you lose it. Revoke it from the same page.
+
+Against a server running with authentication disabled, neither is needed and
+nothing below changes.
+
 ## `horsie connect` — run on your own machine
 
 Point the agent at your server and at the directory you want it to work in:
@@ -89,8 +108,10 @@ HORSIE_VELOS_TOKEN=... horsie-velos-runtime \
   --image ghcr.io/you/horsie-runtime:latest
 ```
 
-Prefer `HORSIE_VELOS_TOKEN` over `--velos-token` so the token never appears in
-argv. The agent verifies it at startup and exits if velos is unreachable or the
+This agent needs *two* tokens, and they are unrelated: `HORSIE_VELOS_TOKEN`
+authenticates it to **velos**, while `HORSIE_TOKEN` (a machine token) is how it
+authenticates to **horsie**. Prefer both as environment variables over
+`--velos-token`/`--token` so neither appears in argv. The agent verifies it at startup and exits if velos is unreachable or the
 token is rejected, rather than letting the first session discover it.
 
 - `--advertise` — `host:port` this agent is reachable at **from velos's

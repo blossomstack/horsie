@@ -129,6 +129,7 @@ impl FakeRuntimeVendor {
             faults: Faults::default(),
             block: false,
             resume: None,
+            owner: crate::auth::Principal::Anonymous,
         }
     }
 
@@ -225,9 +226,20 @@ pub struct FakeRuntimeVendorBuilder {
     /// Runtime state carried over from a previous agent process — see
     /// [`FakeRuntimeVendorBuilder::resuming`].
     resume: Option<Arc<Recorder>>,
+    /// Who this fake agent authenticated as. Defaults to `Anonymous`, matching
+    /// an auth-disabled deployment.
+    owner: crate::auth::Principal,
 }
 
 impl FakeRuntimeVendorBuilder {
+    /// Authenticate as this principal, so tests can exercise vendor-name
+    /// ownership.
+    #[must_use]
+    pub fn owned_by(mut self, owner: crate::auth::Principal) -> Self {
+        self.owner = owner;
+        self
+    }
+
     /// Come back as the same vendor, remembering the runtimes `prior` created.
     ///
     /// A real vendor's runtimes outlive its agent process — that is the whole
@@ -295,7 +307,30 @@ impl FakeRuntimeVendorBuilder {
 
     /// Dial a running server's `/api/vendor/connect`.
     pub async fn connect(self, url: &str) -> Result<FakeRuntimeVendor, String> {
-        let (ws, _) = tokio_tungstenite::connect_async(url)
+        self.connect_with_token(url, None).await
+    }
+
+    /// Dial presenting a bearer, as a real agent does against a server with
+    /// authentication on.
+    pub async fn connect_with_token(
+        self,
+        url: &str,
+        token: Option<&str>,
+    ) -> Result<FakeRuntimeVendor, String> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = url
+            .into_client_request()
+            .map_err(|e| format!("bad url {url}: {e}"))?;
+        if let Some(t) = token {
+            let value = format!("Bearer {t}")
+                .parse()
+                .map_err(|e| format!("bad token header: {e}"))?;
+            request.headers_mut().insert(
+                tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+                value,
+            );
+        }
+        let (ws, _) = tokio_tungstenite::connect_async(request)
             .await
             .map_err(|e| format!("dial {url}: {e}"))?;
         let recorder = self
@@ -349,6 +384,7 @@ impl FakeRuntimeVendorBuilder {
         } else {
             Gate::open()
         };
+        let owner = self.owner.clone();
         let task = tokio::spawn(run_agent(
             agent,
             self,
@@ -356,7 +392,7 @@ impl FakeRuntimeVendorBuilder {
             create_gate.clone(),
             recorder.clone(),
         ));
-        let link = RuntimeVendorLink::start(server).await?;
+        let link = RuntimeVendorLink::start(server, owner).await?;
         Ok(FakeRuntimeVendor {
             recorder,
             gate,
@@ -386,6 +422,7 @@ async fn run_agent<S>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let FakeRuntimeVendorBuilder {
+        owner: _,
         vendor_name,
         supports_provisioning,
         bash_stdout,

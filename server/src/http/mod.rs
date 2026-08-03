@@ -180,6 +180,14 @@ pub fn app(state: AppState) -> Router {
         .route("/api/auth/device/approve", post(auth::device_approve))
         .route("/api/auth/device/deny", post(auth::device_deny))
         .route("/api/auth/refresh", post(auth::refresh))
+        .route(
+            "/api/auth/tokens",
+            get(auth::list_agent_tokens).post(auth::create_agent_token),
+        )
+        .route(
+            "/api/auth/tokens/:id",
+            axum::routing::delete(auth::delete_agent_token),
+        )
         // Guards every route above. The SPA shell and its assets, added below,
         // are deliberately outside it: the app has to load in order to render a
         // login page, and the bundle holds no secrets.
@@ -1668,5 +1676,197 @@ mod tests {
             app.oneshot(req).await.unwrap().status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    /// Bring up a real listener so vendor agents can dial a real WS upgrade.
+    async fn serve(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("ws://{addr}/api/vendor/connect")
+    }
+
+    async fn registered_within(
+        agents: &Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
+        name: &str,
+    ) -> bool {
+        for _ in 0..50 {
+            if agents.connected_names().contains(&name.to_string()) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_vendor_dial_without_a_credential_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _pw) = auth_state(&tmp).await;
+        let agents = state.vendor_agents.clone();
+        let url = serve(app(state)).await;
+
+        // The dial fails at the HTTP layer — a 401, not a completed upgrade
+        // that closes, which an agent would retry forever.
+        let err = match crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
+            .connect(&url)
+            .await
+        {
+            Ok(_) => panic!("a bare dial must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("401") || err.to_lowercase().contains("http"),
+            "{err}"
+        );
+        assert!(!registered_within(&agents, "my-laptop").await);
+    }
+
+    #[tokio::test]
+    async fn a_browser_session_token_cannot_drive_a_vendor_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        // A valid credential of the wrong kind: right principal, but a cookie
+        // has no business being a machine.
+        let web = state.auth.login(&pw).await.unwrap();
+        let agents = state.vendor_agents.clone();
+        let url = serve(app(state)).await;
+
+        let outcome = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
+            .connect_with_token(&url, Some(&web))
+            .await;
+        assert!(outcome.is_err(), "a web token must not open a machine link");
+        assert!(!registered_within(&agents, "my-laptop").await);
+    }
+
+    #[tokio::test]
+    async fn an_agent_token_connects_and_becomes_a_selectable_vendor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _pw) = auth_state(&tmp).await;
+        let (secret, _view) = state
+            .auth
+            .mint_agent_token("my-laptop", &crate::auth::Principal::User(1))
+            .await
+            .unwrap();
+        let agents = state.vendor_agents.clone();
+        let url = serve(app(state)).await;
+
+        let _agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
+            .supports_provisioning(false)
+            .connect_with_token(&url, Some(&secret))
+            .await
+            .expect("agent connects");
+        assert!(registered_within(&agents, "my-laptop").await);
+    }
+
+    #[tokio::test]
+    async fn machine_tokens_are_created_listed_used_and_revoked() {
+        use horsie_models::auth::{AgentTokenCreated, AgentTokenView};
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        let app = app(state);
+
+        // Minting needs a credential — otherwise anyone could mint one.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/tokens",
+                &serde_json::json!({"label": "laptop"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &serde_json::json!({"password": pw}),
+            ))
+            .await
+            .unwrap();
+        let cookie = session_cookie(&res);
+
+        let create = |body: serde_json::Value, cookie: String| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/tokens")
+                .header("content-type", "application/json")
+                .header("cookie", format!("horsie_session={cookie}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        };
+
+        let res = app
+            .clone()
+            .oneshot(create(
+                serde_json::json!({"label": "laptop"}),
+                cookie.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let created: AgentTokenCreated = read_json(res).await;
+        assert!(created.token.starts_with("hsk_agt_"));
+        assert_eq!(created.view.label, "laptop");
+
+        // An unlabelled token is refused.
+        let res = app
+            .clone()
+            .oneshot(create(serde_json::json!({"label": "  "}), cookie.clone()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Listed, without the secret.
+        let res = app
+            .clone()
+            .oneshot(get_with_cookie("/api/auth/tokens", &cookie))
+            .await
+            .unwrap();
+        let listed: Vec<AgentTokenView> = read_json(res).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.view.id);
+
+        // The secret works as a bearer.
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {}", created.token))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // Revoke, and it stops working.
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/auth/tokens/{}", created.view.id))
+            .header("cookie", format!("horsie_session={cookie}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {}", created.token))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let res = app
+            .oneshot(get_with_cookie("/api/auth/tokens", &cookie))
+            .await
+            .unwrap();
+        let listed: Vec<AgentTokenView> = read_json(res).await;
+        assert!(listed.is_empty());
     }
 }
