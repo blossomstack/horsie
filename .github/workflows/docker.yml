@@ -32,7 +32,9 @@ jobs:
   # PR gate: build every image (single-arch, no push) so a broken Dockerfile is
   # caught before merge. The publish jobs below are skipped on pull_request.
   # cache-from only: PR builds get warm starts but never write cache, so they
-  # can't evict main's cache entries.
+  # can't evict main's cache entries. The warm start is the cooked dependency
+  # layer main exported, so a PR that leaves Cargo.lock alone only compiles the
+  # workspace crates.
   validate:
     name: Validate build
     if: github.event_name == 'pull_request'
@@ -146,8 +148,10 @@ jobs:
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/horsie-velos-runtime,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=docker-${{ matrix.platform }}
-          # Single cache writer per scope, after all targets are built:
-          # mode=max exports the shared build stage including cache mounts.
+          # Single cache writer per scope, after all targets are built. mode=max
+          # is required, not a nicety: the layer worth caching is the cooked
+          # dependency layer inside the `build` stage (see horsie.Dockerfile),
+          # and mode=min would export only the final image's layers.
           cache-to: type=gha,mode=max,scope=docker-${{ matrix.platform }}
 
       - name: Export digests

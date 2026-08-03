@@ -11,6 +11,14 @@
 # sequence on the same buildx builder, so the later targets' build stage
 # resolves CACHED.
 #
+# The `build` stage compiles dependencies separately from the workspace, via
+# cargo-chef: the `planner` stage boils the workspace down to recipe.json (deps
+# only, no first-party source), and `cargo chef cook` builds those deps in a
+# layer keyed on recipe.json alone. Changing Rust source -- or anything else in
+# the context -- leaves that layer intact, so only the workspace crates are
+# recompiled. Without it every build recompiled all ~520 dependencies, because
+# the `COPY . .` ahead of `cargo build` invalidated the layer on any change.
+#
 # Build from the horsie workspace ROOT (the whole workspace is the build context):
 #   docker build -f docker/horsie.Dockerfile --target server  -t ghcr.io/blossomstack/horsie:latest .
 #   docker build -f docker/horsie.Dockerfile --target runtime -t ghcr.io/blossomstack/horsie-runtime:latest .
@@ -27,26 +35,46 @@ RUN bun install --frozen-lockfile
 COPY clients/web/ ./
 RUN bun run build
 
+# ---- Stage: Rust toolchain shared by the planner and the build ---------------
+# mold is the linker: it cuts link time on the large server binary. RUSTFLAGS is
+# set here, not in `build`, so `cargo chef cook` and `cargo build` share it --
+# a mismatch changes every crate's fingerprint and throws away the cooked deps.
+FROM rust:1-bookworm AS chef
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends mold \
+ && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --version 0.1.77 --locked
+WORKDIR /src
+ENV RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+
+# ---- Stage: plan the dependency graph ----------------------------------------
+# `cargo chef prepare` distills the workspace into recipe.json: every dependency
+# and its resolved version, with the first-party source thrown away. This stage
+# takes the whole context, so it is a cache miss on every source change -- but
+# it only runs a manifest walk, and recipe.json only changes when a dependency
+# changes. That is what makes the cook layer below cacheable.
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
 # ---- Stage: build all three Rust binaries ------------------------------------
 # Single cargo invocation: of the three packages only horsie-runtime has
 # `default` features (`sandbox`), so --no-default-features only drops that --
 # exactly what the runtime image wants (the container is the isolation
-# boundary; nono is never used in-image). mold is the linker: it cuts link time
-# on the large server binary.
-FROM rust:1-bookworm AS build
-RUN apt-get update \
- && apt-get install -y --no-install-recommends mold \
- && rm -rf /var/lib/apt/lists/*
-WORKDIR /src
+# boundary; nono is never used in-image).
+FROM chef AS build
+# Cook the dependencies against a skeleton workspace, keyed ONLY on recipe.json.
+# Everything the deps need -- the compiled artifacts in target/ and the crate
+# sources in $CARGO_HOME -- lands in this image layer, so `cache-to: type=gha`
+# exports it and a PR that leaves Cargo.lock alone reuses it. Deliberately NOT
+# `--mount=type=cache`: BuildKit does not export cache-mount contents through
+# any cache backend, so mounts are always empty on a fresh CI runner.
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --release --locked --no-default-features --recipe-path recipe.json \
+    -p horsie-server -p horsie-runtime -p horsie-velos-runtime
+# Only the workspace crates are left to compile.
 COPY . .
-ENV RUSTFLAGS="-C link-arg=-fuse-ld=mold"
-# Cache the cargo registry/git and the target dir across builds. All three are
-# cache mounts (not image layers), so the binaries must be copied OUT to a
-# normal path within this same RUN -- otherwise they vanish with the mount.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p horsie-server -p horsie-runtime -p horsie-velos-runtime --no-default-features \
+RUN cargo build --release --locked -p horsie-server -p horsie-runtime -p horsie-velos-runtime --no-default-features \
     && cp target/release/horsie-server target/release/horsie-runtime target/release/horsie-velos-runtime /usr/local/bin/
 
 # ---- Target: horsie (session server + web UI) --------------------------------

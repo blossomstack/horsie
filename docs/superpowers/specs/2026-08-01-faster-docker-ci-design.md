@@ -18,6 +18,20 @@ Root causes:
    exports across per-image-per-arch scopes). LRU eviction means the
    `/src/target` cache mounts frequently restore empty, forcing full dep-tree
    recompiles.
+
+   > **Correction (2026-08-03).** Root cause 1 is wrong, and the design built
+   > on it could not have worked. The `/src/target` cache mount does not
+   > "frequently" restore empty — it restores empty **always**. BuildKit does
+   > not export `RUN --mount=type=cache` contents through *any* cache backend
+   > (gha, registry, or local); the mounts live only on the builder instance,
+   > which dies with the runner. LRU eviction was never involved. Every CI
+   > build since has recompiled the full dependency tree from scratch,
+   > confirmed in run 30822453833 where the cargo step opens with `Updating
+   > crates.io index` and takes 262.5s of a 319s job. Compounding it, the
+   > `COPY . .` ahead of `cargo build` also made the layer cache useless: any
+   > change anywhere in the context invalidated it. Fixed by the cargo-chef
+   > restructure, which moves the dependency build into a real, exportable
+   > image layer keyed on recipe.json.
 2. **`runtime.Dockerfile` has no cache mounts at all** (and no `--locked`), so
    every runtime leg is a guaranteed cold build.
 3. **Duplicated work.** The 6 matrix legs each independently compile the same
