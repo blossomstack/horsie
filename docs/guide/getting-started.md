@@ -8,7 +8,27 @@ This walks you from nothing to a working chat session.
 
 This installs a single binary, `horsie`, for your OS/arch.
 
-## 2. Connect to a server
+## 2. Log in
+
+If the server has authentication on (the default), authorize this machine once:
+
+    horsie auth login --server https://horsie.example.com
+
+    To authorize this machine, open:
+
+        https://horsie.example.com/auth/device?code=PXL8-7TL7
+
+    and confirm the code:  PXL8-7TL7
+
+Open the link, check the code matches what your terminal printed, and approve.
+Credentials land in `~/.config/horsie/credentials.json` (readable only by you)
+and refresh themselves as they age.
+
+`horsie auth status` lists the servers you are logged in to, and
+`horsie auth logout --server <url>` forgets one. For scripts and CI, set
+`HORSIE_TOKEN` instead of logging in.
+
+## 3. Connect to a server
 
 Someone (maybe you) runs the horsie server somewhere — see
 [Self-hosting the server](self-hosting.md) if that's you. Once you have its
@@ -30,7 +50,7 @@ Each session gets its own runtime process, so stopping one session leaves the
 others alone — but they all work in the directories you passed, so concurrent
 sessions can edit the same files.
 
-## 3. Open the web UI, create a session
+## 4. Open the web UI, create a session
 
 Browse to the server's URL. On first visit you'll need a provider/model in
 **Settings** (your admin may have already done this). Then **New** → pick a

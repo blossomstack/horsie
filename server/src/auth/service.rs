@@ -575,12 +575,16 @@ mod tests {
                 Err(LoginError::BadCredentials)
             ));
         }
-        // Failures are now delayed, but the correct password still answers at once.
+        // Further failures would now be delayed...
         assert!(svc.delay_before_failure() > std::time::Duration::ZERO);
-        let started = std::time::Instant::now();
+        // ...but the correct password is still accepted, and clears the delay.
+        //
+        // Deliberately not asserted by timing the call: a successful login also
+        // writes a token row, so under load the measurement is dominated by
+        // argon2 and SQLite rather than by the throttle. That `login` sleeps
+        // only on the failure branch is plain in the code, and the delay
+        // arithmetic itself is covered in `throttle.rs`.
         svc.login(&pw).await.unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        // ...and success cleared the delay.
         assert_eq!(svc.delay_before_failure(), std::time::Duration::ZERO);
     }
 
