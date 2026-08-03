@@ -193,7 +193,13 @@ pub enum WorkflowNotification {
 }
 
 /// Persisted workflow state — purely a function of the event log.
+///
+/// `#[serde(default)]` on the container, not the fields: state is snapshotted, so
+/// it is a durability contract, and a container default fills anything a future
+/// version adds without each field having to remember. Add optional fields;
+/// never rename or repurpose one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WorkflowState {
     pub status: WorkflowStatus,
     pub current_agent: Option<String>,

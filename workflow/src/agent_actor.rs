@@ -262,7 +262,14 @@ pub enum AgentDomainEvent {
 /// The conversation history reconstructed by folding [`AgentDomainEvent`]s, plus
 /// any timers the agent has armed and whether it is currently parked.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AgentState {
+    /// Every field here carries `#[serde(default)]`, including this one: state is
+    /// snapshotted, so it is a durability contract. A field that fails to
+    /// deserialize takes down `recover()` for every existing session — the way
+    /// renamed event variants did on 2026-08-02. Add optional fields; never
+    /// rename or repurpose one.
+    #[serde(default)]
     pub messages: Vec<Message>,
     /// Active timers — durable so they re-arm on recovery and back `list`/`cancel`.
     #[serde(default)]
@@ -482,6 +489,14 @@ enum RunOutcome {
     AlreadyReported,
 }
 
+/// Events an agent may journal between snapshots before the next turn boundary
+/// takes one.
+///
+/// An agent's state *is* its transcript, so a snapshot costs O(transcript) to
+/// write — snapshotting every turn would be quadratic over a session. This
+/// trades a bounded replay on recovery for a bounded write amplification.
+const SNAPSHOT_EVERY_EVENTS: u64 = 200;
+
 /// Observer of an agent's durable history, notified once per event that is both
 /// journaled and folded into state.
 ///
@@ -506,6 +521,11 @@ pub struct AgentActor {
     /// Where durable history is published, when anyone is listening. `None` for
     /// workflow agents, which have no live stream.
     observer: Option<Arc<dyn AgentObserver>>,
+    /// Events journaled since a snapshot was last *requested*. Counting requests
+    /// rather than confirmed writes means a failed snapshot simply waits another
+    /// interval, which is the right instinct for an optimization: retrying hard
+    /// against a failing journal helps nobody.
+    events_since_snapshot: u64,
     /// Id of the next run to start. Monotonic for this actor's loaded lifetime,
     /// which is all the fence needs — a report can only be stale within it.
     next_run_id: u64,
@@ -525,6 +545,7 @@ impl AgentActor {
             params,
             running: None,
             observer: None,
+            events_since_snapshot: 0,
             next_run_id: 0,
             pending_wake: false,
             cancel_acks: Vec::new(),
@@ -542,6 +563,19 @@ impl AgentActor {
             observer: Some(observer),
             ..Self::new(ctx, params)
         }
+    }
+
+    /// Snapshot at a turn boundary, but only once enough events have accrued.
+    ///
+    /// Without this an agent that only ever converses — no ask, no park, no
+    /// cancel — would never snapshot, and every recovery would stay a full
+    /// replay of the whole transcript.
+    fn snapshot_if_due(&mut self) -> CommandEffect<AgentDomainEvent> {
+        if self.events_since_snapshot < SNAPSHOT_EVERY_EVENTS {
+            return CommandEffect::none();
+        }
+        self.events_since_snapshot = 0;
+        CommandEffect::snapshot()
     }
 
     /// The journal identity of an agent session: kind `"agent"`, id = the session
@@ -747,7 +781,7 @@ impl AgentActor {
                 // Resident: the agent goes idle, it does not die. Its whole
                 // transcript stays in memory for the next turn and for history
                 // reads, and nothing has to replay a journal to answer either.
-                CommandEffect::none()
+                self.snapshot_if_due()
             }
             RunOutcome::Concluded { calls } => {
                 match self.interpret(calls) {
@@ -761,7 +795,7 @@ impl AgentActor {
                         parent
                             .deliver(AgentOutcome::Concluded { session_id, output })
                             .await;
-                        CommandEffect::none()
+                        self.snapshot_if_due()
                     }
                     Conclusion::Ask(asks) => {
                         parent
@@ -777,6 +811,7 @@ impl AgentActor {
                         // Snapshot to compact the incrementally-persisted log.
                         // Unconditional now that no cursor is a journal position:
                         // history and streams read state, so compaction is invisible.
+                        self.events_since_snapshot = 0;
                         CommandEffect::snapshot()
                     }
                     Conclusion::Park => self.park_or_resume(state, ctx, session_id, parent).await,
@@ -796,6 +831,7 @@ impl AgentActor {
                         .collect();
                 events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
                 // Snapshot to compact the incrementally-persisted log on cancel.
+                self.events_since_snapshot = 0;
                 CommandEffect::persist(events).and_snapshot()
             }
             RunOutcome::Failed { error, recoverable } => {
@@ -896,6 +932,7 @@ impl AgentActor {
             return CommandEffect::persist(vec![input_event]);
         }
         parent.deliver(AgentOutcome::Parked { session_id }).await;
+        self.events_since_snapshot = 0;
         CommandEffect::persist(vec![AgentDomainEvent::Parked { at_ms: now_ms() }]).and_snapshot()
     }
 
@@ -1244,6 +1281,9 @@ impl EventSourcedActor for AgentActor {
     /// no longer reads the journal: by the time this runs the events are written
     /// and folded, so `state` already contains the messages they appended.
     async fn on_events_persisted(&mut self, events: &[AgentDomainEvent], state: &AgentState) {
+        self.events_since_snapshot = self
+            .events_since_snapshot
+            .saturating_add(events.len() as u64);
         let Some(observer) = &self.observer else {
             return;
         };
@@ -1853,6 +1893,28 @@ async fn run_with_retries(
     clippy::wildcard_enum_match_arm
 )]
 mod tests {
+    // Shared no-op collaborators for tests that only exercise the actor's own
+    // bookkeeping and never start a run.
+    struct StubContext;
+    #[async_trait]
+    impl crate::ContextProvider for StubContext {
+        async fn provide(&self) -> Result<crate::Contexts, crate::ContextError> {
+            Err(crate::ContextError::retryable("no context"))
+        }
+    }
+    struct StubSink;
+    #[async_trait]
+    impl EventSink for StubSink {
+        async fn emit(&self, _: horsie_agentcore::AgentEvent) -> Result<(), EventSinkError> {
+            Ok(())
+        }
+    }
+    struct StubParent;
+    #[async_trait]
+    impl AgentOutcomeSink for StubParent {
+        async fn deliver(&self, _: AgentOutcome) {}
+    }
+
     use super::*;
     use horsie_models::agent::{TextPart, ToolCallPart, ToolResultPart};
 
@@ -1881,6 +1943,46 @@ mod tests {
     #[test]
     fn from_def_defaults_to_non_interactive() {
         assert!(!AgentParams::from_def(&def_fixture()).interactive);
+    }
+
+    /// Without a turn-boundary snapshot an agent that only converses — no ask,
+    /// no park, no cancel — never snapshots, and every recovery stays a full
+    /// replay of the whole transcript.
+    #[test]
+    fn a_turn_boundary_snapshots_only_once_enough_events_have_accrued() {
+        let session_id = uuid::Uuid::new_v4();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(StubContext),
+            event_sink: Arc::new(StubSink),
+            parent: Arc::new(StubParent),
+            session_id,
+        };
+        let mut agent = AgentActor::new(ctx, AgentParams::from_def(&def_fixture()));
+
+        assert!(
+            !agent.snapshot_if_due().snapshots(),
+            "a fresh agent has nothing worth snapshotting"
+        );
+
+        agent.events_since_snapshot = SNAPSHOT_EVERY_EVENTS - 1;
+        assert!(
+            !agent.snapshot_if_due().snapshots(),
+            "one event short of the interval must not snapshot"
+        );
+
+        agent.events_since_snapshot = SNAPSHOT_EVERY_EVENTS;
+        assert!(
+            agent.snapshot_if_due().snapshots(),
+            "reaching the interval snapshots at the turn boundary"
+        );
+        assert_eq!(
+            agent.events_since_snapshot, 0,
+            "the counter resets on request, so a failed write waits one interval"
+        );
+        assert!(
+            !agent.snapshot_if_due().snapshots(),
+            "and the very next turn does not snapshot again"
+        );
     }
 
     /// The observer replaces journal replay: it must see every durable event,

@@ -305,7 +305,12 @@ pub struct InboxMessage {
 }
 
 /// Persisted session state — purely a function of the event log.
+///
+/// `#[serde(default)]` on the container: this is snapshotted, so it is a
+/// durability contract, and a container default fills anything a future version
+/// adds. Add optional fields; never rename or repurpose one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SessionState {
     pub status: SessionStatus,
     /// Every ask awaiting an answer (status `AwaitingInput`), oldest first. A

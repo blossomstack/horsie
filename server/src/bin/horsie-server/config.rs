@@ -62,6 +62,19 @@ fn auth_enabled_from(cfg: &BootConfig, env: Option<String>) -> bool {
     }
 }
 
+/// Which durable backend the actor journal uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JournalBackend {
+    /// SQLite, sharing the settings database. Real snapshots and compaction.
+    #[default]
+    Sqlite,
+    /// Append-only JSONL files under the data dir. No snapshotting, so every
+    /// recovery is a full replay; kept for the CLI/daemon path, where runs are
+    /// short enough for that to be fine.
+    File,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {
     /// Ephemeral runtime state. Defaults to `$XDG_STATE_HOME/horsie`, else
@@ -72,6 +85,10 @@ pub struct StorageConfig {
     /// `$HOME/.local/share/horsie`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    /// Journal backend. A future `postgres` arm lands here rather than in a
+    /// rewrite, which is why this is configuration and not a build choice.
+    #[serde(default)]
+    pub journal: JournalBackend,
 }
 
 impl Default for StorageConfig {
@@ -79,6 +96,7 @@ impl Default for StorageConfig {
         Self {
             state_dir: default_state_dir(),
             data_dir: default_data_dir(),
+            journal: JournalBackend::default(),
         }
     }
 }

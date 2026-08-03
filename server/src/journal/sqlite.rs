@@ -445,6 +445,103 @@ mod tests {
         assert_eq!(drain(&j, "bin", 0).await, vec![(1, payload)]);
     }
 
+    /// The payoff: after a snapshot compacts the log, a fresh actor recovers the
+    /// same state while replaying only what came after it. This is what turns an
+    /// O(transcript) recovery into an O(events-since-snapshot) one.
+    #[tokio::test]
+    async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
+        use futures_util::StreamExt;
+        use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, spawn_root};
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, Default, Clone)]
+        #[serde(default)]
+        struct SumState {
+            total: i64,
+        }
+        #[derive(Serialize, Deserialize, Clone)]
+        struct Added(i64);
+        enum Cmd {
+            Add(i64),
+            Snapshot,
+            Get(tokio::sync::oneshot::Sender<i64>),
+        }
+        struct Sum;
+
+        #[async_trait]
+        impl EventSourcedActor for Sum {
+            type Command = Cmd;
+            type Event = Added;
+            type State = SumState;
+            fn persistence_id(&self) -> PersistenceId {
+                PersistenceId::new("sum", "s1")
+            }
+            fn initial_state() -> SumState {
+                SumState::default()
+            }
+            fn apply_event(mut s: SumState, e: Added) -> SumState {
+                s.total += e.0;
+                s
+            }
+            async fn handle_command(
+                &mut self,
+                state: &SumState,
+                cmd: Cmd,
+                _ctx: &mut ActorContext<Self>,
+            ) -> CommandEffect<Added> {
+                match cmd {
+                    Cmd::Add(n) => CommandEffect::persist(vec![Added(n)]),
+                    Cmd::Snapshot => CommandEffect::snapshot(),
+                    Cmd::Get(tx) => {
+                        let _ = tx.send(state.total);
+                        CommandEffect::none()
+                    }
+                }
+            }
+        }
+
+        let d = tempfile::tempdir().unwrap();
+        let j = std::sync::Arc::new(journal(&d).await);
+        let pid = PersistenceId::new("sum", "s1");
+
+        // Four events, a snapshot (which compacts), then one more.
+        let a = spawn_root(Sum, j.clone() as std::sync::Arc<dyn Journal>);
+        for n in [1, 2, 3, 4] {
+            a.tell(Cmd::Add(n)).await.unwrap();
+        }
+        a.tell(Cmd::Snapshot).await.unwrap();
+        a.tell(Cmd::Add(5)).await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        a.tell(Cmd::Get(tx)).await.unwrap();
+        assert_eq!(rx.await.unwrap(), 15);
+
+        // The snapshot was taken at event 4 and compacted everything up to it.
+        assert_eq!(
+            j.latest_snapshot(&pid).await.unwrap().map(|(_, s)| s),
+            Some(4)
+        );
+        let mut remaining = j.replay(&pid, 0).await;
+        let mut left = Vec::new();
+        while let Some(item) = remaining.next().await {
+            left.push(item.unwrap().0);
+        }
+        assert_eq!(
+            left,
+            vec![5],
+            "only the post-snapshot event survives, keeping its own number"
+        );
+
+        // A second incarnation recovers the same total from snapshot + tail.
+        let b = spawn_root(Sum, j.clone() as std::sync::Arc<dyn Journal>);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        b.tell(Cmd::Get(tx)).await.unwrap();
+        assert_eq!(
+            rx.await.unwrap(),
+            15,
+            "snapshot (10) plus the one replayed event (5)"
+        );
+    }
+
     #[tokio::test]
     async fn clear_removes_events_and_snapshot_together() {
         let d = tempfile::tempdir().unwrap();

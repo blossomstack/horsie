@@ -19,11 +19,12 @@
 mod config;
 
 use clap::Parser;
-use config::{BootConfig, BootError};
+use config::{BootConfig, BootError, JournalBackend};
 use horsie_actor::{FileJournal, Journal, spawn_root};
 use horsie_models::settings::ServerInfo;
 use horsie_server::config::{DbConfigStore, StoreDeps, model_cards};
 use horsie_server::http::{AppState, app};
+use horsie_server::journal::SqliteJournal;
 use horsie_server::plugins::{ArtifactStore, PluginService, PluginStore};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::SessionSupervisor;
@@ -73,8 +74,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     std::fs::create_dir_all(&state_dir).map_err(|e| BootError::Io(e.to_string()))?;
     std::fs::create_dir_all(&data_dir).map_err(|e| BootError::Io(e.to_string()))?;
 
-    let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(data_dir.clone()));
-
     let db_url = resolve_db_url(&cfg, &data_dir);
     let info = ServerInfo {
         config_path: config_path
@@ -90,6 +89,13 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     let opened = DbConfigStore::open(&db_url, StoreDeps { info })
         .await
         .map_err(BootError::Config)?;
+
+    // Built after the store, because the SQLite backend shares its pool — one
+    // database, one migrator, one set of connections.
+    let journal: Arc<dyn Journal> = match cfg.storage.journal {
+        JournalBackend::Sqlite => Arc::new(SqliteJournal::new(opened.pool.clone())),
+        JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
+    };
 
     // Seed the model-card catalog: bundled defaults plus an optional operator
     // file. Seed-file parse/read errors are fatal (operator input should fail
