@@ -232,12 +232,22 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
-          # Immutable tags only: short SHA on every build; version + v-prefixed
-          # version on release tags. No moving tags.
+          # Short SHA on every build; version + v-prefixed version on release
+          # tags. Those are immutable, and are what ops pins its deployments to.
+          #
+          # `latest` moves with main, and exists for the self-host surfaces that
+          # cannot carry a pin a user has to bump by hand: the Deploy to Render
+          # blueprint, fly.toml, and docker/docker-compose.yml. Without it those
+          # three reference a tag CI never publishes, which is how they spent two
+          # weeks serving a hand-pushed image predating the PostgreSQL backend.
+          # A raw tag defaults to priority 200 and would outrank the SHA tag's
+          # 100 (tags sort highest-first), taking over the action's `version`
+          # output that the inspect step below reads. Hence the explicit 50.
           tags: |
             type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern=v{{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,priority=50,enable={{is_default_branch}}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests

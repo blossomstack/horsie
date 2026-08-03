@@ -50,6 +50,14 @@ To use an external Postgres instead of a Fly-managed cluster, skip the two
 fly secrets set HORSIE_DATABASE_URL=postgres://user:password@host/horsie
 ```
 
+## Image tags
+
+All three paths above run `ghcr.io/blossomstack/horsie:latest`, which tracks
+`main`. Every build also publishes an immutable `sha-<short>` tag, and releases
+publish `<version>` and `v<version>` — pin to one of those instead of `latest`
+if you want upgrades to be a deliberate step rather than a `docker compose
+pull` or a Render redeploy.
+
 ## Manual / advanced setup
 
 Building the server image or binary yourself instead of using the published
