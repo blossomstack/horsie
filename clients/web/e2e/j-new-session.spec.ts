@@ -18,7 +18,7 @@ test("J1: the New button opens an editable draft at /", async ({ page, appBase }
   await expect(page.getByTestId("config-repos")).toHaveCount(0);
 });
 
-test("J2: an existing session shows a locked, read-only config bar", async ({
+test("J2: a created session keeps the same row, now read-only", async ({
   page,
   appBase,
   mock,
@@ -27,11 +27,20 @@ test("J2: an existing session shows a locked, read-only config bar", async ({
   await createSession(page, appBase);
   await sendMessage(page, "configure me");
 
-  // Settled config sits behind the header info key rather than on the strip.
-  await page.getByTestId("session-info-button").click();
+  // Same place, same keys — creating the session freezes the values without
+  // moving the control that shows them.
   const bar = page.getByTestId("session-config-bar");
+  await expect(bar).toBeVisible();
   await expect(bar).toHaveAttribute("data-mode", "locked");
-  await expect(page.getByTestId("config-runtime")).toContainText("e2e");
-  // Locked model chip is not a menu button — clicking opens nothing.
-  await expect(page.getByTestId("config-model")).toContainText("mock");
+
+  // Icon-only, so the value is in the accessible name; pressing a key opens
+  // the readout rather than a picker.
+  await expect(page.getByTestId("config-runtime")).toHaveAttribute(
+    "aria-label",
+    /Runtime — e2e/,
+  );
+  await page.getByTestId("config-model").click();
+  await expect(page.getByTestId("session-config-bar")).toContainText("mock");
+  // Nothing here edits: the draft's option rows do not exist on a locked bar.
+  await expect(page.getByTestId("model-option")).toHaveCount(0);
 });

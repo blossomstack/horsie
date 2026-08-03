@@ -1,60 +1,55 @@
 import type { ReactNode } from "react";
 import type { SessionDetail } from "../api/types";
 import type { ConfigDraft } from "../hooks/useSessionDraft";
-import { basename } from "../lib/format";
-import { useConfigPickers } from "./configPickers";
+import { useConfigPickers, useLockedChannels } from "./configPickers";
 import { PopoverMenu } from "./PopoverMenu";
 
 type Props =
   | { mode: "draft"; draft: ConfigDraft }
   | { mode: "locked"; detail: SessionDetail };
 
-/** A settled channel on the header strip: engraved legend over its value.
- * Locked config is a description of the session, not a control, so it reads
- * as an instrument label rather than a button you might be able to press. */
-function Readout({
-  legend,
+/** The row of channel keys, in the one place it lives on both surfaces. */
+function KeyRow({
   children,
-  testId,
+  mode,
 }: {
-  legend: string;
   children: ReactNode;
-  testId?: string;
+  mode: "draft" | "locked";
 }) {
-  return (
-    <span className="flex min-w-0 flex-col gap-0.5" data-testid={testId}>
-      <span className="legend leading-none">{legend}</span>
-      <span className="font-mono text-[11px] leading-snug break-words text-legend">
-        {children}
-      </span>
-    </span>
-  );
-}
-
-export function SessionConfigBar(props: Props) {
-  if (props.mode === "locked") {
-    // A stacked list, not a strip: locked config now lives inside a narrow
-    // info popover rather than spanning the header.
-    return (
-      <div
-        className="space-y-2.5"
-        data-testid="session-config-bar"
-        data-mode="locked"
-      >
-        <LockedControls detail={props.detail} />
-      </div>
-    );
-  }
   return (
     <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
       <div
         className="flex items-center gap-0.5 pb-1.5"
         data-testid="session-config-bar"
-        data-mode="draft"
+        data-mode={mode}
       >
-        <DraftControls draft={props.draft} />
+        {children}
       </div>
     </div>
+  );
+}
+
+/**
+ * The session's channels, above the composer.
+ *
+ * The same row before and after the session exists: same keys, same order,
+ * same place. Creating a session freezes the values but does not move the
+ * control that shows them — before, the launched-with facts jumped from above
+ * the input to a popover in the header, so the one row you had just used to
+ * configure the session was somewhere else the moment you sent a message.
+ */
+export function SessionConfigBar(props: Props) {
+  if (props.mode === "locked") {
+    return (
+      <KeyRow mode="locked">
+        <LockedControls detail={props.detail} />
+      </KeyRow>
+    );
+  }
+  return (
+    <KeyRow mode="draft">
+      <DraftControls draft={props.draft} />
+    </KeyRow>
   );
 }
 
@@ -128,40 +123,27 @@ export function ConfigFields({ draft }: { draft: ConfigDraft }) {
   );
 }
 
+/** The frozen channels, as keys that open a readout instead of a picker. */
 function LockedControls({ detail }: { detail: SessionDetail }) {
+  const channels = useLockedChannels(detail);
   return (
     <>
-      <Readout legend="Model" testId="config-model">
-        {detail.model}
-      </Readout>
-      <Readout legend="Runtime" testId="config-runtime">
-        {detail.vendor}
-      </Readout>
-      {detail.repos.length > 0 && (
-        <Readout legend="Repos" testId="config-repos">
-          {detail.repos.map((r) => basename(r)).join(", ")}
-        </Readout>
-      )}
-      {detail.plugins.length > 0 && (
-        <Readout legend="Skills" testId="config-skills">
-          {detail.plugins.join(", ")}
-        </Readout>
-      )}
-      {detail.mcpServers.length > 0 && (
-        <Readout legend="MCP" testId="config-mcp">
-          {detail.mcpServers.join(", ")}
-        </Readout>
-      )}
-      {detail.memorySpaces.length > 0 && (
-        <Readout legend="Memory" testId="config-memory">
-          {detail.memorySpaces.join(", ")}
-        </Readout>
-      )}
-      {detail.thinkingEffort && (
-        <Readout legend="Thinking" testId="config-thinking">
-          {detail.thinkingEffort}
-        </Readout>
-      )}
+      {channels.map((c) => (
+        <PopoverMenu
+          key={c.key}
+          className={c.key === "model" ? "ml-auto" : undefined}
+          variant="icon"
+          placement="up"
+          testId={c.testId}
+          legend={c.legend}
+          icon={c.icon}
+          label={c.label}
+          marked={c.marked}
+          width={c.width}
+        >
+          {c.body}
+        </PopoverMenu>
+      ))}
     </>
   );
 }

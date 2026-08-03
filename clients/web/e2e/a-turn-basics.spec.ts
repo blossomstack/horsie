@@ -27,14 +27,15 @@ test("A1: draft creates a session on the local runtime vendor via first message"
   await expect(
     page.locator('[data-testid="session-row"]', { hasText: "first message" }),
   ).toBeVisible();
-  // Locked config now lives behind the header's info key, so the header keeps
-  // to one row of live state.
-  await page.getByTestId("session-info-button").click();
+  // The row stays above the composer and flips to read-only.
   await expect(page.getByTestId("session-config-bar")).toHaveAttribute(
     "data-mode",
     "locked",
   );
-  await expect(page.getByTestId("config-runtime")).toContainText("e2e");
+  await expect(page.getByTestId("config-runtime")).toHaveAttribute(
+    "aria-label",
+    /Runtime — e2e/,
+  );
   expect(id).toMatch(/[0-9a-f-]{8,}/);
 });
 
