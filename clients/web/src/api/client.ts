@@ -2,6 +2,9 @@ import type {
   AgentPresetInput,
   AgentView,
   ApiError,
+  AgentTokenCreateInput,
+  AgentTokenCreated,
+  AgentTokenView,
   AuthStatus,
   DeviceApprovalRequest,
   CreateSessionRequest,
@@ -126,6 +129,17 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ userCode } satisfies DeviceApprovalRequest),
       }),
+
+    listTokens: (): Promise<AgentTokenView[]> => request("/auth/tokens"),
+
+    createToken: (label: string): Promise<AgentTokenCreated> =>
+      request("/auth/tokens", {
+        method: "POST",
+        body: JSON.stringify({ label } satisfies AgentTokenCreateInput),
+      }),
+
+    deleteToken: (id: string): Promise<void> =>
+      request(`/auth/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
   },
 
   sessions: {

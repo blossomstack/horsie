@@ -180,6 +180,14 @@ pub fn app(state: AppState) -> Router {
         .route("/api/auth/device/approve", post(auth::device_approve))
         .route("/api/auth/device/deny", post(auth::device_deny))
         .route("/api/auth/refresh", post(auth::refresh))
+        .route(
+            "/api/auth/tokens",
+            get(auth::list_agent_tokens).post(auth::create_agent_token),
+        )
+        .route(
+            "/api/auth/tokens/:id",
+            axum::routing::delete(auth::delete_agent_token),
+        )
         // Guards every route above. The SPA shell and its assets, added below,
         // are deliberately outside it: the app has to load in order to render a
         // login page, and the bundle holds no secrets.
@@ -1751,5 +1759,114 @@ mod tests {
             .await
             .expect("agent connects");
         assert!(registered_within(&agents, "my-laptop").await);
+    }
+
+    #[tokio::test]
+    async fn machine_tokens_are_created_listed_used_and_revoked() {
+        use horsie_models::auth::{AgentTokenCreated, AgentTokenView};
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        let app = app(state);
+
+        // Minting needs a credential — otherwise anyone could mint one.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/tokens",
+                &serde_json::json!({"label": "laptop"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/auth/login",
+                &serde_json::json!({"password": pw}),
+            ))
+            .await
+            .unwrap();
+        let cookie = session_cookie(&res);
+
+        let create = |body: serde_json::Value, cookie: String| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/tokens")
+                .header("content-type", "application/json")
+                .header("cookie", format!("horsie_session={cookie}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        };
+
+        let res = app
+            .clone()
+            .oneshot(create(
+                serde_json::json!({"label": "laptop"}),
+                cookie.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let created: AgentTokenCreated = read_json(res).await;
+        assert!(created.token.starts_with("hsk_agt_"));
+        assert_eq!(created.view.label, "laptop");
+
+        // An unlabelled token is refused.
+        let res = app
+            .clone()
+            .oneshot(create(serde_json::json!({"label": "  "}), cookie.clone()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Listed, without the secret.
+        let res = app
+            .clone()
+            .oneshot(get_with_cookie("/api/auth/tokens", &cookie))
+            .await
+            .unwrap();
+        let listed: Vec<AgentTokenView> = read_json(res).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.view.id);
+
+        // The secret works as a bearer.
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {}", created.token))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // Revoke, and it stops working.
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/auth/tokens/{}", created.view.id))
+            .header("cookie", format!("horsie_session={cookie}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {}", created.token))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let res = app
+            .oneshot(get_with_cookie("/api/auth/tokens", &cookie))
+            .await
+            .unwrap();
+        let listed: Vec<AgentTokenView> = read_json(res).await;
+        assert!(listed.is_empty());
     }
 }

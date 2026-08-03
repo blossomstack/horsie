@@ -7,3 +7,6 @@ export * from './deviceTokenRequest';
 export * from './tokenPair';
 export * from './deviceApprovalRequest';
 export * from './refreshRequest';
+export * from './agentTokenView';
+export * from './agentTokenCreateInput';
+export * from './agentTokenCreated';
