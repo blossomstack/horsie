@@ -7,18 +7,24 @@
     <meta name="color-scheme" content="dark light" />
     <title>horsie</title>
     <script>
-      // Resolve the theme before first paint. `useTheme` sets the same
-      // attribute, but it runs after hydration, so a hardcoded default flashed
-      // the wrong instrument at every user whose OS disagreed with it.
+      // Resolve theme AND skin before first paint. `useTheme` sets the same
+      // two attributes, but it runs after hydration, so a hardcoded default
+      // flashed the wrong instrument at every user whose OS disagreed with it
+      // — and, once skins existed, flashed Console at everyone who had chosen
+      // one of the others.
       (function () {
         try {
-          var s = localStorage.getItem("horsie-theme");
+          var t = localStorage.getItem("horsie-theme");
           document.documentElement.dataset.theme =
-            s === "light" || s === "dark"
-              ? s
+            t === "light" || t === "dark"
+              ? t
               : matchMedia("(prefers-color-scheme: light)").matches
                 ? "light"
                 : "dark";
+          var k = localStorage.getItem("horsie-skin");
+          if (k === "paper" || k === "soft" || k === "slate") {
+            document.documentElement.dataset.skin = k;
+          }
         } catch (e) {
           /* private mode: fall back to the attribute already on <html> */
         }
@@ -43,6 +49,27 @@
       grounded candidate 3 and taken on both axes; seed key e4424f7b.
       FINISH: unreviewed and undocumented is unfinished; this build ends with
       the finish review, the verdict, and DESIGN.md.
+    -->
+    <!--
+      SKINS: three alternate worlds over the same layouts, selected by the user
+      from named options — a brief-pinned direction, so no concept roll was
+      dealt (new-work.md 3 requires the roll; 49 gives a user pin precedence).
+      A skin replaces material, never structure: same components, same testids,
+      same positions.
+      PAPER: editorial calm. Cool near-white ground with a trace of blue —
+      explicitly NOT the cream-plus-serif-plus-terracotta rendition every model
+      ships for "paper". Libre Franklin doing all the work, sentence-case
+      legends, no panel borders, ink blue commits.
+      SOFT: modern product surface. Elevation instead of borders, 6-14px radii,
+      warm neutral greys rather than the blue-greys of the register's default,
+      Manrope, muted violet commits.
+      SLATE: reductive monochrome. No borders, no shadows; surfaces separate by
+      a step in value alone. Reuses Archivo, keeps safety orange, because in a
+      world with one colour that colour should still mean "this commits".
+      INVARIANT: material roles hold across modes, status is a lamp AND a word,
+      code keeps its own palette, and AA is measured across all 8 palettes by
+      scripts/contrast.mjs — which parses these blocks rather than restating
+      them, so the gate cannot drift from what ships.
     -->
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

@@ -3,12 +3,22 @@
 // any other tool call from the mock LLM's perspective: queue a `tool_call`
 // response, then a follow-up `text` response to end the turn.
 
-import { test, expect } from "./fixtures";
+import { test, expect, type Page } from "./fixtures";
 import { createSession, sendMessage, expectStatus } from "./helpers";
 
 test.beforeEach(async ({ mock }) => {
   await mock.reset();
 });
+
+/** The plan panel is closed by default and its visibility is a stored user
+ * choice, so a test that wants to read the list opens it first. */
+async function openPlan(page: Page) {
+  const panel = page.getByTestId("task-list-panel");
+  if (await panel.isVisible().catch(() => false)) return panel;
+  await page.getByTestId("task-list-toggle").click();
+  await expect(panel).toBeVisible();
+  return panel;
+}
 
 test("H1: no widget until the agent has created a task list", async ({
   page,
@@ -21,7 +31,13 @@ test("H1: no widget until the agent has created a task list", async ({
   await sendMessage(page, "hello");
 
   await expect(page.getByTestId("assistant-text")).toContainText("Hi there.");
+  // The panel is reachable on every session now, so "no plan" is an empty
+  // state rather than a missing component — and the header key carries no
+  // progress badge until there is progress to report.
   await expect(page.getByTestId("task-list-panel")).toHaveCount(0);
+  await expect(page.getByTestId("task-list-badge")).toHaveCount(0);
+  await openPlan(page);
+  await expect(page.getByTestId("task-list-empty")).toBeVisible();
 });
 
 test("H2: creating a task list shows it in the side widget", async ({
@@ -38,8 +54,8 @@ test("H2: creating a task list shows it in the side widget", async ({
 
   await sendMessage(page, "make a plan");
 
-  const panel = page.getByTestId("task-list-panel");
-  await expect(panel).toBeVisible();
+  await expect(page.getByTestId("task-list-badge")).toHaveText("0/3");
+  const panel = await openPlan(page);
   await expect(panel.getByTestId("task-list-progress")).toHaveText("0/3 done");
   await expect(panel.getByTestId("task-list-item")).toHaveCount(3);
   await expect(panel.getByTestId("task-list-item").nth(1)).toContainText(
@@ -60,7 +76,7 @@ test("H3: marking a task completed updates the widget", async ({
   await mock.queueText("Plan created.");
   await createSession(page, appBase);
   await sendMessage(page, "make a plan");
-  await expect(page.getByTestId("task-list-panel")).toBeVisible();
+  await openPlan(page);
 
   await mock.queueToolCall("task_list", {
     action: "update_status",
@@ -76,7 +92,7 @@ test("H3: marking a task completed updates the widget", async ({
   await expect(first).toHaveAttribute("data-status", "Completed");
 });
 
-test("H4: the widget collapses to a summary badge and re-expands", async ({
+test("H4: the plan hides and re-opens from the session header", async ({
   page,
   appBase,
   mock,
@@ -89,15 +105,19 @@ test("H4: the widget collapses to a summary badge and re-expands", async ({
   await createSession(page, appBase);
   await sendMessage(page, "make a plan");
 
-  const panel = page.getByTestId("task-list-panel");
+  const panel = await openPlan(page);
   await expect(panel).toBeVisible();
 
+  // Closing from inside the panel and re-opening from the header are the same
+  // stored preference seen from two places.
   await panel.getByTestId("task-list-collapse").click();
-  await expect(panel).toHaveCount(0);
-  const expandButton = page.getByTestId("task-list-expand");
-  await expect(expandButton).toBeVisible();
-  await expect(expandButton).toContainText("0/1");
+  await expect(page.getByTestId("task-list-panel")).toHaveCount(0);
+  await expect(page.getByTestId("task-list-badge")).toHaveText("0/1");
 
-  await expandButton.click();
+  await page.getByTestId("task-list-toggle").click();
+  await expect(page.getByTestId("task-list-panel")).toBeVisible();
+
+  // And it survives a reload, which is the point of storing it.
+  await page.reload();
   await expect(page.getByTestId("task-list-panel")).toBeVisible();
 });

@@ -1,5 +1,5 @@
 // Settings/admin navigation: the nav column, deep links, legacy redirects, and
-// the unsaved-changes guard on the batched-save pages.
+// the unsaved-changes guard on the one page that still batches its save.
 
 import { test, expect } from "./fixtures";
 
@@ -18,6 +18,8 @@ test.describe("settings navigation", () => {
       "Skills",
       "Memory",
       "Integrations",
+      "Appearance",
+      "Account",
     ]) {
       await expect(nav.getByRole("link", { name: label })).toBeVisible();
     }
@@ -49,22 +51,25 @@ test.describe("settings navigation", () => {
     await expect(page).toHaveURL(/\/admin\/model-cards$/);
   });
 
-  test("leaving a page with unsaved edits prompts first", async ({
+  // The guard now protects exactly one page. Settings save per item, so there
+  // is nothing there to lose on navigation; the GitHub App credentials form is
+  // the last batched form in the product, and the worst one to lose input on.
+  test("leaving the credentials form with unsaved edits prompts first", async ({
     page,
     appBase,
   }) => {
-    await page.goto(`${appBase}/settings/models`);
-    await page.getByRole("button", { name: "Add model" }).click();
+    await page.goto(`${appBase}/admin/github-app`);
+    await page.getByLabel("Client ID").fill("Iv1.abc123");
     await expect(page.getByTestId("settings-save")).toBeEnabled();
 
     // Dismiss the prompt: stay put, edit intact.
     page.once("dialog", (d) => d.dismiss());
-    await page.getByTestId("settings-nav-runtimes").click();
-    await expect(page).toHaveURL(/\/settings\/models$/);
+    await page.getByTestId("settings-nav-model-cards").click();
+    await expect(page).toHaveURL(/\/admin\/github-app$/);
 
     // Accept it: navigate away and drop the edit.
     page.once("dialog", (d) => d.accept());
-    await page.getByTestId("settings-nav-runtimes").click();
-    await expect(page).toHaveURL(/\/settings\/runtimes$/);
+    await page.getByTestId("settings-nav-model-cards").click();
+    await expect(page).toHaveURL(/\/admin\/model-cards$/);
   });
 });

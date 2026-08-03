@@ -1,27 +1,185 @@
-import { useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
-export type Theme = "light" | "dark";
+/** What the user chose. `system` follows the OS and keeps following it. */
+export type ThemeChoice = "light" | "dark" | "system";
+/** What is actually painted — `system` is resolved away before this. */
+export type Mode = "light" | "dark";
+export type Skin = "console" | "paper" | "soft" | "slate";
 
-const KEY = "horsie-theme";
+export const SKINS: { id: Skin; name: string; blurb: string }[] = [
+  {
+    id: "console",
+    name: "Console",
+    blurb:
+      "Machined gunmetal, engraved mono legends, one safety-orange key. The instrument horsie was built as.",
+  },
+  {
+    id: "paper",
+    name: "Paper",
+    blurb:
+      "Editorial calm. No panel borders, whitespace doing the separating, one humanist sans, ink blue for the control that commits.",
+  },
+  {
+    id: "soft",
+    name: "Soft",
+    blurb:
+      "A modern product surface. Elevation instead of borders, generous radii, warm neutral greys, muted violet accent.",
+  },
+  {
+    id: "slate",
+    name: "Slate",
+    blurb:
+      "Reductive monochrome. No borders, no shadows — surfaces separate by a step in value, and one accent carries every action.",
+  },
+];
 
-function initial(): Theme {
-  const saved = localStorage.getItem(KEY);
-  if (saved === "light" || saved === "dark") return saved;
-  return window.matchMedia("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
+const THEME_KEY = "horsie-theme";
+const SKIN_KEY = "horsie-skin";
+
+const isChoice = (v: unknown): v is ThemeChoice =>
+  v === "light" || v === "dark" || v === "system";
+const isSkin = (v: unknown): v is Skin =>
+  v === "console" || v === "paper" || v === "soft" || v === "slate";
+
+function readChoice(): ThemeChoice {
+  try {
+    const raw = localStorage.getItem(THEME_KEY);
+    // "light"/"dark" are exactly what earlier versions wrote to this key, so
+    // an existing preference survives rather than resetting to system.
+    return isChoice(raw) ? raw : "system";
+  } catch {
+    return "system";
+  }
 }
 
-export function useTheme(): { theme: Theme; toggle: () => void } {
-  const [theme, setTheme] = useState<Theme>(initial);
+function readSkin(): Skin {
+  try {
+    const raw = localStorage.getItem(SKIN_KEY);
+    return isSkin(raw) ? raw : "console";
+  } catch {
+    return "console";
+  }
+}
 
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem(KEY, theme);
-  }, [theme]);
+const prefersLight = () =>
+  typeof window !== "undefined" &&
+  window.matchMedia("(prefers-color-scheme: light)").matches;
 
+export const resolveMode = (choice: ThemeChoice): Mode =>
+  choice === "system" ? (prefersLight() ? "light" : "dark") : choice;
+
+/**
+ * Theme state, shared across every caller in the tab.
+ *
+ * A module-level store rather than per-call `useState`, for the same reason
+ * `useUiSettings` uses one: the rail's toggle and the Appearance page both
+ * read this, and two disconnected copies would let one drift from the other
+ * until a reload.
+ */
+let choice = readChoice();
+let skin = readSkin();
+const listeners = new Set<() => void>();
+
+let snapshot = { choice, skin, mode: resolveMode(choice) };
+const refresh = () => {
+  snapshot = { choice, skin, mode: resolveMode(choice) };
+};
+const emit = () => {
+  refresh();
+  listeners.forEach((l) => l());
+};
+
+function apply() {
+  const root = document.documentElement;
+  root.dataset.theme = resolveMode(choice);
+  // Console is the default and carries no attribute, so every selector in
+  // index.css keeps the specificity it was written against.
+  if (skin === "console") delete root.dataset.skin;
+  else root.dataset.skin = skin;
+}
+
+/**
+ * The two faces the alternate skins need are fetched only when a skin that
+ * uses one is chosen, so Console — the default, and what most installs run —
+ * pays nothing for worlds nobody opened. Slate deliberately reuses Archivo
+ * and costs no fetch at all.
+ */
+const loadFace = (s: Skin) => {
+  if (s === "paper") void import("@fontsource-variable/libre-franklin");
+  if (s === "soft") void import("@fontsource-variable/manrope");
+};
+
+// A `system` choice keeps tracking the OS after first paint rather than
+// sampling it once at load.
+if (typeof window !== "undefined") {
+  window
+    .matchMedia("(prefers-color-scheme: light)")
+    .addEventListener("change", () => {
+      if (choice === "system") {
+        apply();
+        emit();
+      }
+    });
+}
+
+function setChoice(next: ThemeChoice) {
+  choice = next;
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch {
+    /* private mode: the in-memory value still applies for this tab */
+  }
+  apply();
+  emit();
+}
+
+function setSkin(next: Skin) {
+  skin = next;
+  loadFace(next);
+  try {
+    localStorage.setItem(SKIN_KEY, next);
+  } catch {
+    /* as above */
+  }
+  apply();
+  emit();
+}
+
+const subscribe = (l: () => void) => {
+  listeners.add(l);
+  return () => {
+    listeners.delete(l);
+  };
+};
+const getSnapshot = () => snapshot;
+
+// The inline script in index.html already set both attributes before first
+// paint; this re-asserts them for the SPA's lifetime and fetches the face.
+if (typeof document !== "undefined") {
+  apply();
+  loadFace(skin);
+}
+
+export function useTheme(): {
+  choice: ThemeChoice;
+  mode: Mode;
+  skin: Skin;
+  setChoice: (c: ThemeChoice) => void;
+  setSkin: (s: Skin) => void;
+  /** Flip light/dark, leaving `system` behind — a deliberate click means the
+   * user wants a specific one from here on. */
+  toggle: () => void;
+} {
+  const s = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const toggle = useCallback(() => {
+    setChoice(resolveMode(choice) === "dark" ? "light" : "dark");
+  }, []);
   return {
-    theme,
-    toggle: () => setTheme((t) => (t === "dark" ? "light" : "dark")),
+    choice: s.choice,
+    mode: s.mode,
+    skin: s.skin,
+    setChoice,
+    setSkin,
+    toggle,
   };
 }

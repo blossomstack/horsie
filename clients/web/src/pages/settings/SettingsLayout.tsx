@@ -2,6 +2,7 @@ import {
   Boxes,
   Brain,
   Cpu,
+  Palette,
   Plug,
   SlidersHorizontal,
   UserCog,
@@ -16,6 +17,7 @@ const ITEMS: NavItem[] = [
   { to: "skills", label: "Skills", icon: Boxes },
   { to: "memory", label: "Memory", icon: Brain },
   { to: "integrations", label: "Integrations", icon: Plug },
+  { to: "appearance", label: "Appearance", icon: Palette },
   { to: "account", label: "Account", icon: UserCog },
 ];
 

@@ -6,6 +6,7 @@ import {
   useGithubStatus,
   useSaveGithubAppConfig,
 } from "../../hooks/useGithub";
+import { usePublishDirty } from "../settings/dirty";
 import { Section, SettingsPane, TextField } from "../settings/fields";
 import { SettingsHeader } from "../settings/SettingsHeader";
 
@@ -34,6 +35,9 @@ export function GithubAppPage() {
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+
+  // The only batched form left in the product, so the nav guard exists for it.
+  usePublishDirty(dirty);
 
   // Seed from the stored config once, until the user edits it. Secrets are
   // write-only: the server returns only whether one is set.

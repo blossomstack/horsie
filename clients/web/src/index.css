@@ -5,6 +5,11 @@
 @import "@fontsource-variable/archivo";
 @import "@fontsource-variable/martian-mono";
 
+/* The alternate worlds. Their two extra faces are NOT imported here — they
+ * are fetched by `useTheme` when a skin that needs one is chosen, so the
+ * default skin's bundle is unchanged by their existence. */
+@import "./skins.css";
+
 /* ==================================================================== *
  * THE CONSOLE
  *

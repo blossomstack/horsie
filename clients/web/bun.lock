@@ -6,6 +6,8 @@
       "name": "@horsie/web",
       "dependencies": {
         "@fontsource-variable/archivo": "^5.3.0",
+        "@fontsource-variable/libre-franklin": "^5.3.0",
+        "@fontsource-variable/manrope": "^5.3.0",
         "@fontsource-variable/martian-mono": "^5.3.0",
         "@radix-ui/react-dialog": "^1.1.19",
         "@tanstack/react-query": "^5.101.2",
@@ -70,6 +72,10 @@
     "@exodus/bytes": ["@exodus/bytes@1.15.1", "", { "peerDependencies": { "@noble/hashes": "^1.8.0 || ^2.0.0" }, "optionalPeers": ["@noble/hashes"] }, "sha512-S6mL0yNB/Abt9Ei4tq8gDhcczc4S3+vQ4ra7vxnAf+YHC02srtqxKKZghx2Dq6p0e66THKwR6r8N6P95wEty7Q=="],
 
     "@fontsource-variable/archivo": ["@fontsource-variable/archivo@5.3.0", "", {}, "sha512-HogK8FJelrD1o7TlZlkIVtHgc20bO5PZRWE7mUeUTdMN055alznQV6/00J00IBeu8FQAH4s3zW9UJNvKExXf+g=="],
+
+    "@fontsource-variable/libre-franklin": ["@fontsource-variable/libre-franklin@5.3.0", "", {}, "sha512-PEQemCKVRtkLZJNpfvR4wG7x87c8iG05XJuEaX59ogMcAQpdtCZz/NXZUrXLJyvyx3/HD70W4LUppWLBdEdU2g=="],
+
+    "@fontsource-variable/manrope": ["@fontsource-variable/manrope@5.3.0", "", {}, "sha512-6D5dgokHsWDDMtmXHznKa0hK229NN+1a4BLPmUCLqcO1Pw5EEhWY5RFt0AcXnVRAljFFPfRtLkJePQj6LSsV6g=="],
 
     "@fontsource-variable/martian-mono": ["@fontsource-variable/martian-mono@5.3.0", "", {}, "sha512-0wVODx9ILwNnaYC4XCuSaFRYtj1Prd89MRVaSuv2ng6zLiQkS4SepaWEPefs7vqCZS8sbEOA8jb/4F5KNMnGdg=="],
 
