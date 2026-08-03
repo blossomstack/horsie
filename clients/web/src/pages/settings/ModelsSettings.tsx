@@ -1,16 +1,24 @@
+import { Pencil, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import type {
   ModelCard,
   ModelInput,
+  ModelView,
   ProviderInput,
-  SettingsView,
+  ProviderView,
 } from "../../api/types";
 import { useModelCardSearch } from "../../hooks/useModelCards";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
-import { RowLabel, RowShell, Section, TextField } from "./fields";
+import {
+  ListRow,
+  RowAction,
+  RowLabel,
+  Section,
+  SettingsPane,
+  TextField,
+} from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
-import { usePublishDirty } from "./dirty";
 
 type ProviderKind = "anthropic" | "openai";
 
@@ -47,109 +55,213 @@ type ModelDraft = {
   forcedToolsDisableThinking: boolean;
 };
 
-const toProviderDrafts = (v: SettingsView): ProviderDraft[] =>
-  v.providers.map((p) => ({
-    name: p.name,
-    kind: p.kind === "openai" ? "openai" : "anthropic",
-    baseUrl: p.baseUrl ?? "",
-    apiKeyInput: "",
-    hasInlineKey: p.hasInlineKey,
-    keepThinkingSignature: p.keepThinkingSignature,
-  }));
+const providerToDraft = (p: ProviderView): ProviderDraft => ({
+  name: p.name,
+  kind: p.kind === "openai" ? "openai" : "anthropic",
+  baseUrl: p.baseUrl ?? "",
+  apiKeyInput: "",
+  hasInlineKey: p.hasInlineKey,
+  keepThinkingSignature: p.keepThinkingSignature,
+});
 
-const toModelDrafts = (v: SettingsView): ModelDraft[] =>
-  v.models.map((m) => ({
-    alias: m.alias,
-    provider: m.provider,
-    modelId: m.modelId,
-    maxTokens: m.maxTokens != null ? String(m.maxTokens) : "",
-    contextWindow: m.contextWindow != null ? String(m.contextWindow) : "",
-    thinkingEfforts: m.thinkingEfforts ?? [],
-    thinkingEffort: m.thinkingEffort ?? "",
-    thinkingDialect: m.thinkingDialect ?? "",
-    forcedToolsDisableThinking: m.forcedToolsDisableThinking ?? false,
-  }));
+const modelToDraft = (m: ModelView): ModelDraft => ({
+  alias: m.alias,
+  provider: m.provider,
+  modelId: m.modelId,
+  maxTokens: m.maxTokens != null ? String(m.maxTokens) : "",
+  contextWindow: m.contextWindow != null ? String(m.contextWindow) : "",
+  thinkingEfforts: m.thinkingEfforts ?? [],
+  thinkingEffort: m.thinkingEffort ?? "",
+  thinkingDialect: m.thinkingDialect ?? "",
+  forcedToolsDisableThinking: m.forcedToolsDisableThinking ?? false,
+});
+
+const newProvider = (): ProviderDraft => ({
+  name: "",
+  kind: "anthropic",
+  baseUrl: "",
+  apiKeyInput: "",
+  hasInlineKey: false,
+  keepThinkingSignature: false,
+});
+
+const newModel = (provider: string): ModelDraft => ({
+  alias: "",
+  provider,
+  modelId: "",
+  maxTokens: "",
+  contextWindow: "",
+  thinkingEfforts: [],
+  thinkingEffort: "",
+  thinkingDialect: "",
+  forcedToolsDisableThinking: false,
+});
+
+const toProviderInput = (p: ProviderDraft): ProviderInput => ({
+  name: p.name.trim(),
+  kind: p.kind,
+  baseUrl: p.baseUrl.trim() || undefined,
+  apiKey: p.apiKeyInput === "" ? undefined : p.apiKeyInput,
+  keepThinkingSignature: p.keepThinkingSignature,
+});
+
+const toModelInput = (m: ModelDraft): ModelInput => ({
+  alias: m.alias.trim(),
+  provider: m.provider,
+  modelId: m.modelId.trim(),
+  maxTokens: m.maxTokens.trim() ? Number(m.maxTokens.trim()) : undefined,
+  thinkingEfforts: m.thinkingEfforts.length ? m.thinkingEfforts : undefined,
+  thinkingEffort: m.thinkingEffort || undefined,
+  thinkingDialect: m.thinkingDialect || undefined,
+  forcedToolsDisableThinking: m.forcedToolsDisableThinking,
+  contextWindow: m.contextWindow.trim() ? Number(m.contextWindow.trim()) : undefined,
+});
 
 /**
- * Providers and the model aliases that route to them. Saves only its own two
- * collections — `SettingsUpdate` replaces just the fields it carries, so the
- * Runtimes page's vendors are untouched by a save here.
+ * Providers, and the model aliases routed through each of them.
+ *
+ * A list you can open, not two stacks of expanded forms: models belong to a
+ * provider, and the flat version made you scroll past six fields to learn that
+ * a second entry existed.
+ *
+ * Every action writes immediately. `SettingsUpdate` replaces whole
+ * collections, so an edit sends the current providers *and* models arrays with
+ * the one changed entry substituted — the same payload the batched Save used
+ * to send, just at the moment you press the button. Sending only `models`
+ * would replace `providers` with nothing, which is why both always go.
  */
 export function ModelsSettings() {
   const { data: settings, isLoading, isError } = useSettings();
   const update = useUpdateSettings();
 
-  const [providers, setProviders] = useState<ProviderDraft[]>([]);
-  const [models, setModels] = useState<ModelDraft[]>([]);
-  const [dirty, setDirty] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [editingProvider, setEditingProvider] = useState<string | null>(null);
+  const [addingProvider, setAddingProvider] = useState(false);
+  const [editingModel, setEditingModel] = useState<string | null>(null);
+  const [addingModel, setAddingModel] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-  usePublishDirty(dirty);
 
-  // (Re)seed the form from the server view on load and after a successful save.
+  const providers = useMemo(() => settings?.providers ?? [], [settings]);
+  const models = useMemo(() => settings?.models ?? [], [settings]);
+
+  // Hold a selection whenever anything exists, so the detail half is never an
+  // unexplained blank.
   useEffect(() => {
-    if (!settings) return;
-    setProviders(toProviderDrafts(settings));
-    setModels(toModelDrafts(settings));
-    setDirty(false);
+    if (providers.length === 0) setSelected(null);
+    else if (!selected || !providers.some((p) => p.name === selected))
+      setSelected(providers[0].name);
+  }, [providers, selected]);
+
+  const providerModels = models.filter((m) => m.provider === selected);
+
+  const commit = (next: { providers?: ProviderInput[]; models?: ModelInput[] }) =>
+    update.mutateAsync({
+      providers: next.providers ?? providers.map(providerToDraft).map(toProviderInput),
+      models: next.models ?? models.map(modelToDraft).map(toModelInput),
+    });
+
+  const saveProvider = async (draft: ProviderDraft, original: string | null) => {
     setLocalError(null);
-  }, [settings]);
+    const name = draft.name.trim();
+    if (!name) return setLocalError("Every provider needs a name.");
+    if (providers.some((p) => p.name === name && p.name !== original))
+      return setLocalError(`A provider named “${name}” already exists.`);
 
-  const providerNames = useMemo(
-    () => providers.map((p) => p.name.trim()).filter(Boolean),
-    [providers],
-  );
+    const current = providers.map(providerToDraft);
+    const next =
+      original === null
+        ? [...current, draft]
+        : current.map((p) => (p.name === original ? draft : p));
 
-  const touch = () => setDirty(true);
+    // A rename carries its models with it, or they point at a provider that no
+    // longer exists and every session using them fails to start.
+    const renamed =
+      original !== null && original !== name
+        ? models
+            .map(modelToDraft)
+            .map((m) => (m.provider === original ? { ...m, provider: name } : m))
+        : undefined;
 
-  const save = () => {
-    setLocalError(null);
-    const uniq = (xs: string[]) => new Set(xs).size === xs.length;
-    if (providers.some((p) => !p.name.trim()))
-      return setLocalError("Every provider needs a name.");
-    if (!uniq(providers.map((p) => p.name.trim())))
-      return setLocalError("Provider names must be unique.");
-    if (models.some((m) => !m.alias.trim()))
-      return setLocalError("Every model needs an alias.");
-    if (!uniq(models.map((m) => m.alias.trim())))
-      return setLocalError("Model aliases must be unique.");
-    for (const m of models)
-      if (m.maxTokens.trim() && !/^\d+$/.test(m.maxTokens.trim()))
-        return setLocalError(`Max tokens for "${m.alias}" must be a number.`);
-    for (const m of models)
-      if (m.contextWindow.trim() && !/^\d+$/.test(m.contextWindow.trim()))
-        return setLocalError(`Context window for "${m.alias}" must be a number.`);
-
-    const providerInputs: ProviderInput[] = providers.map((p) => ({
-      name: p.name.trim(),
-      kind: p.kind,
-      baseUrl: p.baseUrl.trim() || undefined,
-      apiKey: p.apiKeyInput === "" ? undefined : p.apiKeyInput,
-      keepThinkingSignature: p.keepThinkingSignature,
-    }));
-    const modelInputs: ModelInput[] = models.map((m) => ({
-      alias: m.alias.trim(),
-      provider: m.provider,
-      modelId: m.modelId.trim(),
-      maxTokens: m.maxTokens.trim() ? Number(m.maxTokens.trim()) : undefined,
-      thinkingEfforts: m.thinkingEfforts.length ? m.thinkingEfforts : undefined,
-      thinkingEffort: m.thinkingEffort || undefined,
-      thinkingDialect: m.thinkingDialect || undefined,
-      forcedToolsDisableThinking: m.forcedToolsDisableThinking,
-      contextWindow: m.contextWindow.trim()
-        ? Number(m.contextWindow.trim())
-        : undefined,
-    }));
-
-    update.mutate({ providers: providerInputs, models: modelInputs });
+    try {
+      await commit({
+        providers: next.map(toProviderInput),
+        models: renamed?.map(toModelInput),
+      });
+      setSelected(name);
+      setEditingProvider(null);
+      setAddingProvider(false);
+    } catch (e) {
+      setLocalError(e instanceof ApiRequestError ? e.message : "Save failed.");
+    }
   };
 
-  const discard = () => {
-    if (!settings) return;
-    setProviders(toProviderDrafts(settings));
-    setModels(toModelDrafts(settings));
-    setDirty(false);
+  const deleteProvider = async (name: string) => {
     setLocalError(null);
-    update.reset();
+    // The server would accept this and leave the models dangling, so the guard
+    // lives here rather than nowhere.
+    const orphans = models.filter((m) => m.provider === name);
+    if (orphans.length > 0) {
+      const many = orphans.length !== 1;
+      return setLocalError(
+        `“${name}” still has ${many ? "models" : "a model"} routed through it: ${orphans
+          .map((m) => m.alias)
+          .join(", ")}. Delete or move ${many ? "them" : "it"} first.`,
+      );
+    }
+    if (!confirm(`Delete provider “${name}”?`)) return;
+    try {
+      await commit({
+        providers: providers
+          .filter((p) => p.name !== name)
+          .map(providerToDraft)
+          .map(toProviderInput),
+      });
+    } catch (e) {
+      setLocalError(e instanceof ApiRequestError ? e.message : "Delete failed.");
+    }
+  };
+
+  const saveModel = async (draft: ModelDraft, original: string | null) => {
+    setLocalError(null);
+    const alias = draft.alias.trim();
+    if (!alias) return setLocalError("Every model needs an alias.");
+    if (models.some((m) => m.alias === alias && m.alias !== original))
+      return setLocalError(`A model aliased “${alias}” already exists.`);
+    for (const [label, v] of [
+      ["Max tokens", draft.maxTokens],
+      ["Context window", draft.contextWindow],
+    ] as const) {
+      if (v.trim() && !/^\d+$/.test(v.trim()))
+        return setLocalError(`${label} for “${alias}” must be a number.`);
+    }
+
+    const current = models.map(modelToDraft);
+    const next =
+      original === null
+        ? [...current, draft]
+        : current.map((m) => (m.alias === original ? draft : m));
+    try {
+      await commit({ models: next.map(toModelInput) });
+      setEditingModel(null);
+      setAddingModel(false);
+    } catch (e) {
+      setLocalError(e instanceof ApiRequestError ? e.message : "Save failed.");
+    }
+  };
+
+  const deleteModel = async (alias: string) => {
+    setLocalError(null);
+    if (!confirm(`Delete model “${alias}”?`)) return;
+    try {
+      await commit({
+        models: models
+          .filter((m) => m.alias !== alias)
+          .map(modelToDraft)
+          .map(toModelInput),
+      });
+    } catch (e) {
+      setLocalError(e instanceof ApiRequestError ? e.message : "Delete failed.");
+    }
   };
 
   const saveError =
@@ -163,130 +275,256 @@ export function ModelsSettings() {
     <div className="flex h-full flex-col overflow-hidden">
       <SettingsHeader
         title="Models & providers"
-        desc="API endpoints and the model aliases sessions pick from."
-        dirty={dirty}
-        saved={update.isSuccess}
+        desc="API endpoints and the model aliases sessions pick from. Changes save as you make them."
         saving={update.isPending}
-        onSave={save}
-        onDiscard={discard}
+        saved={update.isSuccess && !update.isPending}
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
-          {isLoading && (
-            <div className="py-16 text-center text-sm text-faint">Loading…</div>
-          )}
-          {isError && (
-            <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-              Couldn’t load settings. Is <code>horsie serve</code> running?
-            </div>
-          )}
+      <SettingsPane>
+        {isLoading && (
+          <div className="py-16 text-center text-sm text-faint">Loading…</div>
+        )}
+        {isError && (
+          <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+            Couldn’t load settings. Is <code>horsie serve</code> running?
+          </div>
+        )}
 
-          {(localError || saveError) && (
-            <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-              {localError ?? saveError}
-            </div>
-          )}
+        {(localError || saveError) && (
+          <div
+            className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
+            data-testid="models-error"
+          >
+            {localError ?? saveError}
+          </div>
+        )}
 
-          {settings && (
-            <>
-              <Section
-                title="Providers"
-                desc="Anthropic-compatible API endpoints."
-                onAdd={() => {
-                  setProviders((ps) => [
-                    ...ps,
-                    {
-                      name: "",
-                      kind: "anthropic",
-                      baseUrl: "",
-                      keepThinkingSignature: false,
-                      apiKeyInput: "",
-                      hasInlineKey: false,
-                    },
-                  ]);
-                  touch();
-                }}
-                addLabel="Add provider"
-                empty={providers.length === 0 ? "No providers yet." : null}
-              >
-                {providers.map((p, i) => (
-                  <ProviderRow
-                    key={i}
-                    draft={p}
-                    onChange={(next) => {
-                      setProviders((ps) => ps.map((x, j) => (j === i ? next : x)));
-                      touch();
-                    }}
-                    onRemove={() => {
-                      setProviders((ps) => ps.filter((_, j) => j !== i));
-                      touch();
-                    }}
+        {settings && (
+          <>
+            <Section
+              title="Providers"
+              desc="API endpoints. Select one to see the models routed through it."
+              onAdd={() => {
+                setAddingProvider(true);
+                setEditingProvider(null);
+              }}
+              addLabel="Add provider"
+              empty={
+                providers.length === 0 && !addingProvider ? "No providers yet." : null
+              }
+            >
+              {addingProvider && (
+                <ProviderEditor
+                  initial={newProvider()}
+                  onSave={(d) => saveProvider(d, null)}
+                  onCancel={() => setAddingProvider(false)}
+                  busy={update.isPending}
+                />
+              )}
+              {providers.map((p) => {
+                const count = models.filter((m) => m.provider === p.name).length;
+                return editingProvider === p.name ? (
+                  <ProviderEditor
+                    key={p.name}
+                    initial={providerToDraft(p)}
+                    onSave={(d) => saveProvider(d, p.name)}
+                    onCancel={() => setEditingProvider(null)}
+                    busy={update.isPending}
                   />
-                ))}
-              </Section>
+                ) : (
+                  <ListRow
+                    key={p.name}
+                    testId={`provider-row-${p.name}`}
+                    title={p.name}
+                    subtitle={p.baseUrl || defaultEndpoint(p.kind)}
+                    active={selected === p.name}
+                    onActivate={() => setSelected(p.name)}
+                    meta={
+                      <span className="flex shrink-0 items-center gap-2">
+                        <span className="chip">
+                          {p.kind === "openai" ? "OpenAI" : "Anthropic"}
+                        </span>
+                        <span className="legend">
+                          {count} {count === 1 ? "model" : "models"}
+                        </span>
+                      </span>
+                    }
+                    actions={
+                      <>
+                        <RowAction
+                          icon={<Pencil size={14} />}
+                          label={`Edit ${p.name}`}
+                          onClick={() => {
+                            setEditingProvider(p.name);
+                            setAddingProvider(false);
+                          }}
+                          testId={`provider-edit-${p.name}`}
+                        />
+                        <RowAction
+                          icon={<Trash2 size={14} />}
+                          label={`Delete ${p.name}`}
+                          danger
+                          onClick={() => deleteProvider(p.name)}
+                          testId={`provider-delete-${p.name}`}
+                        />
+                      </>
+                    }
+                  />
+                );
+              })}
+            </Section>
 
+            {selected && (
               <Section
-                title="Models"
-                desc="Aliases sessions pick from. Each routes to a provider's model id."
+                title={`Models · ${selected}`}
+                desc="Aliases sessions pick from. Each routes to a model id on this provider."
                 onAdd={() => {
-                  setModels((ms) => [
-                    ...ms,
-                    {
-                      alias: "",
-                      provider: providerNames[0] ?? "",
-                      modelId: "",
-                      maxTokens: "",
-                      contextWindow: "",
-                      thinkingEfforts: [],
-                      thinkingEffort: "",
-                      thinkingDialect: "",
-                      forcedToolsDisableThinking: false,
-                    },
-                  ]);
-                  touch();
+                  setAddingModel(true);
+                  setEditingModel(null);
                 }}
                 addLabel="Add model"
-                empty={models.length === 0 ? "No models yet." : null}
+                empty={
+                  providerModels.length === 0 && !addingModel
+                    ? `No models route through ${selected} yet.`
+                    : null
+                }
               >
-                {models.map((m, i) => (
-                  <ModelRow
-                    key={i}
-                    draft={m}
-                    providerNames={providerNames}
-                    onChange={(next) => {
-                      setModels((ms) => ms.map((x, j) => (j === i ? next : x)));
-                      touch();
-                    }}
-                    onRemove={() => {
-                      setModels((ms) => ms.filter((_, j) => j !== i));
-                      touch();
-                    }}
+                {addingModel && (
+                  <ModelEditor
+                    initial={newModel(selected)}
+                    providerNames={providers.map((p) => p.name)}
+                    onSave={(d) => saveModel(d, null)}
+                    onCancel={() => setAddingModel(false)}
+                    busy={update.isPending}
                   />
-                ))}
+                )}
+                {providerModels.map((m) =>
+                  editingModel === m.alias ? (
+                    <ModelEditor
+                      key={m.alias}
+                      initial={modelToDraft(m)}
+                      providerNames={providers.map((p) => p.name)}
+                      onSave={(d) => saveModel(d, m.alias)}
+                      onCancel={() => setEditingModel(null)}
+                      busy={update.isPending}
+                    />
+                  ) : (
+                    <ListRow
+                      key={m.alias}
+                      testId={`model-row-${m.alias}`}
+                      title={m.alias}
+                      subtitle={m.modelId}
+                      meta={
+                        m.thinkingEfforts && m.thinkingEfforts.length > 0 ? (
+                          <span className="chip shrink-0">thinking</span>
+                        ) : undefined
+                      }
+                      actions={
+                        <>
+                          <RowAction
+                            icon={<Pencil size={14} />}
+                            label={`Edit ${m.alias}`}
+                            onClick={() => {
+                              setEditingModel(m.alias);
+                              setAddingModel(false);
+                            }}
+                            testId={`model-edit-${m.alias}`}
+                          />
+                          <RowAction
+                            icon={<Trash2 size={14} />}
+                            label={`Delete ${m.alias}`}
+                            danger
+                            onClick={() => deleteModel(m.alias)}
+                            testId={`model-delete-${m.alias}`}
+                          />
+                        </>
+                      }
+                    />
+                  ),
+                )}
               </Section>
-            </>
-          )}
-        </div>
+            )}
+          </>
+        )}
+      </SettingsPane>
+    </div>
+  );
+}
+
+function defaultEndpoint(kind: string): string {
+  return kind === "openai"
+    ? "OpenAI-compatible endpoint"
+    : "https://api.anthropic.com";
+}
+
+/** The shell both entity forms sit in. Each commits on its own now, so each
+ * carries its own Save and Cancel. */
+function Editor({
+  children,
+  onSave,
+  onCancel,
+  busy,
+  saveLabel,
+  testId,
+}: {
+  children: React.ReactNode;
+  onSave: () => void;
+  onCancel: () => void;
+  busy: boolean;
+  saveLabel: string;
+  testId: string;
+}) {
+  return (
+    <div
+      className="rounded-[var(--radius-control)] bg-raised p-3 shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+      data-testid={testId}
+    >
+      {children}
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          className="key key-go"
+          onClick={onSave}
+          disabled={busy}
+          data-testid="editor-save"
+        >
+          {busy ? "Saving…" : saveLabel}
+        </button>
+        <button className="key key-flat" onClick={onCancel} data-testid="editor-cancel">
+          <X size={13} aria-hidden /> Cancel
+        </button>
       </div>
     </div>
   );
 }
 
-function ProviderRow({
-  draft,
-  onChange,
-  onRemove,
+function ProviderEditor({
+  initial,
+  onSave,
+  onCancel,
+  busy,
 }: {
-  draft: ProviderDraft;
-  onChange: (next: ProviderDraft) => void;
-  onRemove: () => void;
+  initial: ProviderDraft;
+  onSave: (d: ProviderDraft) => void;
+  onCancel: () => void;
+  busy: boolean;
 }) {
-  const set = (patch: Partial<ProviderDraft>) => onChange({ ...draft, ...patch });
+  const [draft, setDraft] = useState(initial);
+  const set = (patch: Partial<ProviderDraft>) => setDraft((d) => ({ ...d, ...patch }));
   return (
-    <RowShell onRemove={onRemove} removeLabel="Remove provider">
+    <Editor
+      onSave={() => onSave(draft)}
+      onCancel={onCancel}
+      busy={busy}
+      saveLabel="Save provider"
+      testId="provider-editor"
+    >
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <TextField label="Name" value={draft.name} onChange={(v) => set({ name: v })} placeholder="anthropic" />
+        <TextField
+          label="Name"
+          value={draft.name}
+          onChange={(v) => set({ name: v })}
+          placeholder="anthropic"
+        />
         <label className="block">
           <RowLabel>Kind</RowLabel>
           <select
@@ -303,7 +541,9 @@ function ProviderRow({
           value={draft.baseUrl}
           onChange={(v) => set({ baseUrl: v })}
           placeholder={
-            draft.kind === "openai" ? "http://127.0.0.1:11434" : "https://api.anthropic.com"
+            draft.kind === "openai"
+              ? "http://127.0.0.1:11434"
+              : "https://api.anthropic.com"
           }
         />
         <TextField
@@ -314,7 +554,7 @@ function ProviderRow({
           placeholder={draft.hasInlineKey ? "•••• stored — blank keeps it" : "not set"}
         />
         {draft.kind === "anthropic" && (
-          <label className="col-span-1 sm:col-span-2 flex items-start gap-2 text-sm">
+          <label className="col-span-1 flex items-start gap-2 text-sm sm:col-span-2">
             <input
               type="checkbox"
               className="mt-1"
@@ -324,15 +564,15 @@ function ProviderRow({
             <span>
               Keep thinking signatures
               <span className="block text-xs text-dim">
-                Required for api.anthropic.com, which validates them on replay. Leave off for
-                Anthropic-compatible endpoints — the blobs are several KB per thinking block and
-                nothing reads them.
+                Required for api.anthropic.com, which validates them on replay.
+                Leave off for Anthropic-compatible endpoints — the blobs are
+                several KB per thinking block and nothing reads them.
               </span>
             </span>
           </label>
         )}
       </div>
-    </RowShell>
+    </Editor>
   );
 }
 
@@ -384,8 +624,7 @@ function ModelIdField({
       // boolean, unset is `false`. The card's `baseUrl` is deliberately not
       // read here — it describes the provider, not the model.
       forcedToolsDisableThinking:
-        draft.forcedToolsDisableThinking ||
-        (card.forcedToolsDisableThinking ?? false),
+        draft.forcedToolsDisableThinking || (card.forcedToolsDisableThinking ?? false),
     });
     setFocused(false);
   };
@@ -436,26 +675,40 @@ function ModelIdField({
   );
 }
 
-function ModelRow({
-  draft,
+function ModelEditor({
+  initial,
   providerNames,
-  onChange,
-  onRemove,
+  onSave,
+  onCancel,
+  busy,
 }: {
-  draft: ModelDraft;
+  initial: ModelDraft;
   providerNames: string[];
-  onChange: (next: ModelDraft) => void;
-  onRemove: () => void;
+  onSave: (d: ModelDraft) => void;
+  onCancel: () => void;
+  busy: boolean;
 }) {
-  const set = (patch: Partial<ModelDraft>) => onChange({ ...draft, ...patch });
+  const [draft, setDraft] = useState(initial);
+  const set = (patch: Partial<ModelDraft>) => setDraft((d) => ({ ...d, ...patch }));
   const options =
     draft.provider && !providerNames.includes(draft.provider)
       ? [draft.provider, ...providerNames]
       : providerNames;
   return (
-    <RowShell onRemove={onRemove} removeLabel="Remove model">
+    <Editor
+      onSave={() => onSave(draft)}
+      onCancel={onCancel}
+      busy={busy}
+      saveLabel="Save model"
+      testId="model-editor"
+    >
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <TextField label="Alias" value={draft.alias} onChange={(v) => set({ alias: v })} placeholder="sonnet" />
+        <TextField
+          label="Alias"
+          value={draft.alias}
+          onChange={(v) => set({ alias: v })}
+          placeholder="sonnet"
+        />
         <label className="block">
           <RowLabel>Provider</RowLabel>
           <select
@@ -484,7 +737,7 @@ function ModelRow({
           onChange={(v) => set({ contextWindow: v })}
           placeholder="200000"
         />
-        <div className="col-span-1 sm:col-span-2 border-t pt-3">
+        <div className="col-span-1 border-t pt-3 sm:col-span-2">
           <RowLabel>Thinking efforts this model offers</RowLabel>
           <div className="flex flex-wrap gap-3">
             {EFFORTS.map((e) => (
@@ -546,9 +799,7 @@ function ModelRow({
               type="checkbox"
               className="mt-1"
               checked={draft.forcedToolsDisableThinking}
-              onChange={(ev) =>
-                set({ forcedToolsDisableThinking: ev.target.checked })
-              }
+              onChange={(ev) => set({ forcedToolsDisableThinking: ev.target.checked })}
               data-testid="model-forced-tools"
             />
             <span>
@@ -562,6 +813,6 @@ function ModelRow({
           </label>
         </div>
       </div>
-    </RowShell>
+    </Editor>
   );
 }

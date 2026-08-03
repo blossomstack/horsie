@@ -21,7 +21,7 @@ export function RoutinesPage() {
   return (
     <div className="flex h-full flex-col" data-testid="routines-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
-        <h1 className="text-[15px] font-semibold text-legend">Routines</h1>
+        <h1 className="page-title">Routines</h1>
         <button
           className="key key-go ml-auto !px-2.5 !py-1.5 text-xs"
           onClick={() => navigate("/routines/new")}

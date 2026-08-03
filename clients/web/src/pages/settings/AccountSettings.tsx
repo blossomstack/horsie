@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiRequestError, api } from "../../api/client";
 import { AUTH_STATUS_KEY, useAuthStatus } from "../../hooks/useAuth";
+import { SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
 /** Long-lived tokens for headless vendor agents: a container, a CI runner, a
@@ -35,11 +36,11 @@ function MachineTokens() {
 
   return (
     <section
-      className="panel max-w-2xl space-y-3 p-4"
+      className="panel space-y-3 p-4"
       data-testid="machine-tokens"
     >
       <div>
-        <h2 className="text-sm font-semibold text-legend">Machine tokens</h2>
+        <h2 className="section-title">Machine tokens</h2>
         <p className="mt-0.5 text-xs text-faint">
           For runtime vendor agents that run unattended. On your own machine,
           <code className="mx-1">horsie auth login</code> is enough — use a
@@ -147,7 +148,7 @@ export function AccountSettings() {
     return (
       <div className="flex h-full flex-col">
         <SettingsHeader title="Account" desc="Sign-in for this server." />
-        <div className="p-6">
+        <SettingsPane>
           <p
             data-testid="account-disabled"
             className="panel p-4 text-sm text-dim"
@@ -155,7 +156,7 @@ export function AccountSettings() {
             Authentication is disabled on this deployment, so there is no
             account to manage. Anyone who can reach this server has full access.
           </p>
-        </div>
+        </SettingsPane>
       </div>
     );
   }
@@ -166,7 +167,7 @@ export function AccountSettings() {
   return (
     <div className="flex h-full flex-col">
       <SettingsHeader title="Account" desc="Sign-in for this server." />
-      <div className="space-y-6 p-6">
+      <SettingsPane>
         {status.mustChangePassword && (
           <p
             data-testid="account-must-change"
@@ -231,7 +232,7 @@ export function AccountSettings() {
           Sign out
         </button>
         <MachineTokens />
-      </div>
+      </SettingsPane>
     </div>
   );
 }

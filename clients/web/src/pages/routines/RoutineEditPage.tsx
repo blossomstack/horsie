@@ -111,7 +111,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
   return (
     <div className="flex h-full flex-col" data-testid="routine-edit-page">
       <div className="border-b px-6 py-4">
-        <h1 className="text-[15px] font-semibold text-legend">
+        <h1 className="page-title">
           {editing ? `Edit ${initial.name}` : "New routine"}
         </h1>
       </div>

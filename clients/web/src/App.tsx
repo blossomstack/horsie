@@ -21,6 +21,7 @@ import { SkillsSettings } from "./pages/settings/SkillsSettings";
 import { AccountSettings } from "./pages/settings/AccountSettings";
 import { AdminLayout } from "./pages/admin/AdminLayout";
 import { ModelCardsPage } from "./pages/admin/ModelCardsPage";
+import { GithubAppPage } from "./pages/admin/GithubAppPage";
 
 const client = new QueryClient({
   defaultOptions: {
@@ -84,6 +85,7 @@ export default function App() {
               <Route path="admin" element={<AdminLayout />}>
                 <Route index element={<Navigate to="model-cards" replace />} />
                 <Route path="model-cards" element={<ModelCardsPage />} />
+                <Route path="github-app" element={<GithubAppPage />} />
               </Route>
             </Route>
           </Routes>

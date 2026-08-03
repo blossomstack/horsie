@@ -249,7 +249,7 @@ export function SessionView() {
             <RailToggle />
             <h1
               data-testid="session-title"
-              className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-legend"
+              className="page-title min-w-0 flex-1 truncate"
             >
               {title}
             </h1>

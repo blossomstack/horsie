@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import { ApiRequestError } from "../../api/client";
 import type { MemorySpaceView, MemoryView } from "../../api/types";
 import { cn } from "../../lib/cn";
+import { SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 import {
   useCreateMemory,
@@ -32,6 +33,7 @@ export function MemorySettings() {
 
   const createSpace = useCreateSpace();
   const [newSpace, setNewSpace] = useState("");
+  const [addingMemory, setAddingMemory] = useState(false);
 
   const submitSpace = async () => {
     const name = newSpace.trim();
@@ -52,8 +54,7 @@ export function MemorySettings() {
         desc="Durable notes the agent saves and reads back — grouped into spaces you pick per session."
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+      <SettingsPane>
           <section className="panel p-4">
             <SectionHeading
               icon={<FolderPlus size={15} className="mt-0.5 text-faint" />}
@@ -132,7 +133,24 @@ export function MemorySettings() {
               </p>
             ) : (
               <>
-                <NewMemoryForm space={active} />
+                {/* Folded away by default. The agent writes most of these
+                    itself, so the common visit is reading or pruning the list
+                    — a three-field form sitting permanently above it made
+                    authoring, the rare case, the loudest thing on the page. */}
+                {addingMemory ? (
+                  <NewMemoryForm
+                    space={active}
+                    onDone={() => setAddingMemory(false)}
+                  />
+                ) : (
+                  <button
+                    className="key key-blank mt-3"
+                    onClick={() => setAddingMemory(true)}
+                    data-testid="add-memory"
+                  >
+                    <Plus size={13} aria-hidden /> Add memory
+                  </button>
+                )}
 
                 <div className="mt-3 space-y-2.5">
                   {memories.isLoading && (
@@ -152,8 +170,7 @@ export function MemorySettings() {
               </>
             )}
           </section>
-        </div>
-      </div>
+      </SettingsPane>
     </div>
   );
 }
@@ -193,7 +210,7 @@ function SpaceRow({
         className="min-w-0 flex-1 text-left"
         onClick={onSelect}
       >
-        <span className="truncate font-mono text-sm font-semibold text-legend">
+        <span className="item-title truncate">
           {space.name}
         </span>
         {space.description && (
@@ -215,7 +232,13 @@ function SpaceRow({
   );
 }
 
-function NewMemoryForm({ space }: { space: string }) {
+function NewMemoryForm({
+  space,
+  onDone,
+}: {
+  space: string;
+  onDone: () => void;
+}) {
   const create = useCreateMemory();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -233,13 +256,17 @@ function NewMemoryForm({ space }: { space: string }) {
       setName("");
       setDescription("");
       setContent("");
+      onDone();
     } catch {
       /* surfaced from create.error below */
     }
   };
 
   return (
-    <div className="mb-4 rounded-[var(--radius-control)] border border-dashed p-3">
+    <div
+      className="mb-4 mt-3 rounded-[var(--radius-control)] border border-dashed p-3"
+      data-testid="new-memory-form"
+    >
       <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-3">
         <label className="block">
           <span className="mb-1 block text-[11px] font-semibold text-dim">
@@ -248,6 +275,9 @@ function NewMemoryForm({ space }: { space: string }) {
           <input
             className="field font-mono"
             value={name}
+            // The form is opened by an explicit click, so focus belongs in it
+            // — otherwise the click reveals fields and leaves the caret behind.
+            autoFocus
             onChange={(e) => setName(e.target.value)}
             placeholder="deploy-order"
           />
@@ -278,7 +308,14 @@ function NewMemoryForm({ space }: { space: string }) {
 
       <ErrorNote error={create.error} fallback="Failed to save memory." />
 
-      <div className="mt-3 flex justify-end">
+      <div className="mt-3 flex justify-end gap-2">
+        <button
+          className="key key-flat"
+          onClick={onDone}
+          data-testid="cancel-memory"
+        >
+          Cancel
+        </button>
         <button
           className="key key-go"
           onClick={submit}
@@ -335,7 +372,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
           className="min-w-0 flex-1 text-left"
           onClick={() => setOpen((v) => !v)}
         >
-          <span className="truncate font-mono text-sm font-semibold text-legend">
+          <span className="item-title truncate">
             {memory.space}/{memory.name}
           </span>
           <p className="mt-0.5 text-xs text-dim">{memory.description}</p>
@@ -409,7 +446,7 @@ function SectionHeading({
     <div className="mb-3 flex items-start gap-2">
       {icon}
       <div>
-        <h2 className="text-sm font-semibold text-legend">{title}</h2>
+        <h2 className="section-title">{title}</h2>
         <p className="mt-0.5 text-xs text-faint">{subtitle}</p>
       </div>
     </div>

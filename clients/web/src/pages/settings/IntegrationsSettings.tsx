@@ -1,18 +1,13 @@
 import { Boxes, GitBranch, Loader2, Plus, Server } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, ApiRequestError } from "../../api/client";
 import type {
   McpServerInput,
   McpServerView,
   SettingsView,
 } from "../../api/types";
-import {
-  useGithubAppConfig,
-  useGithubDisconnect,
-  useGithubStatus,
-  useSaveGithubAppConfig,
-} from "../../hooks/useGithub";
+import { useGithubDisconnect, useGithubStatus } from "../../hooks/useGithub";
 import {
   useConnectMcpServer,
   useDeleteMcpServer,
@@ -21,7 +16,7 @@ import {
   useUpsertMcpServer,
 } from "../../hooks/useMcp";
 import { useSettings } from "../../hooks/useSettings";
-import { RowLabel, RowShell, TextField } from "./fields";
+import { RowLabel, RowShell, TextField, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
 /** The remote GitHub MCP endpoint reused via the GitHub App connection. */
@@ -42,8 +37,7 @@ export function IntegrationsSettings() {
         desc="GitHub, MCP servers, and this server's build info."
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+      <SettingsPane>
           {isLoading && (
             <div className="py-16 text-center text-sm text-faint">Loading…</div>
           )}
@@ -58,37 +52,23 @@ export function IntegrationsSettings() {
           <McpSection />
 
           {settings && <ServerInfoCard view={settings} />}
-        </div>
-      </div>
+      </SettingsPane>
     </div>
   );
 }
 
 /**
- * The GitHub connection settings: App config (write-only secrets),
- * Connect/Disconnect, and the OAuth-callback outcome banner. Self-contained —
- * it saves to `/api/github/app-config`, independent of the page Save button.
+ * Connecting *your* GitHub account.
+ *
+ * The App's own registration — client id, secret, app id, private key — moved
+ * to Admin → GitHub App. Those are set once by whoever runs the server; this
+ * is the button everyone else came here to press.
  */
 function GithubSection() {
   const { data: status } = useGithubStatus();
-  const { data: cfg } = useGithubAppConfig();
-  const save = useSaveGithubAppConfig();
   const disconnect = useGithubDisconnect();
   const [params, setParams] = useSearchParams();
-
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [appId, setAppId] = useState("");
-  const [privateKey, setPrivateKey] = useState("");
-  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Seed the form from the stored config (once, until the user edits it).
-  useEffect(() => {
-    if (!cfg || dirty) return;
-    setClientId(cfg.clientId ?? "");
-    setAppId(cfg.appId != null ? String(cfg.appId) : "");
-  }, [cfg, dirty]);
 
   // Surface the OAuth callback outcome, then strip the params from the URL.
   const connected = params.get("github_connected");
@@ -103,31 +83,14 @@ function GithubSection() {
     }
   }, [connected, oauthError, params, setParams]);
 
-  const submit = async () => {
-    setError(null);
-    try {
-      await save.mutateAsync({
-        clientId: clientId.trim(),
-        clientSecret: clientSecret === "" ? undefined : clientSecret,
-        appId: appId.trim() === "" ? undefined : Number(appId),
-        privateKey: privateKey === "" ? undefined : privateKey,
-      });
-      setClientSecret("");
-      setPrivateKey("");
-      setDirty(false);
-    } catch (e) {
-      setError(e instanceof ApiRequestError ? e.message : "Failed to save.");
-    }
-  };
-
   return (
     <section className="panel p-4">
       <div className="mb-3 flex items-start gap-2">
         <GitBranch size={15} className="mt-0.5 text-faint" />
         <div>
-          <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">GitHub</h2>
+          <h2 className="section-title">GitHub</h2>
           <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-            Connect a GitHub App so sessions can clone your repositories.
+            Connect your GitHub account so sessions can clone your repositories.
           </p>
         </div>
       </div>
@@ -146,20 +109,31 @@ function GithubSection() {
             </button>
           </div>
         ) : (
-          <div className="flex items-center justify-between rounded-[var(--radius-control)] border border-dashed px-3 py-2 text-sm text-dim">
+          <div className="flex items-center justify-between gap-3 rounded-[var(--radius-control)] border border-dashed px-3 py-2 text-sm text-dim">
             <span>
-              {status?.appConfigured
-                ? "App configured — connect your account."
-                : "Configure the GitHub App below, then connect."}
+              {status?.appConfigured ? (
+                "App configured — connect your account."
+              ) : (
+                <>
+                  No GitHub App is registered on this server yet. Set one up in{" "}
+                  <Link
+                    to="/admin/github-app"
+                    className="text-amber-ink underline underline-offset-2"
+                  >
+                    Admin → GitHub App
+                  </Link>
+                  .
+                </>
+              )}
             </span>
             <a
-              className="key aria-disabled:pointer-events-none aria-disabled:opacity-40"
+              className="key shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40"
               href={api.github.authUrl()}
               aria-disabled={!status?.appConfigured}
               title={
                 status?.appConfigured
                   ? undefined
-                  : "Configure the GitHub App below first"
+                  : "Register the GitHub App in Admin first"
               }
               onClick={(e) => {
                 if (!status?.appConfigured) e.preventDefault();
@@ -172,64 +146,11 @@ function GithubSection() {
 
         {status?.connected && <GithubMcpToggle />}
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <TextField
-            label="Client ID"
-            value={clientId}
-            onChange={(v) => {
-              setClientId(v);
-              setDirty(true);
-            }}
-          />
-          <TextField
-            label="Client secret"
-            type="password"
-            value={clientSecret}
-            onChange={(v) => {
-              setClientSecret(v);
-              setDirty(true);
-            }}
-            placeholder={
-              cfg?.hasClientSecret ? "•••• stored — blank keeps it" : "Not set"
-          }
-          />
-          <TextField
-            label="App ID"
-            value={appId}
-            onChange={(v) => {
-              setAppId(v);
-              setDirty(true);
-            }}
-          />
-          <TextField
-            label="Private key (PEM or base64)"
-            type="password"
-            value={privateKey}
-            onChange={(v) => {
-              setPrivateKey(v);
-              setDirty(true);
-            }}
-            placeholder={
-              cfg?.hasPrivateKey ? "•••• stored — blank keeps it" : "Not set"
-          }
-          />
-        </div>
-
         {error && (
           <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
             {error}
           </div>
         )}
-
-        <div className="flex justify-end">
-          <button
-            className="key key-go"
-            onClick={submit}
-            disabled={!dirty || save.isPending}
-          >
-            Save GitHub settings
-          </button>
-        </div>
       </div>
     </section>
   );
@@ -378,7 +299,7 @@ function McpSection() {
         <div className="flex items-start gap-2">
           <Boxes size={15} className="mt-0.5 text-faint" />
           <div>
-            <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">MCP servers</h2>
+            <h2 className="section-title">MCP servers</h2>
             <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
               Remote Model Context Protocol servers. Sessions pick which to use;
               their tools appear as <code>mcp__&lt;name&gt;__&lt;tool&gt;</code>.
@@ -675,7 +596,7 @@ function ServerInfoCard({ view }: { view: SettingsView }) {
     <section className="panel p-4">
       <div className="flex items-center gap-2">
         <Server size={15} className="text-faint" />
-        <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">Server</h2>
+        <h2 className="section-title">Server</h2>
       </div>
       <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
         {rows.map(([k, v]) => (
