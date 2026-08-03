@@ -1,4 +1,4 @@
-//! SQLite storage for agent presets, sharing the config store's pool.
+//! Storage for agent presets, sharing the config store's database.
 //! List-typed columns are JSON; `AgentRepo` is the storage twin of the wire
 //! `session_api::RepoConfig` (protocol types are not storage types).
 

@@ -1,5 +1,5 @@
-//! SQLite storage for the admin account and every issued token, sharing the
-//! config store's pool. Policy lives in `service.rs`; this layer only reads and
+//! Storage for the admin account and every issued token, sharing the config
+//! store's database. Policy lives in `service.rs`; this layer only reads and
 //! writes rows.
 
 use crate::auth::{Principal, TokenKind};

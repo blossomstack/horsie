@@ -1,4 +1,4 @@
-//! SQLite storage for configured remote MCP servers (`mcp_servers`). One row
+//! Storage for configured remote MCP servers (`mcp_servers`). One row
 //! per server, keyed by `name`. A bearer secret is stored plaintext (the DB
 //! file is the trust boundary) and wrapped in [`Secret`] in memory; write-only
 //! inputs follow the settings store's keep/clear/set convention (`None` keeps,

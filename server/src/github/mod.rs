@@ -1,4 +1,4 @@
-//! Deployment-global GitHub connection: SQLite-backed app config + OAuth
+//! Deployment-global GitHub connection: database-backed app config + OAuth
 //! credentials, a GitHub API client (App JWT → scoped installation tokens,
 //! repo listing), and the session-facing token minter.
 

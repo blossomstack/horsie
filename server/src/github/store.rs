@@ -1,4 +1,4 @@
-//! SQLite storage for the deployment-global GitHub connection: the App config
+//! Storage for the deployment-global GitHub connection: the App config
 //! (single row) and the connected account's OAuth credentials (single row).
 //! Secrets are stored plaintext (the DB file is the trust boundary) and wrapped
 //! in [`Secret`] in memory; write-only inputs follow the settings store's

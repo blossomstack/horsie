@@ -255,7 +255,7 @@ than silent interleaving.
 
 | Method | Implementation |
 | --- | --- |
-| `persist` | One transaction; a single multi-row `INSERT` (chunked at 8 000 rows to stay under Postgres's 65 535 bind-parameter limit — real batches are single digits). The head cache advances **only after commit**. |
+| `persist` | One transaction; a single multi-row `INSERT` (chunked at 1 000 rows — four binds each, inside both Postgres's 65 535 and SQLite's 32 766 parameter caps; real batches are single digits). The head cache advances **only after commit**. |
 | `replay` | Keyset pagination via `futures_util::stream::unfold`: `WHERE kind=? AND id=? AND seq > ? ORDER BY seq LIMIT 1000`, the last `seq` of each page seeding the next. Bounded memory on a 100 000-event log, no borrow of the query string into the stream, and no new dependency. |
 | `save_snapshot` | Upsert on `(actor_kind, actor_id)`; head cache raised to `max(cache, seq)`, mirroring `InMemoryJournal`. |
 | `delete_events_before` | `DELETE … WHERE seq <= ?`. |
@@ -335,14 +335,22 @@ storage layouts) is a larger correctness surface than the feature itself.
   both backends) are all held to one spec. This is the highest-value test in
   the change: the trait's doc comments are the real specification, and the SQL
   implementation is the first one where snapshots and compaction do anything.
-- **Store tests on both backends** — the ~15 inline `SqliteConnectOptions` test
-  helpers collapse into one `test_db()` helper. It always yields a SQLite pool
-  and additionally yields a Postgres one when `HORSIE_TEST_POSTGRES_URL` is
-  set, each test running against every available backend.
-- **CI** — a `postgres:17` service is added to the `check` job, with
-  `HORSIE_TEST_POSTGRES_URL` set. `HORSIE_REQUIRE_POSTGRES_TESTS=1` is also set
-  there, so a missing URL fails the run instead of quietly skipping the half of
-  the suite that is the entire point of this change.
+- **The whole suite on both backends** — the ~15 inline `SqliteConnectOptions`
+  helpers collapse into one `db::testing::db()`, which picks its backend from
+  `HORSIE_TEST_POSTGRES_URL`: unset means SQLite, set means a freshly created
+  PostgreSQL database (one per test, since store tests assert on whole-table
+  contents).
+
+  Selecting per *run* rather than looping per *test* is what makes this
+  affordable: every test that touches storage becomes a portability test
+  without being rewritten, so a query that breaks on PostgreSQL fails in
+  whichever test already covers that code path. `DbConfigStore` grows an
+  `open_on(db, deps)` seam so its tests go through the same selection instead
+  of a hardcoded URL.
+- **CI** — a second job runs `cargo test --workspace --all-features` against a
+  `postgres:17` service with `HORSIE_TEST_POSTGRES_URL` set. A whole job, not a
+  conditional inside one, so the PostgreSQL run cannot quietly skip: if the
+  service fails to come up, the job goes red.
 
 ## Consequences
 

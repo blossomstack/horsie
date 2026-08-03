@@ -1,4 +1,4 @@
-//! SQLite-backed [`ConfigStore`]. Owns the settings database, builds the live
+//! Database-backed [`ConfigStore`]. Owns the settings database, builds the live
 //! provider registry and the runtime vendors from it, and applies edits:
 //! provider/model/default-vendor changes swap the live registry (next turn
 //! sees them); vendor changes reconcile the live vendor map immediately — an
@@ -8,7 +8,8 @@
 //!
 //! Vendors are generic — a `vendors(name, kind, config)` table plus a
 //! kind-tagged config union — so a new vendor kind is a new match arm, not a
-//! schema change. `postgres` is a future driver swap behind the same code.
+//! schema change. The database itself is SQLite or PostgreSQL, selected by
+//! `database.url`; see `crate::db`.
 
 use crate::config::ConfigStore;
 use crate::db::Db;
@@ -69,8 +70,14 @@ impl DbConfigStore {
         max_connections: u32,
         deps: StoreDeps,
     ) -> Result<OpenedConfig, String> {
-        let db = Db::open(db_url, max_connections).await?;
+        Self::open_on(Db::open(db_url, max_connections).await?, deps).await
+    }
 
+    /// Build the store on an already-open database.
+    ///
+    /// The seam tests use, so they exercise whichever backend the run selected
+    /// rather than a hardcoded SQLite URL.
+    pub async fn open_on(db: Db, deps: StoreDeps) -> Result<OpenedConfig, String> {
         let provs = read_providers(&db, db.pool())
             .await
             .map_err(|e| e.to_string())?;
@@ -604,40 +611,19 @@ mod tests {
         }
     }
 
-    // `_sqlx_migrations.version` is the primary key, so two migration files that
-    // share a numeric prefix make *every* migration run fail on the second one —
-    // including a first-boot one against an empty database. Two branches that each
-    // took the next free number independently is all it takes, and the resulting
-    // error names the constraint rather than the files, so catch it by name here.
-    #[test]
-    fn migration_versions_are_unique() {
-        let mut seen: std::collections::HashMap<i64, &str> = std::collections::HashMap::new();
-        for m in sqlx::migrate!().iter() {
-            if let Some(other) = seen.insert(m.version, &m.description) {
-                panic!(
-                    "migration version {} is used twice: '{}' and '{}' — renumber the later one",
-                    m.version, other, m.description
-                );
-            }
-        }
-    }
-
-    async fn open(dir: &std::path::Path) -> OpenedConfig {
-        let _ = dir; // kept for signature symmetry with other test helpers in this crate
-        DbConfigStore::open(
-            &format!("sqlite://{}/t.db", dir.display()),
-            StoreDeps { info: info() },
-        )
-        .await
-        .unwrap()
+    // The migration-version uniqueness check that used to live here now covers
+    // both dialect directories, in `crate::db::tests`.
+    async fn open() -> OpenedConfig {
+        DbConfigStore::open_on(crate::db::testing::db().await, StoreDeps { info: info() })
+            .await
+            .unwrap()
     }
 
     /// The flag has to survive the save→read→build round trip, because it is
     /// what keeps a forced-handoff agent from 400ing on DeepSeek.
     #[tokio::test]
     async fn forced_tools_flag_persists_through_a_settings_update() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open(dir.path()).await.store;
+        let store = open().await.store;
 
         store
             .update(SettingsUpdate {
@@ -697,8 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_persists_and_swaps_registry() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let view = o
             .store
             .update(SettingsUpdate {
@@ -715,8 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_window_defaults_for_known_models_and_stays_editable() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let view = o
             .store
             .update(SettingsUpdate {
@@ -761,8 +745,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_preserves_inline_key_when_omitted() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         o.store
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("sk-secret"))]),
@@ -786,8 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_rejects_unknown_provider_and_rolls_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         o.store
             .update(SettingsUpdate {
                 providers: Some(vec![provider("p", Some("k"))]),
@@ -825,8 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_provider_kind_is_accepted() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let view = o
             .store
             .update(SettingsUpdate {
@@ -845,8 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_provider_kind_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let err = o
             .store
             .update(SettingsUpdate {
@@ -917,8 +897,7 @@ mod tests {
 
     #[tokio::test]
     async fn keep_thinking_signature_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
 
         // Defaults off for a fresh provider.
         let view = o
@@ -949,8 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_thinking_config_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let mut m = model("m", "p");
         m.thinking_efforts = Some(vec!["none".into(), "low".into(), "high".into()]);
         m.thinking_effort = Some("high".into());
@@ -975,8 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_thinking_config_defaults_to_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let view = o
             .store
             .update(SettingsUpdate {
@@ -993,8 +970,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_rejects_effort_outside_its_menu() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let mut m = model("m", "p");
         m.thinking_efforts = Some(vec!["low".into()]);
         m.thinking_effort = Some("max".into());
@@ -1016,8 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_rejects_unknown_dialect() {
-        let dir = tempfile::tempdir().unwrap();
-        let o = open(dir.path()).await;
+        let o = open().await;
         let mut m = model("m", "p");
         m.thinking_dialect = Some("telepathy".into());
         let err = o

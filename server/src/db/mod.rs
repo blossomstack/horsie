@@ -370,6 +370,32 @@ mod tests {
         );
     }
 
+    // `_sqlx_migrations.version` is the primary key, so two migration files that
+    // share a numeric prefix make *every* migration run fail on the second one —
+    // including a first-boot one against an empty database. Two branches that
+    // each took the next free number independently is all it takes, and the
+    // resulting error names the constraint rather than the files, so catch it by
+    // name here. Parity means one directory would be enough, but a collision is
+    // cheap to check and this way neither directory depends on the other's test.
+    #[test]
+    fn migration_versions_are_unique() {
+        for (backend, migrator) in [
+            ("sqlite", sqlx::migrate!("migrations/sqlite")),
+            ("postgres", sqlx::migrate!("migrations/postgres")),
+        ] {
+            let mut seen: std::collections::HashMap<i64, &str> = std::collections::HashMap::new();
+            for m in migrator.iter() {
+                if let Some(other) = seen.insert(m.version, &m.description) {
+                    panic!(
+                        "{backend} migration version {} is used twice: '{}' and '{}' \
+                         — renumber the later one",
+                        m.version, other, m.description
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn redaction_hides_the_password_only() {
         assert_eq!(

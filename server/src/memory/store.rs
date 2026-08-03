@@ -1,8 +1,8 @@
-//! SQLite storage for memory spaces and memories, sharing the config store's
-//! pool. No secrets, so this is a plain metadata store (mirrors
+//! Storage for memory spaces and memories, sharing the config store's
+//! database. No secrets, so this is a plain metadata store (mirrors
 //! `plugins::store` without the artifact bookkeeping).
 //!
-//! `memories.space` is not a SQL foreign key -- see `0008_memory.sql` for why.
+//! `memories.space` is not a SQL foreign key -- see `0009_memory.sql` for why.
 //! The relationship is enforced here: `create_memory` checks the space exists,
 //! and `delete_space` / `rename_space` fix up children inside a transaction.
 
@@ -22,8 +22,8 @@ pub struct MemorySpaceRow {
     pub updated_at: String,
 }
 
-/// One row of the `memories` table. `id` is ignored on insert (the column is
-/// AUTOINCREMENT); `create_memory` returns the assigned id.
+/// One row of the `memories` table. `id` is ignored on insert (the column
+/// generates it); `create_memory` returns the assigned id.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryRow {
     pub id: i64,
