@@ -885,6 +885,10 @@ mod tests {
         svc.bootstrap().await.unwrap();
         // A wall of unlabelled secrets is unrevokable in practice: nobody can
         // tell which machine a row belongs to.
-        assert!(svc.mint_agent_token("   ", &Principal::User(1)).await.is_err());
+        assert!(
+            svc.mint_agent_token("   ", &Principal::User(1))
+                .await
+                .is_err()
+        );
     }
 }

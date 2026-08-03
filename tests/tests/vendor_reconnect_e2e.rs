@@ -23,6 +23,7 @@ use horsie_runtime_vendor::{
     Backoff, ConnectedRuntimeRegistry, FixedWorkspaces, HealthStatus, ProviderFactory,
     RuntimeError, RuntimeHandle, RuntimeProvider, RuntimeVendor,
 };
+use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::fake::runtime_spec_fixture;
 use horsie_server::runtime_vendor::{RuntimeVendorLink, RuntimeVendorRegistry};
 use horsie_server::sessions::spec::SharedVendors;
@@ -80,8 +81,10 @@ async fn serve_vendor_connections(registry: Arc<RuntimeVendorRegistry>) -> Socke
                 let Ok(ws) = tokio_tungstenite::accept_async(socket).await else {
                     return;
                 };
-                if let Ok(link) = RuntimeVendorLink::start(ws).await {
-                    registry.register(link);
+                if let Ok(link) = RuntimeVendorLink::start(ws, Principal::Anonymous).await {
+                    // Auth-disabled shape: one anonymous principal owns every
+                    // name, so a reconnect still replaces its own entry.
+                    let _ = registry.register(link);
                 }
             });
         }

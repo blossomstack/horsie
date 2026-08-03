@@ -262,7 +262,9 @@ impl AuthStore {
             .map(|row| {
                 Ok(TokenSummary {
                     id: row.try_get("id").map_err(|e: sqlx::Error| e.to_string())?,
-                    label: row.try_get("label").map_err(|e: sqlx::Error| e.to_string())?,
+                    label: row
+                        .try_get("label")
+                        .map_err(|e: sqlx::Error| e.to_string())?,
                     created_at: row
                         .try_get("created_at")
                         .map_err(|e: sqlx::Error| e.to_string())?,
@@ -852,6 +854,9 @@ mod tests {
 
         s.revoke_token("t-b", 4000).await.unwrap();
         let listed = s.list_tokens_of_kind(TokenKind::Agent).await.unwrap();
-        assert_eq!(listed.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t-a"]);
+        assert_eq!(
+            listed.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["t-a"]
+        );
     }
 }

@@ -20,7 +20,7 @@ mod registry;
 mod transport;
 
 pub use link::RuntimeVendorLink;
-pub use registry::RuntimeVendorRegistry;
+pub use registry::{RegisterError, RuntimeVendorRegistry};
 pub use transport::RuntimeVendorTransport;
 
 use async_trait::async_trait;

@@ -6,6 +6,7 @@
 //! events (state changes, the boot `Ready`) rather than treating an
 //! unmatched id as a protocol error.
 
+use crate::auth::Principal;
 use crate::runtime_vendor::{
     RuntimeSpec, RuntimeVendorTransport, VendorError, VendorRuntime, VendorRuntimeHandle,
 };
@@ -43,6 +44,9 @@ type BoxedSink = Box<
 
 pub struct RuntimeVendorLink {
     vendor_name: String,
+    /// Who presented the credential this link was accepted on. A vendor name is
+    /// owned by its principal, so a stranger cannot displace it.
+    owner: Principal,
     capabilities: horsie_models::runtime_vendor::RuntimeVendorCapabilities,
     sink: Mutex<BoxedSink>,
     waiters: Waiters,
@@ -58,7 +62,7 @@ impl RuntimeVendorLink {
     ///
     /// The first message must be `RuntimeVendorEvent::Ready`; anything else (or
     /// silence past [`HANDSHAKE_TIMEOUT`]) drops the connection.
-    pub async fn start<S>(ws: WebSocketStream<S>) -> Result<Arc<Self>, String>
+    pub async fn start<S>(ws: WebSocketStream<S>, owner: Principal) -> Result<Arc<Self>, String>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -103,6 +107,7 @@ impl RuntimeVendorLink {
         let connected = Arc::new(AtomicBool::new(true));
         let link = Arc::new_cyclic(|this| Self {
             vendor_name: announced.vendor_name,
+            owner,
             capabilities: announced.capabilities,
             sink: Mutex::new(Box::new(sink)),
             waiters: waiters.clone(),
@@ -148,6 +153,11 @@ impl RuntimeVendorLink {
     #[must_use]
     pub fn vendor_name(&self) -> &str {
         &self.vendor_name
+    }
+
+    #[must_use]
+    pub fn owner(&self) -> &Principal {
+        &self.owner
     }
 
     #[must_use]
@@ -402,7 +412,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let link = RuntimeVendorLink::start(server_ws)
+        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         assert_eq!(link.vendor_name(), "my-laptop");
@@ -422,7 +432,7 @@ mod tests {
             .await;
             std::future::pending::<()>().await;
         });
-        let outcome = RuntimeVendorLink::start(server_ws).await;
+        let outcome = RuntimeVendorLink::start(server_ws, Principal::Anonymous).await;
         let Err(err) = outcome else {
             panic!("a non-Ready first message must be rejected");
         };
@@ -456,7 +466,7 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws)
+        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let event = link
@@ -487,7 +497,7 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws)
+        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let Err(err) = link.create("rt-1", &spec_fixture()).await else {
@@ -505,7 +515,7 @@ mod tests {
             drop(agent_ws);
         });
 
-        let link = RuntimeVendorLink::start(server_ws)
+        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let err = link
@@ -556,7 +566,7 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws)
+        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let rt = link.create("rt-1", &spec_fixture()).await.expect("create");
@@ -581,7 +591,7 @@ mod tests {
             send_event(&mut agent_ws, "boot", boot("fixed-dir", false)).await;
             std::future::pending::<()>().await;
         });
-        let link = RuntimeVendorLink::start(server_ws)
+        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         assert!(

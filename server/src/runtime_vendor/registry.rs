@@ -9,6 +9,23 @@ use crate::runtime_vendor::RuntimeVendorLink;
 use crate::sessions::spec::SharedVendors;
 use std::sync::{Arc, PoisonError};
 
+/// Why a registration was refused.
+#[derive(Debug, PartialEq)]
+pub enum RegisterError {
+    /// A live link owned by someone else already answers to this name.
+    NameTaken { by: String },
+}
+
+impl std::fmt::Display for RegisterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NameTaken { by } => {
+                write!(f, "that vendor name is already held by {by}")
+            }
+        }
+    }
+}
+
 pub struct RuntimeVendorRegistry {
     vendors: SharedVendors,
 }
@@ -27,12 +44,24 @@ impl RuntimeVendorRegistry {
     /// runtimes are gone: keeping it would strand every session on a transport
     /// that can never answer, and `RuntimeClient` would latch each of them
     /// disconnected in turn.
-    pub fn register(&self, link: Arc<RuntimeVendorLink>) {
+    /// A *different* principal claiming a live name is refused: silently
+    /// replacing it is how a stranger takes over someone's laptop and starts
+    /// receiving their tool calls. The same principal reconnecting still
+    /// replaces its own entry, so a dropped socket recovers, and with
+    /// authentication disabled every principal is `Anonymous`, which preserves
+    /// today's behaviour exactly.
+    pub fn register(&self, link: Arc<RuntimeVendorLink>) -> Result<(), RegisterError> {
         let name = link.vendor_name().to_string();
-        self.vendors
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(name, link);
+        let mut vendors = self.vendors.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(existing) = vendors.get(&name)
+            && existing.owner() != link.owner()
+        {
+            return Err(RegisterError::NameTaken {
+                by: existing.owner().to_db(),
+            });
+        }
+        vendors.insert(name, link);
+        Ok(())
     }
 
     /// Names currently published. Used by tests today; the settings view's
@@ -57,6 +86,7 @@ impl RuntimeVendorRegistry {
 )]
 mod tests {
     use super::*;
+    use crate::auth::Principal;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use std::collections::HashMap;
     use std::sync::RwLock;
@@ -74,7 +104,7 @@ mod tests {
             .serve_in_process()
             .await
             .expect("agent");
-        registry.register(agent.link());
+        registry.register(agent.link()).expect("registers");
 
         assert_eq!(registry.connected_names(), vec!["my-laptop".to_string()]);
         let published = vendors.read().unwrap();
@@ -94,14 +124,16 @@ mod tests {
             .serve_in_process()
             .await
             .expect("first agent");
-        registry.register(first.link());
+        registry.register(first.link()).expect("registers");
         first.disconnect();
 
         let second = FakeRuntimeVendor::builder("same-name")
             .serve_in_process()
             .await
             .expect("second agent");
-        registry.register(second.link());
+        registry
+            .register(second.link())
+            .expect("reconnect replaces");
 
         // The published vendor must be the live one: a create routed through it
         // reaches the second agent, not the corpse of the first.
@@ -115,5 +147,80 @@ mod tests {
             .expect("create must reach the live agent");
         assert_eq!(second.signals(), vec!["create:rt-1".to_string()]);
         assert!(first.signals().is_empty(), "the dead link must not be used");
+    }
+
+    #[tokio::test]
+    async fn a_different_principal_cannot_take_over_a_live_vendor_name() {
+        let vendors = empty_vendors();
+        let registry = RuntimeVendorRegistry::new(vendors.clone());
+
+        let mine = FakeRuntimeVendor::builder("my-laptop")
+            .owned_by(Principal::User(1))
+            .serve_in_process()
+            .await
+            .expect("agent");
+        registry.register(mine.link()).expect("first claim wins");
+
+        // The hole this closes: before ownership, this silently replaced the
+        // live link and started receiving its tool calls.
+        let attacker = FakeRuntimeVendor::builder("my-laptop")
+            .owned_by(Principal::User(2))
+            .serve_in_process()
+            .await
+            .expect("agent");
+        assert_eq!(
+            registry.register(attacker.link()),
+            Err(RegisterError::NameTaken {
+                by: "user:1".to_string()
+            })
+        );
+
+        // ...and the original is untouched: still exactly one entry, still
+        // owned by the principal that claimed it.
+        assert_eq!(registry.connected_names(), vec!["my-laptop".to_string()]);
+        assert_eq!(mine.link().owner(), &Principal::User(1));
+    }
+
+    #[tokio::test]
+    async fn the_same_principal_reconnecting_still_replaces_its_own_entry() {
+        let vendors = empty_vendors();
+        let registry = RuntimeVendorRegistry::new(vendors.clone());
+
+        let first = FakeRuntimeVendor::builder("same-name")
+            .owned_by(Principal::User(7))
+            .serve_in_process()
+            .await
+            .expect("agent");
+        registry.register(first.link()).expect("first");
+
+        let second = FakeRuntimeVendor::builder("same-name")
+            .owned_by(Principal::User(7))
+            .serve_in_process()
+            .await
+            .expect("agent");
+        // A dropped socket must recover: the old link is dead, and keeping it
+        // would strand every session on a transport that can never answer.
+        registry
+            .register(second.link())
+            .expect("reconnect replaces");
+        assert_eq!(registry.connected_names(), vec!["same-name".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn different_principals_may_hold_different_names() {
+        let vendors = empty_vendors();
+        let registry = RuntimeVendorRegistry::new(vendors.clone());
+        for (name, who) in [("laptop-a", 1), ("laptop-b", 2)] {
+            let agent = FakeRuntimeVendor::builder(name)
+                .owned_by(Principal::User(who))
+                .serve_in_process()
+                .await
+                .expect("agent");
+            registry.register(agent.link()).expect("distinct names");
+            std::mem::forget(agent);
+        }
+        let mut names = registry.connected_names();
+        names.sort();
+        assert_eq!(names, vec!["laptop-a".to_string(), "laptop-b".to_string()]);
     }
 }

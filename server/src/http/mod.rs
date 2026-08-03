@@ -1669,4 +1669,87 @@ mod tests {
             StatusCode::NOT_FOUND
         );
     }
+
+    /// Bring up a real listener so vendor agents can dial a real WS upgrade.
+    async fn serve(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("ws://{addr}/api/vendor/connect")
+    }
+
+    async fn registered_within(
+        agents: &Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
+        name: &str,
+    ) -> bool {
+        for _ in 0..50 {
+            if agents.connected_names().contains(&name.to_string()) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_vendor_dial_without_a_credential_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _pw) = auth_state(&tmp).await;
+        let agents = state.vendor_agents.clone();
+        let url = serve(app(state)).await;
+
+        // The dial fails at the HTTP layer — a 401, not a completed upgrade
+        // that closes, which an agent would retry forever.
+        let err = match crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
+            .connect(&url)
+            .await
+        {
+            Ok(_) => panic!("a bare dial must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("401") || err.to_lowercase().contains("http"),
+            "{err}"
+        );
+        assert!(!registered_within(&agents, "my-laptop").await);
+    }
+
+    #[tokio::test]
+    async fn a_browser_session_token_cannot_drive_a_vendor_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, pw) = auth_state(&tmp).await;
+        // A valid credential of the wrong kind: right principal, but a cookie
+        // has no business being a machine.
+        let web = state.auth.login(&pw).await.unwrap();
+        let agents = state.vendor_agents.clone();
+        let url = serve(app(state)).await;
+
+        let outcome = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
+            .connect_with_token(&url, Some(&web))
+            .await;
+        assert!(outcome.is_err(), "a web token must not open a machine link");
+        assert!(!registered_within(&agents, "my-laptop").await);
+    }
+
+    #[tokio::test]
+    async fn an_agent_token_connects_and_becomes_a_selectable_vendor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _pw) = auth_state(&tmp).await;
+        let (secret, _view) = state
+            .auth
+            .mint_agent_token("my-laptop", &crate::auth::Principal::User(1))
+            .await
+            .unwrap();
+        let agents = state.vendor_agents.clone();
+        let url = serve(app(state)).await;
+
+        let _agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
+            .supports_provisioning(false)
+            .connect_with_token(&url, Some(&secret))
+            .await
+            .expect("agent connects");
+        assert!(registered_within(&agents, "my-laptop").await);
+    }
 }
