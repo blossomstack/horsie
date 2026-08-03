@@ -209,27 +209,39 @@ impl RoutineStore {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Record what a trigger did, and when the next one is due. One statement
-    /// so the two outcome columns can never both be set.
+    /// Move the timer to its next firing. The scheduler calls this *before*
+    /// starting a run, so a run that outlives a tick cannot be picked up as
+    /// still-due and started a second time.
+    pub async fn arm(&self, name: &str, next_run_at_ms: Option<u64>) -> Result<(), String> {
+        sqlx::query("UPDATE routines SET next_run_at_ms = ? WHERE name = ?")
+            .bind(next_run_at_ms.map(|v| v as i64))
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Record what a trigger did. One statement so the two outcome columns can
+    /// never both be set, and deliberately not the timer: arming is the
+    /// scheduler's business and a manual run must not disturb it.
     pub async fn record_run(
         &self,
         name: &str,
         at_ms: u64,
         outcome: &RunOutcome,
-        next_run_at_ms: Option<u64>,
     ) -> Result<(), String> {
         let (session, error) = match outcome {
             RunOutcome::Started(id) => (Some(id.clone()), None),
             RunOutcome::Failed(msg) => (None, Some(msg.clone())),
         };
         sqlx::query(
-            "UPDATE routines SET last_run_at_ms = ?, last_session_id = ?, last_error = ?, \
-             next_run_at_ms = ? WHERE name = ?",
+            "UPDATE routines SET last_run_at_ms = ?, last_session_id = ?, last_error = ? \
+             WHERE name = ?",
         )
         .bind(at_ms as i64)
         .bind(session)
         .bind(error)
-        .bind(next_run_at_ms.map(|v| v as i64))
         .bind(name)
         .execute(&self.pool)
         .await
@@ -327,7 +339,7 @@ mod tests {
         let (s, _p, _t) = store().await;
         assert!(!s.replace(&row("ghost", Schedule::Manual)).await.unwrap());
         s.insert(&row("a", Schedule::Manual)).await.unwrap();
-        s.record_run("a", 500, &RunOutcome::Started("sess-1".into()), None)
+        s.record_run("a", 500, &RunOutcome::Started("sess-1".into()))
             .await
             .unwrap();
 
@@ -377,33 +389,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_run_replaces_the_previous_outcome() {
+    async fn record_run_replaces_the_previous_outcome_and_leaves_the_timer_alone() {
         let (s, _p, _t) = store().await;
         s.insert(&row("a", Schedule::Every { interval_secs: 60 }))
             .await
             .unwrap();
 
-        s.record_run(
-            "a",
-            100,
-            &RunOutcome::Failed("vendor offline".into()),
-            Some(160),
-        )
-        .await
-        .unwrap();
+        s.record_run("a", 100, &RunOutcome::Failed("vendor offline".into()))
+            .await
+            .unwrap();
         let got = s.get("a").await.unwrap().unwrap();
         assert_eq!(got.last_error.as_deref(), Some("vendor offline"));
         assert_eq!(got.last_session_id, None);
-        assert_eq!(got.next_run_at_ms, Some(160));
+        assert_eq!(
+            got.next_run_at_ms,
+            Some(1_000),
+            "recording a run must not move the timer"
+        );
 
         // A later success must not leave the old error behind.
-        s.record_run("a", 200, &RunOutcome::Started("sess-9".into()), Some(260))
+        s.record_run("a", 200, &RunOutcome::Started("sess-9".into()))
             .await
             .unwrap();
         let got = s.get("a").await.unwrap().unwrap();
         assert_eq!(got.last_session_id.as_deref(), Some("sess-9"));
         assert_eq!(got.last_error, None);
         assert_eq!(got.last_run_at_ms, Some(200));
+    }
+
+    #[tokio::test]
+    async fn arm_moves_the_timer_and_disarming_takes_it_out_of_due() {
+        let (s, _p, _t) = store().await;
+        s.insert(&row("a", Schedule::Every { interval_secs: 60 }))
+            .await
+            .unwrap();
+        s.arm("a", Some(61_000)).await.unwrap();
+        assert_eq!(
+            s.get("a").await.unwrap().unwrap().next_run_at_ms,
+            Some(61_000)
+        );
+        assert!(s.due(60_999).await.unwrap().is_empty());
+
+        s.arm("a", None).await.unwrap();
+        assert_eq!(s.get("a").await.unwrap().unwrap().next_run_at_ms, None);
+        assert!(s.due(u64::MAX).await.unwrap().is_empty());
     }
 
     #[tokio::test]

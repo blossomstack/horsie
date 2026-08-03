@@ -26,9 +26,11 @@ impl RoutineScheduler {
 
     /// Fire every routine due at `now_ms`.
     ///
-    /// The next firing is computed from `now_ms` and written *with* the run's
-    /// outcome, whether or not the run started: a routine whose vendor is
-    /// offline must wait for its next interval, not be retried every tick.
+    /// Each one is *claimed first* — its timer moved to the next firing before
+    /// the run is started. Two things follow, both deliberate: a run that takes
+    /// longer than a tick cannot be found still-due and started twice, and a
+    /// routine whose vendor is offline waits out its interval instead of being
+    /// retried on every tick.
     pub async fn tick(&self, now_ms: u64) {
         let due = match self.routines.due(now_ms).await {
             Ok(due) => due,
@@ -39,7 +41,13 @@ impl RoutineScheduler {
         };
         for routine in due {
             let next = next_run_at(&routine.schedule, routine.enabled, now_ms);
-            if let Err(e) = self.runner.run(&routine.name, now_ms, next).await {
+            if let Err(e) = self.routines.arm(&routine.name, next).await {
+                // Unclaimed, so skipped: running it now would leave it due and
+                // firing again on the next tick, and every tick after that.
+                tracing::error!(routine = %routine.name, error = %e, "arming a routine failed");
+                continue;
+            }
+            if let Err(e) = self.runner.run(&routine.name, now_ms).await {
                 tracing::warn!(routine = %routine.name, error = %e, "routine run did not start");
             }
         }

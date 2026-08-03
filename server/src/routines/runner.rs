@@ -45,69 +45,31 @@ impl RoutineRunner {
 
     /// Trigger `name`: create its session and queue its prompt.
     ///
-    /// `next_run_at_ms` is what the routine's timer should be re-armed to; the
-    /// caller decides it (the scheduler advances the clock, a manual run leaves
-    /// it alone), and it is written together with the outcome so a routine can
-    /// never end up with a recorded run and a stale timer.
+    /// The routine's timer is not touched — arming it is the scheduler's
+    /// business, taken as a claim before the run starts, so pressing the run
+    /// button never moves the next scheduled firing.
     ///
     /// Returns as soon as both the session and the message are accepted — the
     /// turn itself runs in the background and reports through the session.
-    pub async fn run(
-        &self,
-        name: &str,
-        now_ms: u64,
-        next_run_at_ms: Option<u64>,
-    ) -> Result<SessionSummary, RoutineError> {
+    pub async fn run(&self, name: &str, now_ms: u64) -> Result<SessionSummary, RoutineError> {
         match self.start(name, now_ms).await {
             Ok(summary) => {
-                self.record(
-                    name,
-                    now_ms,
-                    RunOutcome::Started(summary.id.clone()),
-                    next_run_at_ms,
-                )
-                .await;
+                self.record(name, now_ms, RunOutcome::Started(summary.id.clone()))
+                    .await;
                 Ok(summary)
             }
             Err(e) => {
                 // Only a failure to *start* is recorded here. A run that began
                 // and then failed reports through its own session.
-                self.record(
-                    name,
-                    now_ms,
-                    RunOutcome::Failed(e.to_string()),
-                    next_run_at_ms,
-                )
-                .await;
+                self.record(name, now_ms, RunOutcome::Failed(e.to_string()))
+                    .await;
                 Err(e)
             }
         }
     }
 
-    /// Trigger `name` by hand (the run endpoint, the UI button), leaving its
-    /// timer exactly where it was: pressing the button is not a reason for the
-    /// next scheduled firing to move.
-    pub async fn run_manual(
-        &self,
-        name: &str,
-        now_ms: u64,
-    ) -> Result<SessionSummary, RoutineError> {
-        let armed = self.routines.row(name).await?.next_run_at_ms;
-        self.run(name, now_ms, armed).await
-    }
-
-    async fn record(
-        &self,
-        name: &str,
-        now_ms: u64,
-        outcome: RunOutcome,
-        next_run_at_ms: Option<u64>,
-    ) {
-        if let Err(e) = self
-            .routines
-            .record_run(name, now_ms, &outcome, next_run_at_ms)
-            .await
-        {
+    async fn record(&self, name: &str, now_ms: u64, outcome: RunOutcome) {
+        if let Err(e) = self.routines.record_run(name, now_ms, &outcome).await {
             // The run already happened; losing its bookkeeping must not undo
             // it or stop the next one.
             tracing::error!(routine = %name, error = %e, "recording a routine run failed");
@@ -333,7 +295,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let summary = f.runner.run("nightly", 2_000, None).await.unwrap();
+        let summary = f.runner.run("nightly", 2_000).await.unwrap();
         assert_eq!(summary.created_at, 2_000);
         assert_eq!(summary.name.as_deref(), Some("nightly"));
 
@@ -360,7 +322,7 @@ pub(crate) mod tests {
         let f = runner_fixture(false).await;
         f.routines.create(input("nightly", None), 0).await.unwrap();
 
-        let err = f.runner.run("nightly", 2_000, None).await.unwrap_err();
+        let err = f.runner.run("nightly", 2_000).await.unwrap_err();
         assert!(matches!(err, RoutineError::Invalid(m) if m.contains("not connected")));
         assert!(sessions(&f.supervisor).await.is_empty());
 
@@ -375,9 +337,33 @@ pub(crate) mod tests {
         f.routines.create(input("nightly", None), 0).await.unwrap();
         f._fixture.agents.delete("reviewer").await.unwrap();
 
-        let err = f.runner.run("nightly", 1, None).await.unwrap_err();
+        let err = f.runner.run("nightly", 1).await.unwrap_err();
         assert!(matches!(err, RoutineError::Invalid(m) if m.contains("reviewer")));
         assert!(sessions(&f.supervisor).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_by_hand_leaves_the_timer_where_it_was() {
+        // Pressing run is not a reason for the next scheduled firing to move.
+        let f = runner_fixture(true).await;
+        f.routines
+            .create(
+                input(
+                    "hourly",
+                    Some(RoutineSchedule::Every(EverySchedule {
+                        interval_secs: 3_600,
+                    })),
+                ),
+                1_000,
+            )
+            .await
+            .unwrap();
+        let armed = f.routines.get("hourly").await.unwrap().next_run_at_ms;
+
+        f.runner.run("hourly", 2_000).await.unwrap();
+        let after = f.routines.get("hourly").await.unwrap();
+        assert_eq!(after.next_run_at_ms, armed);
+        assert_eq!(after.last_run_at_ms, Some(2_000));
     }
 
     #[tokio::test]

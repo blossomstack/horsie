@@ -107,10 +107,7 @@ pub async fn run_routine(
 ) -> Result<(StatusCode, Json<RoutineRunResponse>), Api> {
     state
         .routine_runner
-        // `next_run_at_ms: None` would disarm the timer, so a manual run keeps
-        // the routine's own next firing: pressing the button does not reset the
-        // schedule.
-        .run_manual(&name, now_ms())
+        .run(&name, now_ms())
         .await
         .map(|session| (StatusCode::CREATED, Json(RoutineRunResponse { session })))
         .map_err(api_err)

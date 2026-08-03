@@ -174,15 +174,23 @@ impl RoutineService {
             .map_err(RoutineError::Internal)
     }
 
+    /// Move the timer to its next firing (the scheduler's claim, taken before
+    /// a run starts).
+    pub async fn arm(&self, name: &str, next_run_at_ms: Option<u64>) -> Result<(), RoutineError> {
+        self.store
+            .arm(name, next_run_at_ms)
+            .await
+            .map_err(RoutineError::Internal)
+    }
+
     pub async fn record_run(
         &self,
         name: &str,
         at_ms: u64,
         outcome: &RunOutcome,
-        next_run_at_ms: Option<u64>,
     ) -> Result<(), RoutineError> {
         self.store
-            .record_run(name, at_ms, outcome, next_run_at_ms)
+            .record_run(name, at_ms, outcome)
             .await
             .map_err(RoutineError::Internal)
     }
@@ -493,7 +501,7 @@ pub(crate) mod tests {
     async fn replace_re_arms_the_schedule_and_keeps_created_at() {
         let (s, _t) = service().await;
         let created = s.create(input("a", None), 1_000).await.unwrap();
-        s.record_run("a", 2_000, &RunOutcome::Started("sess-1".into()), None)
+        s.record_run("a", 2_000, &RunOutcome::Started("sess-1".into()))
             .await
             .unwrap();
 
