@@ -1514,6 +1514,24 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
         send_message(&client, &server.addr, &id, "run something slow").await;
         wait_status(&client, &server.addr, &id, "Running").await;
 
+        // `Running` is reported at turn *start* — before the provider answers and
+        // before any tool call reaches the runtime. Stopping there cancels an empty
+        // in-flight set and writes nothing to the wire, so the assertion below would
+        // be measuring a race rather than the behaviour. Wait for the call to
+        // genuinely arrive: the fake records it before blocking on its gate, and
+        // `RuntimeClient` tracks a call before sending it, so an arrival here means
+        // `cancel_in_flight` has something to find.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while agent.tool_agent_ids().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the tool call never reached the runtime, so there was nothing to \
+                 cancel (signals seen: {:?})",
+                agent.signals()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
         let res = client
             .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
             .json(&serde_json::json!({}))
