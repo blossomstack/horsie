@@ -14,7 +14,8 @@
 use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, WorkspaceSpec};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
+    HookManifestResponse, HookOutcomeWire, RunHookResponse, RuntimeInboundMessage,
+    RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
     ToolCallResponse, ToolOutput, ToolResult, WorkspaceScan,
 };
 use horsie_models::runtime_vendor::{
@@ -589,6 +590,32 @@ async fn run_agent<S>(
                         RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
                             call_id: req.call_id,
                             context: String::new(),
+                        }),
+                    ),
+                    // This fake serves sessions with no plugin library, so it
+                    // reports no hooks — the same answer a real runtime gives
+                    // when `plugins_dir` is unset.
+                    RuntimeInboundMessage::HookManifest(req) => Some(
+                        RuntimeOutboundMessage::HookManifestResult(HookManifestResponse {
+                            call_id: req.call_id,
+                            entries: Vec::new(),
+                            unsupported: Vec::new(),
+                        }),
+                    ),
+                    RuntimeInboundMessage::RunHook(req) => Some(
+                        RuntimeOutboundMessage::RunHookResult(RunHookResponse {
+                            call_id: req.call_id,
+                            outcome: HookOutcomeWire {
+                                blocked: false,
+                                reason: None,
+                                additional_context: None,
+                                updated_input: None,
+                                updated_tool_output: None,
+                                system_message: None,
+                                stop: false,
+                                stop_reason: None,
+                                failed: false,
+                            },
                         }),
                     ),
                 };

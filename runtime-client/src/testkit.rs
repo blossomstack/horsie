@@ -8,7 +8,8 @@ use crate::transport::{RuntimeTransport, TransportError};
 use async_trait::async_trait;
 use horsie_agentcore::testkit::Script;
 use horsie_models::runtime::{
-    PluginSkill, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
+    HookDeclWire, HookManifestResponse, HookOutcomeWire, PluginSkill, RunHookResponse,
+    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
     ToolCall, ToolCallResponse, ToolError, ToolOutput, ToolResult, WorkspaceScan,
 };
 use std::sync::{Arc, Mutex, PoisonError};
@@ -106,6 +107,11 @@ pub struct MockTransport {
     shared: Vec<PluginSkill>,
     shared_root: Option<String>,
     session_context: String,
+    /// What `hook_manifest` reports: declarations, and events horsie cannot run.
+    hook_entries: Vec<HookDeclWire>,
+    hook_unsupported: Vec<String>,
+    /// What every `run_hook` returns. Defaults to an all-clear outcome.
+    hook_outcome: HookOutcomeWire,
     /// When set, `invoke` waits on this gate before answering.
     invoke_gate: Option<Arc<Notify>>,
     /// When set, `scan_workspace` and `run_session_start` wait on this gate.
@@ -124,6 +130,19 @@ impl MockTransport {
             shared: Vec::new(),
             shared_root: None,
             session_context: String::new(),
+            hook_entries: Vec::new(),
+            hook_unsupported: Vec::new(),
+            hook_outcome: HookOutcomeWire {
+                blocked: false,
+                reason: None,
+                additional_context: None,
+                updated_input: None,
+                updated_tool_output: None,
+                system_message: None,
+                stop: false,
+                stop_reason: None,
+                failed: false,
+            },
             invoke_gate: None,
             prep_gate: None,
             cancels: Arc::new(Mutex::new(Vec::new())),
@@ -237,6 +256,25 @@ impl MockTransport {
         self
     }
 
+    /// Override the canned hook manifest.
+    #[must_use]
+    pub fn with_hook_manifest(
+        mut self,
+        entries: Vec<HookDeclWire>,
+        unsupported: Vec<String>,
+    ) -> Self {
+        self.hook_entries = entries;
+        self.hook_unsupported = unsupported;
+        self
+    }
+
+    /// Override the canned outcome every `run_hook` returns.
+    #[must_use]
+    pub fn with_hook_outcome(mut self, outcome: HookOutcomeWire) -> Self {
+        self.hook_outcome = outcome;
+        self
+    }
+
     /// Override the canned `SessionStart` context.
     #[must_use]
     pub fn with_session_context(mut self, context: impl Into<String>) -> Self {
@@ -330,6 +368,19 @@ impl RuntimeTransport for MockTransport {
                         context: self.session_context.clone(),
                     },
                 ))
+            }
+            RuntimeInboundMessage::HookManifest(req) => Ok(
+                RuntimeOutboundMessage::HookManifestResult(HookManifestResponse {
+                    call_id: req.call_id,
+                    entries: self.hook_entries.clone(),
+                    unsupported: self.hook_unsupported.clone(),
+                }),
+            ),
+            RuntimeInboundMessage::RunHook(req) => {
+                Ok(RuntimeOutboundMessage::RunHookResult(RunHookResponse {
+                    call_id: req.call_id,
+                    outcome: self.hook_outcome.clone(),
+                }))
             }
             // A cancel draws no reply, so relaying one would hang a real
             // transport; a test that does it has a bug worth surfacing.
