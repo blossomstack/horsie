@@ -507,6 +507,14 @@
       "code": {
         "displayName": "Code",
         "purpose": "Tool input/output, thinking text, .field-mono, prose code and pre."
+      },
+      "field": {
+        "displayName": "Field",
+        "purpose": "Text typed into a recessed slot: .field inputs, textareas and selects."
+      },
+      "kbd": {
+        "displayName": "Keycap hint",
+        "purpose": "The .kbd inline keyboard hint. Defined and reserved; not yet used in the app."
       }
     },
     "shadows": [

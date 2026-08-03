@@ -202,7 +202,9 @@ body {
 }
 
 /* Every focusable thing gets the same amber ring — on an instrument you must
- * always be able to see which control your hands are on. */
+ * always be able to see which control your hands are on. The 2px radius is a
+ * reserved single-purpose value (DESIGN.md `rounded.focus`): it traces the
+ * control tightly whatever shape it wraps, and nothing else may use it. */
 :focus-visible {
   outline: 2px solid var(--amber);
   outline-offset: 2px;

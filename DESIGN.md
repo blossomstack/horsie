@@ -78,11 +78,24 @@ typography:
     fontSize: "11px"
     lineHeight: 1.625
     fontVariation: "'wdth' 87.5"
+  field:
+    fontFamily: "Archivo Variable, system-ui, sans-serif"
+    fontSize: "0.875rem"
+    fontWeight: 400
+  kbd:
+    fontFamily: "Martian Mono Variable, ui-monospace, SF Mono, monospace"
+    fontSize: "9px"
+    letterSpacing: "0.04em"
 rounded:
   chip: "3px"
   control: "4px"
   cap: "6px"
   panel: "8px"
+  # Reserved single-purpose radii. Not general-purpose steps: each belongs to
+  # exactly one part and nothing else may reach for it.
+  scrollbar: "1px"
+  focus: "2px"
+  lamp: "999px"
 components:
   key:
     backgroundColor: "{colors.keycap}"
@@ -285,7 +298,7 @@ Beyond these, depth is drawn with 1px inset rings rather than shadows: `shadow-[
 
 Four machined radii, and nothing between them: **3px** (`--radius-chip`) for chips, `kbd`, inline prose code, and small hit-target hover shells; **4px** (`--radius-control`) for fields, screens, icon keys, nav rows, banners, code blocks; **6px** (`--radius-cap`) for keycaps; **8px** (`--radius-panel`) for panels. Reach them as `var(--radius-*)` or the Tailwind `rounded-[var(--radius-control)]` form.
 
-Two deliberate exceptions: the **lamp** is a 7px circle (`999px`) — the only pill in the system, because a real indicator lamp is round; and `:focus-visible` normalises to a 2px radius so the amber outline traces the control tightly regardless of what it wraps.
+Three radii sit outside that scale, and each is reserved to exactly one part rather than being a step you may choose: the **lamp** is a 7px circle (`999px`) — the only pill in the system, because a real indicator lamp is round; `:focus-visible` normalises to **2px** so the amber outline traces a control tightly regardless of what it wraps; and the **scrollbar thumb** is **1px**, because the channel is machined, not pill-shaped. They are recorded in the `rounded` scale as `lamp`, `focus` and `scrollbar` so the system is auditable, not so they are available.
 
 Borders are hairline and uniform: `* { border-color: var(--rule) }` is set globally, so `border`, `border-b`, `border-l` need no colour class. Weight is carried by `rule-strong`, never by thickness — except `.kbd`, whose 2px bottom border is the one place a border models a physical edge.
 
@@ -365,7 +378,7 @@ One authored gesture: things arrive by settling into the panel, and values cross
 - **Don't** drive syntax highlighting, charts, or any decorative colour from `--orange` or `--amber`. Code has its own `--code-*` palette; anything else needs a new semantic token with a stated meaning.
 - **Don't** convey state with colour alone — no bare coloured dot, no red text with no word, no "the button turns green".
 - **Don't** make a light-theme keycap pale. A keycap is a different material from its panel in both themes; pale-on-pale measured 1.16:1 and destroyed the signature separation.
-- **Don't** introduce a new radius. 3 / 4 / 6 / 8px, plus the lamp's circle. No pills, no `rounded-full` on a control.
+- **Don't** introduce a new radius. 3 / 4 / 6 / 8px are the scale; `lamp` (999px), `focus` (2px) and `scrollbar` (1px) are reserved to those three parts and nothing else. No pills, no `rounded-full` on a control.
 - **Don't** add a fifth shadow, a glow, or an elevation scale. Lift or recess, four tokens.
 - **Don't** import a font from a CDN or add a third family. horsie servers run on LANs with no internet route; both faces are self-hosted through `@fontsource-variable`.
 - **Don't** replace `--screen-inset` when adding a focus ring — append to it.
