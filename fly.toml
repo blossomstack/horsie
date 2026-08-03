@@ -1,0 +1,23 @@
+# Template for `fly launch` / `fly deploy` — see
+# docs/guide/self-hosting.md#deploying-to-flyio. Fly has no browser deploy
+# button; `fly launch` assigns its own unique app name on first run, so the
+# `app` value below is just a placeholder it will overwrite.
+app = 'horsie'
+primary_region = 'iad'
+
+[build]
+  image = 'ghcr.io/blossomstack/horsie:latest'
+
+[http_service]
+  internal_port = 3789
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[http_service.checks]]
+  grace_period = '10s'
+  interval = '30s'
+  method = 'GET'
+  timeout = '5s'
+  path = '/api/health'
