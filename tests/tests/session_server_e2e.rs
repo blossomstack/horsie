@@ -138,23 +138,23 @@ async fn start_server_with(
     // the custom `mock` registry/vendor above, so the store's own registry is
     // unused. It is the same store the journal above runs on.
     let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(opened.pool.clone()),
+        horsie_server::github::GithubStore::new(opened.db.clone()),
         horsie_server::github::GithubApi::new(),
     ));
     let plugins = Arc::new(horsie_server::plugins::PluginService::new(
-        horsie_server::plugins::PluginStore::new(opened.pool.clone()),
+        horsie_server::plugins::PluginStore::new(opened.db.clone()),
         horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
         b"e2e-secret".to_vec(),
     ));
     let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.pool.clone()),
+        horsie_server::mcp::McpStore::new(opened.db.clone()),
         github.clone(),
     ));
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(opened.pool.clone()),
+        horsie_server::memory::MemoryStore::new(opened.db.clone()),
     ));
     let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(opened.pool.clone()),
+        horsie_server::agents::AgentStore::new(opened.db.clone()),
         opened.store.clone(),
     ));
     let routines = Arc::new(horsie_server::routines::RoutineService::new(
@@ -165,7 +165,7 @@ async fn start_server_with(
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
     let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.pool.clone()),
+        horsie_server::auth::AuthStore::new(opened.db.clone()),
         horsie_server::auth::AuthDeps {
             enabled: false,
             state_dir: journal_dir.to_path_buf(),
@@ -187,7 +187,7 @@ async fn start_server_with(
         auth,
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
-            opened.pool.clone(),
+            opened.db.clone(),
         )),
         github,
         mcp,
@@ -299,23 +299,23 @@ async fn start_server_with_live_vendors(
     let (gtx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
     let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(opened.pool.clone()),
+        horsie_server::github::GithubStore::new(opened.db.clone()),
         horsie_server::github::GithubApi::new(),
     ));
     let plugins = Arc::new(horsie_server::plugins::PluginService::new(
-        horsie_server::plugins::PluginStore::new(opened.pool.clone()),
+        horsie_server::plugins::PluginStore::new(opened.db.clone()),
         horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
         b"e2e-secret".to_vec(),
     ));
     let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.pool.clone()),
+        horsie_server::mcp::McpStore::new(opened.db.clone()),
         github.clone(),
     ));
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(opened.pool.clone()),
+        horsie_server::memory::MemoryStore::new(opened.db.clone()),
     ));
     let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(opened.pool.clone()),
+        horsie_server::agents::AgentStore::new(opened.db.clone()),
         opened.store.clone(),
     ));
     let routines = Arc::new(horsie_server::routines::RoutineService::new(
@@ -326,7 +326,7 @@ async fn start_server_with_live_vendors(
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
     let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.pool.clone()),
+        horsie_server::auth::AuthStore::new(opened.db.clone()),
         horsie_server::auth::AuthDeps {
             enabled: false,
             state_dir: journal_dir.to_path_buf(),
@@ -348,7 +348,7 @@ async fn start_server_with_live_vendors(
         auth,
         config_store: opened.store,
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
-            opened.pool.clone(),
+            opened.db.clone(),
         )),
         github,
         mcp,

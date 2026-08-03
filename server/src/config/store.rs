@@ -21,7 +21,7 @@ use horsie_models::settings::{
 };
 use horsie_openai::OpenAiProvider;
 use sqlx::Row;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
+use crate::db::Db;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -42,11 +42,11 @@ pub struct OpenedConfig {
     pub vendors: SharedVendors,
     /// The migrated connection pool, shared with feature stores (e.g. GitHub)
     /// that persist into the same settings DB.
-    pub pool: SqlitePool,
+    pub db: Db,
 }
 
 pub struct DbConfigStore {
-    pool: SqlitePool,
+    db: Db,
     registry: SharedProviderRegistry,
     /// The name new sessions prefer. A preference, not a validated reference:
     /// the agent that answers to it may connect long after boot.
@@ -61,10 +61,12 @@ impl DbConfigStore {
     /// Open (creating if absent) the database, run migrations, and build the
     /// live registry + vendors from it.
     pub async fn open(db_url: &str, deps: StoreDeps) -> Result<OpenedConfig, String> {
-        let pool = open_pool(db_url).await?;
+        let db = open_pool(db_url).await?;
 
-        let provs = read_providers(&pool).await.map_err(|e| e.to_string())?;
-        let mods = read_models(&pool).await.map_err(|e| e.to_string())?;
+        let provs = read_providers(&db, db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
+        let mods = read_models(&db, db.pool()).await.map_err(|e| e.to_string())?;
         let registry: SharedProviderRegistry =
             Arc::new(RwLock::new(build_registry(&provs, &mods)?));
 
@@ -76,13 +78,13 @@ impl DbConfigStore {
         // Kept as a preference even when no agent has connected yet — an agent
         // announcing this name later makes it take effect, so validating it
         // against the (empty) live map at boot would be wrong.
-        let default_vendor = read_setting(&pool, "default_vendor")
+        let default_vendor = read_setting(&db, db.pool(), "default_vendor")
             .await
             .map_err(|e| e.to_string())?
             .unwrap_or_else(|| "local".into());
 
         let store = Arc::new(Self {
-            pool: pool.clone(),
+            db: db.clone(),
             registry: registry.clone(),
             default_vendor: RwLock::new(default_vendor),
             vendors: vendors.clone(),
@@ -92,15 +94,15 @@ impl DbConfigStore {
             store,
             registry,
             vendors,
-            pool,
+            db,
         })
     }
 
     async fn build_view(&self) -> Result<SettingsView, String> {
-        let provs = read_providers(&self.pool)
+        let provs = read_providers(&self.db, self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
-        let mods = read_models(&self.pool).await.map_err(|e| e.to_string())?;
+        let mods = read_models(&self.db, self.db.pool()).await.map_err(|e| e.to_string())?;
         let default_vendor = self.default_vendor();
         Ok(SettingsView {
             providers: provs.iter().map(provider_view).collect(),
@@ -138,16 +140,16 @@ impl ConfigStore for DbConfigStore {
     }
 
     async fn update(&self, update: SettingsUpdate) -> Result<SettingsView, String> {
-        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
+        let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
 
         if let Some(providers) = &update.providers {
-            let existing = read_providers(&mut *tx).await.map_err(|e| e.to_string())?;
+            let existing = read_providers(&self.db, &mut *tx).await.map_err(|e| e.to_string())?;
             let keep: HashMap<&str, &str> = existing
                 .iter()
                 .filter_map(|r| r.api_key.as_deref().map(|k| (r.name.as_str(), k)))
                 .collect();
             let mut seen = HashSet::new();
-            sqlx::query("DELETE FROM providers")
+            sqlx::query(&self.db.q("DELETE FROM providers"))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -166,9 +168,9 @@ impl ConfigStore for DbConfigStore {
                     return Err(format!("duplicate provider '{name}'"));
                 }
                 let api_key = resolve_secret(&p.api_key, keep.get(name).copied());
-                sqlx::query(
+                sqlx::query(&self.db.q(
                     "INSERT INTO providers (name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?)",
-                )
+                ))
                 .bind(name)
                 .bind(&p.kind)
                 .bind(trimmed(&p.base_url))
@@ -182,7 +184,7 @@ impl ConfigStore for DbConfigStore {
 
         if let Some(models) = &update.models {
             let mut seen = HashSet::new();
-            sqlx::query("DELETE FROM models")
+            sqlx::query(&self.db.q("DELETE FROM models"))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -222,9 +224,9 @@ impl ConfigStore for DbConfigStore {
                         "model '{alias}' default thinking effort '{def}' is not among its offered efforts"
                     ));
                 }
-                sqlx::query(
+                sqlx::query(&self.db.q(
                     "INSERT INTO models (alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                )
+                ))
                 .bind(alias)
                 .bind(&m.provider)
                 .bind(m.model_id.trim())
@@ -248,10 +250,10 @@ impl ConfigStore for DbConfigStore {
             // answering to this name may connect long after the preference is
             // set, and rejecting it here would make the setting unusable
             // before its agent is running.
-            sqlx::query(
+            sqlx::query(&self.db.q(
                 "INSERT INTO settings (key, value) VALUES ('default_vendor', ?) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            )
+            ))
             .bind(dv)
             .execute(&mut *tx)
             .await
@@ -260,8 +262,8 @@ impl ConfigStore for DbConfigStore {
 
         // Validate providers/models by building the registry from the new state
         // before committing — a bad edit rolls back untouched.
-        let provs = read_providers(&mut *tx).await.map_err(|e| e.to_string())?;
-        let mods = read_models(&mut *tx).await.map_err(|e| e.to_string())?;
+        let provs = read_providers(&self.db, &mut *tx).await.map_err(|e| e.to_string())?;
+        let mods = read_models(&self.db, &mut *tx).await.map_err(|e| e.to_string())?;
         let new_registry = build_registry(&provs, &mods)?;
 
         tx.commit().await.map_err(|e| e.to_string())?;
@@ -495,44 +497,29 @@ pub(crate) fn encode_efforts(list: Option<&Vec<String>>) -> Option<String> {
 
 // ── connection + row reads ───────────────────────────────────────────────────
 
-pub(crate) async fn open_pool(url: &str) -> Result<SqlitePool, String> {
-    let opts = SqliteConnectOptions::from_str(url)
-        .map_err(|e| format!("invalid database url '{url}': {e}"))?
-        .create_if_missing(true)
-        // Wait for a contended write rather than failing it. The pool hands out
-        // several connections, and authentication put a (throttled) token write
-        // on the path of every API request — without this, a write that lands
-        // while another connection holds the database surfaces as an immediate
-        // `database is locked` instead of a short wait.
-        .busy_timeout(std::time::Duration::from_secs(5))
-        // WAL, because this database also carries the actor journal. The default
-        // (`DELETE`) takes an exclusive lock over the whole file for every write,
-        // which would serialize session writes against the token write on every
-        // authenticated request. WAL lets readers run through a write.
-        .journal_mode(SqliteJournalMode::Wal)
-        // FULL matches the durability the file journal gets from `sync_all` per
-        // batch, which is what `CommandEffect::PersistAndAck` promises its
-        // callers: the ack means the event is on disk, not merely in the WAL.
-        .synchronous(SqliteSynchronous::Full);
-    let pool = SqlitePool::connect_with(opts)
-        .await
-        .map_err(|e| format!("open database '{url}': {e}"))?;
-    sqlx::migrate!()
-        .run(&pool)
-        .await
-        .map_err(|e| format!("run migrations: {e}"))?;
-    Ok(pool)
+/// Default pool size. Sized for one server process sharing the pool between
+/// settings reads and journal writes.
+pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 10;
+
+/// Open (creating a SQLite file if absent) and migrate the settings database.
+///
+/// Connection tuning — WAL, the busy timeout, create-if-missing — moved into
+/// [`Db::open`], which is the only place that knows which dialect is in play.
+pub(crate) async fn open_pool(url: &str) -> Result<Db, String> {
+    Db::open(url, DEFAULT_MAX_CONNECTIONS).await
 }
 
-async fn read_providers<'e, E>(ex: E) -> Result<Vec<ProviderRow>, sqlx::Error>
+// These take the `Db` for its dialect and the executor separately, because the
+// caller is sometimes a pool and sometimes an open transaction — the dialect is
+// a property of the database, not of whichever handle is running the statement.
+async fn read_providers<'e, E>(db: &Db, ex: E) -> Result<Vec<ProviderRow>, sqlx::Error>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
-    let rows = sqlx::query(
+    let sql = db.q(
         "SELECT name, kind, base_url, api_key, keep_thinking_signature FROM providers ORDER BY name",
-    )
-    .fetch_all(ex)
-    .await?;
+    );
+    let rows = sqlx::query(&sql).fetch_all(ex).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ProviderRow {
@@ -546,15 +533,14 @@ where
     Ok(out)
 }
 
-async fn read_models<'e, E>(ex: E) -> Result<Vec<ModelRow>, sqlx::Error>
+async fn read_models<'e, E>(db: &Db, ex: E) -> Result<Vec<ModelRow>, sqlx::Error>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
-    let rows = sqlx::query(
+    let sql = db.q(
         "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking FROM models ORDER BY alias",
-    )
-    .fetch_all(ex)
-    .await?;
+    );
+    let rows = sqlx::query(&sql).fetch_all(ex).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ModelRow {
@@ -573,11 +559,12 @@ where
     Ok(out)
 }
 
-async fn read_setting(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
-    let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
-        .bind(key)
-        .fetch_optional(pool)
-        .await?;
+async fn read_setting<'e, E>(db: &Db, ex: E, key: &str) -> Result<Option<String>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
+    let sql = db.q("SELECT value FROM settings WHERE key = ?");
+    let row = sqlx::query(&sql).bind(key).fetch_optional(ex).await?;
     match row {
         Some(r) => Ok(Some(r.try_get("value")?)),
         None => Ok(None),
@@ -862,14 +849,14 @@ mod tests {
         assert!(err.contains("cohere"), "error names the kind: {err}");
     }
 
+    /// SQLite-only: it asserts on `pragma_table_info`, and it exists because
+    /// SQLite's `DROP COLUMN` is recent enough to be worth pinning. The
+    /// PostgreSQL mirror of 0006 is plain standard DDL with nothing to pin.
     #[tokio::test]
     async fn migration_0006_drops_api_key_env_and_preserves_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/old.db", dir.path().display());
-        let opts = SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = SqlitePool::connect_with(opts).await.unwrap();
+        // Deliberately unmigrated: the point is to build the pre-0006 schema
+        // by hand and then apply exactly that one migration to it.
+        let pool = &crate::db::testing::unmigrated_sqlite().await;
 
         // Mirror the pre-0006 `providers` shape (0001_init.sql).
         sqlx::query(
@@ -877,26 +864,26 @@ mod tests {
                 name TEXT PRIMARY KEY, kind TEXT NOT NULL, base_url TEXT,
                 api_key_env TEXT, api_key TEXT)",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
         sqlx::query(
             "INSERT INTO providers (name, kind, base_url, api_key_env, api_key) \
              VALUES ('p', 'anthropic', NULL, 'OLD_ENV_VAR', 'sk-inline')",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
 
         sqlx::query(include_str!(
             "../../migrations/sqlite/0006_drop_api_key_env.sql"
         ))
-            .execute(&pool)
+            .execute(pool)
             .await
             .expect("DROP COLUMN should succeed on the bundled sqlite");
 
         let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('providers')")
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
             .unwrap()
             .iter()
@@ -905,7 +892,7 @@ mod tests {
         assert!(!cols.iter().any(|c| c == "api_key_env"));
 
         let row = sqlx::query("SELECT name, api_key FROM providers WHERE name = 'p'")
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
             .unwrap();
         assert_eq!(row.try_get::<String, _>("name").unwrap(), "p");

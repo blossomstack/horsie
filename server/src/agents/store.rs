@@ -3,7 +3,8 @@
 //! `session_api::RepoConfig` (protocol types are not storage types).
 
 use sqlx::Row;
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use crate::db::Db;
+use sqlx::any::AnyRow;
 
 const COLS: &str = "name, description, vendor, model, repos, plugins, \
                     mcp_servers, memory_spaces, thinking_effort, created_at, updated_at";
@@ -35,26 +36,26 @@ pub struct AgentRow {
 }
 
 pub struct AgentStore {
-    pool: SqlitePool,
+    db: Db,
 }
 
 impl AgentStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     pub async fn list(&self) -> Result<Vec<AgentRow>, String> {
-        let rows = sqlx::query(&format!("SELECT {COLS} FROM agents ORDER BY name"))
-            .fetch_all(&self.pool)
+        let rows = sqlx::query(&self.db.q(&format!("SELECT {COLS} FROM agents ORDER BY name")))
+            .fetch_all(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         rows.iter().map(row_to_agent).collect()
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<AgentRow>, String> {
-        let row = sqlx::query(&format!("SELECT {COLS} FROM agents WHERE name = ?"))
+        let row = sqlx::query(&self.db.q(&format!("SELECT {COLS} FROM agents WHERE name = ?")))
             .bind(name)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         row.as_ref().map(row_to_agent).transpose()
@@ -63,9 +64,9 @@ impl AgentStore {
     /// Insert; errs when the name is taken (no upsert -- a silent overwrite
     /// would discard the existing preset).
     pub async fn insert(&self, row: &AgentRow) -> Result<(), String> {
-        sqlx::query(&format!(
+        sqlx::query(&self.db.q(&format!(
             "INSERT INTO agents ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        ))
+        )))
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.vendor)
@@ -77,7 +78,7 @@ impl AgentStore {
         .bind(&row.thinking_effort)
         .bind(&row.created_at)
         .bind(&row.updated_at)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| format!("create agent '{}': {e}", row.name))?;
         Ok(())
@@ -85,11 +86,11 @@ impl AgentStore {
 
     /// Full replace. Returns false when no agent has that name.
     pub async fn replace(&self, row: &AgentRow) -> Result<bool, String> {
-        let res = sqlx::query(
+        let res = sqlx::query(&self.db.q(
             "UPDATE agents SET description = ?, vendor = ?, model = ?, repos = ?, \
              plugins = ?, mcp_servers = ?, memory_spaces = ?, thinking_effort = ?, \
              updated_at = ? WHERE name = ?",
-        )
+        ))
         .bind(&row.description)
         .bind(&row.vendor)
         .bind(&row.model)
@@ -100,16 +101,16 @@ impl AgentStore {
         .bind(&row.thinking_effort)
         .bind(&row.updated_at)
         .bind(&row.name)
-        .execute(&self.pool)
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 
     pub async fn delete(&self, name: &str) -> Result<bool, String> {
-        let res = sqlx::query("DELETE FROM agents WHERE name = ?")
+        let res = sqlx::query(&self.db.q("DELETE FROM agents WHERE name = ?"))
             .bind(name)
-            .execute(&self.pool)
+            .execute(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
@@ -124,7 +125,7 @@ fn from_json<T: serde::de::DeserializeOwned>(col: &str, text: String) -> Result<
     serde_json::from_str(&text).map_err(|e| format!("agents.{col}: {e}"))
 }
 
-fn row_to_agent(row: &SqliteRow) -> Result<AgentRow, String> {
+fn row_to_agent(row: &AnyRow) -> Result<AgentRow, String> {
     let get = |c: &str| row.try_get::<String, _>(c).map_err(|e| e.to_string());
     let get_opt = |c: &str| {
         row.try_get::<Option<String>, _>(c)
@@ -153,12 +154,7 @@ mod tests {
 
     async fn store() -> (AgentStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
+        let pool = crate::db::testing::db().await;
         (AgentStore::new(pool), tmp)
     }
 

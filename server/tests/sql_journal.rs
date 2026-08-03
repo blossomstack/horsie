@@ -24,25 +24,24 @@ use uuid::Uuid;
 /// Each gets its own namespace so a database that outlives the process — unlike
 /// a temp dir or a fresh map — cannot carry rows from an earlier run into this
 /// one.
-async fn for_each_backend<F, Fut>(assertion: F)
+async fn on_this_backend<F, Fut>(assertion: F)
 where
     F: Fn(Box<dyn Journal>, String) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    for backend in testing::backends().await {
-        let dialect = backend.dialect();
-        let journal: Box<dyn Journal> = Box::new(SqlJournal::new(backend.db().clone()));
-        let ns = format!("conf-{}", Uuid::new_v4().simple());
-        println!("running against {}", dialect.as_str());
-        assertion(journal, ns).await;
-    }
+    let db = testing::db().await;
+    let journal: Box<dyn Journal> = Box::new(SqlJournal::new(db));
+    // A unique namespace per run: unlike a temp dir or a fresh map, a database
+    // can outlive the process and carry rows into the next run.
+    let ns = format!("conf-{}", Uuid::new_v4().simple());
+    assertion(journal, ns).await;
 }
 
 macro_rules! contract_test {
     ($name:ident) => {
         #[tokio::test]
         async fn $name() {
-            for_each_backend(|j, ns| async move { contract::$name(j.as_ref(), &ns).await }).await;
+            on_this_backend(|j, ns| async move { contract::$name(j.as_ref(), &ns).await }).await;
         }
     };
 }
@@ -66,8 +65,10 @@ async fn replay_pages_a_log_longer_than_one_page() {
     use futures_util::StreamExt;
     use horsie_actor::PersistenceId;
 
-    for backend in testing::backends().await {
-        let journal = SqlJournal::new(backend.db().clone());
+    let db = testing::db().await;
+    let dialect = db.dialect();
+    {
+        let journal = SqlJournal::new(db.clone());
         let pid = PersistenceId::new(format!("paging-{}", Uuid::new_v4().simple()), "a");
 
         // 2 500 events: two full pages plus a partial one.
@@ -87,7 +88,7 @@ async fn replay_pages_a_log_longer_than_one_page() {
             seen,
             events,
             "a {} log spanning several pages must replay whole and in order",
-            backend.dialect().as_str()
+            dialect.as_str()
         );
     }
 }
@@ -99,14 +100,16 @@ async fn replay_pages_a_log_longer_than_one_page() {
 async fn a_fresh_journal_continues_numbering_from_the_database() {
     use horsie_actor::PersistenceId;
 
-    for backend in testing::backends().await {
+    let db = testing::db().await;
+    let dialect = db.dialect();
+    {
         let pid = PersistenceId::new(format!("restart-{}", Uuid::new_v4().simple()), "a");
 
-        let first = SqlJournal::new(backend.db().clone());
+        let first = SqlJournal::new(db.clone());
         first.persist(&pid, &[vec![1], vec![2]]).await.unwrap();
 
         // A new instance over the same database stands in for a restart.
-        let second = SqlJournal::new(backend.db().clone());
+        let second = SqlJournal::new(db.clone());
         second.persist(&pid, &[vec![3]]).await.unwrap();
 
         #[expect(
@@ -126,7 +129,7 @@ async fn a_fresh_journal_continues_numbering_from_the_database() {
             events,
             vec![vec![1], vec![2], vec![3]],
             "on {}, a restarted journal must not reuse sequence numbers",
-            backend.dialect().as_str()
+            dialect.as_str()
         );
     }
 }
@@ -139,15 +142,17 @@ async fn numbering_survives_a_restart_after_full_compaction() {
     use futures_util::StreamExt;
     use horsie_actor::PersistenceId;
 
-    for backend in testing::backends().await {
+    let db = testing::db().await;
+    let dialect = db.dialect();
+    {
         let pid = PersistenceId::new(format!("compacted-{}", Uuid::new_v4().simple()), "a");
 
-        let first = SqlJournal::new(backend.db().clone());
+        let first = SqlJournal::new(db.clone());
         first.persist(&pid, &[vec![1], vec![2]]).await.unwrap();
         first.save_snapshot(&pid, vec![99], 2).await.unwrap();
         first.delete_events_before(&pid, 2).await.unwrap();
 
-        let second = SqlJournal::new(backend.db().clone());
+        let second = SqlJournal::new(db.clone());
         second.persist(&pid, &[vec![3]]).await.unwrap();
 
         #[expect(
@@ -166,7 +171,7 @@ async fn numbering_survives_a_restart_after_full_compaction() {
             after_snapshot,
             vec![vec![3]],
             "on {}, the event after a compacted snapshot must be seq 3, not seq 1",
-            backend.dialect().as_str()
+            dialect.as_str()
         );
     }
 }

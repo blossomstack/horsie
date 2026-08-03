@@ -105,7 +105,20 @@ impl Db {
                         // Not expressible in the URL or in `AnyConnectOptions`
                         // (see the module docs), so they are issued per
                         // connection instead.
+                        //
+                        // WAL because this database also carries the actor
+                        // journal: the default `DELETE` takes an exclusive lock
+                        // over the whole file per write, serializing session
+                        // writes against the token write on every authenticated
+                        // request.
                         conn.execute("PRAGMA journal_mode = WAL").await?;
+                        // FULL, set explicitly rather than left to the compile
+                        // default: SQLite has a *separate* default for WAL
+                        // databases (`SQLITE_DEFAULT_WAL_SYNCHRONOUS`), so
+                        // relying on the default would silently give NORMAL on
+                        // some builds. `CommandEffect::PersistAndAck` promises
+                        // the ack means the event reached the disk.
+                        conn.execute("PRAGMA synchronous = FULL").await?;
                         conn.execute(
                             format!("PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}").as_str(),
                         )
@@ -157,6 +170,19 @@ impl Db {
         match self.dialect {
             Dialect::Sqlite => Cow::Borrowed(sql),
             Dialect::Postgres => Cow::Owned(to_dollar_placeholders(sql)),
+        }
+    }
+
+    /// SQL for "now", as TEXT in the shape the `*_at` TEXT columns use
+    /// (`YYYY-MM-DD HH:MM:SS`, UTC).
+    ///
+    /// The one place the two dialects need different *expressions* rather than
+    /// different DDL. Kept here, next to the dialect, so a query that needs it
+    /// interpolates this instead of growing its own match.
+    pub fn now_text(&self) -> &'static str {
+        match self.dialect {
+            Dialect::Sqlite => "datetime('now')",
+            Dialect::Postgres => "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')",
         }
     }
 

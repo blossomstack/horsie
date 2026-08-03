@@ -269,7 +269,7 @@ mod tests {
             .await
             .unwrap();
         (
-            AgentService::new(AgentStore::new(opened.pool.clone()), opened.store.clone()),
+            AgentService::new(AgentStore::new(opened.db.clone()), opened.store.clone()),
             tmp,
         )
     }

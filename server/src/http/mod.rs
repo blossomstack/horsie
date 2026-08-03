@@ -289,26 +289,26 @@ mod tests {
         .await
         .unwrap();
         let github = Arc::new(crate::github::GithubService::new(
-            crate::github::GithubStore::new(opened.pool.clone()),
+            crate::github::GithubStore::new(opened.db.clone()),
             crate::github::GithubApi::new(),
         ));
         let plugins = Arc::new(crate::plugins::PluginService::new(
-            crate::plugins::PluginStore::new(opened.pool.clone()),
+            crate::plugins::PluginStore::new(opened.db.clone()),
             crate::plugins::ArtifactStore::new(tmp.path().join("plugins")),
             b"test-secret".to_vec(),
         ));
         let mcp = Arc::new(crate::mcp::McpService::new(
-            crate::mcp::McpStore::new(opened.pool.clone()),
+            crate::mcp::McpStore::new(opened.db.clone()),
             github.clone(),
         ));
         let memory = Arc::new(crate::memory::MemoryService::new(
-            crate::memory::MemoryStore::new(opened.pool.clone()),
+            crate::memory::MemoryStore::new(opened.db.clone()),
         ));
         let model_cards = Arc::new(crate::config::model_cards::ModelCardStore::new(
-            opened.pool.clone(),
+            opened.db.clone(),
         ));
         let agents = Arc::new(crate::agents::AgentService::new(
-            crate::agents::AgentStore::new(opened.pool.clone()),
+            crate::agents::AgentStore::new(opened.db.clone()),
             opened.store.clone(),
         ));
         let routines = Arc::new(crate::routines::RoutineService::new(
@@ -336,7 +336,7 @@ mod tests {
         // and a disabled deployment is a real supported configuration, not a
         // test-only escape. `auth_state` turns it on.
         let auth = Arc::new(crate::auth::AuthService::new(
-            crate::auth::AuthStore::new(opened.pool.clone()),
+            crate::auth::AuthStore::new(opened.db.clone()),
             crate::auth::AuthDeps {
                 enabled: false,
                 state_dir: tmp.path().to_path_buf(),
@@ -370,21 +370,15 @@ mod tests {
     /// `test_state` with authentication enabled and the admin account
     /// bootstrapped. Returns the state and the generated password.
     ///
-    /// Opens a second pool on the same file `test_state` already created and
-    /// migrated, rather than reaching through the `Arc<dyn ConfigStore>` trait
-    /// object for its pool — the auth tables live in that database, but auth
-    /// has no business widening the config trait to get at them.
+    /// Gives auth its own database rather than reaching through the
+    /// `Arc<dyn ConfigStore>` trait object for the one `test_state` opened —
+    /// the auth tables live alongside the config tables in production, but auth
+    /// has no business widening the config trait to get at them, and no
+    /// assertion here spans both.
     async fn auth_state(tmp: &tempfile::TempDir) -> (AppState, String) {
-        use std::str::FromStr;
         let mut state = test_state(tmp).await;
-        let url = format!("sqlite://{}/config.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
         let svc = Arc::new(crate::auth::AuthService::new(
-            crate::auth::AuthStore::new(pool),
+            crate::auth::AuthStore::new(crate::db::testing::db().await),
             crate::auth::AuthDeps {
                 enabled: true,
                 state_dir: tmp.path().to_path_buf(),

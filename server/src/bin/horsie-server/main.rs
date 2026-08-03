@@ -101,7 +101,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     // file. Seed-file parse/read errors are fatal (operator input should fail
     // loud); DB errors only warn — the admin API stays usable to fix state.
     // Insert-if-missing semantics mean admin edits survive every restart.
-    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(opened.pool.clone()));
+    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(opened.db.clone()));
     let seed_path = cli
         .model_cards_seed
         .clone()
@@ -129,23 +129,23 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     ));
 
     let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(opened.pool.clone()),
+        horsie_server::github::GithubStore::new(opened.db.clone()),
         horsie_server::github::GithubApi::new(),
     ));
     let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.pool.clone()),
+        horsie_server::mcp::McpStore::new(opened.db.clone()),
         github.clone(),
     ));
     let plugins = Arc::new(PluginService::new(
-        PluginStore::new(opened.pool.clone()),
+        PluginStore::new(opened.db.clone()),
         ArtifactStore::new(data_dir.join("plugins")),
         artifact_secret(),
     ));
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(opened.pool.clone()),
+        horsie_server::memory::MemoryStore::new(opened.db.clone()),
     ));
     let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(opened.pool.clone()),
+        horsie_server::agents::AgentStore::new(opened.db.clone()),
         opened.store.clone(),
     ));
     let routines = Arc::new(horsie_server::routines::RoutineService::new(
@@ -154,7 +154,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     ));
 
     let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.pool.clone()),
+        horsie_server::auth::AuthStore::new(opened.db.clone()),
         horsie_server::auth::AuthDeps {
             enabled: config::auth_enabled(&cfg),
             state_dir: state_dir.clone(),

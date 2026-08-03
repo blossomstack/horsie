@@ -434,12 +434,7 @@ mod tests {
 
     async fn service() -> (McpService, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/t.db", tmp.path().display());
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await.unwrap();
-        sqlx::migrate!().run(&pool).await.unwrap();
+        let pool = crate::db::testing::db().await;
         let github = Arc::new(GithubService::new(
             GithubStore::new(pool.clone()),
             GithubApi::new(),

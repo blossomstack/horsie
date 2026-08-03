@@ -1,61 +1,66 @@
-//! Test databases, one per backend the run can reach.
+//! The test database, on whichever backend the run selects.
 //!
-//! Every store test and the journal conformance suite go through [`backends`],
-//! so a query that works on SQLite and breaks on PostgreSQL fails in the same
-//! test that covers it rather than in a deployment. SQLite is always available;
-//! PostgreSQL joins in when `HORSIE_TEST_POSTGRES_URL` points at a scratch
-//! server.
+//! Every test that needs storage calls [`db`], and the backend comes from the
+//! environment rather than the test: unset means SQLite, and
+//! `HORSIE_TEST_POSTGRES_URL` means a freshly created PostgreSQL database. CI
+//! runs the whole suite twice, once each way, so *every* test that touches
+//! storage — not just the handful written with two backends in mind — is a
+//! portability test.
 //!
-//! Set `HORSIE_REQUIRE_POSTGRES_TESTS=1` to turn a missing URL into a failure.
-//! CI sets both, so the half of the suite that is the entire point of the
-//! two-backend work cannot quietly stop running.
+//! That is the cheap version of a guarantee that would otherwise need each test
+//! rewritten as a loop: a query that works on SQLite and breaks on PostgreSQL
+//! fails in whichever test already covers that code path.
 
 use crate::db::{Db, Dialect};
 use sqlx::any::AnyPoolOptions;
 use uuid::Uuid;
 
-/// A database a test may use, kept alive for the test's duration.
+/// A fresh, migrated, empty database on the backend this run selected.
 ///
-/// The temp dir is held because dropping it deletes the SQLite file out from
-/// under the pool.
-pub struct TestDb {
-    pub db: Db,
-    _tmp: Option<tempfile::TempDir>,
-}
-
-impl TestDb {
-    pub fn db(&self) -> &Db {
-        &self.db
+/// Returns the `Db` alone, with nothing for the caller to keep alive: helpers
+/// that already own a temp dir for their own fixtures can drop this straight
+/// into a store constructor.
+pub async fn db() -> Db {
+    match postgres().await {
+        Some(db) => db,
+        None => sqlite().await,
     }
-
-    pub fn dialect(&self) -> Dialect {
-        self.db.dialect()
-    }
-}
-
-/// Every backend this run can exercise, each freshly migrated and empty.
-///
-/// A test iterates the result and runs its assertions once per backend.
-pub async fn backends() -> Vec<TestDb> {
-    let mut out = vec![sqlite().await];
-    if let Some(pg) = postgres().await {
-        out.push(pg);
-    }
-    out
 }
 
 /// A fresh SQLite database in a temp dir.
 ///
 /// A file rather than `:memory:`: an in-memory database lives per connection
 /// unless shared-cache is negotiated, and the pool hands out several.
-pub async fn sqlite() -> TestDb {
-    let tmp = tempfile::tempdir().expect("create temp dir for the test database");
-    let url = format!("sqlite://{}/test.db", tmp.path().display());
-    let db = Db::open(&url, 5).await.expect("open the test sqlite database");
-    TestDb {
-        db,
-        _tmp: Some(tmp),
-    }
+///
+/// The temp dir is deliberately leaked (`keep`) rather than returned for the
+/// caller to hold. Tying its lifetime to a guard would mean threading that
+/// guard through every test helper, and dropping it early deletes the database
+/// file out from under a live pool — a confusing failure for a saving of a few
+/// kilobytes in the OS temp directory.
+pub async fn sqlite() -> Db {
+    let dir = tempfile::tempdir()
+        .expect("create temp dir for the test database")
+        .keep();
+    let url = format!("sqlite://{}/test.db", dir.display());
+    Db::open(&url, 5).await.expect("open the test sqlite database")
+}
+
+/// An empty SQLite pool with **no** migrations applied.
+///
+/// Only for tests that reconstruct a historical schema by hand and then apply
+/// one migration to it — they need the database as it was before, which
+/// [`sqlite`] cannot give them because it migrates all the way up.
+pub async fn unmigrated_sqlite() -> sqlx::AnyPool {
+    sqlx::any::install_default_drivers();
+    let dir = tempfile::tempdir()
+        .expect("create temp dir for the test database")
+        .keep();
+    let url = format!("sqlite://{}/test.db?mode=rwc", dir.display());
+    AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("open an unmigrated sqlite database")
 }
 
 /// A freshly created PostgreSQL database, or `None` when none is configured.
@@ -66,15 +71,10 @@ pub async fn sqlite() -> TestDb {
 /// to be disposable (a CI service container, or a local scratch instance), and
 /// a cleanup pass keyed on a name prefix would race other test binaries running
 /// concurrently under `cargo test`.
-pub async fn postgres() -> Option<TestDb> {
-    let Some(base) = std::env::var("HORSIE_TEST_POSTGRES_URL").ok().filter(|s| !s.is_empty()) else {
-        assert!(
-            std::env::var("HORSIE_REQUIRE_POSTGRES_TESTS").as_deref() != Ok("1"),
-            "HORSIE_REQUIRE_POSTGRES_TESTS=1 but HORSIE_TEST_POSTGRES_URL is unset — \
-             the PostgreSQL half of the suite would have been skipped silently"
-        );
-        return None;
-    };
+pub async fn postgres() -> Option<Db> {
+    let base = std::env::var("HORSIE_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.is_empty())?;
 
     sqlx::any::install_default_drivers();
     let name = format!("horsie_test_{}", Uuid::new_v4().simple());
@@ -91,10 +91,11 @@ pub async fn postgres() -> Option<TestDb> {
         .unwrap_or_else(|e| panic!("create test database {name}: {e}"));
     admin.close().await;
 
-    let db = Db::open(&swap_database(&base, &name), 5)
-        .await
-        .unwrap_or_else(|e| panic!("open test database {name}: {e}"));
-    TestDb { db, _tmp: None }.into()
+    Some(
+        Db::open(&swap_database(&base, &name), 5)
+            .await
+            .unwrap_or_else(|e| panic!("open test database {name}: {e}")),
+    )
 }
 
 /// Replace the database component of a PostgreSQL URL, preserving any query
