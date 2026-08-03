@@ -37,7 +37,7 @@ futures-util      = "0.3"
 uuid              = { version = "1", features = ["v4", "serde"] }
 rand              = "0.8"
 argon2            = "0.5"
-async-llm         = { version = "0.7.0", git = "https://github.com/blossomstack/async-llm.git", rev = "b499ec1c87921f415381e0813f79e8255459b45d" }
+async-llm         = "0.8.0"
 axum              = { version = "0.7", features = ["macros"] }
 tower-http        = { version = "0.5", features = ["fs"] }
 parking_lot       = "0.12"
