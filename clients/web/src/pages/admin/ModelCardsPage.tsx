@@ -50,6 +50,7 @@ function ModelCardsSection() {
         setEditing(null);
       }}
       addLabel="Add card"
+      addTestId="add-model-card"
       empty={cards?.length === 0 && !adding ? "No model cards." : null}
     >
       {isLoading && <p className="text-sm text-faint">Loading…</p>}
@@ -236,6 +237,10 @@ function ModelCardEditor({
           },
         });
         setDirty(false);
+        // Back to the row. The list is the resting state of this page now, so
+        // an editor left open after a successful save is a page that looks
+        // like it did nothing.
+        onDone();
       }
     } catch (e) {
       setError(e instanceof ApiRequestError ? e.message : "Save failed.");

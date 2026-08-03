@@ -28,6 +28,7 @@ export function Section({
   children,
   onAdd,
   addLabel,
+  addTestId,
   empty,
 }: {
   title: string;
@@ -35,6 +36,7 @@ export function Section({
   children: ReactNode;
   onAdd?: () => void;
   addLabel?: string;
+  addTestId?: string;
   empty?: string | null;
 }) {
   return (
@@ -47,7 +49,7 @@ export function Section({
           </p>
         </div>
         {onAdd && (
-          <button className="key shrink-0" onClick={onAdd}>
+          <button className="key shrink-0" onClick={onAdd} data-testid={addTestId}>
             <Plus size={13} aria-hidden /> {addLabel}
           </button>
         )}
