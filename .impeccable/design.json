@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-03T00:00:00Z",
+  "generatedAt": "2026-08-03T18:30:00Z",
   "title": "Design System: horsie",
   "extensions": {
     "colorMeta": {
@@ -494,7 +494,9 @@
       },
       "readout": {
         "displayName": "Readout",
-        "purpose": "A live measured value. Tabular so digits never jitter as they tick. Size set at the call site (10-13px)."
+        "purpose": "A live measured value. Tabular so digits never jitter as they tick. Size set at the call site (10-13px).",
+        "fontVariation": "'wdth' var(--readout-width)",
+        "color": "var(--readout-ink)"
       },
       "key": {
         "displayName": "Key",
@@ -515,6 +517,33 @@
       "kbd": {
         "displayName": "Keycap hint",
         "purpose": "The .kbd inline keyboard hint. Defined and reserved; not yet used in the app."
+      },
+      "sectionTitle": {
+        "role": "A section or panel heading, one level under the pane title.",
+        "cssClass": ".section-title",
+        "fontFamily": "var(--legend-face)",
+        "fontSize": "12px",
+        "fontWeight": 600,
+        "letterSpacing": "var(--legend-tracking)",
+        "textTransform": "var(--legend-transform)",
+        "note": "Consolidated: this role previously shipped in two renditions \u2014 mono uppercase 12px in the settings panels and sans 14px in Account, Memory and Skills."
+      },
+      "itemTitle": {
+        "role": "The name of one row in a list: a memory, a skill bundle, a model, a card.",
+        "cssClass": ".item-title",
+        "fontFamily": "var(--font-mono)",
+        "fontSize": "13px",
+        "fontWeight": 600,
+        "fontVariation": "'wdth' var(--readout-width)",
+        "note": "A machine string, so this stays mono in every skin."
+      },
+      "pageTitle": {
+        "role": "The h1 of a pane: session title, settings page, agents, routines.",
+        "cssClass": ".page-title",
+        "fontFamily": "var(--font-sans)",
+        "fontSize": "15px",
+        "fontWeight": 600,
+        "letterSpacing": "-0.01em"
       }
     },
     "shadows": [
@@ -544,8 +573,8 @@
       },
       {
         "name": "ring-rule",
-        "value": "inset 0 0 0 1px var(--rule)",
-        "purpose": "Hairline outline standing in for a shadow: .key-blank, settings row shells, popover triggers."
+        "value": "inset 0 0 0 1px var(--row-ring)",
+        "purpose": "Hairline outline standing in for a shadow: list rows, form pickers, the user bubble. Driven by --row-ring rather than --rule so a borderless skin can remove it from the seam. .key-blank still reads --rule directly - it is a control outline, not a row edge."
       },
       {
         "name": "ring-rule-strong",
@@ -640,6 +669,62 @@
       "worstLight": "4.55 - red-ink on screen",
       "materialSeparation": "keycap:panel 9.55 dark / 6.81 light; pale-cap-on-pale-body collapsed to 1.16.",
       "script": "clients/web/scripts/contrast.mjs"
+    },
+    "skins": {
+      "attribute": "data-skin",
+      "default": "console",
+      "note": "Four visual worlds over identical layouts. A skin replaces material, never structure: same components, same data-testids, same positions. Console is the default and carries no attribute, so index.css keeps the specificity it was written against. Paper/Soft/Slate live in src/skins.css and each declares its FULL palette per mode rather than patching Console.",
+      "worlds": [
+        {
+          "id": "console",
+          "name": "Console",
+          "face": "Archivo + Martian Mono",
+          "accent": "safety orange",
+          "character": "Machined gunmetal, engraved mono legends, keys with travel."
+        },
+        {
+          "id": "paper",
+          "name": "Paper",
+          "face": "Libre Franklin",
+          "accent": "ink blue",
+          "character": "Editorial calm on a cool near-white \u2014 deliberately not the cream-plus-serif-plus-terracotta rendition. No panel borders; sentence-case legends."
+        },
+        {
+          "id": "soft",
+          "name": "Soft",
+          "face": "Manrope",
+          "accent": "muted violet",
+          "character": "Elevation instead of borders, 6-14px radii, warm neutral greys."
+        },
+        {
+          "id": "slate",
+          "name": "Slate",
+          "face": "Archivo (reused, no extra fetch)",
+          "accent": "safety orange",
+          "character": "Reductive monochrome: no borders, no shadows, value steps only."
+        }
+      ],
+      "seam": {
+        "note": "Everything a skin may vary reaches the app through these. Anything else a skin needs to vary requires a NEW seam variable, never a per-skin override at a call site.",
+        "variables": {
+          "--face-sans": "The reading and UI face.",
+          "--face-mono": "The machine-string face.",
+          "--r-chip / --r-control / --r-cap / --r-panel": "The radius scale.",
+          "--legend-face / --legend-size / --legend-tracking / --legend-transform / --legend-width": "Legend character. The mannered feel of Martian Mono comes from this combination far more than from the face.",
+          "--prose-measure": "Cap on running-text line length; the 54rem column is for tables and code.",
+          "--prose-heading-face": "Prose headings; Console moved these off mono.",
+          "--readout-ink": "A live measured value's colour. Console amber; a one-accent skin uses legend-dim.",
+          "--readout-width": "Mono width axis for readouts, item titles and mono fields.",
+          "--row-ring": "The hairline on a list row, a form picker and a user bubble. A borderless skin sets this transparent."
+        }
+      },
+      "invariants": [
+        "Material roles hold across modes by order, never brightness: screen most recessed, raised most lifted.",
+        "A status is a lamp AND a word. No skin may reduce one to colour alone.",
+        "Syntax highlighting keeps its own --code-* palette, distinct from the semantic four.",
+        "AA is measured by clients/web/scripts/contrast.mjs, which parses index.css and skins.css and gates all 8 palettes. It reads the shipped CSS rather than restating values, so it cannot drift."
+      ],
+      "layering": "index.css must @import skins.css first (CSS requires imports before rules), so Console's seam defaults live in @layer base. At equal :root weight, source order would otherwise let them beat every skin \u2014 colours escaped only because [data-skin][data-theme] is (0,2,0). Layering settles it by precedence, which also keeps data-skin working on a plain element (the Appearance page's preview swatches set it on a div)."
     }
   },
   "components": [
@@ -719,7 +804,7 @@
       "name": "Chip",
       "kind": "chip",
       "refersTo": "chip",
-      "description": "An engraved tag on the panel face: versions, Default, not tested, ask-user choices. Selected choices border amber.",
+      "description": "An engraved tag on the panel face: versions, Default, not tested, ask-user choices. Selected choices border amber. `.chip-wrap` is the variant for content of unbounded length - an ask_user choice is whatever the model wrote, and `.chip`'s nowrap sent long ones out of the card. `.chip` keeps nowrap, which is right for the short tags it was built for.",
       "html": "<span class=\"ds-chip\">Default</span> <button class=\"ds-chip ds-chip-choice\">Rebase</button> <button class=\"ds-chip ds-chip-choice ds-chip-selected\">Merge</button>",
       "css": ".ds-chip { display: inline-flex; align-items: center; gap: 0.375rem; border-radius: var(--radius-chip, 3px); border: 1px solid var(--rule); background: var(--panel-raised); padding: 0.125rem 0.4375rem; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-weight: 500; letter-spacing: 0.04em; font-variation-settings: \"wdth\" 87.5; color: var(--legend-dim); white-space: nowrap; } .ds-chip-choice { cursor: pointer; } .ds-chip-choice:hover { border-color: var(--amber); } .ds-chip-selected { border-color: var(--amber); background: color-mix(in oklch, var(--amber) 15%, transparent); font-weight: 600; color: var(--legend); } .ds-chip-choice:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }"
     },
@@ -732,32 +817,49 @@
       "css": ".ds-rail { display: flex; flex-direction: column; gap: 1px; background: var(--panel); padding: 0.5rem; border-radius: var(--radius-panel, 8px); } .ds-row { display: flex; align-items: flex-start; gap: 0.625rem; border-radius: var(--radius-control, 4px); padding: 0.5rem 0.625rem; text-decoration: none; color: var(--legend-dim); transition: background 120ms ease, color 120ms ease; } .ds-row:hover { background: var(--panel-raised); color: var(--legend); } .ds-row-active { background: var(--panel-raised); color: var(--legend); box-shadow: inset 0 0 0 1px var(--rule-strong); } .ds-row-text { min-width: 0; flex: 1; } .ds-row-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-sans, \"Archivo Variable\", system-ui, sans-serif); font-size: 13px; line-height: 1.25rem; } .ds-row-meta { display: block; margin-top: 0.125rem; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--legend-faint); font-variation-settings: \"wdth\" 100; } .ds-lamp { position: relative; display: inline-block; height: 7px; width: 7px; flex: none; border-radius: 999px; background: currentColor; box-shadow: 0 0 6px currentColor; }"
     },
     {
-      "name": "Readout Channel",
-      "kind": "custom",
-      "refersTo": "readout",
-      "description": "The header strip's unit: an engraved legend over its value. Amber and tabular when the value is live and measured; legend-coloured mono when the value is settled session config.",
-      "html": "<div class=\"ds-strip\"><button class=\"ds-channel ds-channel-live\"><span class=\"ds-legend\">Tokens</span><span class=\"ds-readout\">267</span></button><span class=\"ds-channel\"><span class=\"ds-legend\">Model</span><span class=\"ds-value\">mock-sonnet</span></span><span class=\"ds-channel\"><span class=\"ds-legend\">Runtime</span><span class=\"ds-value\">e2e</span></span></div>",
-      "css": ".ds-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem; } .ds-channel { display: flex; flex-direction: column; min-width: 0; border: none; background: transparent; padding: 0.125rem 0.25rem; border-radius: var(--radius-chip, 3px); text-align: left; } .ds-channel-live { cursor: pointer; transition: background 120ms ease; } .ds-channel-live:hover { background: var(--panel-raised); } .ds-legend { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-weight: 500; line-height: 1.4; letter-spacing: 0.1em; text-transform: uppercase; color: var(--legend-faint); font-variation-settings: \"wdth\" 100; } .ds-readout { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-variant-numeric: tabular-nums; font-variation-settings: \"wdth\" 87.5; letter-spacing: 0.01em; font-size: 13px; color: var(--amber-ink); } .ds-value { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; color: var(--legend); font-variation-settings: \"wdth\" 87.5; }"
-    },
-    {
       "name": "Tool Call Row",
       "kind": "custom",
       "refersTo": "tool-call",
       "description": "A logged tool call: collapsed it is one line of the recording; expanded it shows raw input and output on recessed screens.",
       "html": "<div class=\"ds-tool\"><button class=\"ds-tool-head\"><svg class=\"ds-tool-chev\" width=\"11\" height=\"11\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m9 18 6-6-6-6\"/></svg><svg class=\"ds-tool-ok\" width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"m9 12 2 2 4-4\"/></svg><span class=\"ds-tool-name\">bash</span><span class=\"ds-tool-preview\">echo 'ran 200 iterations'</span></button></div>",
       "css": ".ds-tool-head { display: flex; width: 100%; align-items: center; gap: 0.5rem; margin: 0 -0.375rem; border: none; background: transparent; border-radius: var(--radius-chip, 3px); padding: 0.25rem 0.375rem; text-align: left; cursor: pointer; transition: background 120ms ease; } .ds-tool-head:hover { background: var(--panel-raised); } .ds-tool-chev { flex: none; color: var(--legend-faint); transition: transform 150ms ease; } .ds-tool-head[aria-expanded=\"true\"] .ds-tool-chev { transform: rotate(90deg); } .ds-tool-ok { flex: none; color: var(--lamp-ok); } .ds-tool-name { flex: none; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; font-weight: 500; letter-spacing: 0.02em; color: var(--legend); } .ds-tool-preview { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; color: var(--legend-faint); } .ds-tool-head:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }"
+    },
+    {
+      "name": "Channel Key",
+      "kind": "button",
+      "refersTo": "key-icon",
+      "description": "One configurable channel of a session, as a bare icon key. Holds a value -> raised background and full ink; unset -> faint; needs attention -> amber. State is the control's own colour, never a dot in its corner: four pixels there did the work of a whole control, and orange competed with the one orange key that commits. The channel name AND its current value both live in title and aria-label, so nothing is lost to a hover or a screen reader.",
+      "html": "<div class=\"ds-row\"><button class=\"ds-ck ds-ck-set\" title=\"Runtime \u2014 local\" aria-label=\"Runtime \u2014 local\">R</button><button class=\"ds-ck\" title=\"Repos \u2014 None\" aria-label=\"Repos \u2014 None\">G</button><button class=\"ds-ck ds-ck-warn\" title=\"Runtime \u2014 no agent connected\" aria-label=\"Runtime \u2014 no agent connected\">!</button><button class=\"ds-ck ds-ck-set ds-ck-end\" title=\"Model \u2014 sonnet\" aria-label=\"Model \u2014 sonnet\">M</button></div>",
+      "css": ".ds-row { display: flex; align-items: center; gap: 0.125rem; } .ds-ck { display: inline-flex; height: 2rem; width: 2rem; align-items: center; justify-content: center; border: none; border-radius: var(--radius-control, 4px); background: transparent; color: var(--legend-faint); cursor: pointer; transition: background 120ms ease, color 120ms ease; } .ds-ck-set { background: var(--panel-raised); color: var(--legend); } .ds-ck-warn { background: var(--amber-quiet); color: var(--amber-ink); } .ds-ck-end { margin-left: auto; } .ds-ck:hover { background: var(--panel-raised); color: var(--legend); }"
+    },
+    {
+      "name": "List Row",
+      "kind": "custom",
+      "refersTo": "row-ring",
+      "description": "One entry in a settings or admin list: an identity line plus its icon actions, with the editor folded away until asked for. Replaced the pattern of rendering every row as a fully-expanded form, which made a catalog of twenty cards twenty stacked six-field forms. Its hairline is --row-ring so a borderless skin can remove it from the seam rather than at the call site.",
+      "html": "<div class=\"ds-lr\"><span class=\"ds-lr-id\"><span class=\"ds-lr-t\">anthropic</span><span class=\"ds-lr-s\">https://api.anthropic.com</span></span><span class=\"ds-lr-a\"><button class=\"ds-lr-b\">E</button><button class=\"ds-lr-b ds-lr-d\">X</button></span></div>",
+      "css": ".ds-lr { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.75rem; border-radius: var(--radius-control, 4px); background: var(--panel-raised); box-shadow: inset 0 0 0 1px var(--row-ring, var(--rule)); } .ds-lr-id { display: flex; flex-direction: column; min-width: 0; flex: 1; } .ds-lr-t { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 13px; font-weight: 600; color: var(--legend); } .ds-lr-s { font-size: 12px; color: var(--legend-faint); } .ds-lr-a { display: flex; gap: 0.125rem; } .ds-lr-b { height: 1.75rem; width: 1.75rem; border: none; background: transparent; border-radius: var(--radius-control, 4px); color: var(--legend-dim); cursor: pointer; } .ds-lr-b:hover { background: var(--panel); color: var(--legend); } .ds-lr-d:hover { background: var(--red-quiet); color: var(--red-ink); }"
+    },
+    {
+      "name": "Turn Actions",
+      "kind": "custom",
+      "refersTo": "readout",
+      "description": "Per-turn controls in the transcript: copy as markdown, copy as plain text, and the server's stamp. Sits bottom-left in the inter-turn gap, so it belongs to the message it follows and costs no reserved height. Revealed on hover AND focus-within, and shown unconditionally under @media (hover: none) - a control that exists only under a pointer is one touch and keyboard users do not have.",
+      "html": "<div class=\"ds-ta\"><button class=\"ds-ta-b\">C</button><button class=\"ds-ta-b\">T</button><span class=\"ds-ta-t\">10:34 AM</span></div>",
+      "css": ".ds-ta { display: inline-flex; align-items: center; gap: 0.25rem; } .ds-ta-b { height: 1.5rem; width: 1.5rem; border: none; background: transparent; border-radius: var(--radius-control, 4px); color: var(--legend-dim); cursor: pointer; } .ds-ta-b:hover { background: var(--panel-raised); color: var(--legend); } .ds-ta-t { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-variant-numeric: tabular-nums; font-variation-settings: 'wdth' var(--readout-width, 87.5); color: var(--readout-ink, var(--amber-ink)); }"
     }
   ],
   "narrative": {
     "northStar": "The Console",
     "overview": "horsie is an instrument you leave running, so the interface is built as the front panel of one: a machined gunmetal chassis, keycaps you press, dye-sublimated mono legends naming each channel, and recessed screens where the machine's own output appears. It is not a chat app with a dark theme. The transcript reads down a single stamped gutter rather than zig-zagging between bubbles, every live number is an amber readout rather than body text, and there is exactly one safety-orange control on any given screen - the one that commits.\n\nColour is load-bearing and never decorative. Four semantic families do all the work: amber is a measured, live value; safety orange is the action that commits (send, save, create); red is interrupt and destroy; green is the one lamp that says a channel is healthy. Everything else is material - chassis, panel, raised panel, screen - plus three weights of engraved ink. If a colour on a new surface does not fall into one of those buckets, the surface is wrong, not the palette.\n\nThe system is deliberately dense and unrounded. Radii are machined (3/4/6/8px), not pill-shaped; shadows do one of two things (lift a cap out, or recess a screen in) and never diffuse. The one place the instrument steps back is agent prose, which runs in the proportional face at a real reading measure - the transcript is the product, and the chrome exists to be read past.",
     "keyCharacteristics": [
-      "Two self-hosted faces: Martian Mono for legends, readouts, keys and machine strings; Archivo for prose and UI. No third face, no font CDN.",
+      "Console runs on two self-hosted faces: Martian Mono for legends, readouts, keys and machine strings; Archivo for prose and UI. No font ever comes from a CDN. An alternate skin may bring one more face, lazy-loaded when that skin is chosen.",
       "Four semantic colours (amber / orange / red / green), each with one meaning, plus a separate four-colour syntax palette.",
-      "Two themes that swap material roles, not brightness - a keycap is always a different material from its panel.",
-      "Machined radii 3-8px; no pills except the 7px lamp.",
-      "A status is always a lamp AND a word. Never colour alone.",
-      "Every ink clears WCAG AA against every field colour in both themes."
+      "Material *roles* hold across light and dark, not brightness \u2014 a keycap is always a different material from its panel.",
+      "Console's radii are machined 3\u20138px; no pills except the 7px lamp. A skin sets its own scale through `--r-*`.",
+      "A status is always a lamp and a word. Never colour alone.",
+      "Every ink clears WCAG AA against every field colour, in all four skins and both modes \u2014 measured, not assumed.",
+      "Console is one of four worlds over the same layouts. See Skins below: everything else in this document describes Console unless it says otherwise."
     ],
     "rules": [
       {
@@ -804,31 +906,48 @@
         "name": "The Ring-After-Recess Rule",
         "section": "elevation",
         "body": "A focused .field composes box-shadow: var(--screen-inset), 0 0 0 3px var(--focus-ring). Replacing the inset instead of appending to it flattens the field and breaks the recessed reading."
+      },
+      {
+        "name": "The Seam Rule",
+        "section": "skins",
+        "body": "A skin varies only what the seam exposes (--face-*, --r-*, --legend-*, --prose-*, --readout-*, --row-ring). Anything else a skin must vary needs a NEW seam variable, never a per-skin override at a call site. This rule was broken twice on first delivery: four hard-coded 1px rings and a .readout that kept amber and wdth 87.5 in every skin, putting a third hue into a one-accent world."
+      },
+      {
+        "name": "The Named-Title Rule",
+        "section": "typography",
+        "body": "Headings use .page-title / .section-title / .item-title. Hard-coding a face and size at a call site pins that heading to Console in every skin, and it is how the same section-heading role came to ship in two different renditions."
+      },
+      {
+        "name": "The Reachable-Control Rule",
+        "section": "components",
+        "body": "A control revealed by hover also needs a focus-within path and an @media (hover: none) branch. On a phone, hover-only did not hide the turn timestamp and its copy buttons - it deleted them."
       }
     ],
     "dos": [
-      "Do build from the existing classes - .key/.field/.panel/.screen/.legend/.readout/.chip/.lamp. A new surface should add layout, not new materials.",
-      "Do reach colour through the semantic Tailwind aliases (bg-panel, bg-raised, text-dim, text-amber-ink, border-rule). Raw hex and Tailwind's stock palette are both out.",
-      "Do pair every lamp with a word - visible, or sr-only when the visual pair is an icon. Follow the TONE_TEXT map for status colour.",
-      "Do put machine strings (model aliases, vendor names, paths, commands, IDs) in Martian Mono, and sentences in Archivo.",
-      "Do use .readout for any number that ticks, and .legend for the word that names it. Legend above value, mono both.",
-      "Do put raw machine output on a .screen. Tool input, tool output, thinking, code - recessed, never a floating card.",
-      "Do re-run clients/web/scripts/contrast.mjs after touching any colour token; every ink must stay at or above 4.5:1 against all four field colours in both themes.",
-      "Do define new colours in both :root and [data-theme=\"light\"], and pick light values by role, not by lightening the dark value.",
-      "Do give a new floating surface shadow-[var(--panel-lift)] and a new recessed one var(--screen-inset).",
-      "Do give any new column a below-md (or below-lg, for a third column) collapse - drawer, strip, or overlay - matching the rail, the settings nav, and the task panel."
+      "Do build from the existing classes \u2014 `.key`/`.field`/`.panel`/`.screen`/`.legend`/`.readout`/`.chip`/`.lamp`. A new surface should add layout, not new materials.",
+      "Do reach colour through the semantic Tailwind aliases (`bg-panel`, `bg-raised`, `text-dim`, `text-amber-ink`, `border-rule`). Raw hex and Tailwind's stock palette are both out.",
+      "Do pair every lamp with a word \u2014 visible, or `sr-only` when the visual pair is an icon. Follow the `TONE_TEXT` map for status colour.",
+      "Do put machine strings (model aliases, vendor names, paths, commands, IDs) in the mono face via `.item-title` / `.field-mono` / `font-mono`, and sentences in the sans. Reach both through `--font-mono` / `--font-sans`, never by naming a family.",
+      "Do use `.readout` for any number that ticks, and `.legend` for the word that names it. Legend above value, mono both.",
+      "Do put raw machine output on a `.screen`. Tool input, tool output, thinking, code \u2014 recessed, never a floating card.",
+      "Do re-run `clients/web/scripts/contrast.mjs` after touching any colour token; it gates all 8 palettes (4 skins \u00d7 2 modes) and exits non-zero on a failure. Every ink must stay \u2265 4.5:1 against all four field colours.",
+      "Do define new colours in both `:root` and `[data-theme=\"light\"]` and in each skin's two blocks, picking light values by *role* rather than by lightening the dark value.",
+      "Do add a new seam variable when a skin needs to vary something the seam does not cover \u2014 never a per-skin override at a call site.",
+      "Do use `.page-title` / `.section-title` / `.item-title` for headings; hard-coding a face and size at a call site pins that heading to Console in every skin.",
+      "Do give a new floating surface `shadow-[var(--panel-lift)]` and a new recessed one `var(--screen-inset)`.",
+      "Do give any new column a below-`md` (or below-`lg`, for a third column) collapse \u2014 drawer, strip, or overlay \u2014 matching the rail, the settings nav, and the task panel."
     ],
     "donts": [
-      "Don't put a second .key-go on a screen. One orange control commits; secondary is .key-blank, inline is .key-flat, destructive is .key-stop or .key-danger.",
-      "Don't use amber for emphasis or red for importance. Amber means measured and live; red means interrupt or destroy.",
-      "Don't drive syntax highlighting, charts, or any decorative colour from --orange or --amber. Code has its own --code-* palette; anything else needs a new semantic token with a stated meaning.",
-      "Don't convey state with colour alone - no bare coloured dot, no red text with no word, no 'the button turns green'.",
+      "Don't put a second `.key-go` on a screen. One orange control commits; secondary is `.key-blank`, inline is `.key-flat`, destructive is `.key-stop` or `.key-danger`.",
+      "Don't use amber for emphasis or red for importance. Amber means *measured and live*; red means *interrupt or destroy*.",
+      "Don't drive syntax highlighting, charts, or any decorative colour from `--orange` or `--amber`. Code has its own `--code-*` palette; anything else needs a new semantic token with a stated meaning.",
+      "Don't convey state with colour alone \u2014 no bare coloured dot, no red text with no word, no \"the button turns green\".",
       "Don't make a light-theme keycap pale. A keycap is a different material from its panel in both themes; pale-on-pale measured 1.16:1 and destroyed the signature separation.",
-      "Don't introduce a new radius. 3 / 4 / 6 / 8px, plus the lamp's circle. No pills, no rounded-full on a control.",
-      "Don't add a fifth shadow, a glow, or an elevation scale. Lift or recess, four tokens.",
-      "Don't import a font from a CDN or add a third family. horsie servers run on LANs with no internet route; both faces are self-hosted through @fontsource-variable.",
-      "Don't replace --screen-inset when adding a focus ring - append to it.",
-      "Don't set a transcript-width container to anything but max-w-[54rem], or a settings-width one to anything but max-w-3xl. Two column widths, consistently applied, are what make the app read as one instrument."
+      "Don't introduce a new radius in Console. 3 / 4 / 6 / 8px are its scale, and a skin sets its own through `--r-*`; `lamp` (999px), `focus` (2px) and `scrollbar` (1px) are reserved to those three parts and nothing else. No pills, no `rounded-full` on a control.",
+      "Don't add a fifth shadow, a glow, or an elevation scale to Console. Lift or recess, four tokens; a skin redefines those four rather than adding to them.",
+      "Don't import a font from a CDN, ever \u2014 horsie servers run on LANs with no internet route, so every face is self-hosted through `@fontsource-variable`. Console stays on its two faces; a *skin* may bring one more, lazy-loaded when that skin is chosen.",
+      "Don't replace `--screen-inset` when adding a focus ring \u2014 append to it.",
+      "Don't set a transcript-width container to anything but `max-w-[54rem]`, or a settings-width one to anything but `max-w-3xl`. Two column widths, consistently applied, are what make the app read as one instrument."
     ]
   }
 }
