@@ -6,7 +6,7 @@ use crate::error::CliError;
 use crate::server_client::ServerClient;
 use futures_util::StreamExt;
 use horsie_models::now_ms;
-use horsie_models::session::{SessionDetail, SessionEvent, SessionSummary};
+use horsie_models::session::{AgentStreamEvent, SessionDetail, SessionSummary};
 use reqwest_eventsource::{Event, EventSource};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
@@ -24,9 +24,9 @@ pub enum EventsMode {
 }
 
 impl EventsMode {
-    fn allows(self, event: &SessionEvent) -> bool {
+    fn allows(self, event: &AgentStreamEvent) -> bool {
         match self {
-            EventsMode::Messages => matches!(event, SessionEvent::Message(_)),
+            EventsMode::Messages => matches!(event, AgentStreamEvent::Appended(_)),
             EventsMode::All => true,
         }
     }
@@ -56,44 +56,44 @@ fn open_append(path: &Path) -> Result<BufWriter<File>, CliError> {
     Ok(BufWriter::new(file))
 }
 
-/// One JSONL line: the journal sequence (absent for ephemeral events) plus
-/// the verbatim `SessionEvent` (serialized as `{"type":…,"value":…}`).
+/// One JSONL line: the append cursor — the message id, absent for everything
+/// that is not a transcript append — plus the verbatim `AgentStreamEvent`
+/// (serialized as `{"type":…,"value":…}`).
 #[derive(Serialize)]
 struct Envelope<'a> {
-    seq: Option<u64>,
-    event: &'a SessionEvent,
+    id: Option<&'a str>,
+    event: &'a AgentStreamEvent,
 }
 
-/// Live-only frames the server sends without an SSE id: deltas, tool starts,
-/// status changes, errors, and progression. Everything else (Message,
-/// ToolResult, TurnCompleted, TaskListChanged, Asked) is journaled and
-/// id-stamped.
-fn is_ephemeral(event: &SessionEvent) -> bool {
-    matches!(
-        event,
-        SessionEvent::Delta(_)
-            | SessionEvent::ToolStart(_)
-            | SessionEvent::StatusChanged(_)
-            | SessionEvent::Error(_)
-            | SessionEvent::Progressed(_)
-    )
+/// Whether a frame is a transcript append — the only kind that carries a
+/// cursor. Everything else is either a current value the client re-reads or
+/// live run noise, and neither can be resumed from.
+fn append_id(event: &AgentStreamEvent) -> Option<&str> {
+    match event {
+        AgentStreamEvent::Appended(e) => Some(e.message.id.as_str()),
+        AgentStreamEvent::Delta(_)
+        | AgentStreamEvent::ToolStart(_)
+        | AgentStreamEvent::TurnCompleted(_)
+        | AgentStreamEvent::TaskListChanged(_)
+        | AgentStreamEvent::Resync(_) => None,
+    }
 }
 
-/// Appends filtered session events to the output file, tracking the resume
-/// cursor (last durable journal sequence seen, written or not).
+/// Appends filtered agent events to the output file, tracking the resume
+/// cursor (the last appended message id seen, written or not).
 struct SessionSink {
     out: BufWriter<File>,
-    cursor: Option<u64>,
+    cursor: Option<String>,
     mode: EventsMode,
 }
 
 impl SessionSink {
-    fn new(out: BufWriter<File>, cursor: Option<u64>, mode: EventsMode) -> Self {
+    fn new(out: BufWriter<File>, cursor: Option<String>, mode: EventsMode) -> Self {
         Self { out, cursor, mode }
     }
 
-    fn cursor(&self) -> Option<u64> {
-        self.cursor
+    fn cursor(&self) -> Option<String> {
+        self.cursor.clone()
     }
 
     fn flush(&mut self) -> Result<(), CliError> {
@@ -104,45 +104,36 @@ impl SessionSink {
 
     /// Process one SSE message frame. Returns whether a line was written.
     /// Parse failures warn and are skipped (mirrors the server's own
-    /// log-and-skip posture); the cursor still advances past durable ids so a
-    /// reconnect never replays a skipped event.
+    /// log-and-skip posture); the cursor still advances past the frame's id so
+    /// a reconnect never replays a skipped event.
     fn handle(&mut self, sse_id: &str, data: &str) -> Result<bool, CliError> {
-        let id: Option<u64> = if sse_id.is_empty() {
-            None
-        } else {
-            match sse_id.parse() {
-                Ok(s) => Some(s),
-                Err(_) => {
-                    eprintln!("warning: non-numeric SSE id '{sse_id}'; ignoring it");
-                    None
-                }
-            }
-        };
-        let event: SessionEvent = match serde_json::from_str(data) {
+        let event: AgentStreamEvent = match serde_json::from_str(data) {
             Ok(e) => e,
             Err(e) => {
-                // Can't tell durable from ephemeral; trust the id and skip
-                // ahead so a reconnect doesn't replay the corrupt event.
-                if let Some(s) = id {
-                    self.cursor = Some(s);
+                // Can't tell an append from a value frame, so trust the stream's
+                // id and skip ahead rather than re-receiving the corrupt frame.
+                if !sse_id.is_empty() {
+                    self.cursor = Some(sse_id.to_string());
                 }
                 eprintln!("warning: skipping unparseable event: {e}");
                 return Ok(false);
             }
         };
-        // Ephemeral frames are sent live-only without an `id:` field, but per
-        // the SSE spec the client reports the stream's *last* id for them.
-        // Null the stamp and leave the cursor alone — only durable (journaled)
-        // events carry a meaningful sequence.
-        let seq = if is_ephemeral(&event) { None } else { id };
-        if let Some(s) = seq {
-            self.cursor = Some(s);
+        // Only an append advances the cursor. Per the SSE spec the client
+        // reports the stream's *last* id for id-less frames too, so trusting
+        // `sse_id` alone would let a delta re-stamp a message it isn't.
+        let id = append_id(&event).map(str::to_string);
+        if let Some(id) = &id {
+            self.cursor = Some(id.clone());
         }
         if !self.mode.allows(&event) {
             return Ok(false);
         }
-        let line = serde_json::to_string(&Envelope { seq, event: &event })
-            .map_err(|e| CliError::Io(format!("serialize event: {e}")))?;
+        let line = serde_json::to_string(&Envelope {
+            id: id.as_deref(),
+            event: &event,
+        })
+        .map_err(|e| CliError::Io(format!("serialize event: {e}")))?;
         writeln!(self.out, "{line}").map_err(|e| CliError::Io(format!("write output: {e}")))?;
         // Flush per line: this is a long-running tail; a crash must not lose
         // events the user already considers archived.
@@ -164,7 +155,7 @@ pub async fn tail(
     mode: EventsMode,
 ) -> Result<(), CliError> {
     let path = output_path(output, session_id);
-    let cursor = scan_last_seq(&path)?;
+    let cursor = scan_last_message_id(&path)?;
     let mut sink = SessionSink::new(open_append(&path)?, cursor, mode);
     eprintln!(
         "tailing session {session_id} → {} (Ctrl-C to stop)",
@@ -192,8 +183,8 @@ pub async fn tail(
         if let Some(t) = &token {
             req = req.bearer_auth(t);
         }
-        if let Some(seq) = sink.cursor() {
-            req = req.header("Last-Event-ID", seq.to_string());
+        if let Some(cursor) = sink.cursor() {
+            req = req.header("Last-Event-ID", cursor);
         }
         let mut es =
             EventSource::new(req).map_err(|e| CliError::Server(format!("connect {url}: {e}")))?;
@@ -248,17 +239,17 @@ pub async fn tail(
     }
 }
 
-/// Probe for resume: only `seq` matters. Deliberately NOT the full
-/// `SessionEvent` — a line from an older/newer schema still yields its cursor.
+/// Probe for resume: only the cursor matters. Deliberately NOT the full
+/// `AgentStreamEvent` — a line from an older/newer schema still yields its id.
 #[derive(serde::Deserialize)]
-struct SeqProbe {
-    seq: Option<u64>,
+struct CursorProbe {
+    id: Option<String>,
 }
 
-/// Last journal sequence written to `path`, scanning forward with a buffered
-/// reader (no whole-file load, no partial-line edge cases). Absent file →
-/// `Ok(None)` (fresh tail from the beginning of the journal).
-fn scan_last_seq(path: &Path) -> Result<Option<u64>, CliError> {
+/// Last appended message id written to `path`, scanning forward with a
+/// buffered reader (no whole-file load, no partial-line edge cases). Absent
+/// file → `Ok(None)`, meaning tail from the transcript's beginning.
+fn scan_last_message_id(path: &Path) -> Result<Option<String>, CliError> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -267,10 +258,10 @@ fn scan_last_seq(path: &Path) -> Result<Option<u64>, CliError> {
     let mut last = None;
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|e| CliError::Io(format!("read {}: {e}", path.display())))?;
-        if let Ok(probe) = serde_json::from_str::<SeqProbe>(&line)
-            && probe.seq.is_some()
+        if let Ok(probe) = serde_json::from_str::<CursorProbe>(&line)
+            && probe.id.is_some()
         {
-            last = probe.seq;
+            last = probe.id;
         }
     }
     Ok(last)
@@ -364,12 +355,8 @@ fn render_session_detail(d: &SessionDetail, now: u64) -> String {
         out.push_str(&format!("error       {err}\n"));
     }
     // Every unanswered ask, not just the first: a turn resumes only once all
-    // of them are answered. `pending_question` is the pre-multi-ask fallback.
-    if d.pending_asks.is_empty() {
-        if let Some(q) = d.pending_question.as_deref() {
-            out.push_str(&format!("awaiting    {q}\n"));
-        }
-    } else {
+    // of them are answered.
+    {
         for a in &d.pending_asks {
             out.push_str(&format!(
                 "awaiting    {}\n",
@@ -395,7 +382,7 @@ fn render_session_detail(d: &SessionDetail, now: u64) -> String {
 )]
 mod tests {
     use super::*;
-    use horsie_models::session::{DeltaEvent, MessageEvent};
+    use horsie_models::session::{AppendedEvent, DeltaEvent};
 
     #[test]
     fn output_path_inside_existing_dir_uses_session_id_filename() {
@@ -441,43 +428,46 @@ mod tests {
     }
 
     #[test]
-    fn scan_last_seq_missing_file_is_none() {
+    fn scan_last_message_id_missing_file_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(scan_last_seq(&dir.path().join("nope.jsonl")).unwrap(), None);
+        assert_eq!(
+            scan_last_message_id(&dir.path().join("nope.jsonl")).unwrap(),
+            None
+        );
     }
 
     #[test]
-    fn scan_last_seq_empty_file_is_none() {
+    fn scan_last_message_id_empty_file_is_none() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.jsonl");
         std::fs::write(&path, "").unwrap();
-        assert_eq!(scan_last_seq(&path).unwrap(), None);
+        assert_eq!(scan_last_message_id(&path).unwrap(), None);
     }
 
     #[test]
-    fn scan_last_seq_returns_the_last_sequenced_line() {
+    fn scan_last_message_id_returns_the_last_append() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
-        // A null-seq line after the last sequenced one must not win.
+        // A null-id line after the last append must not win.
         std::fs::write(
             &path,
-            "{\"seq\":1,\"event\":{}}\n{\"seq\":null,\"event\":{}}\n{\"seq\":41,\"event\":{}}\n{\"seq\":null,\"event\":{}}\n",
+            "{\"id\":\"m1\",\"event\":{}}\n{\"id\":null,\"event\":{}}\n{\"id\":\"m41\",\"event\":{}}\n{\"id\":null,\"event\":{}}\n",
         )
         .unwrap();
-        assert_eq!(scan_last_seq(&path).unwrap(), Some(41));
+        assert_eq!(scan_last_message_id(&path).unwrap().as_deref(), Some("m41"));
     }
 
     #[test]
-    fn scan_last_seq_skips_corrupt_lines() {
+    fn scan_last_message_id_skips_corrupt_lines() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
-        std::fs::write(&path, "{\"seq\":7,\"event\":{}}\nnot-json\n").unwrap();
-        assert_eq!(scan_last_seq(&path).unwrap(), Some(7));
+        std::fs::write(&path, "{\"id\":\"m7\",\"event\":{}}\nnot-json\n").unwrap();
+        assert_eq!(scan_last_message_id(&path).unwrap().as_deref(), Some("m7"));
     }
 
     fn sink(
         mode: EventsMode,
-        cursor: Option<u64>,
+        cursor: Option<String>,
     ) -> (SessionSink, tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
@@ -493,93 +483,106 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn durable_message_is_written_with_its_seq_and_tagged_union_shape() {
-        let (mut s, _dir, path) = sink(EventsMode::All, None);
-        // A MessageEvent for a user message; the SSE id is the journal seq.
-        let data = serde_json::to_string(&SessionEvent::Message(MessageEvent {
-            message: horsie_models::agent::Message::user("m1", "hi", 0),
+    fn appended(id: &str) -> String {
+        serde_json::to_string(&AgentStreamEvent::Appended(AppendedEvent {
+            message: horsie_models::agent::Message::user(id, "hi", 0),
         }))
-        .unwrap();
-        assert!(s.handle("42", &data).unwrap());
-        s.flush().unwrap();
-        let got = lines(&path);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0]["seq"], serde_json::json!(42));
-        assert_eq!(got[0]["event"]["type"], serde_json::json!("Message"));
-        assert!(got[0]["event"]["value"]["message"].is_object());
-        assert_eq!(s.cursor(), Some(42));
+        .unwrap()
     }
 
     #[test]
-    fn ephemeral_event_gets_null_seq_but_still_written_in_all_mode() {
-        let (mut s, _dir, path) = sink(EventsMode::All, Some(9));
-        let data = serde_json::to_string(&SessionEvent::Delta(DeltaEvent {
+    fn an_append_is_written_with_its_message_id_and_tagged_union_shape() {
+        let (mut s, _dir, path) = sink(EventsMode::All, None);
+        assert!(s.handle("m1", &appended("m1")).unwrap());
+        s.flush().unwrap();
+        let got = lines(&path);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["id"], serde_json::json!("m1"));
+        assert_eq!(got[0]["event"]["type"], serde_json::json!("Appended"));
+        assert!(got[0]["event"]["value"]["message"].is_object());
+        assert_eq!(s.cursor().as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn a_value_frame_gets_a_null_cursor_but_is_still_written_in_all_mode() {
+        let (mut s, _dir, path) = sink(EventsMode::All, Some("m9".into()));
+        let data = serde_json::to_string(&AgentStreamEvent::Delta(DeltaEvent {
             text: "chunk".into(),
         }))
         .unwrap();
         assert!(s.handle("", &data).unwrap());
         s.flush().unwrap();
         let got = lines(&path);
-        assert_eq!(got[0]["seq"], serde_json::Value::Null);
-        // An id-less event must NOT move the resume cursor.
-        assert_eq!(s.cursor(), Some(9));
+        assert_eq!(got[0]["id"], serde_json::Value::Null);
+        // A non-append must NOT move the resume cursor.
+        assert_eq!(s.cursor().as_deref(), Some("m9"));
     }
 
     #[test]
-    fn messages_mode_skips_non_messages_but_advances_the_cursor() {
-        let (mut s, _dir, path) = sink(EventsMode::Messages, None);
-        let tool = serde_json::to_string(&SessionEvent::ToolResult(
-            horsie_models::session::ToolOutputEvent {
+    fn messages_mode_skips_non_appends_and_leaves_the_cursor_alone() {
+        let (mut s, _dir, path) = sink(EventsMode::Messages, Some("m9".into()));
+        let turn = serde_json::to_string(&AgentStreamEvent::TurnCompleted(
+            horsie_models::session::TurnCompletedEvent {
                 at_ms: 0,
-                tool_call_id: "t1".into(),
-                output: "ok".into(),
-                is_error: false,
+                iterations: 1,
+                usage: horsie_models::agent::Usage::without_cache(1, 1),
             },
         ))
         .unwrap();
-        assert!(!s.handle("10", &tool).unwrap());
+        assert!(!s.handle("m9", &turn).unwrap());
         s.flush().unwrap();
         assert!(lines(&path).is_empty());
-        // Cursor advanced past the skipped durable event, so a reconnect does
-        // not replay it.
-        assert_eq!(s.cursor(), Some(10));
+        // Not an append, so nothing to resume past.
+        assert_eq!(s.cursor().as_deref(), Some("m9"));
     }
 
+    /// Per the SSE spec an id-less frame inherits the stream's last id, so the
+    /// client reports the previous append's id for a delta. Trusting that would
+    /// be harmless here but wrong in principle — the cursor tracks appends.
     #[test]
-    fn ephemeral_event_with_inherited_sse_id_is_nulled_and_does_not_move_cursor() {
-        // Per the SSE spec, an event without `id:` inherits the stream's last
-        // id; the server sends Deltas id-less, so reqwest-eventsource reports
-        // the previous durable seq (here "12", ahead of the cursor at 9).
-        // The envelope must still record null and the cursor must not move.
-        let (mut s, _dir, path) = sink(EventsMode::All, Some(9));
-        let data = serde_json::to_string(&SessionEvent::Delta(DeltaEvent {
+    fn an_inherited_sse_id_does_not_make_a_delta_an_append() {
+        let (mut s, _dir, path) = sink(EventsMode::All, Some("m9".into()));
+        let data = serde_json::to_string(&AgentStreamEvent::Delta(DeltaEvent {
             text: "chunk".into(),
         }))
         .unwrap();
-        assert!(s.handle("12", &data).unwrap());
+        assert!(s.handle("m12", &data).unwrap());
         s.flush().unwrap();
         let got = lines(&path);
-        assert_eq!(got[0]["seq"], serde_json::Value::Null);
-        assert_eq!(s.cursor(), Some(9));
+        assert_eq!(got[0]["id"], serde_json::Value::Null);
+        assert_eq!(s.cursor().as_deref(), Some("m9"));
     }
 
     #[test]
     fn unparseable_data_is_skipped_with_a_warning() {
         let (mut s, _dir, path) = sink(EventsMode::All, None);
-        assert!(!s.handle("3", "{not json").unwrap());
+        assert!(!s.handle("m3", "{not json").unwrap());
         s.flush().unwrap();
         assert!(lines(&path).is_empty());
-        // The durable seq still counts — the event is gone, don't replay it.
-        assert_eq!(s.cursor(), Some(3));
+        // The id still counts — the frame is gone, don't replay it.
+        assert_eq!(s.cursor().as_deref(), Some("m3"));
     }
 
     #[test]
-    fn messages_mode_filters_to_complete_messages_only() {
-        let msg = SessionEvent::Message(MessageEvent {
-            message: horsie_models::agent::Message::user("m1", "hi", 0),
-        });
-        let delta = SessionEvent::Delta(DeltaEvent { text: "h".into() });
+    fn a_resync_frame_is_surfaced_without_moving_the_cursor() {
+        let (mut s, _dir, path) = sink(EventsMode::All, Some("m9".into()));
+        let data = serde_json::to_string(&AgentStreamEvent::Resync(
+            horsie_models::session::ResyncEvent {},
+        ))
+        .unwrap();
+        assert!(s.handle("", &data).unwrap());
+        s.flush().unwrap();
+        assert_eq!(
+            lines(&path)[0]["event"]["type"],
+            serde_json::json!("Resync")
+        );
+        assert_eq!(s.cursor().as_deref(), Some("m9"));
+    }
+
+    #[test]
+    fn messages_mode_filters_to_appends_only() {
+        let msg: AgentStreamEvent = serde_json::from_str(&appended("m1")).unwrap();
+        let delta = AgentStreamEvent::Delta(DeltaEvent { text: "h".into() });
         assert!(EventsMode::Messages.allows(&msg));
         assert!(!EventsMode::Messages.allows(&delta));
         assert!(EventsMode::All.allows(&delta));
@@ -625,7 +628,6 @@ mod tests {
             status: Some(horsie_models::session::SessionStatusKind::AwaitingInput),
             created_at: 0,
             last_error: None,
-            pending_question: Some("which file?".into()),
             pending_asks: vec![
                 horsie_models::session::PendingAskView {
                     tool_call_id: Some("t1".into()),
@@ -649,6 +651,14 @@ mod tests {
                 text: "follow up".into(),
                 at_ms: 0,
             }],
+            usage_total: horsie_models::session::UsageView {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+            },
+            agents: vec![],
+            progression: None,
         };
         let out = render_session_detail(&d, 0);
         assert!(out.contains("awaiting    which file?"));

@@ -1,5 +1,5 @@
-// Group I — windowed history load. The transcript now paints from
-// `GET /history` (not an SSE journal replay) and then streams live over a
+// Group I — windowed history load. The transcript paints from
+// `GET /agents/main/history` (never an SSE replay) and then streams live over a
 // live-only SSE connection. These verify the browser wiring end-to-end: a
 // reloaded session repaints from history, live updates continue afterward, and
 // the scroll-back affordance stays hidden for a short transcript.
@@ -66,7 +66,7 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
     .poll(
       async () => {
         const [h, s] = await Promise.all([
-          page.request.get(`${appBase}/api/sessions/${id}/history?limit=200`),
+          page.request.get(`${appBase}/api/sessions/${id}/agents/main/history?limit=200`),
           page.request.get(`${appBase}/api/sessions/${id}`),
         ]);
         const count = ((await h.json()).messages as unknown[]).length;
@@ -93,7 +93,7 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
       .poll(
         async () => {
           const [h, s] = await Promise.all([
-            page.request.get(`${appBase}/api/sessions/${id}/history?limit=200`),
+            page.request.get(`${appBase}/api/sessions/${id}/agents/main/history?limit=200`),
             page.request.get(`${appBase}/api/sessions/${id}`),
           ]);
           const count = ((await h.json()).messages as unknown[]).length;

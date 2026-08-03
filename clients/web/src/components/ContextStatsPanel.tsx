@@ -1,6 +1,6 @@
 import { Gauge } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { SessionUsageStats, Usage, UsageView } from "../api/types";
+import type { AgentDocument, Usage, UsageView } from "../api/types";
 import { compactNumber } from "../lib/format";
 
 function StatRow({
@@ -55,10 +55,15 @@ function UsageBreakdown({ usage }: { usage: Usage | UsageView }) {
 }
 
 export function ContextStatsPanel({
-  stats,
+  agent,
+  sessionTotal,
   totalTokens,
 }: {
-  stats: SessionUsageStats | undefined;
+  /** The main agent's own document — context size is per-agent and is never
+   * summed across agents. */
+  agent: AgentDocument | undefined;
+  /** The session's usage summed across every agent it hosts. */
+  sessionTotal: UsageView | undefined;
   totalTokens: number;
 }) {
   const [open, setOpen] = useState(false);
@@ -75,7 +80,7 @@ export function ContextStatsPanel({
 
   if (totalTokens <= 0) return null;
 
-  const mainAgent = stats?.mainAgent;
+  const mainAgent = agent;
   const fillPct =
     mainAgent?.contextWindow != null && mainAgent.contextWindow > 0
       ? Math.min(100, Math.round((mainAgent.contextTokens / mainAgent.contextWindow) * 100))
@@ -96,7 +101,7 @@ export function ContextStatsPanel({
         <Gauge size={12} />
         {compactNumber(totalTokens)} tok
       </button>
-      {open && stats && mainAgent && (
+      {open && sessionTotal && mainAgent && (
         <div
           className="card absolute left-0 top-full z-10 mt-1.5 w-72 p-3 shadow-lg"
           data-testid="context-stats-panel"
@@ -135,7 +140,7 @@ export function ContextStatsPanel({
           <div className="mt-2 mb-1 text-[11px] font-semibold uppercase text-faint">
             Session total
           </div>
-          <UsageBreakdown usage={stats.sessionTotal} />
+          <UsageBreakdown usage={sessionTotal} />
         </div>
       )}
     </div>

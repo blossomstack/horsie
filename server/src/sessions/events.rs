@@ -1,45 +1,47 @@
-//! Event plumbing for session SSE streams.
+//! Event plumbing for session and agent SSE streams.
 //!
-//! Durable coarse events are read from the agent journal with stable sequence
-//! ids (the SSE cursor space — interactive agents never compact, so ids are
-//! exact journal positions forever). Ephemeral deltas ride the live broadcast
-//! without ids.
+//! Two seams, deliberately separate. The agent's *streaming* events (text
+//! deltas, tool starts) ride [`AgentEventSink`] and are ephemeral. Its *durable*
+//! events arrive through [`BroadcastObserver`], which the agent actor calls from
+//! its post-persist hook — so a broadcast append is already journaled and
+//! already folded, and nothing has to re-read the journal to learn about it.
 
-use crate::sessions::SessionFrame;
+use crate::sessions::AgentFrame;
 use async_trait::async_trait;
-use horsie_agentcore::{AgentEvent, EventSink, EventSinkError};
+use horsie_agentcore::{AgentEvent, EventSink, EventSinkError, Message};
 use horsie_models::session::{
-    MessageEvent, SessionEvent, TaskItem, TaskListEvent, TaskStatus as WireTaskStatus,
-    ToolOutputEvent, TurnCompletedEvent,
+    AgentStreamEvent, AppendedEvent, DeltaEvent, ResyncEvent, TaskItem, TaskListEvent,
+    TaskStatus as WireTaskStatus, ToolStartEvent, TurnCompletedEvent,
 };
-use horsie_workflow::{AgentDomainEvent, TaskStatus as AgentTaskStatus};
+use horsie_workflow::{AgentDomainEvent, AgentObserver, AgentState, TaskStatus as AgentTaskStatus};
 use tokio::sync::broadcast;
 
-/// Forwards live agent events into the session's broadcast: deltas pass through
-/// id-less; journaled coarse events become `Journaled` wakeups (SSE handlers
-/// re-read the journal for stable ids). Ordering note: the agent's `PersistSink`
-/// persists each coarse event *before* forwarding here, so a `Journaled` wakeup
-/// always finds the event already durable. Best-effort — never aborts the run.
-pub struct SessionEventSink {
-    pub frames: broadcast::Sender<SessionFrame>,
+/// Forwards an agent's *ephemeral* streaming events to its broadcast. Coarse
+/// events are deliberately dropped here — they reach the stream through
+/// [`BroadcastObserver`] once durable, so publishing them here too would
+/// double-send and, worse, send them before they were written.
+pub struct AgentEventSink {
+    pub frames: broadcast::Sender<AgentFrame>,
 }
 
 #[async_trait]
-impl EventSink for SessionEventSink {
+impl EventSink for AgentEventSink {
     async fn emit(&self, event: AgentEvent) -> Result<(), EventSinkError> {
         let frame = match &event {
-            AgentEvent::TextChunk(e) => Some(SessionFrame::Delta {
+            AgentEvent::TextChunk(e) => Some(AgentFrame::Delta {
                 text: e.text.clone(),
             }),
-            AgentEvent::ToolCallStart(e) => Some(SessionFrame::ToolStart {
+            AgentEvent::ToolCallStart(e) => Some(AgentFrame::ToolStart {
                 tool_call_id: e.tool_call_id.clone(),
                 name: e.name.clone(),
             }),
+            // Durable events: published by the observer, after they are written.
             AgentEvent::InputMessage(_)
             | AgentEvent::MessageComplete(_)
             | AgentEvent::ToolComplete(_)
-            | AgentEvent::RunComplete(_) => Some(SessionFrame::Journaled),
-            AgentEvent::MessageStart(_)
+            | AgentEvent::RunComplete(_)
+            // Streaming noise with no wire shape.
+            | AgentEvent::MessageStart(_)
             | AgentEvent::MessageStop(_)
             | AgentEvent::TextBlockStart(_)
             | AgentEvent::ThinkingBlockStart(_)
@@ -56,72 +58,103 @@ impl EventSink for SessionEventSink {
     }
 }
 
-/// A subagent's observation sink: quiet by design. A subagent's streaming
-/// events never reach the session broadcast — only the spawn/finish
-/// progression frames the session itself emits surface there.
-pub struct QuietEventSink;
+/// Publishes an agent's durable history to its broadcast.
+///
+/// Invoked from `AgentActor::on_events_persisted`, so every frame here
+/// describes something already journaled and folded. Best-effort: a send with
+/// no subscribers is a no-op, which is the normal case for a session nobody is
+/// watching.
+pub struct BroadcastObserver {
+    pub frames: broadcast::Sender<AgentFrame>,
+}
 
-#[async_trait]
-impl EventSink for QuietEventSink {
-    async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
-        Ok(())
+impl AgentObserver for BroadcastObserver {
+    fn publish(&self, event: &AgentDomainEvent, _state: &AgentState) {
+        // Derived from the event, never from `state.messages.last()`: the hook
+        // hands us the state after the *whole batch* folded, so the last message
+        // belongs to the last event, not to this one.
+        if let Some(frame) = agent_frame(event) {
+            let _ = self.frames.send(frame);
+        }
     }
 }
 
-/// A coarse event replayed from the agent journal, with its stable sequence id.
-#[derive(Debug, Clone)]
-pub struct StampedEvent {
-    pub seq: u64,
-    pub event: SessionEvent,
-}
-
-/// Map one journaled agent event onto its wire shape (`None` = not surfaced).
-pub(crate) fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
+/// Map one durable agent event onto its broadcast frame (`None` = not surfaced).
+///
+/// The three transcript-bearing events all become `Appended`, mirroring
+/// `AgentActor::apply_event`, which pushes exactly one message for each — that
+/// correspondence is what lets a client accumulate appends and get the same
+/// transcript `/history` would hand it.
+fn agent_frame(event: &AgentDomainEvent) -> Option<AgentFrame> {
     match event {
-        AgentDomainEvent::InputMessage { mut message }
-        | AgentDomainEvent::MessageComplete { mut message } => {
+        AgentDomainEvent::InputMessage { message }
+        | AgentDomainEvent::MessageComplete { message } => {
+            let mut message = message.clone();
             crate::wire_redact::strip_message_signature(&mut message);
-            Some(SessionEvent::Message(MessageEvent { message }))
+            Some(AgentFrame::Appended { message })
         }
         AgentDomainEvent::ToolComplete {
             tool_call_id,
             output,
             is_error,
             at_ms,
-        } => Some(SessionEvent::ToolResult(ToolOutputEvent {
-            tool_call_id,
-            output,
-            is_error,
-            at_ms,
-        })),
+        } => Some(AgentFrame::Appended {
+            message: Message::tool_result(tool_call_id, output, *is_error, *at_ms),
+        }),
         AgentDomainEvent::RunComplete {
             usage,
             iterations,
             at_ms,
             ..
-        } => Some(SessionEvent::TurnCompleted(TurnCompletedEvent {
-            iterations,
-            usage,
-            at_ms,
-        })),
-        AgentDomainEvent::TaskListChanged { snapshot, .. } => {
-            Some(SessionEvent::TaskListChanged(TaskListEvent {
-                tasks: snapshot
-                    .tasks()
-                    .iter()
-                    .map(|t| TaskItem {
-                        id: t.id,
-                        content: t.content.clone(),
-                        status: wire_task_status(t.status),
-                    })
-                    .collect(),
-            }))
-        }
+        } => Some(AgentFrame::TurnCompleted {
+            iterations: *iterations,
+            usage: usage.clone(),
+            at_ms: *at_ms,
+        }),
+        AgentDomainEvent::TaskListChanged { snapshot, .. } => Some(AgentFrame::TaskListChanged {
+            tasks: snapshot.tasks().to_vec(),
+        }),
         AgentDomainEvent::RunCancelled { .. }
         | AgentDomainEvent::TimerArmed { .. }
         | AgentDomainEvent::TimerCancelled { .. }
         | AgentDomainEvent::TimerFired { .. }
         | AgentDomainEvent::Parked { .. } => None,
+    }
+}
+
+/// Map a broadcast frame onto the wire shape the agent stream sends.
+pub(crate) fn wire_agent_frame(frame: AgentFrame) -> AgentStreamEvent {
+    match frame {
+        AgentFrame::Appended { message } => AgentStreamEvent::Appended(AppendedEvent { message }),
+        AgentFrame::Delta { text } => AgentStreamEvent::Delta(DeltaEvent { text }),
+        AgentFrame::ToolStart { tool_call_id, name } => {
+            AgentStreamEvent::ToolStart(ToolStartEvent { tool_call_id, name })
+        }
+        AgentFrame::TurnCompleted {
+            iterations,
+            usage,
+            at_ms,
+        } => AgentStreamEvent::TurnCompleted(TurnCompletedEvent {
+            iterations,
+            usage,
+            at_ms,
+        }),
+        AgentFrame::TaskListChanged { tasks } => AgentStreamEvent::TaskListChanged(TaskListEvent {
+            tasks: tasks.iter().map(wire_task).collect(),
+        }),
+    }
+}
+
+/// The frame a lagging subscriber gets instead of a silent gap.
+pub(crate) fn resync_frame() -> AgentStreamEvent {
+    AgentStreamEvent::Resync(ResyncEvent {})
+}
+
+pub(crate) fn wire_task(t: &horsie_workflow::TaskRecord) -> TaskItem {
+    TaskItem {
+        id: t.id,
+        content: t.content.clone(),
+        status: wire_task_status(t.status),
     }
 }
 
@@ -176,54 +209,48 @@ fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
 mod tests {
     use super::*;
 
+    /// Every transcript-bearing event becomes exactly one `Appended`, matching
+    /// `AgentActor::apply_event`, which pushes exactly one message for each.
     #[test]
-    fn wire_event_maps_journaled_events_and_drops_the_rest() {
-        // Sequence numbering lives with the agent that owns the journal (see
-        // `an_agent_replays_its_own_journal_after_a_cursor`); what is left here
-        // is the mapping onto the wire, including the events that produce no
-        // frame at all.
+    fn transcript_events_all_become_one_append() {
         let msg = horsie_models::agent::Message::user("m1", "hello", 0);
-        match wire_event(AgentDomainEvent::InputMessage {
+        match agent_frame(&AgentDomainEvent::InputMessage {
             message: msg.clone(),
         }) {
-            Some(SessionEvent::Message(m)) => assert_eq!(m.message.id, "m1"),
-            other => panic!("expected Message, got {other:?}"),
+            Some(AgentFrame::Appended { message }) => assert_eq!(message.id, "m1"),
+            other => panic!("expected Appended, got {other:?}"),
         }
-        assert!(
-            wire_event(AgentDomainEvent::RunCancelled { at_ms: 0 }).is_none(),
-            "a cancellation has no wire shape, but still consumed a sequence number"
-        );
-        match wire_event(AgentDomainEvent::ToolComplete {
-            at_ms: 0,
+        // A tool result is an append too — reconstructed exactly as the fold
+        // does, so the stream and `/history` agree on its id.
+        match agent_frame(&AgentDomainEvent::ToolComplete {
+            at_ms: 7,
             tool_call_id: "tc".into(),
             output: "ok".into(),
             is_error: false,
         }) {
-            Some(SessionEvent::ToolResult(e)) => assert_eq!(e.tool_call_id, "tc"),
-            other => panic!("expected ToolResult, got {other:?}"),
+            Some(AgentFrame::Appended { message }) => {
+                assert_eq!(message.id, "result:tc");
+                assert_eq!(message.created_at_ms, 7);
+            }
+            other => panic!("expected Appended, got {other:?}"),
         }
+        assert!(
+            agent_frame(&AgentDomainEvent::RunCancelled { at_ms: 0 }).is_none(),
+            "a cancellation has no wire shape"
+        );
     }
 
     #[test]
     fn the_wire_carries_the_stamp_off_the_journaled_event() {
-        // The SSE path never reads the clock: a replayed event must report
-        // when it happened, not when the client reconnected.
-        match wire_event(AgentDomainEvent::ToolComplete {
-            at_ms: 1_700_000_000_123,
-            tool_call_id: "tc".into(),
-            output: "ok".into(),
-            is_error: false,
-        }) {
-            Some(SessionEvent::ToolResult(e)) => assert_eq!(e.at_ms, 1_700_000_000_123),
-            other => panic!("expected ToolResult, got {other:?}"),
-        }
-        match wire_event(AgentDomainEvent::RunComplete {
+        // The SSE path never reads the clock: an event must report when it
+        // happened, not when it was broadcast.
+        match agent_frame(&AgentDomainEvent::RunComplete {
             at_ms: 1_700_000_009_999,
             usage: horsie_models::agent::Usage::without_cache(1, 1),
             iterations: 2,
             context_tokens: 3,
         }) {
-            Some(SessionEvent::TurnCompleted(e)) => assert_eq!(e.at_ms, 1_700_000_009_999),
+            Some(AgentFrame::TurnCompleted { at_ms, .. }) => assert_eq!(at_ms, 1_700_000_009_999),
             other => panic!("expected TurnCompleted, got {other:?}"),
         }
     }
@@ -234,17 +261,17 @@ mod tests {
         // the message itself rather than beside it on the event.
         let mut message = horsie_models::agent::Message::user("m1", "hello", 1_700_000_000_001);
         message.started_at_ms = Some(1_700_000_000_000);
-        match wire_event(AgentDomainEvent::MessageComplete { message }) {
-            Some(SessionEvent::Message(m)) => {
-                assert_eq!(m.message.created_at_ms, 1_700_000_000_001);
-                assert_eq!(m.message.started_at_ms, Some(1_700_000_000_000));
+        match agent_frame(&AgentDomainEvent::MessageComplete { message }) {
+            Some(AgentFrame::Appended { message }) => {
+                assert_eq!(message.created_at_ms, 1_700_000_000_001);
+                assert_eq!(message.started_at_ms, Some(1_700_000_000_000));
             }
-            other => panic!("expected Message, got {other:?}"),
+            other => panic!("expected Appended, got {other:?}"),
         }
     }
 
     #[test]
-    fn task_list_changed_maps_to_wire_event() {
+    fn task_list_changed_maps_to_the_whole_list() {
         let mut snapshot = horsie_workflow::TaskListState::default();
         snapshot
             .apply(horsie_workflow::TaskListAction::Create {
@@ -258,8 +285,10 @@ mod tests {
             })
             .unwrap();
 
-        match wire_event(AgentDomainEvent::TaskListChanged { at_ms: 0, snapshot }) {
-            Some(SessionEvent::TaskListChanged(e)) => {
+        let frame = agent_frame(&AgentDomainEvent::TaskListChanged { at_ms: 0, snapshot })
+            .expect("a task-list change surfaces");
+        match wire_agent_frame(frame) {
+            AgentStreamEvent::TaskListChanged(e) => {
                 assert_eq!(e.tasks.len(), 2);
                 assert_eq!(e.tasks[0].id, 1);
                 assert_eq!(e.tasks[0].content, "a");
@@ -271,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_event_strips_thinking_signature() {
+    fn an_append_strips_the_thinking_signature() {
         use horsie_models::agent::{ContentPart, Message, Role, ThinkingPart};
 
         let message = Message {
@@ -284,17 +313,17 @@ mod tests {
                 signature: Some("opaque-blob".into()),
             })],
         };
-        let wired = wire_event(AgentDomainEvent::MessageComplete { message })
+        let frame = agent_frame(&AgentDomainEvent::MessageComplete { message })
             .expect("MessageComplete should surface");
-        match wired {
-            SessionEvent::Message(m) => match &m.message.parts[0] {
+        match frame {
+            AgentFrame::Appended { message } => match &message.parts[0] {
                 ContentPart::Thinking(th) => {
                     assert_eq!(th.signature, None);
                     assert_eq!(th.text, "reasoning");
                 }
                 other => panic!("expected Thinking, got {other:?}"),
             },
-            other => panic!("expected Message, got {other:?}"),
+            other => panic!("expected Appended, got {other:?}"),
         }
     }
 }

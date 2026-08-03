@@ -436,7 +436,7 @@ async fn wait_status(client: &reqwest::Client, addr: &SocketAddr, id: &str, want
 
 #[derive(Debug, Clone)]
 struct Ev {
-    id: Option<u64>,
+    id: Option<String>,
     kind: String,
     data: serde_json::Value,
 }
@@ -445,13 +445,13 @@ struct Ev {
 async fn collect_sse(
     client: &reqwest::Client,
     url: &str,
-    last_event_id: Option<u64>,
+    last_event_id: Option<&str>,
     stop: impl Fn(&[Ev]) -> bool,
 ) -> Vec<Ev> {
     use futures_util::StreamExt;
     let mut req = client.get(url).header("accept", "text/event-stream");
     if let Some(cursor) = last_event_id {
-        req = req.header("last-event-id", cursor.to_string());
+        req = req.header("last-event-id", cursor);
     }
     let resp = req.send().await.unwrap();
     let mut stream = resp.bytes_stream();
@@ -485,7 +485,10 @@ fn parse_event(block: &str) -> Option<Ev> {
     let mut data = None;
     for line in block.lines() {
         if let Some(rest) = line.strip_prefix("id:") {
-            id = rest.trim().parse::<u64>().ok();
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                id = Some(trimmed.to_string());
+            }
         } else if let Some(rest) = line.strip_prefix("data:") {
             data = Some(rest.trim().to_string());
         }
@@ -522,7 +525,10 @@ async fn create_message_sse_roundtrip() {
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // Connect SSE (replay from 0 + live) BEFORE sending, so we see the whole turn.
-    let url = format!("http://{}/api/sessions/{id}/events", server.addr);
+    let url = format!(
+        "http://{}/api/sessions/{id}/agents/main/events",
+        server.addr
+    );
     let client2 = client.clone();
     let sse = tokio::spawn(async move {
         collect_sse(&client2, &url, None, |evs| {
@@ -541,7 +547,7 @@ async fn create_message_sse_roundtrip() {
 
     let events = sse.await.unwrap();
     let ks = kinds(&events);
-    assert!(ks.contains(&"Message".to_string()), "kinds: {ks:?}");
+    assert!(ks.contains(&"Appended".to_string()), "kinds: {ks:?}");
     assert!(ks.contains(&"TurnCompleted".to_string()), "kinds: {ks:?}");
     // The assistant's text made it through the stream (in a durable Message event).
     let joined = events
@@ -553,13 +559,17 @@ async fn create_message_sse_roundtrip() {
         joined.contains("hello from the agent"),
         "assistant text missing from stream: {joined}"
     );
-    // Durable coarse events carry monotonic ids.
-    let ids: Vec<u64> = events.iter().filter_map(|e| e.id).collect();
+    // Only appends carry an SSE id, and it is the message id — the same cursor
+    // `/history` pages with, so a client has one vocabulary for both.
+    let ids: Vec<String> = events.iter().filter_map(|e| e.id.clone()).collect();
     assert!(!ids.is_empty());
-    assert!(
-        ids.windows(2).all(|w| w[0] < w[1]),
-        "ids not increasing: {ids:?}"
-    );
+    let unique: std::collections::HashSet<&String> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "ids must be unique: {ids:?}");
+    for ev in &events {
+        if ev.id.is_some() {
+            assert_eq!(ev.kind, "Appended", "only appends may carry an id");
+        }
+    }
 
     wait_status(&client, &server.addr, &id, "Idle").await;
     assert_eq!(
@@ -592,7 +602,8 @@ async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
     block.wait_until_received().await;
 
     // Subscribe while the turn is in flight — this stands in for a second tab,
-    // which must learn about the queue without reloading the page.
+    // which must learn about the queue without reloading the page. The inbox is
+    // session-scoped, so it rides the session stream, not an agent's.
     let url = format!("http://{}/api/sessions/{id}/events", server.addr);
     let client2 = client.clone();
     let sse = tokio::spawn(async move {
@@ -654,12 +665,15 @@ async fn prep_progressions_stream_during_a_turn() {
     let id = create_session(&client, &server.addr).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
-    // Subscribe before sending so the live (id-less) progression frames are seen.
+    // Subscribe before sending so the live progression frames are seen. Prep
+    // is session-scoped, so it streams on the session — and the turn's end is
+    // observed there as the status returning to Idle.
     let url = format!("http://{}/api/sessions/{id}/events", server.addr);
     let client2 = client.clone();
     let sse = tokio::spawn(async move {
         collect_sse(&client2, &url, None, |evs| {
-            evs.iter().any(|e| e.kind == "TurnCompleted")
+            evs.iter()
+                .any(|e| e.kind == "StatusChanged" && e.data["value"]["status"] == "Idle")
         })
         .await
     });
@@ -709,12 +723,31 @@ async fn history_endpoint_returns_windowed_messages() {
         let addr = server.addr;
         let id = id.clone();
         async move {
-            let mut url = format!("http://{addr}/api/sessions/{id}/history?limit={limit}");
+            let mut url =
+                format!("http://{addr}/api/sessions/{id}/agents/main/history?limit={limit}");
             if let Some(b) = before {
                 url.push_str(&format!("&before={b}"));
             }
             client
                 .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let history_after = |limit: usize, after: &str| {
+        let client = client.clone();
+        let addr = server.addr;
+        let id = id.clone();
+        let after = after.to_string();
+        async move {
+            client
+                .get(format!(
+                    "http://{addr}/api/sessions/{id}/agents/main/history?limit={limit}&after={after}"
+                ))
                 .send()
                 .await
                 .unwrap()
@@ -746,13 +779,16 @@ async fn history_endpoint_returns_windowed_messages() {
     send_message(&client, &server.addr, &id, "two").await;
     wait_for(4).await;
 
-    // Tail page with a small limit: newest messages + has_more.
+    // Tail page with a small limit: newest messages, older ones still owed.
     let page = history(2, None).await;
     let msgs = page["messages"].as_array().unwrap();
     assert_eq!(msgs.len(), 2, "tail limit not honored: {page}");
-    assert_eq!(page["hasMore"], serde_json::json!(true));
-    // Tail page carries the usage readout (tasks may be null when unused).
-    assert!(page["usage"].is_object(), "tail usage missing: {page}");
+    assert_eq!(page["hasMoreBefore"], serde_json::json!(true));
+    assert_eq!(
+        page["hasMoreAfter"],
+        serde_json::json!(false),
+        "the tail is the newest window: {page}"
+    );
     // The newest assistant reply is in the tail window.
     let joined = page.to_string();
     assert!(
@@ -796,15 +832,38 @@ async fn history_endpoint_returns_windowed_messages() {
         "generation cannot end before it began: {assistant}"
     );
 
-    // Scroll back before the oldest returned id → older messages, no tasks/usage.
+    // Scroll back before the oldest returned id → older messages.
     let oldest_id = msgs[0]["id"].as_str().unwrap().to_string();
-    let older = history(2, Some(oldest_id)).await;
+    let older = history(2, Some(oldest_id.clone())).await;
     assert_eq!(older["messages"].as_array().unwrap().len(), 2);
-    assert_eq!(older["hasMore"], serde_json::json!(false));
-    assert!(
-        older["usage"].is_null(),
-        "scroll-back must omit usage: {older}"
+    assert_eq!(older["hasMoreBefore"], serde_json::json!(false));
+    assert_eq!(
+        older["hasMoreAfter"],
+        serde_json::json!(true),
+        "newer messages follow a scroll-back window: {older}"
     );
+
+    // Forward from that same id → the newer half, which is what a reconnecting
+    // stream backfills with. The two cursors are one space read both ways.
+    let newer = history_after(2, &oldest_id).await;
+    let newer_ids: Vec<&str> = newer["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !newer_ids.contains(&oldest_id.as_str()),
+        "an `after` page must exclude the cursor itself: {newer}"
+    );
+    // `oldest_id` is the second-newest of four, so exactly one follows it.
+    assert_eq!(newer_ids.len(), 1, "{newer}");
+    assert_eq!(
+        newer_ids[0],
+        msgs[1]["id"].as_str().unwrap(),
+        "forward paging must resume at the very next message: {newer}"
+    );
+    assert_eq!(newer["hasMoreAfter"], serde_json::json!(false));
 
     server.shutdown().await;
 }
@@ -829,7 +888,7 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
         let client = client.clone();
         async move {
             client
-                .get(format!("http://{addr}/api/sessions/{id}/usage"))
+                .get(format!("http://{addr}/api/sessions/{id}/agents/main"))
                 .send()
                 .await
                 .unwrap()
@@ -839,24 +898,25 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
         }
     };
 
-    // Fresh session: zeroed usage, no completed turns yet.
+    // Fresh session: zeroed usage, no completed turns yet. Session-wide total
+    // is on the session document; the agent's own is on the agent document.
     let zero = usage(server.addr, id.clone()).await;
-    assert_eq!(zero["usage"]["sessionTotal"]["inputTokens"], 0);
-    assert_eq!(zero["usage"]["mainAgent"]["usageTotal"]["inputTokens"], 0);
-    assert_eq!(zero["usage"]["mainAgent"]["model"], "mock");
+    assert_eq!(zero["agent"]["usage"]["inputTokens"], 0);
+    let zero_detail = get_detail(&client, &server.addr, &id).await;
+    assert_eq!(zero_detail["session"]["usageTotal"]["inputTokens"], 0);
 
     // Turn one, then poll until its usage has landed (the 202 races the
     // actual completion).
     send_message(&client, &server.addr, &id, "one").await;
     let after_one = loop {
-        let v = usage(server.addr, id.clone()).await;
-        if v["usage"]["sessionTotal"]["inputTokens"].as_u64().unwrap() > 0 {
+        let v = get_detail(&client, &server.addr, &id).await;
+        if v["session"]["usageTotal"]["inputTokens"].as_u64().unwrap() > 0 {
             break v;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     wait_status(&client, &server.addr, &id, "Idle").await;
-    let after_one_input = after_one["usage"]["sessionTotal"]["inputTokens"]
+    let after_one_input = after_one["session"]["usageTotal"]["inputTokens"]
         .as_u64()
         .unwrap();
 
@@ -864,17 +924,18 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     // the (only) agent's own total must agree, since there's just one agent.
     send_message(&client, &server.addr, &id, "two").await;
     let after_two = loop {
-        let v = usage(server.addr, id.clone()).await;
-        let total = v["usage"]["sessionTotal"]["inputTokens"].as_u64().unwrap();
+        let v = get_detail(&client, &server.addr, &id).await;
+        let total = v["session"]["usageTotal"]["inputTokens"].as_u64().unwrap();
         if total > after_one_input {
             break v;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     wait_status(&client, &server.addr, &id, "Idle").await;
+    let agent_doc = usage(server.addr, id.clone()).await;
     assert_eq!(
-        after_two["usage"]["sessionTotal"], after_two["usage"]["mainAgent"]["usageTotal"],
-        "one agent: session total must equal its own total: {after_two}"
+        after_two["session"]["usageTotal"], agent_doc["agent"]["usage"],
+        "one agent: the session total must equal its own total: {after_two}"
     );
 
     // Crash + restart on the same journal, with no message sent yet on the new
@@ -884,9 +945,9 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     // even been asked anything yet at this point.
     server.shutdown().await;
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let after_restart = usage(server2.addr, id.clone()).await;
+    let after_restart = get_detail(&client, &server2.addr, &id).await;
     assert_eq!(
-        after_restart["usage"]["sessionTotal"], after_two["usage"]["sessionTotal"],
+        after_restart["session"]["usageTotal"], after_two["session"]["usageTotal"],
         "session-level usage total must survive a restart unchanged: {after_restart}"
     );
 
@@ -1008,32 +1069,51 @@ async fn last_event_id_replay_is_gap_free() {
     send_message(&client, &server.addr, &id, "two").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
-    // Full replay from 0.
-    let url = format!("http://{}/api/sessions/{id}/events", server.addr);
-    let all = collect_sse(&client, &url, None, |evs| {
-        evs.iter().filter(|e| e.kind == "TurnCompleted").count() >= 2
-    })
-    .await;
-    let all_ids: Vec<u64> = all.iter().filter_map(|e| e.id).collect();
-    assert!(all_ids.len() >= 2);
-    let mid = all_ids[all_ids.len() / 2];
-
-    // Reconnect after `mid`: only strictly-greater ids, no dupes, no gaps vs the
-    // tail of the full replay.
-    let after = collect_sse(&client, &url, Some(mid), |evs| {
-        evs.iter().filter(|e| e.kind == "TurnCompleted").count() >= 1
-    })
-    .await;
-    let after_ids: Vec<u64> = after.iter().filter_map(|e| e.id).collect();
-    assert!(
-        after_ids.iter().all(|i| *i > mid),
-        "ids: {after_ids:?} mid {mid}"
+    let url = format!(
+        "http://{}/api/sessions/{id}/agents/main/events",
+        server.addr
     );
-    let expected_tail: Vec<u64> = all_ids.iter().copied().filter(|i| *i > mid).collect();
-    // The reconnect's stamped ids are a prefix of the full replay's tail.
+
+    // A connect with no cursor is live-only — it does not replay, because a
+    // stream is not a log. So drive a third turn with the stream open to learn
+    // this transcript's ids.
+    let live_url = url.clone();
+    let live_client = client.clone();
+    let live = tokio::spawn(async move {
+        collect_sse(&live_client, &live_url, None, |evs| {
+            evs.iter().filter(|e| e.kind == "TurnCompleted").count() >= 1
+        })
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    mock.queue_response("three");
+    send_message(&client, &server.addr, &id, "three").await;
+    let streamed = live.await.unwrap();
+
+    let all_ids: Vec<String> = streamed.iter().filter_map(|e| e.id.clone()).collect();
+    assert!(
+        all_ids.len() >= 2,
+        "the turn must append at least a user and an assistant message: {all_ids:?}"
+    );
+    let mid = all_ids[all_ids.len() / 2].clone();
+
+    // Reconnect after `mid`. The backfill is served from the agent's state, and
+    // must be exactly the tail of what the live stream delivered — no gap, no
+    // duplicate, no dependence on any journal position.
+    let expected_tail: Vec<String> = all_ids
+        .iter()
+        .skip_while(|i| **i != mid)
+        .skip(1)
+        .cloned()
+        .collect();
+    let after = collect_sse(&client, &url, Some(&mid), |evs| {
+        evs.iter().filter_map(|e| e.id.clone()).count() >= expected_tail.len()
+    })
+    .await;
+    let after_ids: Vec<String> = after.iter().filter_map(|e| e.id.clone()).collect();
     assert_eq!(
-        &after_ids[..expected_tail.len().min(after_ids.len())],
-        &expected_tail[..expected_tail.len().min(after_ids.len())]
+        after_ids, expected_tail,
+        "reconnect must resume exactly after the cursor"
     );
 
     server.shutdown().await;
@@ -1439,7 +1519,7 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     for _ in 0..3 {
         let page: serde_json::Value = client
             .get(format!(
-                "http://{}/api/sessions/{id}/history?limit=50",
+                "http://{}/api/sessions/{id}/agents/main/history?limit=50",
                 server.addr
             ))
             .send()
@@ -1453,7 +1533,10 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
             "the resident agent still holds the transcript: {page}"
         );
         let usage: serde_json::Value = client
-            .get(format!("http://{}/api/sessions/{id}/usage", server.addr))
+            .get(format!(
+                "http://{}/api/sessions/{id}/agents/main",
+                server.addr
+            ))
             .send()
             .await
             .unwrap()
@@ -1461,10 +1544,8 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
             .await
             .unwrap();
         assert!(
-            usage["usage"]["sessionTotal"]["inputTokens"]
-                .as_u64()
-                .unwrap()
-                > 0
+            usage["agent"]["usage"]["inputTokens"].as_u64().unwrap() > 0,
+            "the agent document reports its own usage: {usage}"
         );
         let _ = get_detail(&client, &server.addr, &id).await;
     }
@@ -1518,7 +1599,7 @@ async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
     // across providers, so the queue is joined with a blank line instead.
     let page: serde_json::Value = client
         .get(format!(
-            "http://{}/api/sessions/{id}/history?limit=100",
+            "http://{}/api/sessions/{id}/agents/main/history?limit=100",
             server.addr
         ))
         .send()

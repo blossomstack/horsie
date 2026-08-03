@@ -1,13 +1,10 @@
 
 import { Message } from '../agent';
-import { TaskItem } from '../session';
-import { UsageView } from '../session';
 /**
- * One page of a session&#x27;s conversation history, served from the agent&#x27;s
+ * One window of an agent&#x27;s transcript, served from the agent&#x27;s in-memory
  */
 export interface HistoryPage {
   messages: Message[];
-  hasMore: boolean;
-  tasks?: TaskItem[];
-  usage?: UsageView;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
 }

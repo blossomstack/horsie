@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
-import { api } from "../api/client";
+import { MAIN_AGENT, api } from "../api/client";
 import {
   Role,
   SessionStatusKind,
@@ -9,6 +9,7 @@ import {
   type Message,
   type PendingAskView,
   type QueuedMessage,
+  type AgentStreamEvent,
   type SessionEvent,
   type TaskItem,
 } from "../api/types";
@@ -125,6 +126,11 @@ interface State {
   hasMoreBefore: boolean;
   loadingMore: boolean;
   progression: { stage: string; detail: string | null } | null;
+  /** Bumped on every `Resync` frame — the signal to backfill from the cursor,
+   * since the server deliberately does not replay a live stream. */
+  needsResync: number;
+  /** Bumped when the agent roster changes, so the session document is re-read. */
+  agentTreeSeq: number;
 }
 
 const INITIAL: State = {
@@ -146,6 +152,8 @@ const INITIAL: State = {
   hasMoreBefore: false,
   loadingMore: false,
   progression: null,
+  needsResync: 0,
+  agentTreeSeq: 0,
 };
 
 type Action =
@@ -159,10 +167,20 @@ type Action =
   // has arrived, which is always fresher.
   | { kind: "seed-queue"; queued: QueuedMessage[] }
   | { kind: "loading-more"; value: boolean }
-  | { kind: "history"; page: HistoryPage; prepend: boolean }
+  | {
+      kind: "history";
+      page: HistoryPage;
+      prepend: boolean;
+      /** A forward backfill page (from `after=`), not a scroll-back or seed. */
+      forward?: boolean;
+    }
   // `fromBackfill` marks a live event replayed from the pre-seed buffer: its
   // turn's usage is already in the seeded tail total, so it must not re-add.
-  | { kind: "event"; event: SessionEvent; fromBackfill?: boolean };
+  | {
+      kind: "event";
+      event: SessionEvent | AgentStreamEvent;
+      fromBackfill?: boolean;
+    };
 
 function textOf(parts: ContentPart[]): string {
   return parts
@@ -308,24 +326,30 @@ function reducer(state: State, action: Action): State {
       return state.queued === null ? { ...state, queued: action.queued } : state;
     case "history": {
       const { page, prepend } = action;
-      let next = applyHistory(state, page.messages, prepend);
-      next = { ...next, hasMoreBefore: page.hasMore, loadingMore: false };
-      // Tasks + usage ride only the tail page: seed them absolutely.
-      if (page.tasks) next.tasks = page.tasks;
-      if (page.usage) {
-        next.usage = {
-          input: Number(page.usage.inputTokens),
-          output: Number(page.usage.outputTokens),
-        };
-      }
-      return next;
+      // A page carries messages and nothing else. Task list and usage are
+      // current values on the agent document, seeded by `useAgent` — a page
+      // no longer means two different things depending on its cursor.
+      const next = applyHistory(state, page.messages, prepend);
+      return {
+        ...next,
+        // A forward (backfill) page says nothing about what precedes the
+        // window already loaded, so it must not overwrite that.
+        hasMoreBefore: prepend || !action.forward ? page.hasMoreBefore : state.hasMoreBefore,
+        loadingMore: false,
+      };
     }
     case "event": {
       const ev = action.event;
       switch (ev.type) {
-        case "Message":
-          // Real output began → the prep stage is done.
+        case "Appended":
+          // Real output began → the prep stage is done. A tool result is an
+          // append like any other, so this one case covers the whole
+          // transcript — the same fold `/history` feeds.
           return { ...ingestMessage(state, ev.value.message), progression: null };
+        case "Resync":
+          // The stream dropped frames. Say so; the effect below re-reads the
+          // documents and backfills from the cursor rather than guessing.
+          return { ...state, needsResync: state.needsResync + 1 };
         case "Progressed":
           return {
             ...state,
@@ -334,27 +358,6 @@ function reducer(state: State, action: Action): State {
               detail: ev.value.detail ?? null,
             },
           };
-        case "ToolResult": {
-          const liveTools = { ...state.liveTools };
-          if (liveTools[ev.value.toolCallId]) {
-            liveTools[ev.value.toolCallId] = {
-              ...liveTools[ev.value.toolCallId],
-              running: false,
-            };
-          }
-          return {
-            ...state,
-            liveTools,
-            toolResults: {
-              ...state.toolResults,
-              [ev.value.toolCallId]: {
-                output: ev.value.output,
-                isError: ev.value.isError,
-                atMs: ev.value.atMs,
-              },
-            },
-          };
-        }
         case "InboxChanged": {
           const queued = ev.value.queued;
           const ids = new Set(queued.map((q) => q.id));
@@ -419,6 +422,8 @@ function reducer(state: State, action: Action): State {
           };
         case "TaskListChanged":
           return { ...state, tasks: ev.value.tasks };
+        case "AgentTreeChanged":
+          return { ...state, agentTreeSeq: state.agentTreeSeq + 1 };
         default:
           return state;
       }
@@ -463,48 +468,82 @@ export function useSessionStream(sessionId: string | undefined): {
 
     let cancelled = false;
     let seeded = false;
-    const buffer: SessionEvent[] = [];
+    const buffer: (SessionEvent | AgentStreamEvent)[] = [];
 
-    // Refetch usage on a status change rather than `TurnCompleted`: the
-    // server journals/broadcasts `TurnCompleted` from inside the agent's own
-    // run — before the session actor has processed the durable usage push
-    // that `handle_finished` sends *after* that (`UsageRecorded` then
+    // Re-read a current value when a frame says it changed. Nothing here
+    // accumulates: every one of these is a document the server owns, and the
+    // frame is only a signal to fetch it again.
+    //
+    // Usage is refreshed on status change rather than `TurnCompleted`: the
+    // server broadcasts `TurnCompleted` from inside the agent's own run —
+    // before the session actor has processed the durable usage push that
+    // `handle_finished` sends *after* that (`UsageRecorded` then
     // `Concluded`/`Asked`, delivered to the same mailbox in that order).
     // `StatusChanged` only fires once `Concluded`/`Asked`/`Failed` runs, so by
-    // then the session's own usage total is guaranteed to have landed.
-    const maybeInvalidateUsage = (event: SessionEvent) => {
-      if (event.type === "StatusChanged") {
-        void queryClient.invalidateQueries({ queryKey: qk.sessionUsage(sessionId) });
+    // then the session's own usage total has landed.
+    const refreshDocuments = (event: SessionEvent | AgentStreamEvent) => {
+      switch (event.type) {
+        case "StatusChanged":
+          void queryClient.invalidateQueries({
+            queryKey: qk.agent(sessionId, MAIN_AGENT),
+          });
+          void queryClient.invalidateQueries({
+            queryKey: qk.session(sessionId),
+          });
+          break;
+        case "AgentTreeChanged":
+          void queryClient.invalidateQueries({
+            queryKey: qk.session(sessionId),
+          });
+          break;
+        default:
+          break;
       }
     };
 
-    // Live-only SSE: events before the tail seed are buffered, then replayed.
-    const es = new EventSource(api.sessionEventsUrl(sessionId, { live: true }));
-    esRef.current = es;
-    es.onopen = () => dispatch({ kind: "connected", value: true });
-    es.onmessage = (e: MessageEvent<string>) => {
-      try {
-        const event = JSON.parse(e.data) as SessionEvent;
-        if (seeded) {
-          dispatch({ kind: "event", event });
-          maybeInvalidateUsage(event);
-        } else buffer.push(event);
-      } catch (err) {
-        console.error("failed to parse session event", err, e.data);
-      }
+    const ingest = (event: SessionEvent | AgentStreamEvent) => {
+      if (seeded) {
+        dispatch({ kind: "event", event });
+        refreshDocuments(event);
+      } else buffer.push(event);
     };
-    es.onerror = () => dispatch({ kind: "connected", value: false });
+
+    const open = (url: string, label: string): EventSource => {
+      const es = new EventSource(url);
+      es.onopen = () => dispatch({ kind: "connected", value: true });
+      es.onmessage = (e: MessageEvent<string>) => {
+        try {
+          ingest(JSON.parse(e.data) as SessionEvent | AgentStreamEvent);
+        } catch (err) {
+          console.error(`failed to parse ${label} event`, err, e.data);
+        }
+      };
+      es.onerror = () => dispatch({ kind: "connected", value: false });
+      return es;
+    };
+
+    // Two streams, matching the two scopes. The session stream carries status,
+    // inbox, progression and roster changes; the agent stream carries this
+    // agent's transcript and its live run frames. The browser resumes the
+    // agent stream on its own via `Last-Event-ID` (the last appended message
+    // id), which the server serves from the agent's state.
+    const sessionEs = open(api.sessionEventsUrl(sessionId), "session");
+    const agentEs = open(
+      api.agentEventsUrl(sessionId, MAIN_AGENT),
+      "agent",
+    );
+    esRef.current = agentEs;
 
     // Seed the latest window, then flush anything buffered during the fetch.
     api.sessions
-      .history(sessionId, { limit: HISTORY_LIMIT })
+      .history(sessionId, MAIN_AGENT, { limit: HISTORY_LIMIT })
       .then((page) => {
         if (cancelled) return;
         dispatch({ kind: "history", page, prepend: false });
         seeded = true;
         for (const event of buffer) {
           dispatch({ kind: "event", event, fromBackfill: true });
-          maybeInvalidateUsage(event);
+          refreshDocuments(event);
         }
         buffer.length = 0;
       })
@@ -514,17 +553,40 @@ export function useSessionStream(sessionId: string | undefined): {
         seeded = true;
         for (const event of buffer) {
           dispatch({ kind: "event", event });
-          maybeInvalidateUsage(event);
+          refreshDocuments(event);
         }
         buffer.length = 0;
       });
 
     return () => {
       cancelled = true;
-      es.close();
+      sessionEs.close();
+      agentEs.close();
       esRef.current = null;
     };
   }, [sessionId, queryClient]);
+
+  // A `Resync` means the stream dropped frames. Backfill forward from the
+  // newest message we hold and re-read the documents; the server deliberately
+  // does not replay, because a live stream is not a log.
+  const latestRef = useRef<string | null>(null);
+  latestRef.current = state.order[state.order.length - 1] ?? null;
+  const needsResync = state.needsResync;
+  useEffect(() => {
+    if (!sessionId || needsResync === 0) return;
+    const after = latestRef.current;
+    void queryClient.invalidateQueries({ queryKey: qk.session(sessionId) });
+    void queryClient.invalidateQueries({
+      queryKey: qk.agent(sessionId, MAIN_AGENT),
+    });
+    if (!after) return;
+    api.sessions
+      .history(sessionId, MAIN_AGENT, { after, limit: HISTORY_LIMIT })
+      .then((page) =>
+        dispatch({ kind: "history", page, prepend: false, forward: true }),
+      )
+      .catch(() => {});
+  }, [sessionId, needsResync, queryClient]);
 
   const seedQueue = detail?.inbox;
   useEffect(() => {
@@ -536,7 +598,7 @@ export function useSessionStream(sessionId: string | undefined): {
     if (!sessionId || !before || !canLoadMoreRef.current) return;
     dispatch({ kind: "loading-more", value: true });
     api.sessions
-      .history(sessionId, { before, limit: HISTORY_LIMIT })
+      .history(sessionId, MAIN_AGENT, { before, limit: HISTORY_LIMIT })
       .then((page) => dispatch({ kind: "history", page, prepend: true }))
       .catch(() => dispatch({ kind: "loading-more", value: false }));
   }, [sessionId]);

@@ -532,10 +532,21 @@ mod tests {
 
     #[test]
     fn session_event_round_trips_with_type_tag() {
-        let ev = session::SessionEvent::Delta(session::DeltaEvent { text: "hi".into() });
+        let ev = session::SessionEvent::Error(session::ErrorEvent {
+            message: "boom".into(),
+        });
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"type\""));
         let back: session::SessionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn agent_stream_event_round_trips_with_type_tag() {
+        let ev = session::AgentStreamEvent::Delta(session::DeltaEvent { text: "hi".into() });
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\""));
+        let back: session::AgentStreamEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(ev, back);
     }
 

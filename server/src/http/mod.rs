@@ -91,9 +91,18 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/sessions/:id/messages", post(handlers::send_message))
         .route("/api/sessions/:id/answers", post(handlers::answer_asks))
-        .route("/api/sessions/:id/history", get(handlers::get_history))
-        .route("/api/sessions/:id/subagents", get(handlers::get_subagents))
-        .route("/api/sessions/:id/usage", get(handlers::get_session_usage))
+        .route(
+            "/api/sessions/:id/agents/:agent_id",
+            get(handlers::get_agent),
+        )
+        .route(
+            "/api/sessions/:id/agents/:agent_id/history",
+            get(handlers::get_history),
+        )
+        .route(
+            "/api/sessions/:id/agents/:agent_id/events",
+            get(sse::agent_events),
+        )
         .route("/api/sessions/:id/stop", post(handlers::stop_session))
         .route("/api/sessions/:id/events", get(sse::session_events))
         .route("/api/events", get(sse::global_events))

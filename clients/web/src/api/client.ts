@@ -10,7 +10,7 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
-  GetSessionUsageResponse,
+  GetAgentResponse,
   HistoryPage,
   GitHubAppConfigInput,
   GitHubAppConfigView,
@@ -100,6 +100,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+/** The path segment naming a session's primary agent, as opposed to a
+ * subagent's uuid. Mirrors the server's own spelling. */
+export const MAIN_AGENT = "main";
+
 export const api = {
   health: (): Promise<{ ok: boolean }> => request("/health"),
 
@@ -148,19 +152,21 @@ export const api = {
     get: (id: string): Promise<GetSessionResponse> =>
       request(`/sessions/${encodeURIComponent(id)}`),
 
-    /** A window of conversation history from the agent's in-memory state.
-     * No `before` requests the latest (tail) page, which also carries the
-     * current task list + cumulative usage. */
+    /** A window of one agent's transcript, from its in-memory state.
+     * `before` pages backwards (scroll-back), `after` pages forwards (the
+     * backfill a reconnecting stream needs); neither requests the tail. */
     history: (
       id: string,
-      opts: { before?: string; limit?: number } = {},
+      agentId: string,
+      opts: { before?: string; after?: string; limit?: number } = {},
     ): Promise<HistoryPage> => {
       const q = new URLSearchParams();
       if (opts.before) q.set("before", opts.before);
+      if (opts.after) q.set("after", opts.after);
       if (opts.limit) q.set("limit", String(opts.limit));
       const qs = q.toString();
       return request(
-        `/sessions/${encodeURIComponent(id)}/history${qs ? `?${qs}` : ""}`,
+        `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/history${qs ? `?${qs}` : ""}`,
       );
     },
 
@@ -192,10 +198,12 @@ export const api = {
         body: "{}",
       }),
 
-    /** Session-level aggregated usage plus the main agent's own usage and
-     * context-size snapshot. */
-    usage: (id: string): Promise<GetSessionUsageResponse> =>
-      request(`/sessions/${encodeURIComponent(id)}/usage`),
+    /** One agent's current values: task list, usage, and — for a subagent —
+     * its spawn metadata and terminal result. */
+    agent: (id: string, agentId: string): Promise<GetAgentResponse> =>
+      request(
+        `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}`,
+      ),
   },
 
   agents: {
@@ -380,11 +388,17 @@ export const api = {
       }),
   },
 
-  /** SSE URL for a single session's event stream. `live` streams only events
-   * after connect (skipping journal replay) — the paginating client backfills
-   * history via `sessions.history` and uses this for live updates. */
-  sessionEventsUrl: (id: string, opts: { live?: boolean } = {}): string =>
-    `${BASE}/sessions/${encodeURIComponent(id)}/events${opts.live ? "?live=1" : ""}`,
+  /** SSE URL for a session's own stream: status, inbox, progression, errors,
+   * and agent-roster changes. Session-scoped current values only — no
+   * transcript, no cursor. */
+  sessionEventsUrl: (id: string): string =>
+    `${BASE}/sessions/${encodeURIComponent(id)}/events`,
+
+  /** SSE URL for one agent's stream: transcript appends (id-stamped with the
+   * message id, so the browser resumes from them automatically), plus that
+   * agent's task list, usage, and live run frames. */
+  agentEventsUrl: (id: string, agentId: string): string =>
+    `${BASE}/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/events`,
 
   /** SSE URL for the global session-status feed. */
   globalEventsUrl: (): string => `${BASE}/events`,

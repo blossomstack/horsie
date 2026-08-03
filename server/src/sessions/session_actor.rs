@@ -11,7 +11,7 @@
 
 use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
-use crate::sessions::events::{QuietEventSink, SessionEventSink, StampedEvent, wire_event};
+use crate::sessions::events::{AgentEventSink, BroadcastObserver};
 use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::{AgentSettings, PendingAsk, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::subagents::{
@@ -19,7 +19,7 @@ use crate::sessions::subagents::{
 };
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
-use crate::sessions::{SessionFrame, UserMessageError};
+use crate::sessions::{AgentFrame, SessionFrame, UserMessageError};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
@@ -105,13 +105,18 @@ pub enum SessionCommand {
     Snapshot {
         reply: oneshot::Sender<SessionSnapshot>,
     },
-    /// Durable events after `after_seq`, for the SSE stream.
-    Events {
-        after_seq: u64,
-        reply: oneshot::Sender<Vec<StampedEvent>>,
+    /// Subscribe to one agent's live frames. `agent_id` is `None`/`"main"` for
+    /// the primary agent, else a subagent id; the outer `None` means no such
+    /// agent. A cold subagent is spawned on demand, exactly as `History` does.
+    SubscribeAgent {
+        agent_id: Option<String>,
+        reply: oneshot::Sender<Option<broadcast::Receiver<AgentFrame>>>,
     },
-    /// The journal head, for a stream that wants only what happens next.
-    HeadSeq { reply: oneshot::Sender<u64> },
+    /// Read one agent's current values (task list, usage) for its document.
+    AgentState {
+        agent_id: Option<String>,
+        reply: oneshot::Sender<Option<horsie_workflow::AgentStateView>>,
+    },
     /// The supervisor wants to unload this session. Answers `false` if a run
     /// started in the meantime, in which case nothing has changed and the idle
     /// clock simply restarts.
@@ -360,6 +365,15 @@ fn derive_title(text: &str) -> Option<String> {
     Some(format!("{}…", truncated.trim_end()))
 }
 
+/// Which agent of a session a broadcast belongs to. `Main` is not a `Uuid`
+/// variant because the main agent's journal is keyed by the *session* id — the
+/// two namespaces are deliberately distinct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentKey {
+    Main,
+    Sub(Uuid),
+}
+
 pub struct SessionActor {
     id: Uuid,
     spec: SessionSpec,
@@ -378,6 +392,11 @@ pub struct SessionActor {
     /// reach the runtime client the run already acquired instead of asking
     /// the manager for a fresh one.
     context_provider: Option<Arc<SessionContextProvider>>,
+    /// One live broadcast per agent. Created with the agent and kept for this
+    /// actor's loaded lifetime, so a subscriber survives a turn ending. A
+    /// session nobody watches still publishes — into a channel with no
+    /// receivers, which costs nothing.
+    agent_frames: HashMap<AgentKey, broadcast::Sender<AgentFrame>>,
 }
 
 impl SessionActor {
@@ -399,6 +418,7 @@ impl SessionActor {
             main_agent: None,
             sub_agents: HashMap::new(),
             context_provider: None,
+            agent_frames: HashMap::new(),
         }
     }
 
@@ -499,17 +519,54 @@ impl SessionActor {
             .thinking_effort
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
+        let frames = self.agent_frames(AgentKey::Main);
         let agent_ctx = AgentRuntimeContext {
             context_provider,
-            event_sink: Arc::new(SessionEventSink {
-                frames: self.frames.clone(),
+            event_sink: Arc::new(AgentEventSink {
+                frames: frames.clone(),
             }),
             parent: Arc::new(SessionParent {
                 target: ctx.self_ref(),
             }),
             session_id: self.id,
         };
-        self.main_agent = Some(ctx.spawn(AgentActor::new(agent_ctx, params)));
+        self.main_agent = Some(ctx.spawn(AgentActor::with_observer(
+            agent_ctx,
+            params,
+            Arc::new(BroadcastObserver { frames }),
+        )));
+    }
+
+    /// The broadcast for one agent, created on first use. Held by the session
+    /// rather than the agent so a subscriber outlives the agent's turn.
+    fn agent_frames(&mut self, key: AgentKey) -> broadcast::Sender<AgentFrame> {
+        self.agent_frames
+            .entry(key)
+            .or_insert_with(|| broadcast::channel(FRAME_BROADCAST_CAPACITY).0)
+            .clone()
+    }
+
+    /// Resolve an agent selector to its resident actor: `None`/`"main"` for the
+    /// primary agent, else a subagent id. A cold node — one in the persisted
+    /// tree with no actor since this session loaded — is spawned on demand, so
+    /// reading a finished subagent works exactly like reading a live one.
+    fn resolve_agent(
+        &mut self,
+        state: &SessionState,
+        ctx: &ActorContext<Self>,
+        agent_id: Option<&str>,
+    ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
+        match agent_id {
+            None | Some("main") => self.main_agent.clone().map(|a| (AgentKey::Main, a)),
+            Some(raw) => {
+                let id = Uuid::parse_str(raw).ok()?;
+                if let Some(agent) = self.sub_agents.get(&id) {
+                    return Some((AgentKey::Sub(id), agent.clone()));
+                }
+                state.subagents.get(&id)?;
+                Some((AgentKey::Sub(id), self.spawn_sub_agent_actor(ctx, id)))
+            }
+        }
     }
 
     /// Spawn a resident subagent actor — journal replay only; the caller
@@ -544,15 +601,22 @@ impl SessionActor {
             .thinking_effort
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
+        let frames = self.agent_frames(AgentKey::Sub(id));
         let agent_ctx = AgentRuntimeContext {
             context_provider,
-            event_sink: Arc::new(QuietEventSink),
+            event_sink: Arc::new(AgentEventSink {
+                frames: frames.clone(),
+            }),
             parent: Arc::new(SessionParent {
                 target: ctx.self_ref(),
             }),
             session_id: id,
         };
-        let actor = ctx.spawn(AgentActor::new(agent_ctx, params));
+        let actor = ctx.spawn(AgentActor::with_observer(
+            agent_ctx,
+            params,
+            Arc::new(BroadcastObserver { frames }),
+        ));
         self.sub_agents.insert(id, actor.clone());
         actor
     }
@@ -1422,6 +1486,24 @@ impl EventSourcedActor for SessionActor {
         state
     }
 
+    /// Announce a changed agent roster once the change is durable. The frame
+    /// carries no payload — the roster is a current value, so a client re-reads
+    /// the session document rather than accumulating deltas.
+    async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], _state: &SessionState) {
+        let tree_changed = events.iter().any(|e| {
+            matches!(
+                e,
+                SessionDomainEvent::SubAgentSpawned { .. }
+                    | SessionDomainEvent::SubAgentRunning { .. }
+                    | SessionDomainEvent::SubAgentCompleted { .. }
+                    | SessionDomainEvent::SubAgentFailed { .. }
+            )
+        });
+        if tree_changed {
+            let _ = self.frames.send(SessionFrame::AgentTreeChanged);
+        }
+    }
+
     async fn handle_command(
         &mut self,
         state: &SessionState,
@@ -1466,27 +1548,12 @@ impl EventSourcedActor for SessionActor {
                 query,
                 reply,
             } => {
-                let agent = match agent_id.as_deref() {
-                    None | Some("main") => self.main_agent.clone(),
-                    Some(raw) => match Uuid::parse_str(raw) {
-                        Ok(id) => match self.sub_agents.get(&id) {
-                            Some(agent) => Some(agent.clone()),
-                            // A cold node read for the first time since load:
-                            // spawn its resident actor on demand (see
-                            // `on_recovery_complete`).
-                            None if state.subagents.get(&id).is_some() => {
-                                Some(self.spawn_sub_agent_actor(ctx, id))
-                            }
-                            None => None,
-                        },
-                        Err(_) => None,
-                    },
-                };
                 // Read history from the resident actor's in-memory state. No
                 // journal access, no runtime — opening a session to read it
                 // stays free of sandbox cost.
+                let agent = self.resolve_agent(state, ctx, agent_id.as_deref());
                 let page = match agent {
-                    Some(agent) => agent
+                    Some((_, agent)) => agent
                         .ask(|reply| AgentCommand::GetHistory { query, reply })
                         .await
                         .ok(),
@@ -1500,33 +1567,26 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(stats);
                 CommandEffect::none()
             }
-            SessionCommand::Events { after_seq, reply } => {
-                let events = match self.agent() {
-                    Some(agent) => agent
-                        .ask(|reply| AgentCommand::ReplayEvents { after_seq, reply })
+            SessionCommand::AgentState { agent_id, reply } => {
+                let agent = self.resolve_agent(state, ctx, agent_id.as_deref());
+                let view = match agent {
+                    Some((_, agent)) => agent
+                        .ask(|reply| AgentCommand::GetState { reply })
                         .await
-                        .unwrap_or_default(),
-                    None => Vec::new(),
+                        .ok(),
+                    None => None,
                 };
-                let _ = reply.send(
-                    events
-                        .into_iter()
-                        .filter_map(|(seq, event)| {
-                            wire_event(event).map(|event| StampedEvent { seq, event })
-                        })
-                        .collect(),
-                );
+                let _ = reply.send(view);
                 CommandEffect::none()
             }
-            SessionCommand::HeadSeq { reply } => {
-                let head = match self.agent() {
-                    Some(agent) => agent
-                        .ask(|reply| AgentCommand::HeadSeq { reply })
-                        .await
-                        .unwrap_or(0),
-                    None => 0,
-                };
-                let _ = reply.send(head);
+            SessionCommand::SubscribeAgent { agent_id, reply } => {
+                // Resolving first means subscribing to a cold subagent spawns
+                // it, so a watcher sees its output the moment it wakes.
+                let key = self
+                    .resolve_agent(state, ctx, agent_id.as_deref())
+                    .map(|(key, _)| key);
+                let rx = key.map(|key| self.agent_frames(key).subscribe());
+                let _ = reply.send(rx);
                 CommandEffect::none()
             }
             SessionCommand::Answer { answers, reply } => {
@@ -2718,6 +2778,235 @@ mod tests {
         panic!("journal did not reach {n} entries within 2s");
     }
 
+    /// Wraps a journal and counts `replay` calls, so a test can assert that
+    /// serving reads and streams never touches durable storage.
+    struct CountingJournal {
+        inner: horsie_actor::InMemoryJournal,
+        replays: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingJournal {
+        fn new() -> Self {
+            Self {
+                inner: horsie_actor::InMemoryJournal::new(),
+                replays: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn replays(&self) -> usize {
+            self.replays.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl horsie_actor::Journal for CountingJournal {
+        async fn persist(
+            &self,
+            pid: &horsie_actor::PersistenceId,
+            events: &[Vec<u8>],
+        ) -> horsie_actor::JournalResult<()> {
+            self.inner.persist(pid, events).await
+        }
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this decorator's whole job is to count the inner journal's replays"
+        )]
+        async fn replay(
+            &self,
+            pid: &horsie_actor::PersistenceId,
+            after_seq: u64,
+        ) -> futures_util::stream::BoxStream<'_, horsie_actor::JournalResult<Vec<u8>>> {
+            self.replays
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.replay(pid, after_seq).await
+        }
+
+        async fn save_snapshot(
+            &self,
+            pid: &horsie_actor::PersistenceId,
+            state: Vec<u8>,
+            seq_nr: u64,
+        ) -> horsie_actor::JournalResult<()> {
+            self.inner.save_snapshot(pid, state, seq_nr).await
+        }
+
+        async fn latest_snapshot(
+            &self,
+            pid: &horsie_actor::PersistenceId,
+        ) -> horsie_actor::JournalResult<Option<(Vec<u8>, u64)>> {
+            self.inner.latest_snapshot(pid).await
+        }
+
+        async fn delete_events_before(
+            &self,
+            pid: &horsie_actor::PersistenceId,
+            seq_nr: u64,
+        ) -> horsie_actor::JournalResult<()> {
+            self.inner.delete_events_before(pid, seq_nr).await
+        }
+
+        async fn copy_snapshot(
+            &self,
+            from: &horsie_actor::PersistenceId,
+            to: &horsie_actor::PersistenceId,
+        ) -> horsie_actor::JournalResult<()> {
+            self.inner.copy_snapshot(from, to).await
+        }
+
+        async fn clear(
+            &self,
+            pid: &horsie_actor::PersistenceId,
+        ) -> horsie_actor::JournalResult<()> {
+            self.inner.clear(pid).await
+        }
+    }
+
+    /// Drain whatever the agent stream has produced so far.
+    fn drain_frames(rx: &mut broadcast::Receiver<AgentFrame>) -> Vec<AgentFrame> {
+        let mut out = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            out.push(frame);
+        }
+        out
+    }
+
+    fn appended_ids(frames: &[AgentFrame]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                AgentFrame::Appended { message } => Some(message.id.clone()),
+                AgentFrame::Delta { .. }
+                | AgentFrame::ToolStart { .. }
+                | AgentFrame::TurnCompleted { .. }
+                | AgentFrame::TaskListChanged { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The invariant the old two-vocabulary design could not even state: the
+    /// transcript you get by accumulating stream appends is the transcript
+    /// `/history` hands you. They are two projections of one append-only log.
+    #[tokio::test]
+    async fn the_stream_and_history_agree_on_the_transcript() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let mut rx = session
+            .ask(|reply| SessionCommand::SubscribeAgent {
+                agent_id: None,
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("the main agent is subscribable");
+
+        session
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "go".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_journal_len(&journal, id, 2).await;
+        // Let the turn's appends land on the broadcast.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let streamed = appended_ids(&drain_frames(&mut rx));
+        let stored: Vec<String> = main_history(&session)
+            .await
+            .messages
+            .iter()
+            .map(|m| m.id.clone())
+            .collect();
+        assert!(!streamed.is_empty(), "the turn must produce appends");
+        assert_eq!(
+            streamed, stored,
+            "stream appends and history must be the same transcript, in the same order"
+        );
+    }
+
+    /// Reads and streams are served from actor state. The journal is touched
+    /// only while an actor recovers — never to answer a query.
+    #[tokio::test]
+    async fn serving_reads_never_touches_the_journal() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "mock", &actor_spec_fixture())
+            .await
+            .expect("create");
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+        );
+        let counting = Arc::new(CountingJournal::new());
+        let journal: Arc<dyn horsie_actor::Journal> = counting.clone();
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                test_frames(),
+            ),
+            journal.clone(),
+        );
+
+        // Drive one turn so both actors are loaded and have history.
+        session
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "go".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_journal_len(&journal, id, 2).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Recovery is allowed to replay; everything after it is not.
+        let after_recovery = counting.replays();
+        assert!(
+            after_recovery > 0,
+            "the counter must actually observe recovery, or this test proves nothing"
+        );
+
+        let _ = main_history(&session).await;
+        let _ = session
+            .ask(|reply| SessionCommand::History {
+                agent_id: None,
+                query: horsie_workflow::HistoryQuery {
+                    before: None,
+                    after: Some("m1".into()),
+                    limit: 10,
+                },
+                reply,
+            })
+            .await
+            .unwrap();
+        let _ = session
+            .ask(|reply| SessionCommand::AgentState {
+                agent_id: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let _ = session
+            .ask(|reply| SessionCommand::SubscribeAgent {
+                agent_id: None,
+                reply,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            counting.replays(),
+            after_recovery,
+            "history, agent state and subscribe must all be served from memory"
+        );
+    }
+
     async fn spawn_sub(session: &ActorRef<SessionCommand>, label: &str, task: &str) -> Uuid {
         session
             .ask(|reply| SessionCommand::SpawnSubAgent {
@@ -2934,6 +3223,7 @@ mod tests {
                 agent_id: None,
                 query: horsie_workflow::HistoryQuery {
                     before: None,
+                    after: None,
                     limit: 50,
                 },
                 reply,
@@ -3222,6 +3512,7 @@ mod tests {
                 agent_id: Some(p.to_string()),
                 query: horsie_workflow::HistoryQuery {
                     before: None,
+                    after: None,
                     limit: 20,
                 },
                 reply,
@@ -3282,6 +3573,7 @@ mod tests {
                 agent_id: Some(sub.to_string()),
                 query: horsie_workflow::HistoryQuery {
                     before: None,
+                    after: None,
                     limit: 10,
                 },
                 reply,

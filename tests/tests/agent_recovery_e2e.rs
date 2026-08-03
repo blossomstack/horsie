@@ -517,6 +517,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
                 .tell(AgentCommand::GetHistory {
                     query: horsie_workflow::HistoryQuery {
                         before: None,
+                        after: None,
                         limit: 100,
                     },
                     reply,
@@ -573,6 +574,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         .tell(AgentCommand::GetHistory {
             query: horsie_workflow::HistoryQuery {
                 before: None,
+                after: None,
                 limit: 100,
             },
             reply,

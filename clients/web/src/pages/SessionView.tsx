@@ -1,7 +1,7 @@
 import { CircleAlert, Loader2, Square, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { ApiRequestError } from "../api/client";
+import { ApiRequestError, MAIN_AGENT } from "../api/client";
 import { SessionStatusKind } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
@@ -18,7 +18,7 @@ import {
   useAnswerAsks,
   useSendMessage,
   useSession,
-  useSessionUsage,
+  useAgent,
   useStopSession,
 } from "../hooks/useSessions";
 import { sessionTitle } from "../lib/format";
@@ -54,7 +54,7 @@ export function SessionView() {
     ackOptimisticUser,
     loadMore,
   } = useSessionStream(id);
-  const { data: usageStats } = useSessionUsage(id);
+  const { data: mainAgent } = useAgent(id, MAIN_AGENT);
   const send = useSendMessage();
   const answerAsks = useAnswerAsks();
   const stop = useStopSession();
@@ -243,7 +243,11 @@ export function SessionView() {
                 <StatusBadge status={status} />
               </div>
               <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                <ContextStatsPanel stats={usageStats} totalTokens={totalTokens} />
+                <ContextStatsPanel
+                  agent={mainAgent}
+                  sessionTotal={detail?.usageTotal}
+                  totalTokens={totalTokens}
+                />
               </div>
             </div>
 
