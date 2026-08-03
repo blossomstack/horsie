@@ -41,7 +41,8 @@ address:
     open https://horsie.example.com in your browser to start a session
 
 This registers your current directory as workspace `main` and dials the
-server. Sessions can reach this machine only while the process is up, so run
+server. It uses the login from step 2 — without one, against a server with
+authentication on, it stops and tells you to log in rather than retrying. Sessions can reach this machine only while the process is up, so run
 it under a process manager if you want it to survive a logout. Pass
 `--workspace` more than once to serve several directories, and `--name` if
 more than one machine connects to the same server.

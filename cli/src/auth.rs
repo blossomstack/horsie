@@ -365,6 +365,23 @@ pub fn status() -> Result<(), CliError> {
     Ok(())
 }
 
+/// Whether `server` requires a credential. Used for a pre-flight check: an
+/// agent that dials without one gets a 401 it will retry forever, and "run
+/// `horsie auth login`" is far more useful than a backoff loop.
+pub async fn server_requires_auth(server: &str) -> Result<bool, CliError> {
+    let url = api_url(server, "/api/auth/status");
+    let res = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| CliError::Server(format!("cannot reach server at {}: {e}", normalize_server(server))))?;
+    let status: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| CliError::Server(format!("{url}: unexpected response: {e}")))?;
+    Ok(status.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
 /// The bearer to send to `server`, refreshing a stale access token first.
 /// `None` means "no credential configured", which callers report as a prompt to
 /// log in rather than as a failure.
