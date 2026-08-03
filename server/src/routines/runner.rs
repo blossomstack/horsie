@@ -84,6 +84,18 @@ impl RoutineRunner {
         }
     }
 
+    /// Trigger `name` by hand (the run endpoint, the UI button), leaving its
+    /// timer exactly where it was: pressing the button is not a reason for the
+    /// next scheduled firing to move.
+    pub async fn run_manual(
+        &self,
+        name: &str,
+        now_ms: u64,
+    ) -> Result<SessionSummary, RoutineError> {
+        let armed = self.routines.row(name).await?.next_run_at_ms;
+        self.run(name, now_ms, armed).await
+    }
+
     async fn record(
         &self,
         name: &str,

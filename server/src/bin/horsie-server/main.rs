@@ -142,6 +142,10 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         horsie_server::agents::AgentStore::new(opened.pool.clone()),
         opened.store.clone(),
     ));
+    let routines = Arc::new(horsie_server::routines::RoutineService::new(
+        horsie_server::routines::RoutineStore::new(opened.pool.clone()),
+        agents.clone(),
+    ));
 
     let auth = Arc::new(horsie_server::auth::AuthService::new(
         horsie_server::auth::AuthStore::new(opened.pool.clone()),
@@ -204,6 +208,20 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         journal.clone(),
     );
 
+    // Triggering a routine is one code path; the timer is a clock on top of it.
+    let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
+        routines.clone(),
+        agents.clone(),
+        opened.store.clone(),
+        vendor_agents.clone(),
+        supervisor.clone(),
+    ));
+    Arc::new(horsie_server::routines::RoutineScheduler::new(
+        routine_runner.clone(),
+        routines.clone(),
+    ))
+    .spawn();
+
     let state = AppState {
         supervisor,
         global_events: global_tx,
@@ -215,6 +233,8 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         plugins,
         memory,
         agents,
+        routines,
+        routine_runner,
         vendor_agents,
         web_dir: cli.web,
     };

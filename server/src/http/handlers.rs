@@ -107,10 +107,14 @@ pub async fn create_session(
     ))
 }
 
+/// Every session a person started. A routine's runs are deliberately absent:
+/// they are listed on the routine's own page, and a routine on a timer would
+/// otherwise bury the sessions somebody is actually having.
 pub async fn list_sessions(State(state): State<AppState>) -> Result<impl IntoResponse, Api> {
     let sessions = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
     let sessions = sessions
         .iter()
+        .filter(|(_, rec, _)| rec.spec.routine().is_none())
         .map(|(id, rec, status)| summary(id, rec, status.as_ref()))
         .collect();
     Ok(Json(ListSessionsResponse { sessions }))

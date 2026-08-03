@@ -68,10 +68,25 @@ pub async fn replace_agent(
 }
 
 /// DELETE /api/agents/:name
+///
+/// Refused while a routine names this preset: a routine's whole configuration
+/// is the agent it points at, so deleting one out from under it turns a
+/// scheduled job into a timer that fails every firing.
 pub async fn delete_agent(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, Api> {
+    let used_by = state
+        .routines
+        .using_agent(&name)
+        .await
+        .map_err(|e| Api::internal(e.to_string()))?;
+    if !used_by.is_empty() {
+        return Err(Api::conflict(
+            "agent_in_use",
+            format!("routines still use this agent: {}", used_by.join(", ")),
+        ));
+    }
     state
         .agents
         .delete(&name)

@@ -153,6 +153,10 @@ async fn start_server_with(
         horsie_server::agents::AgentStore::new(opened.pool.clone()),
         opened.store.clone(),
     ));
+    let routines = Arc::new(horsie_server::routines::RoutineService::new(
+        horsie_server::routines::RoutineStore::new(opened.pool.clone()),
+        agents.clone(),
+    ));
     // Auth off: this suite drives the HTTP API without a credential, and a
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
@@ -162,6 +166,16 @@ async fn start_server_with(
             enabled: false,
             state_dir: journal_dir.to_path_buf(),
         },
+    ));
+    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
+        shared_vendors,
+    ));
+    let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
+        routines.clone(),
+        agents.clone(),
+        opened.store.clone(),
+        vendor_agents.clone(),
+        supervisor.clone(),
     ));
     let state = AppState {
         supervisor: supervisor.clone(),
@@ -176,9 +190,9 @@ async fn start_server_with(
         plugins,
         memory,
         agents,
-        vendor_agents: Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
-            shared_vendors,
-        )),
+        routines,
+        routine_runner,
+        vendor_agents,
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -300,6 +314,10 @@ async fn start_server_with_live_vendors(
         horsie_server::agents::AgentStore::new(opened.pool.clone()),
         opened.store.clone(),
     ));
+    let routines = Arc::new(horsie_server::routines::RoutineService::new(
+        horsie_server::routines::RoutineStore::new(opened.pool.clone()),
+        agents.clone(),
+    ));
     // Auth off: this suite drives the HTTP API without a credential, and a
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
@@ -309,6 +327,16 @@ async fn start_server_with_live_vendors(
             enabled: false,
             state_dir: journal_dir.to_path_buf(),
         },
+    ));
+    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
+        opened.vendors.clone(),
+    ));
+    let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
+        routines.clone(),
+        agents.clone(),
+        opened.store.clone(),
+        vendor_agents.clone(),
+        supervisor.clone(),
     ));
     let state = AppState {
         supervisor: supervisor.clone(),
@@ -323,9 +351,9 @@ async fn start_server_with_live_vendors(
         plugins,
         memory,
         agents,
-        vendor_agents: Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
-            opened.vendors.clone(),
-        )),
+        routines,
+        routine_runner,
+        vendor_agents,
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
