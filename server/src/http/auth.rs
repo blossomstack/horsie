@@ -6,7 +6,7 @@
 //! headers. Non-browser callers (the CLI, vendor agents) send
 //! `Authorization: Bearer` and are accepted by the same code path.
 
-use crate::auth::{LoginError, Principal};
+use crate::auth::{DeviceError, LoginError, Principal};
 use crate::http::AppState;
 use crate::http::error::Api;
 use axum::Json;
@@ -14,7 +14,10 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use horsie_models::auth::{AuthStatus, LoginRequest, PasswordChangeRequest};
+use horsie_models::auth::{
+    AuthStatus, DeviceApprovalRequest, DeviceCodeResponse, DeviceTokenRequest, LoginRequest,
+    PasswordChangeRequest, RefreshRequest, TokenPair,
+};
 
 pub const COOKIE_NAME: &str = "horsie_session";
 
@@ -29,6 +32,11 @@ fn is_public(path: &str) -> bool {
     path == "/api/health"
         || path == "/api/auth/status"
         || path == "/api/auth/login"
+        // How a CLI becomes authenticated in the first place. Approval, which
+        // is the actual authorization step, requires the browser cookie.
+        || path == "/api/auth/device/code"
+        || path == "/api/auth/device/token"
+        || path == "/api/auth/refresh"
         || path.starts_with("/api/plugin-artifacts/")
 }
 
@@ -210,6 +218,122 @@ pub async fn change_password(
         authenticated: true,
         must_change_password: false,
     }))
+}
+
+/// `POST /api/auth/device/code` — start a device authorization.
+pub async fn device_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DeviceCodeResponse>, Api> {
+    let d = state
+        .auth
+        .start_device_authorization()
+        .await
+        .map_err(Api::internal)?;
+    // Same-origin: the browser page that approves this code is served by this
+    // very server, so the request's own host is the right verification URI.
+    let base = crate::http::request_base(&headers);
+    Ok(Json(DeviceCodeResponse {
+        verification_uri: format!("{base}/auth/device"),
+        verification_uri_complete: format!("{base}/auth/device?code={}", d.user_code),
+        device_code: d.device_code,
+        user_code: d.user_code,
+        expires_in: d.expires_in,
+        interval: d.interval,
+    }))
+}
+
+/// `POST /api/auth/device/token` — one poll.
+pub async fn device_token(
+    State(state): State<AppState>,
+    Json(body): Json<DeviceTokenRequest>,
+) -> Result<Json<TokenPair>, Api> {
+    match state.auth.poll_device_token(&body.device_code).await {
+        Ok(t) => Ok(Json(pair(t))),
+        Err(e) => Err(device_error(e)),
+    }
+}
+
+/// `POST /api/auth/refresh` — rotate a refresh token.
+pub async fn refresh(
+    State(state): State<AppState>,
+    Json(body): Json<RefreshRequest>,
+) -> Result<Json<TokenPair>, Api> {
+    match state.auth.refresh(&body.refresh_token).await {
+        Ok(t) => Ok(Json(pair(t))),
+        Err(e) => Err(device_error(e)),
+    }
+}
+
+fn pair(t: crate::auth::IssuedTokens) -> TokenPair {
+    TokenPair {
+        access_token: t.access_token,
+        refresh_token: t.refresh_token,
+        expires_in: u32::try_from(t.expires_in).unwrap_or(u32::MAX),
+    }
+}
+
+/// `POST /api/auth/device/approve` — cookie-authenticated. The principal comes
+/// from the middleware, so a code is always approved *as* whoever is logged in.
+pub async fn device_approve(
+    State(state): State<AppState>,
+    axum::Extension(principal): axum::Extension<Principal>,
+    Json(body): Json<DeviceApprovalRequest>,
+) -> Result<StatusCode, Api> {
+    let approved = state
+        .auth
+        .approve_device(&body.user_code, &principal)
+        .await
+        .map_err(Api::internal)?;
+    answered(approved)
+}
+
+/// `POST /api/auth/device/deny` — cookie-authenticated.
+pub async fn device_deny(
+    State(state): State<AppState>,
+    Json(body): Json<DeviceApprovalRequest>,
+) -> Result<StatusCode, Api> {
+    let denied = state
+        .auth
+        .deny_device(&body.user_code)
+        .await
+        .map_err(Api::internal)?;
+    answered(denied)
+}
+
+/// Unknown, expired, and already-answered codes are one 404: the person at the
+/// browser can do the same thing about all three — start over.
+fn answered(ok: bool) -> Result<StatusCode, Api> {
+    if ok {
+        Ok(StatusCode::OK)
+    } else {
+        Err(Api::not_found(
+            "that code is not waiting for an answer — it may have expired or already been used",
+        ))
+    }
+}
+
+/// Poll/refresh failures answer `400` with the RFC's error name as the code, so
+/// a client can branch on `authorization_pending` vs `slow_down` without
+/// parsing prose.
+fn device_error(e: DeviceError) -> Api {
+    let (code, message) = match e {
+        DeviceError::AuthorizationPending => (
+            "authorization_pending",
+            "waiting for the code to be approved in a browser",
+        ),
+        DeviceError::SlowDown => ("slow_down", "polling too fast"),
+        DeviceError::ExpiredToken => ("expired_token", "that code has expired or was already used"),
+        DeviceError::AccessDenied => ("access_denied", "that request was denied"),
+        DeviceError::Internal(m) => return Api::internal(m),
+    };
+    Api(
+        StatusCode::BAD_REQUEST,
+        horsie_models::session_api::ApiError {
+            code: code.to_string(),
+            message: message.to_string(),
+        },
+    )
 }
 
 fn to_api(e: LoginError) -> Api {
