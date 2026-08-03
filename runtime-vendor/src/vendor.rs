@@ -578,6 +578,7 @@ impl RuntimeVendor {
                 .collect(),
             env,
             provision: request.provision.clone(),
+            state_file: None,
         };
         let handle = (self.provider)(runtime_id, caps_file)
             .create(runtime_id, &config)

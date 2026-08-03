@@ -61,6 +61,11 @@ struct Cli {
     /// node bin dir.
     #[arg(long = "hook-path")]
     hook_path: Vec<PathBuf>,
+    /// Where to mirror the per-agent cwd/env map, so a runtime that is stopped
+    /// and started again resumes with it intact. Passed by vendors that can
+    /// respawn a runtime; absent keeps that state in memory only.
+    #[arg(long = "state-file")]
+    state_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -195,6 +200,9 @@ fn apply_sandbox_or_exit(
 
 /// The async body, run inside a runtime built after the sandbox was applied.
 async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
+    // Taken before `cli` is partially moved into the workspace registry below.
+    let state_file = cli.state_file.clone();
+
     // In-sandbox hackamore self-provisioning — under the same confinement as the
     // job and before the message loop. Fail closed: a daemon that injected
     // hackamore env expects a provisioned runtime, so any failure fails the job.
@@ -244,7 +252,7 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
                     std::process::exit(1);
                 }
             };
-            run_loop(ws, registry, runtime_id, steps).await;
+            run_loop(ws, registry, runtime_id, steps, state_file).await;
         }
         Endpoint::Unix(path) => {
             let ws = match retry(
@@ -269,7 +277,7 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
                     std::process::exit(1);
                 }
             };
-            run_loop(ws, registry, runtime_id, steps).await;
+            run_loop(ws, registry, runtime_id, steps, state_file).await;
         }
     }
 }
@@ -313,6 +321,7 @@ async fn run_loop<S>(
     registry: Arc<horsie_runtime::workspace::WorkspaceRegistry>,
     runtime_id: String,
     steps: Vec<horsie_models::executor::ProvisionStep>,
+    state_file: Option<PathBuf>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -372,8 +381,13 @@ async fn run_loop<S>(
         Arc::new(Mutex::new(HashMap::new()));
 
     // Per-agent cwd/env state, keyed by the agent id stamped on each tool call;
-    // shared by every task this connection spawns.
-    let state = Arc::new(horsie_runtime::state::RuntimeState::new());
+    // shared by every task this connection spawns. File-backed when the vendor
+    // can respawn this runtime, so a hibernate or an agent restart does not
+    // silently reset the agent's working directory and environment.
+    let state = Arc::new(match state_file {
+        Some(path) => horsie_runtime::state::RuntimeState::with_file(path),
+        None => horsie_runtime::state::RuntimeState::new(),
+    });
 
     while let Some(msg) = stream.next().await {
         match msg {

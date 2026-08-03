@@ -46,6 +46,45 @@ impl RuntimeHandle for ProcessRuntimeHandle {
     }
 }
 
+/// The child's argv, minus the binary itself.
+///
+/// Free-standing rather than inline in `create` so the config-to-argument
+/// mapping can be tested without spawning a process.
+fn child_args(
+    id: &str,
+    endpoint: &str,
+    config: &RuntimeConfig,
+    caps: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut args = vec![
+        "--endpoint".to_string(),
+        endpoint.to_string(),
+        "--runtime-id".to_string(),
+        id.to_string(),
+    ];
+    for ws in &config.workspaces {
+        args.push("--workspace".to_string());
+        args.push(format!("{}={}", ws.name, ws.path));
+    }
+    if let Some(dir) = &config.plugins_dir {
+        args.push("--plugins-dir".to_string());
+        args.push(dir.clone());
+    }
+    for hp in &config.hook_path {
+        args.push("--hook-path".to_string());
+        args.push(hp.clone());
+    }
+    if let Some(file) = &config.state_file {
+        args.push("--state-file".to_string());
+        args.push(file.clone());
+    }
+    if let Some(caps) = caps {
+        args.push("--sandbox-caps".to_string());
+        args.push(caps.display().to_string());
+    }
+    args
+}
+
 /// Sandbox policy passed to a spawned runtime child. Its presence means
 /// "sandbox-on"; absence means "no nono" (today's server / test behavior). The
 /// `capabilities_file` fully defines the allowed capabilities — the caller resolves
@@ -136,24 +175,12 @@ impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
         };
 
         let mut cmd = tokio::process::Command::new(&self.binary_path);
-        cmd.arg("--endpoint")
-            .arg(&endpoint_arg)
-            .arg("--runtime-id")
-            .arg(id);
-        for ws in &config.workspaces {
-            cmd.arg("--workspace")
-                .arg(format!("{}={}", ws.name, ws.path));
-        }
-        if let Some(dir) = &config.plugins_dir {
-            cmd.arg("--plugins-dir").arg(dir);
-        }
-        for hp in &config.hook_path {
-            cmd.arg("--hook-path").arg(hp);
-        }
-
-        if let Some(policy) = &self.sandbox {
-            cmd.arg("--sandbox-caps").arg(&policy.capabilities_file);
-        }
+        cmd.args(child_args(
+            id,
+            &endpoint_arg,
+            config,
+            self.sandbox.as_ref().map(|p| p.capabilities_file.as_path()),
+        ));
         let mut injected = config.env.clone();
         if !config.provision.is_empty() {
             let json = serde_json::to_string(&config.provision)
@@ -200,6 +227,64 @@ impl crate::provider::RuntimeProvider for ProcessRuntimeProvider {
 )]
 mod tests {
     use super::*;
+
+    fn config() -> RuntimeConfig {
+        RuntimeConfig {
+            workspaces: vec![],
+            plugins_dir: None,
+            hook_path: vec![],
+            env: vec![],
+            provision: vec![],
+            state_file: None,
+        }
+    }
+
+    /// The argument after `flag`, if the flag is present at all.
+    fn arg_after(args: &[String], flag: &str) -> Option<String> {
+        args.iter().position(|a| a == flag).map(|i| args[i + 1].clone())
+    }
+
+    #[test]
+    fn a_state_file_reaches_the_child_as_an_argument() {
+        let mut cfg = config();
+        cfg.state_file = Some("/state/r1/agents.json".to_string());
+        let args = child_args("r1", "unix:/tmp/s.sock", &cfg, None);
+        assert_eq!(
+            arg_after(&args, "--state-file").as_deref(),
+            Some("/state/r1/agents.json")
+        );
+    }
+
+    /// A vendor that cannot respawn passes no path, and the runtime must not be
+    /// handed an empty one to write to.
+    #[test]
+    fn no_state_file_means_no_argument() {
+        let args = child_args("r1", "unix:/tmp/s.sock", &config(), None);
+        assert!(!args.iter().any(|a| a == "--state-file"));
+    }
+
+    #[test]
+    fn workspaces_plugins_and_caps_still_map_as_before() {
+        let mut cfg = config();
+        cfg.workspaces = vec![horsie_models::executor::WorkspaceConfig {
+            name: "main".to_string(),
+            path: "/work".to_string(),
+        }];
+        cfg.plugins_dir = Some("/lib".to_string());
+        cfg.hook_path = vec!["/node/bin".to_string()];
+        let args = child_args(
+            "r1",
+            "ws://127.0.0.1:3790",
+            &cfg,
+            Some(std::path::Path::new("/caps.json")),
+        );
+        assert_eq!(arg_after(&args, "--endpoint").as_deref(), Some("ws://127.0.0.1:3790"));
+        assert_eq!(arg_after(&args, "--runtime-id").as_deref(), Some("r1"));
+        assert_eq!(arg_after(&args, "--workspace").as_deref(), Some("main=/work"));
+        assert_eq!(arg_after(&args, "--plugins-dir").as_deref(), Some("/lib"));
+        assert_eq!(arg_after(&args, "--hook-path").as_deref(), Some("/node/bin"));
+        assert_eq!(arg_after(&args, "--sandbox-caps").as_deref(), Some("/caps.json"));
+    }
 
     fn which_bash() -> Option<std::path::PathBuf> {
         std::env::var_os("PATH").and_then(|paths| {

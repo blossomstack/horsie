@@ -182,6 +182,10 @@ impl JobRuntime for ProcessJobRuntime {
             // minting is configured, empty otherwise.
             env,
             provision: vec![],
+            // A job's runtime is never respawned — the job owns it for its whole
+            // life and dies with it — so there is nothing for a mirrored
+            // cwd/env map to survive into.
+            state_file: None,
         };
         let runtime_handle = provider
             .create(&job_id, &config)
