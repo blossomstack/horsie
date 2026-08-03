@@ -505,6 +505,7 @@ impl SessionActor {
             settings: self.spec.agent.clone(),
             session_id: self.id,
             kind: SessionAgentKind::Main,
+            unattended: self.spec.is_unattended(),
             session: ctx.self_ref(),
             frames: self.frames.clone(),
             last_client: Mutex::new(None),
@@ -512,7 +513,12 @@ impl SessionActor {
         self.context_provider = Some(context_provider.clone());
         let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
         params.interactive = true;
-        params.optional_handoff_tool = Some(ASK_USER_TOOL.to_string());
+        // Only when the tool exists: an unattended session is not offered
+        // `ask_user`, and naming a handoff tool the toolbox does not carry
+        // would leave the loop watching for a call that can never come.
+        if !self.spec.is_unattended() {
+            params.optional_handoff_tool = Some(ASK_USER_TOOL.to_string());
+        }
         params.thinking_effort = self
             .spec
             .agent
@@ -587,6 +593,7 @@ impl SessionActor {
             settings: self.spec.agent.clone(),
             session_id: self.id,
             kind: SessionAgentKind::Sub(id),
+            unattended: self.spec.is_unattended(),
             session: ctx.self_ref(),
             frames: self.frames.clone(),
             last_client: Mutex::new(None),
@@ -1230,6 +1237,16 @@ it is delivered to the agent that spawned you — make it self-contained. You ma
 your own subagents with spawn_agent and check on them with subagent_status. You cannot \
 ask the user or rename the session; if you are blocked, report that instead.";
 
+/// Appended to an unattended session's system prompt (a routine run). It has
+/// no `ask_user` tool, so the prompt says why rather than leaving the model to
+/// discover a tool it was told about is missing.
+const UNATTENDED_PROMPT_SUFFIX: &str = "\n\n# Unattended run\n\
+This session was started by a routine, not by a person, and nobody is reading it while \
+it runs. There is no ask_user tool: a question would park the run with nobody to answer \
+it. Work from the instructions you were given — where they leave a choice open, make the \
+reasonable one, say which you made and why, and carry on. Your final message is the \
+report; make it self-contained.";
+
 /// Per-run context for a session's agent, resolved on the run's own task.
 ///
 /// It asks the [`RuntimeClientProvider`] for a client each run rather than
@@ -1243,6 +1260,9 @@ struct SessionContextProvider {
     settings: AgentSettings,
     session_id: Uuid,
     kind: SessionAgentKind,
+    /// Whether nobody is watching this session (a routine run). Decides one
+    /// thing: the main agent gets no `ask_user`, and is told why.
+    unattended: bool,
     /// The owning session's mailbox — routes the server-owned tools.
     session: ActorRef<SessionCommand>,
     frames: broadcast::Sender<SessionFrame>,
@@ -1359,6 +1379,11 @@ impl ContextProvider for SessionContextProvider {
             ))
         };
         let toolbox: Arc<dyn Toolbox> = match self.kind {
+            // An unattended session skips the ask layer entirely rather than
+            // offering a tool whose answer would never come.
+            SessionAgentKind::Main if self.unattended => {
+                Arc::new(SessionTitleToolbox::new(with_spawn, self.session.clone()))
+            }
             SessionAgentKind::Main => {
                 let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
                 Arc::new(SessionTitleToolbox::new(inner, self.session.clone()))
@@ -1366,11 +1391,16 @@ impl ContextProvider for SessionContextProvider {
             SessionAgentKind::Sub(_) => with_spawn,
         };
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
-        let system_prompt = match self.kind {
-            SessionAgentKind::Main => system_prompt,
-            SessionAgentKind::Sub(_) => Some(match system_prompt {
-                Some(p) => format!("{p}{SUBAGENT_PROMPT_SUFFIX}"),
-                None => SUBAGENT_PROMPT_SUFFIX.trim_start().to_string(),
+        let suffix = match self.kind {
+            SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
+            SessionAgentKind::Main => None,
+            SessionAgentKind::Sub(_) => Some(SUBAGENT_PROMPT_SUFFIX),
+        };
+        let system_prompt = match suffix {
+            None => system_prompt,
+            Some(suffix) => Some(match system_prompt {
+                Some(p) => format!("{p}{suffix}"),
+                None => suffix.trim_start().to_string(),
             }),
         };
         let system_prompt = match (system_prompt, memory_index.is_empty()) {
@@ -3123,6 +3153,7 @@ mod tests {
             settings: actor_spec_fixture().agent,
             session_id: id,
             kind,
+            unattended: false,
             session: session.clone(),
             frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
@@ -3170,6 +3201,7 @@ mod tests {
             settings,
             session_id: id,
             kind: SessionAgentKind::Main,
+            unattended: false,
             session: session.clone(),
             frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
@@ -3188,6 +3220,48 @@ mod tests {
         for t in ["spawn_agent", "subagent_status"] {
             assert!(!tools.contains(&t.to_string()), "disabled session has {t}");
         }
+    }
+
+    #[tokio::test]
+    async fn an_unattended_session_is_offered_no_ask_user_tool() {
+        // A routine run has nobody to answer a question: offering `ask_user`
+        // would let the agent park the run forever. The prompt has to say so
+        // too -- the base prompt tells the model the tool exists.
+        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let build = |unattended: bool| SessionContextProvider {
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings: actor_spec_fixture().agent,
+            session_id: id,
+            kind: SessionAgentKind::Main,
+            unattended,
+            session: session.clone(),
+            frames: broadcast::channel(8).0,
+            last_client: Mutex::new(None),
+        };
+        let names = |c: &Contexts| -> Vec<String> {
+            c.toolbox.specs().into_iter().map(|s| s.name).collect()
+        };
+
+        let unattended = build(true).provide().await.unwrap();
+        let tools = names(&unattended);
+        assert!(!tools.contains(&ASK_USER_TOOL.to_string()));
+        // Everything else the main agent has is untouched.
+        assert!(tools.contains(&"set_session_title".to_string()));
+        assert!(tools.contains(&"spawn_agent".to_string()));
+        assert!(
+            unattended
+                .system_prompt
+                .unwrap()
+                .contains("# Unattended run"),
+            "an unattended run must be told there is no user"
+        );
+
+        let attended = build(false).provide().await.unwrap();
+        assert!(names(&attended).contains(&ASK_USER_TOOL.to_string()));
+        assert!(!attended.system_prompt.unwrap().contains("# Unattended run"));
     }
 
     #[test]
