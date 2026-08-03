@@ -4,6 +4,7 @@
 //! One file holds every server the user has logged into, keyed by normalised
 //! URL, so `--server` picks the right credential without further configuration.
 
+use crate::config::HorsieConfig;
 use crate::error::CliError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -192,15 +193,25 @@ async fn post_json<T: serde::de::DeserializeOwned>(
     Ok(Err(err))
 }
 
+/// Whether a login should become the configured default: the user asked with
+/// `--default`, or this is the machine's first stored credential (nothing to
+/// displace, so the first server is the natural default).
+pub fn should_default(creds_before: &Credentials, default_flag: bool) -> bool {
+    default_flag || creds_before.is_empty()
+}
+
 /// `horsie auth login`. With `token`, validate and store a pasted credential;
-/// otherwise run the device flow to completion.
-pub async fn login(server: &str, token: Option<&str>) -> Result<(), CliError> {
+/// otherwise run the device flow to completion. The server becomes the
+/// configured default when `default` is set, or when it is the first
+/// credential stored.
+pub async fn login(server: &str, token: Option<&str>, default: bool) -> Result<(), CliError> {
     let path = credentials_path();
     let client = reqwest::Client::new();
 
     if let Some(token) = token {
         validate_token(&client, server, token).await?;
         let mut creds = Credentials::load(&path)?;
+        let is_default = should_default(&creds, default);
         creds.set(
             server,
             ServerCredentials {
@@ -214,6 +225,10 @@ pub async fn login(server: &str, token: Option<&str>) -> Result<(), CliError> {
         );
         creds.save(&path)?;
         println!("stored a token for {}", normalize_server(server));
+        if is_default {
+            crate::config::set_default_server(server, None)?;
+            println!("{} is now your default server", normalize_server(server));
+        }
         return Ok(());
     }
 
@@ -253,6 +268,7 @@ pub async fn login(server: &str, token: Option<&str>) -> Result<(), CliError> {
         match polled {
             Ok(pair) => {
                 let mut creds = Credentials::load(&path)?;
+                let is_default = should_default(&creds, default);
                 creds.set(
                     server,
                     ServerCredentials {
@@ -263,6 +279,10 @@ pub async fn login(server: &str, token: Option<&str>) -> Result<(), CliError> {
                 );
                 creds.save(&path)?;
                 println!("\nLogged in to {}.", normalize_server(server));
+                if is_default {
+                    crate::config::set_default_server(server, None)?;
+                    println!("{} is now your default server", normalize_server(server));
+                }
                 return Ok(());
             }
             Err(e) => match e.code.as_str() {
@@ -360,9 +380,30 @@ pub fn status() -> Result<(), CliError> {
         } else {
             format!("valid for {}m", (c.expires_at - now) / 60)
         };
-        println!("  {server}  —  {state}");
+        println!("  {server}  —  {state}{}", default_marker(server));
     }
     Ok(())
+}
+
+/// `(default)` suffix for the row matching the configured default server,
+/// normalized so `https://Auth.Horsie.dev/` matches `https://auth.horsie.dev`.
+/// Reads fail open: an unreadable config marks nothing.
+fn default_marker(server: &str) -> String {
+    let configured = match HorsieConfig::resolve(None) {
+        Ok(cfg) => cfg.default_server,
+        Err(_) => None,
+    };
+    marker_for(server, configured.as_deref())
+}
+
+fn marker_for(server: &str, configured_default: Option<&str>) -> String {
+    let configured = configured_default.map(normalize_server);
+    let server = normalize_server(server);
+    if configured.as_deref() == Some(server.as_str()) {
+        "  (default)".to_string()
+    } else {
+        String::new()
+    }
 }
 
 /// Whether `server` requires a credential. Used for a pre-flight check: an
@@ -593,5 +634,42 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn first_login_defaults_without_the_flag() {
+        assert!(should_default(&Credentials::default(), false));
+    }
+
+    #[test]
+    fn later_login_defaults_only_with_the_flag() {
+        let mut creds = Credentials::default();
+        creds.set(
+            "http://x",
+            ServerCredentials {
+                access_token: "a".into(),
+                refresh_token: String::new(),
+                expires_at: 0,
+            },
+        );
+        assert!(!should_default(&creds, false));
+        assert!(should_default(&creds, true));
+    }
+
+    #[test]
+    fn marker_marks_the_default_server_only() {
+        assert_eq!(
+            marker_for("http://localhost:3789", Some("http://localhost:3789")),
+            "  (default)"
+        );
+        assert_eq!(
+            marker_for("http://localhost:3789", Some("http://localhost:3789/")),
+            "  (default)"
+        );
+        assert_eq!(
+            marker_for("http://localhost:3789", Some("https://other.dev")),
+            ""
+        );
+        assert_eq!(marker_for("http://localhost:3789", None), "");
     }
 }
