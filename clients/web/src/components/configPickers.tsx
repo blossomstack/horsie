@@ -351,7 +351,7 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
       ) : (
         <ul className="space-y-0.5">
           {items.map((v) => (
-            <li key={v} className="font-mono text-[12px] break-words text-legend">
+            <li key={v} className="font-mono text-[13px] break-words text-legend">
               {v}
             </li>
           ))}
