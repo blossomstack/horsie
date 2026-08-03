@@ -1525,6 +1525,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.0",
  "futures-util",
+ "horsie-actor",
  "parking_lot",
  "serde",
  "serde_json",

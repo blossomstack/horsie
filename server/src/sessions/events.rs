@@ -181,7 +181,7 @@ pub(in crate::sessions) async fn fold_session_state(
     )]
     let mut stream = journal.replay(&pid, 0).await;
     while let Some(item) = stream.next().await {
-        let Ok(bytes) = item else { break };
+        let Ok((_seq, bytes)) = item else { break };
         if let Ok(event) =
             serde_json::from_slice::<crate::sessions::session_actor::SessionDomainEvent>(&bytes)
         {

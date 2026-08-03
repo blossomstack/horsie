@@ -104,6 +104,14 @@ impl<E> CommandEffect<E> {
     pub fn events(&self) -> &[E] {
         &self.events
     }
+
+    /// Whether this effect asks the runtime to snapshot after the write.
+    /// Companion to [`events`](Self::events): lets a test assert on the decision
+    /// itself rather than on whatever the journal happens to hold afterwards.
+    #[must_use]
+    pub fn snapshots(&self) -> bool {
+        self.snapshot
+    }
 }
 
 /// An actor whose state is rebuilt by replaying persisted events.

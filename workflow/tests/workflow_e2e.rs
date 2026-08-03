@@ -112,7 +112,7 @@ async fn load_state(journal: &Arc<InMemoryJournal>, id: &str) -> WorkflowState {
     };
     let mut events = journal.replay(&pid, seq).await;
     while let Some(item) = events.next().await {
-        let ev: WorkflowDomainEvent = serde_json::from_slice(&item.unwrap()).unwrap();
+        let ev: WorkflowDomainEvent = serde_json::from_slice(&item.unwrap().1).unwrap();
         state = WorkflowActor::apply_event(state, ev);
     }
     state
@@ -161,7 +161,7 @@ async fn post_snapshot_events(
     let mut out = Vec::new();
     let mut events = journal.replay(&PersistenceId::new("workflow", id), 0).await;
     while let Some(item) = events.next().await {
-        out.push(serde_json::from_slice(&item.unwrap()).unwrap());
+        out.push(serde_json::from_slice(&item.unwrap().1).unwrap());
     }
     out
 }
@@ -558,7 +558,7 @@ async fn reconstruct_agent_state(journal: &Arc<InMemoryJournal>, session_id: &st
     };
     let mut events = journal.replay(&pid, seq).await;
     while let Some(item) = events.next().await {
-        let ev: AgentDomainEvent = serde_json::from_slice(&item.unwrap()).unwrap();
+        let ev: AgentDomainEvent = serde_json::from_slice(&item.unwrap().1).unwrap();
         state = AgentActor::apply_event(state, ev);
     }
     state
@@ -696,7 +696,7 @@ async fn recurring_timer_fires_then_can_be_cancelled() {
     let mut ev = journal.replay(&pid, 0).await;
     while let Some(item) = ev.next().await {
         if let AgentDomainEvent::TimerFired { .. } =
-            serde_json::from_slice::<AgentDomainEvent>(&item.unwrap()).unwrap()
+            serde_json::from_slice::<AgentDomainEvent>(&item.unwrap().1).unwrap()
         {
             fired += 1;
         }

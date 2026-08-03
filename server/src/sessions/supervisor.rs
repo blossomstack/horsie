@@ -186,7 +186,11 @@ pub struct SessionRecord {
 }
 
 /// Persisted supervisor state — which sessions exist, nothing more.
+///
+/// `#[serde(default)]` on the container: snapshotted state is a durability
+/// contract. Add optional fields; never rename or repurpose one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SessionSupervisorState {
     pub sessions: BTreeMap<SessionId, SessionRecord>,
 }

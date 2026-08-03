@@ -83,7 +83,7 @@ pub async fn workflow_events(journal: &Arc<dyn Journal>, job_id: &str) -> Vec<Wo
     )]
     let mut stream = journal.replay(&pid, seq).await;
     while let Some(item) = stream.next().await {
-        if let Ok(bytes) = item
+        if let Ok((_seq, bytes)) = item
             && let Ok(ev) = serde_json::from_slice::<WorkflowDomainEvent>(&bytes)
         {
             out.push(ev);
@@ -111,7 +111,7 @@ async fn agent_session_lines(journal: &Arc<dyn Journal>, session_id: Uuid) -> Ve
     )]
     let mut stream = journal.replay(&pid, seq).await;
     while let Some(item) = stream.next().await {
-        if let Ok(bytes) = item
+        if let Ok((_seq, bytes)) = item
             && let Ok(ev) = serde_json::from_slice::<AgentDomainEvent>(&bytes)
         {
             state = AgentActor::apply_event(state, ev);
