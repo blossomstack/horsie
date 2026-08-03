@@ -26,8 +26,8 @@ use async_trait::async_trait;
 use horsie_models::executor::RuntimeConfig;
 use horsie_runtime_client::{MockTransport, RuntimeTransport};
 use horsie_runtime_vendor::{
-    ConnectedRuntimeRegistry, FixedWorkspaces, HealthStatus, RuntimeHandle, RuntimeProvider,
-    RuntimeVendor,
+    ConnectedRuntimeRegistry, CredentialProvider, FixedWorkspaces, HealthStatus, RuntimeHandle,
+    RuntimeProvider, RuntimeVendor,
 };
 use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, VendorError, WorkspaceSpec};
@@ -193,7 +193,8 @@ impl Machine {
         tokio::spawn({
             let cancel = cancel.clone();
             async move {
-                let _ = agent.run(&url, None, cancel).await;
+                let credential: CredentialProvider = Arc::new(|| Box::pin(async { Ok(None) }));
+                let _ = agent.run(&url, credential, cancel).await;
             }
         });
 
@@ -265,6 +266,119 @@ async fn hibernate_is_advisory_and_this_agent_declines_it() {
         .get("rt-1")
         .await
         .expect("get after an advisory hibernate");
+}
+
+// ── credentials ──────────────────────────────────────────────────────────────
+
+/// A vendor with nothing configured, for the credential tests: they never get
+/// as far as needing a provider or a workspace.
+fn bare_vendor() -> RuntimeVendor {
+    let connected = Arc::new(ConnectedRuntimeRegistry::new());
+    RuntimeVendor::new(
+        "creds".to_string(),
+        false,
+        Arc::new(move |_id: &str, _caps: Option<PathBuf>| {
+            Arc::new(GatedProvider {
+                connected: Arc::new(ConnectedRuntimeRegistry::new()),
+                gate: None,
+            })
+        }),
+        connected,
+        Arc::new(FixedWorkspaces::new(HashMap::new())),
+        PathBuf::from("/nonexistent"),
+    )
+    // Milliseconds, so a test can watch several attempts go by.
+    .with_backoff(horsie_runtime_vendor::Backoff::new(
+        Duration::from_millis(5),
+        Duration::from_millis(5),
+    ))
+}
+
+/// Port 1 on loopback: nothing listens, so every dial fails and the loop keeps
+/// coming back for another credential.
+const UNDIALABLE: &str = "ws://127.0.0.1:1/api/vendor/connect";
+
+/// The 401 loop, in one assertion. The agent used to capture one token at
+/// startup and present it on every reconnect for the life of the process, so a
+/// token that expired mid-link was retried forever. Every attempt must ask
+/// again.
+#[tokio::test]
+async fn the_credential_is_resolved_on_every_attempt() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let credential: CredentialProvider = Arc::new(move || {
+        let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move { Ok(Some(format!("token-{n}"))) })
+    });
+
+    let cancel = CancellationToken::new();
+    let running = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { bare_vendor().run(UNDIALABLE, credential, cancel).await }
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    cancel.cancel();
+    running
+        .await
+        .expect("join")
+        .expect("cancellation is not an error");
+
+    assert!(
+        calls.load(std::sync::atomic::Ordering::SeqCst) > 1,
+        "a reused token would have been resolved exactly once"
+    );
+}
+
+/// The operator has to do something, so the agent says so and stops rather than
+/// printing the same 401 every 30 seconds forever.
+#[tokio::test]
+async fn a_dead_credential_ends_the_run() {
+    let credential: CredentialProvider = Arc::new(|| {
+        Box::pin(async {
+            Err(horsie_runtime_vendor::CredentialError::Dead(
+                "logged out".to_string(),
+            ))
+        })
+    });
+    let err = bare_vendor()
+        .run(UNDIALABLE, credential, CancellationToken::new())
+        .await
+        .expect_err("a dead credential must end the run, not loop on it");
+    assert!(err.contains("logged out"), "{err}");
+}
+
+/// The other half: an issuer that is merely unreachable must not take the agent
+/// down — that would turn a server restart into a manual recovery.
+#[tokio::test]
+async fn a_transient_credential_failure_keeps_retrying() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let credential: CredentialProvider = Arc::new(move || {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err(horsie_runtime_vendor::CredentialError::Transient(
+                "issuer unreachable".to_string(),
+            ))
+        })
+    });
+
+    let cancel = CancellationToken::new();
+    let running = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { bare_vendor().run(UNDIALABLE, credential, cancel).await }
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !running.is_finished(),
+        "a transient failure must not end the run"
+    );
+    cancel.cancel();
+    running
+        .await
+        .expect("join")
+        .expect("cancellation is not an error");
+
+    assert!(calls.load(std::sync::atomic::Ordering::SeqCst) > 1);
 }
 
 // ── restart resilience ───────────────────────────────────────────────────────

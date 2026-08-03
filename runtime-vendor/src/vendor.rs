@@ -16,6 +16,7 @@
 
 use crate::{
     connected_registry::ConnectedRuntimeRegistry,
+    error::CredentialError,
     provider::{RuntimeHandle, RuntimeProvider},
     reconnect::Backoff,
 };
@@ -55,6 +56,26 @@ pub trait WorkspaceResolver: Send + Sync + 'static {
 /// sandboxing is enabled and the agent wrote its baseline spec to disk.
 pub type ProviderFactory =
     Arc<dyn Fn(&str, Option<PathBuf>) -> Arc<dyn RuntimeProvider> + Send + Sync>;
+
+/// Produces the bearer for one dial attempt.
+///
+/// A closure rather than a string because the answer changes over the life of
+/// an agent: a CLI credential is refreshed against the server, while a machine
+/// token is a constant. Both are the same shape here, and the reconnect loop
+/// does not care which it has.
+pub type CredentialProvider = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<String>, CredentialError>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// A provider that presents no bearer at all — correct against a server running
+/// with authentication disabled, and the shape tests use.
+#[must_use]
+pub fn no_credential() -> CredentialProvider {
+    Arc::new(|| Box::pin(async { Ok(None) }))
+}
 
 /// A resolver over a fixed name→path table, as `horsie connect --workspace`
 /// builds from its arguments.
@@ -289,21 +310,29 @@ impl RuntimeVendor {
     /// next turn. Reconciling the two views with `QueryRuntimes` is issue #92
     /// item 4 and deliberately not done here.
     ///
-    /// The only `Err` is fail-fast: a `server_url` no attempt could ever dial.
-    /// Dial, handshake and transport failures are retried indefinitely.
-    /// `token` is the bearer this agent presents on every dial. `None` is
-    /// correct against a server running with authentication disabled; against
-    /// one that requires it, the dial is refused with a 401 the operator sees.
+    /// `credential` supplies the bearer, and is asked again before *every*
+    /// attempt rather than once at startup. An access token outlives neither a
+    /// long link nor a long outage, and an established WebSocket is never
+    /// re-authenticated — so a token captured at startup can be hours stale by
+    /// the time a reconnect first presents it, and every retry after that
+    /// presents the same corpse. `Ok(None)` is correct against a server running
+    /// with authentication disabled.
+    ///
+    /// Dial, handshake, transport and [`CredentialError::Transient`] failures
+    /// are retried indefinitely. There are exactly two `Err` returns: a
+    /// `server_url` no attempt could ever dial (fail-fast, before the first
+    /// attempt) and a [`CredentialError::Dead`] credential, which no retry
+    /// could fix.
     pub async fn run(
         self,
         server_url: &str,
-        token: Option<&str>,
+        credential: CredentialProvider,
         cancel: CancellationToken,
     ) -> Result<(), String> {
-        // Reject an undialable URL, or a token that cannot be a header, before
-        // the first attempt — a typo should be an error the operator sees once
-        // rather than a retry loop that can never succeed.
-        client_request(server_url, token)?;
+        // Reject an undialable URL before the first attempt — a typo should be
+        // an error the operator sees once rather than a retry loop that can
+        // never succeed. The token is checked per attempt, below.
+        client_request(server_url, None)?;
 
         let mut backoff = self.backoff;
         let mut failures: u32 = 0;
@@ -311,7 +340,32 @@ impl RuntimeVendor {
         let agent = Arc::new(self);
 
         loop {
-            let ended = match agent.connect(server_url, token).await {
+            let token = match credential().await {
+                Ok(token) => token,
+                // Nothing this loop can do will produce a working credential,
+                // and a silent 401 every 30s is the failure mode this whole
+                // change exists to end. Say so and stop.
+                Err(CredentialError::Dead(why)) => {
+                    return Err(format!("credential rejected: {why}"));
+                }
+                // Indistinguishable from the server being unreachable, and
+                // treated the same: the issuer may be back before the next
+                // attempt.
+                Err(CredentialError::Transient(why)) => {
+                    failures = failures.saturating_add(1);
+                    let delay = backoff.next_delay();
+                    note(&format!(
+                        "vendor agent: attempt {failures} failed: {why}; reconnecting in {:.1}s",
+                        delay.as_secs_f64()
+                    ));
+                    tokio::select! {
+                        () = cancel.cancelled() => break,
+                        () = tokio::time::sleep(delay) => {}
+                    }
+                    continue;
+                }
+            };
+            let ended = match agent.connect(server_url, token.as_deref()).await {
                 Ok((sink, stream)) => {
                     connections = connections.saturating_add(1);
                     failures = 0;
@@ -934,7 +988,7 @@ mod tests {
             std::time::Duration::from_secs(5),
             agent().run(
                 "ws://not a host/api/vendor/connect",
-                None,
+                no_credential(),
                 CancellationToken::new(),
             ),
         )
@@ -953,7 +1007,11 @@ mod tests {
             let cancel = cancel.clone();
             async move {
                 agent()
-                    .run("ws://127.0.0.1:1/api/vendor/connect", None, cancel)
+                    .run(
+                        "ws://127.0.0.1:1/api/vendor/connect",
+                        no_credential(),
+                        cancel,
+                    )
                     .await
             }
         });
