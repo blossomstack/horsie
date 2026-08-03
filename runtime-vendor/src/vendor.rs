@@ -20,6 +20,7 @@ use crate::{
     reconnect::Backoff,
 };
 use futures_util::{SinkExt, StreamExt};
+use horsie_models::capabilities::{Access, DirGrant, Grant};
 use horsie_models::executor::{EnvVar, RuntimeConfig, RuntimeInfo, RuntimeState, WorkspaceConfig};
 use horsie_models::runtime::RuntimeInboundMessage;
 use horsie_models::runtime_vendor::{
@@ -145,6 +146,9 @@ pub struct RuntimeVendor {
     /// How long to wait between connection attempts. A field rather than a
     /// constant so tests can run the reconnect path on a millisecond scale.
     backoff: Backoff,
+    /// Whether a get for a runtime that is not live may rebuild it from its
+    /// persisted spec. See [`RuntimeVendor::with_respawnable_runtimes`].
+    respawnable: bool,
     runtimes: Arc<Mutex<HashMap<String, LiveRuntime>>>,
     /// One lock per runtime id, held for the whole of a lifecycle command.
     ///
@@ -200,6 +204,7 @@ impl RuntimeVendor {
             hook_path: Vec::new(),
             bundles: None,
             backoff: Backoff::default(),
+            respawnable: false,
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             lifecycle_locks: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -217,6 +222,30 @@ impl RuntimeVendor {
     #[must_use]
     pub fn with_backoff(mut self, backoff: Backoff) -> Self {
         self.backoff = backoff;
+        self
+    }
+
+    /// Whether a get for a runtime that is not live may rebuild it from the
+    /// spec this agent persisted when it created it.
+    ///
+    /// Off by default, and that default is load-bearing. A vendor that
+    /// provisions the workspace it hands out — cloning repos, installing
+    /// bundles — would redo all of that on a respawn, handing the session a
+    /// clean tree where its work used to be. For that vendor a missing runtime
+    /// really is terminal, and the server turning it into an unrecoverable
+    /// session is the correct, non-destructive answer.
+    ///
+    /// A vendor fixed to user-owned directories is the opposite case: it built
+    /// nothing, so there is nothing to rebuild. Its runtime is a process over a
+    /// directory that exists whether or not the process does, which makes
+    /// starting another one recovery rather than provisioning.
+    ///
+    /// Deliberately not derived from `supports_provisioning`. "Can you build a
+    /// workspace?" and "is your runtime disposable?" are different questions,
+    /// and a vendor could answer them independently.
+    #[must_use]
+    pub fn with_respawnable_runtimes(mut self, enabled: bool) -> Self {
+        self.respawnable = enabled;
         self
     }
 
@@ -417,36 +446,56 @@ impl RuntimeVendor {
                     })
                 })
             }
-            // Never provisions. This agent cannot suspend a process, so
-            // hibernate left the runtime running and a get is a liveness check:
-            // if the process is gone the session is gone with it, and saying so
-            // beats rebuilding a workspace the user thinks they still have.
+            // Live → hand it back. Not live but we recorded how to rebuild it →
+            // rebuild. Neither → gone, which the server turns into a terminally
+            // unrecoverable session.
+            //
+            // Only a vendor that builds nothing gets the middle case: see
+            // `with_respawnable_runtimes`. For everyone else this is exactly the
+            // liveness check it has always been.
             RuntimeVendorCommand::GetRuntime(cmd) => {
                 let lock = self.lifecycle_lock(&cmd.runtime_id).await;
                 let _guard = lock.lock().await;
-                if self.transport_for(&cmd.runtime_id).await.is_some() {
-                    Ok(RuntimeVendorEvent::GetRuntime(GetRuntimeResponse {
-                        runtime_id: cmd.runtime_id,
-                    }))
+                let resolved = if self.transport_for(&cmd.runtime_id).await.is_some() {
+                    Ok(())
                 } else {
-                    Err(format!(
-                        "no runtime '{}' on this vendor; it cannot be resumed",
-                        cmd.runtime_id
-                    ))
-                }
+                    match self.persisted_spec(&cmd.runtime_id) {
+                        Some(spec) => self.provision(&cmd.runtime_id, &spec).await,
+                        None => Err(format!(
+                            "no runtime '{}' on this vendor; it cannot be resumed",
+                            cmd.runtime_id
+                        )),
+                    }
+                };
+                resolved.map(|()| {
+                    RuntimeVendorEvent::GetRuntime(GetRuntimeResponse {
+                        runtime_id: cmd.runtime_id,
+                    })
+                })
             }
-            // Advisory, and this agent declines: a process cannot be suspended
-            // and re-entered, and killing it would destroy the workspace. The
-            // runtime stays up until the session is deleted.
-            RuntimeVendorCommand::HibernateRuntime(cmd) => Ok(
-                RuntimeVendorEvent::HibernateRuntime(HibernateRuntimeResponse {
-                    runtime_id: cmd.runtime_id,
-                }),
-            ),
+            // Advisory. An agent that can rebuild the runtime takes the hint and
+            // frees the process; one that cannot must decline, because for it
+            // stopping the runtime and losing the session are the same act.
+            RuntimeVendorCommand::HibernateRuntime(cmd) => {
+                if self.respawnable {
+                    let lock = self.lifecycle_lock(&cmd.runtime_id).await;
+                    let _guard = lock.lock().await;
+                    self.halt(&cmd.runtime_id).await;
+                }
+                Ok(RuntimeVendorEvent::HibernateRuntime(
+                    HibernateRuntimeResponse {
+                        runtime_id: cmd.runtime_id,
+                    },
+                ))
+            }
             RuntimeVendorCommand::DeleteRuntime(cmd) => {
                 let lock = self.lifecycle_lock(&cmd.runtime_id).await;
                 let _guard = lock.lock().await;
                 self.halt(&cmd.runtime_id).await;
+                // The session is gone, so the record of how to rebuild its
+                // runtime goes with it — otherwise a deleted session's spec
+                // would outlive it on disk forever.
+                let _ = std::fs::remove_dir_all(self.state_dir.join(&cmd.runtime_id));
                 self.lifecycle_locks.lock().await.remove(&cmd.runtime_id);
                 Ok(RuntimeVendorEvent::DeleteRuntime(DeleteRuntimeResponse {
                     runtime_id: cmd.runtime_id,
@@ -536,6 +585,12 @@ impl RuntimeVendor {
         // A previous incarnation may still be live (a re-create after a crash).
         self.halt(runtime_id).await;
 
+        // Recorded before the spawn, not after: a runtime that dies during
+        // provisioning is exactly the one a later get should be able to rebuild.
+        if self.respawnable {
+            self.write_spec_file(runtime_id, request)?;
+        }
+
         // The vendor owns the sandbox policy: nothing about confinement
         // crosses the wire. The provider needs the spec as a file, so the
         // baseline (plus this machine's plugin-library grants) is written per
@@ -578,6 +633,11 @@ impl RuntimeVendor {
                 .collect(),
             env,
             provision: request.provision.clone(),
+            // Only worth mirroring if this runtime can come back: for anyone
+            // else the file would outlive nothing.
+            state_file: self
+                .respawnable
+                .then(|| self.agents_path(runtime_id).to_string_lossy().into_owned()),
         };
         let handle = (self.provider)(runtime_id, caps_file)
             .create(runtime_id, &config)
@@ -636,6 +696,20 @@ impl RuntimeVendor {
                 &sources,
                 &self.hook_path,
             ));
+        // The runtime mirrors its per-agent cwd and env into this directory. The
+        // baseline grants the working dir and a few system reads and nothing
+        // else, so without this the first `set_env` inside a sandboxed runtime
+        // dies on a sandbox denial rather than anything legible.
+        if self.respawnable {
+            spec.grants.push(Grant::Dir(DirGrant {
+                path: self
+                    .state_dir
+                    .join(runtime_id)
+                    .to_string_lossy()
+                    .into_owned(),
+                access: Access::ReadWrite,
+            }));
+        }
         let path = self.caps_path(runtime_id);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -652,6 +726,54 @@ impl RuntimeVendor {
     #[must_use]
     pub fn caps_path(&self, runtime_id: &str) -> PathBuf {
         self.state_dir.join(runtime_id).join("capabilities.json")
+    }
+
+    /// Where this agent remembers what a runtime was made of.
+    fn spec_path(&self, runtime_id: &str) -> PathBuf {
+        self.state_dir.join(runtime_id).join("spec.json")
+    }
+
+    /// Where the runtime's own process mirrors its per-agent cwd and env. This
+    /// agent only supplies the path; it never reads the file.
+    fn agents_path(&self, runtime_id: &str) -> PathBuf {
+        self.state_dir.join(runtime_id).join("agents.json")
+    }
+
+    /// Remember what this runtime was made of, so a later get can rebuild it
+    /// without the server having to re-send anything.
+    ///
+    /// 0600 because the spec's `env` is where the server puts what it mints. A
+    /// vendor fixed to user-owned directories is handed none of that today, but
+    /// nothing in the protocol promises that, and this file sits on the same
+    /// machine as the workspaces it would grant access to.
+    fn write_spec_file(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), String> {
+        let path = self.spec_path(runtime_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create runtime state dir: {e}"))?;
+        }
+        let bytes = serde_json::to_vec(spec).map_err(|e| format!("encode runtime spec: {e}"))?;
+        std::fs::write(&path, bytes).map_err(|e| format!("write runtime spec: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    /// The spec a previous incarnation of this runtime was built from, if this
+    /// agent is allowed to rebuild it at all.
+    ///
+    /// An unreadable or malformed file reads as absent: the runtime is then
+    /// reported gone, which is the same answer this agent gave before it
+    /// persisted anything, and is safe.
+    fn persisted_spec(&self, runtime_id: &str) -> Option<RuntimeSpec> {
+        if !self.respawnable {
+            return None;
+        }
+        let bytes = std::fs::read(self.spec_path(runtime_id)).ok()?;
+        serde_json::from_slice(&bytes).ok()
     }
 }
 

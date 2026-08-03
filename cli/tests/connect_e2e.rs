@@ -258,6 +258,163 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
     let _ = child.wait().await;
 }
 
+/// Restarting the agent must not cost the user their sessions.
+///
+/// The whole chain, twice over the same state directory: create a runtime, give
+/// its agent some state a session would care about, kill the process, start
+/// another one, and require that a `GetRuntime` rebuilds it with that state
+/// intact. Before this, the second agent answered `Gone` and the server wrote
+/// the session off permanently.
+#[tokio::test]
+async fn a_runtime_survives_restarting_the_agent() {
+    let Some(runtime_bin) = locate_runtime_bin() else {
+        eprintln!("skipping a_runtime_survives_restarting_the_agent: horsie-runtime not found");
+        return;
+    };
+
+    let workspace = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let config_path = config_dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"{{"runtime": {{"bin": {:?}}}, "storage": {{"state_dir": {:?}}}}}"#,
+            runtime_bin,
+            config_dir.path().join("state"),
+        ),
+    )
+    .unwrap();
+
+    // Both incarnations share the state dir and the workspace — the two things
+    // that outlive the process on a real machine.
+    let spawn_agent = |addr: std::net::SocketAddr| {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_horsie"))
+            .args([
+                "connect",
+                "--server",
+                &format!("http://{addr}"),
+                "--workspace",
+                workspace.path().to_str().unwrap(),
+                "--name",
+                "test-vendor",
+                "--no-sandbox",
+                "--config",
+            ])
+            .arg(&config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn horsie connect")
+    };
+
+    // ── first incarnation ────────────────────────────────────────────────────
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(accept_vendor_agent(listener));
+    let mut first = spawn_agent(addr);
+    let mut ws = server.await.expect("server task");
+    let _boot = next_event(&mut ws).await;
+
+    send_command(
+        &mut ws,
+        "req-create",
+        RuntimeVendorCommand::CreateRuntime(CreateRuntimeRequest {
+            runtime_id: "rt-1".to_string(),
+            spec: RuntimeSpec {
+                workspaces: vec!["main".to_string()],
+                env: vec![],
+                provision: vec![],
+            },
+        }),
+    )
+    .await;
+    let created = next_event(&mut ws).await;
+    match created.event {
+        RuntimeVendorEvent::CreateRuntime(ev) => assert_eq!(ev.runtime_id, "rt-1"),
+        other => panic!("expected the runtime to come up, got {other:?}"),
+    }
+
+    // State a session would notice losing.
+    send_command(
+        &mut ws,
+        "req-setenv",
+        RuntimeVendorCommand::Runtime(RuntimeRelayRequest {
+            runtime_id: "rt-1".to_string(),
+            message: RuntimeInboundMessage::ToolCall(ToolCallRequest {
+                call_id: "call-env".to_string(),
+                agent_id: "agent-1".to_string(),
+                call: ToolCall::SetEnv(horsie_models::runtime::SetEnvInput {
+                    name: "SURVIVES".to_string(),
+                    value: Some("yes".to_string()),
+                }),
+            }),
+        }),
+    )
+    .await;
+    let _ = next_event(&mut ws).await;
+
+    let _ = first.kill().await;
+    let _ = first.wait().await;
+
+    // ── second incarnation, same machine ─────────────────────────────────────
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(accept_vendor_agent(listener));
+    let mut second = spawn_agent(addr);
+    let mut ws = server.await.expect("server task");
+    let _boot = next_event(&mut ws).await;
+
+    send_command(
+        &mut ws,
+        "req-get",
+        RuntimeVendorCommand::GetRuntime(horsie_models::runtime_vendor::GetRuntimeRequest {
+            runtime_id: "rt-1".to_string(),
+        }),
+    )
+    .await;
+    let got = next_event(&mut ws).await;
+    match got.event {
+        RuntimeVendorEvent::GetRuntime(ev) => assert_eq!(ev.runtime_id, "rt-1"),
+        other => panic!("a get after a restart must rebuild the runtime, got {other:?}"),
+    }
+
+    // And the rebuilt runtime is the same one as far as the agent is concerned.
+    send_command(
+        &mut ws,
+        "req-tool",
+        RuntimeVendorCommand::Runtime(RuntimeRelayRequest {
+            runtime_id: "rt-1".to_string(),
+            message: RuntimeInboundMessage::ToolCall(ToolCallRequest {
+                call_id: "call-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                call: ToolCall::Bash(BashInput {
+                    command: "echo $SURVIVES".to_string(),
+                    timeout_secs: None,
+                }),
+            }),
+        }),
+    )
+    .await;
+    let tooled = next_event(&mut ws).await;
+    match tooled.event {
+        RuntimeVendorEvent::Runtime(ev) => match ev.message {
+            RuntimeOutboundMessage::ToolCallResponse(resp) => match resp.result {
+                ToolResult::Ok(out) => assert!(
+                    out.stdout.contains("yes"),
+                    "the agent's env overlay must survive the restart, got {out:?}"
+                ),
+                ToolResult::Err(e) => panic!("tool call failed: {}", e.reason),
+            },
+            other => panic!("expected a tool result, got {other:?}"),
+        },
+        other => panic!("expected a relayed runtime reply, got {other:?}"),
+    }
+
+    let _ = second.kill().await;
+    let _ = second.wait().await;
+}
+
 #[tokio::test]
 async fn connect_rejects_background_with_a_pointer_to_a_process_manager() {
     let config_dir = tempfile::tempdir().unwrap();

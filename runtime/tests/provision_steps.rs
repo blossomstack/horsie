@@ -103,6 +103,7 @@ fn config(ws: &Path, provision: Vec<ProvisionStep>) -> RuntimeConfig {
         hook_path: vec![],
         env: vec![],
         provision,
+        state_file: None,
     }
 }
 
