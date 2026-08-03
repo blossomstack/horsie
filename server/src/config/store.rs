@@ -1007,26 +1007,6 @@ mod tests {
         assert!(err.contains("telepathy"), "error should name it: {err}");
     }
 
-    /// A pragma that silently fails to apply is exactly the failure this guards
-    /// against: journal writes would land in `DELETE` mode and lock the whole
-    /// database against every authenticated request's token write.
-    #[tokio::test]
-    async fn the_pool_runs_in_wal_mode_with_full_sync() {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}/pragmas.db", dir.path().display());
-        let pool = open_pool(&url).await.unwrap();
-
-        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(mode.to_lowercase(), "wal");
-
-        // 2 == FULL. SQLite reports the numeric level, not the keyword.
-        let sync: i64 = sqlx::query_scalar("PRAGMA synchronous")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(sync, 2, "the ack must mean the write reached the disk");
-    }
+    // The WAL/synchronous pragmas moved to `Db::open`'s `after_connect` hook,
+    // and so did the test that guards them: `crate::db::tests`.
 }

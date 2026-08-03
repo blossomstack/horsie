@@ -16,8 +16,8 @@ use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
 use horsie_runtime_vendor::ConnectedRuntimeRegistry;
 use horsie_server::config::{DbConfigStore, StoreDeps};
+use horsie_server::db::journal::SqlJournal;
 use horsie_server::http::{AppState, app};
-use horsie_server::journal::SqliteJournal;
 use horsie_server::runtime_manager::{RuntimeDeps, RuntimeManager};
 use horsie_server::runtime_vendor::RuntimeVendorLink;
 use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
@@ -118,7 +118,7 @@ async fn start_server_with(
     )
     .await
     .unwrap();
-    let journal: Arc<dyn Journal> = Arc::new(SqliteJournal::new(opened.pool.clone()));
+    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(opened.db.clone()));
     let (gtx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = match clock {
         Some(clock) => spawn_root(
@@ -159,7 +159,7 @@ async fn start_server_with(
         opened.store.clone(),
     ));
     let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(opened.pool.clone()),
+        horsie_server::routines::RoutineStore::new(opened.db.clone()),
         agents.clone(),
     ));
     // Auth off: this suite drives the HTTP API without a credential, and a
@@ -297,7 +297,7 @@ async fn start_server_with_live_vendors(
         plugins: None,
         memory: None,
     };
-    let journal: Arc<dyn Journal> = Arc::new(SqliteJournal::new(opened.pool.clone()));
+    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(opened.db.clone()));
     let (gtx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
     let github = Arc::new(horsie_server::github::GithubService::new(
@@ -321,7 +321,7 @@ async fn start_server_with_live_vendors(
         opened.store.clone(),
     ));
     let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(opened.pool.clone()),
+        horsie_server::routines::RoutineStore::new(opened.db.clone()),
         agents.clone(),
     ));
     // Auth off: this suite drives the HTTP API without a credential, and a

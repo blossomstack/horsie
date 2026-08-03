@@ -48,8 +48,8 @@ zip               = { workspace = true }
 tempfile          = { workspace = true }
 
 [dev-dependencies]
-# The journal conformance suite lives in the actor testkit, so SqliteJournal can
-# be held to exactly the same contract as the backends that ship with the actor.
+# The journal conformance suite lives in the actor testkit, so SqlJournal is held
+# to exactly the same contract as InMemoryJournal and FileJournal.
 horsie-actor           = { path = "../actor", features = ["file-journal", "test-util"] }
 tempfile = { workspace = true }
 tower    = { version = "0.5", features = ["util"] }
@@ -57,9 +57,6 @@ tower    = { version = "0.5", features = ["util"] }
 # builds never see the testkit.
 horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
 horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
-# The journal conformance contract, so SqlJournal is held to the same
-# assertions as InMemoryJournal and FileJournal.
-horsie-actor = { path = "../actor", features = ["test-util"] }
 # `db::testing` and the SqlJournal suite live behind this crate's own
 # `test-util`, which integration tests do not otherwise enable.
 horsie-server = { path = ".", features = ["test-util"] }

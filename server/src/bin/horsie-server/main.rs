@@ -25,7 +25,6 @@ use horsie_models::settings::ServerInfo;
 use horsie_server::config::{DbConfigStore, StoreDeps, model_cards};
 use horsie_server::db::journal::SqlJournal;
 use horsie_server::http::{AppState, app};
-use horsie_server::journal::SqliteJournal;
 use horsie_server::plugins::{ArtifactStore, PluginService, PluginStore};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::SessionSupervisor;
@@ -76,7 +75,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     std::fs::create_dir_all(&data_dir).map_err(|e| BootError::Io(e.to_string()))?;
 
     let db_url = resolve_db_url(&cfg, &data_dir);
-    let journal_backend = config::journal_backend(&cfg, &db_url);
+    let journal_backend = config::journal_backend(&cfg);
     let info = ServerInfo {
         config_path: config_path
             .as_ref()
@@ -99,28 +98,24 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     .await
     .map_err(BootError::Config)?;
 
+    // Built after the store, because the database backend shares its handle —
+    // one database, one migrator, one set of connections.
+    //
     // Which journal a deployment gets is load-bearing and partly defaulted, so
     // say it out loud: switching an existing deployment from `file` to
     // `database` starts from an empty log and leaves the old sessions on disk.
     let journal: Arc<dyn Journal> = match journal_backend {
-        config::JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
-        config::JournalBackend::Database => Arc::new(SqlJournal::new(opened.db.clone())),
+        JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
+        JournalBackend::Database => Arc::new(SqlJournal::new(opened.db.clone())),
     };
     eprintln!(
         "journal backend: {} ({})",
         journal_backend.as_str(),
         match journal_backend {
-            config::JournalBackend::File => data_dir.join("actors").display().to_string(),
-            config::JournalBackend::Database => redact_db_url(&db_url),
+            JournalBackend::File => data_dir.join("actors").display().to_string(),
+            JournalBackend::Database => redact_db_url(&db_url),
         }
     );
-
-    // Built after the store, because the SQLite backend shares its pool — one
-    // database, one migrator, one set of connections.
-    let journal: Arc<dyn Journal> = match cfg.storage.journal {
-        JournalBackend::Sqlite => Arc::new(SqliteJournal::new(opened.pool.clone())),
-        JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
-    };
 
     // Seed the model-card catalog: bundled defaults plus an optional operator
     // file. Seed-file parse/read errors are fatal (operator input should fail
@@ -174,7 +169,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         opened.store.clone(),
     ));
     let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(opened.pool.clone()),
+        horsie_server::routines::RoutineStore::new(opened.db.clone()),
         agents.clone(),
     ));
 

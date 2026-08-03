@@ -1,123 +1,97 @@
 //! [`Journal`] on the server's database, for either backend.
 //!
-//! The alternative is `FileJournal`, which the CLI still uses. That one no-ops
-//! every snapshot method — fine for a short single-shot run that always
-//! full-replays, wrong for a server that offloads idle actors and re-recovers
-//! them on demand. Here snapshots do what the trait says, so a wake reads one
-//! snapshot row plus the events after it instead of the whole log.
+//! Lives in this crate, not `horsie-actor`, because it shares the settings
+//! database: one database takes one sqlx migrator, so the schema belongs to the
+//! server's migration chain (`server/migrations/*/0017_journal.sql`), and
+//! keeping the DDL and the queries together beats splitting them across a crate.
 //!
-//! Sequence numbers are assigned by the journal, not the caller. Asking the
-//! database for `MAX(seq)` before every write would double the round-trips on
-//! the hot path, so each persistence id keeps its head in memory behind its own
-//! async mutex: writes to one actor serialize, writes to different actors do
-//! not. The cache is an optimisation over a value the database already holds,
-//! and it is only sound because one process owns each persistence id — the
-//! composite primary key turns a violation of that into a loud constraint error
-//! rather than silent interleaving.
+//! The property that matters is that **sequence numbers are stored, not
+//! counted**. `journal_logs.last_seq` is the allocator; deleting events cannot
+//! renumber the survivors, which is what makes compaction safe and what the
+//! `Journal` trait already promises. Keeping the allocator in the database
+//! rather than in a per-process cache is also what lets the numbers stay correct
+//! without this type having to assume it is the only writer.
+//!
+//! The alternative backend is `FileJournal`, which the CLI still uses. That one
+//! no-ops every snapshot method — fine for a short single-shot run that always
+//! full-replays, wrong for a server that offloads idle actors and re-recovers
+//! them on demand.
 
 use crate::db::Db;
 use async_trait::async_trait;
 use futures_util::stream::{self, BoxStream, StreamExt};
 use horsie_actor::{Journal, JournalError, JournalResult, PersistenceId};
-use sqlx::Row;
-use std::collections::HashMap;
+use sqlx::{Any, Row, Transaction};
 use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::Mutex as SyncMutex;
-use tokio::sync::Mutex;
-
-/// Rows per `INSERT` statement.
-///
-/// Both backends cap bind parameters per statement — PostgreSQL at 65 535,
-/// SQLite at 32 766 by default — and each row binds four. 1 000 rows is 4 000
-/// parameters, comfortably inside both, and real batches are single digits
-/// anyway; the chunking exists so a pathological batch degrades into several
-/// statements instead of one error.
-const INSERT_CHUNK_ROWS: usize = 1_000;
 
 /// Events fetched per `replay` page. Keyset pagination keeps memory flat on a
-/// long log without holding a cursor (or a borrowed query string) open across
-/// the whole stream.
+/// log that has not been compacted recently, without holding a cursor (or a
+/// borrowed query string) open across the whole stream.
 const REPLAY_PAGE_ROWS: i64 = 1_000;
 
-/// The in-memory head for one persistence id: the sequence number most recently
-/// assigned, or `None` until it has been read back from the database.
-type Head = Arc<Mutex<Option<u64>>>;
-
+/// A [`Journal`] over the server's database, on either dialect.
 pub struct SqlJournal {
     db: Db,
-    /// Per-persistence-id heads. The outer lock is held only long enough to
-    /// clone out an `Arc` — never across an await — so it never serializes
-    /// unrelated actors.
-    heads: SyncMutex<HashMap<PersistenceId, Head>>,
 }
 
 impl SqlJournal {
     pub fn new(db: Db) -> Self {
-        Self {
-            db,
-            heads: SyncMutex::new(HashMap::new()),
-        }
+        Self { db }
     }
 
-    fn head_slot(&self, pid: &PersistenceId) -> Head {
-        let mut map = match self.heads.lock() {
-            Ok(map) => map,
-            // A poisoned lock means a previous holder panicked while updating a
-            // head. The map itself is still structurally sound (it holds Arcs,
-            // and the value behind each is an async mutex updated elsewhere),
-            // so recovering beats propagating a panic into every later write.
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        Arc::clone(map.entry(pid.clone()).or_default())
-    }
-
-    /// The highest sequence number this log has ever assigned.
-    ///
-    /// Both terms matter: after compaction the event table can be empty while
-    /// the snapshot sits at seq 42, and seeding from events alone would restart
-    /// numbering and corrupt the log. Computed in Rust from two scalar reads
-    /// rather than in SQL, because the "greatest of two values" function is
-    /// spelled differently on the two backends and this keeps one code path.
-    async fn read_head(&self, pid: &PersistenceId) -> JournalResult<u64> {
-        let events_sql = self
+    /// The `log_id` for `pid`, or `None` when this actor has never persisted.
+    /// Reads go through this so they never create a row as a side effect.
+    async fn log_id(&self, pid: &PersistenceId) -> JournalResult<Option<i64>> {
+        let sql = self
             .db
-            .q("SELECT COALESCE(MAX(seq), 0) AS s FROM journal_events WHERE actor_kind = ? AND actor_id = ?");
-        let max_event: i64 = sqlx::query(&events_sql)
-            .bind(&pid.kind)
-            .bind(&pid.id)
-            .fetch_one(self.db.pool())
-            .await
-            .and_then(|r| r.try_get("s"))
-            .map_err(backend)?;
-
-        let snap_sql = self
-            .db
-            .q("SELECT seq FROM journal_snapshots WHERE actor_kind = ? AND actor_id = ?");
-        let max_snapshot: Option<i64> = sqlx::query(&snap_sql)
+            .q("SELECT log_id FROM journal_logs WHERE kind = ? AND id = ?");
+        sqlx::query_scalar(&sql)
             .bind(&pid.kind)
             .bind(&pid.id)
             .fetch_optional(self.db.pool())
             .await
-            .map_err(backend)?
-            .map(|r| r.try_get("seq"))
-            .transpose()
+            .map_err(backend)
+    }
+
+    /// The `log_id` for `pid`, creating the row if absent. Only writes call this.
+    async fn log_id_for_write(
+        db: &Db,
+        tx: &mut Transaction<'_, Any>,
+        pid: &PersistenceId,
+    ) -> JournalResult<i64> {
+        // `DO NOTHING` then `SELECT` rather than `RETURNING`: on the conflict
+        // path there is no returned row, and the select is an index hit anyway.
+        let insert =
+            db.q("INSERT INTO journal_logs (kind, id) VALUES (?, ?) ON CONFLICT DO NOTHING");
+        sqlx::query(&insert)
+            .bind(&pid.kind)
+            .bind(&pid.id)
+            .execute(&mut **tx)
+            .await
             .map_err(backend)?;
-
-        Ok(max_event.max(max_snapshot.unwrap_or(0)).max(0) as u64)
+        let select = db.q("SELECT log_id FROM journal_logs WHERE kind = ? AND id = ?");
+        sqlx::query_scalar(&select)
+            .bind(&pid.kind)
+            .bind(&pid.id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(backend)
     }
+}
 
-    /// Read the head, seeding the cache from the database on first touch.
-    async fn ensure_head(&self, pid: &PersistenceId, slot: &mut Option<u64>) -> JournalResult<u64> {
-        match *slot {
-            Some(head) => Ok(head),
-            None => {
-                let head = self.read_head(pid).await?;
-                *slot = Some(head);
-                Ok(head)
-            }
-        }
-    }
+fn backend(e: sqlx::Error) -> JournalError {
+    JournalError::Backend(e.to_string())
+}
+
+/// Neither dialect has unsigned integers, so sequence numbers cross the boundary
+/// as `i64`. A journal would need ~9.2 quintillion events to overflow;
+/// saturating is still better than a panic in a durability path.
+fn to_i64(n: u64) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+fn to_u64(n: i64) -> u64 {
+    u64::try_from(n).unwrap_or(0)
 }
 
 #[async_trait]
@@ -126,75 +100,72 @@ impl Journal for SqlJournal {
         if events.is_empty() {
             return Ok(());
         }
-        let slot = self.head_slot(pid);
-        let mut guard = slot.lock().await;
-        let head = self.ensure_head(pid, &mut guard).await?;
+        let mut tx = self.db.begin_write().await.map_err(backend)?;
+        let log_id = Self::log_id_for_write(&self.db, &mut tx, pid).await?;
 
-        let mut tx = self.db.pool().begin().await.map_err(backend)?;
-        for (chunk_index, chunk) in events.chunks(INSERT_CHUNK_ROWS).enumerate() {
-            let mut sql = String::from(
-                "INSERT INTO journal_events (actor_kind, actor_id, seq, payload) VALUES ",
-            );
-            for i in 0..chunk.len() {
-                if i > 0 {
-                    sql.push_str(", ");
-                }
-                sql.push_str("(?, ?, ?, ?)");
-            }
-            let sql = self.db.q(&sql);
-            let mut query = sqlx::query(&sql);
-            let base = head + (chunk_index * INSERT_CHUNK_ROWS) as u64;
-            for (i, payload) in chunk.iter().enumerate() {
-                query = query
-                    .bind(&pid.kind)
-                    .bind(&pid.id)
-                    .bind((base + i as u64 + 1) as i64)
-                    .bind(payload.clone());
-            }
-            query.execute(&mut *tx).await.map_err(backend)?;
+        // Allocate the whole batch's numbers in one update, then read the base.
+        // The batch is one transaction, so a crash mid-write leaves neither the
+        // numbers nor the rows — the actor advances `seq_nr` only after `persist`
+        // returns `Ok`, so a half-written batch must not be half-applied.
+        let sql = self.db.q(
+            "UPDATE journal_logs SET last_seq = last_seq + ? WHERE log_id = ? RETURNING last_seq",
+        );
+        let last_seq: i64 = sqlx::query_scalar(&sql)
+            .bind(to_i64(events.len() as u64))
+            .bind(log_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(backend)?;
+        let base = last_seq - events.len() as i64;
+
+        let insert = self
+            .db
+            .q("INSERT INTO journal_events (log_id, seq, payload) VALUES (?, ?, ?)");
+        for (offset, payload) in events.iter().enumerate() {
+            sqlx::query(&insert)
+                .bind(log_id)
+                .bind(base + offset as i64 + 1)
+                .bind(payload.as_slice())
+                .execute(&mut *tx)
+                .await
+                .map_err(backend)?;
         }
-        tx.commit().await.map_err(backend)?;
-
-        // Only after the commit: a failed write must leave the head where it
-        // was, so the retry re-uses the same sequence numbers.
-        *guard = Some(head + events.len() as u64);
-        Ok(())
+        tx.commit().await.map_err(backend)
     }
 
     async fn replay(
         &self,
         pid: &PersistenceId,
         after_seq: u64,
-    ) -> BoxStream<'_, JournalResult<Vec<u8>>> {
+    ) -> BoxStream<'_, JournalResult<(u64, Vec<u8>)>> {
+        // An index range scan from the cursor: the cost is the tail returned,
+        // not the length of the log.
+        let log_id = match self.log_id(pid).await {
+            Ok(Some(id)) => id,
+            Ok(None) => return stream::empty().boxed(),
+            Err(e) => return stream::iter(vec![Err(e)]).boxed(),
+        };
         // Everything the stream needs is owned, so it borrows neither `self` nor
         // the query string — which is what makes keyset pagination simpler here
-        // than holding one long-lived sqlx cursor.
-        let init = PageState {
+        // than holding one long-lived sqlx cursor open.
+        let init = Page {
             db: self.db.clone(),
-            kind: pid.kind.clone(),
-            id: pid.id.clone(),
-            cursor: after_seq as i64,
+            log_id,
+            cursor: to_i64(after_seq),
             buffer: VecDeque::new(),
             exhausted: false,
         };
-        stream::unfold(init, |mut state| async move {
+        stream::unfold(init, |mut page| async move {
             loop {
-                if let Some(next) = state.buffer.pop_front() {
-                    return Some((Ok(next), state));
+                if let Some(next) = page.buffer.pop_front() {
+                    return Some((Ok(next), page));
                 }
-                if state.exhausted {
+                if page.exhausted {
                     return None;
                 }
-                match state.fetch_page().await {
-                    Ok(()) => {
-                        // An empty page after a fetch means the log is drained;
-                        // looping once more falls through to `exhausted`.
-                        continue;
-                    }
-                    Err(e) => {
-                        state.exhausted = true;
-                        return Some((Err(e), state));
-                    }
+                if let Err(e) = page.fetch().await {
+                    page.exhausted = true;
+                    return Some((Err(e), page));
                 }
             }
         })
@@ -207,53 +178,66 @@ impl Journal for SqlJournal {
         state: Vec<u8>,
         seq_nr: u64,
     ) -> JournalResult<()> {
-        let slot = self.head_slot(pid);
-        let mut guard = slot.lock().await;
-        let head = self.ensure_head(pid, &mut guard).await?;
-
-        let sql = self.db.q(
-            "INSERT INTO journal_snapshots (actor_kind, actor_id, seq, state) VALUES (?, ?, ?, ?) \
-             ON CONFLICT (actor_kind, actor_id) DO UPDATE SET seq = excluded.seq, state = excluded.state",
+        let mut tx = self.db.begin_write().await.map_err(backend)?;
+        let log_id = Self::log_id_for_write(&self.db, &mut tx, pid).await?;
+        // A snapshot may be taken at a sequence this log has not reached when
+        // the state came from elsewhere; keep `last_seq` monotonic so later
+        // events never reuse a number the snapshot already covers.
+        let statement = format!(
+            "UPDATE journal_logs SET last_seq = {} WHERE log_id = ?",
+            self.db.greatest("last_seq", "?")
         );
-        sqlx::query(&sql)
-            .bind(&pid.kind)
-            .bind(&pid.id)
-            .bind(seq_nr as i64)
-            .bind(state)
-            .execute(self.db.pool())
+        let bump = self.db.q(&statement);
+        sqlx::query(&bump)
+            .bind(to_i64(seq_nr))
+            .bind(log_id)
+            .execute(&mut *tx)
             .await
             .map_err(backend)?;
-
-        // Mirrors InMemoryJournal: a snapshot taken at a sequence beyond
-        // anything persisted here still advances the log's numbering.
-        *guard = Some(head.max(seq_nr));
-        Ok(())
+        let upsert = self.db.q(
+            "INSERT INTO journal_snapshots (log_id, seq, state) VALUES (?, ?, ?) \
+             ON CONFLICT(log_id) DO UPDATE SET seq = excluded.seq, state = excluded.state",
+        );
+        sqlx::query(&upsert)
+            .bind(log_id)
+            .bind(to_i64(seq_nr))
+            .bind(state.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        tx.commit().await.map_err(backend)
     }
 
     async fn latest_snapshot(&self, pid: &PersistenceId) -> JournalResult<Option<(Vec<u8>, u64)>> {
+        let Some(log_id) = self.log_id(pid).await? else {
+            return Ok(None);
+        };
         let sql = self
             .db
-            .q("SELECT state, seq FROM journal_snapshots WHERE actor_kind = ? AND actor_id = ?");
+            .q("SELECT state, seq FROM journal_snapshots WHERE log_id = ?");
         let row = sqlx::query(&sql)
-            .bind(&pid.kind)
-            .bind(&pid.id)
+            .bind(log_id)
             .fetch_optional(self.db.pool())
             .await
             .map_err(backend)?;
         let Some(row) = row else { return Ok(None) };
         let state: Vec<u8> = row.try_get("state").map_err(backend)?;
         let seq: i64 = row.try_get("seq").map_err(backend)?;
-        Ok(Some((state, seq.max(0) as u64)))
+        Ok(Some((state, to_u64(seq))))
     }
 
     async fn delete_events_before(&self, pid: &PersistenceId, seq_nr: u64) -> JournalResult<()> {
+        let Some(log_id) = self.log_id(pid).await? else {
+            return Ok(());
+        };
+        // `last_seq` is untouched, so the survivors keep their numbers and the
+        // next event continues from where the log actually is.
         let sql = self
             .db
-            .q("DELETE FROM journal_events WHERE actor_kind = ? AND actor_id = ? AND seq <= ?");
+            .q("DELETE FROM journal_events WHERE log_id = ? AND seq <= ?");
         sqlx::query(&sql)
-            .bind(&pid.kind)
-            .bind(&pid.id)
-            .bind(seq_nr as i64)
+            .bind(log_id)
+            .bind(to_i64(seq_nr))
             .execute(self.db.pool())
             .await
             .map_err(backend)?;
@@ -261,88 +245,108 @@ impl Journal for SqlJournal {
     }
 
     async fn copy_snapshot(&self, from: &PersistenceId, to: &PersistenceId) -> JournalResult<()> {
-        let (state, seq) = self
-            .latest_snapshot(from)
-            .await?
+        let mut tx = self.db.begin_write().await.map_err(backend)?;
+        let select = self.db.q("SELECT s.state, s.seq FROM journal_snapshots s \
+             JOIN journal_logs l ON l.log_id = s.log_id \
+             WHERE l.kind = ? AND l.id = ?");
+        let src = sqlx::query(&select)
+            .bind(&from.kind)
+            .bind(&from.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(backend)?
+            // Erroring beats succeeding emptily: the caller forks a session from
+            // this snapshot, and a silent miss produces an agent with no history.
             .ok_or_else(|| JournalError::Backend(format!("no snapshot for '{from}'")))?;
 
-        let slot = self.head_slot(to);
-        let mut guard = slot.lock().await;
-
-        let mut tx = self.db.pool().begin().await.map_err(backend)?;
-        // The target starts with an empty log and the source's snapshot
-        // sequence, so a fresh actor recovers the copied state and continues
-        // numbering from there.
-        let delete = self
+        let state: Vec<u8> = src.try_get("state").map_err(backend)?;
+        let seq: i64 = src.try_get("seq").map_err(backend)?;
+        let dst = Self::log_id_for_write(&self.db, &mut tx, to).await?;
+        // The destination starts with an empty event log at the source's
+        // snapshot sequence, so a fresh actor recovers the copied state and
+        // numbers its own first event from there.
+        let set_seq = self
             .db
-            .q("DELETE FROM journal_events WHERE actor_kind = ? AND actor_id = ?");
-        sqlx::query(&delete)
-            .bind(&to.kind)
-            .bind(&to.id)
+            .q("UPDATE journal_logs SET last_seq = ? WHERE log_id = ?");
+        sqlx::query(&set_seq)
+            .bind(seq)
+            .bind(dst)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        let clear_events = self.db.q("DELETE FROM journal_events WHERE log_id = ?");
+        sqlx::query(&clear_events)
+            .bind(dst)
             .execute(&mut *tx)
             .await
             .map_err(backend)?;
         let upsert = self.db.q(
-            "INSERT INTO journal_snapshots (actor_kind, actor_id, seq, state) VALUES (?, ?, ?, ?) \
-             ON CONFLICT (actor_kind, actor_id) DO UPDATE SET seq = excluded.seq, state = excluded.state",
+            "INSERT INTO journal_snapshots (log_id, seq, state) VALUES (?, ?, ?) \
+             ON CONFLICT(log_id) DO UPDATE SET seq = excluded.seq, state = excluded.state",
         );
         sqlx::query(&upsert)
-            .bind(&to.kind)
-            .bind(&to.id)
-            .bind(seq as i64)
-            .bind(state)
+            .bind(dst)
+            .bind(seq)
+            .bind(state.as_slice())
             .execute(&mut *tx)
             .await
             .map_err(backend)?;
-        tx.commit().await.map_err(backend)?;
-
-        *guard = Some(seq);
-        Ok(())
+        tx.commit().await.map_err(backend)
     }
 
     async fn clear(&self, pid: &PersistenceId) -> JournalResult<()> {
-        let slot = self.head_slot(pid);
-        let mut guard = slot.lock().await;
-
-        let mut tx = self.db.pool().begin().await.map_err(backend)?;
+        // Deleted explicitly rather than left to `ON DELETE CASCADE`, which
+        // fires on PostgreSQL and does nothing on SQLite: this server never
+        // enables `PRAGMA foreign_keys` (see `0009_memory.sql`), so the
+        // declaration there is documentation and a PostgreSQL backstop, not a
+        // mechanism. Relying on it would leave orphaned events and snapshots on
+        // SQLite — invisible, since the next `persist` allocates a fresh
+        // `log_id`, and so permanent.
+        // Resolved before the transaction opens, not inside it from the pool: a
+        // second connection taken while holding a write transaction would
+        // deadlock outright on a single-connection pool.
+        let Some(log_id) = self.log_id(pid).await? else {
+            // Nothing to clear, and no row to create by asking.
+            return Ok(());
+        };
+        let mut tx = self.db.begin_write().await.map_err(backend)?;
         for table in ["journal_events", "journal_snapshots"] {
-            let statement = format!("DELETE FROM {table} WHERE actor_kind = ? AND actor_id = ?");
+            let statement = format!("DELETE FROM {table} WHERE log_id = ?");
             let sql = self.db.q(&statement);
             sqlx::query(&sql)
-                .bind(&pid.kind)
-                .bind(&pid.id)
+                .bind(log_id)
                 .execute(&mut *tx)
                 .await
                 .map_err(backend)?;
         }
-        tx.commit().await.map_err(backend)?;
-
-        *guard = None;
-        Ok(())
+        let sql = self.db.q("DELETE FROM journal_logs WHERE log_id = ?");
+        sqlx::query(&sql)
+            .bind(log_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        tx.commit().await.map_err(backend)
     }
 }
 
 /// One `replay` stream's position: the owned state `unfold` threads along.
-struct PageState {
+struct Page {
     db: Db,
-    kind: String,
-    id: String,
+    log_id: i64,
     cursor: i64,
-    buffer: VecDeque<Vec<u8>>,
+    buffer: VecDeque<(u64, Vec<u8>)>,
     exhausted: bool,
 }
 
-impl PageState {
+impl Page {
     /// Fetch the next page, advancing the cursor. A short page means the log is
     /// drained, which is recorded so the stream ends without a final empty
     /// round-trip.
-    async fn fetch_page(&mut self) -> JournalResult<()> {
+    async fn fetch(&mut self) -> JournalResult<()> {
         let sql = self.db.q("SELECT seq, payload FROM journal_events \
-             WHERE actor_kind = ? AND actor_id = ? AND seq > ? \
-             ORDER BY seq LIMIT ?");
+             WHERE log_id = ? AND seq > ? ORDER BY seq LIMIT ?");
         let rows = sqlx::query(&sql)
-            .bind(&self.kind)
-            .bind(&self.id)
+            .bind(self.log_id)
             .bind(self.cursor)
             .bind(REPLAY_PAGE_ROWS)
             .fetch_all(self.db.pool())
@@ -356,12 +360,8 @@ impl PageState {
             let seq: i64 = row.try_get("seq").map_err(backend)?;
             let payload: Vec<u8> = row.try_get("payload").map_err(backend)?;
             self.cursor = self.cursor.max(seq);
-            self.buffer.push_back(payload);
+            self.buffer.push_back((to_u64(seq), payload));
         }
         Ok(())
     }
-}
-
-fn backend(e: sqlx::Error) -> JournalError {
-    JournalError::Backend(e.to_string())
 }

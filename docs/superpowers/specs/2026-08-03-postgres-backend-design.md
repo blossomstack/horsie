@@ -175,13 +175,14 @@ their **content and version numbers must not change**.
 Two embedded directories, selected at runtime:
 
 ```
-server/migrations/sqlite/0001_init.sql   … 0015_agents.sql   (moved verbatim)
-server/migrations/postgres/0001_init.sql … 0015_agents.sql   (new, equivalent)
-server/migrations/{sqlite,postgres}/0016_journal.sql          (new, both)
+server/migrations/sqlite/0001_init.sql   … 0017_journal.sql  (moved verbatim)
+server/migrations/postgres/0001_init.sql … 0017_journal.sql  (new, equivalent)
 ```
 
 Moving a file does not change its content, so SQLite checksums survive the
-reorganisation untouched.
+reorganisation untouched — including `0016_routines.sql` and `0017_journal.sql`,
+which landed on `main` while this work was in flight and are moved, not
+rewritten.
 
 Postgres files mirror the SQLite ones 1:1 by version, translating:
 
@@ -202,69 +203,78 @@ A unit test asserts **parity**: the two directories contain the same set of
 version numbers with the same descriptions. Adding a migration to one and
 forgetting the other fails CI rather than a deployment.
 
-### Journal schema (`0016_journal.sql`)
+### Journal schema (`0017_journal.sql`)
+
+Unchanged from the SQLite journal that shipped in #151 — this work translates it
+to PostgreSQL rather than redesigning it:
 
 ```sql
-CREATE TABLE journal_events (
-    actor_kind TEXT   NOT NULL,
-    actor_id   TEXT   NOT NULL,
-    seq        BIGINT NOT NULL,
-    payload    BLOB   NOT NULL,          -- BYTEA on Postgres
-    PRIMARY KEY (actor_kind, actor_id, seq)
+CREATE TABLE journal_logs (
+    log_id   INTEGER PRIMARY KEY,        -- BIGSERIAL on Postgres
+    kind     TEXT    NOT NULL,
+    id       TEXT    NOT NULL,
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (kind, id)
 );
 
+CREATE TABLE journal_events (
+    log_id  INTEGER NOT NULL REFERENCES journal_logs(log_id) ON DELETE CASCADE,
+    seq     INTEGER NOT NULL,
+    payload BLOB    NOT NULL,            -- BYTEA on Postgres
+    PRIMARY KEY (log_id, seq)
+) WITHOUT ROWID;                         -- SQLite only; no Postgres equivalent
+
 CREATE TABLE journal_snapshots (
-    actor_kind TEXT   NOT NULL,
-    actor_id   TEXT   NOT NULL,
-    seq        BIGINT NOT NULL,
-    state      BLOB   NOT NULL,          -- BYTEA on Postgres
-    PRIMARY KEY (actor_kind, actor_id)
+    log_id INTEGER PRIMARY KEY REFERENCES journal_logs(log_id) ON DELETE CASCADE,
+    seq    INTEGER NOT NULL,
+    state  BLOB    NOT NULL              -- BYTEA on Postgres
 );
 ```
 
-The composite primary key is the only index either table needs. Every access
-path is `(kind, id)` equality plus a `seq` range or ordering, which the primary
-key index serves directly — a left-prefix scan, no sort, no extra structure to
-maintain on the write path. Postgres stores the payload out-of-line in TOAST
-once it exceeds ~2 KB, which is the desired behaviour for large events: the
-index stays dense and only the rows actually replayed pay for decompression.
+The primary key is the only index either table needs. Every access path is
+`log_id` equality plus a `seq` range or ordering, which the primary key index
+serves directly — a left-prefix scan, no sort, no extra structure to maintain on
+the write path. `WITHOUT ROWID` makes that index *be* the storage order on
+SQLite; PostgreSQL has no clustered-index equivalent to declare, so it pays a
+heap fetch per row. Postgres stores the payload out-of-line in TOAST once it
+exceeds ~2 KB, which is the desired behaviour for large events: the index stays
+dense and only the rows actually replayed pay for decompression.
 
 ### `SqlJournal`
 
-Sequence numbers are assigned by the journal, not the caller. Rather than a
-`MAX(seq)` round-trip per write, `SqlJournal` keeps a head cache —
-`Mutex<HashMap<PersistenceId, u64>>` — seeded lazily on first touch of a
-persistence id:
+Sequence numbers are assigned by the journal, not the caller, and the allocator
+is `journal_logs.last_seq` rather than a `MAX(seq)` over the events. A whole
+batch takes its numbers in one statement:
 
 ```sql
-SELECT GREATEST(
-    COALESCE((SELECT MAX(seq) FROM journal_events    WHERE …), 0),
-    COALESCE((SELECT seq      FROM journal_snapshots WHERE …), 0))
+UPDATE journal_logs SET last_seq = last_seq + ? WHERE log_id = ? RETURNING last_seq
 ```
 
-Both terms are required: after compaction the event table can be empty while
-the snapshot sits at seq 42, and seeding from events alone would restart
-numbering and corrupt the log. (`GREATEST` is spelled `MAX` in SQLite; this is
-one of the few places the two dialects genuinely differ, so it is computed in
-Rust from two scalar reads instead — one code path, no dialect branch.)
+Storing the allocator instead of deriving it is what makes compaction safe:
+`delete_events_before` leaves `last_seq` alone, so the survivors keep their
+numbers and the next event continues from where the log actually is. A derived
+head would restart numbering the moment the event table went empty behind a
+snapshot. It also means the number is correct without this type having to assume
+it is the only writer — no in-process cache to go stale.
 
-The cache is an optimisation over a value the database already holds, and it is
-only correct because one process owns each persistence id. The composite
-primary key makes a violation of that assumption a loud constraint error rather
-than silent interleaving.
+`save_snapshot` raises `last_seq` to the snapshot's sequence if the snapshot came
+from elsewhere (a fork), so later events never reuse a covered number. That is
+the one statement where the dialects differ — SQLite spells the two-argument
+maximum `MAX(a, b)` and PostgreSQL spells it `GREATEST(a, b)` — and it goes
+through `Db::greatest`.
 
 | Method | Implementation |
 | --- | --- |
-| `persist` | One transaction; a single multi-row `INSERT` (chunked at 1 000 rows — four binds each, inside both Postgres's 65 535 and SQLite's 32 766 parameter caps; real batches are single digits). The head cache advances **only after commit**. |
-| `replay` | Keyset pagination via `futures_util::stream::unfold`: `WHERE kind=? AND id=? AND seq > ? ORDER BY seq LIMIT 1000`, the last `seq` of each page seeding the next. Bounded memory on a 100 000-event log, no borrow of the query string into the stream, and no new dependency. |
-| `save_snapshot` | Upsert on `(actor_kind, actor_id)`; head cache raised to `max(cache, seq)`, mirroring `InMemoryJournal`. |
-| `delete_events_before` | `DELETE … WHERE seq <= ?`. |
-| `copy_snapshot` | One transaction: read source snapshot (absent → `JournalError::Backend`), delete the target's events, upsert the target's snapshot. Head cache for the target set to the copied seq, so it continues numbering from there. |
-| `clear` | Delete from both tables; drop the cache entry. |
+| `persist` | One transaction (`BEGIN IMMEDIATE` on SQLite, via `Db::begin_write`, so two writers queue instead of deadlocking on a lock upgrade): upsert the log row, allocate the batch's numbers in one `UPDATE … RETURNING`, insert the events. |
+| `replay` | Keyset pagination via `futures_util::stream::unfold`: `WHERE log_id = ? AND seq > ? ORDER BY seq LIMIT 1000`, the last `seq` of each page seeding the next. Bounded memory on a 100 000-event log, no borrow of the query string into the stream, and no new dependency. |
+| `save_snapshot` | Upsert on `log_id`, with `last_seq` raised to the snapshot's sequence. |
+| `delete_events_before` | `DELETE … WHERE log_id = ? AND seq <= ?`, leaving `last_seq` alone. |
+| `copy_snapshot` | One transaction: read source snapshot (absent → `JournalError::Backend`), delete the target's events, set the target's `last_seq` to the copied seq, upsert the target's snapshot. |
+| `clear` | Delete the log row; the foreign keys cascade to events and snapshot. |
 
-**Write path cost.** One round-trip per `persist` — the same count as
-`FileJournal`'s one `write` + `fsync`, but a network hop instead of a local
-one. Against that, snapshots now actually work: `FileJournal::save_snapshot` is
+**Write path cost.** One transaction per `persist`, against `FileJournal`'s one
+`write` + `fsync` — and a network hop instead of a local one on PostgreSQL.
+Against that, snapshots now actually work: `FileJournal::save_snapshot` is
 a no-op, so every recovery replays the entire log from seq 0, and since #101
 the server offloads idle actors and re-recovers them on wake. On the SQL
 journal a wake reads one snapshot row plus the events after it.
@@ -280,14 +290,17 @@ journal a wake reads one snapshot row plus the events after it.
 
 - `database.url` — absent → SQLite file under the data dir, exactly as today.
   `max_connections` defaults to 10.
-- `journal.backend` — `"file"` | `"database"`. Absent → `"database"` when the
-  resolved URL is Postgres, `"file"` otherwise.
+- `journal.backend` — `"file"` | `"database"`. Absent → `"database"` on either
+  dialect.
 
-The default is asymmetric on purpose. Existing SQLite deployments must keep
-their file journals or they would silently lose every session on upgrade. A
-Postgres deployment, by contrast, has no existing journal to preserve and no
-durable volume to assume, so the file default would be the wrong answer every
-time. The resolved choice is logged at startup so it is never a guess.
+This was originally specified as an asymmetric default — `"database"` for a
+Postgres URL, `"file"` for SQLite — so that an existing SQLite deployment could
+not lose its on-disk sessions on upgrade. #151 then shipped the SQLite journal
+with `"database"` as its default, which makes the asymmetric version the more
+destructive of the two: it would abandon the database journal of every
+deployment that has upgraded since. So the default is now uniform, and `"file"`
+is an explicit opt-out (and still what the CLI uses). The resolved choice is
+logged at startup so it is never a guess.
 
 `ServerInfo` gains the resolved journal backend alongside the already-redacted
 database URL, so `/api/config` shows what the server actually did.
@@ -312,15 +325,16 @@ storage layouts) is a larger correctness surface than the feature itself.
   rather than on first request.
 - **Journal write failures propagate as `JournalError::Backend`.** The actor
   runtime already treats a failed `persist` as "state left unchanged" and logs
-  it; the head cache is not advanced, so a retry re-uses the same sequence
-  numbers.
+  it; the whole batch is one transaction, so a failure rolls back the `last_seq`
+  allocation with the rows and a retry re-uses the same sequence numbers.
 - **Pool exhaustion** surfaces as a sqlx timeout and is reported like any other
   store error. Journal writes and settings reads share the pool, so
   `max_connections` is configurable; the default of 10 is sized for a single
   server process.
-- **Constraint violations on `journal_events`** mean two writers touched one
-  persistence id — the invariant this design rests on. It is surfaced as a
-  backend error rather than swallowed.
+- **Constraint violations on `journal_events`** mean two writers allocated the
+  same sequence number. Allocation happens inside the write transaction, so this
+  should not be reachable; it is surfaced as a backend error rather than
+  swallowed.
 
 ## Testing
 
@@ -329,10 +343,10 @@ storage layouts) is a larger correctness surface than the feature itself.
   `LIKE ? ESCAPE '\'` string from `model_cards`.
 - **Migration parity** — a test asserting both directories declare the same
   versions and descriptions.
-- **Journal conformance** — the contract assertions currently inline in
-  `actor/tests/journal_conformance.rs` move into `horsie_actor::testkit` as a
-  reusable module, so `InMemoryJournal`, `FileJournal`, and `SqlJournal` (on
-  both backends) are all held to one spec. This is the highest-value test in
+- **Journal conformance** — the contract assertions in
+  `horsie_actor::testkit::conformance` (moved there by #151) hold
+  `InMemoryJournal`, `FileJournal` and `SqlJournal` (on both backends) to one
+  spec. This is the highest-value test in
   the change: the trait's doc comments are the real specification, and the SQL
   implementation is the first one where snapshots and compaction do anything.
 - **The whole suite on both backends** — the ~15 inline `SqliteConnectOptions`

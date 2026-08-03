@@ -313,7 +313,7 @@ mod tests {
             opened.store.clone(),
         ));
         let routines = Arc::new(crate::routines::RoutineService::new(
-            crate::routines::RoutineStore::new(opened.pool.clone()),
+            crate::routines::RoutineStore::new(opened.db.clone()),
             agents.clone(),
         ));
         let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));

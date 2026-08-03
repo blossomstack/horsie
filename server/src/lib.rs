@@ -5,7 +5,6 @@ pub mod db;
 mod error;
 pub mod github;
 pub mod http;
-pub mod journal;
 pub mod mcp;
 pub mod memory;
 pub mod plugins;

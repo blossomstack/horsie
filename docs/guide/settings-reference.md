@@ -31,10 +31,9 @@ file — is valid.
   },
   "journal": {
     // Where session/agent history is stored: "file" (JSONL under data_dir) or
-    // "database" (the journal_* tables in database.url). Default: "database"
-    // for a postgres:// URL, "file" otherwise. Switching an existing server
-    // from "file" to "database" starts from an empty journal — see
-    // Self-hosting.
+    // "database" (the journal_* tables in database.url). Default: "database".
+    // Switching an existing server from "file" to "database" starts from an
+    // empty journal — see Self-hosting.
     "backend": "file"
   },
   "auth": {
@@ -171,9 +170,9 @@ appends `/v1/chat/completions` itself) or a model id the backend has not loaded.
 
 ## Data & state on disk
 
-- **`data_dir`** — plugin artifacts, plus (with the default `journal.backend`
-  of `file`, and the default SQLite database) the session journal and the
-  settings database under `<data_dir>/server/`. Back this up; mount a volume
-  here in containers. A PostgreSQL deployment that also journals to the database
-  keeps only plugin artifacts here.
+- **`data_dir`** — plugin artifacts, plus (with the default SQLite database) the
+  settings database and the journal under `<data_dir>/server/`. Back this up;
+  mount a volume here in containers. Set `journal.backend` to `file` and the
+  session journal lands here as JSONL instead; a PostgreSQL deployment on the
+  default `database` journal keeps only plugin artifacts here.
 - **`state_dir`** — ephemeral runtime state; safe to lose across restarts.

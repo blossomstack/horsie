@@ -186,6 +186,33 @@ impl Db {
         }
     }
 
+    /// Begin a transaction that is going to write.
+    ///
+    /// On SQLite this issues `BEGIN IMMEDIATE`, taking the write lock up front.
+    /// The default `BEGIN` is deferred and upgrades on the first write, which is
+    /// where two concurrent writers deadlock instead of one simply waiting —
+    /// the journal's `persist` is exactly that shape. `Any` passes a custom
+    /// begin statement straight through to the driver, so this survives the
+    /// façade. PostgreSQL takes its row locks as it goes and needs no
+    /// equivalent, so it gets a plain `BEGIN`.
+    pub async fn begin_write(&self) -> Result<sqlx::Transaction<'static, sqlx::Any>, sqlx::Error> {
+        match self.dialect {
+            Dialect::Sqlite => self.pool.begin_with("BEGIN IMMEDIATE").await,
+            Dialect::Postgres => self.pool.begin().await,
+        }
+    }
+
+    /// SQL for the larger of two values.
+    ///
+    /// SQLite spells it `MAX(a, b)` — the scalar function, distinct from the
+    /// aggregate of the same name — and PostgreSQL spells it `GREATEST(a, b)`.
+    pub fn greatest(&self, a: &str, b: &str) -> String {
+        match self.dialect {
+            Dialect::Sqlite => format!("MAX({a}, {b})"),
+            Dialect::Postgres => format!("GREATEST({a}, {b})"),
+        }
+    }
+
     /// Run a query for its row count, wrapping the SQL in [`Db::q`] first.
     /// A convenience for the many statements that bind nothing.
     pub async fn execute(&self, sql: &str) -> Result<(), sqlx::Error> {
@@ -394,6 +421,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A pragma that silently fails to apply is exactly the failure this guards
+    /// against: journal writes would land in `DELETE` mode and lock the whole
+    /// database against every authenticated request's token write. Pinned to
+    /// SQLite rather than `testing::db()` — these pragmas are the SQLite arm of
+    /// `after_connect`, so there is nothing to assert on PostgreSQL.
+    #[tokio::test]
+    async fn the_sqlite_pool_runs_in_wal_mode_with_full_sync() {
+        let db = testing::sqlite().await;
+
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+
+        // 2 == FULL. SQLite reports the numeric level, not the keyword.
+        let sync: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(sync, 2, "the ack must mean the write reached the disk");
     }
 
     #[test]

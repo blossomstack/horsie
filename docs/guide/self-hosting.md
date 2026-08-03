@@ -54,9 +54,8 @@ journal*, which is separate from the settings tables and has its own setting:
 | `file` | JSONL files under `storage.data_dir` — needs a durable volume |
 | `database` | the `journal_*` tables in `database.url` |
 
-Left unset, a PostgreSQL deployment gets `database` and a SQLite one gets
-`file`. The resolved choice is printed at startup and shown under
-**Settings → Integrations → Server**.
+Left unset, both backends get `database`. The resolved choice is printed at
+startup and shown under **Settings → Integrations → Server**.
 
 > **Switching an existing server from `file` to `database` starts from an empty
 > journal.** Sessions already in the UI disappear. Nothing is deleted — the

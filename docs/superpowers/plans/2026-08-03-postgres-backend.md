@@ -45,25 +45,25 @@ Design spec: `docs/superpowers/specs/2026-08-03-postgres-backend-design.md`
 
 ### Task 4: Reusable journal conformance suite
 
-**Files:** modify `actor/src/testkit.rs`, `actor/tests/journal_conformance.rs`.
+**Files:** none — #151 already moved the contract into `horsie_actor::testkit::conformance`.
 
 - [ ] Move the contract assertions into `horsie_actor::testkit` as a public module taking `&dyn Journal`.
 - [ ] Existing `InMemoryJournal`/`FileJournal` tests call it; the red-catalogue `#[ignore]` markers stay exactly as they are.
 
 ### Task 5: `SqlJournal`
 
-**Files:** create `server/src/db/journal.rs`, `server/migrations/{sqlite,postgres}/0016_journal.sql`; test `server/tests/` (or the crate's own `mod tests`).
+**Files:** create `server/src/db/journal.rs`, `server/migrations/{sqlite,postgres}/0017_journal.sql`; test `server/tests/` (or the crate's own `mod tests`).
 
 - [ ] Schema migration for both dialects.
-- [ ] Head cache seeded from `max(MAX(event seq), snapshot seq)` — computed in Rust from two scalar reads, no `GREATEST`/`MAX` dialect branch.
-- [ ] `persist` (one transaction, chunked multi-row insert, cache advanced only after commit), `replay` (keyset pagination via `unfold`, 1 000/page), `save_snapshot`, `delete_events_before`, `copy_snapshot`, `clear`.
+- [ ] Sequence numbers allocated from `journal_logs.last_seq` (the schema #151 shipped), not from a cached or derived `MAX(seq)`.
+- [ ] `persist` (one transaction, numbers allocated by `UPDATE … RETURNING`), `replay` (keyset pagination via `unfold`, 1 000/page), `save_snapshot`, `delete_events_before`, `copy_snapshot`, `clear`.
 - [ ] Run the Task 4 conformance suite against `SqlJournal` on both backends.
 
 ### Task 6: Configuration and wiring
 
 **Files:** `server/src/bin/horsie-server/{config.rs,main.rs}`, `server/src/config/store.rs` (`DbConfigStore::open`), `models/` (`ServerInfo`).
 
-- [ ] `database.max_connections`; `journal.backend` = `file` | `database`, defaulting to `database` for Postgres URLs and `file` otherwise.
+- [ ] `database.max_connections`; `journal.backend` = `file` | `database`, defaulting to `database` on either dialect.
 - [ ] Select `FileJournal` or `SqlJournal` at boot; log the resolved backend.
 - [ ] `ServerInfo` reports the resolved journal backend.
 

@@ -65,33 +65,16 @@ fn auth_enabled_from(cfg: &BootConfig, env: Option<String>) -> bool {
     }
 }
 
-/// Which durable backend the actor journal uses.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JournalBackend {
-    /// SQLite, sharing the settings database. Real snapshots and compaction.
-    #[default]
-    Sqlite,
-    /// Append-only JSONL files under the data dir. No snapshotting, so every
-    /// recovery is a full replay; kept for the CLI/daemon path, where runs are
-    /// short enough for that to be fine.
-    File,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {
     /// Ephemeral runtime state. Defaults to `$XDG_STATE_HOME/horsie`, else
     /// `$HOME/.local/state/horsie`.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
-    /// Durable session journal. Defaults to `$XDG_DATA_HOME/horsie`, else
-    /// `$HOME/.local/share/horsie`.
+    /// Durable session journal, when `journal.backend` is `file`. Defaults to
+    /// `$XDG_DATA_HOME/horsie`, else `$HOME/.local/share/horsie`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
-    /// Journal backend. A future `postgres` arm lands here rather than in a
-    /// rewrite, which is why this is configuration and not a build choice.
-    #[serde(default)]
-    pub journal: JournalBackend,
 }
 
 impl Default for StorageConfig {
@@ -99,7 +82,6 @@ impl Default for StorageConfig {
         Self {
             state_dir: default_state_dir(),
             data_dir: default_data_dir(),
-            journal: JournalBackend::default(),
         }
     }
 }
@@ -140,23 +122,20 @@ impl JournalBackend {
     }
 }
 
-/// The journal backend to use: the configured one, else a default that depends
-/// on the database.
+/// The journal backend to use: the configured one, else `database`.
 ///
-/// The default is deliberately asymmetric. An existing SQLite deployment has
-/// journals on disk that switching would abandon, so it keeps `file` unless
-/// told otherwise. A PostgreSQL deployment has no existing journal to preserve
-/// and — being the managed-hosting case — no durable volume to assume, so
-/// `file` would be the wrong answer every time. The resolved value is logged at
-/// boot and reported in `/api/config`, so it is never a guess.
-pub fn journal_backend(cfg: &BootConfig, db_url: &str) -> JournalBackend {
-    match cfg.journal.backend {
-        Some(explicit) => explicit,
-        None if db_url.starts_with("postgres://") || db_url.starts_with("postgresql://") => {
-            JournalBackend::Database
-        }
-        None => JournalBackend::File,
-    }
+/// The default does not depend on the dialect. It is tempting to make it
+/// asymmetric — keep `file` on SQLite so an upgrade cannot abandon journals
+/// already on disk — but that ship has sailed: the database journal has been
+/// the default since it landed for SQLite, so defaulting to `file` here would
+/// abandon the journals of every deployment that has upgraded since, which is
+/// the same one-way door pointing the other way. `file` stays available
+/// explicitly, and remains what the CLI uses.
+///
+/// The resolved value is logged at boot and reported in `/api/config`, so it is
+/// never a guess.
+pub fn journal_backend(cfg: &BootConfig) -> JournalBackend {
+    cfg.journal.backend.unwrap_or(JournalBackend::Database)
 }
 
 impl BootConfig {
