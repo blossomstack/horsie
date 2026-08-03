@@ -138,6 +138,10 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
         horsie_server::memory::MemoryStore::new(opened.pool.clone()),
     ));
+    let agents = Arc::new(horsie_server::agents::AgentService::new(
+        horsie_server::agents::AgentStore::new(opened.pool.clone()),
+        opened.store.clone(),
+    ));
 
     let auth = Arc::new(horsie_server::auth::AuthService::new(
         horsie_server::auth::AuthStore::new(opened.pool.clone()),
@@ -210,6 +214,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         mcp,
         plugins,
         memory,
+        agents,
         vendor_agents,
         web_dir: cli.web,
     };

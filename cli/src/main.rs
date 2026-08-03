@@ -9,6 +9,7 @@
 )]
 
 use clap::{Parser, Subcommand};
+use horsie::agent::{self, truncate};
 use horsie::config::HorsieConfig;
 use horsie::connect;
 use horsie::error::CliError;
@@ -42,6 +43,11 @@ enum Command {
     Session {
         #[command(subcommand)]
         action: SessionAction,
+    },
+    /// List and invoke agent presets on a session server (`horsie-server`).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
     },
     /// Dial a session server as this machine's runtime — wraps the standalone
     /// `horsie-runtime --endpoint ...` flow so installing `horsie` is enough.
@@ -87,6 +93,53 @@ enum SessionAction {
         /// Which events to write.
         #[arg(long, value_enum, default_value = "messages")]
         events: EventsMode,
+    },
+    /// List sessions on the server.
+    List {
+        /// Session server base URL.
+        #[arg(long, default_value = "http://127.0.0.1:3789")]
+        server: String,
+    },
+    /// Show a session's current status (point-in-time snapshot).
+    Status {
+        /// Session UUID on the server.
+        session_id: String,
+        /// Session server base URL.
+        #[arg(long, default_value = "http://127.0.0.1:3789")]
+        server: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// List agent presets.
+    List {
+        /// Session server base URL.
+        #[arg(long, default_value = "http://127.0.0.1:3789")]
+        server: String,
+    },
+    /// Show one agent preset.
+    Get {
+        /// Agent preset name.
+        name: String,
+        /// Session server base URL.
+        #[arg(long, default_value = "http://127.0.0.1:3789")]
+        server: String,
+    },
+    /// Invoke an agent with a message: creates a session and prints its id
+    /// and web link immediately.
+    Invoke {
+        /// Agent preset name.
+        name: String,
+        /// First user message (required).
+        #[arg(short = 'm', long)]
+        message: String,
+        /// Optional session title.
+        #[arg(long)]
+        session_name: Option<String>,
+        /// Session server base URL.
+        #[arg(long, default_value = "http://127.0.0.1:3789")]
+        server: String,
     },
 }
 
@@ -299,6 +352,33 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 session::tail(&server, &session_id, &output, events).await?;
                 Ok(0)
             }
+            SessionAction::List { server } => {
+                session::list(&server).await?;
+                Ok(0)
+            }
+            SessionAction::Status { session_id, server } => {
+                session::status(&server, &session_id).await?;
+                Ok(0)
+            }
+        },
+        Command::Agent { action } => match action {
+            AgentAction::List { server } => {
+                agent::list(&server).await?;
+                Ok(0)
+            }
+            AgentAction::Get { name, server } => {
+                agent::get(&server, &name).await?;
+                Ok(0)
+            }
+            AgentAction::Invoke {
+                name,
+                message,
+                session_name,
+                server,
+            } => {
+                agent::invoke(&server, &name, message, session_name).await?;
+                Ok(0)
+            }
         },
         Command::Connect {
             server,
@@ -350,15 +430,4 @@ async fn main() {
         }
     };
     std::process::exit(code);
-}
-
-/// Clip `s` to `max` display columns, marking elision with an ellipsis. Used for
-/// marketplace descriptions, which routinely run to several hundred characters.
-fn truncate(s: &str, max: usize) -> String {
-    let flat = s.replace(['\n', '\r'], " ");
-    if flat.chars().count() <= max {
-        return flat;
-    }
-    let kept: String = flat.chars().take(max.saturating_sub(1)).collect();
-    format!("{}…", kept.trim_end())
 }

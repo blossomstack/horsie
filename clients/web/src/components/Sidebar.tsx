@@ -1,4 +1,5 @@
 import {
+  Bot,
   MessageSquarePlus,
   Plus,
   Search,
@@ -97,6 +98,27 @@ export function Sidebar() {
             data-testid="session-search"
           />
         </div>
+      </div>
+
+      <div className="px-2 pb-1">
+        <NavLink
+          to="/agents"
+          data-testid="agents-link"
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-2 text-sm transition-colors",
+              isActive
+                ? "bg-surface-3 text-text"
+                : "text-muted hover:bg-surface-2 hover:text-text",
+            )
+          }
+        >
+          <Bot size={15} />
+          <span className="font-medium">Agents</span>
+        </NavLink>
+      </div>
+      <div className="px-4 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-faint">
+        Sessions
       </div>
 
       <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-1">

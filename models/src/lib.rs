@@ -110,6 +110,11 @@ pub mod plugins {
     include!(concat!(env!("OUT_DIR"), "/plugins/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod agents {
+    include!(concat!(env!("OUT_DIR"), "/agents/mod.rs"));
+}
+
 /// Env var carrying the provision-steps JSON a vendor injects into a runtime
 /// child. Read by `horsie-runtime` at startup; written by the executor
 /// providers from `RuntimeConfig.provision`.
@@ -743,5 +748,32 @@ mod auth_wire_tests {
             serde_json::from_str(r#"{"currentPassword":"a","newPassword":"b"}"#).unwrap();
         assert_eq!(req.current_password, "a");
         assert_eq!(req.new_password, "b");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod agents_tests {
+    #[test]
+    fn agent_view_round_trips_with_camel_case_keys() {
+        use crate::agents::AgentView;
+        let view = AgentView {
+            name: "reviewer".into(),
+            description: "reviews PRs".into(),
+            vendor: Some("local".into()),
+            model: "sonnet".into(),
+            repos: vec![],
+            plugins: vec!["superpowers".into()],
+            mcp_servers: vec![],
+            memory_spaces: vec!["default".into()],
+            thinking_effort: Some("high".into()),
+            created_at: "1".into(),
+            updated_at: "2".into(),
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"mcpServers\""), "{json}");
+        assert!(json.contains("\"thinkingEffort\":\"high\""), "{json}");
+        let back: AgentView = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, view);
     }
 }

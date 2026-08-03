@@ -149,6 +149,10 @@ async fn start_server_with(
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
         horsie_server::memory::MemoryStore::new(opened.pool.clone()),
     ));
+    let agents = Arc::new(horsie_server::agents::AgentService::new(
+        horsie_server::agents::AgentStore::new(opened.pool.clone()),
+        opened.store.clone(),
+    ));
     // Auth off: this suite drives the HTTP API without a credential, and a
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
@@ -171,6 +175,7 @@ async fn start_server_with(
         mcp,
         plugins,
         memory,
+        agents,
         vendor_agents: Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
             shared_vendors,
         )),
@@ -291,6 +296,10 @@ async fn start_server_with_live_vendors(
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
         horsie_server::memory::MemoryStore::new(opened.pool.clone()),
     ));
+    let agents = Arc::new(horsie_server::agents::AgentService::new(
+        horsie_server::agents::AgentStore::new(opened.pool.clone()),
+        opened.store.clone(),
+    ));
     // Auth off: this suite drives the HTTP API without a credential, and a
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
@@ -313,6 +322,7 @@ async fn start_server_with_live_vendors(
         mcp,
         plugins,
         memory,
+        agents,
         vendor_agents: Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
             opened.vendors.clone(),
         )),

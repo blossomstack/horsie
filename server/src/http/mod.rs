@@ -2,6 +2,7 @@
 //! `SessionSupervisor`. All request/response bodies are fluorite wire types.
 
 mod admin;
+mod agents;
 mod auth;
 mod config;
 pub mod error;
@@ -60,6 +61,8 @@ pub struct AppState {
     /// Agent-managed long-term memories: CRUD for the web UI. The agent reaches
     /// the same data through its `MemoryToolbox`, not over HTTP.
     pub memory: Arc<crate::memory::MemoryService>,
+    /// Named agent presets: CRUD plus invoke-with-message.
+    pub agents: Arc<crate::agents::AgentService>,
     /// Every connected vendor agent, published into the same vendor map
     /// sessions select from. Held here so the connect route can register a
     /// freshly handshaken link.
@@ -156,6 +159,17 @@ pub fn app(state: AppState) -> Router {
                 .put(memory::update_memory)
                 .delete(memory::delete_memory),
         )
+        .route(
+            "/api/agents",
+            get(agents::list_agents).post(agents::create_agent),
+        )
+        .route(
+            "/api/agents/:name",
+            get(agents::get_agent)
+                .put(agents::replace_agent)
+                .delete(agents::delete_agent),
+        )
+        .route("/api/agents/:name/invoke", post(agents::invoke_agent))
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
         .route("/api/auth/status", get(auth::status))
         .route("/api/auth/login", post(auth::login))
@@ -249,6 +263,10 @@ mod tests {
         let model_cards = Arc::new(crate::config::model_cards::ModelCardStore::new(
             opened.pool.clone(),
         ));
+        let agents = Arc::new(crate::agents::AgentService::new(
+            crate::agents::AgentStore::new(opened.pool.clone()),
+            opened.store.clone(),
+        ));
         let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
         let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
             shared_vendors.clone(),
@@ -286,6 +304,7 @@ mod tests {
             mcp,
             plugins,
             memory,
+            agents,
             vendor_agents,
             web_dir: None,
         }
@@ -1251,5 +1270,206 @@ mod tests {
 
         let res = app.oneshot(get("/settings")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// PUT a provider + model so agent save-time validation has a model to
+    /// reference; the alias is "mock".
+    async fn put_mock_model(app: &axum::Router) {
+        let body = serde_json::json!({
+            "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
+            "models": [{"alias": "mock", "provider": "p", "modelId": "id"}],
+        });
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/config", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn agents_crud_over_http() {
+        use horsie_models::agents::AgentView;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        put_mock_model(&app).await;
+
+        // Create -> 201 with the stored view.
+        let body = serde_json::json!({
+            "name": "reviewer", "description": "reviews PRs", "model": "mock",
+            "vendor": "mock", "plugins": ["superpowers"], "memorySpaces": ["default"]
+        });
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/agents", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v: AgentView = read_json(res).await;
+        assert_eq!(v.name, "reviewer");
+        assert_eq!(v.vendor.as_deref(), Some("mock"));
+        assert_eq!(v.plugins, vec!["superpowers".to_string()]);
+
+        // Duplicate -> 409; bad slug -> 422; unknown model -> 422.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/agents", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/agents",
+                &serde_json::json!({"name": "Bad Name", "model": "mock"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/agents",
+                &serde_json::json!({"name": "x", "model": "ghost"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // List + get.
+        let res = app.clone().oneshot(get("/api/agents")).await.unwrap();
+        let list: Vec<AgentView> = read_json(res).await;
+        assert_eq!(list.len(), 1);
+        let res = app
+            .clone()
+            .oneshot(get("/api/agents/reviewer"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Replace -> 200; unknown replace -> 404; name mismatch -> 422.
+        let upd = serde_json::json!({"name": "reviewer", "model": "mock", "description": "v2"});
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/agents/reviewer", &upd))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: AgentView = read_json(res).await;
+        assert_eq!(v.description, "v2");
+        assert!(v.plugins.is_empty(), "PUT is a full replace");
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/agents/ghost",
+                &serde_json::json!({"name": "ghost", "model": "mock"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/agents/reviewer",
+                &serde_json::json!({"name": "other", "model": "mock"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Delete -> 204; again -> 404.
+        let res = app
+            .clone()
+            .oneshot(delete("/api/agents/reviewer"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = app.oneshot(delete("/api/agents/reviewer")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn invoke_creates_a_session_and_queues_the_message() {
+        use horsie_models::agents::AgentInvokeResponse;
+        use horsie_models::session_api::GetSessionResponse;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        put_mock_model(&app).await;
+        let body = serde_json::json!({
+            "name": "reviewer", "model": "mock", "vendor": "mock",
+            "memorySpaces": ["default"]
+        });
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/agents", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+
+        // Invoke -> 201 with the session id, immediately.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/agents/reviewer/invoke",
+                &serde_json::json!({"message": "review the diff"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let invoked: AgentInvokeResponse = read_json(res).await;
+        let id = invoked.session.id;
+
+        // The session exists with the preset's model/vendor and memory spaces.
+        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let list: ListSessionsResponse = read_json(res).await;
+        assert_eq!(list.sessions.len(), 1);
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/api/sessions/{id}")))
+            .await
+            .unwrap();
+        let detail: GetSessionResponse = read_json(res).await;
+        assert_eq!(detail.session.model, "mock");
+        assert_eq!(detail.session.vendor, "mock");
+        assert_eq!(detail.session.memory_spaces, vec!["default".to_string()]);
+
+        // Unknown agent -> 404; empty message -> 422.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/agents/ghost/invoke",
+                &serde_json::json!({"message": "hi"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/agents/reviewer/invoke",
+                &serde_json::json!({"message": "   "}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // An agent naming a disconnected vendor is storable but not invocable.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/agents",
+                &serde_json::json!({"name": "remote", "model": "mock", "vendor": "ghost-vendor"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let res = app
+            .oneshot(post_json(
+                "/api/agents/remote/invoke",
+                &serde_json::json!({"message": "hi"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

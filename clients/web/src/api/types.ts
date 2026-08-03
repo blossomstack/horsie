@@ -1,6 +1,7 @@
 // Single import surface for the fluorite-generated protocol types. Regenerate
 // with `bun run generate-types` whenever the horsie `.fl` schemas change.
 export * from "../generated/agent";
+export * from "../generated/agents";
 export * from "../generated/auth";
 export * from "../generated/capabilities";
 export * from "../generated/github";

@@ -1,9 +1,11 @@
-//! Stream a session's events from `horsie-server`'s SSE endpoint to a local
-//! JSONL file, with idempotent resume via the journal sequence cursor.
+//! Commands against `horsie-server`: tail a session's events to a local JSONL
+//! file (with idempotent resume via the journal sequence cursor), list
+//! sessions, and show one session's status.
 
 use crate::error::CliError;
+use crate::server_client::ServerClient;
 use futures_util::StreamExt;
-use horsie_models::session::SessionEvent;
+use horsie_models::session::{SessionDetail, SessionEvent, SessionSummary};
 use reqwest_eventsource::{Event, EventSource};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
@@ -256,6 +258,120 @@ fn scan_last_seq(path: &Path) -> Result<Option<u64>, CliError> {
     Ok(last)
 }
 
+/// `horsie session list` — every session the server knows about.
+pub async fn list(server: &str) -> Result<(), CliError> {
+    let sessions = ServerClient::new(server).list_sessions().await?;
+    print!("{}", render_session_table(&sessions, now_ms()));
+    Ok(())
+}
+
+/// `horsie session status <id>` — a point-in-time snapshot (live progress is
+/// `session tail`'s job).
+pub async fn status(server: &str, session_id: &str) -> Result<(), CliError> {
+    let detail = ServerClient::new(server).get_session(session_id).await?;
+    print!("{}", render_session_detail(&detail, now_ms()));
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// "just now", "5m ago", "3h ago", "2d ago".
+fn relative(now_ms: u64, then_ms: u64) -> String {
+    let secs = now_ms.saturating_sub(then_ms) / 1000;
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+fn status_label(s: &Option<horsie_models::session::SessionStatusKind>) -> String {
+    s.as_ref()
+        .map(|k| format!("{k:?}"))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn render_session_table(sessions: &[SessionSummary], now: u64) -> String {
+    if sessions.is_empty() {
+        return "no sessions\n".to_string();
+    }
+    let mut out = format!(
+        "{:<38} {:<24} {:<16} {:<10} LAST ERROR\n",
+        "ID", "NAME", "STATUS", "CREATED"
+    );
+    for s in sessions {
+        out.push_str(&format!(
+            "{:<38} {:<24} {:<16} {:<10} {}\n",
+            s.id,
+            crate::agent::truncate(s.name.as_deref().unwrap_or("-"), 24),
+            status_label(&s.status),
+            relative(now, s.created_at),
+            s.last_error.as_deref().unwrap_or(""),
+        ));
+    }
+    out
+}
+
+fn render_session_detail(d: &SessionDetail, now: u64) -> String {
+    let mut out = format!(
+        "session     {}\nname        {}\nstatus      {}\ncreated     {}\nmodel       {}\nvendor      {}\n",
+        d.id,
+        d.name.as_deref().unwrap_or("-"),
+        status_label(&d.status),
+        relative(now, d.created_at),
+        d.model,
+        d.vendor,
+    );
+    if let Some(e) = d.thinking_effort.as_deref() {
+        out.push_str(&format!("thinking    {e}\n"));
+    }
+    for r in &d.repos {
+        out.push_str(&format!("repo        {r}\n"));
+    }
+    if !d.plugins.is_empty() {
+        out.push_str(&format!("skills      {}\n", d.plugins.join(", ")));
+    }
+    if !d.mcp_servers.is_empty() {
+        out.push_str(&format!("mcp         {}\n", d.mcp_servers.join(", ")));
+    }
+    if !d.memory_spaces.is_empty() {
+        out.push_str(&format!("memory      {}\n", d.memory_spaces.join(", ")));
+    }
+    if let Some(err) = d.last_error.as_deref() {
+        out.push_str(&format!("error       {err}\n"));
+    }
+    // Every unanswered ask, not just the first: a turn resumes only once all
+    // of them are answered. `pending_question` is the pre-multi-ask fallback.
+    if d.pending_asks.is_empty() {
+        if let Some(q) = d.pending_question.as_deref() {
+            out.push_str(&format!("awaiting    {q}\n"));
+        }
+    } else {
+        for a in &d.pending_asks {
+            out.push_str(&format!(
+                "awaiting    {}\n",
+                crate::agent::truncate(&a.question, 70)
+            ));
+        }
+    }
+    if !d.inbox.is_empty() {
+        out.push_str(&format!("inbox       {} queued\n", d.inbox.len()));
+        for m in &d.inbox {
+            out.push_str(&format!("  · {}\n", crate::agent::truncate(&m.text, 70)));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -452,5 +568,80 @@ mod tests {
         assert!(EventsMode::Messages.allows(&msg));
         assert!(!EventsMode::Messages.allows(&delta));
         assert!(EventsMode::All.allows(&delta));
+    }
+
+    fn summary(id: &str, name: Option<&str>) -> SessionSummary {
+        SessionSummary {
+            id: id.into(),
+            name: name.map(Into::into),
+            status: Some(horsie_models::session::SessionStatusKind::Running),
+            created_at: 1_000,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn session_table_lists_status_and_relative_time() {
+        let out = render_session_table(&[summary("s-1", Some("review"))], 1_000 + 5 * 60_000);
+        assert!(out.contains("s-1"));
+        assert!(out.contains("review"));
+        assert!(out.contains("Running"));
+        assert!(out.contains("5m ago"));
+    }
+
+    #[test]
+    fn empty_session_table_says_no_sessions() {
+        assert_eq!(render_session_table(&[], 0), "no sessions\n");
+    }
+
+    #[test]
+    fn relative_buckets() {
+        assert_eq!(relative(10_000, 0), "just now");
+        assert_eq!(relative(5 * 60_000, 0), "5m ago");
+        assert_eq!(relative(3 * 3_600_000, 0), "3h ago");
+        assert_eq!(relative(2 * 86_400_000, 0), "2d ago");
+    }
+
+    #[test]
+    fn detail_shows_awaiting_question_and_inbox() {
+        let d = SessionDetail {
+            id: "s-1".into(),
+            name: None,
+            status: Some(horsie_models::session::SessionStatusKind::AwaitingInput),
+            created_at: 0,
+            last_error: None,
+            pending_question: Some("which file?".into()),
+            pending_asks: vec![
+                horsie_models::session::PendingAskView {
+                    tool_call_id: Some("t1".into()),
+                    question: "which file?".into(),
+                },
+                horsie_models::session::PendingAskView {
+                    tool_call_id: Some("t2".into()),
+                    question: "which branch?".into(),
+                },
+            ],
+            model: "sonnet".into(),
+            vendor: "local".into(),
+            repos: vec![],
+            plugins: vec![],
+            mcp_servers: vec![],
+            memory_spaces: vec![],
+            use_plugins: false,
+            thinking_effort: None,
+            inbox: vec![horsie_models::session::QueuedMessage {
+                id: "m1".into(),
+                text: "follow up".into(),
+                at_ms: 0,
+            }],
+        };
+        let out = render_session_detail(&d, 0);
+        assert!(out.contains("awaiting    which file?"));
+        assert!(
+            out.contains("awaiting    which branch?"),
+            "every unanswered ask is listed: {out}"
+        );
+        assert!(out.contains("inbox       1 queued"));
+        assert!(out.contains("· follow up"));
     }
 }
