@@ -4,6 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useAuthStatus } from "./hooks/useAuth";
 import { AgentEditPage } from "./pages/agents/AgentEditPage";
 import { AgentsPage } from "./pages/agents/AgentsPage";
+import { DeviceApprovalPage } from "./pages/DeviceApprovalPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NewSessionView } from "./pages/NewSessionView";
 import { SessionsLayout } from "./pages/SessionsLayout";
@@ -51,6 +52,7 @@ export default function App() {
               <Route path="agents" element={<AgentsPage />} />
               <Route path="agents/new" element={<AgentEditPage />} />
               <Route path="agents/:name/edit" element={<AgentEditPage />} />
+              <Route path="auth/device" element={<DeviceApprovalPage />} />
               <Route path="settings" element={<SettingsLayout />}>
                 <Route index element={<Navigate to="models" replace />} />
                 <Route path="models" element={<ModelsSettings />} />
