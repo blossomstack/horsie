@@ -81,7 +81,7 @@ test("E3: a running tool shows a live status on a multi-item work-group row", as
   await sendMessage(page, "run two things, one slow");
 
   await expectStatus(page, "Running");
-  await expect(page.getByTestId("work-group-summary")).toHaveText("Running bash…");
+  await expect(page.getByTestId("work-group-summary")).toHaveText("Running bash");
 
   await page.getByTestId("composer-stop").click();
   await expectStatus(page, "Idle");

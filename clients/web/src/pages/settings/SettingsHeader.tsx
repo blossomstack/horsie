@@ -1,4 +1,5 @@
-import { Check, Loader2, RotateCcw, Save } from "lucide-react";
+import { RotateCcw, Save } from "lucide-react";
+import { RailToggle } from "../../components/rail";
 
 /**
  * The header bar every settings/admin page renders. Pages that own a batched
@@ -23,39 +24,59 @@ export function SettingsHeader({
   onDiscard?: () => void;
 }) {
   return (
-    <header className="flex items-center gap-3 border-b px-6 py-3.5">
-      <div>
-        <h1 className="text-[15px] font-semibold text-text">{title}</h1>
-        <p className="text-xs text-faint">{desc}</p>
-      </div>
-      {onSave && (
-        <div className="ml-auto flex items-center gap-2">
-          {dirty && !saving && (
-            <span className="text-xs text-faint">Unsaved changes</span>
-          )}
-          {saved && !dirty && (
-            <span className="flex items-center gap-1 text-xs text-success">
-              <Check size={13} /> Saved
-            </span>
-          )}
-          <button className="btn-ghost" onClick={onDiscard} disabled={!dirty}>
-            <RotateCcw size={14} /> Discard
-          </button>
-          <button
-            className="btn-primary"
-            onClick={onSave}
-            disabled={!dirty || saving}
-            data-testid="settings-save"
-          >
-            {saving ? (
-              <Loader2 size={15} className="animate-spin" />
-            ) : (
-              <Save size={15} />
-            )}
-            Save changes
-          </button>
+    // The bar spans the pane; its contents share the content column's left
+    // edge, so the title sits directly above the first panel rather than
+    // floating 100px to its left.
+    <header className="border-b bg-panel">
+      <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3.5 sm:px-6">
+        <RailToggle />
+        <div className="min-w-0 flex-1">
+          <h1 className="text-[15px] font-semibold tracking-tight text-legend">
+            {title}
+          </h1>
+          <p className="mt-0.5 max-w-prose text-xs leading-relaxed text-faint">
+            {desc}
+          </p>
         </div>
-      )}
+        {onSave && (
+          <div className="flex items-center gap-2">
+            {/* Save state is a lamp and a word, like every other state on the
+              panel — never the button's colour alone. */}
+            {saving ? (
+              <span className="flex items-center gap-1.5 text-amber-ink">
+                <span className="lamp lamp-live" aria-hidden />
+                <span className="legend text-current">Saving</span>
+              </span>
+            ) : dirty ? (
+              <span className="flex items-center gap-1.5 text-amber-ink">
+                <span className="lamp" aria-hidden />
+                <span className="legend text-current">Unsaved</span>
+              </span>
+            ) : saved ? (
+              <span className="flex items-center gap-1.5 text-lamp-ok">
+                <span className="lamp" aria-hidden />
+                <span className="legend text-current">Saved</span>
+              </span>
+            ) : null}
+            <button
+              className="key key-blank"
+              onClick={onDiscard}
+              disabled={!dirty}
+            >
+              <RotateCcw size={13} aria-hidden /> Discard
+            </button>
+            <button
+              className="key key-go"
+              onClick={onSave}
+              disabled={!dirty || saving}
+              data-testid="settings-save"
+            >
+              <Save size={13} aria-hidden />
+              Save
+            </button>
+          </div>
+        )}
+      </div>
     </header>
   );
 }

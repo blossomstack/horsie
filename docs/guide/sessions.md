@@ -4,50 +4,60 @@ A **session** is one conversation with an agent. Sessions are durable: the whole
 transcript is saved server-side and streams live to the browser, so you can close
 the tab and reconnect without losing anything.
 
-## The sidebar
+## The session rail
 
-The left sidebar lists all sessions with a live status dot on each (updating,
-idle, error). You can:
+The left rail lists all sessions, each with a status lamp and the state it names
+(idle, running, awaiting input, failed). Its header carries a lamp for the rail's
+own connection to the server, so a dead feed is visible before you click
+anything. From the rail you can:
 
 - **Search** sessions by name.
-- Click **New** to open the New Session dialog.
-- Click a session to open its chat view.
-- Reach **Settings** and **Skills** from the footer.
+- Press **New** to start a session.
+- Click a session to open it.
+- Reach **Agents**, **Settings**, and **Admin** from the footer.
 - Toggle light/dark theme.
+
+On a narrow screen the rail is a drawer — open it with the menu button in the
+header.
 
 ## Creating a session
 
-Click **New**. The dialog adapts to what you've configured:
+Press **New**. This does not create anything yet: you get a draft, and the row of
+controls above the composer adapts to what you've configured. The session is
+created when you send your first message.
 
-- **Name** *(optional)* — a label for the session. Auto-generated if left blank.
 - **Model** *(required)* — one of the models you added in Settings. If you have
-  none, the dialog links you to Settings to add one.
+  none, the control links you to Settings to add one.
 - **Runtime vendor** — shown only when more than one runtime is active. Otherwise
   the session uses the default vendor. See [Runtime vendors](runtime-vendors.md).
 - **Repositories** — shown only when the chosen vendor supports provisioning
   (velos) **and** GitHub is connected. Pick 0..N repos, each with an optional
   ref. See [GitHub](github.md).
-- **Advanced:**
-  - **Enable plugins** + **Skills** — turn on plugin hooks and pick which skill
-    bundles to load. Shown only for provisioning vendors; bundles marked as
-    defaults are pre-checked. See [Skills & plugins](skills-and-plugins.md).
-  - **MCP servers** — enable any MCP servers you've marked enabled, for this
-    session. See [MCP servers](mcp-servers.md).
+- **Skills** — pick which skill bundles to load. Shown only for provisioning
+  vendors; bundles marked as defaults are pre-checked. See
+  [Skills & plugins](skills-and-plugins.md).
+- **MCP servers** — enable any MCP servers you've marked enabled, for this
+  session. See [MCP servers](mcp-servers.md).
+- **Memory** — pick which memory spaces the agent can read and write.
 
-Click **Create** to open the session.
+Send your first message to create the session and open it.
 
 ## The chat view
 
-- **Composer** — type a message and send it. The agent's reply text streams in
-  live. Tool calls appear as collapsible rows you can expand to see the raw
-  input and output; file edits show up there as tool calls, not as diffs — there
-  is no file browser or diff view yet. Thinking is shown once the reply
-  finishes, not streamed.
-- **Stop** — interrupt the current run mid-turn.
-- **Status badge** — shows whether the session is idle, running, or errored.
-- **Token usage** — a running total of tokens used across the session. Note this
-  is cumulative usage, not a measure of how full the context window is.
-- **Repo chips** — the repositories checked out for this session, if any.
+- **Composer** — type a message and press the orange **Send** key (or Enter).
+  The agent's reply text streams in live. Tool calls appear as collapsible rows
+  you can expand to see the raw input and output; file edits show up there as
+  tool calls, not as diffs — there is no file browser or diff view yet. Thinking
+  is shown once the reply finishes, not streamed, and is hidden by default.
+- **Stop** — the red key beside Send; interrupts the current run mid-turn.
+- **Status** — a lamp and the state it names: idle, running, awaiting input,
+  failed, or unrecoverable.
+- **Tokens** — a running total of tokens used across the session. Note this is
+  cumulative usage, not a measure of how full the context window is; open it for
+  the context-window meter and the per-turn breakdown.
+- **Header readouts** — the model, runtime, repositories, skills, MCP servers,
+  and memory spaces this session was launched with. These are fixed for the
+  session's lifetime.
 - **Delete** — remove the session.
 - **Tasks panel** — when the agent tracks a multi-step plan, a collapsible panel
   on the right shows the task list live as it's created and updated. It appears
@@ -56,8 +66,10 @@ Click **Create** to open the session.
 
 ### When the agent asks you a question
 
-If the agent needs input, it can pause and ask. A prompt appears in the
-transcript; type your answer to let the run continue.
+If the agent needs input, it can pause and ask. A question card appears in the
+transcript and the status lamp turns to **awaiting input**. Pick one of the
+offered choices or type your own answer to let the run continue. If several
+questions are parked at once they are answered together, in one go.
 
 ## Reconnecting
 

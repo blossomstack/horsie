@@ -1,0 +1,826 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-03T00:00:00Z",
+  "title": "Design System: horsie",
+  "extensions": {
+    "colorMeta": {
+      "chassis": {
+        "role": "neutral",
+        "displayName": "Gunmetal Chassis",
+        "canonical": "oklch(0.19 0.005 255)",
+        "light": "oklch(0.915 0.009 88)",
+        "tonalRamp": [
+          "oklch(0.15 0.005 255)",
+          "oklch(0.26 0.005 255)",
+          "oklch(0.38 0.005 255)",
+          "oklch(0.49 0.005 255)",
+          "oklch(0.61 0.005 255)",
+          "oklch(0.72 0.005 255)",
+          "oklch(0.84 0.005 255)",
+          "oklch(0.95 0.005 255)"
+        ]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "Front Panel",
+        "canonical": "oklch(0.235 0.006 255)",
+        "light": "oklch(0.955 0.006 88)",
+        "tonalRamp": [
+          "oklch(0.15 0.006 255)",
+          "oklch(0.26 0.006 255)",
+          "oklch(0.38 0.006 255)",
+          "oklch(0.49 0.006 255)",
+          "oklch(0.61 0.006 255)",
+          "oklch(0.72 0.006 255)",
+          "oklch(0.84 0.006 255)",
+          "oklch(0.95 0.006 255)"
+        ]
+      },
+      "panel-raised": {
+        "role": "neutral",
+        "displayName": "Lifted Panel",
+        "canonical": "oklch(0.285 0.007 255)",
+        "light": "oklch(0.978 0.004 88)",
+        "tonalRamp": [
+          "oklch(0.15 0.007 255)",
+          "oklch(0.26 0.007 255)",
+          "oklch(0.38 0.007 255)",
+          "oklch(0.49 0.007 255)",
+          "oklch(0.61 0.007 255)",
+          "oklch(0.72 0.007 255)",
+          "oklch(0.84 0.007 255)",
+          "oklch(0.95 0.007 255)"
+        ]
+      },
+      "screen": {
+        "role": "neutral",
+        "displayName": "Recessed Screen",
+        "canonical": "oklch(0.155 0.006 255)",
+        "light": "oklch(0.878 0.012 88)",
+        "tonalRamp": [
+          "oklch(0.15 0.006 255)",
+          "oklch(0.26 0.006 255)",
+          "oklch(0.38 0.006 255)",
+          "oklch(0.49 0.006 255)",
+          "oklch(0.61 0.006 255)",
+          "oklch(0.72 0.006 255)",
+          "oklch(0.84 0.006 255)",
+          "oklch(0.95 0.006 255)"
+        ]
+      },
+      "rule": {
+        "role": "neutral",
+        "displayName": "Panel Rule",
+        "canonical": "oklch(0.325 0.008 255)",
+        "light": "oklch(0.815 0.011 88)",
+        "tonalRamp": [
+          "oklch(0.15 0.008 255)",
+          "oklch(0.26 0.008 255)",
+          "oklch(0.38 0.008 255)",
+          "oklch(0.49 0.008 255)",
+          "oklch(0.61 0.008 255)",
+          "oklch(0.72 0.008 255)",
+          "oklch(0.84 0.008 255)",
+          "oklch(0.95 0.008 255)"
+        ]
+      },
+      "rule-strong": {
+        "role": "neutral",
+        "displayName": "Strong Rule",
+        "canonical": "oklch(0.43 0.01 255)",
+        "light": "oklch(0.7 0.014 88)",
+        "tonalRamp": [
+          "oklch(0.15 0.01 255)",
+          "oklch(0.26 0.01 255)",
+          "oklch(0.38 0.01 255)",
+          "oklch(0.49 0.01 255)",
+          "oklch(0.61 0.01 255)",
+          "oklch(0.72 0.01 255)",
+          "oklch(0.84 0.01 255)",
+          "oklch(0.95 0.01 255)"
+        ]
+      },
+      "legend": {
+        "role": "neutral",
+        "displayName": "Engraved Legend Ink",
+        "canonical": "oklch(0.93 0.008 90)",
+        "light": "oklch(0.245 0.008 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.008 90)",
+          "oklch(0.26 0.008 90)",
+          "oklch(0.38 0.008 90)",
+          "oklch(0.49 0.008 90)",
+          "oklch(0.61 0.008 90)",
+          "oklch(0.72 0.008 90)",
+          "oklch(0.84 0.008 90)",
+          "oklch(0.95 0.008 90)"
+        ]
+      },
+      "legend-dim": {
+        "role": "neutral",
+        "displayName": "Dimmed Legend Ink",
+        "canonical": "oklch(0.71 0.012 90)",
+        "light": "oklch(0.395 0.011 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.012 90)",
+          "oklch(0.26 0.012 90)",
+          "oklch(0.38 0.012 90)",
+          "oklch(0.49 0.012 90)",
+          "oklch(0.61 0.012 90)",
+          "oklch(0.72 0.012 90)",
+          "oklch(0.84 0.012 90)",
+          "oklch(0.95 0.012 90)"
+        ]
+      },
+      "legend-faint": {
+        "role": "neutral",
+        "displayName": "Faint Legend Ink",
+        "canonical": "oklch(0.655 0.013 90)",
+        "light": "oklch(0.475 0.013 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.013 90)",
+          "oklch(0.26 0.013 90)",
+          "oklch(0.38 0.013 90)",
+          "oklch(0.49 0.013 90)",
+          "oklch(0.61 0.013 90)",
+          "oklch(0.72 0.013 90)",
+          "oklch(0.84 0.013 90)",
+          "oklch(0.95 0.013 90)"
+        ]
+      },
+      "keycap": {
+        "role": "neutral",
+        "displayName": "Keycap Material",
+        "canonical": "oklch(0.82 0.016 90)",
+        "light": "oklch(0.44 0.014 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.016 90)",
+          "oklch(0.26 0.016 90)",
+          "oklch(0.38 0.016 90)",
+          "oklch(0.49 0.016 90)",
+          "oklch(0.61 0.016 90)",
+          "oklch(0.72 0.016 90)",
+          "oklch(0.84 0.016 90)",
+          "oklch(0.95 0.016 90)"
+        ]
+      },
+      "keycap-hover": {
+        "role": "neutral",
+        "displayName": "Keycap Material (hover)",
+        "canonical": "oklch(0.87 0.016 90)",
+        "light": "oklch(0.5 0.015 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.016 90)",
+          "oklch(0.26 0.016 90)",
+          "oklch(0.38 0.016 90)",
+          "oklch(0.49 0.016 90)",
+          "oklch(0.61 0.016 90)",
+          "oklch(0.72 0.016 90)",
+          "oklch(0.84 0.016 90)",
+          "oklch(0.95 0.016 90)"
+        ]
+      },
+      "keycap-ink": {
+        "role": "neutral",
+        "displayName": "Keycap Legend Ink",
+        "canonical": "oklch(0.22 0.008 255)",
+        "light": "oklch(0.965 0.006 88)",
+        "tonalRamp": [
+          "oklch(0.15 0.008 255)",
+          "oklch(0.26 0.008 255)",
+          "oklch(0.38 0.008 255)",
+          "oklch(0.49 0.008 255)",
+          "oklch(0.61 0.008 255)",
+          "oklch(0.72 0.008 255)",
+          "oklch(0.84 0.008 255)",
+          "oklch(0.95 0.008 255)"
+        ]
+      },
+      "keycap-edge": {
+        "role": "neutral",
+        "displayName": "Keycap Edge",
+        "canonical": "oklch(0.63 0.016 90)",
+        "light": "oklch(0.32 0.012 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.016 90)",
+          "oklch(0.26 0.016 90)",
+          "oklch(0.38 0.016 90)",
+          "oklch(0.49 0.016 90)",
+          "oklch(0.61 0.016 90)",
+          "oklch(0.72 0.016 90)",
+          "oklch(0.84 0.016 90)",
+          "oklch(0.95 0.016 90)"
+        ]
+      },
+      "orange": {
+        "role": "primary",
+        "displayName": "Safety Orange",
+        "canonical": "oklch(0.688 0.196 42)",
+        "light": "oklch(0.545 0.2 42)",
+        "tonalRamp": [
+          "oklch(0.15 0.196 42)",
+          "oklch(0.26 0.196 42)",
+          "oklch(0.38 0.196 42)",
+          "oklch(0.49 0.196 42)",
+          "oklch(0.61 0.196 42)",
+          "oklch(0.72 0.196 42)",
+          "oklch(0.84 0.196 42)",
+          "oklch(0.95 0.196 42)"
+        ]
+      },
+      "orange-hover": {
+        "role": "primary",
+        "displayName": "Safety Orange (hover)",
+        "canonical": "oklch(0.735 0.19 42)",
+        "light": "oklch(0.5 0.2 42)",
+        "tonalRamp": [
+          "oklch(0.15 0.19 42)",
+          "oklch(0.26 0.19 42)",
+          "oklch(0.38 0.19 42)",
+          "oklch(0.49 0.19 42)",
+          "oklch(0.61 0.19 42)",
+          "oklch(0.72 0.19 42)",
+          "oklch(0.84 0.19 42)",
+          "oklch(0.95 0.19 42)"
+        ]
+      },
+      "orange-ink": {
+        "role": "primary",
+        "displayName": "Safety Orange Ink",
+        "canonical": "oklch(0.19 0.02 42)",
+        "light": "oklch(0.99 0.01 42)",
+        "tonalRamp": [
+          "oklch(0.15 0.02 42)",
+          "oklch(0.26 0.02 42)",
+          "oklch(0.38 0.02 42)",
+          "oklch(0.49 0.02 42)",
+          "oklch(0.61 0.02 42)",
+          "oklch(0.72 0.02 42)",
+          "oklch(0.84 0.02 42)",
+          "oklch(0.95 0.02 42)"
+        ]
+      },
+      "orange-quiet": {
+        "role": "primary",
+        "displayName": "Safety Orange Wash",
+        "canonical": "oklch(0.32 0.075 42)",
+        "light": "oklch(0.93 0.045 42)",
+        "tonalRamp": [
+          "oklch(0.15 0.075 42)",
+          "oklch(0.26 0.075 42)",
+          "oklch(0.38 0.075 42)",
+          "oklch(0.49 0.075 42)",
+          "oklch(0.61 0.075 42)",
+          "oklch(0.72 0.075 42)",
+          "oklch(0.84 0.075 42)",
+          "oklch(0.95 0.075 42)"
+        ]
+      },
+      "amber": {
+        "role": "secondary",
+        "displayName": "Instrument Amber",
+        "canonical": "oklch(0.8 0.155 78)",
+        "light": "oklch(0.7 0.16 78)",
+        "tonalRamp": [
+          "oklch(0.15 0.155 78)",
+          "oklch(0.26 0.155 78)",
+          "oklch(0.38 0.155 78)",
+          "oklch(0.49 0.155 78)",
+          "oklch(0.61 0.155 78)",
+          "oklch(0.72 0.155 78)",
+          "oklch(0.84 0.155 78)",
+          "oklch(0.95 0.155 78)"
+        ]
+      },
+      "amber-ink": {
+        "role": "secondary",
+        "displayName": "Instrument Amber Ink",
+        "canonical": "oklch(0.8 0.155 78)",
+        "light": "oklch(0.47 0.12 68)",
+        "tonalRamp": [
+          "oklch(0.15 0.155 78)",
+          "oklch(0.26 0.155 78)",
+          "oklch(0.38 0.155 78)",
+          "oklch(0.49 0.155 78)",
+          "oklch(0.61 0.155 78)",
+          "oklch(0.72 0.155 78)",
+          "oklch(0.84 0.155 78)",
+          "oklch(0.95 0.155 78)"
+        ]
+      },
+      "amber-quiet": {
+        "role": "secondary",
+        "displayName": "Instrument Amber Wash",
+        "canonical": "oklch(0.33 0.07 78)",
+        "light": "oklch(0.94 0.05 78)",
+        "tonalRamp": [
+          "oklch(0.15 0.07 78)",
+          "oklch(0.26 0.07 78)",
+          "oklch(0.38 0.07 78)",
+          "oklch(0.49 0.07 78)",
+          "oklch(0.61 0.07 78)",
+          "oklch(0.72 0.07 78)",
+          "oklch(0.84 0.07 78)",
+          "oklch(0.95 0.07 78)"
+        ]
+      },
+      "red": {
+        "role": "tertiary",
+        "displayName": "Emergency Red",
+        "canonical": "oklch(0.655 0.215 27)",
+        "light": "oklch(0.53 0.215 27)",
+        "tonalRamp": [
+          "oklch(0.15 0.215 27)",
+          "oklch(0.26 0.215 27)",
+          "oklch(0.38 0.215 27)",
+          "oklch(0.49 0.215 27)",
+          "oklch(0.61 0.215 27)",
+          "oklch(0.72 0.215 27)",
+          "oklch(0.84 0.215 27)",
+          "oklch(0.95 0.215 27)"
+        ]
+      },
+      "red-ink": {
+        "role": "tertiary",
+        "displayName": "Emergency Red Ink",
+        "canonical": "oklch(0.7 0.2 27)",
+        "light": "oklch(0.5 0.21 27)",
+        "tonalRamp": [
+          "oklch(0.15 0.2 27)",
+          "oklch(0.26 0.2 27)",
+          "oklch(0.38 0.2 27)",
+          "oklch(0.49 0.2 27)",
+          "oklch(0.61 0.2 27)",
+          "oklch(0.72 0.2 27)",
+          "oklch(0.84 0.2 27)",
+          "oklch(0.95 0.2 27)"
+        ]
+      },
+      "red-quiet": {
+        "role": "tertiary",
+        "displayName": "Emergency Red Wash",
+        "canonical": "oklch(0.31 0.09 27)",
+        "light": "oklch(0.94 0.04 27)",
+        "tonalRamp": [
+          "oklch(0.15 0.09 27)",
+          "oklch(0.26 0.09 27)",
+          "oklch(0.38 0.09 27)",
+          "oklch(0.49 0.09 27)",
+          "oklch(0.61 0.09 27)",
+          "oklch(0.72 0.09 27)",
+          "oklch(0.84 0.09 27)",
+          "oklch(0.95 0.09 27)"
+        ]
+      },
+      "lamp-ok": {
+        "role": "tertiary",
+        "displayName": "Ready Green",
+        "canonical": "oklch(0.78 0.16 158)",
+        "light": "oklch(0.44 0.115 158)",
+        "tonalRamp": [
+          "oklch(0.15 0.16 158)",
+          "oklch(0.26 0.16 158)",
+          "oklch(0.38 0.16 158)",
+          "oklch(0.49 0.16 158)",
+          "oklch(0.61 0.16 158)",
+          "oklch(0.72 0.16 158)",
+          "oklch(0.84 0.16 158)",
+          "oklch(0.95 0.16 158)"
+        ]
+      },
+      "lamp-ok-quiet": {
+        "role": "tertiary",
+        "displayName": "Ready Green Wash",
+        "canonical": "oklch(0.32 0.07 158)",
+        "light": "oklch(0.93 0.05 158)",
+        "tonalRamp": [
+          "oklch(0.15 0.07 158)",
+          "oklch(0.26 0.07 158)",
+          "oklch(0.38 0.07 158)",
+          "oklch(0.49 0.07 158)",
+          "oklch(0.61 0.07 158)",
+          "oklch(0.72 0.07 158)",
+          "oklch(0.84 0.07 158)",
+          "oklch(0.95 0.07 158)"
+        ]
+      },
+      "code-keyword": {
+        "role": "tertiary",
+        "displayName": "Phosphor Keyword",
+        "canonical": "oklch(0.78 0.15 40)",
+        "light": "oklch(0.47 0.17 40)",
+        "tonalRamp": [
+          "oklch(0.15 0.15 40)",
+          "oklch(0.26 0.15 40)",
+          "oklch(0.38 0.15 40)",
+          "oklch(0.49 0.15 40)",
+          "oklch(0.61 0.15 40)",
+          "oklch(0.72 0.15 40)",
+          "oklch(0.84 0.15 40)",
+          "oklch(0.95 0.15 40)"
+        ]
+      },
+      "code-string": {
+        "role": "tertiary",
+        "displayName": "Phosphor String",
+        "canonical": "oklch(0.8 0.13 155)",
+        "light": "oklch(0.44 0.12 155)",
+        "tonalRamp": [
+          "oklch(0.15 0.13 155)",
+          "oklch(0.26 0.13 155)",
+          "oklch(0.38 0.13 155)",
+          "oklch(0.49 0.13 155)",
+          "oklch(0.61 0.13 155)",
+          "oklch(0.72 0.13 155)",
+          "oklch(0.84 0.13 155)",
+          "oklch(0.95 0.13 155)"
+        ]
+      },
+      "code-number": {
+        "role": "tertiary",
+        "displayName": "Phosphor Number",
+        "canonical": "oklch(0.82 0.13 78)",
+        "light": "oklch(0.47 0.12 65)",
+        "tonalRamp": [
+          "oklch(0.15 0.13 78)",
+          "oklch(0.26 0.13 78)",
+          "oklch(0.38 0.13 78)",
+          "oklch(0.49 0.13 78)",
+          "oklch(0.61 0.13 78)",
+          "oklch(0.72 0.13 78)",
+          "oklch(0.84 0.13 78)",
+          "oklch(0.95 0.13 78)"
+        ]
+      },
+      "code-type": {
+        "role": "tertiary",
+        "displayName": "Phosphor Type",
+        "canonical": "oklch(0.8 0.1 220)",
+        "light": "oklch(0.46 0.1 235)",
+        "tonalRamp": [
+          "oklch(0.15 0.1 220)",
+          "oklch(0.26 0.1 220)",
+          "oklch(0.38 0.1 220)",
+          "oklch(0.49 0.1 220)",
+          "oklch(0.61 0.1 220)",
+          "oklch(0.72 0.1 220)",
+          "oklch(0.84 0.1 220)",
+          "oklch(0.95 0.1 220)"
+        ]
+      },
+      "focus-ring": {
+        "role": "secondary",
+        "displayName": "Focus Ring",
+        "canonical": "oklch(0.8 0.155 78 / 0.55)",
+        "light": "oklch(0.615 0.2 42 / 0.4)"
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Title",
+        "purpose": "Page and session titles in header bars. The top of the type scale; there is no display face."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Agent prose, user messages, composer input, explanatory paragraphs. Capped by the 54rem transcript column."
+      },
+      "ui": {
+        "displayName": "UI",
+        "purpose": "Session rows, nav items, popover options, task-list items, switch labels."
+      },
+      "legend": {
+        "displayName": "Legend",
+        "purpose": "The engraved panel label: channel names, status words, timestamps, section captions. The only mono role at wdth 100."
+      },
+      "readout": {
+        "displayName": "Readout",
+        "purpose": "A live measured value. Tabular so digits never jitter as they tick. Size set at the call site (10-13px)."
+      },
+      "key": {
+        "displayName": "Key",
+        "purpose": "Every keycap legend."
+      },
+      "chip": {
+        "displayName": "Chip",
+        "purpose": "Engraved tags: versions, Default, not tested, ask-user choices."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "Tool input/output, thinking text, .field-mono, prose code and pre."
+      }
+    },
+    "shadows": [
+      {
+        "name": "cap-lift",
+        "value": "0 1px 0 var(--keycap-edge), 0 2px 4px oklch(0.1 0.01 255 / 0.55)",
+        "light": "0 1px 0 var(--keycap-edge), 0 2px 4px oklch(0.55 0.01 90 / 0.28)",
+        "purpose": "The resting state of .key: the cap's machined edge plus its drop."
+      },
+      {
+        "name": "cap-flat",
+        "value": "0 0 0 var(--keycap-edge), 0 1px 2px oklch(0.1 0.01 255 / 0.5)",
+        "light": "0 0 0 var(--keycap-edge), 0 1px 2px oklch(0.55 0.01 90 / 0.22)",
+        "purpose": "The pressed state, applied with translateY(1px): the cap travels and its edge collapses."
+      },
+      {
+        "name": "panel-lift",
+        "value": "0 1px 2px oklch(0.1 0.01 255 / 0.4), 0 4px 12px oklch(0.1 0.01 255 / 0.3)",
+        "light": "0 1px 2px oklch(0.55 0.01 90 / 0.2), 0 4px 12px oklch(0.55 0.01 90 / 0.16)",
+        "purpose": "Anything floating above its panel: popovers, menus, the mobile rail drawer, the overlaid task panel."
+      },
+      {
+        "name": "screen-inset",
+        "value": "inset 0 1px 3px oklch(0.08 0.01 255 / 0.75)",
+        "light": "inset 0 1px 2px oklch(0.6 0.01 90 / 0.22)",
+        "purpose": "The recess on .screen and .field. Applied first so a focus ring appends after it."
+      },
+      {
+        "name": "ring-rule",
+        "value": "inset 0 0 0 1px var(--rule)",
+        "purpose": "Hairline outline standing in for a shadow: .key-blank, settings row shells, popover triggers."
+      },
+      {
+        "name": "ring-rule-strong",
+        "value": "inset 0 0 0 1px var(--rule-strong)",
+        "purpose": "The selected state of a nav or session row."
+      },
+      {
+        "name": "field-focus",
+        "value": "var(--screen-inset), 0 0 0 3px var(--focus-ring)",
+        "purpose": "A focused .field. Never replace the inset - append to it, or the field flattens."
+      }
+    ],
+    "motion": [
+      {
+        "name": "settle",
+        "value": "settle 220ms cubic-bezier(0.16, 1, 0.3, 1) both",
+        "purpose": "A transcript turn arriving: opacity 0 to 1, translateY(4px) to 0. Class .animate-settle."
+      },
+      {
+        "name": "latch",
+        "value": "latch 260ms ease-out both",
+        "purpose": "A readout changing: opacity 0.25 to 1, re-keyed on the value. Class .animate-latch."
+      },
+      {
+        "name": "caret",
+        "value": "caret 1.1s steps(1, end) infinite",
+        "purpose": "The streaming cursor: a 0.55em x 1.05em amber block with an 8px glow, stepping between opacity 1 and 0.15."
+      },
+      {
+        "name": "lamp-ping",
+        "value": "lamp-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite",
+        "purpose": "The only looping animation, and only on .lamp-live: a 1px ring pinging out to scale(2.1)."
+      },
+      {
+        "name": "key-travel",
+        "value": "background 120ms ease, box-shadow 90ms ease, transform 90ms ease",
+        "purpose": "Keycap press: --cap-lift to --cap-flat with translateY(1px)."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "@media (prefers-reduced-motion: reduce) { animation-duration: 0.01ms; transition-duration: 0.01ms }",
+        "purpose": "Global clamp. New motion must ride the existing keyframes or the clamp will not cover it."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px",
+        "purpose": "Transcript gutter goes inline below this."
+      },
+      {
+        "name": "md",
+        "value": "768px",
+        "purpose": "Session rail becomes a drawer and the settings nav becomes a scrolling strip below this."
+      },
+      {
+        "name": "lg",
+        "value": "1024px",
+        "purpose": "Task panel overlays the transcript and starts collapsed below this."
+      }
+    ],
+    "containers": [
+      {
+        "name": "transcript",
+        "value": "54rem",
+        "purpose": "Transcript, composer, config bar, error banners, progression rows."
+      },
+      {
+        "name": "settings",
+        "value": "48rem (max-w-3xl)",
+        "purpose": "Settings and admin content, including the header bar's inner row."
+      },
+      {
+        "name": "rail",
+        "value": "17.5rem",
+        "purpose": "The session rail column."
+      },
+      {
+        "name": "settings-nav",
+        "value": "12rem (w-48)",
+        "purpose": "The settings/admin nav column at md and up."
+      },
+      {
+        "name": "task-panel",
+        "value": "16rem (w-64)",
+        "purpose": "The agent task list column at lg and up."
+      }
+    ],
+    "accessibility": {
+      "floor": "WCAG AA 4.5:1 for every ink against all four field colours (chassis, panel, panel-raised, screen) in both themes.",
+      "worstDark": "4.53 - legend-faint on panel-raised",
+      "worstLight": "4.55 - red-ink on screen",
+      "materialSeparation": "keycap:panel 9.55 dark / 6.81 light; pale-cap-on-pale-body collapsed to 1.16.",
+      "script": "clients/web/scripts/contrast.mjs"
+    }
+  },
+  "components": [
+    {
+      "name": "Key",
+      "kind": "button",
+      "refersTo": "key",
+      "description": "The default control. Everything you press is a key: travel, an edge, and a mono legend.",
+      "html": "<button class=\"ds-key\">New</button>",
+      "css": ".ds-key { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; border: none; border-radius: var(--radius-cap, 6px); padding: 0.5rem 0.875rem; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; font-weight: 550; letter-spacing: 0.06em; text-transform: uppercase; font-variation-settings: \"wdth\" 87.5; white-space: nowrap; user-select: none; cursor: pointer; background: var(--keycap); color: var(--keycap-ink); box-shadow: var(--cap-lift); transition: background 120ms ease, box-shadow 90ms ease, transform 90ms ease; } .ds-key:hover { background: var(--keycap-hover); } .ds-key:active { transform: translateY(1px); box-shadow: var(--cap-flat); } .ds-key:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 2px; } .ds-key:disabled { opacity: 0.38; pointer-events: none; }"
+    },
+    {
+      "name": "Commit Key",
+      "kind": "button",
+      "refersTo": "key-go",
+      "description": "The one control that commits: send, save, create. Never two on a screen.",
+      "html": "<button class=\"ds-key-go\">Send <svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m5 12 7-7 7 7\"/><path d=\"M12 19V5\"/></svg></button>",
+      "css": ".ds-key-go { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; border: none; border-radius: var(--radius-cap, 6px); padding: 0.5rem 0.875rem; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; font-weight: 550; letter-spacing: 0.06em; text-transform: uppercase; font-variation-settings: \"wdth\" 87.5; white-space: nowrap; cursor: pointer; background: var(--orange); color: var(--orange-ink); box-shadow: var(--cap-lift); transition: background 120ms ease, box-shadow 90ms ease, transform 90ms ease; } .ds-key-go:hover { background: var(--orange-hover); } .ds-key-go:active { transform: translateY(1px); box-shadow: var(--cap-flat); } .ds-key-go:focus-visible { outline: 2px solid var(--orange-ink); outline-offset: 3px; border-radius: 2px; } .ds-key-go:disabled { opacity: 0.38; pointer-events: none; }"
+    },
+    {
+      "name": "Stop Key",
+      "kind": "button",
+      "refersTo": "key-stop",
+      "description": "Interrupt and destroy. Red is the emergency stop, never a style.",
+      "html": "<button class=\"ds-key-stop\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"currentColor\" aria-hidden=\"true\"><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/></svg> Stop</button>",
+      "css": ".ds-key-stop { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; border: none; border-radius: var(--radius-cap, 6px); padding: 0.5rem 0.875rem; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; font-weight: 550; letter-spacing: 0.06em; text-transform: uppercase; font-variation-settings: \"wdth\" 87.5; cursor: pointer; background: var(--red); color: var(--orange-ink); box-shadow: var(--cap-lift); transition: background 120ms ease, box-shadow 90ms ease, transform 90ms ease; } .ds-key-stop:hover { filter: brightness(1.08); } .ds-key-stop:active { transform: translateY(1px); box-shadow: var(--cap-flat); } .ds-key-stop:focus-visible { outline: 2px solid var(--orange-ink); outline-offset: 3px; border-radius: 2px; }"
+    },
+    {
+      "name": "Blank Key",
+      "kind": "button",
+      "refersTo": "key-blank",
+      "description": "An unpressed area of the panel that is still a control. The secondary action beside a commit key.",
+      "html": "<button class=\"ds-key-blank\">Discard</button>",
+      "css": ".ds-key-blank { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; border: none; border-radius: var(--radius-cap, 6px); padding: 0.5rem 0.875rem; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; font-weight: 550; letter-spacing: 0.06em; text-transform: uppercase; font-variation-settings: \"wdth\" 87.5; cursor: pointer; background: transparent; color: var(--legend-dim); box-shadow: inset 0 0 0 1px var(--rule); transition: background 120ms ease, box-shadow 90ms ease, transform 90ms ease; } .ds-key-blank:hover { background: var(--panel-raised); color: var(--legend); } .ds-key-blank:active { transform: translateY(1px); box-shadow: inset 0 0 0 1px var(--rule-strong); } .ds-key-blank:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 2px; }"
+    },
+    {
+      "name": "Icon Key",
+      "kind": "button",
+      "refersTo": "key-icon",
+      "description": "A 2rem square icon control: rail toggle, theme toggle, display menu, delete, panel collapse.",
+      "html": "<button class=\"ds-key-icon\" aria-label=\"Display options\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" aria-hidden=\"true\"><line x1=\"21\" y1=\"4\" x2=\"14\" y2=\"4\"/><line x1=\"10\" y1=\"4\" x2=\"3\" y2=\"4\"/><line x1=\"21\" y1=\"12\" x2=\"12\" y2=\"12\"/><line x1=\"8\" y1=\"12\" x2=\"3\" y2=\"12\"/><line x1=\"21\" y1=\"20\" x2=\"16\" y2=\"20\"/><line x1=\"12\" y1=\"20\" x2=\"3\" y2=\"20\"/><line x1=\"14\" y1=\"2\" x2=\"14\" y2=\"6\"/><line x1=\"8\" y1=\"10\" x2=\"8\" y2=\"14\"/><line x1=\"16\" y1=\"18\" x2=\"16\" y2=\"22\"/></svg></button>",
+      "css": ".ds-key-icon { display: inline-flex; height: 2rem; width: 2rem; align-items: center; justify-content: center; border: none; border-radius: var(--radius-control, 4px); color: var(--legend-dim); background: transparent; cursor: pointer; transition: background 120ms ease, color 120ms ease; } .ds-key-icon:hover { background: var(--panel-raised); color: var(--legend); } .ds-key-icon:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 2px; }"
+    },
+    {
+      "name": "Field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "A recessed slot cut into the panel, not a floating box. .ds-field-mono adds the machine-string face.",
+      "html": "<input class=\"ds-field ds-field-mono\" placeholder=\"http://127.0.0.1:55300\" aria-label=\"Base URL\" />",
+      "css": ".ds-field { width: 100%; box-sizing: border-box; border-radius: var(--radius-control, 4px); border: 1px solid var(--rule); background: var(--screen); box-shadow: var(--screen-inset); padding: 0.5rem 0.6875rem; font-family: var(--font-sans, \"Archivo Variable\", system-ui, sans-serif); font-size: 0.875rem; color: var(--legend); outline: none; transition: border-color 120ms ease, box-shadow 120ms ease; } .ds-field::placeholder { color: var(--legend-faint); } .ds-field:focus { border-color: var(--amber); box-shadow: var(--screen-inset), 0 0 0 3px var(--focus-ring); } .ds-field:disabled { opacity: 0.5; } .ds-field-mono { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 0.8125rem; font-variation-settings: \"wdth\" 87.5; }"
+    },
+    {
+      "name": "Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "A front panel face: cards, popovers, settings sections, the composer shell. Floating instances add --panel-lift.",
+      "html": "<section class=\"ds-panel\"><div class=\"ds-panel-head\"><h2 class=\"ds-legend\">Runtimes connected</h2><span class=\"ds-readout\">1</span></div><p class=\"ds-panel-body\">No runtime agent is connected, so a session can't run a turn yet.</p></section>",
+      "css": ".ds-panel { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--radius-panel, 8px); padding: 1rem; color: var(--legend); } .ds-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; } .ds-legend { margin: 0; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-weight: 500; line-height: 1.4; letter-spacing: 0.1em; text-transform: uppercase; color: var(--legend-faint); font-variation-settings: \"wdth\" 100; } .ds-readout { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-variant-numeric: tabular-nums; font-variation-settings: \"wdth\" 87.5; letter-spacing: 0.01em; font-size: 13px; color: var(--amber-ink); } .ds-panel-body { margin: 0.75rem 0 0; font-family: var(--font-sans, \"Archivo Variable\", system-ui, sans-serif); font-size: 0.875rem; line-height: 1.6; color: var(--legend-dim); }"
+    },
+    {
+      "name": "Screen",
+      "kind": "custom",
+      "refersTo": "screen",
+      "description": "A recessed region showing machine output: tool input/output, thinking text, code blocks. Legend above, screen below.",
+      "html": "<div><span class=\"ds-screen-legend\">Output</span><pre class=\"ds-screen\">Tasks (0/3 done):\n[ ] 1. Reproduce the flake under load\n[ ] 2. Find the timing assumption</pre></div>",
+      "css": ".ds-screen-legend { display: block; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--legend-faint); font-variation-settings: \"wdth\" 100; } .ds-screen { margin: 0.25rem 0 0; background: var(--screen); border: 1px solid var(--rule); border-radius: var(--radius-control, 4px); box-shadow: var(--screen-inset); padding: 0.5rem 0.625rem; overflow-x: auto; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; line-height: 1.625; font-variation-settings: \"wdth\" 87.5; white-space: pre-wrap; color: var(--legend-dim); }"
+    },
+    {
+      "name": "Lamp",
+      "kind": "custom",
+      "refersTo": "lamp",
+      "description": "The signature status indicator: a 7px dot filled with currentColor plus a 6px glow, ALWAYS paired with its word. .ds-lamp-live pings; .ds-lamp-off is hollow.",
+      "html": "<span class=\"ds-lamp-row\" style=\"color: var(--amber-ink)\"><span class=\"ds-lamp ds-lamp-live\" aria-hidden=\"true\"></span><span class=\"ds-lamp-word\">Running</span></span>",
+      "css": ".ds-lamp-row { display: inline-flex; align-items: center; gap: 0.5rem; } .ds-lamp { position: relative; display: inline-block; height: 7px; width: 7px; flex: none; border-radius: 999px; background: currentColor; box-shadow: 0 0 6px currentColor; } .ds-lamp-live::after { content: \"\"; position: absolute; inset: -3px; border-radius: 999px; border: 1px solid currentColor; animation: ds-lamp-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite; } .ds-lamp-off { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; opacity: 0.55; } .ds-lamp-word { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: currentColor; font-variation-settings: \"wdth\" 100; } @keyframes ds-lamp-ping { 75%, 100% { transform: scale(2.1); opacity: 0; } }"
+    },
+    {
+      "name": "Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "An engraved tag on the panel face: versions, Default, not tested, ask-user choices. Selected choices border amber.",
+      "html": "<span class=\"ds-chip\">Default</span> <button class=\"ds-chip ds-chip-choice\">Rebase</button> <button class=\"ds-chip ds-chip-choice ds-chip-selected\">Merge</button>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; gap: 0.375rem; border-radius: var(--radius-chip, 3px); border: 1px solid var(--rule); background: var(--panel-raised); padding: 0.125rem 0.4375rem; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-weight: 500; letter-spacing: 0.04em; font-variation-settings: \"wdth\" 87.5; color: var(--legend-dim); white-space: nowrap; } .ds-chip-choice { cursor: pointer; } .ds-chip-choice:hover { border-color: var(--amber); } .ds-chip-selected { border-color: var(--amber); background: color-mix(in oklch, var(--amber) 15%, transparent); font-weight: 600; color: var(--legend); } .ds-chip-choice:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }"
+    },
+    {
+      "name": "Session Row",
+      "kind": "nav",
+      "refersTo": "nav-row",
+      "description": "One channel strip on the session rail: lamp, 13px title, and a legend line of status and relative time. Selected rows carry a strong inset ring.",
+      "html": "<nav class=\"ds-rail\"><a class=\"ds-row ds-row-active\" href=\"#\"><span class=\"ds-lamp\" style=\"color: var(--lamp-ok); margin-top: 7px\" aria-hidden=\"true\"></span><span class=\"ds-row-text\"><span class=\"ds-row-title\">the pool test is flaky on CI</span><span class=\"ds-row-meta\">Idle &middot; just now</span></span></a><a class=\"ds-row\" href=\"#\"><span class=\"ds-lamp\" style=\"color: var(--amber-ink); margin-top: 7px\" aria-hidden=\"true\"></span><span class=\"ds-row-text\"><span class=\"ds-row-title\">Fix login redirect</span><span class=\"ds-row-meta\">Running &middot; 2m ago</span></span></a></nav>",
+      "css": ".ds-rail { display: flex; flex-direction: column; gap: 1px; background: var(--panel); padding: 0.5rem; border-radius: var(--radius-panel, 8px); } .ds-row { display: flex; align-items: flex-start; gap: 0.625rem; border-radius: var(--radius-control, 4px); padding: 0.5rem 0.625rem; text-decoration: none; color: var(--legend-dim); transition: background 120ms ease, color 120ms ease; } .ds-row:hover { background: var(--panel-raised); color: var(--legend); } .ds-row-active { background: var(--panel-raised); color: var(--legend); box-shadow: inset 0 0 0 1px var(--rule-strong); } .ds-row-text { min-width: 0; flex: 1; } .ds-row-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-sans, \"Archivo Variable\", system-ui, sans-serif); font-size: 13px; line-height: 1.25rem; } .ds-row-meta { display: block; margin-top: 0.125rem; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--legend-faint); font-variation-settings: \"wdth\" 100; } .ds-lamp { position: relative; display: inline-block; height: 7px; width: 7px; flex: none; border-radius: 999px; background: currentColor; box-shadow: 0 0 6px currentColor; }"
+    },
+    {
+      "name": "Readout Channel",
+      "kind": "custom",
+      "refersTo": "readout",
+      "description": "The header strip's unit: an engraved legend over its value. Amber and tabular when the value is live and measured; legend-coloured mono when the value is settled session config.",
+      "html": "<div class=\"ds-strip\"><button class=\"ds-channel ds-channel-live\"><span class=\"ds-legend\">Tokens</span><span class=\"ds-readout\">267</span></button><span class=\"ds-channel\"><span class=\"ds-legend\">Model</span><span class=\"ds-value\">mock-sonnet</span></span><span class=\"ds-channel\"><span class=\"ds-legend\">Runtime</span><span class=\"ds-value\">e2e</span></span></div>",
+      "css": ".ds-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem; } .ds-channel { display: flex; flex-direction: column; min-width: 0; border: none; background: transparent; padding: 0.125rem 0.25rem; border-radius: var(--radius-chip, 3px); text-align: left; } .ds-channel-live { cursor: pointer; transition: background 120ms ease; } .ds-channel-live:hover { background: var(--panel-raised); } .ds-legend { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 10px; font-weight: 500; line-height: 1.4; letter-spacing: 0.1em; text-transform: uppercase; color: var(--legend-faint); font-variation-settings: \"wdth\" 100; } .ds-readout { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-variant-numeric: tabular-nums; font-variation-settings: \"wdth\" 87.5; letter-spacing: 0.01em; font-size: 13px; color: var(--amber-ink); } .ds-value { font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; color: var(--legend); font-variation-settings: \"wdth\" 87.5; }"
+    },
+    {
+      "name": "Tool Call Row",
+      "kind": "custom",
+      "refersTo": "tool-call",
+      "description": "A logged tool call: collapsed it is one line of the recording; expanded it shows raw input and output on recessed screens.",
+      "html": "<div class=\"ds-tool\"><button class=\"ds-tool-head\"><svg class=\"ds-tool-chev\" width=\"11\" height=\"11\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m9 18 6-6-6-6\"/></svg><svg class=\"ds-tool-ok\" width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"m9 12 2 2 4-4\"/></svg><span class=\"ds-tool-name\">bash</span><span class=\"ds-tool-preview\">echo 'ran 200 iterations'</span></button></div>",
+      "css": ".ds-tool-head { display: flex; width: 100%; align-items: center; gap: 0.5rem; margin: 0 -0.375rem; border: none; background: transparent; border-radius: var(--radius-chip, 3px); padding: 0.25rem 0.375rem; text-align: left; cursor: pointer; transition: background 120ms ease; } .ds-tool-head:hover { background: var(--panel-raised); } .ds-tool-chev { flex: none; color: var(--legend-faint); transition: transform 150ms ease; } .ds-tool-head[aria-expanded=\"true\"] .ds-tool-chev { transform: rotate(90deg); } .ds-tool-ok { flex: none; color: var(--lamp-ok); } .ds-tool-name { flex: none; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; font-weight: 500; letter-spacing: 0.02em; color: var(--legend); } .ds-tool-preview { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, \"Martian Mono Variable\", ui-monospace, monospace); font-size: 11px; color: var(--legend-faint); } .ds-tool-head:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Console",
+    "overview": "horsie is an instrument you leave running, so the interface is built as the front panel of one: a machined gunmetal chassis, keycaps you press, dye-sublimated mono legends naming each channel, and recessed screens where the machine's own output appears. It is not a chat app with a dark theme. The transcript reads down a single stamped gutter rather than zig-zagging between bubbles, every live number is an amber readout rather than body text, and there is exactly one safety-orange control on any given screen - the one that commits.\n\nColour is load-bearing and never decorative. Four semantic families do all the work: amber is a measured, live value; safety orange is the action that commits (send, save, create); red is interrupt and destroy; green is the one lamp that says a channel is healthy. Everything else is material - chassis, panel, raised panel, screen - plus three weights of engraved ink. If a colour on a new surface does not fall into one of those buckets, the surface is wrong, not the palette.\n\nThe system is deliberately dense and unrounded. Radii are machined (3/4/6/8px), not pill-shaped; shadows do one of two things (lift a cap out, or recess a screen in) and never diffuse. The one place the instrument steps back is agent prose, which runs in the proportional face at a real reading measure - the transcript is the product, and the chrome exists to be read past.",
+    "keyCharacteristics": [
+      "Two self-hosted faces: Martian Mono for legends, readouts, keys and machine strings; Archivo for prose and UI. No third face, no font CDN.",
+      "Four semantic colours (amber / orange / red / green), each with one meaning, plus a separate four-colour syntax palette.",
+      "Two themes that swap material roles, not brightness - a keycap is always a different material from its panel.",
+      "Machined radii 3-8px; no pills except the 7px lamp.",
+      "A status is always a lamp AND a word. Never colour alone.",
+      "Every ink clears WCAG AA against every field colour in both themes."
+    ],
+    "rules": [
+      {
+        "name": "The One Orange Rule",
+        "section": "colors",
+        "body": "Safety orange marks the control that commits, and nothing else. If a screen has two orange keys, one of them is wrong. A destructive confirm is red, a secondary action is .key-blank, an inline action is .key-flat."
+      },
+      {
+        "name": "The Lamp-Plus-Word Rule",
+        "section": "colors",
+        "body": "A .lamp never carries meaning alone. Every one in the build sits beside its word - Idle, Running, Reconnecting, Saved, Unsaved, Offline, 3 running - or has an sr-only word if the visual pairing is an icon. aria-hidden on the lamp, the word does the talking."
+      },
+      {
+        "name": "The Separate Phosphor Rule",
+        "section": "colors",
+        "body": "Syntax highlighting is driven by code-keyword / code-string / code-number / code-type, which are a different palette from the control colours. Driving highlighting from --orange put safety orange on every let and fn and spent the one colour that means 'this commits'. Never re-point .hljs-* at --orange or --amber."
+      },
+      {
+        "name": "The Material-Role Rule",
+        "section": "colors",
+        "body": "Material roles hold their meaning across themes, not their brightness. screen is always the most recessed, panel-raised is always the most lifted, and a keycap is always a different material from the panel it sits on. That is why light mode inverts the cap to machined charcoal on a bone chassis instead of pale-on-pale: measured keycap:panel is 6.81:1 in light and 9.55:1 in dark, where the pale-cap-on-pale-body reading collapsed to 1.16:1."
+      },
+      {
+        "name": "The AA Floor",
+        "section": "colors",
+        "body": "Every ink (legend, legend-dim, legend-faint, amber-ink, red-ink, lamp-ok) clears WCAG AA 4.5:1 against all four field colours (chassis, panel, panel-raised, screen) in both themes. Worst cases: 4.53 in dark (legend-faint on panel-raised) and 4.55 in light (red-ink on screen). The four code colours clear 4.5:1 on screen in both themes too."
+      },
+      {
+        "name": "The Mono-Is-Measurement Rule",
+        "section": "typography",
+        "body": "Martian Mono is for legends, readouts, keycaps, and machine strings (model aliases, vendor names, repo names, paths, commands, IDs). Archivo is for anything that is a sentence. A machine string set in Archivo is a bug; a paragraph set in mono is a bug."
+      },
+      {
+        "name": "The Tabular Readout Rule",
+        "section": "typography",
+        "body": "Any number that changes while you watch it uses .readout, not text-amber. It buys tabular-nums so the layout does not twitch, and it pairs with animate-latch so the value re-lights instead of popping."
+      },
+      {
+        "name": "The Two-Direction Rule",
+        "section": "elevation",
+        "body": "A shadow either lifts (cap, panel) or recesses (screen, ring). There is no third direction and no diffuse glow. Do not add a new shadow value - reuse one of the four tokens."
+      },
+      {
+        "name": "The Ring-After-Recess Rule",
+        "section": "elevation",
+        "body": "A focused .field composes box-shadow: var(--screen-inset), 0 0 0 3px var(--focus-ring). Replacing the inset instead of appending to it flattens the field and breaks the recessed reading."
+      }
+    ],
+    "dos": [
+      "Do build from the existing classes - .key/.field/.panel/.screen/.legend/.readout/.chip/.lamp. A new surface should add layout, not new materials.",
+      "Do reach colour through the semantic Tailwind aliases (bg-panel, bg-raised, text-dim, text-amber-ink, border-rule). Raw hex and Tailwind's stock palette are both out.",
+      "Do pair every lamp with a word - visible, or sr-only when the visual pair is an icon. Follow the TONE_TEXT map for status colour.",
+      "Do put machine strings (model aliases, vendor names, paths, commands, IDs) in Martian Mono, and sentences in Archivo.",
+      "Do use .readout for any number that ticks, and .legend for the word that names it. Legend above value, mono both.",
+      "Do put raw machine output on a .screen. Tool input, tool output, thinking, code - recessed, never a floating card.",
+      "Do re-run clients/web/scripts/contrast.mjs after touching any colour token; every ink must stay at or above 4.5:1 against all four field colours in both themes.",
+      "Do define new colours in both :root and [data-theme=\"light\"], and pick light values by role, not by lightening the dark value.",
+      "Do give a new floating surface shadow-[var(--panel-lift)] and a new recessed one var(--screen-inset).",
+      "Do give any new column a below-md (or below-lg, for a third column) collapse - drawer, strip, or overlay - matching the rail, the settings nav, and the task panel."
+    ],
+    "donts": [
+      "Don't put a second .key-go on a screen. One orange control commits; secondary is .key-blank, inline is .key-flat, destructive is .key-stop or .key-danger.",
+      "Don't use amber for emphasis or red for importance. Amber means measured and live; red means interrupt or destroy.",
+      "Don't drive syntax highlighting, charts, or any decorative colour from --orange or --amber. Code has its own --code-* palette; anything else needs a new semantic token with a stated meaning.",
+      "Don't convey state with colour alone - no bare coloured dot, no red text with no word, no 'the button turns green'.",
+      "Don't make a light-theme keycap pale. A keycap is a different material from its panel in both themes; pale-on-pale measured 1.16:1 and destroyed the signature separation.",
+      "Don't introduce a new radius. 3 / 4 / 6 / 8px, plus the lamp's circle. No pills, no rounded-full on a control.",
+      "Don't add a fifth shadow, a glow, or an elevation scale. Lift or recess, four tokens.",
+      "Don't import a font from a CDN or add a third family. horsie servers run on LANs with no internet route; both faces are self-hosted through @fontsource-variable.",
+      "Don't replace --screen-inset when adding a focus ring - append to it.",
+      "Don't set a transcript-width container to anything but max-w-[54rem], or a settings-width one to anything but max-w-3xl. Two column widths, consistently applied, are what make the app read as one instrument."
+    ]
+  }
+}

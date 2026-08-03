@@ -2,6 +2,8 @@ import { SessionStatusKind } from "../api/types";
 import { cn } from "../lib/cn";
 import { statusMeta, TONE_TEXT } from "../lib/status";
 
+/** A panel lamp. Never used alone to carry meaning — every lamp on this
+ * console sits beside the word it stands for. */
 export function StatusDot({
   status,
   className,
@@ -13,9 +15,10 @@ export function StatusDot({
   return (
     <span
       className={cn(
-        "inline-block h-2 w-2 shrink-0 rounded-full bg-current",
+        "lamp",
         TONE_TEXT[meta.tone],
-        meta.busy && "dot-pulse",
+        meta.busy && "lamp-live",
+        meta.tone === "off" && "lamp-off",
         className,
       )}
       aria-hidden
@@ -23,6 +26,7 @@ export function StatusDot({
   );
 }
 
+/** Lamp plus engraved legend, as it reads on the panel face. */
 export function StatusBadge({
   status,
 }: {
@@ -33,14 +37,11 @@ export function StatusBadge({
     <span
       data-testid="status-badge"
       data-status={status ?? "Unknown"}
-      className={cn(
-        "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium",
-        TONE_TEXT[meta.tone],
-      )}
+      className={cn("inline-flex items-center gap-2", TONE_TEXT[meta.tone])}
       title={meta.hint}
     >
       <StatusDot status={status} />
-      {meta.label}
+      <span className="legend !text-[10px] text-current">{meta.label}</span>
     </span>
   );
 }

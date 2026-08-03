@@ -1,6 +1,6 @@
-import { Bot, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
+import { RailToggle } from "../../components/rail";
 import { Link, useNavigate } from "react-router-dom";
-import { EmptyState } from "../../components/EmptyState";
 import { useAgents, useDeleteAgent } from "../../hooks/useAgents";
 
 export function AgentsPage() {
@@ -10,80 +10,112 @@ export function AgentsPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="agents-page">
-      <div className="flex items-center gap-3 border-b px-6 py-4">
-        <h1 className="text-[15px] font-semibold text-text">Agents</h1>
+      <div className="flex items-center gap-2 border-b bg-panel px-4 py-3.5 sm:gap-3 sm:px-6">
+        <RailToggle />
+        <div className="min-w-0 flex-1">
+          <h1 className="text-[15px] font-semibold tracking-tight text-legend">
+            Agents
+          </h1>
+          <p className="mt-0.5 text-xs text-faint">
+            Saved session setups you invoke from the CLI.
+          </p>
+        </div>
         <button
-          className="btn-primary ml-auto !px-2.5 !py-1.5 text-xs"
+          className="key key-go shrink-0"
           onClick={() => navigate("/agents/new")}
           data-testid="new-agent-button"
         >
-          <Plus size={15} />
+          <Plus size={13} aria-hidden />
           New agent
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-6 py-4">
-        {isLoading && <p className="text-sm text-faint">Loading…</p>}
-        {isError && (
-          <p className="text-sm text-error">Can’t reach the server.</p>
-        )}
-        {agents && agents.length === 0 && (
-          <EmptyState icon={<Bot size={24} />} title="No agents yet">
-            An agent is a saved session setup — runtime, model, repos, skills,
-            memory — that you invoke from the CLI with{" "}
-            <code>horsie agent invoke &lt;name&gt; -m "…"</code>.
-          </EmptyState>
-        )}
-        <div className="space-y-2">
-          {(agents ?? []).map((a) => (
-            <div
-              key={a.name}
-              className="flex items-center gap-3 rounded-[var(--radius)] border px-4 py-3"
-              data-testid="agent-row"
-              data-agent-name={a.name}
-            >
-              <Link
-                to={`/agents/${encodeURIComponent(a.name)}/edit`}
-                className="min-w-0 flex-1"
-              >
-                <div className="flex items-baseline gap-2">
-                  <span className="font-mono text-sm font-medium text-text">
-                    {a.name}
-                  </span>
-                  <span className="text-xs text-faint">
-                    {a.model} · {a.vendor ?? "default runtime"}
-                  </span>
-                </div>
-                {a.description && (
-                  <div className="truncate text-sm text-muted">
-                    {a.description}
-                  </div>
-                )}
-                <div className="mt-1 flex gap-2 text-[11px] text-faint">
-                  {a.plugins.length > 0 && (
-                    <span>{a.plugins.length} skills</span>
-                  )}
-                  {a.memorySpaces.length > 0 && (
-                    <span>{a.memorySpaces.length} memory</span>
-                  )}
-                  {a.mcpServers.length > 0 && (
-                    <span>{a.mcpServers.length} MCP</span>
-                  )}
-                  {a.repos.length > 0 && <span>{a.repos.length} repos</span>}
-                </div>
-              </Link>
-              <button
-                className="rounded-[var(--radius-sm)] p-1.5 text-faint hover:bg-surface-2 hover:text-error"
-                title={`Delete ${a.name}`}
-                data-testid={`delete-agent-${a.name}`}
-                onClick={() => {
-                  if (window.confirm(`Delete agent '${a.name}'?`))
-                    del.mutate(a.name);
-                }}
-              >
-                <Trash2 size={15} />
-              </button>
+      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+        <div className="mx-auto max-w-3xl">
+          {isLoading && (
+            <div className="flex items-center gap-2">
+              <span className="lamp lamp-live text-amber-ink" aria-hidden />
+              <span className="legend">Loading agents</span>
             </div>
-          ))}
+          )}
+          {isError && (
+            <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+              Can’t reach the server. Check that horsie-server is running, then
+              reload.
+            </p>
+          )}
+          {/* Not a centred icon-in-a-box: an empty roster is a labelled blank
+            slot on the panel, and the label is the command that fills it. */}
+          {agents && agents.length === 0 && (
+            <section className="panel p-4" data-testid="agents-empty">
+              <h2 className="legend">Agent roster</h2>
+              <p className="mt-3 max-w-prose text-sm leading-relaxed text-dim">
+                An agent is a saved session setup — runtime, model, repos,
+                skills, memory — so a run you repeat does not have to be
+                reassembled each time. Press{" "}
+                <span className="text-legend">New agent</span> to define one,
+                then invoke it from any machine:
+              </p>
+              <pre className="screen mt-3 overflow-x-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed text-legend select-all">
+                horsie agent invoke &lt;name&gt; -m "…"
+              </pre>
+            </section>
+          )}
+          <div className="space-y-2">
+            {(agents ?? []).map((a) => (
+              <div
+                key={a.name}
+                className="flex items-center gap-3 rounded-[var(--radius-control)] border bg-panel px-4 py-3 transition-colors hover:bg-raised"
+                data-testid="agent-row"
+                data-agent-name={a.name}
+              >
+                <Link
+                  to={`/agents/${encodeURIComponent(a.name)}/edit`}
+                  className="min-w-0 flex-1"
+                >
+                  <div className="flex items-baseline gap-2">
+                    <span className="font-mono text-sm font-medium text-legend">
+                      {a.name}
+                    </span>
+                    <span className="legend">
+                      {a.model} · {a.vendor ?? "default runtime"}
+                    </span>
+                  </div>
+                  {a.description && (
+                    <div className="truncate text-sm text-dim">
+                      {a.description}
+                    </div>
+                  )}
+                  <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
+                    {a.plugins.length > 0 && (
+                      <span className="legend">{a.plugins.length} skills</span>
+                    )}
+                    {a.memorySpaces.length > 0 && (
+                      <span className="legend">
+                        {a.memorySpaces.length} memory
+                      </span>
+                    )}
+                    {a.mcpServers.length > 0 && (
+                      <span className="legend">{a.mcpServers.length} MCP</span>
+                    )}
+                    {a.repos.length > 0 && (
+                      <span className="legend">{a.repos.length} repos</span>
+                    )}
+                  </div>
+                </Link>
+                <button
+                  className="key-icon shrink-0 !h-7 !w-7 hover:!bg-red-quiet hover:!text-red-ink"
+                  title={`Delete ${a.name}`}
+                  data-testid={`delete-agent-${a.name}`}
+                  onClick={() => {
+                    if (window.confirm(`Delete agent '${a.name}'?`))
+                      del.mutate(a.name);
+                  }}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>

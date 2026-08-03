@@ -35,11 +35,11 @@ function MachineTokens() {
 
   return (
     <section
-      className="card max-w-2xl space-y-3 p-4"
+      className="panel max-w-2xl space-y-3 p-4"
       data-testid="machine-tokens"
     >
       <div>
-        <h2 className="text-sm font-semibold text-text">Machine tokens</h2>
+        <h2 className="text-sm font-semibold text-legend">Machine tokens</h2>
         <p className="mt-0.5 text-xs text-faint">
           For runtime vendor agents that run unattended. On your own machine,
           <code className="mx-1">horsie auth login</code> is enough — use a
@@ -55,7 +55,7 @@ function MachineTokens() {
         }}
       >
         <input
-          className="input flex-1"
+          className="field flex-1"
           data-testid="token-label"
           placeholder="What machine is this for?"
           value={label}
@@ -63,7 +63,7 @@ function MachineTokens() {
         />
         <button
           type="submit"
-          className="btn-primary shrink-0"
+          className="key key-go shrink-0"
           data-testid="token-create"
           disabled={!label.trim() || create.isPending}
         >
@@ -71,17 +71,17 @@ function MachineTokens() {
         </button>
       </form>
       {error && (
-        <p data-testid="token-error" className="text-xs text-error">
+        <p data-testid="token-error" className="text-xs text-red-ink">
           {error}
         </p>
       )}
 
       {fresh && (
         <div className="space-y-1" data-testid="token-secret">
-          <p className="text-xs text-success">
+          <p className="text-xs text-lamp-ok">
             Copy this now — it will not be shown again.
           </p>
-          <code className="block break-all rounded-[var(--radius)] border p-2 font-mono text-xs">
+          <code className="block break-all rounded-[var(--radius-control)] border p-2 font-mono text-xs">
             {fresh}
           </code>
         </div>
@@ -94,17 +94,17 @@ function MachineTokens() {
         {tokens.data?.map((t) => (
           <div
             key={t.id}
-            className="flex items-center justify-between gap-3 rounded-[var(--radius)] border px-3 py-2"
+            className="flex items-center justify-between gap-3 rounded-[var(--radius-control)] border px-3 py-2"
             data-testid={`token-row-${t.label}`}
           >
             <div className="min-w-0">
-              <div className="truncate text-sm text-text">{t.label}</div>
+              <div className="truncate text-sm text-legend">{t.label}</div>
               <div className="text-[11px] text-faint">
                 {t.lastUsedAt ? "in use" : "never used"}
               </div>
             </div>
             <button
-              className="btn-outline shrink-0 text-xs"
+              className="key shrink-0 text-xs"
               data-testid={`token-revoke-${t.label}`}
               onClick={() => remove.mutate(t.id)}
               disabled={remove.isPending}
@@ -150,7 +150,7 @@ export function AccountSettings() {
         <div className="p-6">
           <p
             data-testid="account-disabled"
-            className="card p-4 text-sm text-muted"
+            className="panel p-4 text-sm text-dim"
           >
             Authentication is disabled on this deployment, so there is no
             account to manage. Anyone who can reach this server has full access.
@@ -170,7 +170,7 @@ export function AccountSettings() {
         {status.mustChangePassword && (
           <p
             data-testid="account-must-change"
-            className="card p-4 text-sm text-text"
+            className="panel p-4 text-sm text-legend"
           >
             This server is still using the password it generated on first boot.
             Change it below — that also deletes the{" "}
@@ -179,14 +179,14 @@ export function AccountSettings() {
         )}
         <form
           data-testid="password-form"
-          className="card max-w-sm space-y-3 p-4"
+          className="panel max-w-sm space-y-3 p-4"
           onSubmit={(e) => {
             e.preventDefault();
             change.mutate();
           }}
         >
           <input
-            className="input"
+            className="field"
             type="password"
             autoComplete="current-password"
             data-testid="current-password"
@@ -195,7 +195,7 @@ export function AccountSettings() {
             onChange={(e) => setCurrent(e.target.value)}
           />
           <input
-            className="input"
+            className="field"
             type="password"
             autoComplete="new-password"
             data-testid="new-password"
@@ -204,19 +204,19 @@ export function AccountSettings() {
             onChange={(e) => setNext(e.target.value)}
           />
           {error && (
-            <p data-testid="password-error" className="text-xs text-error">
+            <p data-testid="password-error" className="text-xs text-red-ink">
               {error}
             </p>
           )}
           {change.isSuccess && (
-            <p data-testid="password-saved" className="text-xs text-success">
+            <p data-testid="password-saved" className="text-xs text-lamp-ok">
               Password changed. Other browsers have been signed out.
             </p>
           )}
           <button
             type="submit"
             data-testid="password-submit"
-            className="btn-primary"
+            className="key key-go"
             disabled={change.isPending || !current || !next}
           >
             Change password
@@ -225,7 +225,7 @@ export function AccountSettings() {
         <button
           type="button"
           data-testid="logout"
-          className="btn-outline"
+          className="key"
           onClick={() => logout.mutate()}
         >
           Sign out

@@ -2,3 +2,8 @@
 .claude/worktrees/
 .claire/worktrees/
 .horsie/worktrees/
+
+# impeccable design-review scratch (reference images, critique snapshots).
+# The DESIGN.md sidecar is part of the design record and IS tracked.
+.impeccable/*
+!.impeccable/design.json

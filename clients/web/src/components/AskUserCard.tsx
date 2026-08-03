@@ -76,12 +76,12 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
     <div
       data-testid="ask-user-card"
       data-pending={pending}
-      className="rounded-[var(--radius)] border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-text"
+      className="rounded-[var(--radius-control)] border border-amber bg-amber-quiet px-3 py-2 text-sm text-legend"
     >
       <div className="flex items-start gap-2">
-        <HelpCircle size={16} className="mt-0.5 shrink-0 text-warning" />
+        <HelpCircle size={16} className="mt-0.5 shrink-0 text-amber-ink" />
         <div className="min-w-0 flex-1">
-          <span className="font-medium text-warning">Asked: </span>
+          <span className="font-medium text-amber-ink">Asked: </span>
           {input.question ?? ""}
 
           {choices.length > 0 && (
@@ -97,9 +97,9 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                   onClick={() => toggle(c)}
                   className={cn(
                     "chip text-left",
-                    pending && "cursor-pointer hover:border-warning",
+                    pending && "cursor-pointer hover:border-amber",
                     (pending ? selected.includes(c) : picked?.has(c)) &&
-                      "border-warning bg-warning/15 font-medium",
+                      "border-amber bg-amber/15 font-medium",
                   )}
                 >
                   {c}
@@ -134,7 +134,7 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                 placeholder={
                   choices.length > 0 ? "Or answer in your own words…" : "Your answer…"
                 }
-                className="min-w-0 flex-1 rounded-[var(--radius)] border bg-transparent px-2 py-1 text-sm outline-none placeholder:text-faint focus:border-accent disabled:opacity-60"
+                className="min-w-0 flex-1 rounded-[var(--radius-control)] border bg-transparent px-2 py-1 text-sm outline-none placeholder:text-faint focus:border-amber disabled:opacity-60"
               />
               <button
                 type="button"
@@ -146,7 +146,7 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                     ? "Send all answers"
                     : "Send answer"
                 }
-                className="btn-primary shrink-0 !px-2.5 !py-1"
+                className="key key-go shrink-0 !px-2.5 !py-1"
               >
                 {api.submitting ? (
                   <Loader2 size={15} className="animate-spin" />
@@ -162,7 +162,7 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
               data-testid={superseded ? "ask-user-superseded" : "ask-user-answer"}
               className={cn(
                 "mt-1.5 whitespace-pre-wrap",
-                superseded ? "text-faint italic" : "text-muted",
+                superseded ? "text-faint italic" : "text-dim",
               )}
             >
               {superseded ? `Not answered — ${answer}` : answer}

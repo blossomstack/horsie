@@ -1,10 +1,11 @@
-import { CircleAlert, Loader2, Square, Trash2 } from "lucide-react";
+import { CircleAlert, Square, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError, MAIN_AGENT } from "../api/client";
 import { SessionStatusKind } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
+import { RailToggle } from "../components/rail";
 import { ContextStatsPanel } from "../components/ContextStatsPanel";
 import { SessionConfigBar } from "../components/SessionConfigBar";
 import { SettingsMenu } from "../components/SettingsMenu";
@@ -228,52 +229,68 @@ export function SessionView() {
         submit: submitAnswers,
       }}
     >
-      <div className="flex h-full">
+      <div className="relative flex h-full">
         <div className="flex h-full min-w-0 flex-1 flex-col">
-          {/* Header */}
-          <header
-            className="flex items-center gap-3 border-b px-5 py-3"
-            style={{ background: "var(--surface)" }}
-          >
-            <div className="min-w-0">
-              <div className="flex items-center gap-2.5">
-                <h1 data-testid="session-title" className="truncate text-sm font-semibold text-text">
-                  {title}
-                </h1>
-                <StatusBadge status={status} />
-              </div>
-              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                <ContextStatsPanel
-                  agent={mainAgent}
-                  sessionTotal={detail?.usageTotal}
-                  totalTokens={totalTokens}
-                />
+          {/* The header strip: what this channel is, what it is doing, and
+              every setting it was launched with — read at a glance, never
+              clicked. */}
+          <header className="border-b bg-panel px-4 pb-2.5 pt-3 sm:px-6">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <RailToggle />
+              <h1
+                data-testid="session-title"
+                className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-legend"
+              >
+                {title}
+              </h1>
+              <StatusBadge status={status} />
+              {/* Durability is the product's whole differentiator, so a dropped
+                  feed is a first-class state on the panel — not a transcript
+                  that quietly stops moving while the lamp still says Running. */}
+              {!stream.connected && (
+                <span
+                  className="flex shrink-0 items-center gap-2 text-amber-ink"
+                  data-testid="session-reconnecting"
+                  title="Lost the live feed. The run continues on the server; this reconnects and replays anything missed."
+                >
+                  <span className="lamp lamp-live" aria-hidden />
+                  <span className="legend text-current">Reconnecting</span>
+                </span>
+              )}
+              <div className="flex items-center gap-0.5">
+                <SettingsMenu />
+                {stoppable && (
+                  <button
+                    className="key key-stop !px-2.5"
+                    onClick={handleStop}
+                    disabled={stop.isPending}
+                    title="Stop this turn (queued messages are kept)"
+                    data-testid="session-stop"
+                  >
+                    <Square size={11} className="fill-current" aria-hidden />
+                    Stop
+                  </button>
+                )}
+                <button
+                  className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
+                  onClick={handleDelete}
+                  disabled={del.isPending}
+                  title="Delete session"
+                  aria-label="Delete session"
+                  data-testid="session-delete"
+                >
+                  <Trash2 size={15} aria-hidden />
+                </button>
               </div>
             </div>
 
-            <div className="ml-auto flex items-center gap-1">
-              <SettingsMenu />
-              {stoppable && (
-                <button
-                  className="btn-ghost !px-2.5 text-xs"
-                  onClick={handleStop}
-                  disabled={stop.isPending}
-                  title="Stop this turn (queued messages are kept)"
-                  data-testid="session-stop"
-                >
-                  <Square size={14} />
-                  Stop
-                </button>
-              )}
-              <button
-                className="btn-icon hover:!text-error"
-                onClick={handleDelete}
-                disabled={del.isPending}
-                title="Delete session"
-                data-testid="session-delete"
-              >
-                <Trash2 size={17} />
-              </button>
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-5 gap-y-2">
+              <ContextStatsPanel
+                agent={mainAgent}
+                sessionTotal={detail?.usageTotal}
+                totalTokens={totalTokens}
+              />
+              {detail && <SessionConfigBar mode="locked" detail={detail} />}
             </div>
           </header>
 
@@ -285,24 +302,25 @@ export function SessionView() {
             className="flex-1 overflow-y-auto"
           >
             {isLoading && stream.messages.length === 0 ? (
-              <div className="flex h-full items-center justify-center text-sm text-faint">
-                <Loader2 size={18} className="mr-2 animate-spin" />
-                Loading transcript…
+              <div className="flex h-full items-center justify-center gap-2">
+                <span className="lamp lamp-live text-amber-ink" aria-hidden />
+                <span className="legend">Loading transcript</span>
               </div>
             ) : stream.messages.length === 0 &&
               stream.streaming.length === 0 &&
               status !== SessionStatusKind.Running ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
-                <p className="text-sm font-medium text-muted">
+              // No status badge here: the header strip carries the session's
+              // one status readout, two inches above. A second copy is both a
+              // duplicate source of truth and a duplicate `status-badge`
+              // testid, which trips Playwright's strict mode whenever an
+              // assertion lands while the transcript is still empty.
+              <div className="flex h-full flex-col items-center justify-center gap-2.5 px-6 text-center">
+                <p className="max-w-sm text-sm leading-relaxed text-dim">
                   {statusMeta(status).hint}
                 </p>
-                {stream.statusReason ?? detail?.lastError ? (
-                  <p className="max-w-md text-xs text-error">
+                {(stream.statusReason ?? detail?.lastError) && (
+                  <p className="max-w-md text-xs leading-relaxed text-red-ink">
                     {stream.statusReason ?? detail?.lastError}
-                  </p>
-                ) : (
-                  <p className="text-xs text-faint">
-                    Send a message below to start the conversation.
                   </p>
                 )}
               </div>
@@ -310,16 +328,21 @@ export function SessionView() {
               <>
                 {(stream.loadingMore || stream.hasMoreBefore) && (
                   <div
-                    className="flex items-center justify-center py-2 text-xs text-faint"
+                    className="flex items-center justify-center gap-2 py-3"
                     data-testid="history-load-more"
                   >
                     {stream.loadingMore ? (
                       <>
-                        <Loader2 size={12} className="mr-1.5 animate-spin" />
-                        Loading earlier messages…
+                        <span
+                          className="lamp lamp-live text-amber-ink"
+                          aria-hidden
+                        />
+                        <span className="legend">Loading earlier messages</span>
                       </>
                     ) : (
-                      <span>Scroll up for earlier messages</span>
+                      <span className="legend">
+                        Scroll up for earlier messages
+                      </span>
                     )}
                   </div>
                 )}
@@ -336,10 +359,10 @@ export function SessionView() {
 
           {/* Errors */}
           {(sendError || stream.streamError) && (
-            <div className="mx-auto w-full max-w-3xl px-4">
+            <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
               <div
                 data-testid="session-error"
-                className="flex items-start gap-2 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error"
+                className="flex items-start gap-2 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
               >
                 <CircleAlert size={16} className="mt-0.5 shrink-0" />
                 <span>{sendError ?? stream.streamError}</span>
@@ -349,14 +372,14 @@ export function SessionView() {
 
           {/* Resource-preparation progression (live, while a turn spins up) */}
           {stream.progression && (
-            <div className="mx-auto w-full max-w-3xl px-4">
+            <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
               <div
                 data-testid="session-progression"
                 data-stage={stream.progression.stage}
-                className="flex items-center gap-1.5 py-1 text-xs text-faint"
+                className="flex items-center gap-2 py-1.5"
               >
-                <Loader2 size={12} className="animate-spin text-accent" />
-                <span>
+                <span className="lamp lamp-live text-amber-ink" aria-hidden />
+                <span className="legend">
                   {progressionLabel(stream.progression.stage)}
                   {stream.progression.detail ? ` — ${stream.progression.detail}` : ""}
                 </span>
@@ -366,17 +389,17 @@ export function SessionView() {
 
           {/* Terminal: the runtime is gone and no message can bring it back. */}
           {terminal && (
-            <div className="mx-auto w-full max-w-3xl px-4">
+            <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
               <div
                 data-testid="session-terminal"
-                className="flex items-start gap-2 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error"
+                className="flex items-start gap-2 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
               >
                 <CircleAlert size={16} className="mt-0.5 shrink-0" />
                 <div className="min-w-0">
                   <p>This session can no longer run: {terminal}</p>
                   <button
                     type="button"
-                    className="mt-1 underline underline-offset-2 hover:no-underline"
+                    className="key key-flat mt-2 !text-red-ink hover:!bg-red-quiet"
                     onClick={() => navigate("/")}
                     data-testid="session-terminal-new"
                   >
@@ -386,8 +409,6 @@ export function SessionView() {
               </div>
             </div>
           )}
-
-          {detail && <SessionConfigBar mode="locked" detail={detail} />}
 
           {/* Composer */}
           <Composer

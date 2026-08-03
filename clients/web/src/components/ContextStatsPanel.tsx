@@ -1,4 +1,3 @@
-import { Gauge } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { AgentDocument, Usage, UsageView } from "../api/types";
 import { compactNumber } from "../lib/format";
@@ -14,11 +13,11 @@ function StatRow({
 }) {
   return (
     <div
-      className="flex items-baseline justify-between gap-3 py-0.5"
+      className="flex items-baseline justify-between gap-3 py-[3px]"
       title={hint}
     >
-      <span className="text-xs text-muted">{label}</span>
-      <span className="font-mono text-xs text-text">{value}</span>
+      <span className="legend">{label}</span>
+      <span className="readout text-xs">{value}</span>
     </div>
   );
 }
@@ -54,6 +53,10 @@ function UsageBreakdown({ usage }: { usage: Usage | UsageView }) {
   );
 }
 
+/** The token channel on the header strip: an engraved legend and its live
+ * value, expanding into the full meter. The headline figure is cumulative
+ * spend, not context fullness — the panel says so, because confusing the two
+ * is the single easiest misread on this screen. */
 export function ContextStatsPanel({
   agent,
   sessionTotal,
@@ -74,8 +77,15 @@ export function ContextStatsPanel({
     const onPointerDown = (e: PointerEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   if (totalTokens <= 0) return null;
@@ -83,45 +93,56 @@ export function ContextStatsPanel({
   const mainAgent = agent;
   const fillPct =
     mainAgent?.contextWindow != null && mainAgent.contextWindow > 0
-      ? Math.min(100, Math.round((mainAgent.contextTokens / mainAgent.contextWindow) * 100))
+      ? Math.min(
+          100,
+          Math.round((mainAgent.contextTokens / mainAgent.contextWindow) * 100),
+        )
       : null;
 
   return (
     <div className="relative" ref={ref}>
       <button
-        className="chip hover:bg-surface-3"
+        className="flex items-baseline gap-1.5 rounded-[var(--radius-chip)] px-1 py-0.5 transition-colors hover:bg-raised"
         onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
         title={
           mainAgent
             ? `${mainAgent.contextTokens} tokens in context · ${totalTokens} session total`
-            : undefined
+            : "Cumulative tokens spent by this session. Open for the context-window meter."
         }
         data-testid="context-stats-button"
       >
-        <Gauge size={12} />
-        {compactNumber(totalTokens)} tok
+        <span className="legend">Tokens</span>
+        <span className="readout animate-latch text-[13px]" key={totalTokens}>
+          {compactNumber(totalTokens)}
+        </span>
       </button>
       {open && sessionTotal && mainAgent && (
         <div
-          className="card absolute left-0 top-full z-10 mt-1.5 w-72 p-3 shadow-lg"
+          className="panel absolute left-0 top-full z-10 mt-2 w-[19rem] p-3.5 shadow-[var(--panel-lift)]"
           data-testid="context-stats-panel"
         >
-          <div className="mb-2">
-            <div
-              className="flex items-center justify-between text-xs text-muted"
-              title="Tokens currently loaded in the main agent's context, out of its context window. Cache status doesn't shrink this — it only affects price and speed."
-            >
-              <span>Context window</span>
-              <span className="font-mono">
+          <div title="Tokens currently loaded in the main agent's context, out of its context window. Cache status doesn't shrink this — it only affects price and speed.">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="legend">Context window</span>
+              <span className="readout text-xs">
                 {compactNumber(mainAgent.contextTokens)}
                 {mainAgent.contextWindow != null &&
                   ` / ${compactNumber(mainAgent.contextWindow)}`}
+                {fillPct != null && ` · ${fillPct}%`}
               </span>
             </div>
             {fillPct != null && (
-              <div className="mt-1 h-1.5 w-full rounded-full bg-surface-2">
+              <div
+                className="screen mt-1.5 h-1.5 w-full overflow-hidden !rounded-[2px]"
+                role="meter"
+                aria-valuenow={fillPct}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label="Context window used"
+              >
                 <div
-                  className="h-1.5 rounded-full bg-accent"
+                  className="h-full bg-amber transition-[width] duration-500"
                   style={{ width: `${fillPct}%` }}
                 />
               </div>
@@ -129,18 +150,16 @@ export function ContextStatsPanel({
           </div>
 
           {mainAgent.lastTurnUsage && (
-            <>
-              <div className="mb-1 text-[11px] font-semibold uppercase text-faint">
-                This turn
-              </div>
+            <div className="mt-3.5 border-t pt-2.5">
+              <div className="legend mb-1 !text-dim">This turn</div>
               <UsageBreakdown usage={mainAgent.lastTurnUsage} />
-            </>
+            </div>
           )}
 
-          <div className="mt-2 mb-1 text-[11px] font-semibold uppercase text-faint">
-            Session total
+          <div className="mt-3.5 border-t pt-2.5">
+            <div className="legend mb-1 !text-dim">Session total</div>
+            <UsageBreakdown usage={sessionTotal} />
           </div>
-          <UsageBreakdown usage={sessionTotal} />
         </div>
       )}
     </div>

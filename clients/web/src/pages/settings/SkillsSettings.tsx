@@ -57,12 +57,12 @@ export function SkillsSettings() {
       />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
-          <section className="card p-4">
+        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+          <section className="panel p-4">
             <div className="mb-3 flex items-start gap-2">
               <Download size={15} className="mt-0.5 text-faint" />
               <div>
-                <h2 className="text-sm font-semibold text-text">
+                <h2 className="text-sm font-semibold text-legend">
                   Install a skill bundle
                 </h2>
                 <p className="mt-0.5 text-xs text-faint">
@@ -87,14 +87,14 @@ export function SkillsSettings() {
             </div>
 
             {installError && (
-              <div className="mt-3 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+              <div className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
                 {installError}
               </div>
             )}
 
             <div className="mt-3 flex justify-end">
               <button
-                className="btn-primary"
+                className="key key-go"
                 onClick={submitInstall}
                 disabled={!sourceUrl.trim() || install.isPending}
               >
@@ -108,11 +108,11 @@ export function SkillsSettings() {
             </div>
           </section>
 
-          <section className="card p-4">
+          <section className="panel p-4">
             <div className="mb-3 flex items-start gap-2">
               <Boxes size={15} className="mt-0.5 text-faint" />
               <div>
-                <h2 className="text-sm font-semibold text-text">
+                <h2 className="text-sm font-semibold text-legend">
                   Installed bundles
                 </h2>
                 <p className="mt-0.5 text-xs text-faint">
@@ -126,12 +126,12 @@ export function SkillsSettings() {
                 <p className="py-8 text-center text-sm text-faint">Loading…</p>
               )}
               {isError && (
-                <div className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+                <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
                   Couldn’t load bundles. Is <code>horsie serve</code> running?
                 </div>
               )}
               {bundles && bundles.length === 0 && (
-                <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+                <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
                   No skill bundles installed yet.
                 </p>
               )}
@@ -153,13 +153,13 @@ function BundleRow({ bundle }: { bundle: PluginView }) {
 
   return (
     <div
-      className="rounded-[var(--radius)] border p-3"
-      style={{ background: "var(--surface-2)" }}
+      className="rounded-[var(--radius-control)] border p-3"
+      style={{ background: "var(--panel-raised)" }}
     >
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate font-mono text-sm font-semibold text-text">
+            <span className="truncate font-mono text-sm font-semibold text-legend">
               {bundle.name}
             </span>
             {bundle.version && (
@@ -172,7 +172,7 @@ function BundleRow({ bundle }: { bundle: PluginView }) {
             )}
           </div>
           {bundle.description && (
-            <p className="mt-0.5 text-xs text-muted">{bundle.description}</p>
+            <p className="mt-0.5 text-xs text-dim">{bundle.description}</p>
           )}
           <p className="mt-0.5 text-[11px] text-faint">
             {bundle.skillCount} skill{bundle.skillCount === 1 ? "" : "s"}
@@ -192,7 +192,7 @@ function BundleRow({ bundle }: { bundle: PluginView }) {
             }
           />
           <button
-            className="btn-outline shrink-0 !px-2.5 !py-1.5 text-xs"
+            className="key shrink-0 !px-2.5 !py-1.5 text-xs"
             onClick={() => update.mutate(bundle.name)}
             disabled={update.isPending}
           >
@@ -204,7 +204,7 @@ function BundleRow({ bundle }: { bundle: PluginView }) {
             Update
           </button>
           <button
-            className="btn-icon shrink-0 text-faint hover:text-error"
+            className="key-icon shrink-0 text-faint hover:text-red-ink"
             onClick={() => {
               if (confirm(`Delete skill bundle "${bundle.name}"?`))
                 remove.mutate(bundle.name);
@@ -242,7 +242,7 @@ function Toggle({
       onClick={() => onChange(!checked)}
       className={cn(
         "relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50",
-        checked ? "bg-accent" : "bg-surface-3",
+        checked ? "bg-orange" : "bg-raised",
       )}
     >
       <span

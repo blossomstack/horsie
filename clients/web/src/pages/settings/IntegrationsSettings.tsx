@@ -43,12 +43,12 @@ export function IntegrationsSettings() {
       />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
+        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
           {isLoading && (
             <div className="py-16 text-center text-sm text-faint">Loading…</div>
           )}
           {isError && (
-            <div className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+            <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
               Couldn’t load settings. Is <code>horsie serve</code> running?
             </div>
           )}
@@ -121,12 +121,12 @@ function GithubSection() {
   };
 
   return (
-    <section className="card p-4">
+    <section className="panel p-4">
       <div className="mb-3 flex items-start gap-2">
         <GitBranch size={15} className="mt-0.5 text-faint" />
         <div>
-          <h2 className="text-sm font-semibold text-text">GitHub</h2>
-          <p className="mt-0.5 text-xs text-faint">
+          <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">GitHub</h2>
+          <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
             Connect a GitHub App so sessions can clone your repositories.
           </p>
         </div>
@@ -134,26 +134,26 @@ function GithubSection() {
 
       <div className="space-y-3">
         {status?.connected ? (
-          <div className="flex items-center justify-between rounded-[var(--radius)] border px-3 py-2 text-sm">
+          <div className="flex items-center justify-between rounded-[var(--radius-control)] border px-3 py-2 text-sm">
             <span>
               Connected as <span className="font-mono">@{status.login}</span>
             </span>
             <button
-              className="btn-ghost text-error"
+              className="key key-flat text-red-ink"
               onClick={() => disconnect.mutate()}
             >
               Disconnect
             </button>
           </div>
         ) : (
-          <div className="flex items-center justify-between rounded-[var(--radius)] border border-dashed px-3 py-2 text-sm text-muted">
+          <div className="flex items-center justify-between rounded-[var(--radius-control)] border border-dashed px-3 py-2 text-sm text-dim">
             <span>
               {status?.appConfigured
                 ? "App configured — connect your account."
                 : "Configure the GitHub App below, then connect."}
             </span>
             <a
-              className="btn-outline aria-disabled:pointer-events-none aria-disabled:opacity-40"
+              className="key aria-disabled:pointer-events-none aria-disabled:opacity-40"
               href={api.github.authUrl()}
               aria-disabled={!status?.appConfigured}
               title={
@@ -172,7 +172,7 @@ function GithubSection() {
 
         {status?.connected && <GithubMcpToggle />}
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <TextField
             label="Client ID"
             value={clientId}
@@ -190,8 +190,8 @@ function GithubSection() {
               setDirty(true);
             }}
             placeholder={
-              cfg?.hasClientSecret ? "•••• stored — blank keeps it" : "not set"
-            }
+              cfg?.hasClientSecret ? "•••• stored — blank keeps it" : "Not set"
+          }
           />
           <TextField
             label="App ID"
@@ -210,20 +210,20 @@ function GithubSection() {
               setDirty(true);
             }}
             placeholder={
-              cfg?.hasPrivateKey ? "•••• stored — blank keeps it" : "not set"
-            }
+              cfg?.hasPrivateKey ? "•••• stored — blank keeps it" : "Not set"
+          }
           />
         </div>
 
         {error && (
-          <div className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+          <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
             {error}
           </div>
         )}
 
         <div className="flex justify-end">
           <button
-            className="btn-primary"
+            className="key key-go"
             onClick={submit}
             disabled={!dirty || save.isPending}
           >
@@ -279,26 +279,26 @@ function GithubMcpToggle() {
 
   return (
     <div
-      className="rounded-[var(--radius)] border px-3 py-2.5"
-      style={{ background: "var(--surface-2)" }}
+      className="rounded-[var(--radius-control)] border px-3 py-2.5"
+      style={{ background: "var(--panel-raised)" }}
     >
       <div className="flex items-center justify-between gap-2">
         <div>
-          <p className="text-sm font-medium text-text">GitHub tools (MCP)</p>
-          <p className="mt-0.5 text-xs text-faint">
+          <p className="text-sm font-medium text-legend">GitHub tools (MCP)</p>
+          <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
             Let sessions call the GitHub MCP server (create PRs, search issues…)
             using this connection.
           </p>
         </div>
         {gh ? (
           <button
-            className="btn-ghost text-error"
+            className="key key-flat text-red-ink"
             onClick={() => del.mutate(GITHUB_MCP_NAME)}
           >
             Disable
           </button>
         ) : (
-          <button className="btn-outline" onClick={enable} disabled={busy}>
+          <button className="key" onClick={enable} disabled={busy}>
             {busy ? <Loader2 size={14} className="animate-spin" /> : null} Enable
           </button>
         )}
@@ -306,19 +306,19 @@ function GithubMcpToggle() {
       {gh && (
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
           {gh.enabled ? (
-            <span className="chip !py-0 text-[10px] text-success">
+            <span className="chip !py-0 text-[10px] text-lamp-ok">
               enabled · {gh.toolCount ?? 0} tools
             </span>
           ) : (
             <span className="chip !py-0 text-[10px] text-faint">not tested</span>
           )}
           {gh.lastError && (
-            <span className="truncate text-error" title={gh.lastError}>
+            <span className="truncate text-red-ink" title={gh.lastError}>
               {gh.lastError}
             </span>
           )}
           <button
-            className="btn-ghost ml-auto"
+            className="key key-flat ml-auto"
             onClick={retest}
             disabled={busy}
           >
@@ -327,7 +327,7 @@ function GithubMcpToggle() {
         </div>
       )}
       {error && (
-        <div className="mt-2 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+        <div className="mt-2 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
           {error}
         </div>
       )}
@@ -366,10 +366,10 @@ function McpSection() {
   }, [params, setParams]);
 
   return (
-    <section className="card p-4">
+    <section className="panel p-4">
       {banner && (
         <div
-          className={`mb-3 rounded-[var(--radius)] border px-3 py-2 text-sm ${banner.ok ? "border-success/40 bg-success-soft text-success" : "border-error/40 bg-error-soft text-error"}`}
+          className={`mb-3 rounded-[var(--radius-control)] border px-3 py-2 text-sm ${banner.ok ? "border-lamp-ok bg-lamp-ok-quiet text-lamp-ok" : "border-red bg-red-quiet text-red-ink"}`}
         >
           {banner.text}
         </div>
@@ -378,15 +378,15 @@ function McpSection() {
         <div className="flex items-start gap-2">
           <Boxes size={15} className="mt-0.5 text-faint" />
           <div>
-            <h2 className="text-sm font-semibold text-text">MCP servers</h2>
-            <p className="mt-0.5 text-xs text-faint">
+            <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">MCP servers</h2>
+            <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
               Remote Model Context Protocol servers. Sessions pick which to use;
               their tools appear as <code>mcp__&lt;name&gt;__&lt;tool&gt;</code>.
             </p>
           </div>
         </div>
         <button
-          className="btn-outline shrink-0 !px-2.5 !py-1.5 text-xs"
+          className="key shrink-0 !px-2.5 !py-1.5 text-xs"
           onClick={() => setAdding(true)}
         >
           <Plus size={14} /> Add server
@@ -394,7 +394,7 @@ function McpSection() {
       </div>
       <div className="space-y-2.5">
         {generic.length === 0 && !adding && (
-          <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+          <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
             No MCP servers configured.
           </p>
         )}
@@ -501,7 +501,7 @@ function McpServerRow({
   return (
     <RowShell onRemove={remove} removeLabel="Remove MCP server">
       <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {isNew ? (
             <TextField
               label="Name"
@@ -515,7 +515,7 @@ function McpServerRow({
           ) : (
             <div>
               <RowLabel>Name</RowLabel>
-              <div className="truncate py-1.5 font-mono text-sm text-text">
+              <div className="truncate py-1.5 font-mono text-sm text-legend">
                 {name}
               </div>
             </div>
@@ -532,7 +532,7 @@ function McpServerRow({
           <label className="block">
             <RowLabel>Auth</RowLabel>
             <select
-              className="input font-mono"
+              className="field font-mono"
               value={authKind}
               onChange={(e) => {
                 setAuthKind(e.target.value as "None" | "Bearer" | "OAuth");
@@ -586,19 +586,19 @@ function McpServerRow({
         {!isNew && (
           <div className="flex flex-wrap items-center gap-2 text-xs">
             {server.enabled ? (
-              <span className="chip !py-0 text-[10px] text-success">
+              <span className="chip !py-0 text-[10px] text-lamp-ok">
                 enabled · {server.toolCount ?? 0} tools
               </span>
             ) : (
               <span className="chip !py-0 text-[10px] text-faint">not tested</span>
             )}
             {authKind === "OAuth" && connected && (
-              <span className="chip !py-0 text-[10px] text-success">
+              <span className="chip !py-0 text-[10px] text-lamp-ok">
                 authorized
               </span>
             )}
             {server.lastError && (
-              <span className="truncate text-error" title={server.lastError}>
+              <span className="truncate text-red-ink" title={server.lastError}>
                 {server.lastError}
               </span>
             )}
@@ -606,7 +606,7 @@ function McpServerRow({
         )}
 
         {error && (
-          <div className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+          <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
             {error}
           </div>
         )}
@@ -614,7 +614,7 @@ function McpServerRow({
         <div className="flex justify-end gap-2">
           {!isNew && authKind === "OAuth" && (
             <button
-              className="btn-outline"
+              className="key"
               disabled={connect.isPending || upsert.isPending}
               onClick={async () => {
                 setError(null);
@@ -638,7 +638,7 @@ function McpServerRow({
           )}
           {!isNew && (
             <button
-              className="btn-outline"
+              className="key"
               onClick={runTest}
               disabled={test.isPending}
             >
@@ -649,7 +649,7 @@ function McpServerRow({
             </button>
           )}
           <button
-            className="btn-primary"
+            className="key key-go"
             onClick={save}
             disabled={(!isNew && !dirty) || upsert.isPending}
           >
@@ -672,10 +672,10 @@ function ServerInfoCard({ view }: { view: SettingsView }) {
     ["Version", info.version],
   ];
   return (
-    <section className="card p-4">
+    <section className="panel p-4">
       <div className="flex items-center gap-2">
         <Server size={15} className="text-faint" />
-        <h2 className="text-sm font-semibold text-text">Server</h2>
+        <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">Server</h2>
       </div>
       <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
         {rows.map(([k, v]) => (
@@ -689,8 +689,13 @@ function ServerInfoCard({ view }: { view: SettingsView }) {
 function FieldRow({ k, v }: { k: string; v: string }) {
   return (
     <>
-      <dt className="text-muted">{k}</dt>
-      <dd className="truncate font-mono text-text" title={v}>
+      <dt className="legend pt-0.5">{k}</dt>
+      {/* Selectable, not truncated: these paths exist to be copied into a
+          terminal, and an ellipsis makes that impossible. */}
+      <dd
+        className="min-w-0 font-mono text-[11px] break-all text-legend select-all"
+        title={v}
+      >
         {v}
       </dd>
     </>

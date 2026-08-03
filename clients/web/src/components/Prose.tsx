@@ -1,6 +1,12 @@
 import { lazy, Suspense } from "react";
 
-const Markdown = lazy(() => import("./Markdown"));
+// Start fetching the markdown chunk the moment this module is evaluated, not
+// when the first <Prose> mounts. Without it, reopening a session rendered the
+// whole transcript as *raw* markdown — asterisks, pipe tables, fence markers —
+// until the chunk landed. Deferring the warm to requestIdleCallback was not
+// early enough; the fallback still won the race on a cold load.
+const chunk = import("./Markdown");
+const Markdown = lazy(() => chunk);
 
 /**
  * Lazy markdown renderer. Until the markdown chunk loads it shows the raw text
@@ -9,11 +15,7 @@ const Markdown = lazy(() => import("./Markdown"));
  */
 export function Prose({ text }: { text: string }) {
   return (
-    <Suspense
-      fallback={
-        <div className="prose whitespace-pre-wrap">{text}</div>
-      }
-    >
+    <Suspense fallback={<div className="prose whitespace-pre-wrap">{text}</div>}>
       <Markdown text={text} />
     </Suspense>
   );
