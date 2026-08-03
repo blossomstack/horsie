@@ -2,7 +2,7 @@
 //!
 //! Lives in this crate, not `horsie-actor`, because it shares the settings
 //! database: one database takes one sqlx migrator, so the schema belongs to the
-//! server's migration chain (`server/migrations/0016_journal.sql`), and keeping
+//! server's migration chain (`server/migrations/0017_journal.sql`), and keeping
 //! the DDL and the queries together beats splitting them across a crate.
 //!
 //! The property that matters is that **sequence numbers are stored, not

@@ -1014,6 +1014,32 @@ mod tests {
         assert!(err.contains("telepathy"), "error should name it: {err}");
     }
 
+    /// Two migrations sharing a version number is not a style issue: sqlx keys
+    /// `_sqlx_migrations` on `version`, so the second one to run fails with a
+    /// UNIQUE violation and `open_pool` returns an error — every database, on
+    /// every boot, until someone renumbers a file.
+    ///
+    /// It happened: #150 and #151 each added an `0016_`, neither branch was
+    /// rebased onto the other, and CI passed on both because each ran against a
+    /// base that contained only its own. The collision only existed once both
+    /// were on main, which is exactly the state no PR build had.
+    ///
+    /// `migrate!()` embeds at compile time, so adding a `.sql` file without
+    /// touching any `.rs` can leave a stale build passing this locally. CI
+    /// compiles from a fresh checkout, where it always sees the truth.
+    #[test]
+    fn migration_versions_are_unique() {
+        let mut seen: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+        for m in sqlx::migrate!().iter() {
+            if let Some(first) = seen.insert(m.version, m.description.to_string()) {
+                panic!(
+                    "migration version {} is used twice: '{}' and '{}' — renumber the later one",
+                    m.version, first, m.description
+                );
+            }
+        }
+    }
+
     /// A pragma that silently fails to apply is exactly the failure this guards
     /// against: journal writes would land in `DELETE` mode and lock the whole
     /// database against every authenticated request's token write.
