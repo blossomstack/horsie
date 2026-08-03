@@ -11,7 +11,7 @@
 
 use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
-use crate::sessions::events::{QuietEventSink, SessionEventSink, StampedEvent, wire_event};
+use crate::sessions::events::{AgentEventSink, BroadcastObserver};
 use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::{AgentSettings, PendingAsk, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::subagents::{
@@ -19,7 +19,7 @@ use crate::sessions::subagents::{
 };
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
-use crate::sessions::{SessionFrame, UserMessageError};
+use crate::sessions::{AgentFrame, SessionFrame, UserMessageError};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
@@ -105,13 +105,18 @@ pub enum SessionCommand {
     Snapshot {
         reply: oneshot::Sender<SessionSnapshot>,
     },
-    /// Durable events after `after_seq`, for the SSE stream.
-    Events {
-        after_seq: u64,
-        reply: oneshot::Sender<Vec<StampedEvent>>,
+    /// Subscribe to one agent's live frames. `agent_id` is `None`/`"main"` for
+    /// the primary agent, else a subagent id; the outer `None` means no such
+    /// agent. A cold subagent is spawned on demand, exactly as `History` does.
+    SubscribeAgent {
+        agent_id: Option<String>,
+        reply: oneshot::Sender<Option<broadcast::Receiver<AgentFrame>>>,
     },
-    /// The journal head, for a stream that wants only what happens next.
-    HeadSeq { reply: oneshot::Sender<u64> },
+    /// Read one agent's current values (task list, usage) for its document.
+    AgentState {
+        agent_id: Option<String>,
+        reply: oneshot::Sender<Option<horsie_workflow::AgentStateView>>,
+    },
     /// The supervisor wants to unload this session. Answers `false` if a run
     /// started in the meantime, in which case nothing has changed and the idle
     /// clock simply restarts.
@@ -360,6 +365,15 @@ fn derive_title(text: &str) -> Option<String> {
     Some(format!("{}…", truncated.trim_end()))
 }
 
+/// Which agent of a session a broadcast belongs to. `Main` is not a `Uuid`
+/// variant because the main agent's journal is keyed by the *session* id — the
+/// two namespaces are deliberately distinct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentKey {
+    Main,
+    Sub(Uuid),
+}
+
 pub struct SessionActor {
     id: Uuid,
     spec: SessionSpec,
@@ -378,6 +392,11 @@ pub struct SessionActor {
     /// reach the runtime client the run already acquired instead of asking
     /// the manager for a fresh one.
     context_provider: Option<Arc<SessionContextProvider>>,
+    /// One live broadcast per agent. Created with the agent and kept for this
+    /// actor's loaded lifetime, so a subscriber survives a turn ending. A
+    /// session nobody watches still publishes — into a channel with no
+    /// receivers, which costs nothing.
+    agent_frames: HashMap<AgentKey, broadcast::Sender<AgentFrame>>,
 }
 
 impl SessionActor {
@@ -399,6 +418,7 @@ impl SessionActor {
             main_agent: None,
             sub_agents: HashMap::new(),
             context_provider: None,
+            agent_frames: HashMap::new(),
         }
     }
 
@@ -499,17 +519,54 @@ impl SessionActor {
             .thinking_effort
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
+        let frames = self.agent_frames(AgentKey::Main);
         let agent_ctx = AgentRuntimeContext {
             context_provider,
-            event_sink: Arc::new(SessionEventSink {
-                frames: self.frames.clone(),
+            event_sink: Arc::new(AgentEventSink {
+                frames: frames.clone(),
             }),
             parent: Arc::new(SessionParent {
                 target: ctx.self_ref(),
             }),
             session_id: self.id,
         };
-        self.main_agent = Some(ctx.spawn(AgentActor::new(agent_ctx, params)));
+        self.main_agent = Some(ctx.spawn(AgentActor::with_observer(
+            agent_ctx,
+            params,
+            Arc::new(BroadcastObserver { frames }),
+        )));
+    }
+
+    /// The broadcast for one agent, created on first use. Held by the session
+    /// rather than the agent so a subscriber outlives the agent's turn.
+    fn agent_frames(&mut self, key: AgentKey) -> broadcast::Sender<AgentFrame> {
+        self.agent_frames
+            .entry(key)
+            .or_insert_with(|| broadcast::channel(FRAME_BROADCAST_CAPACITY).0)
+            .clone()
+    }
+
+    /// Resolve an agent selector to its resident actor: `None`/`"main"` for the
+    /// primary agent, else a subagent id. A cold node — one in the persisted
+    /// tree with no actor since this session loaded — is spawned on demand, so
+    /// reading a finished subagent works exactly like reading a live one.
+    fn resolve_agent(
+        &mut self,
+        state: &SessionState,
+        ctx: &ActorContext<Self>,
+        agent_id: Option<&str>,
+    ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
+        match agent_id {
+            None | Some("main") => self.main_agent.clone().map(|a| (AgentKey::Main, a)),
+            Some(raw) => {
+                let id = Uuid::parse_str(raw).ok()?;
+                if let Some(agent) = self.sub_agents.get(&id) {
+                    return Some((AgentKey::Sub(id), agent.clone()));
+                }
+                state.subagents.get(&id)?;
+                Some((AgentKey::Sub(id), self.spawn_sub_agent_actor(ctx, id)))
+            }
+        }
     }
 
     /// Spawn a resident subagent actor — journal replay only; the caller
@@ -544,15 +601,22 @@ impl SessionActor {
             .thinking_effort
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
+        let frames = self.agent_frames(AgentKey::Sub(id));
         let agent_ctx = AgentRuntimeContext {
             context_provider,
-            event_sink: Arc::new(QuietEventSink),
+            event_sink: Arc::new(AgentEventSink {
+                frames: frames.clone(),
+            }),
             parent: Arc::new(SessionParent {
                 target: ctx.self_ref(),
             }),
             session_id: id,
         };
-        let actor = ctx.spawn(AgentActor::new(agent_ctx, params));
+        let actor = ctx.spawn(AgentActor::with_observer(
+            agent_ctx,
+            params,
+            Arc::new(BroadcastObserver { frames }),
+        ));
         self.sub_agents.insert(id, actor.clone());
         actor
     }
@@ -1466,27 +1530,12 @@ impl EventSourcedActor for SessionActor {
                 query,
                 reply,
             } => {
-                let agent = match agent_id.as_deref() {
-                    None | Some("main") => self.main_agent.clone(),
-                    Some(raw) => match Uuid::parse_str(raw) {
-                        Ok(id) => match self.sub_agents.get(&id) {
-                            Some(agent) => Some(agent.clone()),
-                            // A cold node read for the first time since load:
-                            // spawn its resident actor on demand (see
-                            // `on_recovery_complete`).
-                            None if state.subagents.get(&id).is_some() => {
-                                Some(self.spawn_sub_agent_actor(ctx, id))
-                            }
-                            None => None,
-                        },
-                        Err(_) => None,
-                    },
-                };
                 // Read history from the resident actor's in-memory state. No
                 // journal access, no runtime — opening a session to read it
                 // stays free of sandbox cost.
+                let agent = self.resolve_agent(state, ctx, agent_id.as_deref());
                 let page = match agent {
-                    Some(agent) => agent
+                    Some((_, agent)) => agent
                         .ask(|reply| AgentCommand::GetHistory { query, reply })
                         .await
                         .ok(),
@@ -1500,33 +1549,26 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(stats);
                 CommandEffect::none()
             }
-            SessionCommand::Events { after_seq, reply } => {
-                let events = match self.agent() {
-                    Some(agent) => agent
-                        .ask(|reply| AgentCommand::ReplayEvents { after_seq, reply })
+            SessionCommand::AgentState { agent_id, reply } => {
+                let agent = self.resolve_agent(state, ctx, agent_id.as_deref());
+                let view = match agent {
+                    Some((_, agent)) => agent
+                        .ask(|reply| AgentCommand::GetState { reply })
                         .await
-                        .unwrap_or_default(),
-                    None => Vec::new(),
+                        .ok(),
+                    None => None,
                 };
-                let _ = reply.send(
-                    events
-                        .into_iter()
-                        .filter_map(|(seq, event)| {
-                            wire_event(event).map(|event| StampedEvent { seq, event })
-                        })
-                        .collect(),
-                );
+                let _ = reply.send(view);
                 CommandEffect::none()
             }
-            SessionCommand::HeadSeq { reply } => {
-                let head = match self.agent() {
-                    Some(agent) => agent
-                        .ask(|reply| AgentCommand::HeadSeq { reply })
-                        .await
-                        .unwrap_or(0),
-                    None => 0,
-                };
-                let _ = reply.send(head);
+            SessionCommand::SubscribeAgent { agent_id, reply } => {
+                // Resolving first means subscribing to a cold subagent spawns
+                // it, so a watcher sees its output the moment it wakes.
+                let key = self
+                    .resolve_agent(state, ctx, agent_id.as_deref())
+                    .map(|(key, _)| key);
+                let rx = key.map(|key| self.agent_frames(key).subscribe());
+                let _ = reply.send(rx);
                 CommandEffect::none()
             }
             SessionCommand::Answer { answers, reply } => {
@@ -2934,6 +2976,7 @@ mod tests {
                 agent_id: None,
                 query: horsie_workflow::HistoryQuery {
                     before: None,
+                    after: None,
                     limit: 50,
                 },
                 reply,
@@ -3222,6 +3265,7 @@ mod tests {
                 agent_id: Some(p.to_string()),
                 query: horsie_workflow::HistoryQuery {
                     before: None,
+                    after: None,
                     limit: 20,
                 },
                 reply,
@@ -3282,6 +3326,7 @@ mod tests {
                 agent_id: Some(sub.to_string()),
                 query: horsie_workflow::HistoryQuery {
                     before: None,
+                    after: None,
                     limit: 10,
                 },
                 reply,

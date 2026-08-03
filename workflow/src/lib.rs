@@ -16,8 +16,8 @@ mod workflow_actor;
 mod workspace;
 
 pub use agent_actor::{
-    AgentActor, AgentCommand, AgentDomainEvent, AgentHistoryPage, AgentParams, AgentState,
-    AgentUsageSnapshot, HistoryQuery, UsageTotal,
+    AgentActor, AgentCommand, AgentDomainEvent, AgentHistoryPage, AgentObserver, AgentParams,
+    AgentState, AgentStateView, AgentUsageSnapshot, HistoryQuery, UsageTotal,
 };
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL, ContextError,

@@ -4,7 +4,7 @@
 use crate::http::AppState;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
-use crate::sessions::session_actor::{AskAnswer, InboxMessage, SessionUsageStats};
+use crate::sessions::session_actor::{AskAnswer, InboxMessage};
 use crate::sessions::spec::{
     AgentSettings, PendingAsk, ProvisionStepSpec, SessionSpec, SessionStatus, WorkspaceDef,
     status_kind, status_reason,
@@ -17,18 +17,21 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::now_ms;
 use horsie_models::session::{
-    AgentSettings as WireAgentSettings, AgentUsageView, AnswerAsksRequest, PendingAskView,
-    QueuedMessage, SessionDetail, SessionStatusKind, SessionSummary,
-    SessionUsageStats as WireSessionUsageStats, TaskItem, TaskStatus as WireTaskStatus, UsageView,
+    AgentSettings as WireAgentSettings, AnswerAsksRequest, PendingAskView, QueuedMessage,
+    SessionDetail, SessionStatusKind, SessionSummary, SubAgentView, UsageView,
 };
 use horsie_models::session_api::{
-    Ack, CreateSessionRequest, CreateSessionResponse, GetSessionResponse,
-    GetSessionSubAgentsResponse, GetSessionUsageResponse, HistoryPage, ListSessionsResponse,
-    RepoConfig, SendMessageRequest, SessionAck, SubAgentView,
+    Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, GetAgentResponse,
+    GetSessionResponse, HistoryPage, ListSessionsResponse, RepoConfig, SendMessageRequest,
+    SessionAck,
 };
-use horsie_workflow::{AgentHistoryPage, HistoryQuery, TaskStatus as AgentTaskStatus};
+use horsie_workflow::{AgentHistoryPage, HistoryQuery};
 use serde::Deserialize;
 use uuid::Uuid;
+
+/// The path segment naming a session's primary agent, as opposed to a
+/// subagent's uuid. One spelling, shared by every agent-scoped route.
+pub const MAIN_AGENT: &str = "main";
 
 /// Default and maximum messages returned by one `/history` page.
 const HISTORY_DEFAULT_LIMIT: usize = 50;
@@ -224,13 +227,28 @@ pub async fn get_session(
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
     let status = snapshot.as_ref().map(|s| s.status.clone());
     let pending_asks = status.as_ref().map(wire_pending_asks).unwrap_or_default();
+    // Both are session-scoped current values, so they belong on this document
+    // rather than on a history page or a separate endpoint.
+    let usage_total = ask(&state, |reply| SessionSupervisorCommand::UsageStats {
+        id: id.clone(),
+        reply,
+    })
+    .await?
+    .map(|stats| stats.session_total)
+    .unwrap_or_default();
+    let tree = ask(&state, |reply| SessionSupervisorCommand::SubAgents {
+        id: id.clone(),
+        reply,
+    })
+    .await?
+    .unwrap_or_default();
+    let agents = agent_roster(&tree);
     let detail = SessionDetail {
         id: id.clone(),
         name: rec.spec.name.clone(),
         status: status.as_ref().map(status_kind),
         created_at: rec.created_at,
         last_error: status.as_ref().and_then(status_reason),
-        pending_question: pending_asks.first().map(|a| a.question.clone()),
         pending_asks,
         model: rec.spec.agent.model.clone(),
         vendor: rec.spec.vendor.clone(),
@@ -254,6 +272,9 @@ pub async fn get_session(
         inbox: snapshot
             .map(|s| s.inbox.into_iter().map(wire_queued_message).collect())
             .unwrap_or_default(),
+        usage_total: to_wire_usage(usage_total),
+        agents,
+        progression: None,
     };
     Ok(Json(GetSessionResponse { session: detail }))
 }
@@ -286,26 +307,21 @@ pub async fn answer_asks(
     Ok((StatusCode::ACCEPTED, Json(Ack {})))
 }
 
-/// Query params for `GET /api/sessions/:id/history`.
+/// Query params for `GET /api/sessions/:id/agents/:agent_id/history`.
+///
+/// `before` and `after` are the same cursor space — a message id — read in
+/// opposite directions; `after` wins if both are given.
 #[derive(Deserialize)]
 pub struct HistoryParams {
     /// Return the page of messages immediately before this message id; absent
     /// requests the latest (tail) page.
     before: Option<String>,
+    /// Return the page of messages immediately after this message id — the
+    /// forward page a reconnecting stream backfills with.
+    after: Option<String>,
     /// Max messages; defaults to [`HISTORY_DEFAULT_LIMIT`], capped at
     /// [`HISTORY_MAX_LIMIT`].
     limit: Option<usize>,
-    /// Which agent's transcript to read: absent or `main` for the session's
-    /// primary agent, otherwise a subagent id.
-    agent_id: Option<String>,
-}
-
-fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
-    match status {
-        AgentTaskStatus::Pending => WireTaskStatus::Pending,
-        AgentTaskStatus::InProgress => WireTaskStatus::InProgress,
-        AgentTaskStatus::Completed => WireTaskStatus::Completed,
-    }
 }
 
 fn to_wire_history(page: AgentHistoryPage) -> HistoryPage {
@@ -313,19 +329,25 @@ fn to_wire_history(page: AgentHistoryPage) -> HistoryPage {
     crate::wire_redact::strip_thinking_signatures(&mut messages);
     HistoryPage {
         messages,
-        has_more: page.has_more,
-        tasks: page.tasks.map(|tasks| {
-            tasks
-                .into_iter()
-                .map(|t| TaskItem {
-                    id: t.id,
-                    content: t.content,
-                    status: wire_task_status(t.status),
-                })
-                .collect()
-        }),
-        usage: page.usage.map(to_wire_usage),
+        has_more_before: page.has_more_before,
+        has_more_after: page.has_more_after,
     }
+}
+
+/// The session's agent roster: the main agent first, then its subagent tree.
+/// The main agent is listed so every agent — not just spawned ones — is
+/// reachable at the same `/agents/:agent_id` shape.
+fn agent_roster(tree: &[(Uuid, SubAgentRecord)]) -> Vec<SubAgentView> {
+    let mut agents = vec![SubAgentView {
+        id: MAIN_AGENT.to_string(),
+        parent: None,
+        label: None,
+        depth: 0,
+        status: "running".to_string(),
+        error: None,
+    }];
+    agents.extend(tree.iter().map(|(id, rec)| to_wire_subagent(*id, rec)));
+    agents
 }
 
 fn to_wire_usage(u: horsie_workflow::UsageTotal) -> UsageView {
@@ -337,31 +359,12 @@ fn to_wire_usage(u: horsie_workflow::UsageTotal) -> UsageView {
     }
 }
 
-/// Maps the session actor's aggregated usage onto its wire shape, attaching
-/// `context_window` from the model config — the one piece that isn't agent
-/// state, since an agent doesn't know about configured models.
-fn to_wire_usage_stats(
-    stats: SessionUsageStats,
-    context_window: Option<u32>,
-) -> WireSessionUsageStats {
-    WireSessionUsageStats {
-        session_total: to_wire_usage(stats.session_total),
-        main_agent: AgentUsageView {
-            model: stats.main_agent.model,
-            usage_total: to_wire_usage(stats.main_agent.snapshot.usage_total),
-            last_turn_usage: stats.main_agent.snapshot.last_turn_usage,
-            context_tokens: stats.main_agent.snapshot.context_tokens,
-            context_window,
-        },
-    }
-}
-
-/// A window of a session's conversation history, from the agent's in-memory
-/// state (no journal replay in the server). The tail page (no `before`) also
-/// carries the current task list and cumulative usage.
+/// A window of one agent's transcript, from its in-memory state — no journal
+/// replay anywhere in the server. Messages only: current values live on the
+/// agent document, so a page means the same thing whichever cursor produced it.
 pub async fn get_history(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path((id, agent_id)): Path<(String, String)>,
     Query(params): Query<HistoryParams>,
 ) -> Result<impl IntoResponse, Api> {
     let limit = params
@@ -370,11 +373,12 @@ pub async fn get_history(
         .clamp(1, HISTORY_MAX_LIMIT);
     let query = HistoryQuery {
         before: params.before,
+        after: params.after,
         limit,
     };
     let page = ask(&state, |reply| SessionSupervisorCommand::History {
         id: id.clone(),
-        agent_id: params.agent_id,
+        agent_id: Some(agent_id),
         query,
         reply,
     })
@@ -383,28 +387,85 @@ pub async fn get_history(
     Ok(Json(to_wire_history(page)))
 }
 
-/// A session's aggregated usage (summed across every agent it hosts — today
-/// just the one) plus the primary agent's own usage and context-size
-/// snapshot, for the header's context-window display.
-pub async fn get_session_usage(
+/// One agent's current values: its task list, its usage, and — for a subagent —
+/// its spawn metadata and terminal result. Everything here is a value the
+/// client re-reads rather than a log it accumulates; the log is `/history`.
+pub async fn get_agent(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path((id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, Api> {
-    let stats = ask(&state, |reply| SessionSupervisorCommand::UsageStats {
+    let view = ask(&state, |reply| SessionSupervisorCommand::AgentState {
+        id: id.clone(),
+        agent_id: Some(agent_id.clone()),
+        reply,
+    })
+    .await?
+    .ok_or_else(|| Api::not_found(format!("no such agent: {agent_id}")))?;
+
+    // `context_window` is the one field here that is not agent state — an agent
+    // does not know which models are configured, so the HTTP layer attaches it.
+    let (rec, _) = ask(&state, |reply| SessionSupervisorCommand::Get {
         id: id.clone(),
         reply,
     })
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
-    let view = state.config_store.view().await.map_err(Api::internal)?;
-    let context_window = view
+    let settings = state.config_store.view().await.map_err(Api::internal)?;
+    let context_window = settings
         .models
         .iter()
-        .find(|m| m.alias == stats.main_agent.model)
+        .find(|m| m.alias == rec.spec.agent.model)
         .and_then(|m| m.context_window);
-    Ok(Json(GetSessionUsageResponse {
-        usage: to_wire_usage_stats(stats, context_window),
-    }))
+
+    // Spawn metadata comes from the session's tree, which is where a subagent's
+    // lifecycle is recorded; the main agent has none of it.
+    let node = if agent_id == MAIN_AGENT {
+        None
+    } else {
+        let tree = ask(&state, |reply| SessionSupervisorCommand::SubAgents {
+            id: id.clone(),
+            reply,
+        })
+        .await?
+        .unwrap_or_default();
+        Uuid::parse_str(&agent_id)
+            .ok()
+            .and_then(|uid| tree.into_iter().find(|(nid, _)| *nid == uid))
+    };
+
+    let agent = AgentDocument {
+        id: agent_id,
+        parent: node.as_ref().and_then(|(_, rec)| match rec.parent {
+            SubAgentParent::Main => None,
+            SubAgentParent::SubAgent(pid) => Some(pid.to_string()),
+        }),
+        label: node.as_ref().map(|(_, rec)| rec.label.clone()),
+        task: node.as_ref().map(|(_, rec)| rec.task.clone()),
+        depth: node.as_ref().map_or(0, |(_, rec)| rec.depth),
+        status: node.as_ref().map_or_else(
+            || "running".to_string(),
+            |(_, rec)| {
+                match rec.status {
+                    SubAgentStatus::Running => "running",
+                    SubAgentStatus::Completed => "completed",
+                    SubAgentStatus::Failed => "failed",
+                }
+                .to_string()
+            },
+        ),
+        output: node.as_ref().and_then(|(_, rec)| rec.output.clone()),
+        error: node.as_ref().and_then(|(_, rec)| rec.error.clone()),
+        tasks: view
+            .tasks
+            .iter()
+            .map(crate::sessions::events::wire_task)
+            .collect(),
+        usage: to_wire_usage(view.usage_total),
+        last_turn_usage: view.last_turn_usage,
+        context_tokens: view.context_tokens,
+        context_window,
+    };
+    Ok(Json(GetAgentResponse { agent }))
 }
 
 pub async fn send_message(
@@ -486,7 +547,7 @@ fn to_wire_subagent(id: Uuid, rec: &SubAgentRecord) -> SubAgentView {
             SubAgentParent::Main => None,
             SubAgentParent::SubAgent(pid) => Some(pid.to_string()),
         },
-        label: rec.label.clone(),
+        label: Some(rec.label.clone()),
         depth: rec.depth,
         status: match rec.status {
             SubAgentStatus::Running => "running",
@@ -496,26 +557,6 @@ fn to_wire_subagent(id: Uuid, rec: &SubAgentRecord) -> SubAgentView {
         .to_string(),
         error: rec.error.clone(),
     }
-}
-
-/// A session's subagent tree, for client tree rendering. Loading the session
-/// to answer is deliberate and free of sandbox cost — the tree folds from the
-/// session journal, and no agent is asked.
-pub async fn get_subagents(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<impl IntoResponse, Api> {
-    let tree = ask(&state, |reply| SessionSupervisorCommand::SubAgents {
-        id: id.clone(),
-        reply,
-    })
-    .await?
-    .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
-    let subagents = tree
-        .into_iter()
-        .map(|(id, rec)| to_wire_subagent(id, &rec))
-        .collect();
-    Ok(Json(GetSessionSubAgentsResponse { subagents }))
 }
 
 #[cfg(test)]
@@ -552,7 +593,7 @@ mod tests {
         );
         assert_eq!(view.id, id.to_string());
         assert_eq!(view.parent, Some(parent.to_string()));
-        assert_eq!(view.label, "research");
+        assert_eq!(view.label.as_deref(), Some("research"));
         assert_eq!(view.depth, 2);
         assert_eq!(view.status, "failed");
         // No `output` field exists on the wire type at all — transcripts are
