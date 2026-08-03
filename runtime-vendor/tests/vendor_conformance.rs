@@ -26,8 +26,8 @@ use async_trait::async_trait;
 use horsie_models::executor::RuntimeConfig;
 use horsie_runtime_client::{MockTransport, RuntimeTransport};
 use horsie_runtime_vendor::{
-    ConnectedRuntimeRegistry, CredentialProvider, FixedWorkspaces, HealthStatus, RuntimeHandle,
-    RuntimeProvider, RuntimeVendor,
+    AgentExit, ConnectedRuntimeRegistry, CredentialProvider, FixedWorkspaces, HealthStatus,
+    RuntimeHandle, RuntimeProvider, RuntimeVendor,
 };
 use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, VendorError, WorkspaceSpec};
@@ -166,6 +166,11 @@ impl Machine {
             let link = RuntimeVendorLink::start(ws, Principal::Anonymous)
                 .await
                 .expect("handshake");
+            // The agent waits to be told it is published before it serves, so a
+            // stand-in server has to answer the handshake like the real one.
+            link.confirm_registration()
+                .await
+                .expect("acknowledge the registration");
             let _ = link_tx.send(link);
         });
 
@@ -344,7 +349,10 @@ async fn a_dead_credential_ends_the_run() {
         .run(UNDIALABLE, credential, CancellationToken::new())
         .await
         .expect_err("a dead credential must end the run, not loop on it");
-    assert!(err.contains("logged out"), "{err}");
+    assert!(
+        matches!(&err, AgentExit::Fatal(e) if e.contains("logged out")),
+        "{err:?}"
+    );
 }
 
 /// The other half: an issuer that is merely unreachable must not take the agent

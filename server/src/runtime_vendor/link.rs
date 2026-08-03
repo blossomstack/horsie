@@ -14,7 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime_vendor::{
     CreateRuntimeRequest, DeleteRuntimeRequest, GetRuntimeRequest, HibernateRuntimeRequest,
     RuntimeSpec as WireRuntimeSpec, RuntimeVendorCommand, RuntimeVendorEvent,
-    RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage,
+    RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage, VendorRegistered, VendorRejected,
 };
 use horsie_runtime_client::RuntimeClient;
 use std::collections::HashMap;
@@ -28,6 +28,16 @@ use uuid::Uuid;
 
 /// How long the agent has to announce itself after connecting.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a link may go without a single inbound frame before it is treated
+/// as dead.
+///
+/// Agents ping every `HEARTBEAT_INTERVAL` (15s, agent-side), so three missed
+/// pings end the link. It has to be this side of the deal: a half-open socket —
+/// a slept laptop, a dropped VPN — never errors, so without a deadline the
+/// entry would hold its vendor name until TCP eventually noticed, and the name
+/// is exactly what a returning agent needs back.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Ceiling on a single command. A create with `git_checkout` provision steps
 /// legitimately runs for minutes, so this matches the executor's existing
@@ -44,13 +54,26 @@ type BoxedSink = Box<
 
 pub struct RuntimeVendorLink {
     vendor_name: String,
+    /// The announcing *process*. Two links carrying the same id are the same
+    /// agent before and after a dropped socket; two carrying different ids are
+    /// two agents, whatever else they have in common.
+    instance_id: String,
     /// Who presented the credential this link was accepted on. A vendor name is
     /// owned by its principal, so a stranger cannot displace it.
     owner: Principal,
     capabilities: horsie_models::runtime_vendor::RuntimeVendorCapabilities,
+    /// The `request_id` the agent put on its `Ready`. The registration verdict
+    /// echoes it, so accepting or refusing an agent is an ordinary correlated
+    /// reply rather than a second handshake grammar.
+    ready_request_id: String,
     sink: Mutex<BoxedSink>,
     waiters: Waiters,
     connected: Arc<AtomicBool>,
+    /// Fires once the read loop has ended, so whoever published this link can
+    /// unpublish it. A watch rather than a notify: a waiter that arrives after
+    /// the socket died must still be told, and `borrow()` after `subscribe()`
+    /// closes that race.
+    closed: Arc<tokio::sync::watch::Sender<bool>>,
     /// The `Arc` this link lives in, held weakly so the link never keeps
     /// itself alive. Needed because `create`/`attach` hand an owned `Arc` to
     /// the transport and lifecycle handle they build.
@@ -74,7 +97,7 @@ impl RuntimeVendorLink {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<RuntimeVendorOutboundMessage>(&text) {
                             Ok(msg) => match msg.event {
-                                RuntimeVendorEvent::Ready(ev) => return Some(ev),
+                                RuntimeVendorEvent::Ready(ev) => return Some((msg.request_id, ev)),
                                 RuntimeVendorEvent::RuntimeStateChanged(_)
                                 | RuntimeVendorEvent::CreateRuntime(_)
                                 | RuntimeVendorEvent::GetRuntime(_)
@@ -97,26 +120,44 @@ impl RuntimeVendorLink {
         })
         .await;
 
-        let announced = match announced {
-            Ok(Some(ev)) => ev,
+        let (ready_request_id, announced) = match announced {
+            Ok(Some(msg)) => msg,
             Ok(None) => return Err("agent did not announce itself".to_string()),
             Err(_) => return Err("timed out waiting for the agent handshake".to_string()),
         };
 
         let waiters: Waiters = Arc::new(Mutex::new(HashMap::new()));
         let connected = Arc::new(AtomicBool::new(true));
+        let closed = Arc::new(tokio::sync::watch::Sender::new(false));
         let link = Arc::new_cyclic(|this| Self {
             vendor_name: announced.vendor_name,
+            instance_id: announced.instance_id,
             owner,
             capabilities: announced.capabilities,
+            ready_request_id,
             sink: Mutex::new(Box::new(sink)),
             waiters: waiters.clone(),
             connected: connected.clone(),
+            closed: closed.clone(),
             this: this.clone(),
         });
 
         tokio::spawn(async move {
-            while let Some(next) = stream.next().await {
+            loop {
+                // Every inbound frame counts, not just the heartbeat: a link
+                // carrying tool calls is alive by definition, and a busy agent
+                // must never lose its name to a ping that queued behind them.
+                let next = match tokio::time::timeout(IDLE_TIMEOUT, stream.next()).await {
+                    Ok(Some(next)) => next,
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::info!(
+                            timeout_secs = IDLE_TIMEOUT.as_secs(),
+                            "vendor link: no frame within the idle timeout, treating it as dead"
+                        );
+                        break;
+                    }
+                };
                 let text = match next {
                     Ok(Message::Text(text)) => text,
                     Ok(Message::Binary(_))
@@ -145,6 +186,7 @@ impl RuntimeVendorLink {
             // Drop every waiter so no caller blocks on a dead socket: each
             // pending `request` sees its sender vanish and reports Disconnected.
             waiters.lock().await.clear();
+            let _ = closed.send(true);
         });
 
         Ok(link)
@@ -156,8 +198,52 @@ impl RuntimeVendorLink {
     }
 
     #[must_use]
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    #[must_use]
     pub fn owner(&self) -> &Principal {
         &self.owner
+    }
+
+    /// Resolves once the read loop has ended, immediately if it already has.
+    pub async fn closed(&self) {
+        let mut rx = self.closed.subscribe();
+        if *rx.borrow() {
+            return;
+        }
+        let _ = rx.changed().await;
+    }
+
+    /// Tell the agent it is published. Until this arrives an agent cannot tell
+    /// a live registration from a refused one — the socket looks the same.
+    pub async fn confirm_registration(&self) -> Result<(), String> {
+        self.write(&RuntimeVendorInboundMessage {
+            request_id: self.ready_request_id.clone(),
+            command: RuntimeVendorCommand::VendorRegistered(VendorRegistered {}),
+        })
+        .await
+    }
+
+    /// Tell the agent it is not published, and why.
+    ///
+    /// Best-effort: the caller drops the link straight after, which closes the
+    /// socket, and an agent that never reads this still ends up disconnected —
+    /// it just goes back to guessing, which is the state this whole message
+    /// exists to end.
+    pub async fn reject_registration(&self, reason: &str) {
+        if let Err(e) = self
+            .write(&RuntimeVendorInboundMessage {
+                request_id: self.ready_request_id.clone(),
+                command: RuntimeVendorCommand::VendorRejected(VendorRejected {
+                    reason: reason.to_string(),
+                }),
+            })
+            .await
+        {
+            tracing::debug!(error = %e, "could not deliver a registration refusal");
+        }
     }
 
     #[must_use]
@@ -388,6 +474,7 @@ mod tests {
     fn boot(name: &str, provisioning: bool) -> RuntimeVendorEvent {
         RuntimeVendorEvent::Ready(RuntimeVendorReady {
             vendor_name: name.to_string(),
+            instance_id: format!("{name}-instance"),
             capabilities: RuntimeVendorCapabilities {
                 supports_provisioning: provisioning,
             },
@@ -416,7 +503,57 @@ mod tests {
             .await
             .expect("handshake");
         assert_eq!(link.vendor_name(), "my-laptop");
+        assert_eq!(link.instance_id(), "my-laptop-instance");
         assert!(!link.announced_capabilities().supports_provisioning);
+        assert!(link.is_connected());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_that_goes_quiet_is_treated_as_dead() {
+        let (server_ws, mut agent_ws) = ws_pair().await;
+        tokio::spawn(async move {
+            send_event(&mut agent_ws, "boot", boot("slept-laptop", false)).await;
+            // Holds the socket open and says nothing more — a half-open socket
+            // reads exactly like this, and never errors on its own.
+            std::future::pending::<()>().await;
+        });
+
+        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+            .await
+            .expect("handshake");
+        assert!(link.is_connected());
+
+        // Auto-advanced by the paused clock, not slept through.
+        link.closed().await;
+        assert!(
+            !link.is_connected(),
+            "a link with no frame inside the idle timeout must not keep its name"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_keeps_a_link_alive() {
+        let (server_ws, mut agent_ws) = ws_pair().await;
+        tokio::spawn(async move {
+            send_event(&mut agent_ws, "boot", boot("busy-laptop", false)).await;
+            loop {
+                if agent_ws
+                    .send(Message::Ping(Vec::new().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+
+        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+            .await
+            .expect("handshake");
+        // Well short of the idle timeout, but the point is the pings are seen
+        // as liveness rather than skipped as noise.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(link.is_connected());
     }
 
@@ -552,6 +689,8 @@ mod tests {
                     RuntimeVendorCommand::DeleteRuntime(_) => "delete",
                     RuntimeVendorCommand::QueryRuntimes(_) => "query",
                     RuntimeVendorCommand::Runtime(_) => "runtime",
+                    RuntimeVendorCommand::VendorRegistered(_) => "registered",
+                    RuntimeVendorCommand::VendorRejected(_) => "rejected",
                 };
                 recorder.lock().unwrap().push(label.to_string());
                 send_event(

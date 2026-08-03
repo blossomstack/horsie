@@ -52,6 +52,8 @@ tempfile          = { workspace = true }
 # to exactly the same contract as InMemoryJournal and FileJournal.
 horsie-actor           = { path = "../actor", features = ["file-journal", "test-util"] }
 tempfile = { workspace = true }
+# `start_paused` runtimes, so a test about a 45s idle timeout takes no wall time.
+tokio    = { workspace = true, features = ["test-util"] }
 tower    = { version = "0.5", features = ["util"] }
 # MockProvider/scripted completions for subagent routing tests; production
 # builds never see the testkit.

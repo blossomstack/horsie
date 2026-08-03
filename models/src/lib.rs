@@ -757,6 +757,7 @@ mod vendor_tests {
             request_id: "req-2".to_string(),
             event: RuntimeVendorEvent::Ready(RuntimeVendorReady {
                 vendor_name: "my-laptop".to_string(),
+                instance_id: "inst-1".to_string(),
                 capabilities: RuntimeVendorCapabilities {
                     supports_provisioning: false,
                 },

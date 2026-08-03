@@ -45,6 +45,8 @@ struct Recorder {
     /// Call ids the server asked to cancel — how a test proves a stop reached
     /// the sandbox instead of merely being dropped locally.
     cancels: Mutex<Vec<String>>,
+    /// Why the server refused to publish this agent, if it did.
+    rejection: Mutex<Option<String>>,
 }
 
 impl Recorder {
@@ -111,6 +113,8 @@ struct Faults {
 
 pub struct FakeRuntimeVendor {
     recorder: Arc<Recorder>,
+    /// This fake's process identity, kept so `resuming` can inherit it.
+    instance_id: String,
     gate: Gate,
     create_gate: Gate,
     /// Present only for the in-process shape, where the test drives the link
@@ -124,6 +128,9 @@ impl FakeRuntimeVendor {
     pub fn builder(vendor_name: &str) -> FakeRuntimeVendorBuilder {
         FakeRuntimeVendorBuilder {
             vendor_name: vendor_name.to_string(),
+            // A fresh id per builder, so two fakes are two agent processes
+            // unless a test says otherwise with `resuming`.
+            instance_id: uuid::Uuid::new_v4().to_string(),
             supports_provisioning: true,
             bash_stdout: "ok".to_string(),
             faults: Faults::default(),
@@ -140,6 +147,20 @@ impl FakeRuntimeVendor {
     pub fn signals(&self) -> Vec<String> {
         self.recorder
             .signals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Wait for this agent to stop serving and report why the server refused
+    /// it, or `None` if it stopped for any other reason.
+    ///
+    /// A refused agent's socket is closed by the server, so this resolves
+    /// without needing a timeout of its own.
+    pub async fn refusal(&mut self) -> Option<String> {
+        let _ = (&mut self.task).await;
+        self.recorder
+            .rejection
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -219,6 +240,10 @@ impl FakeRuntimeVendor {
 
 pub struct FakeRuntimeVendorBuilder {
     vendor_name: String,
+    /// The agent *process* this fake stands in for. Two fakes with different
+    /// ids are two processes competing for one name; `resuming` is how a test
+    /// says "the same process came back".
+    instance_id: String,
     supports_provisioning: bool,
     bash_stdout: String,
     faults: Faults,
@@ -250,6 +275,17 @@ impl FakeRuntimeVendorBuilder {
     #[must_use]
     pub fn resuming(mut self, prior: &FakeRuntimeVendor) -> Self {
         self.resume = Some(prior.recorder.clone());
+        // Same process, so the same instance id: the server must see this as
+        // the agent reclaiming its own name, not a second one taking it.
+        self.instance_id = prior.instance_id.clone();
+        self
+    }
+
+    /// Announce a specific instance id. Only tests about name collisions have a
+    /// reason to care what it is.
+    #[must_use]
+    pub fn instance_id(mut self, value: &str) -> Self {
+        self.instance_id = value.to_string();
         self
     }
 
@@ -347,6 +383,7 @@ impl FakeRuntimeVendorBuilder {
         } else {
             Gate::open()
         };
+        let instance_id = self.instance_id.clone();
         let task = tokio::spawn(run_agent(
             ws,
             self,
@@ -356,6 +393,7 @@ impl FakeRuntimeVendorBuilder {
         ));
         Ok(FakeRuntimeVendor {
             recorder,
+            instance_id,
             gate,
             create_gate,
             link: None,
@@ -385,6 +423,7 @@ impl FakeRuntimeVendorBuilder {
             Gate::open()
         };
         let owner = self.owner.clone();
+        let instance_id = self.instance_id.clone();
         let task = tokio::spawn(run_agent(
             agent,
             self,
@@ -395,6 +434,7 @@ impl FakeRuntimeVendorBuilder {
         let link = RuntimeVendorLink::start(server, owner).await?;
         Ok(FakeRuntimeVendor {
             recorder,
+            instance_id,
             gate,
             create_gate,
             link: Some(link),
@@ -424,6 +464,7 @@ async fn run_agent<S>(
     let FakeRuntimeVendorBuilder {
         owner: _,
         vendor_name,
+        instance_id,
         supports_provisioning,
         bash_stdout,
         faults,
@@ -445,6 +486,7 @@ async fn run_agent<S>(
         request_id: "boot".to_string(),
         event: RuntimeVendorEvent::Ready(RuntimeVendorReady {
             vendor_name,
+            instance_id,
             capabilities: RuntimeVendorCapabilities {
                 supports_provisioning,
             },
@@ -635,6 +677,18 @@ async fn run_agent<S>(
                         message,
                     })
                 })
+            }
+            // Published. A real agent starts its heartbeat here; this one has
+            // nothing to do but keep serving.
+            RuntimeVendorCommand::VendorRegistered(_) => None,
+            // Refused, and no retry can change that: record why and stop, the
+            // way `horsie connect` exits instead of backing off forever.
+            RuntimeVendorCommand::VendorRejected(rejected) => {
+                *recorder
+                    .rejection
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(rejected.reason);
+                return;
             }
         };
 

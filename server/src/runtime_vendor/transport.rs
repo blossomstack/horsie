@@ -113,6 +113,7 @@ mod tests {
                 request_id: "boot".to_string(),
                 event: RuntimeVendorEvent::Ready(RuntimeVendorReady {
                     vendor_name: "v".to_string(),
+                    instance_id: "v-instance".to_string(),
                     capabilities: RuntimeVendorCapabilities {
                         supports_provisioning: true,
                     },
