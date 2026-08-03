@@ -190,9 +190,16 @@ async fn run(cli: Cli) -> Result<(), String> {
         signal_cancel.cancel();
     });
 
-    agent
-        .run(&endpoint, cli.token.as_deref(), cancel.clone())
-        .await
+    // A machine token has no expiry and nothing to refresh against, so this
+    // agent's answer is the same on every attempt. It still goes through the
+    // provider so the reconnect loop has one shape.
+    let token = cli.token.clone();
+    let credential: horsie_runtime_vendor::CredentialProvider = Arc::new(move || {
+        let token = token.clone();
+        Box::pin(async move { Ok(token) })
+    });
+
+    agent.run(&endpoint, credential, cancel.clone()).await
 }
 
 #[cfg(unix)]

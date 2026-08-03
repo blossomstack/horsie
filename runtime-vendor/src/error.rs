@@ -12,6 +12,21 @@ pub enum RuntimeError {
     Provider(String),
 }
 
+/// Why a credential could not be produced for a dial, split by what the
+/// reconnect loop should do about it.
+#[derive(Debug, Error)]
+pub enum CredentialError {
+    /// The issuer could not be reached. Indistinguishable from a failed dial
+    /// as far as the agent is concerned, and retried the same way.
+    #[error("{0}")]
+    Transient(String),
+    /// The credential is definitively dead — revoked, expired past recovery,
+    /// or refused by the issuer. No amount of retrying will fix it, so the
+    /// agent stops and says so rather than looping on a 401 forever.
+    #[error("{0}")]
+    Dead(String),
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutorError {
     #[error("connection failed: {0}")]

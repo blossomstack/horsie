@@ -390,36 +390,75 @@ pub async fn server_requires_auth(server: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// What resolving a credential produced, split by what a caller that will try
+/// again should do about it.
+///
+/// A one-shot command can flatten all three into a `Result` and exit. A
+/// long-lived vendor agent cannot: it has to tell "the server is down right
+/// now" (wait, try again) from "this login is finished" (stop and say so), and
+/// before this distinction existed it treated both as neither — retrying a dead
+/// token every 30 seconds forever.
+#[derive(Debug)]
+pub enum TokenOutcome {
+    /// A usable bearer, or `None` when no credential is configured — which is
+    /// correct against a server with authentication disabled.
+    Token(Option<String>),
+    /// The issuer could not be reached. Says nothing about the credential.
+    Transient(String),
+    /// The stored login is finished and has been discarded locally.
+    Dead(String),
+}
+
 /// The bearer to send to `server`, refreshing a stale access token first.
 /// `None` means "no credential configured", which callers report as a prompt to
 /// log in rather than as a failure.
 pub async fn resolve_token(server: &str) -> Result<Option<String>, CliError> {
-    resolve_token_with(server, &credentials_path(), std::env::var(TOKEN_ENV).ok()).await
+    match resolve_token_outcome(server).await {
+        TokenOutcome::Token(t) => Ok(t),
+        TokenOutcome::Transient(m) | TokenOutcome::Dead(m) => Err(CliError::Server(m)),
+    }
 }
 
-async fn resolve_token_with(
+/// [`resolve_token`], keeping the distinction its `Result` throws away.
+pub async fn resolve_token_outcome(server: &str) -> TokenOutcome {
+    resolve_token_outcome_with(server, &credentials_path(), std::env::var(TOKEN_ENV).ok()).await
+}
+
+async fn resolve_token_outcome_with(
     server: &str,
     path: &Path,
     env_token: Option<String>,
-) -> Result<Option<String>, CliError> {
+) -> TokenOutcome {
     if let Some(t) = env_token.filter(|t| !t.is_empty()) {
-        return Ok(Some(t));
+        return TokenOutcome::Token(Some(t));
     }
-    let mut creds = Credentials::load(path)?;
+    let mut creds = match Credentials::load(path) {
+        Ok(c) => c,
+        // An unreadable credential file is a local fault, not a verdict on the
+        // credential: a caller that retries may well find it readable next time.
+        Err(e) => return TokenOutcome::Transient(e.to_string()),
+    };
     let Some(current) = creds.get(server).cloned() else {
-        return Ok(None);
+        return TokenOutcome::Token(None);
     };
     if !current.is_expired(now_secs()) || current.refresh_token.is_empty() {
-        return Ok(Some(current.access_token));
+        return TokenOutcome::Token(Some(current.access_token));
     }
 
     let client = reqwest::Client::new();
-    let refreshed: Result<TokenPair, ApiErrorBody> = post_json(
+    let refreshed: Result<TokenPair, ApiErrorBody> = match post_json(
         &client,
         &api_url(server, "/api/auth/refresh"),
         &serde_json::json!({ "refreshToken": current.refresh_token }),
     )
-    .await?;
+    .await
+    {
+        Ok(r) => r,
+        // The request never got an answer. Crucially, the stored credential is
+        // left alone — discarding it here would turn a server restart into a
+        // forced re-login.
+        Err(e) => return TokenOutcome::Transient(e.to_string()),
+    };
     match refreshed {
         Ok(pair) => {
             let updated = ServerCredentials {
@@ -428,20 +467,23 @@ async fn resolve_token_with(
                 expires_at: now_secs() + pair.expires_in,
             };
             creds.set(server, updated.clone());
-            creds.save(path)?;
-            Ok(Some(updated.access_token))
+            if let Err(e) = creds.save(path) {
+                // The token in hand is good even if it could not be written
+                // down; the next run refreshes again rather than failing now.
+                eprintln!("warning: could not save refreshed credentials: {e}");
+            }
+            TokenOutcome::Token(Some(updated.access_token))
         }
+        // The server answered, and its answer was no: the refresh token is
+        // rotated away, revoked, or expired. Drop it so the next run says "log
+        // in" instead of retrying a credential that can never work again.
         Err(_) => {
-            // The refresh token is dead (rotated away, revoked, or expired).
-            // Drop it so the next run says "log in" instead of retrying a
-            // credential that can never work again.
             creds.remove(server);
-            creds.save(path)?;
-            Err(CliError::Server(format!(
-                "the stored login for {} is no longer valid — run `horsie auth login --server {}`",
-                normalize_server(server),
+            let _ = creds.save(path);
+            TokenOutcome::Dead(format!(
+                "the stored login for {} is no longer valid",
                 normalize_server(server)
-            )))
+            ))
         }
     }
 }
@@ -550,14 +592,13 @@ mod tests {
         // The env override exists precisely so scripts need no credential file.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("credentials.json");
-        let token = resolve_token_with(
+        let outcome = resolve_token_outcome_with(
             "http://localhost:3789",
             &path,
             Some("hsk_usr_from_env".to_string()),
         )
-        .await
-        .unwrap();
-        assert_eq!(token.as_deref(), Some("hsk_usr_from_env"));
+        .await;
+        assert!(matches!(outcome, TokenOutcome::Token(Some(t)) if t == "hsk_usr_from_env"));
     }
 
     #[tokio::test]
@@ -577,21 +618,52 @@ mod tests {
         );
         creds.save(&path).unwrap();
 
-        let token = resolve_token_with("http://localhost:3789", &path, None)
-            .await
-            .unwrap();
-        assert_eq!(token.as_deref(), Some("hsk_usr_live"));
+        let outcome = resolve_token_outcome_with("http://localhost:3789", &path, None).await;
+        assert!(matches!(outcome, TokenOutcome::Token(Some(t)) if t == "hsk_usr_live"));
     }
 
     #[tokio::test]
     async fn resolve_token_is_none_when_the_server_is_unknown() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("credentials.json");
+        assert!(matches!(
+            resolve_token_outcome_with("http://elsewhere", &path, None).await,
+            TokenOutcome::Token(None)
+        ));
+    }
+
+    /// The distinction the vendor agent's reconnect loop depends on. An issuer
+    /// that cannot be reached says nothing about whether the credential is
+    /// still good, so it must neither be reported dead nor — worse — discarded:
+    /// that would turn every server restart into a forced re-login.
+    #[tokio::test]
+    async fn an_unreachable_issuer_is_transient_and_keeps_the_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("credentials.json");
+        let mut creds = Credentials::default();
+        creds.set(
+            // Port 1: nothing listens, so the refresh POST fails to connect.
+            "http://127.0.0.1:1",
+            ServerCredentials {
+                access_token: "hsk_usr_stale".into(),
+                refresh_token: "hsk_ref_r".into(),
+                expires_at: now_secs() - 1,
+            },
+        );
+        creds.save(&path).unwrap();
+
+        match resolve_token_outcome_with("http://127.0.0.1:1", &path, None).await {
+            TokenOutcome::Transient(_) => {}
+            other @ (TokenOutcome::Token(_) | TokenOutcome::Dead(_)) => {
+                panic!("expected Transient, got {other:?}")
+            }
+        }
         assert!(
-            resolve_token_with("http://elsewhere", &path, None)
-                .await
+            Credentials::load(&path)
                 .unwrap()
-                .is_none()
+                .get("http://127.0.0.1:1")
+                .is_some(),
+            "an unreachable issuer must not discard a credential that may still be valid"
         );
     }
 }

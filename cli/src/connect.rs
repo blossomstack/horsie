@@ -205,6 +205,29 @@ pub async fn run(
     // a server with authentication off, which is what keeps that setup working
     // untouched.
     let token = crate::auth::resolve_token(server).await?;
+    // Resolved again before every dial, not captured here: an access token
+    // lives an hour, an established link is never re-authenticated, and this
+    // process is expected to run for days. The one-shot resolve above is only
+    // for the pre-flight below.
+    let credential: horsie_runtime_vendor::CredentialProvider = {
+        let server = server.to_string();
+        Arc::new(move || {
+            let server = server.clone();
+            Box::pin(async move {
+                match crate::auth::resolve_token_outcome(&server).await {
+                    crate::auth::TokenOutcome::Token(t) => Ok(t),
+                    crate::auth::TokenOutcome::Transient(m) => {
+                        Err(horsie_runtime_vendor::CredentialError::Transient(m))
+                    }
+                    crate::auth::TokenOutcome::Dead(m) => {
+                        Err(horsie_runtime_vendor::CredentialError::Dead(format!(
+                            "{m} — run `horsie auth login --server {server}`"
+                        )))
+                    }
+                }
+            })
+        })
+    };
     // Pre-flight rather than discovering it as a 401 the reconnect loop retries
     // forever: the overwhelmingly common cause is simply not having logged in.
     if token.is_none() && crate::auth::server_requires_auth(server).await {
@@ -317,7 +340,7 @@ pub async fn run(
     });
 
     agent
-        .run(&endpoint, token.as_deref(), cancel.clone())
+        .run(&endpoint, credential, cancel.clone())
         .await
         .map_err(CliError::Executor)?;
     Ok(0)
