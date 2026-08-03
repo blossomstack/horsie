@@ -188,8 +188,9 @@ dependencies = [
 
 [[package]]
 name = "async-llm"
-version = "0.7.0"
-source = "git+https://github.com/blossomstack/async-llm.git?rev=b499ec1c87921f415381e0813f79e8255459b45d#b499ec1c87921f415381e0813f79e8255459b45d"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "019d57621e8373cd1be9ae4f6f6b804efe4d2f886782a806ff8c1ef20300bd7e"
 dependencies = [
  "backoff",
  "derive_builder",

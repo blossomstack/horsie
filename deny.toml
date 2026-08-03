@@ -57,7 +57,6 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
-    "https://github.com/blossomstack/async-llm.git",
     # hackamore-agent: in-process hackamore provisioning for the sandboxed runtime.
     "https://github.com/blossomstack/hackamore",
 ]
