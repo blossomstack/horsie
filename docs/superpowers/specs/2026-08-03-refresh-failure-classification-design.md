@@ -111,24 +111,31 @@ returns `CliError::Server`, ending the login. A gateway error during the
 ten-minute approval window therefore kills a login the user may already have
 approved in the browser.
 
-A failure that is not one of the flow's own codes (`authorization_pending`,
-`slow_down`, `access_denied`) is treated as `authorization_pending`: keep
-polling until the device code's own deadline, which already bounds the loop.
-`access_denied` and an expired code still end it.
+The decision moves into a `poll_step(&ApiFailure) -> PollStep` free function
+(`KeepPolling` / `SlowDown` / `Denied` / `Expired`), so it can be tested without
+`login`'s side effects — the command writes to the real `credentials_path()`,
+which a test cannot redirect without setting environment variables.
+
+A failure that is not one of the flow's own codes keeps polling until the device
+code's own deadline, which already bounds the loop. `access_denied` and an
+expired code still end it.
 
 ## Testing
 
-All in `cli/src/auth.rs`'s existing test module. The stub is a one-shot
+All in `cli/src/auth.rs`'s existing test module. The refresh cases drive a real
+`resolve_token_outcome_with` against a stub issuer: a one-shot
 `tokio::net::TcpListener` on `127.0.0.1:0` that reads the request and writes a
-canned HTTP response — no new dependency, and hermetic.
+canned HTTP response — no new dependency, and hermetic. The poll cases call
+`poll_step` directly.
 
 | Case | Expected |
 | --- | --- |
-| 502 with an HTML body | `Transient`; credential still in the file |
-| 500 with a JSON envelope | `Transient`; credential still in the file |
-| 400 `access_denied` | `Dead`; credential removed |
-| 400 with an unrecognized code | `Transient`; credential still in the file |
-| device poll gets a 502, then a token | login completes |
+| refresh: 502 with an HTML body | `Transient`; credential still in the file |
+| refresh: 500 with a JSON envelope | `Transient`; credential still in the file |
+| refresh: 403 with an HTML body | `Transient`; credential still in the file |
+| refresh: 400 `access_denied` | `Dead`; credential removed |
+| poll: 502, 429, 500 `internal` | `KeepPolling` |
+| poll: the four flow codes | `KeepPolling` / `SlowDown` / `Denied` / `Expired` |
 
 The existing `an_unreachable_issuer_is_transient_and_keeps_the_credential` stays
 as-is; it covers the path that already worked.
