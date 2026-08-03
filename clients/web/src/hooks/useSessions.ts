@@ -17,7 +17,7 @@ import { deriveTitle } from "../lib/format";
 export const qk = {
   sessions: ["sessions"] as const,
   session: (id: string) => ["session", id] as const,
-  sessionUsage: (id: string) => ["session-usage", id] as const,
+  agent: (id: string, agentId: string) => ["session-agent", id, agentId] as const,
 };
 
 export function useSessionList() {
@@ -38,15 +38,16 @@ export function useSession(id: string | undefined) {
   });
 }
 
-/** Session-level aggregated usage + the main agent's context-window state.
- * Kept fresh by SSE-driven invalidation on `StatusChanged` (see
- * `useSessionStream`), not polling. */
-export function useSessionUsage(id: string | undefined) {
+/** One agent's current values: task list, usage, context-window state. Kept
+ * fresh by SSE-driven invalidation (see `useSessionStream`), not polling —
+ * every frame that changes one of these is a signal to re-read, never a delta
+ * to accumulate. */
+export function useAgent(id: string | undefined, agentId: string) {
   return useQuery({
-    queryKey: id ? qk.sessionUsage(id) : ["session-usage", "none"],
-    queryFn: () => api.sessions.usage(id as string),
+    queryKey: id ? qk.agent(id, agentId) : ["session-agent", "none"],
+    queryFn: () => api.sessions.agent(id as string, agentId),
     enabled: !!id,
-    select: (r) => r.usage,
+    select: (r) => r.agent,
   });
 }
 

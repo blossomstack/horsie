@@ -1,17 +1,16 @@
 
 import { PendingAskView } from './pendingAskView';
+import { ProgressionEvent } from './progressionEvent';
 import { QueuedMessage } from './queuedMessage';
 import { SessionStatusKind } from './sessionStatusKind';
+import { SubAgentView } from './subAgentView';
+import { UsageView } from './usageView';
 export interface SessionDetail {
   id: string;
   name?: string;
   status?: SessionStatusKind;
   createdAt: number;
   lastError?: string;
-  /**
-   * The first question the agent is awaiting an answer to (status
-   */
-  pendingQuestion?: string;
   /**
    * Every question the agent is awaiting an answer to, oldest first. All of
    */
@@ -46,4 +45,16 @@ export interface SessionDetail {
    * Messages accepted but not yet carried into a turn, oldest first (empty
    */
   inbox: QueuedMessage[];
+  /**
+   * Token usage summed across every agent this session hosts. Per-agent
+   */
+  usageTotal: UsageView;
+  /**
+   * Every agent this session hosts: the main agent first, then its subagent
+   */
+  agents: SubAgentView[];
+  /**
+   * The resource-preparation stage a turn is currently at, when one is
+   */
+  progression?: ProgressionEvent;
 }

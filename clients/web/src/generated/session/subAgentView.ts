@@ -1,6 +1,6 @@
 
 /**
- * One node of a session&#x27;s subagent tree. `output` is deliberately absent —
+ * One agent this session hosts. The main agent has `parent`/`label` absent
  */
 export interface SubAgentView {
   id: string;
@@ -8,7 +8,7 @@ export interface SubAgentView {
    * Parent agent id; absent → the session&#x27;s main agent.
    */
   parent?: string;
-  label: string;
+  label?: string;
   depth: number;
   /**
    * &quot;running&quot; | &quot;completed&quot; | &quot;failed&quot;.

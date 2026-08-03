@@ -1,22 +1,15 @@
 
-import { DeltaEvent } from './deltaEvent';
+import { AgentTreeEvent } from './agentTreeEvent';
 import { ErrorEvent } from './errorEvent';
 import { InboxChangedEvent } from './inboxChangedEvent';
-import { MessageEvent } from './messageEvent';
 import { ProgressionEvent } from './progressionEvent';
 import { StatusChangedEvent } from './statusChangedEvent';
-import { TaskListEvent } from './taskListEvent';
-import { ToolOutputEvent } from './toolOutputEvent';
-import { ToolStartEvent } from './toolStartEvent';
-import { TurnCompletedEvent } from './turnCompletedEvent';
+/**
+ * A frame on the session stream (`/sessions/:id/events`). Session-scoped
+ */
 export type SessionEvent =
-  | { type: "Message"; value: MessageEvent }
-  | { type: "ToolResult"; value: ToolOutputEvent }
-  | { type: "TurnCompleted"; value: TurnCompletedEvent }
-  | { type: "InboxChanged"; value: InboxChangedEvent }
   | { type: "StatusChanged"; value: StatusChangedEvent }
+  | { type: "InboxChanged"; value: InboxChangedEvent }
   | { type: "Error"; value: ErrorEvent }
-  | { type: "Delta"; value: DeltaEvent }
-  | { type: "ToolStart"; value: ToolStartEvent }
-  | { type: "TaskListChanged"; value: TaskListEvent }
-  | { type: "Progressed"; value: ProgressionEvent };
+  | { type: "Progressed"; value: ProgressionEvent }
+  | { type: "AgentTreeChanged"; value: AgentTreeEvent };
