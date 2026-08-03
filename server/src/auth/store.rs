@@ -3,8 +3,8 @@
 //! writes rows.
 
 use crate::auth::{Principal, TokenKind};
-use sqlx::Row;
 use crate::db::Db;
+use sqlx::Row;
 use sqlx::any::AnyRow;
 
 /// One row of `auth_users`.
@@ -82,10 +82,12 @@ impl AuthStore {
     }
 
     pub async fn get_user(&self, username: &str) -> Result<Option<UserRow>, String> {
-        let row = sqlx::query(&self.db.q(
-            "SELECT id, username, password_hash, password_is_generated \
-             FROM auth_users WHERE username = ?",
-        ))
+        let row = sqlx::query(
+            &self
+                .db
+                .q("SELECT id, username, password_hash, password_is_generated \
+             FROM auth_users WHERE username = ?"),
+        )
         .bind(username)
         .fetch_optional(self.db.pool())
         .await
@@ -107,11 +109,9 @@ impl AuthStore {
         }
         // `RETURNING id` rather than a follow-up `last_insert_id`: sqlx's Any
         // driver reports that as NULL on SQLite regardless of the backend.
-        let row = sqlx::query(&self.db.q(
-            "INSERT INTO auth_users \
+        let row = sqlx::query(&self.db.q("INSERT INTO auth_users \
              (username, password_hash, password_is_generated, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?) RETURNING id",
-        ))
+             VALUES (?, ?, ?, ?, ?) RETURNING id"))
         .bind(username)
         .bind(password_hash)
         .bind(i64::from(generated))
@@ -158,11 +158,9 @@ impl AuthStore {
         expires_at: Option<i64>,
         now: i64,
     ) -> Result<(), String> {
-        sqlx::query(&self.db.q(
-            "INSERT INTO auth_tokens \
+        sqlx::query(&self.db.q("INSERT INTO auth_tokens \
              (id, kind, principal, token_hash, label, chain_id, expires_at, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ))
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"))
         .bind(id)
         .bind(kind.as_db())
         .bind(principal.to_db())
@@ -195,12 +193,16 @@ impl AuthStore {
     }
 
     pub async fn revoke_token(&self, id: &str, now: i64) -> Result<(), String> {
-        sqlx::query(&self.db.q("UPDATE auth_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL"))
-            .bind(now)
-            .bind(id)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            &self
+                .db
+                .q("UPDATE auth_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL"),
+        )
+        .bind(now)
+        .bind(id)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -214,11 +216,9 @@ impl AuthStore {
         except_id: Option<&str>,
         now: i64,
     ) -> Result<(), String> {
-        sqlx::query(&self.db.q(
-            "UPDATE auth_tokens SET revoked_at = ? \
+        sqlx::query(&self.db.q("UPDATE auth_tokens SET revoked_at = ? \
              WHERE principal = ? AND kind = ? AND revoked_at IS NULL \
-             AND (? IS NULL OR id <> ?)",
-        ))
+             AND (? IS NULL OR id <> ?)"))
         .bind(now)
         .bind(principal.to_db())
         .bind(kind.as_db())
@@ -242,12 +242,16 @@ impl AuthStore {
         if last_used_at.is_some_and(|t| now - t < 60) {
             return Ok(false);
         }
-        sqlx::query(&self.db.q("UPDATE auth_tokens SET last_used_at = ? WHERE id = ?"))
-            .bind(now)
-            .bind(id)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            &self
+                .db
+                .q("UPDATE auth_tokens SET last_used_at = ? WHERE id = ?"),
+        )
+        .bind(now)
+        .bind(id)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(true)
     }
     /// Live tokens of one kind, newest first. Used to list machine tokens; the
@@ -288,10 +292,8 @@ impl AuthStore {
         now: i64,
         expires_at: i64,
     ) -> Result<(), String> {
-        sqlx::query(&self.db.q(
-            "INSERT INTO auth_device_codes \
-             (device_code_hash, user_code, created_at, expires_at) VALUES (?, ?, ?, ?)",
-        ))
+        sqlx::query(&self.db.q("INSERT INTO auth_device_codes \
+             (device_code_hash, user_code, created_at, expires_at) VALUES (?, ?, ?, ?)"))
         .bind(device_hash)
         .bind(user_code)
         .bind(now)
@@ -355,11 +357,9 @@ impl AuthStore {
     }
 
     pub async fn deny_device_code(&self, user_code: &str, now: i64) -> Result<bool, String> {
-        let res = sqlx::query(&self.db.q(
-            "UPDATE auth_device_codes SET denied_at = ? \
+        let res = sqlx::query(&self.db.q("UPDATE auth_device_codes SET denied_at = ? \
              WHERE user_code = ? AND expires_at > ? \
-             AND approved_at IS NULL AND denied_at IS NULL",
-        ))
+             AND approved_at IS NULL AND denied_at IS NULL"))
         .bind(now)
         .bind(user_code)
         .bind(now)
@@ -370,33 +370,45 @@ impl AuthStore {
     }
 
     pub async fn mark_device_polled(&self, device_hash: &[u8], now: i64) -> Result<(), String> {
-        sqlx::query(&self.db.q("UPDATE auth_device_codes SET last_polled_at = ? WHERE device_code_hash = ?"))
-            .bind(now)
-            .bind(device_hash)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            &self
+                .db
+                .q("UPDATE auth_device_codes SET last_polled_at = ? WHERE device_code_hash = ?"),
+        )
+        .bind(now)
+        .bind(device_hash)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub async fn consume_device_code(&self, device_hash: &[u8], now: i64) -> Result<(), String> {
-        sqlx::query(&self.db.q("UPDATE auth_device_codes SET consumed_at = ? WHERE device_code_hash = ?"))
-            .bind(now)
-            .bind(device_hash)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            &self
+                .db
+                .q("UPDATE auth_device_codes SET consumed_at = ? WHERE device_code_hash = ?"),
+        )
+        .bind(now)
+        .bind(device_hash)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     /// Housekeeping, called whenever a code is issued. Device codes are
     /// short-lived and never read after expiry, so nothing is lost.
     pub async fn purge_expired_device_codes(&self, now: i64) -> Result<(), String> {
-        sqlx::query(&self.db.q("DELETE FROM auth_device_codes WHERE expires_at <= ?"))
-            .bind(now)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM auth_device_codes WHERE expires_at <= ?"),
+        )
+        .bind(now)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -433,9 +445,11 @@ impl AuthStore {
     /// Revoke every live token sharing a rotation chain — the response to a
     /// replayed refresh token.
     pub async fn revoke_chain(&self, chain_id: &str, now: i64) -> Result<(), String> {
-        sqlx::query(&self.db.q(
-            "UPDATE auth_tokens SET revoked_at = ? WHERE chain_id = ? AND revoked_at IS NULL",
-        ))
+        sqlx::query(
+            &self.db.q(
+                "UPDATE auth_tokens SET revoked_at = ? WHERE chain_id = ? AND revoked_at IS NULL",
+            ),
+        )
         .bind(now)
         .bind(chain_id)
         .execute(self.db.pool())
@@ -480,7 +494,6 @@ mod tests {
     /// through one connection is invisible to the next. Same shape as
     /// `memory::store`'s test helper.
     async fn store() -> (AuthStore, tempfile::TempDir) {
-        use std::str::FromStr;
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
         (AuthStore::new(pool), tmp)

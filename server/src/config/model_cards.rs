@@ -4,8 +4,8 @@
 //! when cards change. Seeded at startup (insert-if-missing), managed via
 //! /api/admin/model-cards, searched via /api/model-cards.
 
-use horsie_models::model_cards::{ModelCard, ModelCardInput, ModelCardUpdate};
 use crate::db::Db;
+use horsie_models::model_cards::{ModelCard, ModelCardInput, ModelCardUpdate};
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
@@ -188,22 +188,22 @@ impl ModelCardStore {
             self.db.now_text()
         );
         let res = sqlx::query(&self.db.q(&statement))
-        .bind(&update.name)
-        .bind(update.context_window.map(i64::from))
-        .bind(update.max_tokens.map(i64::from))
-        .bind(crate::config::store::encode_efforts(
-            update.thinking_efforts.as_ref(),
-        ))
-        .bind(update.default_thinking_effort.clone())
-        .bind(update.thinking_dialect.clone())
-        .bind(update.base_url.clone())
-        .bind(i64::from(
-            update.forced_tools_disable_thinking.unwrap_or(false),
-        ))
-        .bind(model_id)
-        .execute(self.db.pool())
-        .await
-        .map_err(|e| ModelCardError::Db(e.to_string()))?;
+            .bind(&update.name)
+            .bind(update.context_window.map(i64::from))
+            .bind(update.max_tokens.map(i64::from))
+            .bind(crate::config::store::encode_efforts(
+                update.thinking_efforts.as_ref(),
+            ))
+            .bind(update.default_thinking_effort.clone())
+            .bind(update.thinking_dialect.clone())
+            .bind(update.base_url.clone())
+            .bind(i64::from(
+                update.forced_tools_disable_thinking.unwrap_or(false),
+            ))
+            .bind(model_id)
+            .execute(self.db.pool())
+            .await
+            .map_err(|e| ModelCardError::Db(e.to_string()))?;
         if res.rows_affected() == 0 {
             return Err(ModelCardError::NotFound(format!(
                 "no model card '{model_id}'"
@@ -301,11 +301,8 @@ fn parse_seed(json: &str) -> Result<Vec<ModelCardInput>, String> {
 mod tests {
     use super::*;
 
-    async fn test_store(dir: &std::path::Path) -> ModelCardStore {
-        let pool = crate::config::store::open_pool(&format!("sqlite://{}/t.db", dir.display()))
-            .await
-            .unwrap();
-        ModelCardStore::new(pool)
+    async fn test_store() -> ModelCardStore {
+        ModelCardStore::new(crate::db::testing::db().await)
     }
 
     fn input(model_id: &str, name: &str, cw: Option<u32>, mt: Option<u32>) -> ModelCardInput {
@@ -337,8 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn base_url_and_forced_tools_flag_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
 
         let mut card = input("ds", "DS", Some(1000), Some(100));
         card.base_url = Some("https://api.deepseek.com".into());
@@ -369,8 +365,7 @@ mod tests {
     /// API clients keep working unchanged.
     #[tokio::test]
     async fn absent_flag_reads_back_as_false() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store
             .insert(&input("plain", "Plain", None, None))
             .await
@@ -382,8 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn crud_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
 
         let card = store
             .insert(&input("gpt-4o", "GPT-4o", Some(128_000), Some(16_384)))
@@ -410,8 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_duplicate_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store.insert(&input("a", "A", None, None)).await.unwrap();
         assert_eq!(
             store
@@ -424,8 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn validation_rejects_empty_ids_and_zero_limits() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         assert!(matches!(
             store
                 .insert(&input("  ", "A", None, None))
@@ -458,8 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn untrimmed_ids_and_names_are_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         assert!(matches!(
             store
                 .insert(&input(" gpt-4o", "GPT-4o", None, None))
@@ -486,8 +477,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_and_delete_of_unknown_card_are_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         assert!(matches!(
             store
                 .update("ghost", &update_of("x", None, None))
@@ -503,8 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefix_search_orders_limits_and_escapes_wildcards() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store
             .insert(&input("gpt-4o", "GPT-4o", None, None))
             .await
@@ -538,8 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn seed_if_missing_never_overwrites_existing_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         let seeds = vec![input("a", "A", Some(1), None), input("b", "B", None, None)];
         assert_eq!(store.seed_if_missing(&seeds).await.unwrap(), 2);
 
@@ -564,13 +552,13 @@ mod tests {
 
     #[tokio::test]
     async fn operator_seed_file_merges_with_same_semantics() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store
             .seed_if_missing(&bundled_seed().unwrap())
             .await
             .unwrap();
 
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extra.json");
         std::fs::write(
             &path,
@@ -656,11 +644,12 @@ mod tests {
         let db = crate::db::testing::sqlite().await;
         let pool = db.pool();
 
-        let stale: Option<String> =
-            sqlx::query_scalar(&db.q("SELECT model_id FROM model_cards WHERE model_id = 'deepseek-chat'"))
-                .fetch_optional(pool)
-                .await
-                .unwrap();
+        let stale: Option<String> = sqlx::query_scalar(
+            &db.q("SELECT model_id FROM model_cards WHERE model_id = 'deepseek-chat'"),
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap();
         assert!(stale.is_none(), "deepseek-chat must be gone");
 
         // A fresh database is still empty: nothing is seeded from a migration.
@@ -684,13 +673,12 @@ mod tests {
         assert_eq!(row.get::<Option<String>, _>("base_url"), None);
         assert_eq!(row.get::<i64, _>("forced_tools_disable_thinking"), 0);
 
-        let models_flag: i64 = sqlx::query_scalar(&db.q(
-            "SELECT count(*) FROM pragma_table_info('models') \
-             WHERE name = 'forced_tools_disable_thinking'",
-        ))
-        .fetch_one(pool)
-        .await
-        .unwrap();
+        let models_flag: i64 =
+            sqlx::query_scalar(&db.q("SELECT count(*) FROM pragma_table_info('models') \
+             WHERE name = 'forced_tools_disable_thinking'"))
+            .fetch_one(pool)
+            .await
+            .unwrap();
         assert_eq!(models_flag, 1, "models must carry the flag too");
     }
 
@@ -726,8 +714,7 @@ mod tests {
     /// usable DeepSeek cards, since the migration deliberately seeds nothing.
     #[tokio::test]
     async fn seeding_a_fresh_database_installs_the_deepseek_cards() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path()).await;
+        let store = test_store().await;
         store
             .seed_if_missing(&bundled_seed().unwrap())
             .await

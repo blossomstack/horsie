@@ -11,7 +11,7 @@ pub mod model_cards;
 use async_trait::async_trait;
 use horsie_models::settings::{SettingsUpdate, SettingsView};
 
-pub use store::{DbConfigStore, OpenedConfig, StoreDeps};
+pub use store::{DEFAULT_MAX_CONNECTIONS, DbConfigStore, OpenedConfig, StoreDeps};
 
 /// Read + mutate the runtime-editable configuration, redacting secrets.
 #[async_trait]

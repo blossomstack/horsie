@@ -4,10 +4,10 @@
 //! in [`Secret`] in memory; write-only inputs follow the settings store's
 //! keep/clear/set convention (`None` keeps, `""` clears, a value sets).
 
+use crate::db::Db;
 use horsie_agentcore::Secret;
 use horsie_models::github::GitHubAppConfigInput;
 use sqlx::Row;
-use crate::db::Db;
 use sqlx::any::AnyRow;
 
 /// The GitHub App config row (`github_app`, id = 1).
@@ -199,7 +199,6 @@ fn trimmed(v: &Option<String>) -> Option<String> {
 mod tests {
     use super::*;
     use horsie_models::github::GitHubAppConfigInput;
-    use std::str::FromStr;
 
     async fn store() -> (GithubStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();

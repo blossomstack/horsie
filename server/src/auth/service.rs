@@ -549,7 +549,6 @@ mod tests {
     /// The temp dir doubles as the service's state dir, so the generated
     /// password file lands somewhere the test can read.
     async fn service(tmp: &tempfile::TempDir, enabled: bool) -> AuthService {
-        use std::str::FromStr;
         let pool = crate::db::testing::db().await;
         AuthService::new(
             AuthStore::new(pool),

@@ -5,10 +5,10 @@
 //! `""` clears, a value sets). `github_app` servers store no token — it is
 //! minted from the GitHub App connection at use time.
 
+use crate::db::Db;
 use horsie_agentcore::Secret;
 use horsie_models::mcp::{McpAuthInput, McpOAuthInput, McpServerInput};
 use sqlx::Row;
-use crate::db::Db;
 use sqlx::any::AnyRow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -405,7 +405,6 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use horsie_models::mcp::{McpBearerInput, McpGithubAppAuth, McpNoAuth};
-    use std::str::FromStr;
 
     async fn store() -> (McpStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();

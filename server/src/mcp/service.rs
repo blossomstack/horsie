@@ -430,7 +430,6 @@ mod tests {
     use super::*;
     use crate::github::{GithubApi, GithubStore};
     use horsie_models::mcp::{McpAuthInput, McpNoAuth};
-    use std::str::FromStr;
 
     async fn service() -> (McpService, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();

@@ -269,6 +269,7 @@ mod tests {
             data_dir: String::new(),
             plugins_dir: String::new(),
             version: "test".into(),
+            journal_backend: "file".into(),
         }
     }
 

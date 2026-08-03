@@ -666,6 +666,7 @@ function ServerInfoCard({ view }: { view: SettingsView }) {
   const rows: [string, string][] = [
     ["Config file", info.configPath || "(none)"],
     ["Database", info.database || "(none)"],
+    ["Journal", info.journalBackend],
     ["State dir", info.stateDir],
     ["Data dir", info.dataDir],
     ["Plugins dir", info.pluginsDir],

@@ -6,8 +6,8 @@
 //! The relationship is enforced here: `create_memory` checks the space exists,
 //! and `delete_space` / `rename_space` fix up children inside a transaction.
 
-use sqlx::Row;
 use crate::db::Db;
+use sqlx::Row;
 use sqlx::any::AnyRow;
 
 const SPACE_COLS: &str = "name, description, created_at, updated_at";
@@ -91,14 +91,17 @@ impl MemoryStore {
         description: &str,
         updated_at: &str,
     ) -> Result<bool, String> {
-        let res =
-            sqlx::query(&self.db.q("UPDATE memory_spaces SET description = ?, updated_at = ? WHERE name = ?"))
-                .bind(description)
-                .bind(updated_at)
-                .bind(name)
-                .execute(self.db.pool())
-                .await
-                .map_err(|e| e.to_string())?;
+        let res = sqlx::query(
+            &self
+                .db
+                .q("UPDATE memory_spaces SET description = ?, updated_at = ? WHERE name = ?"),
+        )
+        .bind(description)
+        .bind(updated_at)
+        .bind(name)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 
@@ -207,16 +210,23 @@ impl MemoryStore {
         for s in spaces {
             q = q.bind(s);
         }
-        let rows = q.fetch_all(self.db.pool()).await.map_err(|e| e.to_string())?;
+        let rows = q
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
         rows.iter().map(row_to_memory).collect()
     }
 
     pub async fn get_memory(&self, id: i64) -> Result<Option<MemoryRow>, String> {
-        let row = sqlx::query(&self.db.q(&format!("SELECT {MEMORY_COLS} FROM memories WHERE id = ?")))
-            .bind(id)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        let row = sqlx::query(
+            &self
+                .db
+                .q(&format!("SELECT {MEMORY_COLS} FROM memories WHERE id = ?")),
+        )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         row.as_ref().map(row_to_memory).transpose()
     }
 
@@ -263,7 +273,9 @@ impl MemoryStore {
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("create memory '{}/{}': {e}", row.space, row.name))?;
-        let id = inserted.try_get::<i64, _>("id").map_err(|e| e.to_string())?;
+        let id = inserted
+            .try_get::<i64, _>("id")
+            .map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(id)
     }
@@ -328,7 +340,6 @@ fn row_to_memory(row: &AnyRow) -> Result<MemoryRow, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     async fn store() -> (MemoryStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();

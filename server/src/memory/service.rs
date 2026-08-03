@@ -224,7 +224,6 @@ fn now_secs() -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     async fn service() -> (MemoryService, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();

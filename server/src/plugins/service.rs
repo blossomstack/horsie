@@ -206,7 +206,6 @@ fn now_string() -> String {
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::str::FromStr;
 
     async fn service() -> (PluginService, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();

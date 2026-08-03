@@ -25,6 +25,9 @@ pub struct BootConfig {
     /// Where the session server persists its runtime-editable settings.
     #[serde(default)]
     pub database: DatabaseConfig,
+    /// Where actor journals live.
+    #[serde(default)]
+    pub journal: JournalConfig,
     /// Authentication. Enabled unless explicitly turned off — a deployment
     /// reachable from anywhere but localhost should not be open by accident.
     #[serde(default)]
@@ -102,11 +105,58 @@ impl Default for StorageConfig {
 }
 
 /// Absent → a SQLite file under the server data dir. Set `url` to a
-/// `sqlite://…` path today, or a `postgres://…` URL once that backend lands.
+/// `sqlite://…` path or a `postgres://…` URL.
 #[derive(Debug, Default, Deserialize)]
 pub struct DatabaseConfig {
     #[serde(default)]
     pub url: Option<String>,
+    /// Pool size. Settings reads and journal writes share this pool.
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+}
+
+/// Which journal backend to use, and how an absent setting resolves.
+#[derive(Debug, Default, Deserialize)]
+pub struct JournalConfig {
+    #[serde(default)]
+    pub backend: Option<JournalBackend>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JournalBackend {
+    /// Base64 JSONL under `storage.data_dir`. Needs a durable volume.
+    File,
+    /// The `journal_events` / `journal_snapshots` tables in `database.url`.
+    Database,
+}
+
+impl JournalBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JournalBackend::File => "file",
+            JournalBackend::Database => "database",
+        }
+    }
+}
+
+/// The journal backend to use: the configured one, else a default that depends
+/// on the database.
+///
+/// The default is deliberately asymmetric. An existing SQLite deployment has
+/// journals on disk that switching would abandon, so it keeps `file` unless
+/// told otherwise. A PostgreSQL deployment has no existing journal to preserve
+/// and — being the managed-hosting case — no durable volume to assume, so
+/// `file` would be the wrong answer every time. The resolved value is logged at
+/// boot and reported in `/api/config`, so it is never a guess.
+pub fn journal_backend(cfg: &BootConfig, db_url: &str) -> JournalBackend {
+    match cfg.journal.backend {
+        Some(explicit) => explicit,
+        None if db_url.starts_with("postgres://") || db_url.starts_with("postgresql://") => {
+            JournalBackend::Database
+        }
+        None => JournalBackend::File,
+    }
 }
 
 impl BootConfig {

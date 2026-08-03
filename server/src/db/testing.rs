@@ -1,3 +1,8 @@
+// Test scaffolding, not production code: a database that will not open is a
+// broken test environment, and failing loudly at the point of failure beats
+// threading a Result through every helper that calls this.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 //! The test database, on whichever backend the run selects.
 //!
 //! Every test that needs storage calls [`db`], and the backend comes from the
@@ -11,7 +16,7 @@
 //! rewritten as a loop: a query that works on SQLite and breaks on PostgreSQL
 //! fails in whichever test already covers that code path.
 
-use crate::db::{Db, Dialect};
+use crate::db::Db;
 use sqlx::any::AnyPoolOptions;
 use uuid::Uuid;
 
@@ -42,7 +47,9 @@ pub async fn sqlite() -> Db {
         .expect("create temp dir for the test database")
         .keep();
     let url = format!("sqlite://{}/test.db", dir.display());
-    Db::open(&url, 5).await.expect("open the test sqlite database")
+    Db::open(&url, 5)
+        .await
+        .expect("open the test sqlite database")
 }
 
 /// An empty SQLite pool with **no** migrations applied.
@@ -101,7 +108,9 @@ pub async fn postgres() -> Option<Db> {
 /// Replace the database component of a PostgreSQL URL, preserving any query
 /// string (`?sslmode=…`), which managed providers routinely require.
 fn swap_database(url: &str, database: &str) -> String {
-    let (head, tail) = url.split_once('?').map_or((url, None), |(h, q)| (h, Some(q)));
+    let (head, tail) = url
+        .split_once('?')
+        .map_or((url, None), |(h, q)| (h, Some(q)));
     let base = head.trim_end_matches('/');
     // Everything up to the last '/' is scheme + authority; what follows is the
     // database name this replaces.

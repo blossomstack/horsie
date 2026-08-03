@@ -24,8 +24,18 @@ file — is valid.
   },
   "database": {
     // Where runtime-editable settings are stored. Default: a SQLite file at
-    // <data_dir>/server/config.db. Only sqlite:// is supported today.
-    "url": "sqlite:///var/lib/horsie/data/server/config.db"
+    // <data_dir>/server/config.db. sqlite:// and postgres:// are both supported.
+    "url": "sqlite:///var/lib/horsie/data/server/config.db",
+    // Pool size, shared by settings reads and journal writes. Default: 10.
+    "max_connections": 10
+  },
+  "journal": {
+    // Where session/agent history is stored: "file" (JSONL under data_dir) or
+    // "database" (the journal_* tables in database.url). Default: "database"
+    // for a postgres:// URL, "file" otherwise. Switching an existing server
+    // from "file" to "database" starts from an empty journal — see
+    // Self-hosting.
+    "backend": "file"
   },
   "auth": {
     // Require a password for the web UI and API. Default: true. First boot
@@ -60,7 +70,7 @@ ignored (skill bundles are managed from the UI now).
 
 | Variable | Effect |
 | --- | --- |
-| `HORSIE_DATABASE_URL` | Overrides `database.url`. Takes precedence over the config file. |
+| `HORSIE_DATABASE_URL` | Overrides `database.url`. Takes precedence over the config file. Accepts `sqlite://` or `postgres://`. |
 | `HORSIE_ARTIFACT_SECRET` | Signing secret for the short-lived tokens runtimes use to fetch skill bundles. Unset → a random per-process secret (fine for a single instance). Set a stable value if you run more than one server instance. |
 | `HORSIE_TOKEN` | Bearer token the CLI sends instead of reading `~/.config/horsie/credentials.json`. For scripts and CI. |
 | `HORSIE_AUTH_ENABLED` | Overrides `auth.enabled`. `false`/`0`/`no` turns authentication off; `true`/`1`/`yes` turns it on. An unrecognised value falls through to the config file rather than silently disabling it. |
@@ -79,7 +89,7 @@ Open **Settings**. The left nav lists one page per group of settings:
 | **Memory** | — | Memory spaces and the notes the agent has saved in them. |
 | **Integrations** | GitHub | GitHub App config + connection; the GitHub-tools-(MCP) toggle. See [GitHub](github.md). |
 | | MCP servers | Remote MCP servers: name, URL, auth. See [MCP servers](mcp-servers.md). |
-| | Server *(read-only)* | Config file path, database, state dir, data dir, plugins dir, version. |
+| | Server *(read-only)* | Config file path, database, journal backend, state dir, data dir, plugins dir, version. |
 | **Account** | — | Change the admin password and sign out. Shows a notice while the deployment is still using its generated first-boot password. Says so plainly when authentication is disabled. |
 
 **Models** and **Runtimes** batch their edits behind a **Save changes** button —
@@ -161,7 +171,9 @@ appends `/v1/chat/completions` itself) or a model id the backend has not loaded.
 
 ## Data & state on disk
 
-- **`data_dir`** — the durable session journal (transcripts) and the SQLite
-  settings database (`<data_dir>/server/`). Back this up; mount a volume here in
-  containers.
+- **`data_dir`** — plugin artifacts, plus (with the default `journal.backend`
+  of `file`, and the default SQLite database) the session journal and the
+  settings database under `<data_dir>/server/`. Back this up; mount a volume
+  here in containers. A PostgreSQL deployment that also journals to the database
+  keeps only plugin artifacts here.
 - **`state_dir`** — ephemeral runtime state; safe to lose across restarts.

@@ -247,9 +247,9 @@ impl Journal for SqlJournal {
     }
 
     async fn delete_events_before(&self, pid: &PersistenceId, seq_nr: u64) -> JournalResult<()> {
-        let sql = self.db.q(
-            "DELETE FROM journal_events WHERE actor_kind = ? AND actor_id = ? AND seq <= ?",
-        );
+        let sql = self
+            .db
+            .q("DELETE FROM journal_events WHERE actor_kind = ? AND actor_id = ? AND seq <= ?");
         sqlx::query(&sql)
             .bind(&pid.kind)
             .bind(&pid.id)
@@ -337,11 +337,9 @@ impl PageState {
     /// drained, which is recorded so the stream ends without a final empty
     /// round-trip.
     async fn fetch_page(&mut self) -> JournalResult<()> {
-        let sql = self.db.q(
-            "SELECT seq, payload FROM journal_events \
+        let sql = self.db.q("SELECT seq, payload FROM journal_events \
              WHERE actor_kind = ? AND actor_id = ? AND seq > ? \
-             ORDER BY seq LIMIT ?",
-        );
+             ORDER BY seq LIMIT ?");
         let rows = sqlx::query(&sql)
             .bind(&self.kind)
             .bind(&self.id)

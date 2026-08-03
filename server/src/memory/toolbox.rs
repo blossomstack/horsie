@@ -357,7 +357,6 @@ mod tests {
     use super::*;
     use crate::memory::MemoryStore;
     use horsie_agentcore::EmptyToolbox;
-    use std::str::FromStr;
 
     async fn toolbox(spaces: &[&str]) -> (MemoryToolbox, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();

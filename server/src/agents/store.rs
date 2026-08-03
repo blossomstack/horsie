@@ -2,8 +2,8 @@
 //! List-typed columns are JSON; `AgentRepo` is the storage twin of the wire
 //! `session_api::RepoConfig` (protocol types are not storage types).
 
-use sqlx::Row;
 use crate::db::Db;
+use sqlx::Row;
 use sqlx::any::AnyRow;
 
 const COLS: &str = "name, description, vendor, model, repos, plugins, \
@@ -45,19 +45,27 @@ impl AgentStore {
     }
 
     pub async fn list(&self) -> Result<Vec<AgentRow>, String> {
-        let rows = sqlx::query(&self.db.q(&format!("SELECT {COLS} FROM agents ORDER BY name")))
-            .fetch_all(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        let rows = sqlx::query(
+            &self
+                .db
+                .q(&format!("SELECT {COLS} FROM agents ORDER BY name")),
+        )
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         rows.iter().map(row_to_agent).collect()
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<AgentRow>, String> {
-        let row = sqlx::query(&self.db.q(&format!("SELECT {COLS} FROM agents WHERE name = ?")))
-            .bind(name)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        let row = sqlx::query(
+            &self
+                .db
+                .q(&format!("SELECT {COLS} FROM agents WHERE name = ?")),
+        )
+        .bind(name)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         row.as_ref().map(row_to_agent).transpose()
     }
 
@@ -150,7 +158,6 @@ fn row_to_agent(row: &AnyRow) -> Result<AgentRow, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     async fn store() -> (AgentStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();

@@ -11,6 +11,7 @@
 //! schema change. `postgres` is a future driver swap behind the same code.
 
 use crate::config::ConfigStore;
+use crate::db::Db;
 use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret, ThinkingDialect, ThinkingEffort};
@@ -21,9 +22,7 @@ use horsie_models::settings::{
 };
 use horsie_openai::OpenAiProvider;
 use sqlx::Row;
-use crate::db::Db;
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 type Registry = HashMap<String, Arc<dyn LlmProvider>>;
@@ -61,12 +60,23 @@ impl DbConfigStore {
     /// Open (creating if absent) the database, run migrations, and build the
     /// live registry + vendors from it.
     pub async fn open(db_url: &str, deps: StoreDeps) -> Result<OpenedConfig, String> {
-        let db = open_pool(db_url).await?;
+        Self::open_with(db_url, DEFAULT_MAX_CONNECTIONS, deps).await
+    }
+
+    /// As [`open`](Self::open), with an explicit pool size.
+    pub async fn open_with(
+        db_url: &str,
+        max_connections: u32,
+        deps: StoreDeps,
+    ) -> Result<OpenedConfig, String> {
+        let db = Db::open(db_url, max_connections).await?;
 
         let provs = read_providers(&db, db.pool())
             .await
             .map_err(|e| e.to_string())?;
-        let mods = read_models(&db, db.pool()).await.map_err(|e| e.to_string())?;
+        let mods = read_models(&db, db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
         let registry: SharedProviderRegistry =
             Arc::new(RwLock::new(build_registry(&provs, &mods)?));
 
@@ -102,7 +112,9 @@ impl DbConfigStore {
         let provs = read_providers(&self.db, self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
-        let mods = read_models(&self.db, self.db.pool()).await.map_err(|e| e.to_string())?;
+        let mods = read_models(&self.db, self.db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
         let default_vendor = self.default_vendor();
         Ok(SettingsView {
             providers: provs.iter().map(provider_view).collect(),
@@ -143,7 +155,9 @@ impl ConfigStore for DbConfigStore {
         let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
 
         if let Some(providers) = &update.providers {
-            let existing = read_providers(&self.db, &mut *tx).await.map_err(|e| e.to_string())?;
+            let existing = read_providers(&self.db, &mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
             let keep: HashMap<&str, &str> = existing
                 .iter()
                 .filter_map(|r| r.api_key.as_deref().map(|k| (r.name.as_str(), k)))
@@ -262,8 +276,12 @@ impl ConfigStore for DbConfigStore {
 
         // Validate providers/models by building the registry from the new state
         // before committing — a bad edit rolls back untouched.
-        let provs = read_providers(&self.db, &mut *tx).await.map_err(|e| e.to_string())?;
-        let mods = read_models(&self.db, &mut *tx).await.map_err(|e| e.to_string())?;
+        let provs = read_providers(&self.db, &mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mods = read_models(&self.db, &mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
         let new_registry = build_registry(&provs, &mods)?;
 
         tx.commit().await.map_err(|e| e.to_string())?;
@@ -499,15 +517,7 @@ pub(crate) fn encode_efforts(list: Option<&Vec<String>>) -> Option<String> {
 
 /// Default pool size. Sized for one server process sharing the pool between
 /// settings reads and journal writes.
-pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 10;
-
-/// Open (creating a SQLite file if absent) and migrate the settings database.
-///
-/// Connection tuning — WAL, the busy timeout, create-if-missing — moved into
-/// [`Db::open`], which is the only place that knows which dialect is in play.
-pub(crate) async fn open_pool(url: &str) -> Result<Db, String> {
-    Db::open(url, DEFAULT_MAX_CONNECTIONS).await
-}
+pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 
 // These take the `Db` for its dialect and the executor separately, because the
 // caller is sometimes a pool and sometimes an open transaction — the dialect is
@@ -590,6 +600,7 @@ mod tests {
             data_dir: String::new(),
             plugins_dir: String::new(),
             version: "test".into(),
+            journal_backend: "file".into(),
         }
     }
 
@@ -878,9 +889,9 @@ mod tests {
         sqlx::query(include_str!(
             "../../migrations/sqlite/0006_drop_api_key_env.sql"
         ))
-            .execute(pool)
-            .await
-            .expect("DROP COLUMN should succeed on the bundled sqlite");
+        .execute(pool)
+        .await
+        .expect("DROP COLUMN should succeed on the bundled sqlite");
 
         let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('providers')")
             .fetch_all(pool)
