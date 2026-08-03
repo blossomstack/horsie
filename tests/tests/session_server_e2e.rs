@@ -10,13 +10,14 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use horsie_actor::{ActorRef, FileJournal, Journal, spawn_root};
+use horsie_actor::{ActorRef, Journal, spawn_root};
 use horsie_agentcore::LlmProvider;
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
 use horsie_runtime_vendor::ConnectedRuntimeRegistry;
 use horsie_server::config::{DbConfigStore, StoreDeps};
 use horsie_server::http::{AppState, app};
+use horsie_server::journal::SqliteJournal;
 use horsie_server::runtime_manager::{RuntimeDeps, RuntimeManager};
 use horsie_server::runtime_vendor::RuntimeVendorLink;
 use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
@@ -98,25 +99,8 @@ async fn start_server_with(
         plugins: None,
         memory: None,
     };
-    let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
-    let (gtx, _) = tokio::sync::broadcast::channel(256);
-    let supervisor = match clock {
-        Some(clock) => spawn_root(
-            SessionSupervisor::with_config(
-                deps,
-                gtx.clone(),
-                SupervisorConfig {
-                    clock,
-                    idle_timeout: Duration::from_secs(180),
-                    tick_interval: None,
-                },
-            ),
-            journal.clone(),
-        ),
-        None => spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone()),
-    };
-    // A real (empty) settings store backs `/api/config`; the session flow uses the
-    // custom `mock` registry/vendor above, so the store's own registry is unused.
+    // The e2e suite runs on the production default backend, so every test here
+    // — including the restart ones — exercises real snapshots and compaction.
     let db = journal_dir.join("config.db");
     let opened = DbConfigStore::open(
         &format!("sqlite://{}", db.display()),
@@ -133,6 +117,26 @@ async fn start_server_with(
     )
     .await
     .unwrap();
+    let journal: Arc<dyn Journal> = Arc::new(SqliteJournal::new(opened.pool.clone()));
+    let (gtx, _) = tokio::sync::broadcast::channel(256);
+    let supervisor = match clock {
+        Some(clock) => spawn_root(
+            SessionSupervisor::with_config(
+                deps,
+                gtx.clone(),
+                SupervisorConfig {
+                    clock,
+                    idle_timeout: Duration::from_secs(180),
+                    tick_interval: None,
+                },
+            ),
+            journal.clone(),
+        ),
+        None => spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone()),
+    };
+    // A real (empty) settings store backs `/api/config`; the session flow uses
+    // the custom `mock` registry/vendor above, so the store's own registry is
+    // unused. It is the same store the journal above runs on.
     let github = Arc::new(horsie_server::github::GithubService::new(
         horsie_server::github::GithubStore::new(opened.pool.clone()),
         horsie_server::github::GithubApi::new(),
@@ -245,7 +249,6 @@ async fn start_server_with_live_vendors(
 ) -> (Server, SocketAddr) {
     let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
     providers.insert("mock".into(), provider_at(mock_url));
-    let journal: Arc<dyn Journal> = Arc::new(FileJournal::new(journal_dir.to_path_buf()));
     let db = journal_dir.join("config.db");
     let _runtime_registry = Arc::new(ConnectedRuntimeRegistry::new());
     let opened = DbConfigStore::open(
@@ -278,6 +281,7 @@ async fn start_server_with_live_vendors(
         plugins: None,
         memory: None,
     };
+    let journal: Arc<dyn Journal> = Arc::new(SqliteJournal::new(opened.pool.clone()));
     let (gtx, _) = tokio::sync::broadcast::channel(256);
     let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
     let github = Arc::new(horsie_server::github::GithubService::new(
@@ -949,6 +953,92 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     assert_eq!(
         after_restart["session"]["usageTotal"], after_two["session"]["usageTotal"],
         "session-level usage total must survive a restart unchanged: {after_restart}"
+    );
+
+    server2.shutdown().await;
+}
+
+/// Compaction is real now, and a pause is where it happens: the snapshot on
+/// cancel deletes every event it folded in. That is only safe if recovery
+/// actually reads the snapshot — so this drives turns, forces a compaction, and
+/// restarts on the same database to prove nothing was lost with the events.
+#[tokio::test]
+async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("first");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    send_message(&client, &server.addr, &id, "one").await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    // Stop only cancels a turn that is actually running, and cancelling is what
+    // snapshots and compacts — so block the second turn mid-flight rather than
+    // letting it finish, or this test would prove nothing.
+    let block = mock.blocking_response("second");
+    send_message(&client, &server.addr, &id, "two").await;
+    block.wait_until_received().await;
+
+    let res = client
+        .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    block.release();
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    let history = |addr: std::net::SocketAddr| {
+        let client = client.clone();
+        let id = id.clone();
+        async move {
+            client
+                .get(format!(
+                    "http://{addr}/api/sessions/{id}/agents/main/history?limit=100"
+                ))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let before = history(server.addr).await;
+    let before_ids: Vec<String> = before["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        before_ids.len() >= 3,
+        "a completed turn plus the cancelled turn's user message: {before}"
+    );
+
+    // Restart on the same database. Recovery must come from the snapshot plus
+    // whatever events survived compaction — a full replay is no longer possible,
+    // because those events are gone.
+    server.shutdown().await;
+    let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let after = history(server2.addr).await;
+    let after_ids: Vec<String> = after["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        after_ids, before_ids,
+        "a compacted session must recover exactly the transcript it had: {after}"
     );
 
     server2.shutdown().await;

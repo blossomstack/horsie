@@ -166,6 +166,16 @@ pub fn write_corrupt_journal(
 /// layout, which is what makes them portable.
 ///
 /// Each takes a fresh, empty journal.
+///
+/// Assertions panic on failure, which is the point — this module is test support
+/// and only exists under the `test-util` feature, so the workspace's ban on
+/// panic-prone constructs does not apply to it.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 pub mod conformance {
     use crate::{Journal, PersistenceId};
     use futures_util::StreamExt;

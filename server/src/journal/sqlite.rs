@@ -283,7 +283,11 @@ impl Journal for SqliteJournal {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::wildcard_enum_match_arm
+    clippy::wildcard_enum_match_arm,
+    // This module tests a `Journal` implementation, so reading one directly is
+    // the subject rather than a violation. Everywhere else the ban stands: only
+    // an actor reads its own journal, and only to recover.
+    clippy::disallowed_methods
 )]
 mod tests {
     use super::*;
