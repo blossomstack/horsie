@@ -1,6 +1,9 @@
 import { SessionStatusKind } from "../api/types";
 
-export type StatusTone = "accent" | "success" | "warning" | "error" | "muted";
+/** Panel lamp colours. `live` is a value in motion, `attention` is a control
+ * waiting on the operator, `fault` is a stopped machine, `off` is an
+ * unlit lamp — a channel the server has nothing to report for. */
+export type StatusTone = "live" | "ready" | "attention" | "fault" | "off";
 
 interface StatusMeta {
   label: string;
@@ -19,7 +22,7 @@ interface StatusMeta {
  * a guess — and still sendable, since sending is what loads it. */
 export const UNKNOWN_STATUS: StatusMeta = {
   label: "—",
-  tone: "muted",
+  tone: "off",
   busy: false,
   canSend: true,
   hint: "Not loaded — send a message to open it.",
@@ -28,35 +31,35 @@ export const UNKNOWN_STATUS: StatusMeta = {
 const META: Record<SessionStatusKind, StatusMeta> = {
   [SessionStatusKind.Idle]: {
     label: "Idle",
-    tone: "success",
+    tone: "ready",
     busy: false,
     canSend: true,
     hint: "Ready for your next message.",
   },
   [SessionStatusKind.Running]: {
     label: "Running",
-    tone: "accent",
+    tone: "live",
     busy: true,
     canSend: true,
     hint: "The agent is working — anything you send is answered next turn.",
   },
   [SessionStatusKind.AwaitingInput]: {
     label: "Awaiting input",
-    tone: "warning",
+    tone: "attention",
     busy: false,
     canSend: true,
     hint: "The agent asked you a question.",
   },
   [SessionStatusKind.Failed]: {
     label: "Failed",
-    tone: "error",
+    tone: "fault",
     busy: false,
     canSend: true,
     hint: "The last turn failed — send a message to try again.",
   },
   [SessionStatusKind.Unrecoverable]: {
     label: "Unrecoverable",
-    tone: "error",
+    tone: "fault",
     busy: false,
     canSend: false,
     hint: "This session's runtime is gone for good. Start a new session.",
@@ -71,9 +74,9 @@ export function statusMeta(
 }
 
 export const TONE_TEXT: Record<StatusTone, string> = {
-  accent: "text-accent",
-  success: "text-success",
-  warning: "text-warning",
-  error: "text-error",
-  muted: "text-faint",
+  live: "text-amber-ink",
+  ready: "text-lamp-ok",
+  attention: "text-orange",
+  fault: "text-red-ink",
+  off: "text-faint",
 };

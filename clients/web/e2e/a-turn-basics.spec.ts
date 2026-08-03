@@ -27,7 +27,9 @@ test("A1: draft creates a session on the local runtime vendor via first message"
   await expect(
     page.locator('[data-testid="session-row"]', { hasText: "first message" }),
   ).toBeVisible();
-  // The locked config bar shows the real local vendor.
+  // Locked config now lives behind the header's info key, so the header keeps
+  // to one row of live state.
+  await page.getByTestId("session-info-button").click();
   await expect(page.getByTestId("session-config-bar")).toHaveAttribute(
     "data-mode",
     "locked",

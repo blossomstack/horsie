@@ -5,15 +5,45 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
     <title>horsie</title>
+    <script>
+      // Resolve the theme before first paint. `useTheme` sets the same
+      // attribute, but it runs after hydration, so a hardcoded default flashed
+      // the wrong instrument at every user whose OS disagreed with it.
+      (function () {
+        try {
+          var s = localStorage.getItem("horsie-theme");
+          document.documentElement.dataset.theme =
+            s === "light" || s === "dark"
+              ? s
+              : matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+        } catch (e) {
+          /* private mode: fall back to the attribute already on <html> */
+        }
+      })();
+    </script>
   </head>
   <body>
+    <!--
+      THESIS: horsie is an instrument you leave running, so the UI is a console
+      around a recording — not another chat app. It refuses the category
+      arrangement it used to ship: bubble column, rounded violet accent, Inter.
+      OWN-WORLD: machined gunmetal chassis, bone keycaps carrying dye-sub mono
+      legends, recessed screens for machine output, amber for any live measured
+      value, safety orange for the one control that commits, red for interrupt
+      and destroy. Martian Mono legends, Archivo prose, 3-8px machined radii.
+      STORY: the operator sees what the machine is doing, what it cost, and
+      where it ran; presses one orange key to commit; reads the run afterwards.
+      FIRST VIEWPORT: session rail left with a status lamp per run; header strip
+      of amber readouts (status, tokens, model, runtime); recessed transcript
+      centre; action row bottom with the orange SEND key at its right end.
+      FORM: creator-hardware desk instrument, dealt as a challenger against
+      grounded candidate 3 and taken on both axes; seed key e4424f7b.
+      FINISH: unreviewed and undocumented is unfinished; this build ends with
+      the finish review, the verdict, and DESIGN.md.
+    -->
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

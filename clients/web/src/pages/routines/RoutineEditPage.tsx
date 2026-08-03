@@ -26,7 +26,7 @@ export function RoutineEditPage() {
   }
   if (name && (isError || !existing)) {
     return (
-      <p className="px-6 py-4 text-sm text-error">No such routine: {name}.</p>
+      <p className="px-6 py-4 text-sm text-red-ink">No such routine: {name}.</p>
     );
   }
   return <RoutineForm key={name ?? "new"} initial={existing} />;
@@ -111,18 +111,18 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
   return (
     <div className="flex h-full flex-col" data-testid="routine-edit-page">
       <div className="border-b px-6 py-4">
-        <h1 className="text-[15px] font-semibold text-text">
+        <h1 className="text-[15px] font-semibold text-legend">
           {editing ? `Edit ${initial.name}` : "New routine"}
         </h1>
       </div>
       <div className="flex-1 overflow-y-auto px-6 py-4">
         <div className="mx-auto w-full max-w-3xl space-y-4">
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted">
+            <span className="mb-1 block text-xs font-medium text-dim">
               Name
             </span>
             <input
-              className="input w-full font-mono"
+              className="field w-full font-mono"
               placeholder="nightly-triage"
               value={routineName}
               disabled={editing}
@@ -132,11 +132,11 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted">
+            <span className="mb-1 block text-xs font-medium text-dim">
               Description
             </span>
             <input
-              className="input w-full"
+              className="field w-full"
               placeholder="What this routine is for"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -145,11 +145,11 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted">
+            <span className="mb-1 block text-xs font-medium text-dim">
               Agent
             </span>
             <select
-              className="input w-full"
+              className="field w-full"
               value={agent}
               onChange={(e) => setAgent(e.target.value)}
               data-testid="routine-agent-select"
@@ -168,11 +168,11 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted">
+            <span className="mb-1 block text-xs font-medium text-dim">
               Prompt
             </span>
             <textarea
-              className="input h-40 w-full resize-y font-mono text-sm"
+              className="field h-40 w-full resize-y font-mono text-sm"
               placeholder="Everything the run gets told. It cannot ask you a question, so say what to do when a choice comes up."
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
@@ -181,12 +181,12 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <fieldset className="space-y-2">
-            <legend className="mb-1 text-xs font-medium text-muted">
+            <legend className="mb-1 text-xs font-medium text-dim">
               Trigger
             </legend>
             <div className="flex flex-wrap items-center gap-3">
               <select
-                className="input"
+                className="field"
                 value={kind}
                 onChange={(e) => setKind(e.target.value as ScheduleKind)}
                 data-testid="routine-schedule-kind"
@@ -197,10 +197,10 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
               </select>
 
               {kind === "Every" && (
-                <label className="flex items-center gap-2 text-sm text-muted">
+                <label className="flex items-center gap-2 text-sm text-dim">
                   every
                   <input
-                    className="input w-24"
+                    className="field w-24"
                     type="number"
                     min={MIN_INTERVAL_SECS / 60}
                     step={1}
@@ -216,7 +216,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
 
               {kind === "Once" && (
                 <input
-                  className="input"
+                  className="field"
                   type="datetime-local"
                   value={atLocal}
                   onChange={(e) => setAtLocal(e.target.value)}
@@ -225,12 +225,12 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
               )}
             </div>
             {kind === "Every" && intervalSecs < MIN_INTERVAL_SECS && (
-              <p className="text-xs text-error">
+              <p className="text-xs text-red-ink">
                 The shortest interval is {MIN_INTERVAL_SECS / 60} minute.
               </p>
             )}
             {kind !== "Manual" && (
-              <label className="flex items-center gap-2 text-sm text-muted">
+              <label className="flex items-center gap-2 text-sm text-dim">
                 <input
                   type="checkbox"
                   checked={enabled}
@@ -249,7 +249,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
 
           {error && (
             <div
-              className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error"
+              className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2 text-sm text-red-ink"
               data-testid="routine-error"
             >
               {error}
@@ -259,14 +259,14 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
       </div>
       <div className="mx-auto flex w-full max-w-3xl gap-2 px-4 pb-4">
         <button
-          className="btn-primary"
+          className="key key-go"
           disabled={!canSave}
           onClick={handleSave}
           data-testid="save-routine-button"
         >
           {busy ? "Saving…" : "Save routine"}
         </button>
-        <button className="btn-outline" onClick={() => navigate("/routines")}>
+        <button className="key" onClick={() => navigate("/routines")}>
           Cancel
         </button>
       </div>

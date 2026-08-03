@@ -9,3 +9,4 @@ e2e/.output/
 playwright-report/
 test-results/
 .last-run.json
+e2e/.shots/

@@ -81,7 +81,7 @@ test("E3: a running tool shows a live status on a multi-item work-group row", as
   await sendMessage(page, "run two things, one slow");
 
   await expectStatus(page, "Running");
-  await expect(page.getByTestId("work-group-summary")).toHaveText("Running bash…");
+  await expect(page.getByTestId("work-group-summary")).toHaveText("Running bash");
 
   await page.getByTestId("composer-stop").click();
   await expectStatus(page, "Idle");
@@ -133,4 +133,29 @@ test("E5: a turn that ends on a trailing thinking step shows the mixed summary",
   await page.locator('[data-testid="setting-toggle"][data-key="showThinking"]').click();
 
   await expect(page.getByTestId("work-group-summary")).toHaveText("Thought and ran 1 tool");
+});
+
+test("E6: the header context gauge reports how full the window is, and opens the token breakdown", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.queueText("ok");
+  await createSession(page, appBase, { model: "mock-sonnet" });
+  await sendMessage(page, "fill a little context");
+  await expectStatus(page, "Idle");
+
+  // The dial carries a real percentage once the model declares a window.
+  const gauge = page.getByTestId("context-stats-button");
+  await expect(gauge).toBeVisible();
+  await expect(gauge).toHaveAttribute("data-pct", /^\d+$/);
+
+  // Clicking it opens the exact figures, which is where they now live.
+  await gauge.click();
+  await expect(page.getByTestId("context-stats-panel")).toContainText(
+    "Context window",
+  );
+  await expect(page.getByTestId("context-stats-panel")).toContainText(
+    "Session total",
+  );
 });

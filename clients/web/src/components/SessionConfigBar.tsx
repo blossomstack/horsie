@@ -15,40 +15,50 @@ type Props =
   | { mode: "draft"; draft: ConfigDraft }
   | { mode: "locked"; detail: SessionDetail };
 
-/** A non-interactive labelled chip used in locked mode. */
-function LockedChip({
-  icon,
+/** A settled channel on the header strip: engraved legend over its value.
+ * Locked config is a description of the session, not a control, so it reads
+ * as an instrument label rather than a button you might be able to press. */
+function Readout({
+  legend,
   children,
   testId,
 }: {
-  icon: ReactNode;
+  legend: string;
   children: ReactNode;
   testId?: string;
 }) {
   return (
-    <span
-      className="flex items-center gap-1.5 rounded-[var(--radius)] border px-2.5 py-1.5 text-xs font-medium text-muted"
-      data-testid={testId}
-    >
-      {icon}
-      <span className="max-w-[14rem] truncate">{children}</span>
+    <span className="flex min-w-0 flex-col gap-0.5" data-testid={testId}>
+      <span className="legend leading-none">{legend}</span>
+      <span className="font-mono text-[11px] leading-snug break-words text-legend">
+        {children}
+      </span>
     </span>
   );
 }
 
 export function SessionConfigBar(props: Props) {
-  return (
-    <div className="mx-auto w-full max-w-3xl px-4">
+  if (props.mode === "locked") {
+    // A stacked list, not a strip: locked config now lives inside a narrow
+    // info popover rather than spanning the header.
+    return (
       <div
-        className="flex flex-wrap items-center gap-2 pb-2"
+        className="space-y-2.5"
         data-testid="session-config-bar"
-        data-mode={props.mode}
+        data-mode="locked"
       >
-        {props.mode === "draft" ? (
-          <DraftControls draft={props.draft} />
-        ) : (
-          <LockedControls detail={props.detail} />
-        )}
+        <LockedControls detail={props.detail} />
+      </div>
+    );
+  }
+  return (
+    <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
+      <div
+        className="flex flex-wrap items-center gap-1.5 pb-2"
+        data-testid="session-config-bar"
+        data-mode="draft"
+      >
+        <DraftControls draft={props.draft} />
       </div>
     </div>
   );
@@ -65,15 +75,16 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
   const { data: repoList } = useGithubRepos(draft.provisions && draft.githubConnected);
 
   const modelLabel =
-    models.find((m) => m.alias === draft.model)?.alias ?? "Select model";
+    models.find((m) => m.alias === draft.model)?.alias ?? "Select";
 
   return (
     <>
       {/* Runtime */}
       <PopoverMenu
         testId="config-runtime"
+        legend="Runtime"
         icon={<Server size={13} />}
-        label={draft.vendor || "Runtime"}
+        label={draft.vendor || "Select"}
         width="w-56"
       >
         {(close) =>
@@ -81,7 +92,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
             <button
               key={v.name}
               type="button"
-              className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-left text-sm hover:bg-surface-2"
+              className="flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm hover:bg-raised"
               data-testid="runtime-option"
               data-value={v.name}
               onClick={() => {
@@ -103,17 +114,16 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
         <>
           <PopoverMenu
             testId="config-repos"
+            legend="Repos"
             icon={<FolderGit2 size={13} />}
-            label={
-              draft.repos.size ? `${draft.repos.size} repo(s)` : "Repos"
-            }
+            label={draft.repos.size ? `${draft.repos.size} selected` : "None"}
             width="w-80"
           >
             {() =>
               !draft.githubConnected ? (
                 <Link
                   to="/settings"
-                  className="block px-2 py-1.5 text-sm text-muted hover:text-text"
+                  className="block px-2 py-1.5 text-sm text-dim hover:text-legend"
                 >
                   Connect GitHub in Settings to pick repos
                 </Link>
@@ -124,7 +134,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
                     return (
                       <label
                         key={r.fullName}
-                        className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-surface-2"
+                        className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised"
                       >
                         <input
                           type="checkbox"
@@ -143,7 +153,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
                     );
                   })}
                   {repoList && repoList.repos.length === 0 && (
-                    <p className="px-2 py-1 text-sm text-muted">
+                    <p className="px-2 py-1 text-sm text-dim">
                       No repos visible to the app installation.
                     </p>
                   )}
@@ -154,15 +164,16 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
 
           <PopoverMenu
             testId="config-skills"
+            legend="Skills"
             icon={<Boxes size={13} />}
-            label={draft.skills.size ? `${draft.skills.size} skill(s)` : "Skills"}
+            label={draft.skills.size ? `${draft.skills.size} selected` : "None"}
             width="w-80"
           >
             {() =>
               (bundles ?? []).length === 0 ? (
                 <Link
                   to="/skills"
-                  className="block px-2 py-1.5 text-sm text-muted hover:text-text"
+                  className="block px-2 py-1.5 text-sm text-dim hover:text-legend"
                 >
                   Install skill bundles in the Skills page
                 </Link>
@@ -173,7 +184,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
                     return (
                       <label
                         key={b.name}
-                        className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-surface-2"
+                        className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised"
                       >
                         <input
                           type="checkbox"
@@ -198,15 +209,16 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
 
           <PopoverMenu
             testId="config-mcp"
+            legend="MCP"
             icon={<Plug size={13} />}
-            label={draft.mcp.size ? `${draft.mcp.size} MCP` : "MCP"}
+            label={draft.mcp.size ? `${draft.mcp.size} selected` : "None"}
             width="w-72"
           >
             {() =>
               enabledMcp.length === 0 ? (
                 <Link
                   to="/settings"
-                  className="block px-2 py-1.5 text-sm text-muted hover:text-text"
+                  className="block px-2 py-1.5 text-sm text-dim hover:text-legend"
                 >
                   Add MCP servers in Settings
                 </Link>
@@ -217,7 +229,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
                     return (
                       <label
                         key={s.name}
-                        className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-surface-2"
+                        className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised"
                       >
                         <input
                           type="checkbox"
@@ -246,19 +258,16 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
           works on vendors that can't provision a workspace too. */}
       <PopoverMenu
         testId="config-memory"
+        legend="Memory"
         icon={<Brain size={13} />}
-        label={
-          draft.memorySpaces.size
-            ? `${draft.memorySpaces.size} memory`
-            : "Memory"
-        }
+        label={draft.memorySpaces.size ? `${draft.memorySpaces.size} selected` : "None"}
         width="w-72"
       >
         {() =>
           (memorySpaces ?? []).length === 0 ? (
             <Link
               to="/memory"
-              className="block px-2 py-1.5 text-sm text-muted hover:text-text"
+              className="block px-2 py-1.5 text-sm text-dim hover:text-legend"
             >
               Create a memory space first
             </Link>
@@ -269,7 +278,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
                 return (
                   <label
                     key={sp.name}
-                    className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-surface-2"
+                    className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised"
                   >
                     <input
                       type="checkbox"
@@ -298,13 +307,14 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
       {draft.thinkingEfforts.length > 0 && (
         <PopoverMenu
           testId="config-thinking"
+          legend="Thinking"
           icon={<Lightbulb size={13} />}
-          label={draft.thinkingEffort || "Thinking"}
+          label={draft.thinkingEffort || "Default"}
           width="w-52"
         >
           {() => (
             <div className="space-y-0.5">
-              <label className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-surface-2">
+              <label className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised">
                 <input
                   type="radio"
                   name="thinking-effort"
@@ -320,7 +330,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
               {draft.thinkingEfforts.map((e) => (
                 <label
                   key={e}
-                  className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-surface-2"
+                  className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised"
                 >
                   <input
                     type="radio"
@@ -341,6 +351,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
       <div className="ml-auto">
         <PopoverMenu
           testId="config-model"
+          legend="Model"
           icon={<Cpu size={13} />}
           label={modelLabel}
           width="w-72"
@@ -349,7 +360,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
             models.length === 0 ? (
               <Link
                 to="/settings"
-                className="block px-2 py-1.5 text-sm text-muted hover:text-text"
+                className="block px-2 py-1.5 text-sm text-dim hover:text-legend"
               >
                 No models configured — add one in Settings
               </Link>
@@ -358,7 +369,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
                 <button
                   key={m.alias}
                   type="button"
-                  className="flex w-full flex-col rounded-[var(--radius-sm)] px-2 py-1.5 text-left hover:bg-surface-2"
+                  className="flex w-full flex-col rounded-[var(--radius-chip)] px-2 py-1.5 text-left hover:bg-raised"
                   data-testid="model-option"
                   data-value={m.alias}
                   onClick={() => {
@@ -366,7 +377,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
                     close();
                   }}
                 >
-                  <span className="font-mono text-sm text-text">{m.alias}</span>
+                  <span className="font-mono text-sm text-legend">{m.alias}</span>
                   <span className="text-[11px] text-faint">{m.modelId}</span>
                 </button>
               ))
@@ -379,49 +390,39 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
 }
 
 function LockedControls({ detail }: { detail: SessionDetail }) {
-  const hasWorkspace =
-    detail.repos.length > 0 ||
-    detail.plugins.length > 0 ||
-    detail.mcpServers.length > 0;
   return (
     <>
-      <LockedChip icon={<Server size={13} />} testId="config-runtime">
+      <Readout legend="Model" testId="config-model">
+        {detail.model}
+      </Readout>
+      <Readout legend="Runtime" testId="config-runtime">
         {detail.vendor}
-      </LockedChip>
-      {hasWorkspace && (
-        <>
-          {detail.repos.length > 0 && (
-            <LockedChip icon={<FolderGit2 size={13} />} testId="config-repos">
-              {detail.repos.map((r) => basename(r)).join(", ")}
-            </LockedChip>
-          )}
-          {detail.plugins.length > 0 && (
-            <LockedChip icon={<Boxes size={13} />} testId="config-skills">
-              {detail.plugins.join(", ")}
-            </LockedChip>
-          )}
-          {detail.mcpServers.length > 0 && (
-            <LockedChip icon={<Plug size={13} />} testId="config-mcp">
-              {detail.mcpServers.join(", ")}
-            </LockedChip>
-          )}
-        </>
+      </Readout>
+      {detail.repos.length > 0 && (
+        <Readout legend="Repos" testId="config-repos">
+          {detail.repos.map((r) => basename(r)).join(", ")}
+        </Readout>
+      )}
+      {detail.plugins.length > 0 && (
+        <Readout legend="Skills" testId="config-skills">
+          {detail.plugins.join(", ")}
+        </Readout>
+      )}
+      {detail.mcpServers.length > 0 && (
+        <Readout legend="MCP" testId="config-mcp">
+          {detail.mcpServers.join(", ")}
+        </Readout>
       )}
       {detail.memorySpaces.length > 0 && (
-        <LockedChip icon={<Brain size={13} />} testId="config-memory">
+        <Readout legend="Memory" testId="config-memory">
           {detail.memorySpaces.join(", ")}
-        </LockedChip>
+        </Readout>
       )}
       {detail.thinkingEffort && (
-        <LockedChip icon={<Lightbulb size={13} />} testId="config-thinking">
+        <Readout legend="Thinking" testId="config-thinking">
           {detail.thinkingEffort}
-        </LockedChip>
+        </Readout>
       )}
-      <div className="ml-auto">
-        <LockedChip icon={<Cpu size={13} />} testId="config-model">
-          {detail.model}
-        </LockedChip>
-      </div>
     </>
   );
 }

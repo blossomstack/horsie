@@ -1,7 +1,5 @@
-import { Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ApiRequestError } from "../../api/client";
-import { cn } from "../../lib/cn";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { RowLabel } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
@@ -36,29 +34,34 @@ export function RuntimesSettings() {
       await update.mutateAsync({ defaultVendor: defaultVendor || undefined });
     } catch (e) {
       setSaveError(
-        e instanceof ApiRequestError ? e.message : "failed to save settings",
+        e instanceof ApiRequestError ? e.message : "Failed to save settings.",
       );
     }
   };
 
   if (isLoading) {
     return (
-      <div className="flex items-center gap-2 p-6 text-sm text-neutral-500">
-        <Loader2 className="h-4 w-4 animate-spin" />
-        Loading runtimes…
+      <div className="flex items-center gap-2 p-6">
+        <span className="lamp lamp-live text-amber-ink" aria-hidden />
+        <span className="legend">Loading runtimes</span>
       </div>
     );
   }
   if (error || !settings) {
     return (
-      <div className="p-6 text-sm text-red-600">Could not load settings.</div>
+      <div className="p-6">
+        <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+          Couldn’t load settings. Check that horsie-server is running, then
+          reload.
+        </p>
+      </div>
     );
   }
 
   const vendors = settings.vendors;
 
   return (
-    <div className="flex flex-col">
+    <div className="flex h-full flex-col overflow-hidden">
       <SettingsHeader
         title="Runtimes"
         desc="Where sessions execute. Vendors are agent processes that connect to this server; each one is configured where it runs."
@@ -67,73 +70,83 @@ export function RuntimesSettings() {
         onSave={save}
         onDiscard={() => setDefaultVendor(settings.defaultVendor)}
       />
-      {saveError && (
-        <div className="mx-6 mt-4 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-700">
-          {saveError}
-        </div>
-      )}
 
-      <section className="card p-4">
-        <h2 className="text-sm font-semibold text-text">Connected vendors</h2>
-        <p className="mt-0.5 mb-3 text-xs text-faint">
-          Agents connected right now. Run <code>horsie connect</code> on a
-          machine, or start a vendor agent such as{" "}
-          <code>horsie-velos-runtime</code>, and it appears here.
-        </p>
-        {vendors.length === 0 ? (
-          <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">
-            No vendor agents are connected, so sessions cannot run a turn yet.
-          </p>
-        ) : (
-          <ul className="divide-y">
-            {vendors.map((v) => (
-              <li
-                key={v.name}
-                className="flex items-center justify-between py-2.5"
-              >
-                <div className="flex items-center gap-2.5">
-                  <span className="font-mono text-sm text-text">{v.name}</span>
-                  {v.isDefault && (
-                    <span className="rounded-[var(--radius)] border px-1.5 py-0.5 text-[11px] text-muted">
-                      default
-                    </span>
-                  )}
-                </div>
-                <span className="text-xs text-faint">
-                  {v.capabilities.supportsProvisioning
-                    ? "provisions repos and skill bundles"
-                    : "works in the agent's own directories"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="card mt-4 p-4">
-        <h2 className="text-sm font-semibold text-text">Default vendor</h2>
-        <p className="mt-0.5 mb-3 text-xs text-faint">
-          Which vendor new sessions use when they don't pick one. It may name an
-          agent that isn't connected yet — the preference applies once that
-          agent dials in.
-        </p>
-        <label className="block max-w-sm">
-          <RowLabel>Vendor name</RowLabel>
-          <input
-            className="input w-full"
-            value={defaultVendor}
-            placeholder="local"
-            onChange={(e) => setDefaultVendor(e.target.value)}
-          />
-        </label>
-        {defaultVendor !== "" &&
-          !vendors.some((v) => v.name === defaultVendor) && (
-            <p className={cn("mt-2 text-xs text-faint")}>
-              No connected vendor is named "{defaultVendor}" right now. Sessions
-              defaulting to it will fail to start until its agent connects.
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+          {saveError && (
+            <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+              {saveError}
             </p>
           )}
-      </section>
+
+          <section className="panel p-4">
+            <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">
+              Connected vendors
+            </h2>
+            <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
+              Agents connected right now. Run <code>horsie connect</code> on a
+              machine, or start a vendor agent such as{" "}
+              <code>horsie-velos-runtime</code>, and it appears here.
+            </p>
+
+            {vendors.length === 0 ? (
+              <p className="screen mt-4 px-3 py-5 text-center text-sm text-faint">
+                No vendor agents are connected, so sessions cannot run a turn
+                yet.
+              </p>
+            ) : (
+              <ul className="mt-4 space-y-px">
+                {vendors.map((v) => (
+                  <li
+                    key={v.name}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[var(--radius-control)] bg-raised px-3 py-2.5"
+                  >
+                    <span className="lamp text-lamp-ok" aria-hidden />
+                    <span className="font-mono text-[13px] text-legend">
+                      {v.name}
+                    </span>
+                    {v.isDefault && <span className="chip">Default</span>}
+                    <span className="legend ml-auto">
+                      {v.capabilities.supportsProvisioning
+                        ? "Provisions repos and skill bundles"
+                        : "Works in the agent’s own directories"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="panel p-4">
+            <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">
+              Default vendor
+            </h2>
+            <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
+              Which vendor new sessions use when they don’t pick one. It may name
+              an agent that isn’t connected yet — the preference applies once
+              that agent dials in.
+            </p>
+            <label className="mt-4 block max-w-sm">
+              <RowLabel>Vendor name</RowLabel>
+              <input
+                className="field field-mono"
+                value={defaultVendor}
+                placeholder="local"
+                onChange={(e) => setDefaultVendor(e.target.value)}
+              />
+            </label>
+            {defaultVendor !== "" &&
+              !vendors.some((v) => v.name === defaultVendor) && (
+                <p className="mt-2 flex items-start gap-2 text-xs leading-relaxed text-amber-ink">
+                  <span className="lamp mt-1" aria-hidden />
+                  No connected vendor is named “{defaultVendor}” right now.
+                  Sessions defaulting to it will fail to start until its agent
+                  connects.
+                </p>
+              )}
+          </section>
+        </div>
+      </div>
     </div>
   );
 }

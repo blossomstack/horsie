@@ -53,8 +53,8 @@ export function MemorySettings() {
       />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
-          <section className="card p-4">
+        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+          <section className="panel p-4">
             <SectionHeading
               icon={<FolderPlus size={15} className="mt-0.5 text-faint" />}
               title="Memory spaces"
@@ -63,11 +63,11 @@ export function MemorySettings() {
 
             <div className="grid grid-cols-[1fr_auto] gap-3">
               <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold text-muted">
+                <span className="mb-1 block text-[11px] font-semibold text-dim">
                   New space
                 </span>
                 <input
-                  className="input font-mono"
+                  className="field font-mono"
                   value={newSpace}
                   onChange={(e) => setNewSpace(e.target.value)}
                   placeholder="ops"
@@ -75,7 +75,7 @@ export function MemorySettings() {
               </label>
               <div className="flex items-end">
                 <button
-                  className="btn-primary"
+                  className="key key-go"
                   onClick={submitSpace}
                   disabled={!newSpace.trim() || createSpace.isPending}
                 >
@@ -99,12 +99,12 @@ export function MemorySettings() {
                 <p className="py-8 text-center text-sm text-faint">Loading…</p>
               )}
               {spaces.isError && (
-                <div className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+                <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
                   Couldn’t load memory spaces. Is the server running?
                 </div>
               )}
               {spaces.data?.length === 0 && (
-                <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+                <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
                   No memory spaces yet. Create one above.
                 </p>
               )}
@@ -119,7 +119,7 @@ export function MemorySettings() {
             </div>
           </section>
 
-          <section className="card p-4">
+          <section className="panel p-4">
             <SectionHeading
               icon={<Brain size={15} className="mt-0.5 text-faint" />}
               title={active ? `Memories in ${active}` : "Memories"}
@@ -127,7 +127,7 @@ export function MemorySettings() {
             />
 
             {!active ? (
-              <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+              <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
                 Create a memory space first.
               </p>
             ) : (
@@ -141,7 +141,7 @@ export function MemorySettings() {
                     </p>
                   )}
                   {memories.data?.length === 0 && (
-                    <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+                    <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
                       No memories in this space yet.
                     </p>
                   )}
@@ -183,28 +183,28 @@ function SpaceRow({
   return (
     <div
       className={cn(
-        "flex items-center gap-3 rounded-[var(--radius)] border p-3",
-        active && "border-accent",
+        "flex items-center gap-3 rounded-[var(--radius-control)] border p-3",
+        active && "border-amber",
       )}
-      style={{ background: "var(--surface-2)" }}
+      style={{ background: "var(--panel-raised)" }}
     >
       <button
         type="button"
         className="min-w-0 flex-1 text-left"
         onClick={onSelect}
       >
-        <span className="truncate font-mono text-sm font-semibold text-text">
+        <span className="truncate font-mono text-sm font-semibold text-legend">
           {space.name}
         </span>
         {space.description && (
-          <p className="mt-0.5 text-xs text-muted">{space.description}</p>
+          <p className="mt-0.5 text-xs text-dim">{space.description}</p>
         )}
         <p className="mt-0.5 text-[11px] text-faint">
           {space.memoryCount} {space.memoryCount === 1 ? "memory" : "memories"}
         </p>
       </button>
       <button
-        className="btn-icon shrink-0 text-faint hover:text-error"
+        className="key-icon shrink-0 text-faint hover:text-red-ink"
         onClick={confirmDelete}
         disabled={remove.isPending}
         aria-label="Delete space"
@@ -239,25 +239,25 @@ function NewMemoryForm({ space }: { space: string }) {
   };
 
   return (
-    <div className="mb-4 rounded-[var(--radius)] border border-dashed p-3">
+    <div className="mb-4 rounded-[var(--radius-control)] border border-dashed p-3">
       <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-3">
         <label className="block">
-          <span className="mb-1 block text-[11px] font-semibold text-muted">
+          <span className="mb-1 block text-[11px] font-semibold text-dim">
             Name
           </span>
           <input
-            className="input font-mono"
+            className="field font-mono"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="deploy-order"
           />
         </label>
         <label className="block">
-          <span className="mb-1 block text-[11px] font-semibold text-muted">
+          <span className="mb-1 block text-[11px] font-semibold text-dim">
             Description (one line, shown to the agent)
           </span>
           <input
-            className="input"
+            className="field"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="velos must be up before the server"
@@ -265,11 +265,11 @@ function NewMemoryForm({ space }: { space: string }) {
         </label>
       </div>
       <label className="mt-3 block">
-        <span className="mb-1 block text-[11px] font-semibold text-muted">
+        <span className="mb-1 block text-[11px] font-semibold text-dim">
           Content
         </span>
         <textarea
-          className="input min-h-24 font-mono text-xs"
+          className="field min-h-24 font-mono text-xs"
           value={content}
           onChange={(e) => setContent(e.target.value)}
           placeholder="Markdown. Reference another memory as [[space/name]]."
@@ -280,7 +280,7 @@ function NewMemoryForm({ space }: { space: string }) {
 
       <div className="mt-3 flex justify-end">
         <button
-          className="btn-primary"
+          className="key key-go"
           onClick={submit}
           disabled={
             !name.trim() ||
@@ -326,8 +326,8 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
 
   return (
     <div
-      className="rounded-[var(--radius)] border p-3"
-      style={{ background: "var(--surface-2)" }}
+      className="rounded-[var(--radius-control)] border p-3"
+      style={{ background: "var(--panel-raised)" }}
     >
       <div className="flex items-start gap-3">
         <button
@@ -335,13 +335,13 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
           className="min-w-0 flex-1 text-left"
           onClick={() => setOpen((v) => !v)}
         >
-          <span className="truncate font-mono text-sm font-semibold text-text">
+          <span className="truncate font-mono text-sm font-semibold text-legend">
             {memory.space}/{memory.name}
           </span>
-          <p className="mt-0.5 text-xs text-muted">{memory.description}</p>
+          <p className="mt-0.5 text-xs text-dim">{memory.description}</p>
         </button>
         <button
-          className="btn-icon shrink-0 text-faint hover:text-error"
+          className="key-icon shrink-0 text-faint hover:text-red-ink"
           onClick={() => {
             if (confirm(`Delete memory "${memory.space}/${memory.name}"?`))
               remove.mutate(memory.id);
@@ -356,21 +356,21 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
       {open && (
         <div className="mt-3 border-t pt-3">
           <label className="block">
-            <span className="mb-1 block text-[11px] font-semibold text-muted">
+            <span className="mb-1 block text-[11px] font-semibold text-dim">
               Description
             </span>
             <input
-              className="input"
+              className="field"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
           </label>
           <label className="mt-3 block">
-            <span className="mb-1 block text-[11px] font-semibold text-muted">
+            <span className="mb-1 block text-[11px] font-semibold text-dim">
               Content
             </span>
             <textarea
-              className="input min-h-32 font-mono text-xs"
+              className="field min-h-32 font-mono text-xs"
               value={content}
               onChange={(e) => setContent(e.target.value)}
             />
@@ -380,7 +380,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
 
           <div className="mt-3 flex justify-end">
             <button
-              className="btn-primary"
+              className="key key-go"
               onClick={save}
               disabled={!dirty || update.isPending}
             >
@@ -409,7 +409,7 @@ function SectionHeading({
     <div className="mb-3 flex items-start gap-2">
       {icon}
       <div>
-        <h2 className="text-sm font-semibold text-text">{title}</h2>
+        <h2 className="text-sm font-semibold text-legend">{title}</h2>
         <p className="mt-0.5 text-xs text-faint">{subtitle}</p>
       </div>
     </div>
@@ -426,7 +426,7 @@ function ErrorNote({
   if (!error) return null;
   const message = error instanceof ApiRequestError ? error.message : fallback;
   return (
-    <div className="mt-3 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+    <div className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
       {message}
     </div>
   );

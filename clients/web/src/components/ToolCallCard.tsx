@@ -1,4 +1,4 @@
-import { ChevronRight, CircleAlert, CircleCheck, Loader2, Wrench } from "lucide-react";
+import { ChevronRight, CircleAlert, CircleCheck, Wrench } from "lucide-react";
 import { useState } from "react";
 import type { RenderedToolCall } from "../hooks/useSessionStream";
 import { ASK_USER_TOOL } from "../lib/askUser";
@@ -21,7 +21,15 @@ function inputPreview(input: unknown): string | null {
   if (typeof input === "string") return input;
   if (typeof input === "object") {
     const obj = input as Record<string, unknown>;
-    for (const key of ["command", "cmd", "path", "file_path", "query", "pattern", "url"]) {
+    for (const key of [
+      "command",
+      "cmd",
+      "path",
+      "file_path",
+      "query",
+      "pattern",
+      "url",
+    ]) {
       const v = obj[key];
       if (typeof v === "string" && v.length > 0) return v;
     }
@@ -29,6 +37,9 @@ function inputPreview(input: unknown): string | null {
   return null;
 }
 
+/** A logged tool call. Collapsed it is one line of the recording; expanded it
+ * shows the raw input and output on recessed screens, because these operators
+ * came to read exactly what the machine sent and got back. */
 export function ToolCallCard({ call }: { call: RenderedToolCall }) {
   const [open, setOpen] = useState(false);
   if (call.name === ASK_USER_TOOL) return <AskUserCard call={call} />;
@@ -37,10 +48,15 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
   const inputStr = stringifyInput(call.input);
 
   return (
-    <div data-testid="tool-call-card" data-tool={call.name} data-error={call.isError ? "true" : "false"}>
+    <div
+      data-testid="tool-call-card"
+      data-tool={call.name}
+      data-error={call.isError ? "true" : "false"}
+    >
       <button
-        className="-mx-1 flex w-full items-center gap-2 rounded px-1 py-1 text-left hover:bg-surface-2"
+        className="-mx-1.5 flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-1.5 py-1 text-left transition-colors hover:bg-raised"
         onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
         data-testid="tool-call-toggle"
       >
         <ChevronRight
@@ -49,50 +65,62 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
             "shrink-0 text-faint transition-transform",
             open && "rotate-90",
           )}
+          aria-hidden
         />
-        <span className="shrink-0 text-faint">
+        <span className="flex w-3.5 shrink-0 justify-center">
           {call.running ? (
-            <Loader2 size={13} className="animate-spin text-accent" />
+            <span className="lamp lamp-live text-amber-ink" aria-hidden />
           ) : call.isError ? (
-            <CircleAlert size={13} className="text-error" />
+            <CircleAlert size={12} className="text-red-ink" aria-hidden />
           ) : hasOutput ? (
-            <CircleCheck size={13} className="text-success" />
+            <CircleCheck size={12} className="text-lamp-ok" aria-hidden />
           ) : (
-            <Wrench size={13} />
+            <Wrench size={12} className="text-faint" aria-hidden />
           )}
         </span>
-        <span className="font-mono text-[13px] text-text">{call.name}</span>
+        <span className="shrink-0 font-mono text-[11px] font-medium tracking-[0.02em] text-legend">
+          {call.name}
+        </span>
         {preview && (
-          <span className="min-w-0 flex-1 truncate font-mono text-xs text-faint">
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">
             {preview}
           </span>
         )}
         {!preview && <span className="flex-1" />}
-        {call.running && (
-          <span className="shrink-0 text-xs text-accent">running…</span>
+        {call.running && <span className="legend shrink-0">Running</span>}
+        {call.isError && !call.running && (
+          <span className="legend shrink-0 !text-red-ink">Failed</span>
         )}
       </button>
 
       {open && (
-        <div className="mt-1 ml-3 space-y-2 border-l pl-3">
+        <div className="mt-1.5 space-y-1.5 pl-[26px]">
           {inputStr && (
-            <pre className="overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap text-faint">
-              {inputStr}
-            </pre>
+            <div>
+              <span className="legend">Input</span>
+              <pre className="screen mt-1 overflow-x-auto px-2.5 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-dim">
+                {inputStr}
+              </pre>
+            </div>
           )}
           {hasOutput && (
-            <pre
-              data-testid="tool-call-output"
-              className={cn(
-                "max-h-72 overflow-auto font-mono text-xs leading-relaxed whitespace-pre-wrap",
-                call.isError ? "text-error" : "text-muted",
-              )}
-            >
-              {call.output}
-            </pre>
+            <div>
+              <span className={cn("legend", call.isError && "!text-red-ink")}>
+                {call.isError ? "Error" : "Output"}
+              </span>
+              <pre
+                data-testid="tool-call-output"
+                className={cn(
+                  "screen mt-1 max-h-72 overflow-auto px-2.5 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap",
+                  call.isError ? "text-red-ink" : "text-dim",
+                )}
+              >
+                {call.output}
+              </pre>
+            </div>
           )}
           {!hasOutput && !call.running && (
-            <div className="text-xs text-faint">No output.</div>
+            <p className="legend">Returned nothing</p>
           )}
         </div>
       )}

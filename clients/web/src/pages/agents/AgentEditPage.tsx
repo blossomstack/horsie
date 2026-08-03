@@ -19,7 +19,7 @@ export function AgentEditPage() {
   }
   if (name && (isError || !existing)) {
     return (
-      <p className="px-6 py-4 text-sm text-error">No such agent: {name}.</p>
+      <p className="px-6 py-4 text-sm text-red-ink">No such agent: {name}.</p>
     );
   }
   return <AgentForm key={name ?? "new"} initial={existing} />;
@@ -54,18 +54,18 @@ function AgentForm({ initial }: { initial?: AgentView }) {
   return (
     <div className="flex h-full flex-col" data-testid="agent-edit-page">
       <div className="border-b px-6 py-4">
-        <h1 className="text-[15px] font-semibold text-text">
+        <h1 className="text-[15px] font-semibold text-legend">
           {editing ? `Edit ${initial.name}` : "New agent"}
         </h1>
       </div>
       <div className="flex-1 overflow-y-auto px-6 py-4">
         <div className="mx-auto w-full max-w-3xl space-y-4">
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted">
+            <span className="mb-1 block text-xs font-medium text-dim">
               Name
             </span>
             <input
-              className="input w-full font-mono"
+              className="field w-full font-mono"
               placeholder="reviewer"
               value={agentName}
               disabled={editing}
@@ -74,11 +74,11 @@ function AgentForm({ initial }: { initial?: AgentView }) {
             />
           </label>
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted">
+            <span className="mb-1 block text-xs font-medium text-dim">
               Description
             </span>
             <input
-              className="input w-full"
+              className="field w-full"
               placeholder="What this agent is for"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -87,7 +87,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
           </label>
           {error && (
             <div
-              className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error"
+              className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
               data-testid="agent-error"
             >
               {error}
@@ -98,14 +98,14 @@ function AgentForm({ initial }: { initial?: AgentView }) {
       <SessionConfigBar mode="draft" draft={draft} />
       <div className="mx-auto flex w-full max-w-3xl gap-2 px-4 pb-4">
         <button
-          className="btn-primary"
+          className="key key-go"
           disabled={!canSave}
           onClick={handleSave}
           data-testid="save-agent-button"
         >
           {busy ? "Saving…" : "Save agent"}
         </button>
-        <button className="btn-outline" onClick={() => navigate("/agents")}>
+        <button className="key" onClick={() => navigate("/agents")}>
           Cancel
         </button>
       </div>

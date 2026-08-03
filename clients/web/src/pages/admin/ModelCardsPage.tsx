@@ -19,7 +19,7 @@ export function ModelCardsPage() {
         desc="Well-known models and their token limits. Settings → Models autocompletes model ids from these and prefills empty limit fields; editing a card never changes an already-configured model."
       />
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
+        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
           <ModelCardsSection />
         </div>
       </div>
@@ -31,11 +31,11 @@ function ModelCardsSection() {
   const { data: cards, isLoading, isError } = useAdminModelCards();
   const [adding, setAdding] = useState(false);
   return (
-    <section className="card p-4">
+    <section className="panel p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
-        <h2 className="text-sm font-semibold text-text">Catalog</h2>
+        <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">Catalog</h2>
         <button
-          className="btn-outline shrink-0 !px-2.5 !py-1.5 text-xs"
+          className="key shrink-0 !px-2.5 !py-1.5 text-xs"
           onClick={() => setAdding(true)}
           data-testid="add-model-card"
         >
@@ -45,10 +45,10 @@ function ModelCardsSection() {
       <div className="space-y-2.5">
         {isLoading && <p className="text-sm text-faint">Loading…</p>}
         {isError && (
-          <p className="text-sm text-error">Couldn’t load model cards.</p>
+          <p className="text-sm text-red-ink">Couldn’t load model cards.</p>
         )}
         {cards?.length === 0 && !adding && (
-          <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+          <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
             No model cards.
           </p>
         )}
@@ -153,15 +153,15 @@ function ModelCardRow({
 
   return (
     <div
-      className="rounded-[var(--radius)] border p-3"
-      style={{ background: "var(--surface-2)" }}
+      className="rounded-[var(--radius-control)] border p-3"
+      style={{ background: "var(--panel-raised)" }}
       data-testid={isNew ? "model-card-row-new" : `model-card-row-${card.modelId}`}
     >
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block">
           <RowLabel>Model id</RowLabel>
           <input
-            className="input font-mono"
+            className="field font-mono"
             value={modelId}
             onChange={(e) => {
               setModelId(e.target.value);
@@ -174,7 +174,7 @@ function ModelCardRow({
         <label className="block">
           <RowLabel>Name</RowLabel>
           <input
-            className="input"
+            className="field"
             value={name}
             onChange={(e) => {
               setName(e.target.value);
@@ -186,7 +186,7 @@ function ModelCardRow({
         <label className="block">
           <RowLabel>Context window (optional)</RowLabel>
           <input
-            className="input font-mono"
+            className="field font-mono"
             value={contextWindow}
             onChange={(e) => {
               setContextWindow(e.target.value);
@@ -198,7 +198,7 @@ function ModelCardRow({
         <label className="block">
           <RowLabel>Max tokens (optional)</RowLabel>
           <input
-            className="input font-mono"
+            className="field font-mono"
             value={maxTokens}
             onChange={(e) => {
               setMaxTokens(e.target.value);
@@ -210,7 +210,7 @@ function ModelCardRow({
         <label className="block">
           <RowLabel>Base URL (optional)</RowLabel>
           <input
-            className="input font-mono"
+            className="field font-mono"
             value={baseUrl}
             onChange={(e) => {
               setBaseUrl(e.target.value);
@@ -220,7 +220,7 @@ function ModelCardRow({
             data-testid="model-card-base-url"
           />
         </label>
-        <label className="col-span-2 flex items-start gap-2 text-sm">
+        <label className="col-span-1 sm:col-span-2 flex items-start gap-2 text-sm">
           <input
             type="checkbox"
             className="mt-1"
@@ -233,7 +233,7 @@ function ModelCardRow({
           />
           <span>
             Pinned tool choice disables thinking
-            <span className="block text-xs opacity-70">
+            <span className="block text-xs text-dim">
               For backends that reject a forced <code>tool_choice</code> while
               thinking is on — DeepSeek answers 400 “Thinking mode does not
               support this tool_choice”.
@@ -243,14 +243,14 @@ function ModelCardRow({
       </div>
 
       {error && (
-        <div className="mt-3 rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+        <div className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
           {error}
         </div>
       )}
 
       <div className="mt-3 flex items-center justify-end gap-2">
         <button
-          className="btn-icon text-faint hover:text-error"
+          className="key-icon text-faint hover:text-red-ink"
           onClick={onRemove}
           aria-label={isNew ? "Discard new card" : "Delete card"}
           data-testid="model-card-remove"
@@ -259,7 +259,7 @@ function ModelCardRow({
           <Trash2 size={15} />
         </button>
         <button
-          className="btn-primary !px-2.5 !py-1.5 text-xs"
+          className="key key-go !px-2.5 !py-1.5 text-xs"
           onClick={save}
           disabled={(!isNew && !dirty) || pending}
           data-testid="model-card-save"

@@ -20,11 +20,11 @@ export function DeviceApprovalPage() {
   return (
     <div className="flex h-full items-center justify-center p-6">
       <div
-        className="card w-full max-w-md space-y-4 p-6"
+        className="panel w-full max-w-md space-y-4 p-6"
         data-testid="device-page"
       >
         <div>
-          <h1 className="text-[15px] font-semibold text-text">
+          <h1 className="text-[15px] font-semibold text-legend">
             Authorize a command-line login
           </h1>
           <p className="mt-0.5 text-xs text-faint">
@@ -34,18 +34,18 @@ export function DeviceApprovalPage() {
         </div>
 
         {approve.isSuccess ? (
-          <p data-testid="device-approved" className="text-sm text-success">
+          <p data-testid="device-approved" className="text-sm text-lamp-ok">
             Approved. Your terminal should continue in a few seconds — you can
             close this page.
           </p>
         ) : deny.isSuccess ? (
-          <p data-testid="device-denied" className="text-sm text-text">
+          <p data-testid="device-denied" className="text-sm text-legend">
             Denied. That login attempt was refused.
           </p>
         ) : (
           <>
             <input
-              className="input text-center font-mono text-lg tracking-[0.3em]"
+              className="field text-center font-mono text-lg tracking-[0.3em]"
               data-testid="device-code"
               value={code}
               onChange={(e) => setCode(e.target.value)}
@@ -53,13 +53,13 @@ export function DeviceApprovalPage() {
               autoFocus
             />
             {error && (
-              <p data-testid="device-error" className="text-xs text-error">
+              <p data-testid="device-error" className="text-xs text-red-ink">
                 {error.message}
               </p>
             )}
             <div className="flex gap-2">
               <button
-                className="btn-primary flex-1 justify-center"
+                className="key key-go flex-1 justify-center"
                 data-testid="device-approve"
                 disabled={!code || approve.isPending}
                 onClick={() => approve.mutate()}
@@ -67,7 +67,7 @@ export function DeviceApprovalPage() {
                 Approve
               </button>
               <button
-                className="btn-outline flex-1 justify-center"
+                className="key flex-1 justify-center"
                 data-testid="device-deny"
                 disabled={!code || deny.isPending}
                 onClick={() => deny.mutate()}

@@ -156,7 +156,16 @@ export default async function globalSetup(): Promise<void> {
         { name: "mock-openai", kind: "openai", baseUrl: mockUrl, apiKey: "test-key" },
       ],
       models: [
-        { alias: "mock-sonnet", provider: "mock", modelId: "mock-model", maxTokens: 4096 },
+        // A context window is seeded so the header's context gauge has a real
+        // denominator to draw an arc from; without one it can only render its
+        // "window unknown" state and the dial is never exercised.
+        {
+          alias: "mock-sonnet",
+          provider: "mock",
+          modelId: "mock-model",
+          maxTokens: 4096,
+          contextWindow: 200000,
+        },
         // Alias sorts AFTER "mock-sonnet" (models are ORDER BY alias) so the
         // New Session modal's default (models[0]) stays the Anthropic wire —
         // the OpenAI wire is opt-in per test via createSession({ model }).

@@ -1,7 +1,8 @@
 import { Plus, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 
-/** A titled card of rows with an "add" affordance and an empty-state note. */
+/** A titled block of the settings panel: what it configures, what it holds,
+ * and one control to add to it. */
 export function Section({
   title,
   desc,
@@ -18,19 +19,23 @@ export function Section({
   empty: string | null;
 }) {
   return (
-    <section className="card p-4">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold text-text">{title}</h2>
-          <p className="mt-0.5 text-xs text-faint">{desc}</p>
+    <section className="panel p-4">
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">
+            {title}
+          </h2>
+          <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
+            {desc}
+          </p>
         </div>
-        <button className="btn-outline shrink-0 !px-2.5 !py-1.5 text-xs" onClick={onAdd}>
-          <Plus size={14} /> {addLabel}
+        <button className="key shrink-0" onClick={onAdd}>
+          <Plus size={13} aria-hidden /> {addLabel}
         </button>
       </div>
       <div className="space-y-2.5">
         {empty && (
-          <p className="rounded-[var(--radius)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+          <p className="screen px-3 py-5 text-center text-sm text-faint">
             {empty}
           </p>
         )}
@@ -41,11 +46,7 @@ export function Section({
 }
 
 export function RowLabel({ children }: { children: ReactNode }) {
-  return (
-    <span className="mb-1 block text-[11px] font-semibold text-muted">
-      {children}
-    </span>
-  );
+  return <span className="legend mb-1 block">{children}</span>;
 }
 
 export function TextField({
@@ -65,7 +66,7 @@ export function TextField({
     <label className="block">
       <RowLabel>{label}</RowLabel>
       <input
-        className="input font-mono"
+        className="field field-mono"
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -85,18 +86,16 @@ export function RowShell({
   children: ReactNode;
 }) {
   return (
-    <div
-      className="rounded-[var(--radius)] border p-3"
-      style={{ background: "var(--surface-2)" }}
-    >
+    <div className="rounded-[var(--radius-control)] bg-raised p-3 shadow-[inset_0_0_0_1px_var(--rule)]">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">{children}</div>
         <button
-          className="btn-icon shrink-0 text-faint hover:text-error"
+          className="key-icon shrink-0 !h-7 !w-7 text-faint hover:!bg-red-quiet hover:!text-red-ink"
           onClick={onRemove}
           aria-label={removeLabel}
+          title={removeLabel}
         >
-          <Trash2 size={15} />
+          <Trash2 size={14} aria-hidden />
         </button>
       </div>
     </div>

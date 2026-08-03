@@ -22,7 +22,7 @@ const ITEMS: NavItem[] = [
 export function SettingsLayout() {
   return (
     <SettingsDirtyProvider>
-      <div className="flex h-full overflow-hidden">
+      <div className="flex h-full flex-col overflow-hidden md:flex-row">
         <SettingsNav title="Settings" items={ITEMS} />
         <div className="min-w-0 flex-1">
           <Outlet />

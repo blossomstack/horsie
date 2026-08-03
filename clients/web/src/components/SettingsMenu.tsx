@@ -1,8 +1,10 @@
-import { Check, Settings } from "lucide-react";
+import { Check, SlidersHorizontal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { SETTINGS, useUiSettings } from "../hooks/useUiSettings";
 import { cn } from "../lib/cn";
 
+/** Display switches for this browser — what the panel shows, not what the
+ * session does. Kept separate from Settings for exactly that reason. */
 export function SettingsMenu() {
   const { values, toggle } = useUiSettings();
   const [open, setOpen] = useState(false);
@@ -13,47 +15,64 @@ export function SettingsMenu() {
     const onPointerDown = (e: PointerEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   return (
     <div className="relative" ref={ref}>
       <button
-        className="btn-icon"
+        className="key-icon"
         onClick={() => setOpen((o) => !o)}
-        title="Display settings"
-        aria-label="Display settings"
+        title="What this panel shows"
+        aria-label="Display options"
+        aria-expanded={open}
         data-testid="settings-menu-button"
       >
-        <Settings size={17} />
+        <SlidersHorizontal size={15} aria-hidden />
       </button>
       {open && (
         <div
-          className="card absolute right-0 top-full z-10 mt-1.5 w-64 p-1.5 shadow-lg"
+          className="panel absolute right-0 top-full z-10 mt-2 w-64 p-1.5 shadow-[var(--panel-lift)]"
           data-testid="settings-menu"
         >
+          <p className="legend px-2 pb-1 pt-1">Display</p>
           {SETTINGS.map((def) => (
             <button
               key={def.key}
-              className="flex w-full items-start gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-left hover:bg-surface-2"
+              className="flex w-full items-start gap-2.5 rounded-[var(--radius-chip)] px-2 py-1.5 text-left transition-colors hover:bg-raised"
               onClick={() => toggle(def.key)}
+              role="switch"
+              aria-checked={values[def.key]}
               data-testid="setting-toggle"
               data-key={def.key}
               data-checked={values[def.key]}
             >
               <span
+                aria-hidden
                 className={cn(
-                  "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
-                  values[def.key] && "border-transparent",
+                  "mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px]",
+                  values[def.key]
+                    ? "bg-orange text-orange-ink"
+                    : "shadow-[inset_0_0_0_1px_var(--rule-strong)]",
                 )}
-                style={values[def.key] ? { background: "var(--accent)" } : undefined}
               >
-                {values[def.key] && <Check size={12} className="text-accent-fg" />}
+                {values[def.key] && <Check size={11} strokeWidth={3} />}
               </span>
               <span className="min-w-0">
-                <span className="block text-sm text-text">{def.label}</span>
-                <span className="block text-xs text-faint">{def.description}</span>
+                <span className="block text-[13px] text-legend">
+                  {def.label}
+                </span>
+                <span className="mt-0.5 block text-xs leading-snug text-faint">
+                  {def.description}
+                </span>
               </span>
             </button>
           ))}

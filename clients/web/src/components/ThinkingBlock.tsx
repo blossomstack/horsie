@@ -7,23 +7,28 @@ export function ThinkingBlock({ text }: { text: string }) {
   return (
     <div data-testid="thinking-block">
       <button
-        className="-ml-1 flex items-center gap-1 rounded px-1 py-0.5 text-xs text-faint transition-colors hover:bg-surface-2 hover:text-muted"
+        className="-mx-1.5 flex items-center gap-2 rounded-[var(--radius-chip)] px-1.5 py-1 transition-colors hover:bg-raised"
         onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
         data-testid="thinking-toggle"
       >
         <ChevronRight
           size={11}
-          className={cn("transition-transform", open && "rotate-90")}
+          className={cn(
+            "shrink-0 text-faint transition-transform",
+            open && "rotate-90",
+          )}
+          aria-hidden
         />
-        <span>Thought for a moment</span>
+        <span className="legend">Thought for a moment</span>
       </button>
       {open && (
-        <div
-          className="mt-1 ml-3 border-l pl-3 text-xs leading-relaxed whitespace-pre-wrap text-faint"
+        <pre
+          className="screen mt-1.5 ml-[26px] overflow-x-auto px-2.5 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-faint"
           data-testid="thinking-content"
         >
           {text}
-        </div>
+        </pre>
       )}
     </div>
   );

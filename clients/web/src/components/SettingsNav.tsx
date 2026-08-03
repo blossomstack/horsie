@@ -5,7 +5,8 @@ import { useSettingsDirty } from "../pages/settings/dirty";
 
 export type NavItem = { to: string; label: string; icon: LucideIcon };
 
-/** The second column of the settings/admin areas: a vertical page switcher. */
+/** The page switcher for the settings/admin areas: a column beside the content
+ * on a desk, a scrolling strip of keys above it on a phone. */
 export function SettingsNav({
   title,
   items,
@@ -16,14 +17,12 @@ export function SettingsNav({
   const { confirmLeave } = useSettingsDirty();
   return (
     <nav
-      className="flex h-full w-52 shrink-0 flex-col border-r"
-      style={{ background: "var(--surface)" }}
+      className="flex shrink-0 flex-col border-rule bg-chassis md:h-full md:w-48 md:border-r"
       data-testid="settings-nav"
+      aria-label={title}
     >
-      <div className="px-4 py-3.5 text-[15px] font-semibold tracking-tight text-text">
-        {title}
-      </div>
-      <div className="space-y-0.5 px-2">
+      <p className="legend hidden px-4 pb-2 pt-4 md:block">{title}</p>
+      <div className="flex gap-1 overflow-x-auto border-b px-2 py-2 [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)] md:mask-none md:flex-col md:gap-px md:overflow-visible md:border-b-0 md:py-0">
         {items.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
@@ -35,14 +34,14 @@ export function SettingsNav({
             }}
             className={({ isActive }) =>
               cn(
-                "flex items-center gap-2 rounded-[var(--radius)] px-2.5 py-2 text-sm transition-colors",
+                "flex shrink-0 items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-2 text-[13px] transition-colors md:gap-2.5",
                 isActive
-                  ? "bg-surface-3 text-text"
-                  : "text-muted hover:bg-surface-2 hover:text-text",
+                  ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+                  : "text-dim hover:bg-raised hover:text-legend",
               )
             }
           >
-            <Icon size={15} />
+            <Icon size={14} aria-hidden />
             {label}
           </NavLink>
         ))}

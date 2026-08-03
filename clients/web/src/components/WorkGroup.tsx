@@ -1,4 +1,4 @@
-import { ChevronRight, Loader2 } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { useState } from "react";
 import type { WorkItem } from "../lib/transcriptSegments";
 import { cn } from "../lib/cn";
@@ -61,11 +61,11 @@ export function WorkGroup({
     if (!live) return null;
     return (
       <div
-        className="flex items-center gap-1.5 px-1 py-0.5 text-xs text-faint"
+        className="flex items-center gap-2 py-0.5"
         data-testid="work-group-pulse"
       >
-        <Loader2 size={12} className="animate-spin text-accent" />
-        <span>Working…</span>
+        <span className="lamp lamp-live text-amber-ink" aria-hidden />
+        <span className="legend">Working</span>
       </div>
     );
   }
@@ -90,31 +90,40 @@ export function WorkGroup({
       : null;
   const label = live
     ? runningTool
-      ? `Running ${runningTool.call.name}…`
-      : "Working…"
+      ? `Running ${runningTool.call.name}`
+      : "Working"
     : summary(visible);
 
   return (
     <div data-testid="work-group" data-live={live}>
       <button
-        className="-ml-1 flex items-center gap-1.5 rounded px-1 py-0.5 text-xs text-faint transition-colors hover:bg-surface-2 hover:text-muted"
+        className="-mx-1.5 flex items-center gap-2 rounded-[var(--radius-chip)] px-1.5 py-1 transition-colors hover:bg-raised"
         onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
         data-testid="work-group-toggle"
       >
         <ChevronRight
           size={11}
-          className={cn("transition-transform", open && "rotate-90")}
+          className={cn(
+            "shrink-0 text-faint transition-transform",
+            open && "rotate-90",
+          )}
+          aria-hidden
         />
-        {live && <Loader2 size={12} className="animate-spin text-accent" />}
-        <span data-testid="work-group-summary">{label}</span>
+        {live && <span className="lamp lamp-live text-amber-ink" aria-hidden />}
+        <span className="legend" data-testid="work-group-summary">
+          {label}
+        </span>
         {duration && (
-          <span data-testid="work-group-duration">· {duration}</span>
+          <span className="legend" data-testid="work-group-duration">
+            · {duration}
+          </span>
         )}
       </button>
       {open && (
-        <div className="mt-1 ml-3 space-y-2 border-l pl-3">
+        <div className="mt-1.5 ml-1.5 space-y-1.5 border-l pl-3.5">
           {visibleWithIndices.map(({ item, index }) =>
-            renderItem(item, getItemKey(item, index))
+            renderItem(item, getItemKey(item, index)),
           )}
         </div>
       )}

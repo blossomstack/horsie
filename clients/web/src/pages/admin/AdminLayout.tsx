@@ -9,7 +9,7 @@ const ITEMS: NavItem[] = [
 /** Operator-facing surfaces. Adding a page = one more entry in ITEMS. */
 export function AdminLayout() {
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="flex h-full flex-col overflow-hidden md:flex-row">
       <SettingsNav title="Admin" items={ITEMS} />
       <div className="min-w-0 flex-1">
         <Outlet />

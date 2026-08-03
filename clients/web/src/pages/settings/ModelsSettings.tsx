@@ -172,18 +172,18 @@ export function ModelsSettings() {
       />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
+        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
           {isLoading && (
             <div className="py-16 text-center text-sm text-faint">Loading…</div>
           )}
           {isError && (
-            <div className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+            <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
               Couldn’t load settings. Is <code>horsie serve</code> running?
             </div>
           )}
 
           {(localError || saveError) && (
-            <div className="rounded-[var(--radius)] border border-error/40 bg-error-soft px-3 py-2 text-sm text-error">
+            <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
               {localError ?? saveError}
             </div>
           )}
@@ -285,12 +285,12 @@ function ProviderRow({
   const set = (patch: Partial<ProviderDraft>) => onChange({ ...draft, ...patch });
   return (
     <RowShell onRemove={onRemove} removeLabel="Remove provider">
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <TextField label="Name" value={draft.name} onChange={(v) => set({ name: v })} placeholder="anthropic" />
         <label className="block">
           <RowLabel>Kind</RowLabel>
           <select
-            className="input font-mono"
+            className="field font-mono"
             value={draft.kind}
             onChange={(e) => set({ kind: e.target.value as ProviderKind })}
           >
@@ -314,7 +314,7 @@ function ProviderRow({
           placeholder={draft.hasInlineKey ? "•••• stored — blank keeps it" : "not set"}
         />
         {draft.kind === "anthropic" && (
-          <label className="col-span-2 flex items-start gap-2 text-sm">
+          <label className="col-span-1 sm:col-span-2 flex items-start gap-2 text-sm">
             <input
               type="checkbox"
               className="mt-1"
@@ -323,7 +323,7 @@ function ProviderRow({
             />
             <span>
               Keep thinking signatures
-              <span className="block text-xs opacity-70">
+              <span className="block text-xs text-dim">
                 Required for api.anthropic.com, which validates them on replay. Leave off for
                 Anthropic-compatible endpoints — the blobs are several KB per thinking block and
                 nothing reads them.
@@ -394,7 +394,7 @@ function ModelIdField({
     <label className="relative block">
       <RowLabel>Model id</RowLabel>
       <input
-        className="input font-mono"
+        className="field font-mono"
         value={draft.modelId}
         onChange={(e) => set({ modelId: e.target.value })}
         onFocus={() => setFocused(true)}
@@ -405,22 +405,22 @@ function ModelIdField({
       />
       {show && (
         <ul
-          className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-[var(--radius)] border shadow-lg"
-          style={{ background: "var(--surface)" }}
+          className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-[var(--radius-control)] border shadow-lg"
+          style={{ background: "var(--panel)" }}
           data-testid="model-card-suggestions"
         >
           {suggestions!.map((c) => (
             <li key={c.modelId}>
               <button
                 type="button"
-                className="flex w-full items-baseline justify-between gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-surface-2"
+                className="flex w-full items-baseline justify-between gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-raised"
                 onMouseDown={(e) => {
                   e.preventDefault();
                   pick(c);
                 }}
                 data-testid={`model-card-suggestion-${c.modelId}`}
               >
-                <span className="font-mono text-text">{c.modelId}</span>
+                <span className="font-mono text-legend">{c.modelId}</span>
                 <span className="truncate text-faint">
                   {c.name}
                   {c.contextWindow != null
@@ -454,12 +454,12 @@ function ModelRow({
       : providerNames;
   return (
     <RowShell onRemove={onRemove} removeLabel="Remove model">
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <TextField label="Alias" value={draft.alias} onChange={(v) => set({ alias: v })} placeholder="sonnet" />
         <label className="block">
           <RowLabel>Provider</RowLabel>
           <select
-            className="input font-mono"
+            className="field font-mono"
             value={draft.provider}
             onChange={(e) => set({ provider: e.target.value })}
           >
@@ -484,7 +484,7 @@ function ModelRow({
           onChange={(v) => set({ contextWindow: v })}
           placeholder="200000"
         />
-        <div className="col-span-2 border-t pt-3">
+        <div className="col-span-1 sm:col-span-2 border-t pt-3">
           <RowLabel>Thinking efforts this model offers</RowLabel>
           <div className="flex flex-wrap gap-3">
             {EFFORTS.map((e) => (
@@ -510,11 +510,11 @@ function ModelRow({
               </label>
             ))}
           </div>
-          <div className="mt-2 grid grid-cols-2 gap-3">
+          <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label className="block">
               <RowLabel>Default effort</RowLabel>
               <select
-                className="input font-mono"
+                className="field font-mono"
                 value={draft.thinkingEffort}
                 onChange={(ev) => set({ thinkingEffort: ev.target.value })}
               >
@@ -529,7 +529,7 @@ function ModelRow({
             <label className="block">
               <RowLabel>Wire dialect</RowLabel>
               <select
-                className="input font-mono"
+                className="field font-mono"
                 value={draft.thinkingDialect}
                 onChange={(ev) => set({ thinkingDialect: ev.target.value })}
               >
@@ -553,7 +553,7 @@ function ModelRow({
             />
             <span>
               Pinned tool choice disables thinking
-              <span className="block text-xs opacity-70">
+              <span className="block text-xs text-dim">
                 Required for DeepSeek, which rejects a forced tool choice while
                 thinking is on. Sub-agents that must call a handoff tool will
                 run without thinking.

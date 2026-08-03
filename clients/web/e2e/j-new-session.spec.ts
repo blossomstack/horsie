@@ -27,6 +27,8 @@ test("J2: an existing session shows a locked, read-only config bar", async ({
   await createSession(page, appBase);
   await sendMessage(page, "configure me");
 
+  // Settled config sits behind the header info key rather than on the strip.
+  await page.getByTestId("session-info-button").click();
   const bar = page.getByTestId("session-config-bar");
   await expect(bar).toHaveAttribute("data-mode", "locked");
   await expect(page.getByTestId("config-runtime")).toContainText("e2e");
