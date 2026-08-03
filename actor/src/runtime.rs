@@ -119,11 +119,14 @@ async fn recover<A: EventSourcedActor>(
 
     let mut stream = journal.replay(pid, seq_nr).await;
     while let Some(item) = stream.next().await {
-        let bytes = item?;
+        // Take the journal's number rather than counting: after compaction the
+        // survivors keep their original numbers, and this is the number a later
+        // snapshot is recorded at.
+        let (seq, bytes) = item?;
         let event = serde_json::from_slice::<A::Event>(&bytes)
             .map_err(|e| JournalError::Serialization(e.to_string()))?;
         state = A::apply_event(state, event);
-        seq_nr += 1;
+        seq_nr = seq;
     }
     Ok((state, seq_nr))
 }

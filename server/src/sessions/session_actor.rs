@@ -2816,7 +2816,8 @@ mod tests {
             &self,
             pid: &horsie_actor::PersistenceId,
             after_seq: u64,
-        ) -> futures_util::stream::BoxStream<'_, horsie_actor::JournalResult<Vec<u8>>> {
+        ) -> futures_util::stream::BoxStream<'_, horsie_actor::JournalResult<(u64, Vec<u8>)>>
+        {
             self.replays
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.replay(pid, after_seq).await

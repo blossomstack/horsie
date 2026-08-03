@@ -25,6 +25,10 @@ base64       = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Self-dependency so this crate's own integration tests (actor/tests/) see the
+# optional features. Unit tests get `testkit` via cfg(test); a test *binary* is a
+# separate crate and does not.
+horsie-actor = { path = ".", features = ["file-journal", "test-util"] }
 
 [lints]
 workspace = true

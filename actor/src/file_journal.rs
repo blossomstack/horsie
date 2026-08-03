@@ -77,7 +77,7 @@ impl Journal for FileJournal {
         &self,
         pid: &PersistenceId,
         after_seq: u64,
-    ) -> BoxStream<'_, JournalResult<Vec<u8>>> {
+    ) -> BoxStream<'_, JournalResult<(u64, Vec<u8>)>> {
         let items = decode_after(&self.journal_path(pid), after_seq);
         stream::iter(items).boxed()
     }
@@ -113,10 +113,12 @@ impl Journal for FileJournal {
 }
 
 /// Decode complete batch lines (those terminated by `\n`) in order, assigning each
-/// contained event a 1-based sequence number; yield those whose seq > `after_seq`.
+/// contained event a 1-based sequence number; yield `(seq, bytes)` for those whose
+/// seq > `after_seq`. The number is positional — this backend never compacts, so
+/// position and sequence coincide for the life of the log.
 /// A trailing partial line (a torn write that never returned `Ok`) is dropped; an
 /// undecodable complete line is treated as a corruption boundary and stops replay.
-fn decode_after(path: &Path, after_seq: u64) -> Vec<JournalResult<Vec<u8>>> {
+fn decode_after(path: &Path, after_seq: u64) -> Vec<JournalResult<(u64, Vec<u8>)>> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -149,7 +151,7 @@ fn decode_after(path: &Path, after_seq: u64) -> Vec<JournalResult<Vec<u8>>> {
                 Ok(bytes) => {
                     seq += 1;
                     if seq > after_seq {
-                        out.push(Ok(bytes));
+                        out.push(Ok((seq, bytes)));
                     }
                 }
                 Err(_) => return out,
@@ -173,7 +175,7 @@ mod tests {
         let mut s = j.replay(&pid(id), after).await;
         let mut out = Vec::new();
         while let Some(item) = s.next().await {
-            out.push(item.unwrap());
+            out.push(item.unwrap().1);
         }
         out
     }

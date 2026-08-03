@@ -71,16 +71,16 @@ impl<J: Journal> Journal for FaultyJournal<J> {
         &self,
         pid: &PersistenceId,
         after_seq: u64,
-    ) -> BoxStream<'_, JournalResult<Vec<u8>>> {
+    ) -> BoxStream<'_, JournalResult<(u64, Vec<u8>)>> {
         let Some(fail_at) = self.replay_fails_at else {
             return self.inner.replay(pid, after_seq).await;
         };
-        let mut out: Vec<JournalResult<Vec<u8>>> = Vec::new();
-        let mut seq = after_seq;
+        let mut out: Vec<JournalResult<(u64, Vec<u8>)>> = Vec::new();
         let mut inner = self.inner.replay(pid, after_seq).await;
         while let Some(item) = inner.next().await {
-            seq += 1;
-            if seq >= fail_at {
+            // Fail at the journal's own numbering, so an injected failure lands
+            // at the same event whether or not the log has been compacted.
+            if item.as_ref().is_ok_and(|(seq, _)| *seq >= fail_at) {
                 out.push(Err(JournalError::Backend("injected replay failure".into())));
                 break;
             }
@@ -157,6 +157,157 @@ pub fn write_corrupt_journal(
     file.flush()
 }
 
+/// The `Journal` contract, as executable assertions.
+///
+/// Lives here rather than in a test file so every backend can be held to it —
+/// including `SqliteJournal`, which lives in the server crate and so cannot be
+/// reached from `actor/tests/`. The assertions come from the trait's own doc
+/// comments, which are the real spec: they are behavioural, never about storage
+/// layout, which is what makes them portable.
+///
+/// Each takes a fresh, empty journal.
+pub mod conformance {
+    use crate::{Journal, PersistenceId};
+    use futures_util::StreamExt;
+
+    fn pid(id: &str) -> PersistenceId {
+        PersistenceId::new("conformance", id)
+    }
+
+    async fn drain(j: &dyn Journal, id: &str, after: u64) -> Vec<Vec<u8>> {
+        let mut s = j.replay(&pid(id), after).await;
+        let mut out = Vec::new();
+        while let Some(item) = s.next().await {
+            out.push(item.unwrap().1);
+        }
+        out
+    }
+
+    // ── the contract ─────────────────────────────────────────────────────────────
+
+    pub async fn persist_then_replay_returns_events_in_order(j: &dyn Journal) {
+        j.persist(&pid("order"), &[vec![1], vec![2], vec![3]])
+            .await
+            .unwrap();
+        assert_eq!(
+            drain(j, "order", 0).await,
+            vec![vec![1], vec![2], vec![3]],
+            "replay must return events in ascending sequence order"
+        );
+    }
+
+    pub async fn replay_skips_events_at_or_before_after_seq(j: &dyn Journal) {
+        j.persist(&pid("skip"), &[vec![1], vec![2], vec![3]])
+            .await
+            .unwrap();
+        assert_eq!(
+            drain(j, "skip", 1).await,
+            vec![vec![2], vec![3]],
+            "replay(after_seq) must yield strictly-greater sequence numbers only"
+        );
+    }
+
+    pub async fn logs_are_namespaced_by_kind(j: &dyn Journal) {
+        j.persist(&PersistenceId::new("workflow", "shared"), &[vec![1]])
+            .await
+            .unwrap();
+        j.persist(&PersistenceId::new("agent", "shared"), &[vec![2]])
+            .await
+            .unwrap();
+        let mut wf = j.replay(&PersistenceId::new("workflow", "shared"), 0).await;
+        let mut ag = j.replay(&PersistenceId::new("agent", "shared"), 0).await;
+        assert_eq!(wf.next().await.unwrap().unwrap(), (1, vec![1]));
+        assert_eq!(ag.next().await.unwrap().unwrap(), (1, vec![2]));
+    }
+
+    pub async fn clear_removes_all_state(j: &dyn Journal) {
+        j.persist(&pid("cleared"), &[vec![1]]).await.unwrap();
+        j.clear(&pid("cleared")).await.unwrap();
+        assert!(drain(j, "cleared", 0).await.is_empty());
+    }
+
+    pub async fn persist_continues_numbering_after_compaction(j: &dyn Journal) {
+        j.persist(&pid("numbering"), &[vec![1], vec![2]])
+            .await
+            .unwrap();
+        j.delete_events_before(&pid("numbering"), 2).await.unwrap();
+        j.persist(&pid("numbering"), &[vec![3]]).await.unwrap();
+        assert_eq!(
+            drain(j, "numbering", 2).await,
+            vec![vec![3]],
+            "an event's sequence number must be stable across compaction"
+        );
+    }
+
+    pub async fn snapshot_roundtrips_with_seq(j: &dyn Journal) {
+        j.save_snapshot(&pid("snap"), vec![9, 9], 5).await.unwrap();
+        assert_eq!(
+            j.latest_snapshot(&pid("snap")).await.unwrap(),
+            Some((vec![9, 9], 5)),
+            "a saved snapshot must be readable back with its sequence number"
+        );
+    }
+
+    pub async fn delete_events_before_compacts(j: &dyn Journal) {
+        j.persist(&pid("compact"), &[vec![1], vec![2], vec![3]])
+            .await
+            .unwrap();
+        j.delete_events_before(&pid("compact"), 2).await.unwrap();
+        assert_eq!(
+            drain(j, "compact", 0).await,
+            vec![vec![3]],
+            "delete_events_before must drop events at or below seq_nr"
+        );
+    }
+
+    pub async fn copy_snapshot_seeds_new_id(j: &dyn Journal) {
+        j.persist(&pid("src"), &[vec![1], vec![2]]).await.unwrap();
+        j.save_snapshot(&pid("src"), vec![7], 2).await.unwrap();
+        j.copy_snapshot(&pid("src"), &pid("dst")).await.unwrap();
+        assert_eq!(
+            j.latest_snapshot(&pid("dst")).await.unwrap(),
+            Some((vec![7], 2)),
+            "copy_snapshot must seed the destination with the source snapshot"
+        );
+        assert!(
+            drain(j, "dst", 2).await.is_empty(),
+            "the destination must start with an empty event log"
+        );
+    }
+
+    pub async fn copy_snapshot_without_source_errors(j: &dyn Journal) {
+        assert!(
+            j.copy_snapshot(&pid("missing"), &pid("dst2"))
+                .await
+                .is_err(),
+            "copying a snapshot that does not exist must fail, not silently succeed"
+        );
+    }
+
+    /// Asserts both that recovery starts from the snapshot and that the log was
+    /// compacted. The second half is what a `spawn_root`-based version of this test
+    /// would need: `FileJournal` recovers the correct *value* via a full replay from
+    /// event 0 even with snapshotting disabled, so asserting state alone would pass
+    /// and hide the bug.
+    pub async fn snapshot_then_compact_leaves_only_later_events(j: &dyn Journal) {
+        j.persist(&pid("e2e"), &[vec![1], vec![2]]).await.unwrap();
+        j.save_snapshot(&pid("e2e"), vec![42], 2).await.unwrap();
+        j.delete_events_before(&pid("e2e"), 2).await.unwrap();
+        j.persist(&pid("e2e"), &[vec![3]]).await.unwrap();
+
+        assert_eq!(
+            j.latest_snapshot(&pid("e2e")).await.unwrap(),
+            Some((vec![42], 2)),
+            "recovery must start from the snapshot"
+        );
+        assert_eq!(
+            drain(j, "e2e", 0).await,
+            vec![vec![3]],
+            "only post-snapshot events should remain in the log"
+        );
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -191,7 +342,7 @@ mod tests {
         let j = FaultyJournal::wrapping(InMemoryJournal::new());
         j.persist(&pid(), &[vec![7]]).await.unwrap();
         let mut s = j.replay(&pid(), 0).await;
-        assert_eq!(s.next().await.unwrap().unwrap(), vec![7]);
+        assert_eq!(s.next().await.unwrap().unwrap(), (1, vec![7]));
     }
 
     #[tokio::test]
@@ -228,7 +379,7 @@ mod tests {
         let j = crate::file_journal::FileJournal::new(dir.path());
         let mut s = j.replay(&pid, 0).await;
         let first = s.next().await.unwrap().unwrap();
-        assert_eq!(first, vec![1]);
+        assert_eq!(first, (1, vec![1]));
         // Everything past the corrupt line is unreachable — that is the fixture
         // working, and separately it is the bug (#61 item 13), asserted in
         // actor/tests/journal_corruption.rs.

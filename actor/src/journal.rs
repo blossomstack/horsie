@@ -21,12 +21,17 @@ pub trait Journal: Send + Sync + 'static {
     async fn persist(&self, pid: &PersistenceId, events: &[Vec<u8>]) -> JournalResult<()>;
 
     /// Stream every event for `pid` whose sequence number is strictly greater than
-    /// `after_seq`, in ascending sequence order.
+    /// `after_seq`, in ascending sequence order, as `(seq_nr, bytes)`.
+    ///
+    /// The sequence number is the journal's, not a count of what it yielded: a
+    /// caller must never re-derive it by counting, because compaction leaves the
+    /// survivors' numbers untouched and a snapshot recorded at a counted number
+    /// would make the next `replay(after_seq)` skip or repeat events.
     async fn replay(
         &self,
         pid: &PersistenceId,
         after_seq: u64,
-    ) -> BoxStream<'_, JournalResult<Vec<u8>>>;
+    ) -> BoxStream<'_, JournalResult<(u64, Vec<u8>)>>;
 
     /// Store `state` as the snapshot for `pid`, taken at sequence `seq_nr` (the
     /// sequence number of the last event folded into it). Replaces any prior snapshot.
@@ -89,15 +94,15 @@ impl Journal for InMemoryJournal {
         &self,
         pid: &PersistenceId,
         after_seq: u64,
-    ) -> BoxStream<'_, JournalResult<Vec<u8>>> {
-        let items: Vec<JournalResult<Vec<u8>>> = {
+    ) -> BoxStream<'_, JournalResult<(u64, Vec<u8>)>> {
+        let items: Vec<JournalResult<(u64, Vec<u8>)>> = {
             let map = self.inner.lock();
             map.get(pid)
                 .map(|e| {
                     e.events
                         .iter()
                         .filter(|(seq, _)| *seq > after_seq)
-                        .map(|(_, bytes)| Ok(bytes.clone()))
+                        .map(|(seq, bytes)| Ok((*seq, bytes.clone())))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -172,7 +177,7 @@ mod tests {
         let mut s = j.replay(&pid(id), after).await;
         let mut out = Vec::new();
         while let Some(item) = s.next().await {
-            out.push(item.unwrap());
+            out.push(item.unwrap().1);
         }
         out
     }
@@ -198,8 +203,8 @@ mod tests {
         // Same id, different kind → separate logs.
         let mut wf = j.replay(&PersistenceId::new("workflow", "x"), 0).await;
         let mut ag = j.replay(&PersistenceId::new("agent", "x"), 0).await;
-        assert_eq!(wf.next().await.unwrap().unwrap(), vec![1]);
-        assert_eq!(ag.next().await.unwrap().unwrap(), vec![2]);
+        assert_eq!(wf.next().await.unwrap().unwrap(), (1, vec![1]));
+        assert_eq!(ag.next().await.unwrap().unwrap(), (1, vec![2]));
     }
 
     #[tokio::test]
