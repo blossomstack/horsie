@@ -277,7 +277,7 @@ fn scan_last_seq(path: &Path) -> Result<Option<u64>, CliError> {
 
 /// `horsie session list` — every session the server knows about.
 pub async fn list(server: &str) -> Result<(), CliError> {
-    let sessions = ServerClient::new(server).list_sessions().await?;
+    let sessions = ServerClient::new(server).await?.list_sessions().await?;
     print!("{}", render_session_table(&sessions, now_ms()));
     Ok(())
 }
@@ -285,7 +285,10 @@ pub async fn list(server: &str) -> Result<(), CliError> {
 /// `horsie session status <id>` — a point-in-time snapshot (live progress is
 /// `session tail`'s job).
 pub async fn status(server: &str, session_id: &str) -> Result<(), CliError> {
-    let detail = ServerClient::new(server).get_session(session_id).await?;
+    let detail = ServerClient::new(server)
+        .await?
+        .get_session(session_id)
+        .await?;
     print!("{}", render_session_detail(&detail, now_ms()));
     Ok(())
 }
