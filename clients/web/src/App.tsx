@@ -7,6 +7,9 @@ import { AgentsPage } from "./pages/agents/AgentsPage";
 import { DeviceApprovalPage } from "./pages/DeviceApprovalPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NewSessionView } from "./pages/NewSessionView";
+import { RoutineDetailPage } from "./pages/routines/RoutineDetailPage";
+import { RoutineEditPage } from "./pages/routines/RoutineEditPage";
+import { RoutinesPage } from "./pages/routines/RoutinesPage";
 import { SessionsLayout } from "./pages/SessionsLayout";
 import { SessionView } from "./pages/SessionView";
 import { SettingsLayout } from "./pages/settings/SettingsLayout";
@@ -52,6 +55,13 @@ export default function App() {
               <Route path="agents" element={<AgentsPage />} />
               <Route path="agents/new" element={<AgentEditPage />} />
               <Route path="agents/:name/edit" element={<AgentEditPage />} />
+              <Route path="routines" element={<RoutinesPage />} />
+              <Route path="routines/new" element={<RoutineEditPage />} />
+              <Route path="routines/:name" element={<RoutineDetailPage />} />
+              <Route
+                path="routines/:name/edit"
+                element={<RoutineEditPage />}
+              />
               <Route path="auth/device" element={<DeviceApprovalPage />} />
               <Route path="settings" element={<SettingsLayout />}>
                 <Route index element={<Navigate to="models" replace />} />

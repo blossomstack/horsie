@@ -1,5 +1,6 @@
 import {
   Bot,
+  CalendarClock,
   MessageSquarePlus,
   Plus,
   Search,
@@ -115,6 +116,21 @@ export function Sidebar() {
         >
           <Bot size={15} />
           <span className="font-medium">Agents</span>
+        </NavLink>
+        <NavLink
+          to="/routines"
+          data-testid="routines-link"
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-2 text-sm transition-colors",
+              isActive
+                ? "bg-surface-3 text-text"
+                : "text-muted hover:bg-surface-2 hover:text-text",
+            )
+          }
+        >
+          <CalendarClock size={15} />
+          <span className="font-medium">Routines</span>
         </NavLink>
       </div>
       <div className="px-4 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-faint">

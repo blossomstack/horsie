@@ -9,6 +9,7 @@ export * from "../generated/mcp";
 export * from "../generated/memory";
 export * from "../generated/model_cards";
 export * from "../generated/plugins";
+export * from "../generated/routines";
 export * from "../generated/session";
 export * from "../generated/session_api";
 export * from "../generated/settings";
