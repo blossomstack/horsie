@@ -37,6 +37,10 @@ import type {
   PluginInstallInput,
   PasswordChangeRequest,
   PluginView,
+  RoutineInput,
+  RoutineRunResponse,
+  RoutineSessionsResponse,
+  RoutineView,
   Ack,
   SessionAck,
   SettingsUpdate,
@@ -225,6 +229,41 @@ export const api = {
 
     remove: (name: string): Promise<void> =>
       request(`/agents/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  },
+
+  routines: {
+    /** All routines. */
+    list: (): Promise<RoutineView[]> => request("/routines"),
+
+    get: (name: string): Promise<RoutineView> =>
+      request(`/routines/${encodeURIComponent(name)}`),
+
+    create: (body: RoutineInput): Promise<RoutineView> =>
+      request("/routines", { method: "POST", body: JSON.stringify(body) }),
+
+    /** Full replace; the path is the id of record. */
+    update: (name: string, body: RoutineInput): Promise<RoutineView> =>
+      request(`/routines/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    /** Deletes the routine *and* every session it created. */
+    remove: (name: string): Promise<void> =>
+      request(`/routines/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+    /** Trigger now, whatever the schedule says. Returns as soon as the
+     * session exists; the run itself continues in the background. */
+    run: (name: string): Promise<RoutineRunResponse> =>
+      request(`/routines/${encodeURIComponent(name)}/run`, {
+        method: "POST",
+        body: "{}",
+      }),
+
+    /** The routine's runs, newest first. They are deliberately absent from
+     * the session list. */
+    sessions: (name: string): Promise<RoutineSessionsResponse> =>
+      request(`/routines/${encodeURIComponent(name)}/sessions`),
   },
 
   config: {

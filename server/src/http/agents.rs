@@ -7,7 +7,8 @@ use super::error::Api;
 use super::handlers;
 use crate::agents::AgentError;
 use crate::sessions::UserMessageError;
-use crate::sessions::spec::SessionStatus;
+use crate::sessions::builder::build_session_spec;
+use crate::sessions::spec::{SessionOrigin, SessionStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
 use axum::extract::{Path, State};
@@ -67,10 +68,25 @@ pub async fn replace_agent(
 }
 
 /// DELETE /api/agents/:name
+///
+/// Refused while a routine names this preset: a routine's whole configuration
+/// is the agent it points at, so deleting one out from under it turns a
+/// scheduled job into a timer that fails every firing.
 pub async fn delete_agent(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, Api> {
+    let used_by = state
+        .routines
+        .using_agent(&name)
+        .await
+        .map_err(|e| Api::internal(e.to_string()))?;
+    if !used_by.is_empty() {
+        return Err(Api::conflict(
+            "agent_in_use",
+            format!("routines still use this agent: {}", used_by.join(", ")),
+        ));
+    }
     state
         .agents
         .delete(&name)
@@ -120,13 +136,14 @@ pub async fn invoke_agent(
         thinking_effort: agent.thinking_effort.clone(),
         max_concurrent_subagents: None,
     };
-    let spec = handlers::build_session_spec(
-        &state,
+    let spec = build_session_spec(
+        &state.config_store,
         req.name,
         wire,
         Some(vendor),
         agent.repos.clone(),
         Some(agent.plugins.clone()),
+        SessionOrigin::User,
     )
     .await?;
     let created_at = now_ms();

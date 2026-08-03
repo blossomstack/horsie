@@ -6,6 +6,7 @@
 //! journals replay at startup, runtimes respawn only on user action.
 
 pub mod ask_tool;
+pub mod builder;
 pub mod clock;
 pub mod events;
 pub mod session_actor;

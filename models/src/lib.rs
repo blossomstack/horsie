@@ -115,6 +115,11 @@ pub mod agents {
     include!(concat!(env!("OUT_DIR"), "/agents/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod routines {
+    include!(concat!(env!("OUT_DIR"), "/routines/mod.rs"));
+}
+
 /// Env var carrying the provision-steps JSON a vendor injects into a runtime
 /// child. Read by `horsie-runtime` at startup; written by the executor
 /// providers from `RuntimeConfig.provision`.

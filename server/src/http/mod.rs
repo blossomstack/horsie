@@ -12,6 +12,7 @@ mod mcp;
 mod memory;
 mod model_cards;
 mod plugins;
+mod routines;
 mod sse;
 pub mod vendor_connect;
 
@@ -63,6 +64,12 @@ pub struct AppState {
     pub memory: Arc<crate::memory::MemoryService>,
     /// Named agent presets: CRUD plus invoke-with-message.
     pub agents: Arc<crate::agents::AgentService>,
+    /// Named routines: CRUD over the definitions. Triggering one goes through
+    /// `routine_runner`, which the scheduler's timer shares.
+    pub routines: Arc<crate::routines::RoutineService>,
+    /// Turns a routine into a running session. Held here so the run endpoint
+    /// and the background timer are the same code path.
+    pub routine_runner: Arc<crate::routines::RoutineRunner>,
     /// Every connected vendor agent, published into the same vendor map
     /// sessions select from. Held here so the connect route can register a
     /// freshly handshaken link.
@@ -179,6 +186,21 @@ pub fn app(state: AppState) -> Router {
                 .delete(agents::delete_agent),
         )
         .route("/api/agents/:name/invoke", post(agents::invoke_agent))
+        .route(
+            "/api/routines",
+            get(routines::list_routines).post(routines::create_routine),
+        )
+        .route(
+            "/api/routines/:name",
+            get(routines::get_routine)
+                .put(routines::replace_routine)
+                .delete(routines::delete_routine),
+        )
+        .route("/api/routines/:name/run", post(routines::run_routine))
+        .route(
+            "/api/routines/:name/sessions",
+            get(routines::get_routine_sessions),
+        )
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
         .route("/api/auth/status", get(auth::status))
         .route("/api/auth/login", post(auth::login))
@@ -289,6 +311,10 @@ mod tests {
             crate::agents::AgentStore::new(opened.pool.clone()),
             opened.store.clone(),
         ));
+        let routines = Arc::new(crate::routines::RoutineService::new(
+            crate::routines::RoutineStore::new(opened.pool.clone()),
+            agents.clone(),
+        ));
         let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
         let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
             shared_vendors.clone(),
@@ -316,6 +342,13 @@ mod tests {
                 state_dir: tmp.path().to_path_buf(),
             },
         ));
+        let routine_runner = Arc::new(crate::routines::RoutineRunner::new(
+            routines.clone(),
+            agents.clone(),
+            opened.store.clone(),
+            vendor_agents.clone(),
+            supervisor.clone(),
+        ));
         AppState {
             supervisor,
             global_events: gtx,
@@ -327,6 +360,8 @@ mod tests {
             plugins,
             memory,
             agents,
+            routines,
+            routine_runner,
             vendor_agents,
             web_dir: None,
         }
@@ -1408,6 +1443,225 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let res = app.oneshot(delete("/api/agents/reviewer")).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// An app with a "mock" model and a "reviewer" agent preset on the
+    /// connected "mock" vendor — everything a routine needs to be runnable.
+    async fn routine_app(tmp: &tempfile::TempDir) -> axum::Router {
+        let app = app(test_state(tmp).await);
+        put_mock_model(&app).await;
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/agents",
+                &serde_json::json!({"name": "reviewer", "model": "mock", "vendor": "mock"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        app
+    }
+
+    fn routine_body() -> serde_json::Value {
+        serde_json::json!({
+            "name": "nightly", "description": "triage", "agent": "reviewer",
+            "prompt": "triage the inbox",
+            "schedule": {"type": "Every", "value": {"intervalSecs": 3600}}
+        })
+    }
+
+    #[tokio::test]
+    async fn routines_crud_over_http() {
+        use horsie_models::routines::RoutineView;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = routine_app(&tmp).await;
+
+        // Create -> 201, with the schedule armed.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/routines", &routine_body()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v: RoutineView = read_json(res).await;
+        assert_eq!(v.name, "nightly");
+        assert_eq!(v.agent, "reviewer");
+        assert!(v.enabled);
+        assert!(v.next_run_at_ms.is_some());
+
+        // Duplicate -> 409; bad slug, unknown agent, and a too-short interval -> 422.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/routines", &routine_body()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        for bad in [
+            serde_json::json!({"name": "Bad Name", "agent": "reviewer", "prompt": "x"}),
+            serde_json::json!({"name": "b", "agent": "ghost", "prompt": "x"}),
+            serde_json::json!({"name": "b", "agent": "reviewer", "prompt": "  "}),
+            serde_json::json!({"name": "b", "agent": "reviewer", "prompt": "x",
+                               "schedule": {"type": "Every", "value": {"intervalSecs": 5}}}),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json("/api/routines", &bad))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+        }
+
+        // List + get.
+        let res = app.clone().oneshot(get("/api/routines")).await.unwrap();
+        let list: Vec<RoutineView> = read_json(res).await;
+        assert_eq!(list.len(), 1);
+        let res = app
+            .clone()
+            .oneshot(get("/api/routines/nightly"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .clone()
+            .oneshot(get("/api/routines/ghost"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // Replace -> 200 and a full replace of the schedule; rename -> 422.
+        let upd = serde_json::json!({
+            "name": "nightly", "agent": "reviewer", "prompt": "new prompt", "enabled": false
+        });
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/routines/nightly", &upd))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: RoutineView = read_json(res).await;
+        assert_eq!(v.prompt, "new prompt");
+        assert!(!v.enabled);
+        assert_eq!(v.next_run_at_ms, None, "a paused routine is not armed");
+        assert_eq!(
+            v.schedule,
+            horsie_models::routines::RoutineSchedule::Manual(
+                horsie_models::routines::ManualSchedule {}
+            ),
+            "PUT is a full replace"
+        );
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/routines/nightly",
+                &serde_json::json!({"name": "other", "agent": "reviewer", "prompt": "x"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Delete -> 204; again -> 404.
+        let res = app
+            .clone()
+            .oneshot(delete("/api/routines/nightly"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = app.oneshot(delete("/api/routines/nightly")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_run_is_listed_under_its_routine_and_nowhere_else() {
+        use horsie_models::routines::{RoutineRunResponse, RoutineSessionsResponse};
+        let tmp = tempfile::tempdir().unwrap();
+        let app = routine_app(&tmp).await;
+        app.clone()
+            .oneshot(post_json("/api/routines", &routine_body()))
+            .await
+            .unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/routines/nightly/run",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let run: RoutineRunResponse = read_json(res).await;
+        let id = run.session.id;
+
+        // The run is on the routine's page...
+        let res = app
+            .clone()
+            .oneshot(get("/api/routines/nightly/sessions"))
+            .await
+            .unwrap();
+        let runs: RoutineSessionsResponse = read_json(res).await;
+        assert_eq!(runs.sessions.len(), 1);
+        assert_eq!(runs.sessions[0].id, id);
+
+        // ...and deliberately not in the session list, though it is still
+        // openable by id (that is how the run list links to it).
+        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let list: ListSessionsResponse = read_json(res).await;
+        assert!(
+            list.sessions.is_empty(),
+            "a routine run must not bury the sessions somebody is having"
+        );
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/api/sessions/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Running an unknown routine is a 404, not a silent no-op.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/routines/ghost/run", &serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // Deleting the routine takes its runs with it: nothing else lists them.
+        let res = app
+            .clone()
+            .oneshot(delete("/api/routines/nightly"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = app
+            .oneshot(get(&format!("/api/sessions/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_agent_a_routine_uses_cannot_be_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = routine_app(&tmp).await;
+        app.clone()
+            .oneshot(post_json("/api/routines", &routine_body()))
+            .await
+            .unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(delete("/api/agents/reviewer"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+
+        // Freed by removing the routine.
+        app.clone()
+            .oneshot(delete("/api/routines/nightly"))
+            .await
+            .unwrap();
+        let res = app.oneshot(delete("/api/agents/reviewer")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

@@ -1,0 +1,73 @@
+/// Named routines: an agent preset plus a fixed prompt and a trigger. Running
+/// one creates an unattended session that works from the prompt alone — those
+/// sessions are listed under the routine, never in the session list.
+package routines;
+
+use session.SessionSummary;
+
+/// Triggered only by hand: the web UI's run button, or the run endpoint.
+struct ManualSchedule {}
+
+/// Triggered every `interval_secs` seconds. The next run is scheduled from
+/// when the previous one fired, not from a fixed origin, so a server that was
+/// down resumes with one run rather than a backlog. Minimum 60 seconds.
+struct EverySchedule { interval_secs: u64 }
+
+/// Triggered once at `at_ms` (unix epoch millis) and never re-armed. An
+/// instant already in the past never fires; move it forward to re-arm.
+struct OnceSchedule { at_ms: u64 }
+
+/// When a routine fires by itself. A union rather than a kind + optional
+/// fields, so "every, with no interval" cannot be expressed.
+#[type_tag = "type"]
+union RoutineSchedule {
+    Manual(ManualSchedule),
+    Every(EverySchedule),
+    Once(OnceSchedule),
+}
+
+/// A routine as shown to clients: its definition, plus what the schedule and
+/// the last trigger did.
+struct RoutineView {
+    /// Slug; the id of record, used in API paths.
+    name: String,
+    description: String,
+    /// Name of the agent preset every run is configured from.
+    agent: String,
+    /// The message queued as each run's first user message.
+    prompt: String,
+    schedule: RoutineSchedule,
+    /// False pauses the timer. The run endpoint and the UI button still work.
+    enabled: bool,
+    /// When the timer fires next; absent when nothing is scheduled (a manual
+    /// routine, a paused one, or a spent `Once`).
+    next_run_at_ms: Option<u64>,
+    /// When a trigger was last attempted.
+    last_run_at_ms: Option<u64>,
+    /// The session the last successful trigger created.
+    last_session_id: Option<String>,
+    /// Why the last trigger failed to create a session. A run that started and
+    /// then failed reports through its session, not here.
+    last_error: Option<String>,
+    /// Unix epoch seconds.
+    created_at: String,
+    updated_at: String,
+}
+
+/// Create or fully replace a routine. `description` defaults to "", `schedule`
+/// to Manual, and `enabled` to true.
+struct RoutineInput {
+    name: String,
+    description: Option<String>,
+    agent: String,
+    prompt: String,
+    schedule: Option<RoutineSchedule>,
+    enabled: Option<bool>,
+}
+
+/// The session a trigger created. It is running in the background by the time
+/// this is returned.
+struct RoutineRunResponse { session: SessionSummary }
+
+/// A routine's runs, newest first.
+struct RoutineSessionsResponse { sessions: Vec<SessionSummary> }
