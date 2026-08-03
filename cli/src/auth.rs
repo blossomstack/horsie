@@ -162,6 +162,71 @@ struct ApiErrorBody {
     message: String,
 }
 
+/// A non-2xx answer, keeping the two facts a caller needs to tell the server's
+/// verdict from someone else's: the status, and whether the body was actually
+/// the server's error envelope.
+///
+/// `body` is `None` for a proxy's HTML page, an empty body, or a gateway error
+/// — anything that did not come from the application. No code is synthesized
+/// for those: manufacturing one the server never sent is exactly what made
+/// `refresh` unable to tell a revoked login from a restarting container.
+struct ApiFailure {
+    status: u16,
+    body: Option<ApiErrorBody>,
+}
+
+impl ApiFailure {
+    fn code(&self) -> Option<&str> {
+        self.body.as_ref().map(|b| b.code.as_str())
+    }
+
+    /// The server's message when there is one, else the status line — so an
+    /// operator reading a retry message can tell a 502 from a 429.
+    fn message(&self) -> String {
+        match self.body.as_ref().filter(|b| !b.message.is_empty()) {
+            Some(b) => b.message.clone(),
+            None => format!("the server answered {}", self.status),
+        }
+    }
+
+    /// Whether this answer means the credential presented is finished, as
+    /// opposed to the request simply not having worked this time.
+    ///
+    /// The server says so in exactly one way: a 4xx carrying one of the flow's
+    /// own codes. A 5xx, a throttle, or a proxy page says nothing about the
+    /// credential — and a login destroyed on a guess costs a re-login the
+    /// credential never needed. Both halves are load-bearing: a proxy can
+    /// answer 404 (bad route) or 403 (WAF, IP rule) with a body that parses as
+    /// nothing, and status alone would let that discard a working login.
+    fn is_terminal(&self) -> bool {
+        (400..500).contains(&self.status)
+            && matches!(self.code(), Some("access_denied" | "expired_token"))
+    }
+}
+
+/// What one unsuccessful device-flow poll means for the loop.
+#[derive(Debug, PartialEq)]
+enum PollStep {
+    KeepPolling,
+    SlowDown,
+    Denied,
+    Expired,
+}
+
+/// Only the flow's own answers end a login. Anything else did not come from the
+/// flow — a gateway error while the server restarts, a throttle, a proxy page —
+/// and ending on one would abandon a code the human may already have approved
+/// in the browser. The device code's own deadline still bounds the wait.
+fn poll_step(e: &ApiFailure) -> PollStep {
+    match e.code() {
+        Some("slow_down") => PollStep::SlowDown,
+        Some("access_denied") => PollStep::Denied,
+        Some("expired_token") => PollStep::Expired,
+        // `authorization_pending`, and everything that is not the flow talking.
+        _ => PollStep::KeepPolling,
+    }
+}
+
 fn api_url(server: &str, path: &str) -> String {
     format!("{}{path}", normalize_server(server))
 }
@@ -171,7 +236,7 @@ async fn post_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
     body: &serde_json::Value,
-) -> Result<Result<T, ApiErrorBody>, CliError> {
+) -> Result<Result<T, ApiFailure>, CliError> {
     let res = client
         .post(url)
         .json(body)
@@ -185,12 +250,11 @@ async fn post_json<T: serde::de::DeserializeOwned>(
             .map_err(|e| CliError::Server(format!("{url}: unexpected response: {e}")))?;
         return Ok(Ok(parsed));
     }
-    let status = res.status();
-    let err = res.json::<ApiErrorBody>().await.unwrap_or(ApiErrorBody {
-        code: format!("http_{}", status.as_u16()),
-        message: status.to_string(),
-    });
-    Ok(Err(err))
+    let status = res.status().as_u16();
+    Ok(Err(ApiFailure {
+        status,
+        body: res.json::<ApiErrorBody>().await.ok(),
+    }))
 }
 
 /// Whether a login should become the configured default: the user asked with
@@ -238,7 +302,7 @@ pub async fn login(server: &str, token: Option<&str>, default: bool) -> Result<(
         &serde_json::json!({}),
     )
     .await?
-    .map_err(|e| CliError::Server(format!("starting the login: {}", e.message)))?;
+    .map_err(|e| CliError::Server(format!("starting the login: {}", e.message())))?;
 
     println!("To authorize this machine, open:\n");
     println!("    {}\n", start.verification_uri_complete);
@@ -259,7 +323,7 @@ pub async fn login(server: &str, token: Option<&str>, default: bool) -> Result<(
                 "the code expired before it was approved; run `horsie auth login` again".into(),
             ));
         }
-        let polled: Result<TokenPair, ApiErrorBody> = post_json(
+        let polled: Result<TokenPair, ApiFailure> = post_json(
             &client,
             &api_url(server, "/api/auth/device/token"),
             &serde_json::json!({ "deviceCode": start.device_code }),
@@ -285,17 +349,14 @@ pub async fn login(server: &str, token: Option<&str>, default: bool) -> Result<(
                 }
                 return Ok(());
             }
-            Err(e) => match e.code.as_str() {
-                "authorization_pending" => {}
-                "slow_down" => interval = interval.saturating_add(5),
-                "access_denied" => {
+            Err(e) => match poll_step(&e) {
+                PollStep::KeepPolling => {}
+                PollStep::SlowDown => interval = interval.saturating_add(5),
+                PollStep::Denied => {
                     return Err(CliError::Server("that login was denied".into()));
                 }
-                _ => {
-                    return Err(CliError::Server(format!(
-                        "login failed: {} ({})",
-                        e.message, e.code
-                    )));
+                PollStep::Expired => {
+                    return Err(CliError::Server(format!("login failed: {}", e.message())));
                 }
             },
         }
@@ -487,7 +548,7 @@ async fn resolve_token_outcome_with(
     }
 
     let client = reqwest::Client::new();
-    let refreshed: Result<TokenPair, ApiErrorBody> = match post_json(
+    let refreshed: Result<TokenPair, ApiFailure> = match post_json(
         &client,
         &api_url(server, "/api/auth/refresh"),
         &serde_json::json!({ "refreshToken": current.refresh_token }),
@@ -515,10 +576,10 @@ async fn resolve_token_outcome_with(
             }
             TokenOutcome::Token(Some(updated.access_token))
         }
-        // The server answered, and its answer was no: the refresh token is
+        // The *server* answered, and its answer was no: the refresh token is
         // rotated away, revoked, or expired. Drop it so the next run says "log
         // in" instead of retrying a credential that can never work again.
-        Err(_) => {
+        Err(e) if e.is_terminal() => {
             creds.remove(server);
             let _ = creds.save(path);
             TokenOutcome::Dead(format!(
@@ -526,6 +587,16 @@ async fn resolve_token_outcome_with(
                 normalize_server(server)
             ))
         }
+        // Something answered, but not with a verdict on this credential — a
+        // gateway error while the server restarts, a throttle, a proxy page.
+        // Keeping the credential is the whole point: the refresh token outlives
+        // the access token by months, and discarding it here turns a container
+        // restart into a forced re-login of every agent on the machine.
+        Err(e) => TokenOutcome::Transient(format!(
+            "could not refresh the login for {}: {}",
+            normalize_server(server),
+            e.message()
+        )),
     }
 }
 
@@ -705,6 +776,184 @@ mod tests {
                 .get("http://127.0.0.1:1")
                 .is_some(),
             "an unreachable issuer must not discard a credential that may still be valid"
+        );
+    }
+
+    /// Serve `responses` in order, one per connection, then stop. Enough to
+    /// stand in for the issuer without pulling an HTTP server into the CLI's
+    /// dev-dependencies: every case here turns on the status line and the body,
+    /// which a canned response carries as faithfully as a real handler.
+    async fn stub_issuer(responses: Vec<(u16, &'static str, &'static str)>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for (status, content_type, body) in responses {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                // Read the request far enough that the client is not writing
+                // into a closed socket when the response goes out.
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let res = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(res.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A credential file holding one stale-but-refreshable entry for `server`.
+    fn stale_credential(path: &Path, server: &str) {
+        let mut creds = Credentials::default();
+        creds.set(
+            server,
+            ServerCredentials {
+                access_token: "hsk_usr_stale".into(),
+                refresh_token: "hsk_ref_r".into(),
+                expires_at: now_secs() - 1,
+            },
+        );
+        creds.save(path).unwrap();
+    }
+
+    fn stored(path: &Path, server: &str) -> bool {
+        Credentials::load(path).unwrap().get(server).is_some()
+    }
+
+    /// The reported failure: the horsie container was being recreated, so Caddy
+    /// — not horsie — answered the refresh. The credential was still perfectly
+    /// good on the server, and the CLI deleted it.
+    #[tokio::test]
+    async fn a_gateway_error_is_transient_and_keeps_the_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("credentials.json");
+        let server = stub_issuer(vec![(
+            502,
+            "text/html",
+            "<html><body>502 Bad Gateway</body></html>",
+        )])
+        .await;
+        stale_credential(&path, &server);
+
+        match resolve_token_outcome_with(&server, &path, None).await {
+            TokenOutcome::Transient(m) => assert!(m.contains("502"), "{m}"),
+            other @ (TokenOutcome::Token(_) | TokenOutcome::Dead(_)) => {
+                panic!("expected Transient, got {other:?}")
+            }
+        }
+        assert!(
+            stored(&path, &server),
+            "a proxy that answers must not discard a credential the server never rejected"
+        );
+    }
+
+    /// The server's own internal faults are 500s. They say nothing about the
+    /// credential either, even though they do arrive in its error envelope.
+    #[tokio::test]
+    async fn a_server_fault_is_transient_and_keeps_the_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("credentials.json");
+        let server = stub_issuer(vec![(
+            500,
+            "application/json",
+            r#"{"code":"internal","message":"database is locked"}"#,
+        )])
+        .await;
+        stale_credential(&path, &server);
+
+        match resolve_token_outcome_with(&server, &path, None).await {
+            TokenOutcome::Transient(m) => assert!(m.contains("database is locked"), "{m}"),
+            other @ (TokenOutcome::Token(_) | TokenOutcome::Dead(_)) => {
+                panic!("expected Transient, got {other:?}")
+            }
+        }
+        assert!(stored(&path, &server));
+    }
+
+    /// The one answer that does mean the login is finished. Discarding it is the
+    /// point: the next run says "log in" instead of retrying a dead credential.
+    #[tokio::test]
+    async fn access_denied_is_dead_and_discards_the_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("credentials.json");
+        let server = stub_issuer(vec![(
+            400,
+            "application/json",
+            r#"{"code":"access_denied","message":"that request was denied"}"#,
+        )])
+        .await;
+        stale_credential(&path, &server);
+
+        match resolve_token_outcome_with(&server, &path, None).await {
+            TokenOutcome::Dead(m) => assert!(m.contains("no longer valid"), "{m}"),
+            other @ (TokenOutcome::Token(_) | TokenOutcome::Transient(_)) => {
+                panic!("expected Dead, got {other:?}")
+            }
+        }
+        assert!(!stored(&path, &server));
+    }
+
+    /// A 4xx alone is not a verdict: a proxy's 403 or 404 carries a status the
+    /// server would never have sent for this credential.
+    #[tokio::test]
+    async fn a_4xx_the_server_did_not_send_keeps_the_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("credentials.json");
+        let server = stub_issuer(vec![(403, "text/html", "<html>Forbidden</html>")]).await;
+        stale_credential(&path, &server);
+
+        assert!(matches!(
+            resolve_token_outcome_with(&server, &path, None).await,
+            TokenOutcome::Transient(_)
+        ));
+        assert!(stored(&path, &server));
+    }
+
+    fn failure(status: u16, code: Option<&str>) -> ApiFailure {
+        ApiFailure {
+            status,
+            body: code.map(|c| ApiErrorBody {
+                code: c.to_string(),
+                message: String::new(),
+            }),
+        }
+    }
+
+    /// Same fault as the refresh path, at login time: a gateway error mid-poll
+    /// used to end a login the human may already have approved in the browser.
+    #[test]
+    fn the_device_poll_rides_out_answers_the_flow_did_not_send() {
+        assert_eq!(poll_step(&failure(502, None)), PollStep::KeepPolling);
+        assert_eq!(poll_step(&failure(429, None)), PollStep::KeepPolling);
+        assert_eq!(
+            poll_step(&failure(500, Some("internal"))),
+            PollStep::KeepPolling
+        );
+    }
+
+    #[test]
+    fn the_device_poll_ends_on_the_flows_own_answers() {
+        assert_eq!(
+            poll_step(&failure(400, Some("authorization_pending"))),
+            PollStep::KeepPolling
+        );
+        assert_eq!(
+            poll_step(&failure(400, Some("slow_down"))),
+            PollStep::SlowDown
+        );
+        assert_eq!(
+            poll_step(&failure(400, Some("access_denied"))),
+            PollStep::Denied
+        );
+        assert_eq!(
+            poll_step(&failure(400, Some("expired_token"))),
+            PollStep::Expired
         );
     }
 
