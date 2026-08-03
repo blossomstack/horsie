@@ -39,7 +39,7 @@ export function RoutineDetailPage() {
   return (
     <div className="flex h-full flex-col" data-testid="routine-detail-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
-        <h1 className="font-mono text-[15px] font-semibold text-legend">
+        <h1 className="page-title font-mono">
           {routine.name}
         </h1>
         {!routine.enabled && (

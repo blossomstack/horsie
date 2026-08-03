@@ -88,10 +88,13 @@ function FooterLink({
       data-testid={`${label.toLowerCase()}-link`}
       className={({ isActive }) =>
         cn(
-          "flex min-w-0 items-center gap-1.5 rounded-[var(--radius-control)] px-1.5 py-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.08em] transition-colors",
+          // `.legend` rather than a hard-coded mono uppercase: these are
+          // engraved labels by role, so they follow whatever the active skin
+          // decided legends look like.
+          "legend flex min-w-0 items-center gap-1.5 rounded-[var(--radius-control)] px-1.5 py-1.5 transition-colors",
           isActive
-            ? "bg-raised text-legend"
-            : "text-faint hover:bg-raised hover:text-legend",
+            ? "bg-raised !text-legend"
+            : "hover:bg-raised hover:!text-legend",
         )
       }
     >
@@ -104,8 +107,6 @@ function FooterLink({
 export function Sidebar() {
   const { data: sessions, isLoading, isError } = useSessionList();
   const navigate = useNavigate();
-
-  const running = sessions?.filter((s) => statusMeta(s.status).busy).length ?? 0;
 
   return (
     <aside className="flex h-full w-[17.5rem] shrink-0 flex-col border-r bg-panel">
@@ -122,20 +123,21 @@ export function Sidebar() {
         <span className="font-mono text-[13px] font-semibold tracking-[0.16em] text-legend">
           HORSIE
         </span>
-        <span
-          className={cn(
-            "lamp ml-auto",
-            isError
-              ? "text-red-ink"
-              : running > 0
-                ? "lamp-live text-amber-ink"
-                : "text-lamp-ok",
-          )}
-          aria-hidden
-        />
-        <span className="legend" data-testid="rail-state">
-          {isError ? "Offline" : running > 0 ? `${running} running` : "Ready"}
-        </span>
+        {/* Only the fault state earns a place here. "N running" restated what
+            every session row below already carries in its own status dot and
+            word, and "Ready" labelled the absence of news. A dead server link
+            is the one thing that is visible nowhere else — without it the
+            first symptom is an empty session list that looks like an account
+            with no sessions. */}
+        {isError && (
+          <span
+            className="ml-auto flex shrink-0 items-center gap-2 text-red-ink"
+            data-testid="rail-state"
+          >
+            <span className="lamp" aria-hidden />
+            <span className="legend text-current">Offline</span>
+          </span>
+        )}
       </div>
 
       {/* The things you keep, before the things you accumulate. */}

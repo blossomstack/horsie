@@ -31,7 +31,7 @@ export function SettingsHeader({
       <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3.5 sm:px-6">
         <RailToggle />
         <div className="min-w-0 flex-1">
-          <h1 className="text-[15px] font-semibold tracking-tight text-legend">
+          <h1 className="page-title">
             {title}
           </h1>
           <p className="mt-0.5 max-w-prose text-xs leading-relaxed text-faint">

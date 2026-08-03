@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { Star, X } from "lucide-react";
+import { useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
-import { RowLabel } from "./fields";
+import { ListRow, RowAction, Section, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
-import { usePublishDirty } from "./dirty";
 
 /**
  * Where sessions execute.
@@ -18,20 +18,14 @@ import { usePublishDirty } from "./dirty";
 export function RuntimesSettings() {
   const { data: settings, isLoading, error } = useSettings();
   const update = useUpdateSettings();
-  const [defaultVendor, setDefaultVendor] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const dirty = settings != null && defaultVendor !== settings.defaultVendor;
-  usePublishDirty(dirty);
-
-  useEffect(() => {
-    if (settings) setDefaultVendor(settings.defaultVendor);
-  }, [settings]);
-
-  const save = async () => {
+  // Setting the default is one action on one row, so there is nothing to batch
+  // and no dirty state to publish.
+  const makeDefault = async (name: string) => {
     setSaveError(null);
     try {
-      await update.mutateAsync({ defaultVendor: defaultVendor || undefined });
+      await update.mutateAsync({ defaultVendor: name || undefined });
     } catch (e) {
       setSaveError(
         e instanceof ApiRequestError ? e.message : "Failed to save settings.",
@@ -59,94 +53,96 @@ export function RuntimesSettings() {
   }
 
   const vendors = settings.vendors;
+  // A default naming an agent that has not dialled in is legitimate — the
+  // preference applies whenever it connects — so it gets a row of its own
+  // rather than disappearing from a list of only-connected vendors.
+  const absentDefault =
+    settings.defaultVendor &&
+    !vendors.some((v) => v.name === settings.defaultVendor)
+      ? settings.defaultVendor
+      : null;
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <SettingsHeader
         title="Runtimes"
         desc="Where sessions execute. Vendors are agent processes that connect to this server; each one is configured where it runs."
-        dirty={dirty}
         saving={update.isPending}
-        onSave={save}
-        onDiscard={() => setDefaultVendor(settings.defaultVendor)}
+        saved={update.isSuccess && !update.isPending}
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
-          {saveError && (
-            <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-              {saveError}
-            </p>
+      <SettingsPane>
+        {saveError && (
+          <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+            {saveError}
+          </p>
+        )}
+
+        <Section
+          title="Connected vendors"
+          desc="Agents connected right now. Run horsie connect on a machine, or start a vendor agent such as horsie-velos-runtime, and it appears here. New sessions use the default when they don’t pick one."
+          empty={
+            vendors.length === 0 && !absentDefault
+              ? "No vendor agents are connected, so sessions cannot run a turn yet."
+              : null
+          }
+        >
+          {vendors.map((v) => (
+            <ListRow
+              key={v.name}
+              testId={`vendor-row-${v.name}`}
+              title={v.name}
+              subtitle={
+                v.capabilities.supportsProvisioning
+                  ? "Provisions repos and skill bundles"
+                  : "Works in the agent’s own directories"
+              }
+              meta={
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className="lamp text-lamp-ok" aria-hidden />
+                  <span className="legend text-lamp-ok">Connected</span>
+                  {v.isDefault && <span className="chip">Default</span>}
+                </span>
+              }
+              actions={
+                v.isDefault ? undefined : (
+                  <RowAction
+                    icon={<Star size={14} />}
+                    label={`Make ${v.name} the default`}
+                    onClick={() => makeDefault(v.name)}
+                    disabled={update.isPending}
+                    testId={`vendor-make-default-${v.name}`}
+                  />
+                )
+              }
+            />
+          ))}
+
+          {absentDefault && (
+            <ListRow
+              testId="vendor-row-absent-default"
+              title={absentDefault}
+              subtitle="Set as the default, but its agent has not connected. Sessions defaulting to it fail to start until it dials in."
+              meta={
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className="lamp lamp-off text-faint" aria-hidden />
+                  <span className="legend">Not connected</span>
+                  <span className="chip">Default</span>
+                </span>
+              }
+              actions={
+                <RowAction
+                  icon={<X size={14} />}
+                  label="Clear the default"
+                  onClick={() => makeDefault("")}
+                  disabled={update.isPending}
+                  testId="vendor-clear-default"
+                />
+              }
+            />
           )}
-
-          <section className="panel p-4">
-            <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">
-              Connected vendors
-            </h2>
-            <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-              Agents connected right now. Run <code>horsie connect</code> on a
-              machine, or start a vendor agent such as{" "}
-              <code>horsie-velos-runtime</code>, and it appears here.
-            </p>
-
-            {vendors.length === 0 ? (
-              <p className="screen mt-4 px-3 py-5 text-center text-sm text-faint">
-                No vendor agents are connected, so sessions cannot run a turn
-                yet.
-              </p>
-            ) : (
-              <ul className="mt-4 space-y-px">
-                {vendors.map((v) => (
-                  <li
-                    key={v.name}
-                    className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[var(--radius-control)] bg-raised px-3 py-2.5"
-                  >
-                    <span className="lamp text-lamp-ok" aria-hidden />
-                    <span className="font-mono text-[13px] text-legend">
-                      {v.name}
-                    </span>
-                    {v.isDefault && <span className="chip">Default</span>}
-                    <span className="legend ml-auto">
-                      {v.capabilities.supportsProvisioning
-                        ? "Provisions repos and skill bundles"
-                        : "Works in the agent’s own directories"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section className="panel p-4">
-            <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-legend">
-              Default vendor
-            </h2>
-            <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-              Which vendor new sessions use when they don’t pick one. It may name
-              an agent that isn’t connected yet — the preference applies once
-              that agent dials in.
-            </p>
-            <label className="mt-4 block max-w-sm">
-              <RowLabel>Vendor name</RowLabel>
-              <input
-                className="field field-mono"
-                value={defaultVendor}
-                placeholder="local"
-                onChange={(e) => setDefaultVendor(e.target.value)}
-              />
-            </label>
-            {defaultVendor !== "" &&
-              !vendors.some((v) => v.name === defaultVendor) && (
-                <p className="mt-2 flex items-start gap-2 text-xs leading-relaxed text-amber-ink">
-                  <span className="lamp mt-1" aria-hidden />
-                  No connected vendor is named “{defaultVendor}” right now.
-                  Sessions defaulting to it will fail to start until its agent
-                  connects.
-                </p>
-              )}
-          </section>
-        </div>
-      </div>
+        </Section>
+      </SettingsPane>
     </div>
   );
 }

@@ -80,7 +80,11 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
     >
       <div className="flex items-start gap-2">
         <HelpCircle size={16} className="mt-0.5 shrink-0 text-amber-ink" />
-        <div className="min-w-0 flex-1">
+        {/* `break-words` is load-bearing, not defensive: a question or an
+            answer routinely carries a path, a URL or an identifier with no
+            break opportunity, and without it that single token widens the
+            card past the transcript column. */}
+        <div className="min-w-0 flex-1 break-words">
           <span className="font-medium text-amber-ink">Asked: </span>
           {input.question ?? ""}
 
@@ -96,7 +100,10 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                   disabled={!pending || api.submitting}
                   onClick={() => toggle(c)}
                   className={cn(
-                    "chip text-left",
+                    // `.chip` alone sets `white-space: nowrap`, which sent a
+                    // long choice label straight out of the card — the model
+                    // writes these, so their length is unbounded.
+                    "chip chip-wrap",
                     pending && "cursor-pointer hover:border-amber",
                     (pending ? selected.includes(c) : picked?.has(c)) &&
                       "border-amber bg-amber/15 font-medium",
@@ -161,7 +168,7 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
             <p
               data-testid={superseded ? "ask-user-superseded" : "ask-user-answer"}
               className={cn(
-                "mt-1.5 whitespace-pre-wrap",
+                "mt-1.5 break-words whitespace-pre-wrap",
                 superseded ? "text-faint italic" : "text-dim",
               )}
             >

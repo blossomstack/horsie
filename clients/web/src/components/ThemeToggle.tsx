@@ -1,16 +1,20 @@
 import { Moon, Sun } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 
+/** The quick light/dark flip on the rail. Choosing a theme, and following the
+ * system, live on the Appearance settings page — this is the one-click version
+ * of the one axis people change often. */
 export function ThemeToggle() {
-  const { theme, toggle } = useTheme();
+  const { mode, toggle } = useTheme();
   return (
     <button
       className="key-icon"
       onClick={toggle}
-      title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-      aria-label="Toggle theme"
+      title={`Switch to ${mode === "dark" ? "light" : "dark"}`}
+      aria-label="Toggle light and dark"
+      data-testid="theme-toggle"
     >
-      {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+      {mode === "dark" ? <Sun size={18} /> : <Moon size={18} />}
     </button>
   );
 }

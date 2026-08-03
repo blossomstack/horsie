@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError } from "../../api/client";
-import { SessionConfigBar } from "../../components/SessionConfigBar";
+import { ConfigFields } from "../../components/SessionConfigBar";
+import { RailToggle } from "../../components/rail";
 import type { AgentView } from "../../api/types";
 import { useAgent, useCreateAgent, useUpdateAgent } from "../../hooks/useAgents";
 import { useAgentDraft } from "../../hooks/useAgentDraft";
+import { RowLabel } from "../settings/fields";
 
 /** Create (`/agents/new`) and edit (`/agents/:name/edit`) share one form. The
  * form is a child component mounted only once the preset has loaded: its
@@ -25,6 +27,15 @@ export function AgentEditPage() {
   return <AgentForm key={name ?? "new"} initial={existing} />;
 }
 
+/**
+ * One panel, read top to bottom: what this agent is called, what it is for,
+ * and how it runs.
+ *
+ * The configuration used to be the session action row, rendered verbatim and
+ * pinned to the bottom of the pane — so a preset's model and runtime sat
+ * below the save button, separated from the name and description by the whole
+ * height of the page. They are one form.
+ */
 function AgentForm({ initial }: { initial?: AgentView }) {
   const editing = !!initial;
   const create = useCreateAgent();
@@ -53,38 +64,49 @@ function AgentForm({ initial }: { initial?: AgentView }) {
 
   return (
     <div className="flex h-full flex-col" data-testid="agent-edit-page">
-      <div className="border-b px-6 py-4">
-        <h1 className="text-[15px] font-semibold text-legend">
+      <header className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:px-6">
+        <RailToggle />
+        <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? `Edit ${initial.name}` : "New agent"}
         </h1>
-      </div>
-      <div className="flex-1 overflow-y-auto px-6 py-4">
-        <div className="mx-auto w-full max-w-3xl space-y-4">
-          <label className="block">
-            <span className="mb-1 block text-xs font-medium text-dim">
-              Name
-            </span>
-            <input
-              className="field w-full font-mono"
-              placeholder="reviewer"
-              value={agentName}
-              disabled={editing}
-              onChange={(e) => setAgentName(e.target.value)}
-              data-testid="agent-name-input"
-            />
-          </label>
-          <label className="block">
-            <span className="mb-1 block text-xs font-medium text-dim">
-              Description
-            </span>
-            <input
-              className="field w-full"
-              placeholder="What this agent is for"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              data-testid="agent-description-input"
-            />
-          </label>
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+          <section className="panel space-y-4 p-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="block">
+                <RowLabel>Name</RowLabel>
+                <input
+                  className="field field-mono"
+                  placeholder="reviewer"
+                  value={agentName}
+                  disabled={editing}
+                  onChange={(e) => setAgentName(e.target.value)}
+                  data-testid="agent-name-input"
+                />
+              </label>
+              <label className="block">
+                <RowLabel>Description</RowLabel>
+                <input
+                  className="field"
+                  placeholder="What this agent is for"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  data-testid="agent-description-input"
+                />
+              </label>
+            </div>
+
+            <div className="border-t pt-4">
+              <h2 className="section-title">Configuration</h2>
+              <p className="mb-3 mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
+                What every session started from this preset runs with.
+              </p>
+              <ConfigFields draft={draft} />
+            </div>
+          </section>
+
           {error && (
             <div
               className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
@@ -93,21 +115,21 @@ function AgentForm({ initial }: { initial?: AgentView }) {
               {error}
             </div>
           )}
+
+          <div className="flex gap-2">
+            <button
+              className="key key-go"
+              disabled={!canSave}
+              onClick={handleSave}
+              data-testid="save-agent-button"
+            >
+              {busy ? "Saving…" : "Save agent"}
+            </button>
+            <button className="key key-blank" onClick={() => navigate("/agents")}>
+              Cancel
+            </button>
+          </div>
         </div>
-      </div>
-      <SessionConfigBar mode="draft" draft={draft} />
-      <div className="mx-auto flex w-full max-w-3xl gap-2 px-4 pb-4">
-        <button
-          className="key key-go"
-          disabled={!canSave}
-          onClick={handleSave}
-          data-testid="save-agent-button"
-        >
-          {busy ? "Saving…" : "Save agent"}
-        </button>
-        <button className="key" onClick={() => navigate("/agents")}>
-          Cancel
-        </button>
       </div>
     </div>
   );

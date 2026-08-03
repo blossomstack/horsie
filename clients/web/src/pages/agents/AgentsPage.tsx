@@ -13,7 +13,7 @@ export function AgentsPage() {
       <div className="flex items-center gap-2 border-b bg-panel px-4 py-3.5 sm:gap-3 sm:px-6">
         <RailToggle />
         <div className="min-w-0 flex-1">
-          <h1 className="text-[15px] font-semibold tracking-tight text-legend">
+          <h1 className="page-title">
             Agents
           </h1>
           <p className="mt-0.5 text-xs text-faint">

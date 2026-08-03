@@ -59,10 +59,11 @@ test("C1: a single-select ask is answered by picking a choice and sending", asyn
   await expectStatus(page, "AwaitingInput");
 
   // The composer stays live — a message sent from it answers the ask, exactly
-  // as the card does — but points at the question so the two surfaces are not
-  // mistaken for a choice between sending and answering.
+  // as the card does. The pointer that used to sit under it is gone: the card
+  // is in the transcript and the header already reads AwaitingInput, so the
+  // hint restated state that was on screen twice over.
   await expect(page.getByTestId("composer-input")).toBeEnabled();
-  await expect(page.getByTestId("composer-ask-hint")).toBeVisible();
+  await expect(page.getByTestId("composer-ask-hint")).toHaveCount(0);
 
   const blue = page.locator('[data-testid="ask-user-choice"][data-value="blue"]');
   const red = page.locator('[data-testid="ask-user-choice"][data-value="red"]');

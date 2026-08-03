@@ -1,0 +1,527 @@
+/* ==================================================================== *
+ * SKINS
+ *
+ * Three alternate visual worlds for the same layouts. A skin is
+ * `data-skin` on <html>; Console is the default and lives in index.css.
+ *
+ * A skin may replace materials, borders, radii, shadows and type. It may
+ * not move anything: every surface keeps its structure, its testids and
+ * its behaviour, so switching skins is a change of material and never a
+ * change of where things are.
+ *
+ * The four invariants from index.css bind every block below:
+ *   material roles hold across modes; status is a lamp AND a word; code
+ *   keeps its own palette; AA is measured by scripts/contrast.mjs.
+ *
+ * Each skin defines its FULL palette per mode rather than patching the
+ * Console values. That is deliberate — the contrast script reads these
+ * blocks directly, and a skin that inherited half its ramp would be
+ * verified against numbers it does not actually use.
+ * ==================================================================== */
+
+/* ==================================================================== *
+ * PAPER — editorial calm.
+ *
+ * Paper under daylight, not lamplight. The obvious rendition of "paper" is
+ * a cream ground with a serif display face and a terracotta accent; that
+ * is the house style of every generated interface, so this is its cool
+ * neutral opposite — near-white with a trace of blue, one humanist sans
+ * doing all the work, and ink blue as the colour that commits.
+ *
+ * Separation comes from whitespace. Panels have no border at all, and the
+ * hairline rules that remain are structural: a header from its body, a row
+ * from the next row.
+ * ==================================================================== */
+[data-skin="paper"] {
+  --face-sans: "Libre Franklin Variable", system-ui, sans-serif;
+
+  --r-chip: 3px;
+  --r-control: 4px;
+  --r-cap: 4px;
+  --r-panel: 6px;
+
+  /* Legends stop shouting: sentence case, in the reading face, at a size
+   * that belongs to the same document as the prose. */
+  --legend-face: var(--face-sans);
+  --legend-transform: none;
+  --legend-tracking: 0.01em;
+  --legend-width: 100;
+  --legend-size: 11.5px;
+
+  --prose-measure: 66ch;
+  --prose-heading-face: var(--face-sans);
+}
+
+[data-skin="paper"][data-theme="dark"] {
+  --chassis: oklch(0.165 0.004 255);
+  --panel: oklch(0.205 0.005 255);
+  --panel-raised: oklch(0.255 0.006 255);
+  --screen: oklch(0.135 0.005 255);
+
+  --rule: oklch(0.285 0.006 255);
+  --rule-strong: oklch(0.38 0.008 255);
+
+  --legend: oklch(0.945 0.004 255);
+  --legend-dim: oklch(0.72 0.008 255);
+  --legend-faint: oklch(0.66 0.009 255);
+
+  --keycap: oklch(0.325 0.008 255);
+  --keycap-hover: oklch(0.375 0.009 255);
+  --keycap-ink: oklch(0.95 0.004 255);
+  --keycap-edge: transparent;
+
+  --orange: oklch(0.66 0.15 258);
+  --orange-hover: oklch(0.71 0.145 258);
+  --orange-ink: oklch(0.16 0.03 258);
+  --orange-quiet: oklch(0.28 0.06 258);
+
+  --amber: oklch(0.8 0.12 75);
+  --amber-ink: oklch(0.8 0.12 75);
+  --amber-quiet: oklch(0.3 0.05 75);
+
+  --red: oklch(0.65 0.2 25);
+  --red-ink: oklch(0.7 0.19 25);
+  --red-quiet: oklch(0.3 0.08 25);
+
+  --lamp-ok: oklch(0.78 0.14 155);
+  --lamp-ok-quiet: oklch(0.3 0.06 155);
+
+  --code-keyword: oklch(0.78 0.13 262);
+  --code-string: oklch(0.8 0.11 155);
+  --code-number: oklch(0.82 0.11 75);
+  --code-type: oklch(0.8 0.09 210);
+
+  --focus-ring: oklch(0.66 0.15 258 / 0.45);
+  --cap-lift: none;
+  --cap-flat: none;
+  --panel-lift: 0 2px 8px oklch(0.08 0.01 255 / 0.5);
+  --screen-inset: none;
+  color-scheme: dark;
+}
+
+[data-skin="paper"][data-theme="light"] {
+  --chassis: oklch(0.968 0.002 255);
+  --panel: oklch(0.995 0.001 255);
+  --panel-raised: oklch(1 0 0);
+  --screen: oklch(0.945 0.003 255);
+
+  --rule: oklch(0.905 0.004 255);
+  --rule-strong: oklch(0.8 0.006 255);
+
+  --legend: oklch(0.235 0.008 255);
+  --legend-dim: oklch(0.42 0.01 255);
+  --legend-faint: oklch(0.475 0.011 255);
+
+  --keycap: oklch(0.888 0.005 255);
+  --keycap-hover: oklch(0.845 0.006 255);
+  --keycap-ink: oklch(0.245 0.008 255);
+  --keycap-edge: transparent;
+
+  --orange: oklch(0.47 0.16 258);
+  --orange-hover: oklch(0.42 0.16 258);
+  --orange-ink: oklch(0.99 0.005 258);
+  --orange-quiet: oklch(0.94 0.03 258);
+
+  --amber: oklch(0.7 0.13 75);
+  --amber-ink: oklch(0.47 0.11 68);
+  --amber-quiet: oklch(0.95 0.035 75);
+
+  --red: oklch(0.52 0.2 25);
+  --red-ink: oklch(0.49 0.2 25);
+  --red-quiet: oklch(0.95 0.03 25);
+
+  --lamp-ok: oklch(0.45 0.11 155);
+  --lamp-ok-quiet: oklch(0.94 0.04 155);
+
+  --code-keyword: oklch(0.45 0.15 262);
+  --code-string: oklch(0.43 0.11 155);
+  --code-number: oklch(0.46 0.11 65);
+  --code-type: oklch(0.45 0.09 235);
+
+  --focus-ring: oklch(0.47 0.16 258 / 0.35);
+  --cap-lift: none;
+  --cap-flat: none;
+  --panel-lift: 0 2px 10px oklch(0.5 0.01 255 / 0.14);
+  --screen-inset: none;
+  color-scheme: light;
+}
+
+/* ==================================================================== *
+ * SOFT — a modern product surface.
+ *
+ * Borders replaced by elevation, generous radii, warm neutral greys
+ * rather than the blue-greys that are this register's tell. Keys are flat
+ * fills with no travel; lamps are plain dots with no glow.
+ * ==================================================================== */
+[data-skin="soft"] {
+  --face-sans: "Manrope Variable", system-ui, sans-serif;
+
+  --r-chip: 6px;
+  --r-control: 10px;
+  --r-cap: 10px;
+  --r-panel: 14px;
+
+  --legend-face: var(--face-sans);
+  --legend-transform: none;
+  --legend-tracking: 0.005em;
+  --legend-width: 100;
+  --legend-size: 11.5px;
+
+  --prose-measure: 68ch;
+  --prose-heading-face: var(--face-sans);
+}
+
+[data-skin="soft"][data-theme="dark"] {
+  --chassis: oklch(0.175 0.005 285);
+  --panel: oklch(0.225 0.006 285);
+  --panel-raised: oklch(0.275 0.007 285);
+  --screen: oklch(0.145 0.005 285);
+
+  --rule: oklch(0.3 0.007 285);
+  --rule-strong: oklch(0.4 0.009 285);
+
+  --legend: oklch(0.945 0.004 285);
+  --legend-dim: oklch(0.725 0.008 285);
+  --legend-faint: oklch(0.665 0.009 285);
+
+  --keycap: oklch(0.345 0.009 285);
+  --keycap-hover: oklch(0.395 0.01 285);
+  --keycap-ink: oklch(0.95 0.004 285);
+  --keycap-edge: transparent;
+
+  --orange: oklch(0.62 0.19 292);
+  --orange-hover: oklch(0.67 0.18 292);
+  --orange-ink: oklch(0.16 0.03 292);
+  --orange-quiet: oklch(0.29 0.08 292);
+
+  --amber: oklch(0.8 0.14 78);
+  --amber-ink: oklch(0.8 0.14 78);
+  --amber-quiet: oklch(0.31 0.06 78);
+
+  --red: oklch(0.65 0.21 25);
+  --red-ink: oklch(0.7 0.2 25);
+  --red-quiet: oklch(0.3 0.08 25);
+
+  --lamp-ok: oklch(0.78 0.15 158);
+  --lamp-ok-quiet: oklch(0.3 0.06 158);
+
+  --code-keyword: oklch(0.78 0.14 292);
+  --code-string: oklch(0.8 0.12 158);
+  --code-number: oklch(0.82 0.12 78);
+  --code-type: oklch(0.8 0.1 220);
+
+  --focus-ring: oklch(0.62 0.19 292 / 0.45);
+  --cap-lift: none;
+  --cap-flat: none;
+  --panel-lift: 0 1px 2px oklch(0.08 0.01 285 / 0.3), 0 8px 24px oklch(0.08 0.01 285 / 0.35);
+  --screen-inset: none;
+  color-scheme: dark;
+}
+
+[data-skin="soft"][data-theme="light"] {
+  --chassis: oklch(0.965 0.004 75);
+  --panel: oklch(0.99 0.002 75);
+  --panel-raised: oklch(1 0 0);
+  --screen: oklch(0.945 0.005 75);
+
+  --rule: oklch(0.915 0.005 75);
+  --rule-strong: oklch(0.82 0.007 75);
+
+  --legend: oklch(0.24 0.008 285);
+  --legend-dim: oklch(0.42 0.01 285);
+  --legend-faint: oklch(0.475 0.011 285);
+
+  --keycap: oklch(0.885 0.006 75);
+  --keycap-hover: oklch(0.842 0.007 75);
+  --keycap-ink: oklch(0.25 0.008 285);
+  --keycap-edge: transparent;
+
+  --orange: oklch(0.5 0.2 292);
+  --orange-hover: oklch(0.45 0.2 292);
+  --orange-ink: oklch(0.99 0.005 292);
+  --orange-quiet: oklch(0.945 0.035 292);
+
+  --amber: oklch(0.7 0.14 78);
+  --amber-ink: oklch(0.47 0.11 68);
+  --amber-quiet: oklch(0.95 0.04 78);
+
+  --red: oklch(0.52 0.2 25);
+  --red-ink: oklch(0.49 0.2 25);
+  --red-quiet: oklch(0.95 0.03 25);
+
+  --lamp-ok: oklch(0.45 0.115 158);
+  --lamp-ok-quiet: oklch(0.94 0.045 158);
+
+  --code-keyword: oklch(0.45 0.17 292);
+  --code-string: oklch(0.43 0.12 158);
+  --code-number: oklch(0.46 0.12 65);
+  --code-type: oklch(0.45 0.1 235);
+
+  --focus-ring: oklch(0.5 0.2 292 / 0.35);
+  --cap-lift: none;
+  --cap-flat: none;
+  --panel-lift: 0 1px 2px oklch(0.6 0.01 75 / 0.1), 0 8px 24px oklch(0.6 0.01 75 / 0.12);
+  --screen-inset: none;
+  color-scheme: light;
+}
+
+/* ==================================================================== *
+ * SLATE — reductive monochrome.
+ *
+ * No borders, no shadows: separation is a step in background value and
+ * nothing else. True neutral greys and a single accent, which stays the
+ * Console orange — in a world with one colour, that colour should keep
+ * meaning "this commits".
+ *
+ * Reuses Archivo, already bundled. The reductive skin reusing the
+ * incumbent face is on concept and costs nothing to download.
+ * ==================================================================== */
+[data-skin="slate"] {
+  --r-chip: 4px;
+  --r-control: 6px;
+  --r-cap: 6px;
+  --r-panel: 8px;
+
+  --legend-face: var(--face-sans);
+  --legend-transform: none;
+  --legend-tracking: 0.015em;
+  --legend-width: 100;
+  --legend-size: 11px;
+
+  --prose-measure: 70ch;
+  --prose-heading-face: var(--face-sans);
+}
+
+[data-skin="slate"][data-theme="dark"] {
+  --chassis: oklch(0.155 0 0);
+  --panel: oklch(0.195 0 0);
+  --panel-raised: oklch(0.245 0 0);
+  --screen: oklch(0.125 0 0);
+
+  --rule: oklch(0.27 0 0);
+  --rule-strong: oklch(0.37 0 0);
+
+  --legend: oklch(0.945 0 0);
+  --legend-dim: oklch(0.72 0 0);
+  --legend-faint: oklch(0.66 0 0);
+
+  --keycap: oklch(0.315 0 0);
+  --keycap-hover: oklch(0.365 0 0);
+  --keycap-ink: oklch(0.95 0 0);
+  --keycap-edge: transparent;
+
+  --orange: oklch(0.688 0.196 42);
+  --orange-hover: oklch(0.735 0.19 42);
+  --orange-ink: oklch(0.19 0.02 42);
+  --orange-quiet: oklch(0.3 0.075 42);
+
+  --amber: oklch(0.8 0.155 78);
+  --amber-ink: oklch(0.8 0.155 78);
+  --amber-quiet: oklch(0.31 0.07 78);
+
+  --red: oklch(0.655 0.215 27);
+  --red-ink: oklch(0.7 0.2 27);
+  --red-quiet: oklch(0.3 0.09 27);
+
+  --lamp-ok: oklch(0.78 0.16 158);
+  --lamp-ok-quiet: oklch(0.3 0.07 158);
+
+  --code-keyword: oklch(0.78 0.15 40);
+  --code-string: oklch(0.8 0.13 155);
+  --code-number: oklch(0.82 0.13 78);
+  --code-type: oklch(0.8 0.1 220);
+
+  --focus-ring: oklch(0.688 0.196 42 / 0.45);
+  --cap-lift: none;
+  --cap-flat: none;
+  --panel-lift: 0 4px 16px oklch(0.05 0 0 / 0.5);
+  --screen-inset: none;
+  color-scheme: dark;
+}
+
+[data-skin="slate"][data-theme="light"] {
+  --chassis: oklch(0.955 0 0);
+  --panel: oklch(0.985 0 0);
+  --panel-raised: oklch(1 0 0);
+  --screen: oklch(0.925 0 0);
+
+  --rule: oklch(0.895 0 0);
+  --rule-strong: oklch(0.79 0 0);
+
+  --legend: oklch(0.235 0 0);
+  --legend-dim: oklch(0.415 0 0);
+  --legend-faint: oklch(0.475 0 0);
+
+  --keycap: oklch(0.875 0 0);
+  --keycap-hover: oklch(0.832 0 0);
+  --keycap-ink: oklch(0.24 0 0);
+  --keycap-edge: transparent;
+
+  --orange: oklch(0.545 0.2 42);
+  --orange-hover: oklch(0.5 0.2 42);
+  --orange-ink: oklch(0.99 0.01 42);
+  --orange-quiet: oklch(0.94 0.045 42);
+
+  --amber: oklch(0.7 0.16 78);
+  --amber-ink: oklch(0.47 0.12 68);
+  --amber-quiet: oklch(0.95 0.05 78);
+
+  --red: oklch(0.53 0.215 27);
+  --red-ink: oklch(0.5 0.21 27);
+  --red-quiet: oklch(0.95 0.04 27);
+
+  --lamp-ok: oklch(0.44 0.115 158);
+  --lamp-ok-quiet: oklch(0.94 0.05 158);
+
+  --code-keyword: oklch(0.47 0.17 40);
+  --code-string: oklch(0.44 0.12 155);
+  --code-number: oklch(0.46 0.12 65);
+  --code-type: oklch(0.45 0.1 235);
+
+  --focus-ring: oklch(0.545 0.2 42 / 0.35);
+  --cap-lift: none;
+  --cap-flat: none;
+  --panel-lift: 0 4px 16px oklch(0.6 0 0 / 0.14);
+  --screen-inset: none;
+  color-scheme: light;
+}
+
+/* ==================================================================== *
+ * Recipe overrides
+ *
+ * The materials above change what things are made of; these change how
+ * they are built. Grouped by what they do rather than by skin, so the
+ * shared decisions stay visible.
+ * ==================================================================== */
+
+/* No panel borders in any of the three. Console draws a 1px rule around
+ * every panel; here separation is space and elevation. */
+[data-skin="paper"] .panel,
+[data-skin="soft"] .panel,
+[data-skin="slate"] .panel {
+  border: none;
+}
+[data-skin="soft"] .panel {
+  box-shadow: var(--panel-lift);
+}
+
+/* Screens stop being recessed hardware and become quiet regions. */
+[data-skin="paper"] .screen,
+[data-skin="soft"] .screen,
+[data-skin="slate"] .screen {
+  border: none;
+  box-shadow: none;
+}
+
+/* Keys lose their travel and their edge: nothing here is a moulded cap. */
+[data-skin="paper"] .key,
+[data-skin="soft"] .key,
+[data-skin="slate"] .key {
+  /* A hairline ring rather than no boundary at all. With the cap shadow gone
+   * the only thing separating a secondary key from its panel is a value step,
+   * and the contrast gate measured that step at 1.19 — a button you have to
+   * hunt for. The step was widened *and* bounded; either alone was thin. */
+  box-shadow: inset 0 0 0 1px var(--rule-strong);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  font-variation-settings: normal;
+  padding: 0.4375rem 0.8125rem;
+}
+[data-skin="paper"] .key:active:not(:disabled),
+[data-skin="soft"] .key:active:not(:disabled),
+[data-skin="slate"] .key:active:not(:disabled) {
+  transform: none;
+}
+[data-skin="paper"] .key-blank,
+[data-skin="soft"] .key-blank,
+[data-skin="slate"] .key-blank {
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+/* The filled keys carry their own colour, so a ring on top reads as a seam. */
+[data-skin="paper"] .key-go,
+[data-skin="soft"] .key-go,
+[data-skin="slate"] .key-go,
+[data-skin="paper"] .key-stop,
+[data-skin="soft"] .key-stop,
+[data-skin="slate"] .key-stop,
+[data-skin="paper"] .key-flat,
+[data-skin="soft"] .key-flat,
+[data-skin="slate"] .key-flat,
+[data-skin="paper"] .key-danger,
+[data-skin="soft"] .key-danger,
+[data-skin="slate"] .key-danger {
+  box-shadow: none;
+}
+
+/* Fields are outlined, not carved. */
+[data-skin="paper"] .field,
+[data-skin="soft"] .field,
+[data-skin="slate"] .field {
+  background: var(--panel-raised);
+  border-color: var(--rule-strong);
+  box-shadow: none;
+  font-family: var(--font-sans);
+}
+[data-skin="paper"] .field:focus,
+[data-skin="soft"] .field:focus,
+[data-skin="slate"] .field:focus {
+  border-color: var(--orange);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* Chips and kbd shed the mono legend along with the rest. */
+[data-skin="paper"] .chip,
+[data-skin="soft"] .chip,
+[data-skin="slate"] .chip {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  letter-spacing: 0;
+  font-variation-settings: normal;
+  background: var(--screen);
+  border-color: transparent;
+}
+
+/* A lamp stays a lamp — it is half of every status readout — but stops
+ * glowing where the world has no light sources in it. */
+[data-skin="paper"] .lamp,
+[data-skin="soft"] .lamp,
+[data-skin="slate"] .lamp {
+  box-shadow: none;
+}
+
+/* Section titles follow the legend into sentence case. */
+[data-skin="paper"] .section-title,
+[data-skin="soft"] .section-title,
+[data-skin="slate"] .section-title {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+/* The focus ring takes the skin's own accent rather than Console amber. */
+[data-skin="paper"] :focus-visible,
+[data-skin="soft"] :focus-visible,
+[data-skin="slate"] :focus-visible {
+  outline-color: var(--orange);
+}
+
+/* Prose: the streaming caret is a bar again, not a lit phosphor segment. */
+[data-skin="paper"] .caret,
+[data-skin="soft"] .caret,
+[data-skin="slate"] .caret {
+  box-shadow: none;
+  width: 0.12em;
+  background: var(--legend-dim);
+}
+
+/* Code blocks keep a hairline in Paper, which has no other way to bound
+ * them once the inset shadow is gone. */
+[data-skin="paper"] .prose pre {
+  border-color: var(--rule);
+}
+[data-skin="soft"] .prose pre,
+[data-skin="slate"] .prose pre {
+  border: none;
+}

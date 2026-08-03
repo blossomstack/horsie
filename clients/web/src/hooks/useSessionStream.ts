@@ -13,7 +13,7 @@ import {
   type SessionEvent,
   type TaskItem,
 } from "../api/types";
-import { qk, useSession } from "./useSessions";
+import { qk, useAgent, useSession } from "./useSessions";
 
 /** Messages per history page (initial tail and each scroll-back load). */
 const HISTORY_LIMIT = 50;
@@ -57,7 +57,6 @@ export interface SessionStream {
   streaming: string;
   /** Tools started but not yet attached to a finalized assistant message. */
   orphanTools: RenderedToolCall[];
-  usage: { input: number; output: number };
   liveStatus: SessionStatusKind | null;
   /** The asks the live status says are waiting, or null when no status frame
    * has arrived yet — in which case the session detail is the answer. */
@@ -115,7 +114,6 @@ interface State {
    * which is different from a queue known to be empty. */
   queued: QueuedMessage[] | null;
   streaming: string;
-  usage: { input: number; output: number };
   liveStatus: SessionStatusKind | null;
   livePendingAsks: PendingAskView[] | null;
   statusSeq: number;
@@ -123,6 +121,9 @@ interface State {
   streamError: string | null;
   connected: boolean;
   tasks: TaskItem[];
+  /** A live `TaskListChanged` has arrived for this session, so the agent
+   * document must no longer seed over it. Cleared on `reset`. */
+  tasksLive: boolean;
   hasMoreBefore: boolean;
   loadingMore: boolean;
   progression: { stage: string; detail: string | null } | null;
@@ -141,7 +142,6 @@ const INITIAL: State = {
   optimistic: [],
   queued: null,
   streaming: "",
-  usage: { input: 0, output: 0 },
   liveStatus: null,
   livePendingAsks: null,
   statusSeq: 0,
@@ -149,6 +149,7 @@ const INITIAL: State = {
   streamError: null,
   connected: false,
   tasks: [],
+  tasksLive: false,
   hasMoreBefore: false,
   loadingMore: false,
   progression: null,
@@ -166,6 +167,7 @@ type Action =
   // The queue as the *detail* endpoint reported it; ignored once a live frame
   // has arrived, which is always fresher.
   | { kind: "seed-queue"; queued: QueuedMessage[] }
+  | { kind: "seed-tasks"; tasks: TaskItem[] }
   | { kind: "loading-more"; value: boolean }
   | {
       kind: "history";
@@ -174,13 +176,7 @@ type Action =
       /** A forward backfill page (from `after=`), not a scroll-back or seed. */
       forward?: boolean;
     }
-  // `fromBackfill` marks a live event replayed from the pre-seed buffer: its
-  // turn's usage is already in the seeded tail total, so it must not re-add.
-  | {
-      kind: "event";
-      event: SessionEvent | AgentStreamEvent;
-      fromBackfill?: boolean;
-    };
+  | { kind: "event"; event: SessionEvent | AgentStreamEvent };
 
 function textOf(parts: ContentPart[]): string {
   return parts
@@ -324,11 +320,19 @@ function reducer(state: State, action: Action): State {
     }
     case "seed-queue":
       return state.queued === null ? { ...state, queued: action.queued } : state;
+    // The durable task list, from the agent document. Same guard shape as
+    // `seed-queue`: a live frame is always fresher, so once one has arrived
+    // this is a no-op. Without it, a session the server had offloaded came
+    // back from a reload with an empty plan — the list existed, but only in
+    // events that had already been broadcast and would never replay.
+    case "seed-tasks":
+      return state.tasksLive ? state : { ...state, tasks: action.tasks };
     case "history": {
       const { page, prepend } = action;
       // A page carries messages and nothing else. Task list and usage are
-      // current values on the agent document, seeded by `useAgent` — a page
-      // no longer means two different things depending on its cursor.
+      // current values on the agent document: usage is read straight off it
+      // by the view, and the task list is seeded from it below. A page no
+      // longer means two different things depending on its cursor.
       const next = applyHistory(state, page.messages, prepend);
       return {
         ...next,
@@ -382,18 +386,13 @@ function reducer(state: State, action: Action): State {
             },
           };
         case "TurnCompleted":
-          return {
-            ...state,
-            streaming: "",
-            progression: null,
-            // A backfilled turn's usage is already in the seeded tail total.
-            usage: action.fromBackfill
-              ? state.usage
-              : {
-                  input: state.usage.input + ev.value.usage.inputTokens,
-                  output: state.usage.output + ev.value.usage.outputTokens,
-                },
-          };
+          // Usage is deliberately not accumulated here. It is a cumulative
+          // value the server owns on the agent document, and `StatusChanged`
+          // below re-reads that document — so summing frames locally bought
+          // nothing except a total that reset to zero on every reload,
+          // because a session with no live events to replay had never seen
+          // a frame to sum.
+          return { ...state, streaming: "", progression: null };
         case "StatusChanged":
           return {
             ...state,
@@ -421,7 +420,10 @@ function reducer(state: State, action: Action): State {
             progression: null,
           };
         case "TaskListChanged":
-          return { ...state, tasks: ev.value.tasks };
+          // `tasksLive` latches: from here the stream is the fresher source
+          // and the agent document must not overwrite it. The document is
+          // only re-read on `StatusChanged`, so mid-turn it is already stale.
+          return { ...state, tasks: ev.value.tasks, tasksLive: true };
         case "AgentTreeChanged":
           return { ...state, agentTreeSeq: state.agentTreeSeq + 1 };
         default:
@@ -454,6 +456,9 @@ export function useSessionStream(sessionId: string | undefined): {
   // The durable queue, for a session opened with messages already waiting.
   // Shares `useSession`'s cache entry with the view, so this costs no request.
   const { data: detail } = useSession(sessionId);
+  // Shares `SessionView`'s cache entry, so this is a read of state already
+  // fetched rather than a second request.
+  const { data: mainAgent } = useAgent(sessionId, MAIN_AGENT);
   const esRef = useRef<EventSource | null>(null);
   // Earliest loaded message id — the cursor for the next scroll-back page.
   const earliestRef = useRef<string | null>(null);
@@ -542,7 +547,7 @@ export function useSessionStream(sessionId: string | undefined): {
         dispatch({ kind: "history", page, prepend: false });
         seeded = true;
         for (const event of buffer) {
-          dispatch({ kind: "event", event, fromBackfill: true });
+          dispatch({ kind: "event", event });
           refreshDocuments(event);
         }
         buffer.length = 0;
@@ -592,6 +597,15 @@ export function useSessionStream(sessionId: string | undefined): {
   useEffect(() => {
     if (seedQueue) dispatch({ kind: "seed-queue", queued: seedQueue });
   }, [seedQueue]);
+
+  // The main agent's durable `task_list` state. `useAgent` shares its cache
+  // entry with the view, so this costs no extra request, and `StatusChanged`
+  // already invalidates it. The reducer ignores this once a live frame has
+  // landed.
+  const seedTasks = mainAgent?.tasks;
+  useEffect(() => {
+    if (seedTasks) dispatch({ kind: "seed-tasks", tasks: seedTasks });
+  }, [seedTasks]);
 
   const loadMore = useCallback(() => {
     const before = earliestRef.current;
@@ -683,7 +697,6 @@ export function useSessionStream(sessionId: string | undefined): {
       messages,
       streaming: state.streaming,
       orphanTools,
-      usage: state.usage,
       liveStatus: state.liveStatus,
       livePendingAsks: state.livePendingAsks,
       statusSeq: state.statusSeq,

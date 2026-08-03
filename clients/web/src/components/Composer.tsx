@@ -3,28 +3,32 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { SessionStatusKind } from "../api/types";
 import { statusMeta } from "../lib/status";
 
-/** The action row. One orange key commits; the emergency stop beside it is the
- * only red control on the panel. Both are labelled — an unlabelled icon is a
- * control you have to learn. */
+/**
+ * The composer: one field, one button, riding inside it.
+ *
+ * The button is icon-only. The rule it breaks — "an unlabelled icon is a
+ * control you have to learn" — is retired deliberately here and nowhere else:
+ * these are the two most-pressed controls in the product, they never move, and
+ * an upward arrow beside a text field is not a symbol anyone has to be taught.
+ * Both carry their word in `title` and `aria-label`.
+ *
+ * While a turn runs the button is Stop and only Stop. Queueing the next
+ * message is still supported and still useful — Enter does it, and the
+ * placeholder says so — but a turn in flight has exactly one thing worth
+ * pressing.
+ */
 export function Composer({
   status,
   busy,
   blockedReason = null,
-  askPending = false,
   onSend,
   onStop,
-  onFocusAsk,
 }: {
   status: SessionStatusKind | null | undefined;
   busy: boolean;
   blockedReason?: string | null;
-  /** A question in the transcript is awaiting an answer. The composer stays
-   * live — sending from here answers it, exactly as the card does — but says
-   * where the question is. */
-  askPending?: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
-  onFocusAsk?: () => void;
 }) {
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -60,7 +64,7 @@ export function Composer({
       {/* The focus ring rides the whole panel. Setting `border-color` instead
           landed the amber on the internal divider and left the outer edge
           grey, which read as a stray underline. */}
-      <div className="panel overflow-hidden transition-shadow focus-within:border-amber focus-within:shadow-[0_0_0_3px_var(--focus-ring)]">
+      <div className="panel relative overflow-hidden transition-shadow focus-within:border-amber focus-within:shadow-[0_0_0_3px_var(--focus-ring)]">
         <textarea
           ref={ref}
           rows={1}
@@ -79,54 +83,37 @@ export function Composer({
                   : "Message the agent…"
           }
           disabled={!meta.canSend}
-          className="max-h-[200px] w-full resize-none bg-transparent px-3.5 pb-2 pt-3 text-[0.9375rem] leading-relaxed text-legend outline-none placeholder:text-faint disabled:opacity-60"
+          // `pr-14` reserves the button's lane so a long line never runs
+          // underneath it.
+          className="max-h-[200px] w-full resize-none bg-transparent py-3 pl-3.5 pr-14 text-[0.9375rem] leading-relaxed text-legend outline-none placeholder:text-faint disabled:opacity-60"
         />
 
-        <div className="flex items-center gap-2 border-t px-2.5 py-2">
-          <span className="legend hidden sm:block">
-            {running ? "Queued for the next turn" : "Enter sends · Shift+Enter newline"}
-          </span>
-
-          {/* Stop sits *beside* Send, never instead of it: a turn in flight is
-              exactly when queueing the next message is most useful. */}
-          <div className="ml-auto flex items-center gap-2">
-            {running && (
-              <button
-                className="key key-stop"
-                onClick={onStop}
-                disabled={busy}
-                title="Stop this turn (queued messages are kept)"
-                data-testid="composer-stop"
-              >
-                <Square size={12} className="fill-current" aria-hidden />
-                Stop
-              </button>
-            )}
+        <div className="absolute bottom-2 right-2">
+          {running ? (
             <button
-              className="key key-go"
+              className="key key-stop !h-8 !w-8 !p-0"
+              onClick={onStop}
+              disabled={busy}
+              title="Stop this turn — queued messages are kept"
+              aria-label="Stop this turn"
+              data-testid="composer-stop"
+            >
+              <Square size={12} className="fill-current" aria-hidden />
+            </button>
+          ) : (
+            <button
+              className="key key-go !h-8 !w-8 !p-0"
               onClick={submit}
               disabled={!text.trim() || !meta.canSend || busy || blocked}
-              title={blockedReason ?? (running ? "Queue for the next turn" : "Send")}
+              title={blockedReason ?? "Send — Enter sends, Shift+Enter starts a new line"}
+              aria-label="Send message"
               data-testid="composer-send"
             >
-              Send
-              <ArrowUp size={13} aria-hidden />
+              <ArrowUp size={15} aria-hidden />
             </button>
-          </div>
+          )}
         </div>
       </div>
-
-      {askPending && (
-        <button
-          type="button"
-          onClick={onFocusAsk}
-          data-testid="composer-ask-hint"
-          className="mt-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.1em] text-orange hover:underline"
-        >
-          <span className="lamp text-orange" aria-hidden />
-          The agent is waiting on an answer — jump to it
-        </button>
-      )}
 
       {blocked && (
         <p

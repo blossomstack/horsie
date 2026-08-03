@@ -24,7 +24,7 @@ export function DeviceApprovalPage() {
         data-testid="device-page"
       >
         <div>
-          <h1 className="text-[15px] font-semibold text-legend">
+          <h1 className="page-title">
             Authorize a command-line login
           </h1>
           <p className="mt-0.5 text-xs text-faint">

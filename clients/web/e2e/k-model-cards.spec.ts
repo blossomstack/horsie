@@ -10,17 +10,19 @@ test.describe("model cards", () => {
   }) => {
     await page.goto(`${appBase}/admin/model-cards`);
 
-    // Bundled seed is present (the real server seeds at startup). The row
-    // renders the id as an input value, not text, so assert on the row.
+    // The catalog reads as a list now: each row states the card, and the
+    // editor opens on request rather than every card rendering as a form.
     const seeded = page.getByTestId("model-card-row-claude-sonnet-4-6");
     await expect(seeded).toBeVisible();
-    await expect(seeded.getByLabel("Model id")).toHaveValue(
-      "claude-sonnet-4-6",
-    );
+    await expect(seeded).toContainText("claude-sonnet-4-6");
+
+    // The info key reveals the values the row has no room for.
+    await seeded.getByTestId("model-card-info-claude-sonnet-4-6").click();
+    await expect(seeded).toContainText("Thinking dialect");
 
     // Create.
     await page.getByTestId("add-model-card").click();
-    const draft = page.getByTestId("model-card-row-new");
+    const draft = page.getByTestId("model-card-editor-new");
     await draft.getByLabel("Model id").fill("e2e-model-1");
     await draft.getByLabel("Name").fill("E2E Model");
     await draft.getByLabel("Context window (optional)").fill("123456");
@@ -29,13 +31,18 @@ test.describe("model cards", () => {
 
     const row = page.getByTestId("model-card-row-e2e-model-1");
     await expect(row).toBeVisible();
-    // model_id is immutable once saved.
-    await expect(row.getByLabel("Model id")).toBeDisabled();
+    await expect(row).toContainText("E2E Model");
 
-    // Edit the name.
-    await row.getByLabel("Name").fill("E2E Model Renamed");
-    await row.getByTestId("model-card-save").click();
-    await expect(row.getByLabel("Name")).toHaveValue("E2E Model Renamed");
+    // Edit the name through the row's own edit key. model_id is the id of
+    // record, so it is fixed once saved.
+    await row.getByTestId("model-card-edit-e2e-model-1").click();
+    const editor = page.getByTestId("model-card-editor-e2e-model-1");
+    await expect(editor.getByLabel("Model id")).toBeDisabled();
+    await editor.getByLabel("Name").fill("E2E Model Renamed");
+    await editor.getByTestId("model-card-save").click();
+    await expect(
+      page.getByTestId("model-card-row-e2e-model-1"),
+    ).toContainText("E2E Model Renamed");
 
     // Persists across reload.
     await page.reload();
@@ -43,10 +50,7 @@ test.describe("model cards", () => {
 
     // Delete (accept the confirm dialog).
     page.on("dialog", (d) => d.accept());
-    await page
-      .getByTestId("model-card-row-e2e-model-1")
-      .getByTestId("model-card-remove")
-      .click();
+    await page.getByTestId("model-card-delete-e2e-model-1").click();
     await expect(page.getByTestId("model-card-row-e2e-model-1")).toHaveCount(0);
   });
 
@@ -87,8 +91,11 @@ test.describe("model cards", () => {
     // every provider's base URL untouched — prefilling that is out of scope.
     await page.goto(`${appBase}/settings/models`);
 
-    const providerBaseUrl = page.getByLabel("Base URL (optional)").first();
-    const before = await providerBaseUrl.inputValue();
+    // Providers are collapsed rows now, and each states its endpoint on the
+    // row itself — so the invariant is checked without opening an editor that
+    // would only be another chance to change the value under test.
+    const providerRow = page.getByTestId(/^provider-row-/).first();
+    const before = await providerRow.textContent();
 
     await page.getByRole("button", { name: "Add model" }).click();
     const idInput = page.getByTestId("model-id-input").last();
@@ -105,6 +112,6 @@ test.describe("model cards", () => {
     await expect(
       page.getByLabel("Context window (optional)").last(),
     ).toHaveValue("1048576");
-    await expect(providerBaseUrl).toHaveValue(before);
+    expect(await providerRow.textContent()).toBe(before);
   });
 });

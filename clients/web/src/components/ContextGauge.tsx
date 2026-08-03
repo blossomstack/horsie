@@ -75,14 +75,14 @@ const CIRC = 2 * Math.PI * R;
 export function ContextGauge({
   agent,
   sessionTotal,
-  totalTokens,
 }: {
   /** The main agent's own document — context size is per-agent and is never
-   * summed across agents. */
+   * summed across agents. Every figure here comes from the server, so a
+   * session reopened after the server offloaded it reads the same as one that
+   * has been in front of you the whole time. */
   agent: AgentDocument | undefined;
   /** The session's usage summed across every agent it hosts. */
   sessionTotal: UsageView | undefined;
-  totalTokens: number;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -103,14 +103,20 @@ export function ContextGauge({
     };
   }, [open]);
 
-  if (totalTokens <= 0) return null;
+  // Gated on the document existing, not on a token count. The old gate was
+  // `totalTokens <= 0` against a locally-accumulated total, so a session the
+  // server had offloaded — which replays no events — came back from a reload
+  // with the dial gone entirely, even though every figure behind it was sitting
+  // on the agent document.
+  if (!agent) return null;
 
+  const totalTokens = agent.usage.inputTokens + agent.usage.outputTokens;
   const known =
-    agent?.contextWindow != null &&
+    agent.contextWindow != null &&
     agent.contextWindow > 0 &&
     agent.contextTokens != null;
   const pct = known
-    ? Math.min(100, Math.round((agent!.contextTokens / agent!.contextWindow!) * 100))
+    ? Math.min(100, Math.round((agent.contextTokens / agent.contextWindow!) * 100))
     : null;
   const tone = pct != null ? band(pct) : null;
 
@@ -127,7 +133,7 @@ export function ContextGauge({
         }
         title={
           pct != null
-            ? `Context ${pct}% full — ${tone!.word}. ${compactNumber(agent!.contextTokens)} of ${compactNumber(agent!.contextWindow!)}. Click for the token breakdown.`
+            ? `Context ${pct}% full — ${tone!.word}. ${compactNumber(agent.contextTokens)} of ${compactNumber(agent.contextWindow!)}. Click for the token breakdown.`
             : `${compactNumber(totalTokens)} tokens spent. Context window unknown for this model. Click for the token breakdown.`
         }
         data-testid="context-stats-button"
@@ -175,16 +181,12 @@ export function ContextGauge({
           <div title="Tokens currently loaded in the main agent's context, out of its context window. Cache status doesn't shrink this — it only affects price and speed.">
             <div className="flex items-baseline justify-between gap-3">
               <span className="legend">Context window</span>
-              {agent ? (
-                <span className="readout text-xs">
-                  {compactNumber(agent.contextTokens)}
-                  {agent.contextWindow != null &&
-                    ` / ${compactNumber(agent.contextWindow)}`}
-                  {pct != null && ` · ${pct}%`}
-                </span>
-              ) : (
-                <span className="legend">Not loaded</span>
-              )}
+              <span className="readout text-xs">
+                {compactNumber(agent.contextTokens)}
+                {agent.contextWindow != null &&
+                  ` / ${compactNumber(agent.contextWindow)}`}
+                {pct != null && ` · ${pct}%`}
+              </span>
             </div>
             {pct != null && (
               <>
@@ -211,7 +213,7 @@ export function ContextGauge({
             )}
           </div>
 
-          {agent?.lastTurnUsage && (
+          {agent.lastTurnUsage && (
             <div className="mt-3.5 border-t pt-2.5">
               <div className="legend mb-1 !text-dim">This turn</div>
               <UsageBreakdown usage={agent.lastTurnUsage} />

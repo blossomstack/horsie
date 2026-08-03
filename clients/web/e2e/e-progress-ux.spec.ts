@@ -66,6 +66,9 @@ test("E2: several tool-call steps collapse into one work group", async ({
   // reducer — and reach the transcript as a clock time on each turn boundary.
   // The group's own duration is deliberately not asserted: these tools answer
   // in milliseconds, and a sub-second span renders nothing at all.
+  // The stamp moved off the permanent gutter and into the per-turn hover row,
+  // so it is reached the way a user reaches it.
+  await page.getByTestId("message").first().hover();
   await expect(page.getByTestId("turn-time").first()).toHaveText(/^\d{1,2}:\d{2}/);
 });
 
@@ -158,4 +161,43 @@ test("E6: the header context gauge reports how full the window is, and opens the
   await expect(page.getByTestId("context-stats-panel")).toContainText(
     "Session total",
   );
+});
+
+test("E7: usage and the plan survive a reload of an offloaded session", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  // Both readouts used to be summed from live SSE frames and nothing else, so
+  // reopening a session the server had already offloaded — which replays no
+  // events — showed a zeroed dial and an empty plan, even though the figures
+  // and the list were both sitting on the agent document the whole time.
+  await mock.queueToolCall("task_list", {
+    action: "create",
+    tasks: ["Survive a reload", "Report the same numbers"],
+  });
+  await mock.queueText("Planned and spent some tokens.");
+  await createSession(page, appBase, { model: "mock-sonnet" });
+  await sendMessage(page, "make a plan");
+  await expectStatus(page, "Idle");
+
+  const gauge = page.getByTestId("context-stats-button");
+  await expect(gauge).toBeVisible();
+  const pctBefore = await gauge.getAttribute("data-pct");
+  expect(pctBefore).toMatch(/^\d+$/);
+
+  await page.getByTestId("task-list-toggle").click();
+  await expect(page.getByTestId("task-list-item")).toHaveCount(2);
+
+  // A reload is the cheap stand-in for an offload: this tab starts again with
+  // no buffered stream and has to source both values from the server.
+  await page.reload();
+
+  await expect(page.getByTestId("context-stats-button")).toHaveAttribute(
+    "data-pct",
+    pctBefore!,
+  );
+  await expect(page.getByTestId("task-list-panel")).toBeVisible();
+  await expect(page.getByTestId("task-list-item")).toHaveCount(2);
+  await expect(page.getByTestId("task-list-progress")).toHaveText("0/2 done");
 });

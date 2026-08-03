@@ -5,6 +5,11 @@
 @import "@fontsource-variable/archivo";
 @import "@fontsource-variable/martian-mono";
 
+/* The alternate worlds. Their two extra faces are NOT imported here — they
+ * are fetched by `useTheme` when a skin that needs one is chosen, so the
+ * default skin's bundle is unchanged by their existence. */
+@import "./skins.css";
+
 /* ==================================================================== *
  * THE CONSOLE
  *
@@ -23,6 +28,62 @@
  *   red                        interrupt and destroy (stop, delete, error)
  *   lamp-*                     status indicators, always paired with a word
  * ==================================================================== */
+
+/* ==================================================================== *
+ * SKIN SEAM
+ *
+ * Four visual worlds share these layouts. A skin is `data-skin` on <html>
+ * and may replace materials, borders, radii, shadows and type — not
+ * structure. Everything a skin varies is reached through one of the
+ * indirection variables below, so `@theme inline` never has to change.
+ *
+ * Console (this file's default) is the instrument described under it.
+ * Paper / Soft / Slate live in ./skins.css.
+ *
+ * Four invariants bind every skin, without exception:
+ *   1. Material roles hold across modes, never brightness — `screen` is
+ *      always the most recessed thing, `raised` always the most lifted.
+ *   2. Status is a lamp AND a word. Never colour alone.
+ *   3. Syntax highlighting keeps its own --code-* palette.
+ *   4. AA is measured by scripts/contrast.mjs, not assumed.
+ * ==================================================================== */
+/* In `@layer base` on purpose. These are Console's *defaults* for the seam,
+ * and a skin block must beat them. Both selectors are `:root`-weight, and
+ * `skins.css` is imported above this (CSS requires `@import` first), so on
+ * source order alone these would win and a skin would get its colours but
+ * keep Console's mono uppercase legends and machined radii. Layering settles
+ * it by precedence instead of specificity, which also keeps `[data-skin]`
+ * working on a plain element — the Appearance page's preview swatches set it
+ * on a `div` to render each skin from its own tokens. */
+@layer base {
+  :root {
+    /* Type faces. Indirection so a skin can swap the face without touching
+     * `@theme inline`; Console keeps the machined pair. */
+    --face-sans: "Archivo Variable", system-ui, sans-serif;
+    --face-mono: "Martian Mono Variable", ui-monospace, "SF Mono", monospace;
+
+    /* Machined, not pill-shaped. A skin may raise these; Console may not. */
+    --r-chip: 3px;
+    --r-control: 4px;
+    --r-cap: 6px;
+    --r-panel: 8px;
+
+    /* Legend character. The mannered feel of Martian Mono comes from this
+     * combination — narrow width axis, wide tracking, uppercase — far more
+     * than from the face. A skin that wants calm legends relaxes these
+     * rather than swapping the font. */
+    --legend-transform: uppercase;
+    --legend-tracking: 0.1em;
+    --legend-width: 100;
+    --legend-face: var(--face-mono);
+    --legend-size: 10px;
+
+    /* Prose measure. Capped well below the 54rem column: the column has to
+     * hold tables and code, a paragraph does not. */
+    --prose-measure: 68ch;
+    --prose-heading-face: var(--face-sans);
+  }
+}
 
 /* --- Dark: the instrument's own body. The primary rendition, because the
  *     scene is a dim room at 11pm and the monitor is the light source. --- */
@@ -163,14 +224,16 @@
   --color-lamp-ok: var(--lamp-ok);
   --color-lamp-ok-quiet: var(--lamp-ok-quiet);
 
-  --font-sans: "Archivo Variable", system-ui, sans-serif;
-  --font-mono: "Martian Mono Variable", ui-monospace, "SF Mono", monospace;
+  /* Both faces and every radius resolve through the skin seam, exactly as
+   * the colours above do. `inline` means utilities emit the var() chain
+   * rather than a frozen value, so `data-skin` re-resolves them live. */
+  --font-sans: var(--face-sans);
+  --font-mono: var(--face-mono);
 
-  /* Machined, not pill-shaped. */
-  --radius-chip: 3px;
-  --radius-control: 4px;
-  --radius-cap: 6px;
-  --radius-panel: 8px;
+  --radius-chip: var(--r-chip);
+  --radius-control: var(--r-control);
+  --radius-cap: var(--r-cap);
+  --radius-panel: var(--r-panel);
 }
 
 /* ==================================================================== *
@@ -253,14 +316,14 @@ body {
  * these name channels and values on an instrument face.
  * ==================================================================== */
 @utility legend {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--legend-face);
+  font-size: var(--legend-size);
   font-weight: 500;
   line-height: 1.4;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  letter-spacing: var(--legend-tracking);
+  text-transform: var(--legend-transform);
   color: var(--legend-faint);
-  font-variation-settings: "wdth" 100;
+  font-variation-settings: "wdth" var(--legend-width);
 }
 
 /* A live measured value. Tabular so digits never jitter as they tick. */
@@ -273,6 +336,46 @@ body {
 }
 
 @layer components {
+  /* ------------------------------------------------------------------ *
+   * Titles. Three roles, one rendition each — the point of naming them.
+   * Before this, a section heading shipped in two different looks (mono
+   * uppercase 12px in the settings panels, sans 14px in Account, Memory
+   * and Skills) for the same job, and every skin would have had to
+   * reproduce both accidents.
+   * ------------------------------------------------------------------ */
+
+  /* The h1 of a pane: session title, settings page, agents, routines. */
+  .page-title {
+    font-family: var(--font-sans);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1.3;
+    color: var(--legend);
+  }
+
+  /* A section or panel heading, one level down from the pane. */
+  .section-title {
+    font-family: var(--legend-face);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: var(--legend-tracking);
+    text-transform: var(--legend-transform);
+    line-height: 1.35;
+    color: var(--legend);
+    font-variation-settings: "wdth" var(--legend-width);
+  }
+
+  /* The name of one row in a list — a memory, a skill bundle, a model.
+   * Machine strings, so this one stays mono in every skin. */
+  .item-title {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--legend);
+    font-variation-settings: "wdth" var(--legend-width);
+  }
+
   /* ------------------------------------------------------------------ *
    * Keys. Everything you press is a key: it has travel, an edge, and a
    * legend. Pressing moves it 1px down and collapses its edge.
@@ -485,6 +588,16 @@ body {
     white-space: nowrap;
   }
 
+  /* A chip carrying arbitrary-length content — an `ask_user` choice is
+   * whatever the model wrote, and `.chip`'s `nowrap` sent long ones
+   * straight out of the card. `.chip` keeps `nowrap`, which is right for
+   * the short tags it was built for. */
+  .chip-wrap {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+
   .kbd {
     display: inline-flex;
     align-items: center;
@@ -607,6 +720,23 @@ body {
   line-height: 1.65;
   color: var(--legend);
 }
+
+/* Measure. The transcript column is 54rem because tables, code blocks and
+ * tool cards need the room; a paragraph does not, and at 15px that column
+ * ran a line to ~115 characters against a comfortable 65-75. Capping the
+ * running text — and only the running text — is what makes agent replies
+ * readable at length. Tables and pre keep the full column. */
+.prose > p,
+.prose > ul,
+.prose > ol,
+.prose > blockquote,
+.prose > h1,
+.prose > h2,
+.prose > h3,
+.prose > h4 {
+  max-width: var(--prose-measure);
+}
+
 .prose > :first-child {
   margin-top: 0;
 }
@@ -614,18 +744,19 @@ body {
   margin-bottom: 0;
 }
 .prose p {
-  margin: 0.7em 0;
+  margin: 0.85em 0;
 }
 .prose h1,
 .prose h2,
 .prose h3,
 .prose h4 {
-  margin: 1.5em 0 0.5em;
-  font-family: var(--font-mono);
-  font-weight: 600;
-  font-variation-settings: "wdth" 87.5;
-  letter-spacing: -0.01em;
+  /* More space above a heading than below it. */
+  margin: 1.6em 0 0.5em;
+  font-family: var(--prose-heading-face);
+  font-weight: 650;
+  letter-spacing: -0.015em;
   line-height: 1.3;
+  text-wrap: balance;
   color: var(--legend);
 }
 .prose h1 {
@@ -643,7 +774,7 @@ body {
   padding-left: 1.35em;
 }
 .prose ul {
-  list-style: square;
+  list-style: disc;
 }
 .prose ol {
   list-style: decimal;
@@ -672,14 +803,19 @@ body {
   border-left: 1px solid var(--rule-strong);
   color: var(--legend-dim);
 }
+/* Inline code carried a border AND a background AND a 20% size drop. In
+ * text where nearly every clause names an identifier, that turned a
+ * paragraph into a fence of boxes and made the baseline jitter word to
+ * word. A tint alone separates it; 0.875em puts the mono at the same
+ * optical size as the sans around it. */
 .prose code {
   font-family: var(--font-mono);
-  font-size: 0.8em;
+  font-size: 0.875em;
   font-variation-settings: "wdth" 87.5;
-  padding: 0.1em 0.32em;
+  padding: 0.08em 0.3em;
   border-radius: 3px;
   background: var(--panel-raised);
-  border: 1px solid var(--rule);
+  overflow-wrap: anywhere;
 }
 .prose pre {
   margin: 0.9em 0;
@@ -687,9 +823,8 @@ body {
   border-radius: var(--radius-control);
   border: 1px solid var(--rule);
   background: var(--screen);
-  box-shadow: var(--screen-inset);
   overflow-x: auto;
-  font-size: 0.8em;
+  font-size: 0.8125em;
   line-height: 1.6;
 }
 .prose pre code {
@@ -712,11 +847,11 @@ body {
 }
 .prose th {
   background: var(--panel-raised);
-  font-family: var(--font-mono);
+  font-family: var(--legend-face);
   font-size: 0.85em;
   font-weight: 550;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
+  text-transform: var(--legend-transform);
   color: var(--legend-dim);
 }
 .prose hr {

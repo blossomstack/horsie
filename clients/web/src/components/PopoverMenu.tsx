@@ -2,23 +2,43 @@ import { ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 
-/** A panel selector: a small legend-labelled control that drops its options
- * above itself (it lives on the action row, at the bottom of the screen). */
+/**
+ * A panel selector.
+ *
+ * Two renditions of the same control, because it serves two surfaces. On the
+ * session action row it is `icon` — a bare key with a dot when it holds a
+ * value, since a row of seven labelled controls wrapped onto three lines and
+ * spent more height than the transcript could afford. In a form it is `field`,
+ * labelled and full-width, because a form is read top to bottom and its rows
+ * are supposed to name themselves.
+ */
 export function PopoverMenu({
   label,
   legend,
   icon,
+  variant = "field",
+  placement = "up",
   disabled = false,
+  /** Something other than the default is selected — draws the dot in `icon`. */
+  marked = false,
+  /** Overrides the dot's colour to amber: the control is reachable but the
+   * thing it configures is in a state the operator should look at. */
+  warn = false,
   testId,
   width = "w-64",
   children,
 }: {
   label: ReactNode;
-  /** The engraved channel name. Shown above the value so the control reads as
-   * a labelled setting rather than an anonymous chip. */
+  /** The engraved channel name. In `icon` it is not rendered, but it still
+   * carries the accessible name and the tooltip — losing the visible label
+   * must not mean losing the label. */
   legend?: string;
   icon?: ReactNode;
+  variant?: "field" | "icon";
+  placement?: "up" | "down";
   disabled?: boolean;
+  marked?: boolean;
+  warn?: boolean;
   testId?: string;
   width?: string;
   children: (close: () => void) => ReactNode;
@@ -42,36 +62,76 @@ export function PopoverMenu({
     };
   }, [open]);
 
+  // Both the tooltip and the accessible name. An icon-only control that only
+  // says "Model" tells you which control it is but not what it is set to,
+  // which is the half that matters at a glance.
+  const described = legend ? `${legend} — ${labelText(label)}` : labelText(label);
+
   return (
     <div className="relative" ref={ref}>
-      <button
-        type="button"
-        className={cn(
-          "flex items-center gap-1.5 rounded-[var(--radius-control)] px-2 py-1 text-left transition-colors",
-          "shadow-[inset_0_0_0_1px_var(--rule)]",
-          disabled ? "cursor-default opacity-70" : "hover:bg-raised",
-          open && "bg-raised",
-        )}
-        onClick={() => !disabled && setOpen((o) => !o)}
-        disabled={disabled}
-        aria-expanded={disabled ? undefined : open}
-        data-testid={testId}
-      >
-        {icon && <span className="text-faint">{icon}</span>}
-        <span className="min-w-0">
-          {legend && <span className="legend block leading-none">{legend}</span>}
-          <span className="block max-w-[11rem] truncate font-mono text-[11px] text-legend">
-            {label}
+      {variant === "icon" ? (
+        <button
+          type="button"
+          className={cn(
+            "key-icon relative",
+            disabled && "cursor-default opacity-70",
+            open && "bg-raised text-legend",
+          )}
+          onClick={() => !disabled && setOpen((o) => !o)}
+          disabled={disabled}
+          aria-expanded={disabled ? undefined : open}
+          title={described}
+          aria-label={described}
+          data-testid={testId}
+          data-marked={marked ? "true" : undefined}
+        >
+          {icon}
+          {(marked || warn) && (
+            <span
+              className={cn(
+                "absolute right-1 top-1 h-1.5 w-1.5 rounded-[999px]",
+                warn ? "bg-amber" : "bg-orange",
+              )}
+              aria-hidden
+            />
+          )}
+        </button>
+      ) : (
+        <button
+          type="button"
+          className={cn(
+            "flex w-full items-center gap-1.5 rounded-[var(--radius-control)] px-2 py-1 text-left transition-colors",
+            "shadow-[inset_0_0_0_1px_var(--rule)]",
+            disabled ? "cursor-default opacity-70" : "hover:bg-raised",
+            open && "bg-raised",
+          )}
+          onClick={() => !disabled && setOpen((o) => !o)}
+          disabled={disabled}
+          aria-expanded={disabled ? undefined : open}
+          data-testid={testId}
+        >
+          {icon && <span className="text-faint">{icon}</span>}
+          <span className="min-w-0 flex-1">
+            {legend && <span className="legend block leading-none">{legend}</span>}
+            <span className="block truncate font-mono text-[11px] text-legend">
+              {label}
+            </span>
           </span>
-        </span>
-        {!disabled && (
-          <ChevronDown size={12} className="shrink-0 text-faint" aria-hidden />
-        )}
-      </button>
+          {!disabled && (
+            <ChevronDown size={12} className="shrink-0 text-faint" aria-hidden />
+          )}
+        </button>
+      )}
       {open && !disabled && (
         <div
           className={cn(
-            "panel absolute bottom-full left-0 z-20 mb-1.5 max-h-72 overflow-y-auto p-1.5 shadow-[var(--panel-lift)]",
+            "panel absolute z-20 max-h-72 overflow-y-auto p-1.5 shadow-[var(--panel-lift)]",
+            // The action row sits at the bottom of the screen, so its menus
+            // open upward or they open off-screen; a form's open downward.
+            placement === "up" ? "bottom-full mb-1.5" : "top-full mt-1.5",
+            // Right-anchored in `icon`: these keys sit at the right edge of
+            // the action row, and a left-anchored menu overflowed the viewport.
+            variant === "icon" ? "right-0" : "left-0",
             width,
           )}
         >
@@ -80,4 +140,12 @@ export function PopoverMenu({
       )}
     </div>
   );
+}
+
+/** Best-effort text for a label that is usually a string but is typed as a
+ * node. Only used for the tooltip and accessible name. */
+function labelText(label: ReactNode): string {
+  return typeof label === "string" || typeof label === "number"
+    ? String(label)
+    : "";
 }

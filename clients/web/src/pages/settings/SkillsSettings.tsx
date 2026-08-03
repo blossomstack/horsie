@@ -17,7 +17,7 @@ import {
   useSetPluginDefault,
   useUpdatePlugin,
 } from "../../hooks/usePlugins";
-import { TextField } from "./fields";
+import { TextField, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
 export function SkillsSettings() {
@@ -56,13 +56,12 @@ export function SkillsSettings() {
         desc="Shareable skill bundles installed from git repos — pick them per session."
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+      <SettingsPane>
           <section className="panel p-4">
             <div className="mb-3 flex items-start gap-2">
               <Download size={15} className="mt-0.5 text-faint" />
               <div>
-                <h2 className="text-sm font-semibold text-legend">
+                <h2 className="section-title">
                   Install a skill bundle
                 </h2>
                 <p className="mt-0.5 text-xs text-faint">
@@ -112,7 +111,7 @@ export function SkillsSettings() {
             <div className="mb-3 flex items-start gap-2">
               <Boxes size={15} className="mt-0.5 text-faint" />
               <div>
-                <h2 className="text-sm font-semibold text-legend">
+                <h2 className="section-title">
                   Installed bundles
                 </h2>
                 <p className="mt-0.5 text-xs text-faint">
@@ -140,8 +139,7 @@ export function SkillsSettings() {
               ))}
             </div>
           </section>
-        </div>
-      </div>
+      </SettingsPane>
     </div>
   );
 }
@@ -159,7 +157,7 @@ function BundleRow({ bundle }: { bundle: PluginView }) {
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate font-mono text-sm font-semibold text-legend">
+            <span className="item-title truncate">
               {bundle.name}
             </span>
             {bundle.version && (

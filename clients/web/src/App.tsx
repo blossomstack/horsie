@@ -19,8 +19,10 @@ import { IntegrationsSettings } from "./pages/settings/IntegrationsSettings";
 import { MemorySettings } from "./pages/settings/MemorySettings";
 import { SkillsSettings } from "./pages/settings/SkillsSettings";
 import { AccountSettings } from "./pages/settings/AccountSettings";
+import { AppearanceSettings } from "./pages/settings/AppearanceSettings";
 import { AdminLayout } from "./pages/admin/AdminLayout";
 import { ModelCardsPage } from "./pages/admin/ModelCardsPage";
+import { GithubAppPage } from "./pages/admin/GithubAppPage";
 
 const client = new QueryClient({
   defaultOptions: {
@@ -70,6 +72,7 @@ export default function App() {
                 <Route path="skills" element={<SkillsSettings />} />
                 <Route path="memory" element={<MemorySettings />} />
                 <Route path="integrations" element={<IntegrationsSettings />} />
+                <Route path="appearance" element={<AppearanceSettings />} />
                 <Route path="account" element={<AccountSettings />} />
               </Route>
               {/* Pre-redesign paths, kept so old bookmarks keep working. */}
@@ -84,6 +87,7 @@ export default function App() {
               <Route path="admin" element={<AdminLayout />}>
                 <Route index element={<Navigate to="model-cards" replace />} />
                 <Route path="model-cards" element={<ModelCardsPage />} />
+                <Route path="github-app" element={<GithubAppPage />} />
               </Route>
             </Route>
           </Routes>
