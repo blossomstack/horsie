@@ -153,9 +153,11 @@ async fn replay_from_a_cursor_yields_only_the_tail() {
     );
 }
 
-/// Replay pages internally (1 000 rows at a time), so a log longer than one page
-/// has to come back complete and in order — the page boundary is invisible to
-/// the caller or it is a bug.
+/// Both sides of the 1 000-row boundary at once: `persist` chunks its `INSERT`
+/// and `replay` pages its `SELECT`, at the same size, so a 2 500-event batch
+/// crosses each of them twice. Either boundary is invisible to the caller or it
+/// is a bug — and an off-by-one in the per-chunk sequence base would show up
+/// here as duplicated or skipped numbers rather than as an error.
 #[tokio::test]
 async fn replay_pages_a_log_longer_than_one_page() {
     let j = journal().await;

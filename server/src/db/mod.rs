@@ -340,6 +340,17 @@ mod tests {
         assert!(to_dollar_placeholders(sql).ends_with("$10, $11)"));
     }
 
+    /// The journal builds one `INSERT` per chunk, so `q` has to keep numbering
+    /// straight through the row boundaries rather than restarting at `$1` on
+    /// each row. Three placeholders per row, continuing across all of them.
+    #[test]
+    fn a_multi_row_insert_numbers_placeholders_across_rows() {
+        assert_eq!(
+            to_dollar_placeholders(&journal::insert_statement(2)),
+            "INSERT INTO journal_events (log_id, seq, payload) VALUES ($1, $2, $3), ($4, $5, $6)"
+        );
+    }
+
     #[test]
     fn dialect_comes_from_the_url_scheme() {
         assert_eq!(Dialect::from_url("sqlite://x.db").unwrap(), Dialect::Sqlite);
