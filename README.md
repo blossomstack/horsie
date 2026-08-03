@@ -138,7 +138,7 @@ philosophy and contribution conventions.
 
 ## Contributing
 
-Pull requests are welcome. Contributors sign a [CLA](CLA.md) so the project can
+Pull requests are welcome. Contributors sign a [CLA](https://github.com/blossomstack/.github/blob/main/CLA.md) so the project can
 keep offering horsie under both licences below and adjust its licensing later if
 it needs to. See [CONTRIBUTING.md](CONTRIBUTING.md).
 

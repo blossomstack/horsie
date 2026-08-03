@@ -6,8 +6,9 @@ welcome.
 ## Contributor License Agreement
 
 Before your first pull request can be merged you need to sign the
-[CLA](CLA.md). A bot will comment on your PR with instructions; signing is a
-one-line comment and covers all your future contributions.
+[CLA](https://github.com/blossomstack/.github/blob/main/CLA.md). A bot comments on your PR with a link; signing takes a moment in
+the browser and covers all your future contributions, here and in every other
+blossomstack repository.
 
 **Why?** horsie is dual-licensed Apache-2.0 / MIT today. The CLA keeps the door
 open to changing that later — for example to fund the project's development —
@@ -35,5 +36,5 @@ does.
 ## Licence of contributions
 
 Unless you state otherwise, contributions are submitted under the terms of the
-[CLA](CLA.md) and distributed under [Apache-2.0](LICENSE-APACHE) and
+[CLA](https://github.com/blossomstack/.github/blob/main/CLA.md) and distributed under [Apache-2.0](LICENSE-APACHE) and
 [MIT](LICENSE-MIT).
