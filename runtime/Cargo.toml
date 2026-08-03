@@ -37,7 +37,7 @@ sha2          = { workspace = true }
 zip           = { workspace = true }
 # Upstream nono. The macOS SecurityServer TLS allow is injected as a capability rule
 # (see server/src/default_capabilities.json), not a fork. default-features=false drops system-keyring.
-nono          = { version = "0.66", default-features = false, optional = true }
+nono          = { version = "0.70", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile      = "3"
