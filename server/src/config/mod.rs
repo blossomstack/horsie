@@ -4,7 +4,7 @@
 //! distinct from, and never synced with, the deployment/bootstrap config the
 //! host reads from `config.json`/env.
 
-mod store;
+pub(crate) mod store;
 
 pub mod model_cards;
 

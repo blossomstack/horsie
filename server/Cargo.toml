@@ -48,6 +48,9 @@ zip               = { workspace = true }
 tempfile          = { workspace = true }
 
 [dev-dependencies]
+# The journal conformance suite lives in the actor testkit, so SqliteJournal can
+# be held to exactly the same contract as the backends that ship with the actor.
+horsie-actor           = { path = "../actor", features = ["file-journal", "test-util"] }
 tempfile = { workspace = true }
 tower    = { version = "0.5", features = ["util"] }
 # MockProvider/scripted completions for subagent routing tests; production
