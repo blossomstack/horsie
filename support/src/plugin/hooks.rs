@@ -463,6 +463,39 @@ mod tests {
     }
 
     #[test]
+    /// impeccable's real `hooks/hooks.json`, verbatim. It is the plugin that
+    /// motivated all of #105, so its exact shape is worth pinning: one event
+    /// horsie runs today and one it defers, with a matcher that only selects
+    /// the right tools because of the Claude alias table.
+    #[test]
+    fn impeccables_real_hooks_split_as_expected() {
+        let dir = TempDir::new().unwrap();
+        write_hooks(
+            dir.path(),
+            r#"{"hooks":{
+                 "PostToolUse":[{"matcher":"Edit|Write|MultiEdit","hooks":[
+                   {"type":"command","command":"node hook.mjs","timeout":5}]}],
+                 "Stop":[{"hooks":[
+                   {"type":"command","command":"node hook.mjs","timeout":30}]}]}}"#,
+        );
+        let h = read(dir.path()).unwrap();
+
+        assert_eq!(h.decls.len(), 1);
+        assert_eq!(h.decls[0].event, HookEvent::PostToolUse);
+        assert_eq!(
+            h.unsupported,
+            vec![("Stop".to_string(), Unsupported::NotImplemented)]
+        );
+
+        // The matcher must reach horsie's editors and nothing else.
+        let m = h.decls[0].matcher.as_deref();
+        assert!(matcher_applies(m, "write_file"));
+        assert!(matcher_applies(m, "find_and_replace"));
+        assert!(!matcher_applies(m, "bash"));
+        assert!(!matcher_applies(m, "read_file"));
+    }
+
+    #[test]
     fn a_malformed_hooks_file_is_an_error_not_an_empty_set() {
         let dir = TempDir::new().unwrap();
         write_hooks(dir.path(), "{not json");
