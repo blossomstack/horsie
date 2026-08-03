@@ -13,8 +13,11 @@ pub enum HookEvent {
     SessionStart,
     PreToolUse,
     PostToolUse,
-    // A later change adds SessionEnd, UserPromptSubmit, Stop, SubagentStart and
-    // SubagentStop alongside their call sites.
+    Stop,
+    // `UserPromptSubmit` is deferred: its only seam is the session actor's
+    // `drain`, which runs on the actor's command loop, and awaiting a hook
+    // there would stall every other command for that session. `SessionEnd` and
+    // the subagent pair are deferred pending their own call sites.
 }
 
 /// Why an event cannot run, which decides what the error tells the user.
@@ -35,11 +38,12 @@ impl HookEvent {
             "SessionStart" => Ok(HookEvent::SessionStart),
             "PreToolUse" => Ok(HookEvent::PreToolUse),
             "PostToolUse" => Ok(HookEvent::PostToolUse),
+            "Stop" => Ok(HookEvent::Stop),
 
-            // Wired in a follow-up, when their call sites land. Classified as
-            // deferred rather than supported so no hook can install believing
-            // it works and then silently never fire.
-            "SessionEnd" | "UserPromptSubmit" | "Stop" | "SubagentStart" | "SubagentStop"
+            // Deferred pending safe call sites. `UserPromptSubmit`'s only seam
+            // is the session actor's command loop, where awaiting a hook would
+            // stall the session.
+            "UserPromptSubmit" | "SessionEnd" | "SubagentStart" | "SubagentStop"
             // horsie has the seam; nothing published uses these, so they are
             // deliberately not built. Promoting one is a small change.
             | "PostToolUseFailure" | "PostToolBatch" | "StopFailure" | "Notification"
@@ -65,6 +69,7 @@ impl HookEvent {
             HookEvent::SessionStart => "SessionStart",
             HookEvent::PreToolUse => "PreToolUse",
             HookEvent::PostToolUse => "PostToolUse",
+            HookEvent::Stop => "Stop",
         }
     }
 }
@@ -267,29 +272,28 @@ mod tests {
                 }
             }
         }
-        // Wiring the five turn/subagent events makes these 8 / 7 / 16.
-        // Changing them is a deliberate act, not a side effect.
-        assert_eq!(supported, 3, "supported set changed");
-        assert_eq!(not_implemented, 12, "deferred set changed");
+        // Wiring `UserPromptSubmit` would make these 8 / 7 / 16. Changing them
+        // is a deliberate act, not a side effect.
+        assert_eq!(supported, 4, "supported set changed");
+        assert_eq!(not_implemented, 11, "deferred set changed");
         assert_eq!(no_concept, 16, "absent set changed");
     }
 
     #[test]
-    fn the_supported_three_are_exactly_these() {
-        for name in ["SessionStart", "PreToolUse", "PostToolUse"] {
+    fn the_supported_set_is_exactly_these() {
+        for name in ["SessionStart", "PreToolUse", "PostToolUse", "Stop"] {
             assert!(HookEvent::parse(name).is_ok(), "{name} must be supported");
         }
     }
 
-    /// The turn and subagent events must classify as deferred, not supported —
-    /// horsie has no call site for them yet, and claiming them would mean a
+    /// `UserPromptSubmit` must classify as deferred, not supported — its only
+    /// seam is the session actor's command loop, and claiming it would mean a
     /// hook that installs and silently never fires.
     #[test]
-    fn the_unwired_events_are_deferred_until_their_call_sites_exist() {
+    fn events_without_a_safe_seam_stay_deferred() {
         for name in [
-            "SessionEnd",
             "UserPromptSubmit",
-            "Stop",
+            "SessionEnd",
             "SubagentStart",
             "SubagentStop",
         ] {
@@ -479,15 +483,16 @@ mod tests {
         );
         let h = read(dir.path()).unwrap();
 
-        assert_eq!(h.decls.len(), 1);
-        assert_eq!(h.decls[0].event, HookEvent::PostToolUse);
-        assert_eq!(
-            h.unsupported,
-            vec![("Stop".to_string(), Unsupported::NotImplemented)]
-        );
+        assert_eq!(h.decls.len(), 2, "PostToolUse and Stop both run now");
+        assert!(h.unsupported.is_empty(), "{:?}", h.unsupported);
 
         // The matcher must reach horsie's editors and nothing else.
-        let m = h.decls[0].matcher.as_deref();
+        let post = h
+            .decls
+            .iter()
+            .find(|d| d.event == HookEvent::PostToolUse)
+            .expect("PostToolUse declaration");
+        let m = post.matcher.as_deref();
         assert!(matcher_applies(m, "write_file"));
         assert!(matcher_applies(m, "find_and_replace"));
         assert!(!matcher_applies(m, "bash"));

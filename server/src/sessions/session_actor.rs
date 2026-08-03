@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_models::agent::ToolResultInput;
+use horsie_models::runtime::HookDeclWire;
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
@@ -460,6 +461,7 @@ impl SessionActor {
     /// Spawn the resident agent. Cheap and runtime-free: the provider, toolbox
     /// and system prompt are resolved per run, on the run's own task.
     fn spawn_main_agent(&mut self, ctx: &ActorContext<Self>) {
+        let hooks: HookState = Arc::new(Mutex::new(None));
         let context_provider = Arc::new(SessionContextProvider {
             runtimes: self
                 .deps
@@ -474,6 +476,7 @@ impl SessionActor {
             session: ctx.self_ref(),
             frames: self.frames.clone(),
             last_client: Mutex::new(None),
+            hooks: hooks.clone(),
         });
         self.context_provider = Some(context_provider.clone());
         let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
@@ -492,6 +495,7 @@ impl SessionActor {
             }),
             parent: Arc::new(SessionParent {
                 target: ctx.self_ref(),
+                hooks: hooks.clone(),
             }),
             session_id: self.id,
         };
@@ -505,6 +509,7 @@ impl SessionActor {
         ctx: &ActorContext<Self>,
         id: Uuid,
     ) -> ActorRef<AgentCommand> {
+        let hooks: HookState = Arc::new(Mutex::new(None));
         let context_provider = Arc::new(SessionContextProvider {
             runtimes: self
                 .deps
@@ -519,6 +524,7 @@ impl SessionActor {
             session: ctx.self_ref(),
             frames: self.frames.clone(),
             last_client: Mutex::new(None),
+            hooks: hooks.clone(),
         });
         let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
         params.interactive = true;
@@ -535,6 +541,7 @@ impl SessionActor {
             event_sink: Arc::new(QuietEventSink),
             parent: Arc::new(SessionParent {
                 target: ctx.self_ref(),
+                hooks: hooks.clone(),
             }),
             session_id: id,
         };
@@ -1033,15 +1040,69 @@ impl SessionActor {
 /// by `run_id`, so every outcome that arrives here is one the session asked for.
 struct SessionParent {
     target: ActorRef<SessionCommand>,
+    /// Resolved by the run's context provider; empty until the first run.
+    hooks: HookState,
 }
+
+/// What the `Stop` hook needs at turn end: the run's runtime client and what
+/// the session's plugins declared.
+///
+/// Shared because the two halves live apart — `provide()` resolves the client
+/// and the manifest at the top of a run, while the outcome sink needs them when
+/// that run ends.
+type HookState = Arc<Mutex<Option<(RuntimeClient, Vec<HookDeclWire>)>>>;
 
 #[async_trait]
 impl AgentOutcomeSink for SessionParent {
     async fn deliver(&self, outcome: AgentOutcome) {
+        // `Stop` runs here rather than in the session actor's outcome handler:
+        // `deliver` is called on the agent's own run task, so a hook that takes
+        // its full timeout delays this turn's completion without stalling the
+        // session's command loop — a cancel or a new message still lands.
+        if matches!(outcome, AgentOutcome::Concluded { .. }) {
+            self.run_stop_hook().await;
+        }
         let _ = self
             .target
             .tell(SessionCommand::AgentOutcome(outcome))
             .await;
+    }
+}
+
+impl SessionParent {
+    /// Run any `Stop` hooks the session's plugins declared.
+    ///
+    /// Advisory only: `Stop` cannot un-end a turn here, so a block or a failure
+    /// is logged rather than acted on. Honouring `continue: false` would mean
+    /// re-entering the agent, which is a turn-lifecycle change rather than a
+    /// hook-dispatch one.
+    async fn run_stop_hook(&self) {
+        let state = self
+            .hooks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some((client, decls)) = state else {
+            return;
+        };
+        if !decls.iter().any(|d| d.event == "Stop") {
+            return;
+        }
+        let payload = serde_json::json!({ "hook_event_name": "Stop" }).to_string();
+        match client.run_hook("Stop", &payload).await {
+            Ok(outcome) => {
+                if let Some(ctx) = outcome.additional_context.as_deref() {
+                    tracing::info!(context = ctx, "Stop hook returned context");
+                }
+                if outcome.blocked || outcome.stop {
+                    tracing::info!(
+                        reason = ?outcome.reason.or(outcome.stop_reason),
+                        "a Stop hook asked to keep going; horsie does not resume a concluded turn"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "Stop hook dispatch failed"),
+        }
     }
 }
 
@@ -1130,6 +1191,8 @@ struct SessionContextProvider {
     /// shares the same in-flight-call tracking — and it is what lets
     /// [`SessionActor::cancel_run`] cancel without a fresh vendor round-trip.
     last_client: Mutex<Option<RuntimeClient>>,
+    /// Shared with the outcome sink so the `Stop` hook can run at turn end.
+    hooks: HookState,
 }
 
 impl SessionContextProvider {
@@ -1190,12 +1253,19 @@ impl ContextProvider for SessionContextProvider {
         // exactly today's behaviour rather than failing.
         let hook_decls = if use_plugins {
             match runtime_client.hook_manifest().await {
-                Ok(manifest) => {
-                    for why in &manifest.unsupported {
-                        tracing::warn!(session = %self.session_id, "unsupported plugin hook: {why}");
-                    }
-                    manifest.entries
+                Ok(manifest) if !manifest.unsupported.is_empty() => {
+                    // Fail rather than run a session whose plugins believe they
+                    // have guards horsie never fires. `plugin install` catches
+                    // this first; this gate catches plugins installed before
+                    // hook support and hooks.json files changed by an update.
+                    // Terminal: retrying cannot make a plugin's hooks runnable,
+                    // and the fix is to remove or update the plugin.
+                    return Err(ContextError::terminal(format!(
+                        "this session's plugins declare hooks horsie cannot run: {}",
+                        manifest.unsupported.join("; ")
+                    )));
                 }
+                Ok(manifest) => manifest.entries,
                 Err(e) => {
                     tracing::debug!(
                         session = %self.session_id,
@@ -1208,6 +1278,10 @@ impl ContextProvider for SessionContextProvider {
         } else {
             Vec::new()
         };
+        // Hand the run's client and declarations to the outcome sink, which
+        // needs them when this turn ends.
+        *self.hooks.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((runtime_client.clone(), hook_decls.clone()));
         let shared = if use_plugins {
             let bootstrap = match runtime_client.run_session_start().await {
                 Ok(context) if !context.trim().is_empty() => Some(context),
@@ -2779,6 +2853,7 @@ mod tests {
             session: session.clone(),
             frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
+            hooks: Arc::new(Mutex::new(None)),
         };
 
         let main = build(SessionAgentKind::Main).provide().await.unwrap();
@@ -2826,6 +2901,7 @@ mod tests {
             session: session.clone(),
             frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
+            hooks: Arc::new(Mutex::new(None)),
         };
         let tools: Vec<String> = provider
             .provide()

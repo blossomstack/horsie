@@ -107,6 +107,8 @@ work. horsie runs:
   arguments, or add context.
 - **`PostToolUse`** — runs after a tool call and may replace or annotate what the
   agent sees.
+- **`Stop`** — runs when a turn ends. Advisory: its output is logged, and it
+  cannot resume a turn that has already concluded.
 
 Matchers written for Claude Code work unchanged: Claude's tool names are mapped
 onto horsie's, so a matcher of `Edit|Write|MultiEdit` selects `write_file`,
@@ -125,8 +127,10 @@ Two behaviours worth knowing:
 Hooks run inside the runtime, under whatever confinement it has — sandboxed by
 default, or unconfined if you started `horsie connect --no-sandbox`.
 
-Claude Code defines many more hook events than horsie runs. The rest are
-recognised and reported, but do not fire.
+Claude Code defines many more hook events than horsie runs. **A plugin
+declaring one of them is refused** — at install, and again at session start, so
+a hook can never quietly do nothing. The error names each event and says whether
+horsie has simply not implemented it yet or has no equivalent concept at all.
 
 ### How the library is stored
 

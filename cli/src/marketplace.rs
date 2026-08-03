@@ -169,8 +169,8 @@ pub fn remove(paths: &PluginPaths, name: &str) -> Result<(), CliError> {
 /// buries the error itself.
 const MAX_SUGGESTIONS: usize = 8;
 
-/// A short "did you mean" tail for an unknown plugin name.
-fn suggest(names: &[&str], marketplace: &str) -> String {
+/// A short "did you mean" tail listing candidate plugin names.
+pub(crate) fn suggest(names: &[&str], marketplace: &str) -> String {
     if names.len() <= MAX_SUGGESTIONS {
         return format!("Available: {}", names.join(", "));
     }

@@ -234,6 +234,25 @@ pub fn install(
         )));
     }
 
+    // The first of the two gates: reject a plugin whose hooks horsie cannot
+    // run, naming each one, so the user learns before it is in their library.
+    // Session start re-checks, catching plugins installed before hook support
+    // and hooks.json files changed by an update.
+    let hooks = horsie_support::plugin::hooks::read(&root_dir).map_err(CliError::Config)?;
+    if !hooks.unsupported.is_empty() {
+        gc_checkout(paths, &checkout.key);
+        let detail = hooks
+            .unsupported
+            .iter()
+            .map(|(event, why)| why.explain(event))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(CliError::Config(format!(
+            "'{}' declares hooks horsie cannot run: {detail}",
+            resolved.label
+        )));
+    }
+
     let install_name = name.unwrap_or_else(|| root.name(&resolved.fallback));
     let link = paths.plugins.join(&install_name);
     if link.symlink_metadata().is_ok() {
@@ -339,9 +358,11 @@ fn resolve_target(
                     entry_name: String::new(),
                 }),
                 many => Err(CliError::Config(format!(
-                    "'{url}' is a marketplace listing {} plugins. Add it with `horsie marketplace add {url}`, then install one by name. Available: {}",
+                    "'{url}' is a marketplace listing {} plugins. Add it with `horsie marketplace add {url}`, then install one by name. {}",
                     many.len(),
-                    market.names().join(", ")
+                    // Same truncation as the unknown-plugin error: a 276-name
+                    // dump buries the instruction that precedes it.
+                    crate::marketplace::suggest(&market.names(), &name_from_url(url))
                 ))),
             }
         }
@@ -971,6 +992,78 @@ mod tests {
 
         update(&p, "shortname").expect("update must re-resolve via the index name");
         assert!(p.plugins.join("shortname/skills/s/SKILL.md").is_file());
+    }
+
+    /// The install gate: a plugin declaring a hook horsie cannot run is
+    /// rejected, naming it, and leaves nothing behind.
+    #[test]
+    #[cfg(unix)]
+    fn install_rejects_a_plugin_declaring_unsupported_hooks() {
+        let src = TempDir::new().unwrap();
+        let d = src.path().join("skills/x");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("SKILL.md"), "---\nname: x\n---\nb").unwrap();
+        let h = src.path().join("hooks");
+        std::fs::create_dir_all(&h).unwrap();
+        std::fs::write(
+            h.join("hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"ok"}]}],
+                         "WorktreeCreate":[{"hooks":[{"type":"command","command":"x"}]}]}}"#,
+        )
+        .unwrap();
+        commit_all(src.path());
+
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        let err = install(
+            &p,
+            &InstallTarget::Url(file_url(src.path())),
+            None,
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("WorktreeCreate"), "err: {err}");
+        assert!(
+            !err.contains("PreToolUse"),
+            "supported events must not be named: {err}"
+        );
+        assert!(list(&p).is_empty());
+    }
+
+    /// impeccable declares `PostToolUse` and `Stop`, both of which horsie runs,
+    /// so the gate must not reject the plugin that motivated all of #105.
+    #[test]
+    #[cfg(unix)]
+    fn install_accepts_hooks_horsie_runs() {
+        let src = TempDir::new().unwrap();
+        let d = src.path().join("skills/x");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("SKILL.md"), "---\nname: x\n---\nb").unwrap();
+        let h = src.path().join("hooks");
+        std::fs::create_dir_all(&h).unwrap();
+        std::fs::write(
+            h.join("hooks.json"),
+            r#"{"hooks":{
+                 "PostToolUse":[{"matcher":"Edit|Write|MultiEdit","hooks":[
+                   {"type":"command","command":"node hook.mjs"}]}],
+                 "Stop":[{"hooks":[{"type":"command","command":"node hook.mjs"}]}]}}"#,
+        )
+        .unwrap();
+        commit_all(src.path());
+
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        install(
+            &p,
+            &InstallTarget::Url(file_url(src.path())),
+            None,
+            None,
+            false,
+        )
+        .expect("a plugin whose hooks horsie runs must install");
+        assert_eq!(list(&p).len(), 1);
     }
 
     #[test]
