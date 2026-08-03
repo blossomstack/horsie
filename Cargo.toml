@@ -32,7 +32,7 @@ thiserror        = "1.0"
 tokio             = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time"] }
 tokio-util        = { version = "0.7" }
 tokio-stream      = { version = "0.1", features = ["sync"] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.30"
 futures-util      = "0.3"
 uuid              = { version = "1", features = ["v4", "serde"] }
 rand              = "0.8"
