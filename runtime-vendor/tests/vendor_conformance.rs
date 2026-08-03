@@ -5,13 +5,17 @@
 //! those tests pass without any locking at all and say nothing about the agent
 //! that ships. This one dials a real `RuntimeVendor::run` over a real
 //! WebSocket, where every command dispatches on its own task, and holds it to
-//! the same four promises:
+//! the same promises:
 //!
 //! 1. `create` then `get` hands back a runtime.
 //! 2. `get` without a create is `Gone` — it must never provision.
-//! 3. `hibernate` is advisory; this agent declines, so `get` still works after.
+//! 3. `hibernate` is advisory: an agent that cannot rebuild the runtime
+//!    declines it, and one that can frees the process and rebuilds on the next
+//!    `get`.
 //! 4. `get` during an in-flight `create` waits for it, rather than answering
 //!    `Gone` for a runtime that is moments from existing.
+//! 5. A respawnable agent's runtimes outlive the agent process; a
+//!    non-respawnable one's do not, and saying `Gone` is the safe answer there.
 //!
 //! Only the sandbox process is doubled: the provider hands back a transport
 //! instead of spawning `horsie-runtime`.
@@ -36,11 +40,19 @@ use tokio_util::sync::CancellationToken;
 
 // ── doubles ──────────────────────────────────────────────────────────────────
 
-struct NoopHandle;
+/// Stands in for a spawned process. Stopping it deregisters the transport, as
+/// `ProcessRuntimeHandle::stop` does — without that the agent would still find
+/// a live transport for a runtime it had just killed, and no test could tell a
+/// working hibernate from a no-op one.
+struct StoppableHandle {
+    connected: Arc<ConnectedRuntimeRegistry>,
+    runtime_id: String,
+}
 
 #[async_trait]
-impl RuntimeHandle for NoopHandle {
+impl RuntimeHandle for StoppableHandle {
     async fn stop(&self) -> Result<(), horsie_runtime_vendor::RuntimeError> {
+        self.connected.remove(&self.runtime_id).await;
         Ok(())
     }
     async fn health_check(&self) -> Result<HealthStatus, horsie_runtime_vendor::RuntimeError> {
@@ -75,7 +87,10 @@ impl RuntimeProvider for GatedProvider {
         self.connected
             .register_transport(id.to_string(), transport)
             .await;
-        Ok(Arc::new(NoopHandle))
+        Ok(Arc::new(StoppableHandle {
+            connected: self.connected.clone(),
+            runtime_id: id.to_string(),
+        }))
     }
 }
 
@@ -84,8 +99,9 @@ impl RuntimeProvider for GatedProvider {
 struct Agent {
     link: Arc<RuntimeVendorLink>,
     cancel: CancellationToken,
-    /// Holds the workspace alive for the test's life.
-    _dir: tempfile::TempDir,
+    /// The transports this incarnation's runtimes dialed back on, so a test can
+    /// tell a live runtime from a stopped one.
+    connected: Arc<ConnectedRuntimeRegistry>,
 }
 
 impl Agent {
@@ -99,6 +115,10 @@ impl Agent {
             env: vec![],
         }
     }
+
+    async fn is_live(&self, runtime_id: &str) -> bool {
+        self.connected.runtime_transport(runtime_id).await.is_some()
+    }
 }
 
 impl Drop for Agent {
@@ -107,69 +127,100 @@ impl Drop for Agent {
     }
 }
 
-/// Bring up a real `RuntimeVendor` dialing a one-shot WebSocket endpoint, and
-/// hand back the server-side link the session server would hold.
-async fn start_agent(gate: Option<tokio::sync::watch::Receiver<bool>>) -> Agent {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let (link_tx, link_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("the agent dials in");
-        let ws = tokio_tungstenite::accept_async(stream)
-            .await
-            .expect("websocket upgrade");
-        // Auth-disabled shape: every principal is anonymous.
-        let link = RuntimeVendorLink::start(ws, Principal::Anonymous)
-            .await
-            .expect("handshake");
-        let _ = link_tx.send(link);
-    });
+/// The machine an agent runs on: the workspace it serves and the state
+/// directory it records runtimes in.
+///
+/// Separate from [`Agent`] because it outlives one. That is the whole subject
+/// of the restart tests — the process goes away, the directories do not.
+struct Machine {
+    dir: tempfile::TempDir,
+}
 
-    let dir = tempfile::tempdir().unwrap();
-    let state_dir = dir.path().join("state");
-    let connected = Arc::new(ConnectedRuntimeRegistry::new());
-    let provider_connected = connected.clone();
-    let mut workspaces = HashMap::new();
-    workspaces.insert("main".to_string(), dir.path().to_path_buf());
-
-    let agent = RuntimeVendor::new(
-        "conformance".to_string(),
-        true,
-        Arc::new(move |_id: &str, _caps: Option<PathBuf>| {
-            Arc::new(GatedProvider {
-                connected: provider_connected.clone(),
-                gate: gate.clone(),
-            })
-        }),
-        connected,
-        Arc::new(FixedWorkspaces::new(workspaces)),
-        state_dir,
-    );
-    let cancel = CancellationToken::new();
-    let url = format!("ws://{addr}/api/vendor/connect");
-    tokio::spawn({
-        let cancel = cancel.clone();
-        async move {
-            let _ = agent.run(&url, None, cancel).await;
+impl Machine {
+    fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().unwrap(),
         }
-    });
-
-    let link = tokio::time::timeout(Duration::from_secs(5), link_rx)
-        .await
-        .expect("the agent must connect")
-        .expect("link channel");
-    Agent {
-        link,
-        cancel,
-        _dir: dir,
     }
+
+    fn state_dir(&self) -> PathBuf {
+        self.dir.path().join("state")
+    }
+
+    /// Bring up a real `RuntimeVendor` dialing a one-shot WebSocket endpoint,
+    /// and hand back the server-side link the session server would hold.
+    async fn start(
+        &self,
+        gate: Option<tokio::sync::watch::Receiver<bool>>,
+        respawnable: bool,
+    ) -> Agent {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let (link_tx, link_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("the agent dials in");
+            let ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket upgrade");
+            // Auth-disabled shape: every principal is anonymous.
+            let link = RuntimeVendorLink::start(ws, Principal::Anonymous)
+                .await
+                .expect("handshake");
+            let _ = link_tx.send(link);
+        });
+
+        let connected = Arc::new(ConnectedRuntimeRegistry::new());
+        let provider_connected = connected.clone();
+        let mut workspaces = HashMap::new();
+        workspaces.insert("main".to_string(), self.dir.path().to_path_buf());
+
+        let agent = RuntimeVendor::new(
+            "conformance".to_string(),
+            true,
+            Arc::new(move |_id: &str, _caps: Option<PathBuf>| {
+                Arc::new(GatedProvider {
+                    connected: provider_connected.clone(),
+                    gate: gate.clone(),
+                })
+            }),
+            connected.clone(),
+            Arc::new(FixedWorkspaces::new(workspaces)),
+            self.state_dir(),
+        )
+        .with_respawnable_runtimes(respawnable);
+        let cancel = CancellationToken::new();
+        let url = format!("ws://{addr}/api/vendor/connect");
+        tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                let _ = agent.run(&url, None, cancel).await;
+            }
+        });
+
+        let link = tokio::time::timeout(Duration::from_secs(5), link_rx)
+            .await
+            .expect("the agent must connect")
+            .expect("link channel");
+        Agent {
+            link,
+            cancel,
+            connected,
+        }
+    }
+}
+
+/// A machine plus its first agent, for the tests that never restart one.
+async fn start_agent(gate: Option<tokio::sync::watch::Receiver<bool>>) -> (Machine, Agent) {
+    let machine = Machine::new();
+    let agent = machine.start(gate, false).await;
+    (machine, agent)
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn get_after_create_returns_a_runtime() {
-    let agent = start_agent(None).await;
+    let (_machine, agent) = start_agent(None).await;
     agent
         .link
         .create("rt-1", &agent.spec())
@@ -180,7 +231,7 @@ async fn get_after_create_returns_a_runtime() {
 
 #[tokio::test]
 async fn get_without_create_is_gone_and_provisions_nothing() {
-    let agent = start_agent(None).await;
+    let (_machine, agent) = start_agent(None).await;
     let err = agent
         .link
         .get("rt-unknown")
@@ -200,7 +251,7 @@ async fn get_without_create_is_gone_and_provisions_nothing() {
 
 #[tokio::test]
 async fn hibernate_is_advisory_and_this_agent_declines_it() {
-    let agent = start_agent(None).await;
+    let (_machine, agent) = start_agent(None).await;
     agent
         .link
         .create("rt-1", &agent.spec())
@@ -216,6 +267,80 @@ async fn hibernate_is_advisory_and_this_agent_declines_it() {
         .expect("get after an advisory hibernate");
 }
 
+// ── restart resilience ───────────────────────────────────────────────────────
+
+/// The bug this whole change exists for. Ctrl-C on `horsie connect` used to
+/// take every session on the machine with it: the runtimes lived only in the
+/// agent's memory, so the next get answered `Gone` and the server wrote the
+/// session off permanently.
+#[tokio::test]
+async fn a_respawnable_runtime_outlives_the_agent_process() {
+    let machine = Machine::new();
+    let first = machine.start(None, true).await;
+    first.link.create("rt-1", &first.spec()).await.expect("create");
+    drop(first);
+
+    let second = machine.start(None, true).await;
+    second
+        .link
+        .get("rt-1")
+        .await
+        .expect("a get after an agent restart must rebuild, not report it gone");
+    assert!(second.is_live("rt-1").await);
+}
+
+/// The other half of that contract, and the reason it is opt-in: a vendor that
+/// provisions its own workspace would re-clone on a respawn, so for it a
+/// missing runtime stays terminal.
+#[tokio::test]
+async fn a_non_respawnable_agent_still_reports_it_gone_after_a_restart() {
+    let machine = Machine::new();
+    let first = machine.start(None, false).await;
+    first.link.create("rt-1", &first.spec()).await.expect("create");
+    drop(first);
+
+    let second = machine.start(None, false).await;
+    let err = second
+        .link
+        .get("rt-1")
+        .await
+        .expect_err("a provisioning vendor must not silently rebuild a workspace");
+    assert!(matches!(err, VendorError::Gone(_)), "{err:?}");
+}
+
+/// Hibernate is where the respawn path earns its keep in normal operation: the
+/// process is freed while the session is idle, and the next turn brings it back.
+#[tokio::test]
+async fn hibernate_frees_the_process_and_a_get_brings_it_back() {
+    let machine = Machine::new();
+    let agent = machine.start(None, true).await;
+    agent.link.create("rt-1", &agent.spec()).await.expect("create");
+    assert!(agent.is_live("rt-1").await);
+
+    agent.link.hibernate("rt-1").await;
+    assert!(
+        !agent.is_live("rt-1").await,
+        "an agent that can rebuild the runtime should take the hint"
+    );
+
+    agent.link.get("rt-1").await.expect("a get resumes it");
+    assert!(agent.is_live("rt-1").await);
+}
+
+/// A deleted session must not leave the means to rebuild its runtime lying
+/// around: the directory is the record, so it goes with the session.
+#[tokio::test]
+async fn delete_removes_the_runtimes_state_directory() {
+    let machine = Machine::new();
+    let agent = machine.start(None, true).await;
+    agent.link.create("rt-1", &agent.spec()).await.expect("create");
+    let dir = machine.state_dir().join("rt-1");
+    assert!(dir.join("spec.json").exists(), "create records the spec");
+
+    agent.link.delete("rt-1").await;
+    assert!(!dir.exists(), "delete takes the record with it");
+}
+
 /// The promise `lifecycle_locks` exists to keep. The real agent dispatches every
 /// command on its own task, so without the per-id lock this `get` races ahead of
 /// the create it belongs to and answers `Gone` for a runtime that is moments
@@ -223,7 +348,7 @@ async fn hibernate_is_advisory_and_this_agent_declines_it() {
 #[tokio::test]
 async fn get_during_an_in_flight_create_waits_for_it() {
     let (open, gate) = tokio::sync::watch::channel(false);
-    let agent = start_agent(Some(gate)).await;
+    let (_machine, agent) = start_agent(Some(gate)).await;
 
     let creating = {
         let link = agent.link.clone();
