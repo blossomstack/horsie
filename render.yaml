@@ -1,0 +1,23 @@
+# Render Blueprint for the "Deploy to Render" button in README.md.
+# Provisions the published server image plus a managed Postgres database;
+# HORSIE_DATABASE_URL can be edited after deploy to point at any external
+# postgres:// instance instead (see docs/guide/self-hosting.md).
+databases:
+  - name: horsie-db
+    plan: free
+
+services:
+  - type: web
+    name: horsie
+    runtime: image
+    plan: free
+    image:
+      url: ghcr.io/blossomstack/horsie:latest
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: "3789"
+      - key: HORSIE_DATABASE_URL
+        fromDatabase:
+          name: horsie-db
+          property: connectionString
