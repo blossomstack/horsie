@@ -17,6 +17,7 @@ horsie-models = { version = "0.1.6", path = "../models" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 sha2       = { workspace = true }
+regex      = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
