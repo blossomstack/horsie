@@ -188,9 +188,8 @@ pub(crate) async fn run_hook_raw(
         Ok(Err(e)) => return failed(&format!("wait failed: {e}")),
         Err(_) => return failed("timed out"),
     };
-    let clamp = |s: std::borrow::Cow<'_, str>| -> String {
-        s.chars().take(HOOK_OUTPUT_CLAMP).collect()
-    };
+    let clamp =
+        |s: std::borrow::Cow<'_, str>| -> String { s.chars().take(HOOK_OUTPUT_CLAMP).collect() };
     HookRun {
         code: output.status.code(),
         stdout: clamp(String::from_utf8_lossy(&output.stdout)),

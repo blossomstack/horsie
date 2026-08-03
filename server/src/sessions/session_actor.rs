@@ -1184,6 +1184,30 @@ impl ContextProvider for SessionContextProvider {
             emit_progress(&self.frames, "scanning_workspace", None);
         }
         let (ws, shared_scan) = scan_workspace(&runtime_client, None, use_plugins).await;
+        // What hooks the session's plugins declare. An `Err` means the runtime
+        // predates hook support — the protocol carries no version, so this call
+        // is also the negotiation, and an older `horsie connect` degrades to
+        // exactly today's behaviour rather than failing.
+        let hook_decls = if use_plugins {
+            match runtime_client.hook_manifest().await {
+                Ok(manifest) => {
+                    for why in &manifest.unsupported {
+                        tracing::warn!(session = %self.session_id, "unsupported plugin hook: {why}");
+                    }
+                    manifest.entries
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        session = %self.session_id,
+                        error = %e,
+                        "runtime does not support hooks; continuing without them"
+                    );
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let shared = if use_plugins {
             let bootstrap = match runtime_client.run_session_start().await {
                 Ok(context) if !context.trim().is_empty() => Some(context),
@@ -1221,8 +1245,16 @@ impl ContextProvider for SessionContextProvider {
             use_plugins,
             mcp,
         );
+        // Hooks wrap the runtime tools but sit inside the server-synthesized
+        // tools (ask/title/memory): a plugin hooks what the agent does in the
+        // workspace, not horsie's own control surface.
+        let hooked = crate::sessions::hooked_toolbox::HookedToolbox::wrap(
+            base,
+            runtime_client.clone(),
+            hook_decls,
+        );
         let (with_memory, memory_index) =
-            build_memory_layer(base, self.memory.clone(), settings).await?;
+            build_memory_layer(hooked, self.memory.clone(), settings).await?;
         let caller = match self.kind {
             SessionAgentKind::Main => SubAgentParent::Main,
             SessionAgentKind::Sub(id) => SubAgentParent::SubAgent(id),

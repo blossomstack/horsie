@@ -6,7 +6,7 @@
 //! does, so a session without matching hooks never round-trips.
 
 use horsie_models::runtime::{HookDeclWire, HookOutcomeWire};
-use horsie_support::plugin::hooks::{HookEvent, HookDecl};
+use horsie_support::plugin::hooks::{HookDecl, HookEvent};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -103,10 +103,9 @@ pub async fn run(
 
     let mut contexts: Vec<String> = Vec::new();
     for (plugin_root, decl) in decls_for(plugins_dir, parsed) {
-        let command = decl.command.replace(
-            "${CLAUDE_PLUGIN_ROOT}",
-            &plugin_root.to_string_lossy(),
-        );
+        let command = decl
+            .command
+            .replace("${CLAUDE_PLUGIN_ROOT}", &plugin_root.to_string_lossy());
         let timeout = decl.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_secs);
         let run =
             crate::plugins::run_hook_raw(&plugin_root, &command, hook_path, payload, timeout).await;
@@ -247,7 +246,11 @@ mod tests {
         assert_eq!(entries[0].matcher.as_deref(), Some("Bash"));
         assert_eq!(unsupported.len(), 1);
         assert!(unsupported[0].contains("bad"), "{:?}", unsupported);
-        assert!(unsupported[0].contains("WorktreeCreate"), "{:?}", unsupported);
+        assert!(
+            unsupported[0].contains("WorktreeCreate"),
+            "{:?}",
+            unsupported
+        );
     }
 
     #[test]

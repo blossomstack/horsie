@@ -15,8 +15,8 @@ use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, WorkspaceSpec};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
     HookManifestResponse, HookOutcomeWire, RunHookResponse, RuntimeInboundMessage,
-    RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
-    ToolCallResponse, ToolOutput, ToolResult, WorkspaceScan,
+    RuntimeOutboundMessage, ScanResponse, SessionStartResponse, ToolCallResponse, ToolOutput,
+    ToolResult, WorkspaceScan,
 };
 use horsie_models::runtime_vendor::{
     CreateRuntimeResponse, DeleteRuntimeResponse, GetRuntimeResponse, HibernateRuntimeResponse,
@@ -602,8 +602,8 @@ async fn run_agent<S>(
                             unsupported: Vec::new(),
                         }),
                     ),
-                    RuntimeInboundMessage::RunHook(req) => Some(
-                        RuntimeOutboundMessage::RunHookResult(RunHookResponse {
+                    RuntimeInboundMessage::RunHook(req) => {
+                        Some(RuntimeOutboundMessage::RunHookResult(RunHookResponse {
                             call_id: req.call_id,
                             outcome: HookOutcomeWire {
                                 blocked: false,
@@ -616,8 +616,8 @@ async fn run_agent<S>(
                                 stop_reason: None,
                                 failed: false,
                             },
-                        }),
-                    ),
+                        }))
+                    }
                 };
                 answer.map(|message| {
                     RuntimeVendorEvent::Runtime(RuntimeRelayResponse {

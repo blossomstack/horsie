@@ -97,6 +97,34 @@ Since `<plugin>@<marketplace>` and a git URL are both just text, horsie treats
 an argument as a marketplace reference only when both halves are plain lowercase
 names — so `git@github.com:you/your-plugin.git` is always read as a URL.
 
+### Hooks
+
+A plugin can ship hooks in `hooks/hooks.json` that run at points in the agent's
+work. horsie runs:
+
+- **`SessionStart`** — output is injected into the session's bootstrap context.
+- **`PreToolUse`** — runs before a tool call and may block it, amend its
+  arguments, or add context.
+- **`PostToolUse`** — runs after a tool call and may replace or annotate what the
+  agent sees.
+
+Matchers written for Claude Code work unchanged: Claude's tool names are mapped
+onto horsie's, so a matcher of `Edit|Write|MultiEdit` selects `write_file`,
+`find_and_replace` and `replace_lines`.
+
+Two behaviours worth knowing:
+
+- **A `PreToolUse` hook that cannot run denies the call.** If it times out,
+  fails to start, or exits with an unexpected code, horsie refuses the tool
+  rather than proceeding unguarded. Hooks for other events are logged and
+  skipped on failure, because the action has already happened.
+- **A hook asking for approval is allowed.** horsie has no permission prompt and
+  runs unattended sessions, so `permissionDecision: "ask"` proceeds and is
+  logged.
+
+Claude Code defines many more hook events than horsie runs. The rest are
+recognised and reported, but do not fire.
+
 ### How the library is stored
 
 Installed plugins are symlinks into a shared clone under `<data-dir>/sources`,

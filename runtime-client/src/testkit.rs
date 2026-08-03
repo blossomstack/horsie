@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use horsie_agentcore::testkit::Script;
 use horsie_models::runtime::{
     HookDeclWire, HookManifestResponse, HookOutcomeWire, PluginSkill, RunHookResponse,
-    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
-    ToolCall, ToolCallResponse, ToolError, ToolOutput, ToolResult, WorkspaceScan,
+    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse, ToolCall,
+    ToolCallResponse, ToolError, ToolOutput, ToolResult, WorkspaceScan,
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Notify;

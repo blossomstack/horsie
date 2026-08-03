@@ -11,8 +11,8 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeProvisionFailed, RuntimeProvisioning,
-    HookManifestResponse, RunHookResponse, RuntimeReady, ScanResponse, SessionStartResponse,
+    HookManifestResponse, RunHookResponse, RuntimeInboundMessage, RuntimeOutboundMessage,
+    RuntimeProvisionFailed, RuntimeProvisioning, RuntimeReady, ScanResponse, SessionStartResponse,
     ToolCallResponse, ToolError, ToolResult,
 };
 use std::collections::HashMap;
@@ -517,13 +517,11 @@ async fn run_loop<S>(
                                 None => (Vec::new(), Vec::new()),
                             };
                             let response = serde_json::to_string(
-                                &RuntimeOutboundMessage::HookManifestResult(
-                                    HookManifestResponse {
-                                        call_id: call_id.clone(),
-                                        entries,
-                                        unsupported,
-                                    },
-                                ),
+                                &RuntimeOutboundMessage::HookManifestResult(HookManifestResponse {
+                                    call_id: call_id.clone(),
+                                    entries,
+                                    unsupported,
+                                }),
                             );
                             if let Ok(json) = response {
                                 let _ = sink_clone

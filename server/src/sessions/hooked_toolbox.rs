@@ -10,11 +10,11 @@
 //! round-trips to the runtime at all.
 
 use async_trait::async_trait;
-use horsie_agentcore::{ToolCallError, Toolbox, ToolSpec};
+use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
 use horsie_models::runtime::{HookDeclWire, HookOutcomeWire};
 use horsie_runtime_client::RuntimeClient;
 use horsie_support::plugin::hooks::matcher_applies;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub struct HookedToolbox {
@@ -200,9 +200,7 @@ mod tests {
         }
         async fn execute(&self, _name: &str, input: Value) -> Result<Value, ToolCallError> {
             self.calls.lock().unwrap().push(input);
-            self.result
-                .clone()
-                .map_err(ToolCallError::ExecutionFailed)
+            self.result.clone().map_err(ToolCallError::ExecutionFailed)
         }
     }
 
@@ -254,10 +252,7 @@ mod tests {
         );
         assert_eq!(wrapped.specs().len(), 1);
         // Same allocation, so nothing was layered on.
-        assert!(Arc::ptr_eq(
-            &(inner as Arc<dyn Toolbox>),
-            &wrapped
-        ));
+        assert!(Arc::ptr_eq(&(inner as Arc<dyn Toolbox>), &wrapped));
     }
 
     #[tokio::test]
