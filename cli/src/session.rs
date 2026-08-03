@@ -171,6 +171,10 @@ pub async fn tail(
     );
 
     let client = reqwest::Client::new();
+    // Resolved once: a refresh mid-tail would be a new access token the
+    // reconnect loop could not see anyway, and a tail that outlives its access
+    // token reconnects and re-resolves from the top.
+    let token = crate::auth::resolve_token(server).await?;
     let url = format!(
         "{}/api/sessions/{session_id}/events",
         server.trim_end_matches('/')
@@ -184,6 +188,9 @@ pub async fn tail(
     // stream; `break` reconnects, `return` exits (Ctrl-C, unknown session).
     loop {
         let mut req = client.get(&url);
+        if let Some(t) = &token {
+            req = req.bearer_auth(t);
+        }
         if let Some(seq) = sink.cursor() {
             req = req.header("Last-Event-ID", seq.to_string());
         }
@@ -207,6 +214,16 @@ pub async fn tail(
                     {
                         es.close();
                         return Err(CliError::Server(format!("no such session: {session_id}")));
+                    }
+                    // Reconnecting cannot fix a missing credential, so say what
+                    // to do instead of retrying forever.
+                    Some(Err(reqwest_eventsource::Error::InvalidStatusCode(status, _)))
+                        if status == reqwest::StatusCode::UNAUTHORIZED =>
+                    {
+                        es.close();
+                        return Err(CliError::Server(format!(
+                            "not authorized for {server} — run `horsie auth login --server {server}`"
+                        )));
                     }
                     Some(Err(reqwest_eventsource::Error::StreamEnded)) => break,
                     Some(Err(e)) => {

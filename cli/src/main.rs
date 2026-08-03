@@ -39,6 +39,11 @@ enum Command {
         #[command(subcommand)]
         action: PluginAction,
     },
+    /// Log in to a session server so other commands can reach it.
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
     /// Commands against a session server (`horsie-server`).
     Session {
         #[command(subcommand)]
@@ -74,6 +79,27 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum AuthAction {
+    /// Authorize this machine against a session server, approving in a browser.
+    Login {
+        /// `http(s)://host:port` of the session server.
+        #[arg(long)]
+        server: String,
+        /// Store this token instead of running the browser flow. For scripts.
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Forget stored credentials, revoking them server-side when reachable.
+    Logout {
+        /// Omit to log out of every server.
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Show which servers this machine has credentials for.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -339,6 +365,20 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 let paths = resolve_plugin_paths(config.as_deref())?;
                 horsie::plugins::remove(&paths, &name)?;
                 println!("removed plugin '{name}'");
+                Ok(0)
+            }
+        },
+        Command::Auth { action } => match action {
+            AuthAction::Login { server, token } => {
+                horsie::auth::login(&server, token.as_deref()).await?;
+                Ok(0)
+            }
+            AuthAction::Logout { server } => {
+                horsie::auth::logout(server.as_deref()).await?;
+                Ok(0)
+            }
+            AuthAction::Status => {
+                horsie::auth::status()?;
                 Ok(0)
             }
         },
