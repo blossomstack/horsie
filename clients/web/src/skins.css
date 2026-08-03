@@ -50,6 +50,15 @@
 
   --prose-measure: 66ch;
   --prose-heading-face: var(--face-sans);
+
+  /* Readouts drop Console's condensed axis and its amber. In a world with one
+   * accent, a second hue for "0/3 done" is a colour with no meaning. */
+  --readout-width: 100;
+  --readout-ink: var(--legend-dim);
+
+  /* Borderless means borderless: no hairline on list rows, form pickers or
+   * user bubbles either. */
+  --row-ring: transparent;
 }
 
 [data-skin="paper"][data-theme="dark"] {
@@ -169,6 +178,15 @@
 
   --prose-measure: 68ch;
   --prose-heading-face: var(--face-sans);
+
+  /* Readouts drop Console's condensed axis and its amber. In a world with one
+   * accent, a second hue for "0/3 done" is a colour with no meaning. */
+  --readout-width: 100;
+  --readout-ink: var(--legend-dim);
+
+  /* Borderless means borderless: no hairline on list rows, form pickers or
+   * user bubbles either. */
+  --row-ring: transparent;
 }
 
 [data-skin="soft"][data-theme="dark"] {
@@ -290,6 +308,15 @@
 
   --prose-measure: 70ch;
   --prose-heading-face: var(--face-sans);
+
+  /* Readouts drop Console's condensed axis and its amber. In a world with one
+   * accent, a second hue for "0/3 done" is a colour with no meaning. */
+  --readout-width: 100;
+  --readout-ink: var(--legend-dim);
+
+  /* Borderless means borderless: no hairline on list rows, form pickers or
+   * user bubbles either. */
+  --row-ring: transparent;
 }
 
 [data-skin="slate"][data-theme="dark"] {

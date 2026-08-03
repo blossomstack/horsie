@@ -69,8 +69,12 @@ function ModelCardsSection() {
           <ListRow
             key={c.modelId}
             testId={`model-card-row-${c.modelId}`}
-            title={c.name}
-            subtitle={c.modelId}
+            // `.item-title` is the mono face for machine strings, so the id
+            // takes it and the display name reads as the prose it is. The
+            // other way round put mono on "Claude Opus 4.6" and sans on
+            // `claude-opus-4-6`.
+            title={c.modelId}
+            subtitle={c.name}
             meta={
               <span className="hidden shrink-0 items-center gap-2 sm:flex">
                 {c.contextWindow != null && (

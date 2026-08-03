@@ -154,7 +154,7 @@ export function ListRow({
   return (
     <div
       className={cn(
-        "rounded-[var(--radius-control)] bg-raised shadow-[inset_0_0_0_1px_var(--rule)]",
+        "rounded-[var(--radius-control)] bg-raised shadow-[inset_0_0_0_1px_var(--row-ring)]",
         active && "shadow-[inset_0_0_0_1px_var(--rule-strong)]",
       )}
       data-testid={testId}
@@ -221,7 +221,7 @@ export function RowShell({
   children: ReactNode;
 }) {
   return (
-    <div className="rounded-[var(--radius-control)] bg-raised p-3 shadow-[inset_0_0_0_1px_var(--rule)]">
+    <div className="rounded-[var(--radius-control)] bg-raised p-3 shadow-[inset_0_0_0_1px_var(--row-ring)]">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">{children}</div>
         <button

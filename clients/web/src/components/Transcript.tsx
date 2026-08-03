@@ -50,6 +50,12 @@ function SegmentView({
     case "text":
       return (
         <div
+          // Marks the prose of a turn, as distinct from its tool traffic.
+          // `TurnActions` reads only these when copying plain text — reading
+          // the whole turn swept in tool-call names, work-group summaries and
+          // ask-card choices, so the two copy buttons returned different
+          // content from each other.
+          data-prose-segment=""
           data-testid={
             segment.streaming ? "assistant-streaming" : "assistant-text"
           }
@@ -144,7 +150,7 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
       data-queued={msg.queued ? "true" : undefined}
       actions={settled ? <TurnActions atMs={msg.createdAtMs} /> : undefined}
     >
-      <div className="rounded-[var(--radius-control)] border bg-raised px-3.5 py-2.5 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
+      <div className="rounded-[var(--radius-control)] bg-raised px-3.5 py-2.5 shadow-[inset_0_0_0_1px_var(--row-ring)] text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
         {msg.text}
       </div>
       {msg.queued && (

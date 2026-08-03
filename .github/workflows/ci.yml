@@ -158,6 +158,13 @@ jobs:
         working-directory: clients/web
         run: bun run test:unit
 
+      # The design system calls this "the gate" for WCAG AA across all four
+      # skins in both modes. It was only ever a command someone remembered to
+      # run; a colour token can regress contrast without failing anything else.
+      - name: Contrast (all skins, both modes)
+        working-directory: clients/web
+        run: bun run contrast
+
   web-e2e:
     name: Web e2e (Playwright)
     runs-on: ubuntu-latest

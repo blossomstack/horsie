@@ -51,6 +51,14 @@ export async function copyText(text: string): Promise<boolean> {
  */
 export function renderedTextOf(el: HTMLElement | null): string {
   if (!el) return "";
-  const text = el.innerText ?? el.textContent ?? "";
-  return text.replace(/\n{3,}/g, "\n\n").trim();
+  // Only the prose. A turn's DOM also holds tool-call rows, work-group
+  // summaries and ask cards; taking the container's text wholesale meant
+  // "copy as plain text" returned something the markdown button never would.
+  const parts = el.querySelectorAll<HTMLElement>("[data-prose-segment]");
+  const nodes = parts.length > 0 ? Array.from(parts) : [el];
+  return nodes
+    .map((n) => n.innerText ?? n.textContent ?? "")
+    .join("\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }

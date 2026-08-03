@@ -52,6 +52,9 @@ export function NewSessionView() {
         page that failed to load. Centred, it reads as a page waiting for you.
       */}
       <div className="flex min-h-0 flex-1 flex-col justify-center overflow-y-auto">
+        {/* The visible heading is gone by design, but the route still needs
+            one — without it this page announces as untitled. */}
+        <h1 className="sr-only">New session</h1>
         {error && (
           <div className="mx-auto w-full max-w-[54rem] px-4 pb-3 sm:px-6">
             <div
