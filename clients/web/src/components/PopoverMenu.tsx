@@ -18,6 +18,7 @@ export function PopoverMenu({
   icon,
   variant = "field",
   placement = "up",
+  className,
   disabled = false,
   /** Something other than the default is selected — draws the dot in `icon`. */
   marked = false,
@@ -36,6 +37,8 @@ export function PopoverMenu({
   icon?: ReactNode;
   variant?: "field" | "icon";
   placement?: "up" | "down";
+  /** Layout only — positioning within the row that renders it. */
+  className?: string;
   disabled?: boolean;
   marked?: boolean;
   warn?: boolean;
@@ -68,7 +71,7 @@ export function PopoverMenu({
   const described = legend ? `${legend} — ${labelText(label)}` : labelText(label);
 
   return (
-    <div className="relative" ref={ref}>
+    <div className={cn("relative", className)} ref={ref}>
       {variant === "icon" ? (
         <button
           type="button"
@@ -101,7 +104,7 @@ export function PopoverMenu({
           type="button"
           className={cn(
             "flex w-full items-center gap-1.5 rounded-[var(--radius-control)] px-2 py-1 text-left transition-colors",
-            "shadow-[inset_0_0_0_1px_var(--rule)]",
+            "shadow-[inset_0_0_0_1px_var(--row-ring)]",
             disabled ? "cursor-default opacity-70" : "hover:bg-raised",
             open && "bg-raised",
           )}

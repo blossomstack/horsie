@@ -46,7 +46,16 @@ function AgentForm({ initial }: { initial?: AgentView }) {
   const [error, setError] = useState<string | null>(null);
   const draft = useAgentDraft(initial);
   const busy = create.isPending || update.isPending;
-  const canSave = !busy && agentName.trim() !== "" && draft.model.trim() !== "";
+  // Name the requirement rather than just greying the button out: the Model
+  // picker reads "Select" exactly like the optional Runtime and Memory pickers
+  // beside it, so a disabled Save with no message is a dead end.
+  const blockedReason =
+    agentName.trim() === ""
+      ? "Give the agent a name to save it."
+      : draft.model.trim() === ""
+        ? "Pick a model to save this agent."
+        : null;
+  const canSave = !busy && blockedReason === null;
 
   const handleSave = async () => {
     setError(null);
@@ -116,7 +125,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
             </div>
           )}
 
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               className="key key-go"
               disabled={!canSave}
@@ -128,6 +137,14 @@ function AgentForm({ initial }: { initial?: AgentView }) {
             <button className="key key-blank" onClick={() => navigate("/agents")}>
               Cancel
             </button>
+            {blockedReason && (
+              <p
+                className="text-xs leading-relaxed text-dim"
+                data-testid="agent-blocked-hint"
+              >
+                {blockedReason}
+              </p>
+            )}
           </div>
         </div>
       </div>

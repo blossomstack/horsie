@@ -48,7 +48,7 @@ export function SessionConfigBar(props: Props) {
   return (
     <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
       <div
-        className="flex items-center justify-end gap-0.5 pb-1.5"
+        className="flex items-center gap-0.5 pb-1.5"
         data-testid="session-config-bar"
         data-mode="draft"
       >
@@ -74,6 +74,10 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
       {pickers.map((p) => (
         <PopoverMenu
           key={p.key}
+          // Model and Thinking sit apart from the workspace channels: effort
+          // is a property of the model, and the pair is the decision you
+          // revisit most.
+          className={p.key === "model" ? "ml-auto" : undefined}
           variant="icon"
           placement="up"
           testId={p.testId}

@@ -353,7 +353,18 @@ function reducer(state: State, action: Action): State {
         case "Resync":
           // The stream dropped frames. Say so; the effect below re-reads the
           // documents and backfills from the cursor rather than guessing.
-          return { ...state, needsResync: state.needsResync + 1 };
+          //
+          // `tasksLive` is released here too. It exists to stop the agent
+          // document overwriting a fresher live frame, but a Resync means live
+          // frames were *lost* — so the document is now the better source
+          // again. Left latched, the plan stayed frozen at the last delivered
+          // frame until the user navigated away and back, while usage (read
+          // straight off the document) recovered on its own.
+          return {
+            ...state,
+            needsResync: state.needsResync + 1,
+            tasksLive: false,
+          };
         case "Progressed":
           return {
             ...state,

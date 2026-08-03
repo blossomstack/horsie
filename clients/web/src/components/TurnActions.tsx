@@ -7,9 +7,11 @@ import { formatTime } from "../lib/time";
  * The per-turn control row: when it happened, and two ways to take it with
  * you.
  *
- * Revealed on hover *and* on `focus-within`. The focus half is not a nicety —
- * a control that only exists under a pointer is a control a keyboard user
- * does not have, and these buttons stay in the tab order either way.
+ * Revealed on hover *and* on `focus-within`, and shown unconditionally on a
+ * device with no hover at all (see `.turn-actions` in index.css). A control
+ * that exists only under a pointer is a control keyboard and touch users do
+ * not have — on a phone this would not have hidden the timestamp, it would
+ * have deleted it.
  *
  * The channel labels ("You" / "Agent") and the always-visible timestamp that
  * used to occupy a 4.75rem gutter are gone: a user turn is a bordered bubble
@@ -58,6 +60,7 @@ export function TurnActions({
     if (await copyText(text)) flash("txt");
   };
 
+
   // A user turn's text is already plain, so a second button offering the same
   // string would be a choice without a difference.
   const plainOnly = markdown === undefined;
@@ -66,7 +69,7 @@ export function TurnActions({
     /* `-top-6` lands the row in the 1.75rem gap between turns, so it never
        overlaps the first line of prose and costs no reserved height. */
     <div
-      className="pointer-events-none absolute -top-6 right-0 z-10 flex items-center gap-1 opacity-0 transition-opacity focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+      className="turn-actions pointer-events-none absolute -top-6 right-0 z-10 flex items-center gap-1 opacity-0 transition-opacity focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
       data-testid="turn-actions"
     >
       {atMs !== undefined && (

@@ -24,10 +24,10 @@ const STATUS_WORD: Record<TaskStatus, string> = {
 /**
  * The agent's live `task_list` state as a plan readout.
  *
- * Visibility is not this component's decision any more — the session header
- * owns it, so the panel is reachable on every session rather than appearing
- * only once the agent happened to use the tool and vanishing again whenever
- * the server offloaded the session.
+ * Visibility is not this component's decision — the session header owns it, so
+ * the panel is reachable on every session rather than appearing only once the
+ * agent happened to use the tool and vanishing again whenever the server
+ * offloaded the session.
  */
 export function TaskListPanel({
   tasks,
@@ -39,68 +39,83 @@ export function TaskListPanel({
   const done = tasks.filter((t) => t.status === TaskStatus.Completed).length;
 
   return (
-    <aside
-      // Below lg the plan overlays the transcript instead of taking a column
-      // from it — a third column at that width leaves nothing to read.
-      className="flex w-64 shrink-0 flex-col border-l bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:shadow-[var(--panel-lift)]"
-      data-testid="task-list-panel"
-    >
-      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b px-3">
-        <h2 className="legend !text-dim">Plan</h2>
-        {tasks.length > 0 && (
-          <span className="readout text-[11px]" data-testid="task-list-progress">
-            {done}/{tasks.length} done
-          </span>
-        )}
-        <button
-          className="key-icon ml-auto !h-7 !w-7"
-          onClick={onClose}
-          title="Hide the plan"
-          aria-label="Hide the plan"
-          data-testid="task-list-collapse"
-        >
-          <ChevronsRight size={14} aria-hidden />
-        </button>
-      </div>
+    <>
+      {/* Below lg the panel is an overlay, so it needs a scrim. Without one the
+          transcript behind stayed scrollable and tappable, and on a phone the
+          panel covered the session header — including the very key that opens
+          it — leaving the chevron as the only way back out. */}
+      <button
+        type="button"
+        className="fixed inset-0 z-10 cursor-default bg-chassis/60 lg:hidden"
+        onClick={onClose}
+        aria-label="Close the plan"
+        data-testid="task-list-scrim"
+      />
+      <aside
+        // A third column below lg leaves nothing to read, so it overlays. Below
+        // sm a 16rem overlay left a ~134px sliver of transcript with code
+        // clipped mid-token, so there it takes the full width instead of
+        // pretending to still be a column.
+        className="flex w-64 shrink-0 flex-col border-l bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:shadow-[var(--panel-lift)] max-sm:w-full"
+        data-testid="task-list-panel"
+      >
+        <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b px-3">
+          <h2 className="legend !text-dim">Plan</h2>
+          {tasks.length > 0 && (
+            <span className="readout text-[11px]" data-testid="task-list-progress">
+              {done}/{tasks.length} done
+            </span>
+          )}
+          <button
+            className="key-icon ml-auto !h-7 !w-7"
+            onClick={onClose}
+            title="Hide the plan"
+            aria-label="Hide the plan"
+            data-testid="task-list-collapse"
+          >
+            <ChevronsRight size={14} aria-hidden />
+          </button>
+        </div>
 
-      {tasks.length === 0 ? (
-        <p
-          className="px-3 py-6 text-center text-xs leading-relaxed text-faint"
-          data-testid="task-list-empty"
-        >
-          No plan yet. The agent writes one here when a task is big enough to
-          need steps.
-        </p>
-      ) : (
-        <ul className="flex-1 space-y-0.5 overflow-y-auto p-2">
-          {tasks.map((t) => (
-            <li
-              key={t.id}
-              className={cn(
-                "flex items-start gap-2 rounded-[var(--radius-chip)] px-1.5 py-1.5 text-[13px] leading-snug",
-                t.status === TaskStatus.InProgress && "bg-raised",
-              )}
-              data-testid="task-list-item"
-              data-status={t.status}
-            >
-              <span className="mt-0.5 flex w-3.5 shrink-0 justify-center">
-                <StatusIcon status={t.status} />
-              </span>
-              <span
+        {tasks.length === 0 ? (
+          <p
+            className="px-3 py-6 text-center text-xs leading-relaxed text-faint"
+            data-testid="task-list-empty"
+          >
+            No plan yet. The agent writes one here when a task is big enough to
+            need steps.
+          </p>
+        ) : (
+          <ul className="flex-1 space-y-0.5 overflow-y-auto p-2">
+            {tasks.map((t) => (
+              <li
+                key={t.id}
                 className={cn(
-                  "min-w-0 break-words",
-                  t.status === TaskStatus.Completed
-                    ? "text-faint line-through"
-                    : "text-legend",
+                  "flex items-start gap-2 rounded-[var(--radius-chip)] px-1.5 py-1.5 text-[13px] leading-snug",
+                  t.status === TaskStatus.InProgress && "bg-raised",
                 )}
+                data-testid="task-list-item"
+                data-status={t.status}
               >
-                {t.content}
-              </span>
-              <span className="sr-only">{STATUS_WORD[t.status]}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </aside>
+                <span className="mt-0.5 flex w-3.5 shrink-0 justify-center">
+                  <StatusIcon status={t.status} />
+                </span>
+                <span
+                  className={cn(
+                    "min-w-0 break-words",
+                    t.status === TaskStatus.Completed
+                      ? "text-faint line-through"
+                      : "text-legend",
+                  )}
+                >
+                  {t.content}
+                </span>
+                <span className="sr-only">{STATUS_WORD[t.status]}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </aside>
+    </>
   );
 }

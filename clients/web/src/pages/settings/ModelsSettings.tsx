@@ -341,6 +341,29 @@ export function ModelsSettings() {
                     onActivate={() => setSelected(p.name)}
                     meta={
                       <span className="flex shrink-0 items-center gap-2">
+                        {/* Whether a key is set is the one thing here that
+                            decides if this provider works at all, so it is a
+                            lamp and a word rather than a detail in the editor. */}
+                        <span
+                          className={
+                            p.hasInlineKey
+                              ? "flex items-center gap-1.5 text-lamp-ok"
+                              : "flex items-center gap-1.5 text-amber-ink"
+                          }
+                          title={
+                            p.hasInlineKey
+                              ? "An API key is stored for this provider."
+                              : "No API key stored — calls to this provider will fail unless the key comes from the environment."
+                          }
+                        >
+                          <span
+                            className={p.hasInlineKey ? "lamp" : "lamp lamp-off"}
+                            aria-hidden
+                          />
+                          <span className="legend text-current">
+                            {p.hasInlineKey ? "Key set" : "No key"}
+                          </span>
+                        </span>
                         <span className="chip">
                           {p.kind === "openai" ? "OpenAI" : "Anthropic"}
                         </span>
@@ -364,6 +387,11 @@ export function ModelsSettings() {
                           icon={<Trash2 size={14} />}
                           label={`Delete ${p.name}`}
                           danger
+                          // Every write sends the whole collection, rebuilt
+                          // from this render's data. Two deletes issued before
+                          // the refetch lands would have the second resurrect
+                          // the first.
+                          disabled={update.isPending}
                           onClick={() => deleteProvider(p.name)}
                           testId={`provider-delete-${p.name}`}
                         />
@@ -434,6 +462,7 @@ export function ModelsSettings() {
                             icon={<Trash2 size={14} />}
                             label={`Delete ${m.alias}`}
                             danger
+                            disabled={update.isPending}
                             onClick={() => deleteModel(m.alias)}
                             testId={`model-delete-${m.alias}`}
                           />

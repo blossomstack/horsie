@@ -82,6 +82,17 @@
      * hold tables and code, a paragraph does not. */
     --prose-measure: 68ch;
     --prose-heading-face: var(--face-sans);
+
+    /* A readout is a live measured value, so in Console it is amber and
+     * condensed. Both are Console decisions, not universal ones — a skin with
+     * one accent should not gain a second hue just to print "0/3 done". */
+    --readout-ink: var(--amber-ink);
+    --readout-width: 87.5;
+
+    /* The hairline around a list row, a form picker and a user bubble. A
+     * borderless skin needs a way to remove these without reaching into three
+     * component files; that is what a seam is for. */
+    --row-ring: var(--rule);
   }
 }
 
@@ -330,9 +341,9 @@ body {
 @utility readout {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-variation-settings: "wdth" 87.5;
+  font-variation-settings: "wdth" var(--readout-width);
   letter-spacing: 0.01em;
-  color: var(--amber-ink);
+  color: var(--readout-ink);
 }
 
 @layer components {
@@ -373,7 +384,7 @@ body {
     font-size: 13px;
     font-weight: 600;
     color: var(--legend);
-    font-variation-settings: "wdth" var(--legend-width);
+    font-variation-settings: "wdth" var(--readout-width);
   }
 
   /* ------------------------------------------------------------------ *
@@ -540,7 +551,7 @@ body {
   .field-mono {
     font-family: var(--font-mono);
     font-size: 0.8125rem;
-    font-variation-settings: "wdth" 87.5;
+    font-variation-settings: "wdth" var(--readout-width);
   }
 
   select.field {
@@ -698,6 +709,17 @@ body {
   background: var(--amber);
   box-shadow: 0 0 8px var(--amber);
   animation: caret 1.1s steps(1, end) infinite;
+}
+
+/* Touch has no hover, so the per-turn controls simply never appeared there —
+ * taking the timestamp and both copy buttons with them. On a coarse pointer
+ * they are always on; the transcript can afford the ink more than a phone
+ * user can afford an unreachable control. */
+@media (hover: none) {
+  .turn-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

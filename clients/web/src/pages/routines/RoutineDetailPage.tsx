@@ -39,7 +39,7 @@ export function RoutineDetailPage() {
   return (
     <div className="flex h-full flex-col" data-testid="routine-detail-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
-        <h1 className="page-title font-mono">
+        <h1 className="page-title">
           {routine.name}
         </h1>
         {!routine.enabled && (
@@ -113,7 +113,7 @@ export function RoutineDetailPage() {
           )}
 
           <div>
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-faint">
+            <div className="legend mb-2">
               Runs
             </div>
             {runs && runs.length === 0 && (
