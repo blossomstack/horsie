@@ -277,7 +277,11 @@ async fn hibernate_is_advisory_and_this_agent_declines_it() {
 async fn a_respawnable_runtime_outlives_the_agent_process() {
     let machine = Machine::new();
     let first = machine.start(None, true).await;
-    first.link.create("rt-1", &first.spec()).await.expect("create");
+    first
+        .link
+        .create("rt-1", &first.spec())
+        .await
+        .expect("create");
     drop(first);
 
     let second = machine.start(None, true).await;
@@ -296,7 +300,11 @@ async fn a_respawnable_runtime_outlives_the_agent_process() {
 async fn a_non_respawnable_agent_still_reports_it_gone_after_a_restart() {
     let machine = Machine::new();
     let first = machine.start(None, false).await;
-    first.link.create("rt-1", &first.spec()).await.expect("create");
+    first
+        .link
+        .create("rt-1", &first.spec())
+        .await
+        .expect("create");
     drop(first);
 
     let second = machine.start(None, false).await;
@@ -314,7 +322,11 @@ async fn a_non_respawnable_agent_still_reports_it_gone_after_a_restart() {
 async fn hibernate_frees_the_process_and_a_get_brings_it_back() {
     let machine = Machine::new();
     let agent = machine.start(None, true).await;
-    agent.link.create("rt-1", &agent.spec()).await.expect("create");
+    agent
+        .link
+        .create("rt-1", &agent.spec())
+        .await
+        .expect("create");
     assert!(agent.is_live("rt-1").await);
 
     agent.link.hibernate("rt-1").await;
@@ -333,7 +345,11 @@ async fn hibernate_frees_the_process_and_a_get_brings_it_back() {
 async fn delete_removes_the_runtimes_state_directory() {
     let machine = Machine::new();
     let agent = machine.start(None, true).await;
-    agent.link.create("rt-1", &agent.spec()).await.expect("create");
+    agent
+        .link
+        .create("rt-1", &agent.spec())
+        .await
+        .expect("create");
     let dir = machine.state_dir().join("rt-1");
     assert!(dir.join("spec.json").exists(), "create records the spec");
 

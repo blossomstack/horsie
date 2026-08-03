@@ -274,6 +274,12 @@ pub async fn run(
         state_dir.join("runtimes"),
     )
     .with_sandbox(sandbox)
+    // The workspaces this agent serves are the user's own directories, which
+    // exist whether or not a runtime does. So a runtime here is just a process:
+    // stopping one destroys nothing, and starting another is recovery rather
+    // than provisioning. Without this, Ctrl-C on this command would leave every
+    // session it was serving permanently unrecoverable.
+    .with_respawnable_runtimes(true)
     .with_bundles(horsie_runtime_vendor::BundleDelivery {
         // The runtimes run on this machine, so whatever address reaches the
         // server from here reaches it from them.

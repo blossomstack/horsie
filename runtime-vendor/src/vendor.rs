@@ -749,7 +749,8 @@ impl RuntimeVendor {
     fn write_spec_file(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), String> {
         let path = self.spec_path(runtime_id);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create runtime state dir: {e}"))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create runtime state dir: {e}"))?;
         }
         let bytes = serde_json::to_vec(spec).map_err(|e| format!("encode runtime spec: {e}"))?;
         std::fs::write(&path, bytes).map_err(|e| format!("write runtime spec: {e}"))?;

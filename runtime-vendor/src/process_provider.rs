@@ -241,7 +241,9 @@ mod tests {
 
     /// The argument after `flag`, if the flag is present at all.
     fn arg_after(args: &[String], flag: &str) -> Option<String> {
-        args.iter().position(|a| a == flag).map(|i| args[i + 1].clone())
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args[i + 1].clone())
     }
 
     #[test]
@@ -278,12 +280,24 @@ mod tests {
             &cfg,
             Some(std::path::Path::new("/caps.json")),
         );
-        assert_eq!(arg_after(&args, "--endpoint").as_deref(), Some("ws://127.0.0.1:3790"));
+        assert_eq!(
+            arg_after(&args, "--endpoint").as_deref(),
+            Some("ws://127.0.0.1:3790")
+        );
         assert_eq!(arg_after(&args, "--runtime-id").as_deref(), Some("r1"));
-        assert_eq!(arg_after(&args, "--workspace").as_deref(), Some("main=/work"));
+        assert_eq!(
+            arg_after(&args, "--workspace").as_deref(),
+            Some("main=/work")
+        );
         assert_eq!(arg_after(&args, "--plugins-dir").as_deref(), Some("/lib"));
-        assert_eq!(arg_after(&args, "--hook-path").as_deref(), Some("/node/bin"));
-        assert_eq!(arg_after(&args, "--sandbox-caps").as_deref(), Some("/caps.json"));
+        assert_eq!(
+            arg_after(&args, "--hook-path").as_deref(),
+            Some("/node/bin")
+        );
+        assert_eq!(
+            arg_after(&args, "--sandbox-caps").as_deref(),
+            Some("/caps.json")
+        );
     }
 
     fn which_bash() -> Option<std::path::PathBuf> {
