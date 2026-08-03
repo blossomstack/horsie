@@ -32,7 +32,13 @@ thiserror        = "2.0"
 tokio             = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time"] }
 tokio-util        = { version = "0.7" }
 tokio-stream      = { version = "0.1", features = ["sync"] }
-tokio-tungstenite = "0.30"
+# `native-tls` is not optional: vendor agents and runtimes dial `wss://` URLs
+# whenever the session server sits behind HTTPS, and without a TLS feature
+# `connect_async` rejects those before any I/O ("TLS support not compiled in").
+# native-tls rather than rustls because reqwest's default-tls already links it
+# into every one of these binaries, and it reads the OS trust store — so a
+# self-hosted server behind a private CA works once that CA is trusted here.
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 futures-util      = "0.3"
 uuid              = { version = "1", features = ["v4", "serde"] }
 rand              = "0.8"
