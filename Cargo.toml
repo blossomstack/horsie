@@ -47,7 +47,7 @@ reqwest-eventsource = "0.6.0"
 tempfile          = "3"
 jsonschema        = "0.47"
 jsonwebtoken      = "9"
-base64            = "0.22"
+base64            = "0.23"
 sha2              = "0.10"
 zip               = { version = "2", default-features = false, features = ["deflate"] }
 eval              = "0.4"
