@@ -52,8 +52,22 @@ struct Message {
 
 `created_at_ms` is required, not optional. Every message the server produces has
 one, and a required field makes the compiler enumerate all construction sites
-instead of leaving silent nulls behind. `Message::user` and
-`Message::tool_result` in `models/src/lib.rs` gain an `at_ms` parameter.
+instead of leaving silent nulls behind. `Message::user`, `Message::tool_result`
+and `AgentInput::to_message` in `models/src/lib.rs` take the stamp as a
+parameter rather than reading the clock themselves, so a caller that also
+stamps an event uses one instant for both.
+
+### `models/fluorite/events.fl`
+
+```
+struct ToolCompleteEvent { …, at_ms: u64 }
+struct RunCompleteEvent  { …, at_ms: u64 }
+```
+
+The streaming events carry the stamp so the tool-result message agentcore holds
+in memory and the one the actor folds from the journal are the same instant.
+Reading the clock separately in each layer would let a replayed transcript
+disagree with the live one about when a tool finished.
 
 ### `models/fluorite/session.fl`
 
@@ -108,8 +122,8 @@ before it is handed to `CommandEffect::persist`.
   `558`, `634`) take `started_at_ms` from a wall-clock reading taken before the
   provider call and `created_at_ms` from one taken at completion. Tool-result
   and user messages pushed onto `self.history` stamp at construction.
-- `workflow/src/agent_actor.rs` — `coarse_event` stamps `ToolComplete` and
-  `RunComplete` as it maps an `AgentEvent` onto its domain event.
+- `workflow/src/agent_actor.rs` — `coarse_event` copies `at_ms` off the
+  streaming `AgentEvent` onto its domain event rather than re-reading the clock.
   `InputMessage` events built by the actor stamp their `Message`. Synthetic
   repair messages (`repair_unanswered_tool_calls`, `missing_tool_results`)
   stamp at repair time.

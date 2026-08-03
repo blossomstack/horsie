@@ -327,6 +327,8 @@ mod tests {
 
     fn user_msg(id: &str, text: &str) -> Message {
         Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: id.to_string(),
             role: Role::User,
             parts: vec![ContentPart::Text(TextPart {
@@ -399,6 +401,8 @@ mod tests {
         let second = vec![
             user_msg("m1", "hi"),
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "m2".into(),
                 role: Role::Assistant,
                 parts: vec![ContentPart::ToolCall(TcPart {
@@ -408,6 +412,8 @@ mod tests {
                 })],
             },
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "m3".into(),
                 role: Role::Tool,
                 parts: vec![ContentPart::ToolResult(ToolResultPart {

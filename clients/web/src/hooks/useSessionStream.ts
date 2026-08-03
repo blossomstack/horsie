@@ -26,6 +26,8 @@ export interface RenderedToolCall {
   output?: string;
   isError?: boolean;
   running: boolean;
+  /** Server stamp for when the tool finished; absent while it still runs. */
+  endedAtMs?: number;
 }
 
 export interface RenderedMessage {
@@ -34,6 +36,13 @@ export interface RenderedMessage {
   text: string;
   thinking: string[];
   toolCalls: RenderedToolCall[];
+  /** Server stamp for when this message was finalized. Absent on a message
+   * this tab invented (an optimistic echo, a queued entry) — those have no
+   * server time yet, and guessing one with the local clock would put them out
+   * of order against the stamps around them. */
+  createdAtMs?: number;
+  /** Server stamp for when the provider call began (assistant only). */
+  startedAtMs?: number;
   optimistic?: boolean;
   /** Accepted by the server but not yet carried into a turn. Rendered as
    * unread: without the marker, "stop, then the queued message immediately
@@ -78,12 +87,23 @@ interface StoredMessage {
   text: string;
   thinking: string[];
   toolCalls: { id: string; name: string; input: unknown }[];
+  createdAtMs: number;
+  startedAtMs?: number;
+}
+
+/** One tool call's outcome, keyed by tool-call id. `atMs` is the server's
+ * stamp for when the tool finished — it arrives on the `ToolResult` event
+ * live, and as the tool-result message's `createdAtMs` on replay. */
+interface ToolResultEntry {
+  output: string;
+  isError: boolean;
+  atMs: number;
 }
 
 interface State {
   order: string[];
   byId: Record<string, StoredMessage>;
-  toolResults: Record<string, { output: string; isError: boolean }>;
+  toolResults: Record<string, ToolResultEntry>;
   liveTools: Record<string, { name: string; running: boolean }>;
   /** Local echoes of messages this tab sent, shown until the server's own
    * account of them arrives — either in the queue or in the transcript.
@@ -173,7 +193,7 @@ function toolCallsOf(parts: ContentPart[]) {
 function storeMessage(
   msg: Message,
   byId: Record<string, StoredMessage>,
-  toolResults: Record<string, { output: string; isError: boolean }>,
+  toolResults: Record<string, ToolResultEntry>,
   liveTools: Record<string, { name: string; running: boolean }>,
 ): void {
   if (msg.role === Role.Tool) {
@@ -182,6 +202,7 @@ function storeMessage(
         toolResults[part.value.toolCallId] = {
           output: part.value.output,
           isError: part.value.isError,
+          atMs: msg.createdAtMs,
         };
         if (liveTools[part.value.toolCallId]) {
           liveTools[part.value.toolCallId] = {
@@ -199,6 +220,8 @@ function storeMessage(
     text: textOf(msg.parts),
     thinking: thinkingOf(msg.parts),
     toolCalls: toolCallsOf(msg.parts),
+    createdAtMs: msg.createdAtMs,
+    startedAtMs: msg.startedAtMs,
   };
 }
 
@@ -327,6 +350,7 @@ function reducer(state: State, action: Action): State {
               [ev.value.toolCallId]: {
                 output: ev.value.output,
                 isError: ev.value.isError,
+                atMs: ev.value.atMs,
               },
             },
           };
@@ -543,6 +567,7 @@ export function useSessionStream(sessionId: string | undefined): {
         ...tc,
         output: result?.output,
         isError: result?.isError,
+        endedAtMs: result?.atMs,
         running: result === undefined && (live?.running ?? false),
       };
     };
@@ -588,6 +613,7 @@ export function useSessionStream(sessionId: string | undefined): {
         input: undefined,
         output: state.toolResults[id]?.output,
         isError: state.toolResults[id]?.isError,
+        endedAtMs: state.toolResults[id]?.atMs,
         running: state.toolResults[id] === undefined && t.running,
       }));
 

@@ -12,6 +12,7 @@ use horsie_models::events::{
     AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
     RunCompleteEvent, ToolCompleteEvent, ToolExecutingEvent,
 };
+use horsie_models::now_ms;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -270,7 +271,7 @@ impl Agent {
     ) -> Result<AgentOutput, AgentError> {
         let run_id = Uuid::new_v4().to_string();
 
-        let input_msg = input.to_message();
+        let input_msg = input.to_message(now_ms());
         events
             .emit(AgentEvent::InputMessage(InputMessageEvent {
                 message_id: input.message_id(),
@@ -340,6 +341,12 @@ impl Agent {
             // request/stream, so a stopped turn stops burning tokens now rather
             // than at the next loop checkpoint. Nothing is persisted for an
             // aborted call — only a fully-assembled `MessageComplete` ever is.
+            //
+            // Stamped here rather than at `MessageStart` so the figure is the
+            // provider call's own span: everything between this and the
+            // assistant message's `created_at_ms` is generation, and anything
+            // outside it is tool or harness time.
+            let call_started_ms = now_ms();
             let response = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(AgentError::Cancelled),
@@ -370,6 +377,8 @@ impl Agent {
                 id: msg_id.clone(),
                 role: Role::Assistant,
                 parts: response.parts.clone(),
+                created_at_ms: now_ms(),
+                started_at_ms: Some(call_started_ms),
             };
             events
                 .emit(AgentEvent::MessageComplete(MessageCompleteEvent {
@@ -419,6 +428,7 @@ impl Agent {
                              deliver your output or ask the user; if there is more work to do, call a \
                              tool to do it."
                         ),
+                        now_ms(),
                     ));
                     continue;
                 }
@@ -429,6 +439,7 @@ impl Agent {
                         usage: total_usage.clone(),
                         iterations: iteration,
                         context_tokens,
+                        at_ms: now_ms(),
                     }))
                     .await?;
                 return Ok(AgentOutput {
@@ -480,6 +491,7 @@ impl Agent {
                                 usage: total_usage.clone(),
                                 iterations: iteration,
                                 context_tokens,
+                                at_ms: now_ms(),
                             }))
                             .await?;
                         return Ok(AgentOutput {
@@ -516,18 +528,21 @@ impl Agent {
                                 )
                             };
                             let message_id = format!("result:{tool_call_id}");
+                            let at_ms = now_ms();
                             events
                                 .emit(AgentEvent::ToolComplete(ToolCompleteEvent {
                                     message_id,
                                     tool_call_id: tool_call_id.clone(),
                                     output: content.clone(),
                                     is_error: true,
+                                    at_ms,
                                 }))
                                 .await?;
                             self.history.push(Message::tool_result(
                                 tool_call_id.clone(),
                                 content,
                                 true,
+                                at_ms,
                             ));
                         }
                         continue;
@@ -563,6 +578,8 @@ impl Agent {
                             output: "You have called this tool with identical arguments multiple times. Please try a different approach.".to_string(),
                             is_error: false,
                         })],
+                        created_at_ms: now_ms(),
+                        started_at_ms: None,
                     };
                     self.history.push(nudge_msg);
                 }
@@ -622,12 +639,16 @@ impl Agent {
                 Err(e) => (e.to_string(), true),
             };
 
+            // One reading of the clock for both the event and the message it
+            // becomes, so the journal and the in-memory history agree.
+            let finished_ms = now_ms();
             events
                 .emit(AgentEvent::ToolComplete(ToolCompleteEvent {
                     message_id: result_msg_id.clone(),
                     tool_call_id: tool_call_id.clone(),
                     output: output.clone(),
                     is_error,
+                    at_ms: finished_ms,
                 }))
                 .await?;
 
@@ -639,6 +660,8 @@ impl Agent {
                     output,
                     is_error,
                 })],
+                created_at_ms: finished_ms,
+                started_at_ms: None,
             })
         });
 
@@ -812,6 +835,104 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ToolComplete(_)))
         );
+    }
+
+    #[tokio::test]
+    async fn every_message_carries_a_server_timestamp() {
+        let before = now_ms();
+        let provider =
+            MockProvider::tool_then_text("tc1", "search", json!({"q": "rust"}), "found it");
+        let mut agent = Agent::builder(provider, MockToolbox::echo("search"))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "search rust"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let after = now_ms();
+
+        assert_eq!(
+            agent.history.len(),
+            4,
+            "user, assistant, tool result, assistant"
+        );
+        for msg in &agent.history {
+            assert!(
+                (before..=after).contains(&msg.created_at_ms),
+                "{:?} message stamped outside the run",
+                msg.role
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_assistant_message_reports_when_its_provider_call_began() {
+        let mut agent = Agent::builder(MockProvider::text("hi"), Arc::new(EmptyToolbox))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "hi"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let assistant = agent
+            .history
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .cloned()
+            .expect("one assistant message");
+        let started = assistant.started_at_ms.expect("assistant carries a start");
+        assert!(
+            started <= assistant.created_at_ms,
+            "generation cannot end before it began: {started} > {}",
+            assistant.created_at_ms
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_result_and_its_event_share_one_stamp() {
+        // Two clock readings would let a replayed transcript disagree with the
+        // live one about when a tool finished.
+        let provider =
+            MockProvider::tool_then_text("tc1", "search", json!({"q": "rust"}), "found it");
+        let mut agent = Agent::builder(provider, MockToolbox::echo("search"))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "search rust"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let event_at = sink
+            .events()
+            .into_iter()
+            .find_map(|e| match e {
+                AgentEvent::ToolComplete(ev) => Some(ev.at_ms),
+                _ => None,
+            })
+            .expect("a ToolComplete event");
+        let message_at = agent
+            .history
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .map(|m| m.created_at_ms)
+            .expect("a tool-result message");
+        assert_eq!(event_at, message_at);
     }
 
     #[tokio::test]
@@ -1268,6 +1389,8 @@ mod tests {
     async fn test_resume_with_tool_result() {
         let history = vec![
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "m0".into(),
                 role: Role::User,
                 parts: vec![ContentPart::Text(TextPart {
@@ -1275,6 +1398,8 @@ mod tests {
                 })],
             },
             Message {
+                created_at_ms: 0,
+                started_at_ms: None,
                 id: "m1".into(),
                 role: Role::Assistant,
                 parts: vec![ContentPart::ToolCall(ToolCallPart {

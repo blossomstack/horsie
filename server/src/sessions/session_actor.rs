@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_models::agent::ToolResultInput;
+use horsie_models::now_ms;
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
@@ -58,13 +59,6 @@ const ABANDONED_ASK_RESULT: &str = "not answered — the user sent a new message
 /// model is reading them as one message and paragraph breaks are what a human
 /// would have typed.
 const MERGE_SEPARATOR: &str = "\n\n";
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
-}
 
 fn emit_progress(frames: &broadcast::Sender<SessionFrame>, stage: &str, detail: Option<String>) {
     let _ = frames.send(SessionFrame::Progression {
@@ -165,6 +159,10 @@ pub enum SessionCommand {
 }
 
 /// Events recording a session's lifecycle. Persisted.
+///
+/// Every variant carries `at_ms`, the unix-epoch millisecond it was recorded,
+/// so a journal pulled off a server reconstructs a timeline and not just an
+/// order. Stamped where the event is built, immediately before it is persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionDomainEvent {
     /// A user message was accepted. Durable *before* anything is done with it,
@@ -178,6 +176,7 @@ pub enum SessionDomainEvent {
     /// was parked on an ask, answering it. One event so a crash anywhere in
     /// the window replays to the same place.
     TurnBegan {
+        at_ms: u64,
         consumed: Vec<String>,
         /// The single ask this turn answered. Kept for journals written before
         /// a turn could answer several; new turns write `answered`.
@@ -189,26 +188,36 @@ pub enum SessionDomainEvent {
     },
     /// The agent asked the user something and is parked on it.
     AskRecorded {
+        at_ms: u64,
         tool_call_id: Option<String>,
         question: String,
     },
-    TurnEnded,
+    TurnEnded {
+        at_ms: u64,
+    },
     TurnFailed {
+        at_ms: u64,
         error: String,
     },
     /// The user cancelled the turn. Distinct from `TurnEnded` only in intent;
     /// both are turn boundaries, and both let the inbox drain.
-    TurnStopped,
+    TurnStopped {
+        at_ms: u64,
+    },
     /// Recovery found a turn that the process died in. Recorded rather than
     /// inferred, so the transition is in the log like every other one.
-    TurnInterrupted,
+    TurnInterrupted {
+        at_ms: u64,
+    },
     /// Terminal: this session can never run again.
     SessionFailed {
+        at_ms: u64,
         reason: String,
     },
     /// One agent's cumulative usage after a completed run. Durable here so the
     /// session-level total never requires waking an idle agent.
     UsageRecorded {
+        at_ms: u64,
         agent_id: String,
         usage_total: UsageTotal,
     },
@@ -216,6 +225,7 @@ pub enum SessionDomainEvent {
     /// subagent). Persisted before the child actor exists — a crash between
     /// the two replays as a node that recovery reconciles to failed.
     SubAgentSpawned {
+        at_ms: u64,
         id: Uuid,
         parent: SubAgentParent,
         label: String,
@@ -224,19 +234,23 @@ pub enum SessionDomainEvent {
     },
     /// A terminal node started another run, woken to consume child results.
     SubAgentRunning {
+        at_ms: u64,
         id: Uuid,
     },
     SubAgentCompleted {
+        at_ms: u64,
         id: Uuid,
         output: String,
     },
     SubAgentFailed {
+        at_ms: u64,
         id: Uuid,
         error: String,
     },
     /// The node's latest terminal result was sent to its parent. Persisted in
     /// the same effect as the send, so a reload neither re- nor never-sends.
     SubAgentNotified {
+        at_ms: u64,
         id: Uuid,
     },
 }
@@ -637,13 +651,17 @@ impl SessionActor {
         // `spawn_agent`'s stricter persist-then-spawn is the deliberate
         // exception, because an untracked agent is worse than a duplicate.
         let mut events = vec![SessionDomainEvent::TurnBegan {
+            at_ms: now_ms(),
             consumed,
             answering: None,
             answered: Vec::new(),
         }];
         events.extend(
             owed.iter()
-                .map(|(child, _)| SessionDomainEvent::SubAgentNotified { id: *child }),
+                .map(|(child, _)| SessionDomainEvent::SubAgentNotified {
+                    at_ms: now_ms(),
+                    id: *child,
+                }),
         );
         events
     }
@@ -705,10 +723,16 @@ impl SessionActor {
             {
                 continue;
             }
-            events.push(SessionDomainEvent::SubAgentRunning { id: parent_id });
+            events.push(SessionDomainEvent::SubAgentRunning {
+                at_ms: now_ms(),
+                id: parent_id,
+            });
             events.extend(
                 owed.iter()
-                    .map(|(child, _)| SessionDomainEvent::SubAgentNotified { id: *child }),
+                    .map(|(child, _)| SessionDomainEvent::SubAgentNotified {
+                        at_ms: now_ms(),
+                        id: *child,
+                    }),
             );
         }
         events
@@ -765,6 +789,7 @@ impl SessionActor {
         self.report(SessionStatus::Running).await;
         let _ = reply.send(Ok(()));
         CommandEffect::persist(vec![SessionDomainEvent::TurnBegan {
+            at_ms: now_ms(),
             consumed: Vec::new(),
             answering: None,
             answered: answers.into_iter().map(|a| a.tool_call_id).collect(),
@@ -832,6 +857,7 @@ impl SessionActor {
         // the turn that spent them.
         if let AgentOutcome::UsageRecorded { usage_total, .. } = outcome {
             return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
+                at_ms: now_ms(),
                 agent_id: MAIN_AGENT_ID.to_string(),
                 usage_total,
             }]);
@@ -840,7 +866,10 @@ impl SessionActor {
             AgentOutcome::UsageRecorded { .. } => unreachable!("handled above"),
             AgentOutcome::Concluded { .. } => {
                 self.report(SessionStatus::Idle).await;
-                (vec![SessionDomainEvent::TurnEnded], true)
+                (
+                    vec![SessionDomainEvent::TurnEnded { at_ms: now_ms() }],
+                    true,
+                )
             }
             AgentOutcome::Asked { asks, .. } => {
                 self.report(SessionStatus::AwaitingInput {
@@ -856,6 +885,7 @@ impl SessionActor {
                 (
                     asks.into_iter()
                         .map(|a| SessionDomainEvent::AskRecorded {
+                            at_ms: now_ms(),
                             tool_call_id: a.tool_call_id,
                             question: a.question,
                         })
@@ -882,7 +912,10 @@ impl SessionActor {
                     })
                     .await;
                     (
-                        vec![SessionDomainEvent::SessionFailed { reason: error }],
+                        vec![SessionDomainEvent::SessionFailed {
+                            at_ms: now_ms(),
+                            reason: error,
+                        }],
                         false,
                     )
                 } else {
@@ -893,7 +926,13 @@ impl SessionActor {
                     // Deliberately no drain: a stuck cause (expired key, dead
                     // vendor) would otherwise turn three queued messages into
                     // three back-to-back failures. The next message drains them.
-                    (vec![SessionDomainEvent::TurnFailed { error }], false)
+                    (
+                        vec![SessionDomainEvent::TurnFailed {
+                            at_ms: now_ms(),
+                            error,
+                        }],
+                        false,
+                    )
                 }
             }
             AgentOutcome::Parked { .. } => {
@@ -905,7 +944,13 @@ impl SessionActor {
                     reason: error.clone(),
                 })
                 .await;
-                (vec![SessionDomainEvent::TurnFailed { error }], false)
+                (
+                    vec![SessionDomainEvent::TurnFailed {
+                        at_ms: now_ms(),
+                        error,
+                    }],
+                    false,
+                )
             }
         };
         if drained {
@@ -931,6 +976,7 @@ impl SessionActor {
     ) -> CommandEffect<SessionDomainEvent> {
         if let AgentOutcome::UsageRecorded { usage_total, .. } = outcome {
             return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
+                at_ms: now_ms(),
                 agent_id: id.to_string(),
                 usage_total,
             }]);
@@ -950,7 +996,11 @@ impl SessionActor {
                     "subagent_completed",
                     Some(format!("\"{}\" ({id})", rec.label)),
                 );
-                SessionDomainEvent::SubAgentCompleted { id, output: text }
+                SessionDomainEvent::SubAgentCompleted {
+                    at_ms: now_ms(),
+                    id,
+                    output: text,
+                }
             }
             AgentOutcome::Failed { error, .. } => {
                 emit_progress(
@@ -958,15 +1008,21 @@ impl SessionActor {
                     "subagent_failed",
                     Some(format!("\"{}\" ({id})", rec.label)),
                 );
-                SessionDomainEvent::SubAgentFailed { id, error }
+                SessionDomainEvent::SubAgentFailed {
+                    at_ms: now_ms(),
+                    id,
+                    error,
+                }
             }
             // Defensive: a subagent has no ask or timer tools, so neither
             // outcome should ever occur.
             AgentOutcome::Asked { .. } => SessionDomainEvent::SubAgentFailed {
+                at_ms: now_ms(),
                 id,
                 error: "subagent asked the user; not supported".to_string(),
             },
             AgentOutcome::Parked { .. } => SessionDomainEvent::SubAgentFailed {
+                at_ms: now_ms(),
                 id,
                 error: "subagent parked; timers are not supported in sessions".to_string(),
             },
@@ -1304,6 +1360,7 @@ impl EventSourcedActor for SessionActor {
             SessionDomainEvent::AskRecorded {
                 tool_call_id,
                 question,
+                ..
             } => {
                 state.pending_asks.push(PendingAsk {
                     tool_call_id,
@@ -1313,18 +1370,18 @@ impl EventSourcedActor for SessionActor {
                     asks: state.pending_asks.clone(),
                 };
             }
-            SessionDomainEvent::TurnEnded
-            | SessionDomainEvent::TurnStopped
-            | SessionDomainEvent::TurnInterrupted => {
+            SessionDomainEvent::TurnEnded { .. }
+            | SessionDomainEvent::TurnStopped { .. }
+            | SessionDomainEvent::TurnInterrupted { .. } => {
                 state.status = SessionStatus::Idle;
             }
-            SessionDomainEvent::TurnFailed { error } => {
+            SessionDomainEvent::TurnFailed { error, .. } => {
                 state.status = SessionStatus::Failed {
                     reason: error.clone(),
                 };
                 state.last_error = Some(error);
             }
-            SessionDomainEvent::SessionFailed { reason } => {
+            SessionDomainEvent::SessionFailed { reason, .. } => {
                 state.status = SessionStatus::Unrecoverable {
                     reason: reason.clone(),
                 };
@@ -1333,6 +1390,7 @@ impl EventSourcedActor for SessionActor {
             SessionDomainEvent::UsageRecorded {
                 agent_id,
                 usage_total,
+                ..
             } => {
                 state.agent_usage.insert(agent_id, usage_total);
             }
@@ -1342,21 +1400,22 @@ impl EventSourcedActor for SessionActor {
                 label,
                 task,
                 depth,
+                ..
             } => {
                 state
                     .subagents
                     .apply_spawned(id, parent, label, task, depth);
             }
-            SessionDomainEvent::SubAgentRunning { id } => {
+            SessionDomainEvent::SubAgentRunning { id, .. } => {
                 state.subagents.apply_running(id);
             }
-            SessionDomainEvent::SubAgentCompleted { id, output } => {
+            SessionDomainEvent::SubAgentCompleted { id, output, .. } => {
                 state.subagents.apply_completed(id, output);
             }
-            SessionDomainEvent::SubAgentFailed { id, error } => {
+            SessionDomainEvent::SubAgentFailed { id, error, .. } => {
                 state.subagents.apply_failed(id, error);
             }
-            SessionDomainEvent::SubAgentNotified { id } => {
+            SessionDomainEvent::SubAgentNotified { id, .. } => {
                 state.subagents.apply_notified(id);
             }
         }
@@ -1381,10 +1440,13 @@ impl EventSourcedActor for SessionActor {
                 self.cancel_run().await;
                 let _ = reply.send(());
                 self.report(SessionStatus::Idle).await;
-                let mut events = vec![SessionDomainEvent::TurnStopped];
+                let mut events = vec![SessionDomainEvent::TurnStopped { at_ms: now_ms() }];
                 // Stop is a turn boundary like any other, so anything the user
                 // queued while the cancelled turn ran starts the next one.
-                let next = Self::apply_event(state.clone(), SessionDomainEvent::TurnStopped);
+                let next = Self::apply_event(
+                    state.clone(),
+                    SessionDomainEvent::TurnStopped { at_ms: now_ms() },
+                );
                 events.extend(self.flush_then_drain(&next, ctx).await);
                 self.publish_inbox(state, &events);
                 CommandEffect::persist(events)
@@ -1519,6 +1581,7 @@ impl EventSourcedActor for SessionActor {
                     interrupted
                         .into_iter()
                         .map(|id| SessionDomainEvent::SubAgentFailed {
+                            at_ms: now_ms(),
                             id,
                             error: INTERRUPTED_ERROR.to_string(),
                         })
@@ -1528,7 +1591,9 @@ impl EventSourcedActor for SessionActor {
             SessionCommand::ReconcileInterrupted => {
                 if state.status == SessionStatus::Running {
                     self.report(SessionStatus::Idle).await;
-                    CommandEffect::persist(vec![SessionDomainEvent::TurnInterrupted])
+                    CommandEffect::persist(vec![SessionDomainEvent::TurnInterrupted {
+                        at_ms: now_ms(),
+                    }])
                 } else {
                     CommandEffect::none()
                 }
@@ -1567,6 +1632,7 @@ impl EventSourcedActor for SessionActor {
                 // to failed — never an untracked agent.
                 let id = Uuid::new_v4();
                 let spawned = SessionDomainEvent::SubAgentSpawned {
+                    at_ms: now_ms(),
                     id,
                     parent: caller,
                     label: label.clone(),
@@ -1705,6 +1771,7 @@ mod tests {
             queued("m1", "one"),
             queued("m2", "two"),
             SessionDomainEvent::TurnBegan {
+                at_ms: 0,
                 consumed: vec!["m1".into()],
                 answering: None,
                 answered: Vec::new(),
@@ -1726,11 +1793,13 @@ mod tests {
         // written then must still fold to the same place.
         let s = fold(vec![
             SessionDomainEvent::AskRecorded {
+                at_ms: 0,
                 tool_call_id: Some("call-1".into()),
                 question: "which branch?".into(),
             },
             queued("m1", "main"),
             SessionDomainEvent::TurnBegan {
+                at_ms: 0,
                 consumed: vec!["m1".into()],
                 answering: Some("call-1".into()),
                 answered: Vec::new(),
@@ -1743,6 +1812,7 @@ mod tests {
     #[test]
     fn two_asks_in_one_turn_are_both_pending_until_a_turn_begins() {
         let asked = |id: &str, q: &str| SessionDomainEvent::AskRecorded {
+            at_ms: 0,
             tool_call_id: Some(id.to_string()),
             question: q.to_string(),
         };
@@ -1763,6 +1833,7 @@ mod tests {
         let s = SessionActor::apply_event(
             s,
             SessionDomainEvent::TurnBegan {
+                at_ms: 0,
                 consumed: Vec::new(),
                 answering: None,
                 answered: vec!["call-1".into(), "call-2".into()],
@@ -1778,6 +1849,7 @@ mod tests {
         // consumption in one step: a crash before it replays to "still asking".
         let s = fold(vec![
             SessionDomainEvent::AskRecorded {
+                at_ms: 0,
                 tool_call_id: Some("call-1".into()),
                 question: "which branch?".into(),
             },
@@ -1796,12 +1868,13 @@ mod tests {
     #[test]
     fn stop_and_interrupt_both_land_idle_and_keep_the_inbox() {
         for boundary in [
-            SessionDomainEvent::TurnStopped,
-            SessionDomainEvent::TurnInterrupted,
+            SessionDomainEvent::TurnStopped { at_ms: 0 },
+            SessionDomainEvent::TurnInterrupted { at_ms: 0 },
         ] {
             let s = fold(vec![
                 queued("m1", "one"),
                 SessionDomainEvent::TurnBegan {
+                    at_ms: 0,
                     consumed: vec!["m1".into()],
                     answering: None,
                     answered: Vec::new(),
@@ -1823,6 +1896,7 @@ mod tests {
         let s = fold(vec![
             queued("m1", "still owed an answer"),
             SessionDomainEvent::TurnFailed {
+                at_ms: 0,
                 error: "provider exploded".into(),
             },
         ]);
@@ -1838,6 +1912,7 @@ mod tests {
         let s = SessionActor::apply_event(
             s,
             SessionDomainEvent::TurnBegan {
+                at_ms: 0,
                 consumed: vec![],
                 answering: None,
                 answered: Vec::new(),
@@ -1852,6 +1927,7 @@ mod tests {
     #[test]
     fn a_gone_runtime_is_terminal() {
         let s = fold(vec![SessionDomainEvent::SessionFailed {
+            at_ms: 0,
             reason: "vendor has no runtime".into(),
         }]);
         assert!(matches!(s.status, SessionStatus::Unrecoverable { .. }));
@@ -1860,6 +1936,7 @@ mod tests {
     #[test]
     fn usage_is_recorded_per_agent() {
         let s = fold(vec![SessionDomainEvent::UsageRecorded {
+            at_ms: 0,
             agent_id: MAIN_AGENT_ID.to_string(),
             usage_total: UsageTotal {
                 input_tokens: 10,
@@ -1876,6 +1953,7 @@ mod tests {
         use crate::sessions::subagents::{SubAgentParent, SubAgentStatus};
         let id = Uuid::new_v4();
         let s = fold(vec![SessionDomainEvent::SubAgentSpawned {
+            at_ms: 0,
             id,
             parent: SubAgentParent::Main,
             label: "research".into(),
@@ -1887,6 +1965,7 @@ mod tests {
         let s = SessionActor::apply_event(
             s,
             SessionDomainEvent::SubAgentCompleted {
+                at_ms: 0,
                 id,
                 output: "answer".into(),
             },
@@ -1895,7 +1974,7 @@ mod tests {
         assert_eq!(rec.status, SubAgentStatus::Completed);
         assert!(!rec.notified);
 
-        let s = SessionActor::apply_event(s, SessionDomainEvent::SubAgentNotified { id });
+        let s = SessionActor::apply_event(s, SessionDomainEvent::SubAgentNotified { at_ms: 0, id });
         assert!(s.subagents.get(&id).unwrap().notified);
     }
 
@@ -1904,6 +1983,7 @@ mod tests {
         use crate::sessions::subagents::SubAgentParent;
         let id = Uuid::new_v4();
         let s = fold(vec![SessionDomainEvent::SubAgentSpawned {
+            at_ms: 0,
             id,
             parent: SubAgentParent::Main,
             label: "w".into(),
@@ -1914,6 +1994,7 @@ mod tests {
         let s = SessionActor::apply_event(
             s,
             SessionDomainEvent::SubAgentFailed {
+                at_ms: 0,
                 id,
                 error: "interrupted by restart".into(),
             },
@@ -2070,6 +2151,7 @@ mod tests {
         let state = fold(vec![
             queued("m1", "one"),
             SessionDomainEvent::TurnBegan {
+                at_ms: 0,
                 consumed: vec!["m1".into()],
                 answering: None,
                 answered: Vec::new(),
@@ -2097,6 +2179,7 @@ mod tests {
         let state = fold(vec![
             queued("m1", "one"),
             SessionDomainEvent::SessionFailed {
+                at_ms: 0,
                 reason: "runtime gone".into(),
             },
         ]);
@@ -2122,6 +2205,7 @@ mod tests {
         let prior = [
             queued("m1", "one"),
             SessionDomainEvent::TurnBegan {
+                at_ms: 0,
                 consumed: vec!["m1".into()],
                 answering: None,
                 answered: Vec::new(),
@@ -2193,6 +2277,7 @@ mod tests {
         let running = fold(vec![
             queued("m1", "one"),
             SessionDomainEvent::TurnBegan {
+                at_ms: 0,
                 consumed: vec!["m1".into()],
                 answering: None,
                 answered: Vec::new(),
@@ -2200,7 +2285,8 @@ mod tests {
             queued("m2", "queued while running"),
         ]);
 
-        let stopped = SessionActor::apply_event(running, SessionDomainEvent::TurnStopped);
+        let stopped =
+            SessionActor::apply_event(running, SessionDomainEvent::TurnStopped { at_ms: 0 });
         assert_eq!(stopped.status, SessionStatus::Idle);
         let events = actor.drain(&stopped).await;
 
@@ -2244,6 +2330,7 @@ mod tests {
         );
         let state = fold(vec![
             SessionDomainEvent::AskRecorded {
+                at_ms: 0,
                 tool_call_id: Some("call-1".into()),
                 question: "which?".into(),
             },
@@ -2278,10 +2365,12 @@ mod tests {
         );
         let state = fold(vec![
             SessionDomainEvent::AskRecorded {
+                at_ms: 0,
                 tool_call_id: Some("call-1".into()),
                 question: "which branch?".into(),
             },
             SessionDomainEvent::AskRecorded {
+                at_ms: 0,
                 tool_call_id: Some("call-2".into()),
                 question: "which model?".into(),
             },
@@ -3055,6 +3144,7 @@ mod tests {
         let pid = SessionActor::persistence_id_for(id);
         let events: Vec<Vec<u8>> = [
             SessionDomainEvent::SubAgentSpawned {
+                at_ms: 0,
                 id: p,
                 parent: SubAgentParent::Main,
                 label: "parent".into(),
@@ -3062,11 +3152,13 @@ mod tests {
                 depth: 1,
             },
             SessionDomainEvent::SubAgentCompleted {
+                at_ms: 0,
                 id: p,
                 output: "parent first answer".into(),
             },
-            SessionDomainEvent::SubAgentNotified { id: p },
+            SessionDomainEvent::SubAgentNotified { at_ms: 0, id: p },
             SessionDomainEvent::SubAgentSpawned {
+                at_ms: 0,
                 id: c,
                 parent: SubAgentParent::SubAgent(p),
                 label: "child".into(),
@@ -3074,6 +3166,7 @@ mod tests {
                 depth: 2,
             },
             SessionDomainEvent::SubAgentFailed {
+                at_ms: 0,
                 id: c,
                 error: crate::sessions::subagents::INTERRUPTED_ERROR.into(),
             },

@@ -269,6 +269,8 @@ mod tests {
         // content blocks. OpenAI needs one `role: "tool"` message per result,
         // keyed by tool_call_id. This is the structural remap.
         let history = vec![Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: "m1".into(),
             role: Role::Tool,
             parts: vec![
@@ -297,6 +299,8 @@ mod tests {
     #[test]
     fn assistant_tool_calls_move_into_the_tool_calls_field() {
         let history = vec![Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: "m1".into(),
             role: Role::Assistant,
             parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -321,6 +325,8 @@ mod tests {
     #[test]
     fn thinking_parts_are_dropped() {
         let history = vec![Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: "m1".into(),
             role: Role::Assistant,
             parts: vec![
@@ -343,6 +349,8 @@ mod tests {
     #[test]
     fn a_turn_of_only_thinking_produces_no_message() {
         let history = vec![Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: "m1".into(),
             role: Role::Assistant,
             parts: vec![ContentPart::Thinking(ThinkingPart {
@@ -371,6 +379,8 @@ mod tests {
     #[test]
     fn user_text_maps_to_a_user_message() {
         let history = vec![Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: "m1".into(),
             role: Role::User,
             parts: vec![ContentPart::Text(TextPart { text: "hi".into() })],

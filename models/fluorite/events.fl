@@ -30,14 +30,19 @@ struct ContentBlockStopEvent       { message_id: String, index: u32 }
 
 /// Tool execution — message_id is the tool-result message id ("result:<tool_call_id>")
 struct ToolExecutingEvent { message_id: String, tool_call_id: String }
-struct ToolCompleteEvent  { message_id: String, tool_call_id: String, output: String, is_error: bool }
+/// `at_ms` is the unix-epoch millisecond the tool finished. It rides on the
+/// event so the tool-result message held in memory and the one folded from the
+/// journal carry the identical stamp — read the clock twice and a replayed
+/// transcript would disagree with the live one.
+struct ToolCompleteEvent  { message_id: String, tool_call_id: String, output: String, is_error: bool, at_ms: u64 }
 
 /// Run lifecycle — message_id is a UUID for this run invocation.
 /// `usage` sums every provider call this run made (tool-loop iterations
 /// included) — a cost figure, not a context-size one. `context_tokens` is the
 /// *last* call's prompt size alone (provider-normalized to include any cache
 /// tokens) — what's actually loaded in the model's context once the run ends.
-struct RunCompleteEvent { message_id: String, usage: Usage, iterations: u32, context_tokens: u32 }
+/// `at_ms` is the unix-epoch millisecond the run finished.
+struct RunCompleteEvent { message_id: String, usage: Usage, iterations: u32, context_tokens: u32, at_ms: u64 }
 
 /// All events emitted during agent execution.
 ///

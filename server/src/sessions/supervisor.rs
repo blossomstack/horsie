@@ -918,6 +918,7 @@ mod tests {
             .persist(
                 &pid,
                 &[serde_json::to_vec(&SessionDomainEvent::AskRecorded {
+                    at_ms: 0,
                     tool_call_id: Some("call-1".into()),
                     question: "which shape?".into(),
                 })

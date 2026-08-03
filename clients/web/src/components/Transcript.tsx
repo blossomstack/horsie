@@ -4,6 +4,25 @@ import { buildSegments, type Segment } from "../lib/transcriptSegments";
 import { Prose } from "./Prose";
 import { ToolCallCard } from "./ToolCallCard";
 import { WorkGroup } from "./WorkGroup";
+import { formatTime } from "../lib/time";
+
+/** A turn boundary's clock time. Rendered only for messages the server has
+ * stamped — an optimistic echo has no server time, and inventing one from the
+ * local clock would misreport when the turn actually happened. */
+function TurnTime({ atMs, align }: { atMs?: number; align: "left" | "right" }) {
+  if (atMs === undefined) return null;
+  return (
+    <div
+      className={cn(
+        "mt-1 text-xs text-faint",
+        align === "right" ? "flex justify-end pr-1" : "",
+      )}
+      data-testid="turn-time"
+    >
+      {formatTime(atMs)}
+    </div>
+  );
+}
 
 function AssistantAvatar() {
   return (
@@ -46,7 +65,13 @@ function SegmentView({
       );
     case "work":
       return (
-        <WorkGroup items={segment.items} live={segment.live} showThinking={showThinking} />
+        <WorkGroup
+          items={segment.items}
+          live={segment.live}
+          showThinking={showThinking}
+          startedAtMs={segment.startedAtMs}
+          endedAtMs={segment.endedAtMs}
+        />
       );
     case "ask":
       return <ToolCallCard call={segment.call} />;
@@ -85,6 +110,7 @@ function AssistantTurn({
             <SegmentView key={s.key} segment={s} showThinking={showThinking} />
           ))
         )}
+        {!live && <TurnTime atMs={msgs[msgs.length - 1]?.createdAtMs} align="left" />}
       </div>
     </div>
   );
@@ -99,6 +125,7 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
       className={cn("animate-rise", (msg.optimistic || msg.queued) && "opacity-70")}
     >
       <UserBubble text={msg.text} />
+      {!msg.queued && <TurnTime atMs={msg.createdAtMs} align="right" />}
       {msg.queued && (
         <div
           className="mt-1 flex justify-end pr-1 text-xs text-faint"

@@ -15,6 +15,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use horsie_models::now_ms;
 use horsie_models::session::{
     AgentSettings as WireAgentSettings, AgentUsageView, AnswerAsksRequest, PendingAskView,
     QueuedMessage, SessionDetail, SessionStatusKind, SessionSummary,
@@ -32,13 +33,6 @@ use uuid::Uuid;
 /// Default and maximum messages returned by one `/history` page.
 const HISTORY_DEFAULT_LIMIT: usize = 50;
 const HISTORY_MAX_LIMIT: usize = 200;
-
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
-}
 
 /// The wire shape of one queued message. Shared with the SSE layer so the
 /// detail endpoint and `InboxChanged` can never disagree about the queue.

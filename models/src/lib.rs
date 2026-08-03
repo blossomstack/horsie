@@ -160,14 +160,31 @@ impl capabilities::CapabilitySpec {
     }
 }
 
+/// Wall-clock milliseconds since the Unix epoch — the one stamp behind every
+/// `at_ms` / `created_at_ms` on the wire. Lives here because every crate that
+/// stamps one already depends on `horsie-models`, and a single reading of the
+/// clock keeps journal, history and SSE talking about the same instant.
+///
+/// A clock before the epoch reads as 0 rather than panicking; the alternative
+/// is killing a turn over a misconfigured host clock.
+#[must_use]
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 impl agent::Message {
-    pub fn user(id: impl Into<String>, text: impl Into<String>) -> Self {
+    pub fn user(id: impl Into<String>, text: impl Into<String>, created_at_ms: u64) -> Self {
         Self {
             id: id.into(),
             role: agent::Role::User,
             parts: vec![agent::ContentPart::Text(agent::TextPart {
                 text: text.into(),
             })],
+            created_at_ms,
+            started_at_ms: None,
         }
     }
 
@@ -175,6 +192,7 @@ impl agent::Message {
         tool_call_id: impl Into<String>,
         output: impl Into<String>,
         is_error: bool,
+        created_at_ms: u64,
     ) -> Self {
         let tool_call_id = tool_call_id.into();
         Self {
@@ -185,6 +203,8 @@ impl agent::Message {
                 output: output.into(),
                 is_error,
             })],
+            created_at_ms,
+            started_at_ms: None,
         }
     }
 }
@@ -228,7 +248,10 @@ impl agent::AgentInput {
         }
     }
 
-    pub fn to_message(&self) -> agent::Message {
+    /// `created_at_ms` is the moment this input became a journaled message —
+    /// passed in rather than read from the clock here so a caller that already
+    /// stamped a matching event uses the same instant for both.
+    pub fn to_message(&self, created_at_ms: u64) -> agent::Message {
         match self {
             Self::UserMessage(u) => agent::Message {
                 id: u.id.clone(),
@@ -236,6 +259,8 @@ impl agent::AgentInput {
                 parts: vec![agent::ContentPart::Text(agent::TextPart {
                     text: u.text.clone(),
                 })],
+                created_at_ms,
+                started_at_ms: None,
             },
             Self::ToolResult(t) => agent::Message {
                 id: format!("result:{}", t.tool_call_id),
@@ -245,6 +270,8 @@ impl agent::AgentInput {
                     output: t.output.clone(),
                     is_error: t.is_error,
                 })],
+                created_at_ms,
+                started_at_ms: None,
             },
             // One message carrying every result: Anthropic takes it as a user
             // message with N `tool_result` blocks, and the OpenAI wire splits it
@@ -263,6 +290,8 @@ impl agent::AgentInput {
                         })
                     })
                     .collect(),
+                created_at_ms,
+                started_at_ms: None,
             },
         }
     }

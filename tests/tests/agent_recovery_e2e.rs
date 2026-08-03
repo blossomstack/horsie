@@ -82,6 +82,8 @@ fn provider_at(url: &str) -> Arc<dyn LlmProvider> {
 
 fn assistant_tool_call(id: &str, call_id: &str) -> Message {
     Message {
+        created_at_ms: 0,
+        started_at_ms: None,
         id: id.into(),
         role: Role::Assistant,
         parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -96,6 +98,8 @@ fn assistant_tool_call(id: &str, call_id: &str) -> Message {
 /// handoff tool, so the run ends on the call and it is never executed.
 fn assistant_ask(id: &str, call_id: &str) -> Message {
     Message {
+        created_at_ms: 0,
+        started_at_ms: None,
         id: id.into(),
         role: Role::Assistant,
         parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -108,6 +112,8 @@ fn assistant_ask(id: &str, call_id: &str) -> Message {
 
 fn assistant_text(id: &str, text: &str) -> Message {
     Message {
+        created_at_ms: 0,
+        started_at_ms: None,
         id: id.into(),
         role: Role::Assistant,
         parts: vec![ContentPart::Text(TextPart { text: text.into() })],
@@ -191,17 +197,17 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
         session_id,
         &[
             AgentDomainEvent::InputMessage {
-                message: Message::user("u1", "read the readme"),
+                message: Message::user("u1", "read the readme", 0),
             },
             // The user pressed Stop here: the tool call is journaled, its result
             // never was.
             AgentDomainEvent::MessageComplete {
                 message: assistant_tool_call("a1", "stopped-call"),
             },
-            AgentDomainEvent::RunCancelled,
+            AgentDomainEvent::RunCancelled { at_ms: 0 },
             // Later turns completed on top of it, burying it mid-history.
             AgentDomainEvent::InputMessage {
-                message: Message::user("u2", "never mind, just say hi"),
+                message: Message::user("u2", "never mind, just say hi", 0),
             },
             AgentDomainEvent::MessageComplete {
                 message: assistant_text("a2", "hi"),
@@ -300,7 +306,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
         session_id,
         &[
             AgentDomainEvent::InputMessage {
-                message: Message::user("u1", "remove some commands"),
+                message: Message::user("u1", "remove some commands", 0),
             },
             AgentDomainEvent::MessageComplete {
                 message: assistant_ask("a1", "ask-1"),
@@ -471,7 +477,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         session_id,
         &[
             AgentDomainEvent::InputMessage {
-                message: Message::user("u1", "read the readme"),
+                message: Message::user("u1", "read the readme", 0),
             },
             // The process died here: the call is journaled, its result is not.
             AgentDomainEvent::MessageComplete {

@@ -87,18 +87,24 @@ pub(crate) fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
             tool_call_id,
             output,
             is_error,
+            at_ms,
         } => Some(SessionEvent::ToolResult(ToolOutputEvent {
             tool_call_id,
             output,
             is_error,
+            at_ms,
         })),
         AgentDomainEvent::RunComplete {
-            usage, iterations, ..
+            usage,
+            iterations,
+            at_ms,
+            ..
         } => Some(SessionEvent::TurnCompleted(TurnCompletedEvent {
             iterations,
             usage,
+            at_ms,
         })),
-        AgentDomainEvent::TaskListChanged { snapshot } => {
+        AgentDomainEvent::TaskListChanged { snapshot, .. } => {
             Some(SessionEvent::TaskListChanged(TaskListEvent {
                 tasks: snapshot
                     .tasks()
@@ -111,11 +117,11 @@ pub(crate) fn wire_event(event: AgentDomainEvent) -> Option<SessionEvent> {
                     .collect(),
             }))
         }
-        AgentDomainEvent::RunCancelled
+        AgentDomainEvent::RunCancelled { .. }
         | AgentDomainEvent::TimerArmed { .. }
         | AgentDomainEvent::TimerCancelled { .. }
         | AgentDomainEvent::TimerFired { .. }
-        | AgentDomainEvent::Parked => None,
+        | AgentDomainEvent::Parked { .. } => None,
     }
 }
 
@@ -176,7 +182,7 @@ mod tests {
         // `an_agent_replays_its_own_journal_after_a_cursor`); what is left here
         // is the mapping onto the wire, including the events that produce no
         // frame at all.
-        let msg = horsie_models::agent::Message::user("m1", "hello");
+        let msg = horsie_models::agent::Message::user("m1", "hello", 0);
         match wire_event(AgentDomainEvent::InputMessage {
             message: msg.clone(),
         }) {
@@ -184,16 +190,56 @@ mod tests {
             other => panic!("expected Message, got {other:?}"),
         }
         assert!(
-            wire_event(AgentDomainEvent::RunCancelled).is_none(),
+            wire_event(AgentDomainEvent::RunCancelled { at_ms: 0 }).is_none(),
             "a cancellation has no wire shape, but still consumed a sequence number"
         );
         match wire_event(AgentDomainEvent::ToolComplete {
+            at_ms: 0,
             tool_call_id: "tc".into(),
             output: "ok".into(),
             is_error: false,
         }) {
             Some(SessionEvent::ToolResult(e)) => assert_eq!(e.tool_call_id, "tc"),
             other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_wire_carries_the_stamp_off_the_journaled_event() {
+        // The SSE path never reads the clock: a replayed event must report
+        // when it happened, not when the client reconnected.
+        match wire_event(AgentDomainEvent::ToolComplete {
+            at_ms: 1_700_000_000_123,
+            tool_call_id: "tc".into(),
+            output: "ok".into(),
+            is_error: false,
+        }) {
+            Some(SessionEvent::ToolResult(e)) => assert_eq!(e.at_ms, 1_700_000_000_123),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        match wire_event(AgentDomainEvent::RunComplete {
+            at_ms: 1_700_000_009_999,
+            usage: horsie_models::agent::Usage::without_cache(1, 1),
+            iterations: 2,
+            context_tokens: 3,
+        }) {
+            Some(SessionEvent::TurnCompleted(e)) => assert_eq!(e.at_ms, 1_700_000_009_999),
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_transcript_message_carries_its_own_stamps() {
+        // `/history` is answered from agent state, so the stamps must live on
+        // the message itself rather than beside it on the event.
+        let mut message = horsie_models::agent::Message::user("m1", "hello", 1_700_000_000_001);
+        message.started_at_ms = Some(1_700_000_000_000);
+        match wire_event(AgentDomainEvent::MessageComplete { message }) {
+            Some(SessionEvent::Message(m)) => {
+                assert_eq!(m.message.created_at_ms, 1_700_000_000_001);
+                assert_eq!(m.message.started_at_ms, Some(1_700_000_000_000));
+            }
+            other => panic!("expected Message, got {other:?}"),
         }
     }
 
@@ -212,7 +258,7 @@ mod tests {
             })
             .unwrap();
 
-        match wire_event(AgentDomainEvent::TaskListChanged { snapshot }) {
+        match wire_event(AgentDomainEvent::TaskListChanged { at_ms: 0, snapshot }) {
             Some(SessionEvent::TaskListChanged(e)) => {
                 assert_eq!(e.tasks.len(), 2);
                 assert_eq!(e.tasks[0].id, 1);
@@ -229,6 +275,8 @@ mod tests {
         use horsie_models::agent::{ContentPart, Message, Role, ThinkingPart};
 
         let message = Message {
+            created_at_ms: 0,
+            started_at_ms: None,
             id: "m1".into(),
             role: Role::Assistant,
             parts: vec![ContentPart::Thinking(ThinkingPart {
