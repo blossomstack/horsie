@@ -368,18 +368,26 @@ pub fn status() -> Result<(), CliError> {
 /// Whether `server` requires a credential. Used for a pre-flight check: an
 /// agent that dials without one gets a 401 it will retry forever, and "run
 /// `horsie auth login`" is far more useful than a backoff loop.
-pub async fn server_requires_auth(server: &str) -> Result<bool, CliError> {
-    let url = api_url(server, "/api/auth/status");
-    let res = reqwest::Client::new()
-        .get(&url)
+///
+/// Fails **open**. This is a courtesy check, not an authorization decision —
+/// anything unexpected (unreachable, a non-JSON body, an older server with no
+/// such endpoint) answers `false` so the dial proceeds and the server itself
+/// decides. A probe that can block a working setup is worse than no probe.
+pub async fn server_requires_auth(server: &str) -> bool {
+    let Ok(res) = reqwest::Client::new()
+        .get(api_url(server, "/api/auth/status"))
         .send()
         .await
-        .map_err(|e| CliError::Server(format!("cannot reach server at {}: {e}", normalize_server(server))))?;
-    let status: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| CliError::Server(format!("{url}: unexpected response: {e}")))?;
-    Ok(status.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+    else {
+        return false;
+    };
+    let Ok(status) = res.json::<serde_json::Value>().await else {
+        return false;
+    };
+    status
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// The bearer to send to `server`, refreshing a stale access token first.

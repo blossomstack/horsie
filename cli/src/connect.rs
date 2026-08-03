@@ -207,7 +207,7 @@ pub async fn run(
     let token = crate::auth::resolve_token(server).await?;
     // Pre-flight rather than discovering it as a 401 the reconnect loop retries
     // forever: the overwhelmingly common cause is simply not having logged in.
-    if token.is_none() && crate::auth::server_requires_auth(server).await? {
+    if token.is_none() && crate::auth::server_requires_auth(server).await {
         return Err(CliError::Server(format!(
             "{server} requires a login — run `horsie auth login --server {server}` first, \
              or set HORSIE_TOKEN to a machine token from Settings → Account"

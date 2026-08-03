@@ -48,14 +48,36 @@ fn locate_runtime_bin() -> Option<PathBuf> {
     cand.exists().then_some(cand)
 }
 
-/// A minimal stand-in for the server's `/api/vendor/connect`: accept one TCP
-/// connection, complete the WebSocket handshake by hand, and hand back the
-/// framed stream.
+/// A minimal stand-in for the server's `/api/vendor/connect`: accept TCP
+/// connections until one is a WebSocket upgrade, complete the handshake by
+/// hand, and hand back the framed stream.
+///
+/// Plain HTTP requests are answered and skipped rather than treated as a failed
+/// upgrade: `horsie connect` probes `/api/auth/status` before dialing, and a
+/// stand-in that panicked on it would be testing the harness, not the agent.
 async fn accept_vendor_agent(listener: TcpListener) -> WebSocketStream<tokio::net::TcpStream> {
-    let (stream, _) = listener.accept().await.expect("accept agent");
-    tokio_tungstenite::accept_async(stream)
-        .await
-        .expect("websocket handshake")
+    loop {
+        let (mut stream, _) = listener.accept().await.expect("accept agent");
+        let mut peek = [0u8; 1024];
+        let n = stream.peek(&mut peek).await.expect("peek");
+        let head = String::from_utf8_lossy(&peek[..n]);
+        if head.to_ascii_lowercase().contains("upgrade: websocket") {
+            return tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket handshake");
+        }
+        // Answer as a server with authentication disabled, then wait for the
+        // real dial.
+        let body = br#"{"enabled":false,"authenticated":false,"mustChangePassword":false}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        use tokio::io::AsyncWriteExt;
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.write_all(body).await;
+        let _ = stream.shutdown().await;
+    }
 }
 
 async fn next_event(
