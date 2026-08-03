@@ -57,6 +57,12 @@ tower    = { version = "0.5", features = ["util"] }
 # builds never see the testkit.
 horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
 horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
+# The journal conformance contract, so SqlJournal is held to the same
+# assertions as InMemoryJournal and FileJournal.
+horsie-actor = { path = "../actor", features = ["test-util"] }
+# `db::testing` and the SqlJournal suite live behind this crate's own
+# `test-util`, which integration tests do not otherwise enable.
+horsie-server = { path = ".", features = ["test-util"] }
 
 [lints]
 workspace = true

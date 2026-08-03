@@ -888,7 +888,9 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query(include_str!("../../migrations/0006_drop_api_key_env.sql"))
+        sqlx::query(include_str!(
+            "../../migrations/sqlite/0006_drop_api_key_env.sql"
+        ))
             .execute(&pool)
             .await
             .expect("DROP COLUMN should succeed on the bundled sqlite");
