@@ -31,13 +31,18 @@ file — is valid.
     // Require a password for the web UI and API. Default: true. First boot
     // creates an `admin` account and prints a generated password.
     "enabled": true
-  }
+  },
+  // CLI-only: the session server `horsie` commands use when --server is
+  // omitted. Managed with `horsie config set default-server`. The server
+  // ignores this key.
+  "default_server": "https://horsie.example.com"
 }
 ```
 
 That's the whole file. Notably, **providers, models, velos vendors, the default
 vendor, GitHub, MCP servers, and skill bundles are not here** — they live in the
-database and are managed from the UI. Old files that still set the removed
+database and are managed from the UI. The CLI reads one CLI-owned key,
+`default_server`, which the server ignores. Old files that still set the removed
 `storage.plugins_dir` or `runtime.hook_path` keys keep parsing — the keys are
 ignored (skill bundles are managed from the UI now).
 
