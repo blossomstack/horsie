@@ -15,6 +15,6 @@ pub use service::{
     DEVICE_POLL_INTERVAL_SECS, DeviceAuthorization, DeviceError, INITIAL_PASSWORD_FILE,
     IssuedTokens, LoginError, USER_CODE_ALPHABET, VerifiedToken,
 };
-pub use store::{AuthStore, DeviceCodeRow, RawTokenRow, TokenRow, UserRow};
+pub use store::{AuthStore, DeviceCodeRow, RawTokenRow, TokenRow, TokenSummary, UserRow};
 pub use throttle::Throttle;
 pub use token::{GeneratedToken, Principal, TokenKind, generate, hash_secret, parse};

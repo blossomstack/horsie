@@ -51,6 +51,16 @@ pub struct RawTokenRow {
     pub revoked_at: Option<i64>,
 }
 
+/// A token as listed in the UI: never the secret, which exists only at the
+/// moment of minting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenSummary {
+    pub id: String,
+    pub label: Option<String>,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
 pub struct AuthStore {
     pool: SqlitePool,
 }
@@ -237,6 +247,33 @@ impl AuthStore {
             .map_err(|e| e.to_string())?;
         Ok(true)
     }
+    /// Live tokens of one kind, newest first. Used to list machine tokens; the
+    /// hash is deliberately not selected.
+    pub async fn list_tokens_of_kind(&self, kind: TokenKind) -> Result<Vec<TokenSummary>, String> {
+        let rows = sqlx::query(
+            "SELECT id, label, created_at, last_used_at FROM auth_tokens \
+             WHERE kind = ? AND revoked_at IS NULL ORDER BY created_at DESC, id DESC",
+        )
+        .bind(kind.as_db())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        rows.iter()
+            .map(|row| {
+                Ok(TokenSummary {
+                    id: row.try_get("id").map_err(|e: sqlx::Error| e.to_string())?,
+                    label: row.try_get("label").map_err(|e: sqlx::Error| e.to_string())?,
+                    created_at: row
+                        .try_get("created_at")
+                        .map_err(|e: sqlx::Error| e.to_string())?,
+                    last_used_at: row
+                        .try_get("last_used_at")
+                        .map_err(|e: sqlx::Error| e.to_string())?,
+                })
+            })
+            .collect()
+    }
+
     // --- device codes ---
 
     pub async fn insert_device_code(
@@ -757,5 +794,64 @@ mod tests {
         assert!(s.lookup_token(&a.hash, 2001).await.unwrap().is_none());
         assert!(s.lookup_token(&b.hash, 2001).await.unwrap().is_none());
         assert!(s.lookup_token(&other.hash, 2001).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn agent_tokens_list_newest_first_and_drop_out_when_revoked() {
+        let (s, _tmp) = store().await;
+        let (a, b, other) = (
+            generate(TokenKind::Agent),
+            generate(TokenKind::Agent),
+            generate(TokenKind::Access),
+        );
+        s.insert_token(
+            "t-a",
+            TokenKind::Agent,
+            &Principal::User(1),
+            &a.hash,
+            Some("laptop"),
+            None,
+            None,
+            1000,
+        )
+        .await
+        .unwrap();
+        s.insert_token(
+            "t-b",
+            TokenKind::Agent,
+            &Principal::User(1),
+            &b.hash,
+            Some("ci"),
+            None,
+            None,
+            2000,
+        )
+        .await
+        .unwrap();
+        // A different kind must not show up in the machine-token list.
+        s.insert_token(
+            "t-c",
+            TokenKind::Access,
+            &Principal::User(1),
+            &other.hash,
+            None,
+            None,
+            None,
+            3000,
+        )
+        .await
+        .unwrap();
+
+        let listed = s.list_tokens_of_kind(TokenKind::Agent).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["t-b", "t-a"],
+            "newest first"
+        );
+        assert_eq!(listed[0].label.as_deref(), Some("ci"));
+
+        s.revoke_token("t-b", 4000).await.unwrap();
+        let listed = s.list_tokens_of_kind(TokenKind::Agent).await.unwrap();
+        assert_eq!(listed.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t-a"]);
     }
 }

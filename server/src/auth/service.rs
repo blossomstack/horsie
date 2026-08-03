@@ -2,7 +2,7 @@
 //! change, and credential verification. `store.rs` holds the rows; everything
 //! that decides *whether* something is allowed lives here.
 
-use crate::auth::store::AuthStore;
+use crate::auth::store::{AuthStore, TokenSummary};
 use crate::auth::{Principal, Throttle, TokenKind, generate, hash_secret, parse, password};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -398,6 +398,54 @@ impl AuthService {
         self.issue_pair(&row.principal, &chain, now)
             .await
             .map_err(DeviceError::Internal)
+    }
+
+    /// Mint a long-lived machine token. Returns the secret — the only time it
+    /// exists in the clear — alongside the summary the UI lists.
+    ///
+    /// No expiry: a headless agent has nobody to re-approve a device code, so
+    /// revocation rather than rotation is the control that matters here.
+    pub async fn mint_agent_token(
+        &self,
+        label: &str,
+        principal: &Principal,
+    ) -> Result<(String, TokenSummary), String> {
+        let label = label.trim();
+        if label.is_empty() {
+            return Err("a machine token needs a label".to_string());
+        }
+        let now = now_secs();
+        let token = generate(TokenKind::Agent);
+        let id = uuid::Uuid::new_v4().to_string();
+        self.store
+            .insert_token(
+                &id,
+                TokenKind::Agent,
+                principal,
+                &token.hash,
+                Some(label),
+                None,
+                None,
+                now,
+            )
+            .await?;
+        Ok((
+            token.secret,
+            TokenSummary {
+                id,
+                label: Some(label.to_string()),
+                created_at: now,
+                last_used_at: None,
+            },
+        ))
+    }
+
+    pub async fn list_agent_tokens(&self) -> Result<Vec<TokenSummary>, String> {
+        self.store.list_tokens_of_kind(TokenKind::Agent).await
+    }
+
+    pub async fn revoke_agent_token(&self, id: &str) -> Result<(), String> {
+        self.store.revoke_token(id, now_secs()).await
     }
 
     /// Mint an access/refresh pair on one rotation chain.
@@ -802,5 +850,41 @@ mod tests {
             svc.refresh("not-a-token").await,
             Err(DeviceError::AccessDenied)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_minted_agent_token_authenticates_and_can_be_revoked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service(&tmp, true).await;
+        svc.bootstrap().await.unwrap();
+
+        let (secret, view) = svc
+            .mint_agent_token("my-laptop", &Principal::User(1))
+            .await
+            .unwrap();
+        assert!(secret.starts_with("hsk_agt_"), "{secret}");
+        assert_eq!(view.label.as_deref(), Some("my-laptop"));
+
+        let v = svc.verify(&secret).await.unwrap().expect("verifies");
+        assert_eq!(v.kind, TokenKind::Agent);
+        assert_eq!(v.principal, Principal::User(1));
+
+        let listed = svc.list_agent_tokens().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, view.id);
+
+        svc.revoke_agent_token(&view.id).await.unwrap();
+        assert!(svc.verify(&secret).await.unwrap().is_none());
+        assert!(svc.list_agent_tokens().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_agent_token_needs_a_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service(&tmp, true).await;
+        svc.bootstrap().await.unwrap();
+        // A wall of unlabelled secrets is unrevokable in practice: nobody can
+        // tell which machine a row belongs to.
+        assert!(svc.mint_agent_token("   ", &Principal::User(1)).await.is_err());
     }
 }
