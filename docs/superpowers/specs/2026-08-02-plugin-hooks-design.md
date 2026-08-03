@@ -339,18 +339,20 @@ earlier one's, so ordering is deterministic and stated rather than incidental.
 
 ### Where hooks execute
 
-Unchanged by this phase, and worth stating precisely because it is easy to get
-wrong: hooks run inside the runtime. For velos, and for
-`horsie connect --sandbox`, that is under the nono sandbox with the plugin
-library and its clone roots granted read-only. For a plain `horsie connect`,
-runtimes are **unsandboxed by default** — `cli/src/main.rs` documents
-`--sandbox` as "Off by default: the machine is already your own", and
-`runtime-vendor/src/vendor.rs` defaults `sandbox: false`.
+Unchanged by this phase: hooks run inside the runtime, because that is where the
+plugin files and the workspace are.
 
-So enabling plugins on the default local vendor means a plugin's hooks run with
-the user's own privileges. That is already true of `SessionStart` today, and the
-guide already warns to install only plugins you trust. This phase widens *when*
-those hooks run, not *what* they can reach.
+Since #115, `horsie connect` **sandboxes its runtimes by default** — the flag
+inverted from an opt-in `--sandbox` to an opt-out `--no-sandbox`, and the
+capability spec is vendor-owned. So hooks normally run under the nono sandbox,
+with the plugin library and its clone roots granted read-only (the grants added
+in #110). A user who passes `--no-sandbox` runs them unconfined on their own
+machine, as does anyone who was relying on the old default.
+
+This phase widens *when* hooks run, not *what* they can reach: the confinement
+is whatever the runtime already had. The guide still tells users to install only
+plugins they trust, which remains the operative advice for the `--no-sandbox`
+path.
 
 ### Error handling
 

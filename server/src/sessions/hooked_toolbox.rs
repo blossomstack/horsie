@@ -180,45 +180,8 @@ impl Toolbox for HookedToolbox {
 )]
 mod tests {
     use super::*;
-    use horsie_models::runtime::{RunHookResponse, RuntimeInboundMessage, RuntimeOutboundMessage};
-    use horsie_runtime_client::{RuntimeTransport, TransportError};
+    use horsie_runtime_client::MockTransport;
     use std::sync::Mutex;
-
-    /// A transport that answers `RunHook` with a canned outcome and nothing
-    /// else.
-    ///
-    /// Deliberately hand-rolled rather than reusing `runtime-client`'s
-    /// `MockTransport`: that lives behind a `test-util` feature which cascades
-    /// into `horsie-agentcore` and `horsie-actor`, turning on code that trips
-    /// the workspace's `disallowed_methods` lint. A five-line double keeps this
-    /// crate's feature graph unchanged.
-    struct StubTransport {
-        outcome: HookOutcomeWire,
-    }
-
-    #[async_trait]
-    impl RuntimeTransport for StubTransport {
-        async fn relay(
-            &self,
-            message: RuntimeInboundMessage,
-        ) -> Result<RuntimeOutboundMessage, TransportError> {
-            match message {
-                RuntimeInboundMessage::RunHook(req) => {
-                    Ok(RuntimeOutboundMessage::RunHookResult(RunHookResponse {
-                        call_id: req.call_id,
-                        outcome: self.outcome.clone(),
-                    }))
-                }
-                _ => Err(TransportError::SendFailed(
-                    "this stub only answers RunHook".to_string(),
-                )),
-            }
-        }
-
-        async fn send_oneway(&self, _message: RuntimeInboundMessage) -> Result<(), TransportError> {
-            Ok(())
-        }
-    }
 
     /// Records whether the real toolbox was reached, and with what.
     struct Spy {
@@ -260,7 +223,7 @@ mod tests {
     }
 
     fn client_returning(outcome: HookOutcomeWire) -> RuntimeClient {
-        RuntimeClient::new(StubTransport { outcome }, "test")
+        RuntimeClient::new(MockTransport::ok("{}").with_hook_outcome(outcome), "test")
     }
 
     fn clear() -> HookOutcomeWire {

@@ -122,6 +122,9 @@ Two behaviours worth knowing:
   runs unattended sessions, so `permissionDecision: "ask"` proceeds and is
   logged.
 
+Hooks run inside the runtime, under whatever confinement it has — sandboxed by
+default, or unconfined if you started `horsie connect --no-sandbox`.
+
 Claude Code defines many more hook events than horsie runs. The rest are
 recognised and reported, but do not fire.
 
