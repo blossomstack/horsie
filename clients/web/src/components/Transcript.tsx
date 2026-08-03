@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { cn } from "../lib/cn";
 import type {
   RenderedMessage,
@@ -6,50 +7,34 @@ import type {
 import { buildSegments, type Segment } from "../lib/transcriptSegments";
 import { Prose } from "./Prose";
 import { ToolCallCard } from "./ToolCallCard";
+import { TurnActions } from "./TurnActions";
 import { WorkGroup } from "./WorkGroup";
-import { formatTime } from "../lib/time";
 
-/** The channel gutter. Every turn is stamped and labelled in the same
- * left-hand column, so a long recording reads down one edge instead of
- * zig-zagging between bubbles. Times come only from the server's own stamps —
- * an optimistic echo has none, and inventing one from the local clock would
- * misreport when the turn actually happened. */
-function Gutter({ channel, atMs }: { channel: string; atMs?: number }) {
-  return (
-    <div className="flex shrink-0 items-baseline gap-2 sm:w-[4.75rem] sm:flex-col sm:items-end sm:gap-0.5">
-      <span className="legend !text-faint">{channel}</span>
-      {atMs !== undefined && (
-        <span
-          className="legend tabular-nums"
-          data-testid="turn-time"
-          title={new Date(atMs).toLocaleString()}
-        >
-          {formatTime(atMs)}
-        </span>
-      )}
-    </div>
-  );
-}
-
+/**
+ * One entry in the recording.
+ *
+ * `group` + `relative` exist for `TurnActions`, which floats into the 1.75rem
+ * gap above the turn rather than reserving a strip of its own: at ~24px on
+ * every entry, a permanent control row would cost more vertical space than
+ * the channel gutter it replaced.
+ */
 function Turn({
-  channel,
-  atMs,
   className,
   children,
+  actions,
   ...rest
 }: {
-  channel: string;
-  atMs?: number;
   className?: string;
   children: React.ReactNode;
+  actions?: React.ReactNode;
 } & React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("animate-settle flex flex-col gap-1 sm:flex-row sm:gap-4", className)}
+      className={cn("animate-settle group relative min-w-0", className)}
       {...rest}
     >
-      <Gutter channel={channel} atMs={atMs} />
-      <div className="min-w-0 flex-1 space-y-2">{children}</div>
+      {actions}
+      <div className="min-w-0 space-y-2">{children}</div>
     </div>
   );
 }
@@ -108,35 +93,58 @@ function AssistantTurn({
   showThinking: boolean;
 }) {
   const segments = buildSegments(msgs, live);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  // What a copy takes: the prose the user reads, not the tool traffic
+  // underneath it. A turn still in flight offers no copy — its text is
+  // arriving, so anything taken now is a fragment of a sentence.
+  const markdown = live
+    ? undefined
+    : segments
+        .filter(
+          (s): s is Extract<Segment, { kind: "text" }> => s.kind === "text",
+        )
+        .map((s) => s.text)
+        .join("\n\n")
+        .trim();
+  const atMs = live ? undefined : msgs[msgs.length - 1]?.createdAtMs;
+
   return (
     <Turn
-      channel="Agent"
-      atMs={live ? undefined : msgs[msgs.length - 1]?.createdAtMs}
       data-testid="message"
       data-role="Assistant"
+      actions={
+        markdown ? (
+          <TurnActions atMs={atMs} markdown={markdown} renderedRef={bodyRef} />
+        ) : undefined
+      }
     >
-      {segments.length === 0 ? (
-        <span className="caret" aria-label="The agent is working" />
-      ) : (
-        segments.map((s) => (
-          <SegmentView key={s.key} segment={s} showThinking={showThinking} />
-        ))
-      )}
+      <div ref={bodyRef} className="min-w-0 space-y-2">
+        {segments.length === 0 ? (
+          <span className="caret" aria-label="The agent is working" />
+        ) : (
+          segments.map((s) => (
+            <SegmentView key={s.key} segment={s} showThinking={showThinking} />
+          ))
+        )}
+      </div>
     </Turn>
   );
 }
 
 function UserTurn({ msg }: { msg: RenderedMessage }) {
+  // One copy button, not two: a user message is plain text already, so a
+  // markdown flavour would be a second control with the same outcome.
+  const settled = !msg.optimistic && !msg.queued;
   return (
     <Turn
-      channel="You"
-      atMs={msg.queued ? undefined : msg.createdAtMs}
       className={cn((msg.optimistic || msg.queued) && "opacity-60")}
       data-testid="message"
       data-role={msg.role}
       data-queued={msg.queued ? "true" : undefined}
+      actions={settled ? <TurnActions atMs={msg.createdAtMs} /> : undefined}
     >
-      <div className="rounded-[var(--radius-control)] border bg-raised px-3.5 py-2.5 text-[0.9375rem] leading-relaxed whitespace-pre-wrap text-legend">
+      <div className="rounded-[var(--radius-control)] border bg-raised px-3.5 py-2.5 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
         {msg.text}
       </div>
       {msg.queued && (

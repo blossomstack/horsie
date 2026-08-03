@@ -1,8 +1,8 @@
-import { CircleAlert, Square, Trash2 } from "lucide-react";
+import { CircleAlert, ListTodo, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError, MAIN_AGENT } from "../api/client";
-import { SessionStatusKind } from "../api/types";
+import { SessionStatusKind, TaskStatus } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
@@ -12,6 +12,7 @@ import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
 import { Transcript } from "../components/Transcript";
+import { usePersistentState } from "../hooks/usePersistentState";
 import { useSessionStream } from "../hooks/useSessionStream";
 import { useUiSettings } from "../hooks/useUiSettings";
 import {
@@ -26,15 +27,24 @@ import { sessionTitle } from "../lib/format";
 import { statusMeta } from "../lib/status";
 
 /** Friendly label for a resource-preparation progression stage. Unknown stages
- * fall back to a de-slugged form so a new backend stage still reads sensibly. */
+ * fall back to a de-slugged form so a new backend stage still reads sensibly.
+ *
+ * `ready` is deliberately absent. The preparation stages earn a line because
+ * they explain a wait the operator is sitting through; "Ready" is the end of
+ * that wait and reports nothing — it sat above the composer as a lamp and a
+ * word saying only that nothing was happening. */
 function progressionLabel(stage: string): string {
   const known: Record<string, string> = {
     provisioning_runtime: "Starting runtime…",
     scanning_workspace: "Scanning workspace…",
     connecting_tools: "Connecting tools…",
-    ready: "Ready",
   };
   return known[stage] ?? `${stage.replace(/_/g, " ")}…`;
+}
+
+/** Stages worth showing. Anything terminal is the absence of news. */
+function showsProgression(stage: string | undefined): boolean {
+  return stage !== undefined && stage !== "ready";
 }
 
 /** Router state carrying the first message through the navigation from a new
@@ -115,12 +125,6 @@ export function SessionView() {
     }
   };
 
-  const focusPendingAsk = () => {
-    document
-      .querySelector('[data-testid="ask-user-card"][data-pending="true"]')
-      ?.scrollIntoView({ behavior: "smooth", block: "center" });
-  };
-
   // A new chat's first message is sent here, once this view's own session
   // fetch has resolved — not from NewSessionView immediately after create.
   // Two reasons: it gives the server's async provisioning the same
@@ -148,7 +152,13 @@ export function SessionView() {
     status === SessionStatusKind.Unrecoverable
       ? (stream.statusReason ?? detail?.lastError ?? "This session cannot run again.")
       : null;
-  const totalTokens = stream.usage.input + stream.usage.output;
+
+  // The plan panel is available on every session, with or without a list, and
+  // its visibility is the operator's standing choice rather than a
+  // consequence of whether the agent happened to use the tool.
+  const [tasksOpen, setTasksOpen] = usePersistentState("horsie-tasks-open", false);
+  const tasks = stream.tasks;
+  const tasksDone = tasks.filter((t) => t.status === TaskStatus.Completed).length;
 
   // The server names what is answerable: live from the status frame, and from
   // the session detail for a page opened on an already-parked session. Nothing
@@ -213,9 +223,9 @@ export function SessionView() {
   };
 
   const title = sessionTitle(detail?.name);
-  // The composer grows its own Stop button while a turn runs; the header one is
-  // for stopping a turn you have scrolled away from.
-  const stoppable = status === SessionStatusKind.Running;
+  // Stop lives only in the composer. The header used to carry a second one
+  // "for stopping a turn you have scrolled away from", which was never a real
+  // case: the composer is pinned to the bottom of the pane and never scrolls.
 
   return (
     <AskAnswerProvider
@@ -263,22 +273,34 @@ export function SessionView() {
               <ContextGauge
                 agent={mainAgent}
                 sessionTotal={detail?.usageTotal}
-                totalTokens={totalTokens}
               />
+              {/* The plan is always reachable, so a session with no list
+                  still has somewhere for one to appear. The badge reports
+                  progress without the panel having to be open. */}
+              <button
+                className="key-icon relative"
+                onClick={() => setTasksOpen(!tasksOpen)}
+                aria-pressed={tasksOpen}
+                title={
+                  tasks.length
+                    ? `${tasksOpen ? "Hide" : "Show"} the plan — ${tasksDone}/${tasks.length} done`
+                    : `${tasksOpen ? "Hide" : "Show"} the plan`
+                }
+                aria-label="Toggle the agent's plan"
+                data-testid="task-list-toggle"
+              >
+                <ListTodo size={15} aria-hidden />
+                {tasks.length > 0 && (
+                  <span
+                    className="readout absolute -right-0.5 -top-0.5 text-[9px] leading-none"
+                    data-testid="task-list-badge"
+                  >
+                    {tasksDone}/{tasks.length}
+                  </span>
+                )}
+              </button>
               {detail && <SessionInfoMenu detail={detail} />}
               <SettingsMenu />
-              {stoppable && (
-                <button
-                  className="key key-stop !px-2.5"
-                  onClick={handleStop}
-                  disabled={stop.isPending}
-                  title="Stop this turn (queued messages are kept)"
-                  data-testid="session-stop"
-                >
-                  <Square size={11} className="fill-current" aria-hidden />
-                  Stop
-                </button>
-              )}
               <button
                 className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
                 onClick={handleDelete}
@@ -369,7 +391,7 @@ export function SessionView() {
           )}
 
           {/* Resource-preparation progression (live, while a turn spins up) */}
-          {stream.progression && (
+          {stream.progression && showsProgression(stream.progression.stage) && (
             <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
               <div
                 data-testid="session-progression"
@@ -414,12 +436,12 @@ export function SessionView() {
             busy={send.isPending}
             onSend={(text) => handleSend(id, text)}
             onStop={handleStop}
-            onFocusAsk={focusPendingAsk}
-            askPending={answerableIds.length > 0}
           />
         </div>
 
-        <TaskListPanel tasks={stream.tasks} />
+        {tasksOpen && (
+          <TaskListPanel tasks={tasks} onClose={() => setTasksOpen(false)} />
+        )}
       </div>
     </AskAnswerProvider>
   );
