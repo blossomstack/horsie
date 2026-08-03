@@ -191,12 +191,13 @@ Colour is load-bearing and never decorative. Four semantic families do all the w
 The system is deliberately dense and unrounded. Radii are machined (3/4/6/8px), not pill-shaped; shadows do one of two things (lift a cap out, or recess a screen in) and never diffuse. The one place the instrument steps back is agent prose, which runs in the proportional face at a real reading measure — the transcript is the product, and the chrome exists to be read past.
 
 **Key Characteristics:**
-- Two self-hosted faces: Martian Mono for legends, readouts, keys and machine strings; Archivo for prose and UI. No third face, no font CDN.
+- Console runs on two self-hosted faces: Martian Mono for legends, readouts, keys and machine strings; Archivo for prose and UI. No font ever comes from a CDN. An alternate skin may bring one more face, lazy-loaded when that skin is chosen.
 - Four semantic colours (amber / orange / red / green), each with one meaning, plus a separate four-colour syntax palette.
-- Two themes that swap material *roles*, not brightness — a keycap is always a different material from its panel.
-- Machined radii 3–8px; no pills except the 7px lamp.
+- Material *roles* hold across light and dark, not brightness — a keycap is always a different material from its panel.
+- Console's radii are machined 3–8px; no pills except the 7px lamp. A skin sets its own scale through `--r-*`.
 - A status is always a lamp **and** a word. Never colour alone.
-- Every ink clears WCAG AA against every field colour in both themes.
+- Every ink clears WCAG AA against every field colour, in all four skins and both modes — measured, not assumed.
+- Console is one of four worlds over the same layouts. See **Skins** below: everything else in this document describes Console unless it says otherwise.
 
 ## Skins
 
