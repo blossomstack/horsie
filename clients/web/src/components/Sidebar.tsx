@@ -1,13 +1,5 @@
-import {
-  Bot,
-  CalendarClock,
-  Plus,
-  Search,
-  Settings,
-  ShieldCheck,
-} from "lucide-react";
+import { Bot, CalendarClock, Plus, Settings, ShieldCheck } from "lucide-react";
 import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import type { SessionSummary } from "../api/types";
 import { relativeTime, sessionTitle } from "../lib/format";
@@ -111,19 +103,7 @@ function FooterLink({
 
 export function Sidebar() {
   const { data: sessions, isLoading, isError } = useSessionList();
-  const [query, setQuery] = useState("");
   const navigate = useNavigate();
-
-  const filtered = useMemo(() => {
-    if (!sessions) return [];
-    const q = query.trim().toLowerCase();
-    if (!q) return sessions;
-    return sessions.filter(
-      (s) =>
-        (s.name ?? "").toLowerCase().includes(q) ||
-        s.id.toLowerCase().includes(q),
-    );
-  }, [sessions, query]);
 
   const running = sessions?.filter((s) => statusMeta(s.status).busy).length ?? 0;
 
@@ -174,38 +154,18 @@ export function Sidebar() {
         />
       </div>
 
-      <div className="flex items-center gap-2 px-3 pt-4">
-        <div className="relative min-w-0 flex-1">
-          <Search
-            size={13}
-            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
-            aria-hidden
-          />
-          <input
-            className="field field-mono !py-1.5 !pl-8"
-            placeholder="Search"
-            aria-label="Search sessions"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            data-testid="session-search"
-          />
-        </div>
+      {/* The + is the only control here, so it carries the row's right edge. */}
+      <div className="flex items-center justify-between pb-1.5 pl-4 pr-2 pt-4">
+        <span className="legend">Sessions</span>
         <button
-          className="key !px-2.5"
+          className="key-icon !h-6 !w-6"
           onClick={() => navigate("/")}
           data-testid="new-session-button"
           title="Start a new session"
+          aria-label="Start a new session"
         >
           <Plus size={14} aria-hidden />
-          New
         </button>
-      </div>
-
-      <div className="flex items-baseline justify-between px-4 pb-1.5 pt-4">
-        <span className="legend">Sessions</span>
-        <span className="legend" data-testid="session-count">
-          {sessions?.length ?? 0}
-        </span>
       </div>
 
       <nav
@@ -219,19 +179,13 @@ export function Sidebar() {
             reload.
           </p>
         )}
-        {!isLoading && !isError && filtered.length === 0 && (
+        {!isLoading && !isError && sessions?.length === 0 && (
           <p className="px-2.5 py-8 text-[13px] leading-relaxed text-faint">
-            {query ? (
-              <>No session matches “{query}”.</>
-            ) : (
-              <>
-                No sessions yet. Press <span className="text-legend">New</span>{" "}
-                to start one.
-              </>
-            )}
+            No sessions yet. Press <span className="text-legend">+</span> to
+            start one.
           </p>
         )}
-        {filtered.map((s) => (
+        {sessions?.map((s) => (
           <SessionRow key={s.id} s={s} />
         ))}
       </nav>
