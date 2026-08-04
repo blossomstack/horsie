@@ -188,12 +188,44 @@ pub enum SessionSupervisorEvent {
         id: SessionId,
         name: String,
     },
+    GroupCreated {
+        name: String,
+        created_at: u64,
+    },
+    /// Renames the registry key and rewrites `group=<old>` annotations; both
+    /// ride one event so the fixup is atomic with the rename.
+    GroupRenamed {
+        old: String,
+        new: String,
+    },
+    /// Removes the registry key and strips `group=<name>` annotations.
+    GroupDeleted {
+        name: String,
+    },
+    /// Merge-update of one session's annotations: `set` upserts, `remove` drops.
+    SessionAnnotationsSet {
+        id: SessionId,
+        set: BTreeMap<String, String>,
+        remove: Vec<String>,
+    },
 }
 
 /// One registry row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub spec: SessionSpec,
+    pub created_at: u64,
+    /// User-set key-value metadata (group, future provenance keys). Field-level
+    /// default so pre-annotations journal rows load with an empty map.
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
+}
+
+/// One registered group. Registration is optional metadata: a group can exist
+/// with zero sessions, and an annotation can name a group that was never
+/// registered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRecord {
     pub created_at: u64,
 }
 
@@ -205,6 +237,9 @@ pub struct SessionRecord {
 #[serde(default)]
 pub struct SessionSupervisorState {
     pub sessions: BTreeMap<SessionId, SessionRecord>,
+    /// Registered groups, name-keyed.
+    #[serde(default)]
+    pub groups: BTreeMap<String, GroupRecord>,
 }
 
 pub struct SessionSupervisor {
@@ -390,9 +425,14 @@ impl EventSourcedActor for SessionSupervisor {
                 spec,
                 created_at,
             } => {
-                state
-                    .sessions
-                    .insert(id, SessionRecord { spec, created_at });
+                state.sessions.insert(
+                    id,
+                    SessionRecord {
+                        spec,
+                        created_at,
+                        annotations: BTreeMap::new(),
+                    },
+                );
             }
             SessionSupervisorEvent::SessionDeleted { id } => {
                 state.sessions.remove(&id);
@@ -400,6 +440,35 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorEvent::SessionNamed { id, name } => {
                 if let Some(rec) = state.sessions.get_mut(&id) {
                     rec.spec.name = Some(name);
+                }
+            }
+            SessionSupervisorEvent::GroupCreated { name, created_at } => {
+                state.groups.insert(name, GroupRecord { created_at });
+            }
+            SessionSupervisorEvent::GroupRenamed { old, new } => {
+                if let Some(rec) = state.groups.remove(&old) {
+                    state.groups.insert(new.clone(), rec);
+                }
+                for rec in state.sessions.values_mut() {
+                    if rec.annotations.get("group") == Some(&old) {
+                        rec.annotations.insert("group".to_string(), new.clone());
+                    }
+                }
+            }
+            SessionSupervisorEvent::GroupDeleted { name } => {
+                state.groups.remove(&name);
+                for rec in state.sessions.values_mut() {
+                    if rec.annotations.get("group") == Some(&name) {
+                        rec.annotations.remove("group");
+                    }
+                }
+            }
+            SessionSupervisorEvent::SessionAnnotationsSet { id, set, remove } => {
+                if let Some(rec) = state.sessions.get_mut(&id) {
+                    for key in &remove {
+                        rec.annotations.remove(key);
+                    }
+                    rec.annotations.extend(set);
                 }
             }
         }
@@ -875,6 +944,120 @@ mod tests {
         assert_eq!(
             s.sessions.get("s1").unwrap().spec.name.as_deref(),
             Some("Latest")
+        );
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::SessionDeleted { id: "s1".into() },
+        );
+        assert!(s.sessions.is_empty());
+    }
+
+    fn created_session(s: SessionSupervisorState, id: &str) -> SessionSupervisorState {
+        SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::SessionCreated {
+                id: id.into(),
+                spec: spec_fixture(),
+                created_at: 1,
+            },
+        )
+    }
+
+    #[test]
+    fn annotations_set_and_removed_fold() {
+        let s = created_session(SessionSupervisorState::default(), "s1");
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::SessionAnnotationsSet {
+                id: "s1".into(),
+                set: BTreeMap::from([("group".to_string(), "web".to_string())]),
+                remove: vec![],
+            },
+        );
+        assert_eq!(
+            s.sessions.get("s1").unwrap().annotations.get("group"),
+            Some(&"web".to_string())
+        );
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::SessionAnnotationsSet {
+                id: "s1".into(),
+                set: BTreeMap::new(),
+                remove: vec!["group".to_string()],
+            },
+        );
+        assert!(s.sessions.get("s1").unwrap().annotations.is_empty());
+    }
+
+    #[test]
+    fn group_rename_rewrites_annotations() {
+        let s = created_session(SessionSupervisorState::default(), "s1");
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::GroupCreated {
+                name: "web".into(),
+                created_at: 1,
+            },
+        );
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::SessionAnnotationsSet {
+                id: "s1".into(),
+                set: BTreeMap::from([("group".to_string(), "web".to_string())]),
+                remove: vec![],
+            },
+        );
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::GroupRenamed {
+                old: "web".into(),
+                new: "frontend".into(),
+            },
+        );
+        assert!(s.groups.contains_key("frontend"));
+        assert!(!s.groups.contains_key("web"));
+        assert_eq!(
+            s.sessions.get("s1").unwrap().annotations.get("group"),
+            Some(&"frontend".to_string())
+        );
+    }
+
+    #[test]
+    fn group_delete_strips_annotations() {
+        let s = created_session(SessionSupervisorState::default(), "s1");
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::GroupCreated {
+                name: "web".into(),
+                created_at: 1,
+            },
+        );
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::SessionAnnotationsSet {
+                id: "s1".into(),
+                set: BTreeMap::from([("group".to_string(), "web".to_string())]),
+                remove: vec![],
+            },
+        );
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::GroupDeleted { name: "web".into() },
+        );
+        assert!(s.groups.is_empty());
+        assert!(s.sessions.get("s1").unwrap().annotations.is_empty());
+    }
+
+    #[test]
+    fn session_delete_drops_its_annotations() {
+        let s = created_session(SessionSupervisorState::default(), "s1");
+        let s = SessionSupervisor::apply_event(
+            s,
+            SessionSupervisorEvent::SessionAnnotationsSet {
+                id: "s1".into(),
+                set: BTreeMap::from([("group".to_string(), "web".to_string())]),
+                remove: vec![],
+            },
         );
         let s = SessionSupervisor::apply_event(
             s,

@@ -170,6 +170,8 @@ impl RoutineRunner {
             last_error: status_reason(&status),
             // A routine invokes an agent preset, never a workflow.
             workflow: None,
+            // A run's session was just created; it has no annotations yet.
+            annotations: vec![],
         })
     }
 }
