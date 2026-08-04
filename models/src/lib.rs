@@ -61,15 +61,6 @@ pub mod workflow {
 // (workflow + caps + hackamore policy) and is intrinsically larger than the other
 // control variants. The enum is fluorite-generated, so boxing the variant isn't
 // available here; the size is acceptable for a one-shot control message.
-#[allow(
-    clippy::doc_markdown,
-    clippy::too_many_arguments,
-    clippy::large_enum_variant
-)]
-pub mod daemon {
-    include!(concat!(env!("OUT_DIR"), "/daemon/mod.rs"));
-}
-
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod session {
     include!(concat!(env!("OUT_DIR"), "/session/mod.rs"));

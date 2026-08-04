@@ -13,7 +13,6 @@ members = [
     "providers/mock-llm",
     "runtime-client",
     "mcp-client",
-    "supervisor",
     "cli",
     "velos-runtime",
     "tests",
