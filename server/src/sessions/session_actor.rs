@@ -539,6 +539,17 @@ pub struct SessionActor {
 }
 
 impl SessionActor {
+    /// One journalled event per hook record, in the order the hooks ran.
+    ///
+    /// Split out so the mapping is testable without standing up an actor: this
+    /// is the whole of what a hook contributes to the session's history.
+    fn fold_hooks(records: Vec<HookRecord>) -> Vec<SessionDomainEvent> {
+        records
+            .into_iter()
+            .map(|record| SessionDomainEvent::HookRan { record })
+            .collect()
+    }
+
     /// `frames` is owned by the supervisor and outlives this actor: a session
     /// that unloads under a watching client must not disconnect it.
     pub fn new(
@@ -1667,6 +1678,21 @@ struct SessionParent {
     target: ActorRef<SessionCommand>,
 }
 
+/// Routes what plugin hooks did into the session's journal.
+///
+/// A `tell`, not an `ask`: nothing waits on a record, and a hook's audit trail
+/// must never be able to slow the tool call it describes.
+struct SessionHookSink {
+    target: ActorRef<SessionCommand>,
+}
+
+#[async_trait]
+impl horsie_runtime_client::HookSink for SessionHookSink {
+    async fn record(&self, hooks: Vec<HookRecord>) {
+        let _ = self.target.tell(SessionCommand::HooksRan(hooks)).await;
+    }
+}
+
 #[async_trait]
 impl AgentOutcomeSink for SessionParent {
     async fn deliver(&self, outcome: AgentOutcome) {
@@ -1847,6 +1873,12 @@ impl ContextProvider for SessionContextProvider {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
         let runtime_client = scoped_client(&self.kind, runtime_client);
+        // Hooks run runtime-side and report what they did on the tool response.
+        // Routing those records here is what makes a plugin's interventions
+        // visible to the user rather than silent.
+        let runtime_client = runtime_client.with_hook_sink(Arc::new(SessionHookSink {
+            target: self.session.clone(),
+        }));
 
         if broadcast {
             emit_progress(&self.frames, "scanning_workspace", None);
@@ -2286,12 +2318,7 @@ impl EventSourcedActor for SessionActor {
             SessionCommand::RetryStep { index, reply } => {
                 self.on_retry_step(state, index, reply, ctx).await
             }
-            SessionCommand::HooksRan(records) => CommandEffect::persist(
-                records
-                    .into_iter()
-                    .map(|record| SessionDomainEvent::HookRan { record })
-                    .collect(),
-            ),
+            SessionCommand::HooksRan(records) => CommandEffect::persist(Self::fold_hooks(records)),
             SessionCommand::SubAgentTree { reply } => {
                 let tree = state
                     .mode
@@ -3059,6 +3086,62 @@ mod tests {
             panic!("an interactive session starts turns, not steps");
         };
         assert_eq!(consumed, &vec!["m2".to_string()]);
+    }
+
+    fn hook_record(plugin: &str, blocked: bool) -> HookRecord {
+        HookRecord {
+            plugin: plugin.to_string(),
+            event: "PreToolUse".to_string(),
+            tool: "write_file".to_string(),
+            duration_ms: 12,
+            blocked,
+            reason: blocked.then(|| "not allowed".to_string()),
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        }
+    }
+
+    /// Hook records are journalled verbatim, one event each, so the session's
+    /// audit trail shows every intervention a plugin made.
+    #[test]
+    fn hook_records_become_one_journalled_event_each() {
+        let events = SessionActor::fold_hooks(vec![
+            hook_record("guard", true),
+            hook_record("linter", false),
+        ]);
+        assert_eq!(events.len(), 2);
+        let SessionDomainEvent::HookRan { record } = &events[0] else {
+            panic!("expected HookRan, got {:?}", events[0]);
+        };
+        assert_eq!(record.plugin, "guard");
+        assert!(record.blocked);
+        assert_eq!(record.reason.as_deref(), Some("not allowed"));
+
+        let SessionDomainEvent::HookRan { record } = &events[1] else {
+            panic!("expected HookRan, got {:?}", events[1]);
+        };
+        assert_eq!(record.plugin, "linter");
+        assert!(!record.blocked, "a no-op hook is still recorded");
+    }
+
+    /// Folding a hook record must not disturb session state — it is a record of
+    /// what the agent did, not a change to what the session is.
+    #[test]
+    fn a_hook_record_does_not_alter_session_state() {
+        let before = SessionState::default();
+        let after = SessionActor::apply_event(
+            before.clone(),
+            SessionDomainEvent::HookRan {
+                record: hook_record("guard", true),
+            },
+        );
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.inbox.len(), before.inbox.len());
     }
 
     #[tokio::test]
