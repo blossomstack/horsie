@@ -49,7 +49,7 @@ export function LoginPage() {
           </span>
         </div>
 
-        <h1 className="mt-5 text-[15px] font-semibold text-legend">Sign in</h1>
+        <h1 className="mt-5 text-[0.9375rem] font-semibold text-legend">Sign in</h1>
         <p className="mt-1 text-xs leading-relaxed text-faint">
           This server requires a password. On first boot horsie writes a
           generated one to{" "}

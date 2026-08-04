@@ -141,7 +141,11 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                 placeholder={
                   choices.length > 0 ? "Or answer in your own words…" : "Your answer…"
                 }
-                className="min-w-0 flex-1 rounded-[var(--radius-control)] border bg-transparent px-2 py-1 text-sm outline-none placeholder:text-faint focus:border-amber disabled:opacity-60"
+                // No `outline-none` here, unlike the composer: this input has
+                // nothing clipping it and no ring of its own, and it is the
+                // field that unblocks a parked agent — the one place to lose
+                // the focus ring is not this one.
+                className="min-w-0 flex-1 rounded-[var(--radius-control)] border bg-transparent px-2 py-1 text-sm placeholder:text-faint focus:border-amber disabled:opacity-60"
               />
               <button
                 type="button"

@@ -145,7 +145,7 @@ function CardDetails({ card }: { card: ModelCard }) {
       {rows.map(([k, v]) => (
         <div key={k} className="flex items-baseline justify-between gap-3">
           <dt className="legend">{k}</dt>
-          <dd className="min-w-0 truncate font-mono text-[11px] text-legend">{v}</dd>
+          <dd className="min-w-0 truncate font-mono text-[0.6875rem] text-legend">{v}</dd>
         </div>
       ))}
     </dl>

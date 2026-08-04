@@ -5,6 +5,9 @@ export type ThemeChoice = "light" | "dark" | "system";
 /** What is actually painted — `system` is resolved away before this. */
 export type Mode = "light" | "dark";
 export type Skin = "console" | "paper" | "soft" | "slate";
+/** How big the instrument is drawn. Scales every rem in the build, so the
+ * spacing grows with the type instead of the type outgrowing its slots. */
+export type TextSize = "compact" | "default" | "large";
 
 export const SKINS: { id: Skin; name: string; blurb: string }[] = [
   {
@@ -33,13 +36,22 @@ export const SKINS: { id: Skin; name: string; blurb: string }[] = [
   },
 ];
 
+export const TEXT_SIZES: { id: TextSize; name: string; blurb: string }[] = [
+  { id: "compact", name: "Compact", blurb: "The densest fit — most transcript on screen." },
+  { id: "default", name: "Default", blurb: "The shipped density." },
+  { id: "large", name: "Large", blurb: "Roomier type and spacing, less on screen at once." },
+];
+
 const THEME_KEY = "horsie-theme";
 const SKIN_KEY = "horsie-skin";
+const TEXT_SIZE_KEY = "horsie-text-size";
 
 const isChoice = (v: unknown): v is ThemeChoice =>
   v === "light" || v === "dark" || v === "system";
 const isSkin = (v: unknown): v is Skin =>
   v === "console" || v === "paper" || v === "soft" || v === "slate";
+const isTextSize = (v: unknown): v is TextSize =>
+  v === "compact" || v === "default" || v === "large";
 
 function readChoice(): ThemeChoice {
   try {
@@ -61,6 +73,15 @@ function readSkin(): Skin {
   }
 }
 
+function readTextSize(): TextSize {
+  try {
+    const raw = localStorage.getItem(TEXT_SIZE_KEY);
+    return isTextSize(raw) ? raw : "default";
+  } catch {
+    return "default";
+  }
+}
+
 const prefersLight = () =>
   typeof window !== "undefined" &&
   window.matchMedia("(prefers-color-scheme: light)").matches;
@@ -78,11 +99,12 @@ export const resolveMode = (choice: ThemeChoice): Mode =>
  */
 let choice = readChoice();
 let skin = readSkin();
+let textSize = readTextSize();
 const listeners = new Set<() => void>();
 
-let snapshot = { choice, skin, mode: resolveMode(choice) };
+let snapshot = { choice, skin, textSize, mode: resolveMode(choice) };
 const refresh = () => {
-  snapshot = { choice, skin, mode: resolveMode(choice) };
+  snapshot = { choice, skin, textSize, mode: resolveMode(choice) };
 };
 const emit = () => {
   refresh();
@@ -96,6 +118,10 @@ function apply() {
   // index.css keeps the specificity it was written against.
   if (skin === "console") delete root.dataset.skin;
   else root.dataset.skin = skin;
+  // Same convention: the shipped density carries no attribute, so `--text-root`
+  // falls through to its default rather than being restated in two places.
+  if (textSize === "default") delete root.dataset.textSize;
+  else root.dataset.textSize = textSize;
 }
 
 /**
@@ -145,6 +171,17 @@ function setSkin(next: Skin) {
   emit();
 }
 
+function setTextSize(next: TextSize) {
+  textSize = next;
+  try {
+    localStorage.setItem(TEXT_SIZE_KEY, next);
+  } catch {
+    /* as above */
+  }
+  apply();
+  emit();
+}
+
 const subscribe = (l: () => void) => {
   listeners.add(l);
   return () => {
@@ -164,8 +201,10 @@ export function useTheme(): {
   choice: ThemeChoice;
   mode: Mode;
   skin: Skin;
+  textSize: TextSize;
   setChoice: (c: ThemeChoice) => void;
   setSkin: (s: Skin) => void;
+  setTextSize: (t: TextSize) => void;
   /** Flip light/dark, leaving `system` behind — a deliberate click means the
    * user wants a specific one from here on. */
   toggle: () => void;
@@ -178,8 +217,10 @@ export function useTheme(): {
     choice: s.choice,
     mode: s.mode,
     skin: s.skin,
+    textSize: s.textSize,
     setChoice,
     setSkin,
+    setTextSize,
     toggle,
   };
 }

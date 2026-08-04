@@ -100,7 +100,7 @@ function MachineTokens() {
           >
             <div className="min-w-0">
               <div className="truncate text-sm text-legend">{t.label}</div>
-              <div className="text-[11px] text-faint">
+              <div className="text-[0.6875rem] text-faint">
                 {t.lastUsedAt ? "in use" : "never used"}
               </div>
             </div>

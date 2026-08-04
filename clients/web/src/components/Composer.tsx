@@ -61,9 +61,11 @@ export function Composer({
 
   return (
     <div className="mx-auto w-full max-w-[54rem] px-4 pb-4 sm:px-6">
-      {/* The focus ring rides the whole panel. Setting `border-color` instead
-          landed the amber on the internal divider and left the outer edge
-          grey, which read as a stray underline. */}
+      {/* The focus ring rides the whole panel, and the textarea inside it is
+          `outline-none` on purpose: the field fills the panel, so its own
+          2px offset outline had nowhere to go but the sliver below it, and
+          the only segment `overflow-hidden` did not clip read as a solid
+          coloured line ruled under the input. One control, one ring. */}
       <div className="panel relative overflow-hidden transition-shadow focus-within:border-amber focus-within:shadow-[0_0_0_3px_var(--focus-ring)]">
         <textarea
           ref={ref}

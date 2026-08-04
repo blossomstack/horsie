@@ -227,11 +227,11 @@ function GithubMcpToggle() {
       {gh && (
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
           {gh.enabled ? (
-            <span className="chip !py-0 text-[10px] text-lamp-ok">
+            <span className="chip !py-0 text-[0.625rem] text-lamp-ok">
               enabled · {gh.toolCount ?? 0} tools
             </span>
           ) : (
-            <span className="chip !py-0 text-[10px] text-faint">not tested</span>
+            <span className="chip !py-0 text-[0.625rem] text-faint">not tested</span>
           )}
           {gh.lastError && (
             <span className="truncate text-red-ink" title={gh.lastError}>
@@ -507,14 +507,14 @@ function McpServerRow({
         {!isNew && (
           <div className="flex flex-wrap items-center gap-2 text-xs">
             {server.enabled ? (
-              <span className="chip !py-0 text-[10px] text-lamp-ok">
+              <span className="chip !py-0 text-[0.625rem] text-lamp-ok">
                 enabled · {server.toolCount ?? 0} tools
               </span>
             ) : (
-              <span className="chip !py-0 text-[10px] text-faint">not tested</span>
+              <span className="chip !py-0 text-[0.625rem] text-faint">not tested</span>
             )}
             {authKind === "OAuth" && connected && (
-              <span className="chip !py-0 text-[10px] text-lamp-ok">
+              <span className="chip !py-0 text-[0.625rem] text-lamp-ok">
                 authorized
               </span>
             )}
@@ -615,7 +615,7 @@ function FieldRow({ k, v }: { k: string; v: string }) {
       {/* Selectable, not truncated: these paths exist to be copied into a
           terminal, and an ellipsis makes that impossible. */}
       <dd
-        className="min-w-0 font-mono text-[11px] break-all text-legend select-all"
+        className="min-w-0 font-mono text-[0.6875rem] break-all text-legend select-all"
         title={v}
       >
         {v}

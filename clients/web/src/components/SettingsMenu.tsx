@@ -67,7 +67,7 @@ export function SettingsMenu() {
                 {values[def.key] && <Check size={11} strokeWidth={3} />}
               </span>
               <span className="min-w-0">
-                <span className="block text-[13px] text-legend">
+                <span className="block text-[0.8125rem] text-legend">
                   {def.label}
                 </span>
                 <span className="mt-0.5 block text-xs leading-snug text-faint">

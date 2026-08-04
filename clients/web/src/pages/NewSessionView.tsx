@@ -51,7 +51,10 @@ export function NewSessionView() {
         it, and a lone control group at the bottom of an empty pane reads as a
         page that failed to load. Centred, it reads as a page waiting for you.
       */}
-      <div className="flex min-h-0 flex-1 flex-col justify-center overflow-y-auto">
+      <div
+        className="flex min-h-0 flex-1 flex-col justify-center overflow-y-auto"
+        data-popover-boundary
+      >
         {/* The visible heading is gone by design, but the route still needs
             one — without it this page announces as untitled. */}
         <h1 className="sr-only">New session</h1>

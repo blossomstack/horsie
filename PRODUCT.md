@@ -40,8 +40,8 @@ Confirmed functionality the redesign must preserve:
 - **Sessions** — list with live status (idle / updating / error), search, create, open, stop mid-turn, delete. Titles auto-generate. History paginates: recent messages load instantly, older ones load on scroll-up.
 - **Transcript** — grouped assistant turns; streaming reply text; collapsible tool-call rows exposing raw input and output; thinking blocks shown after a turn completes (hidden by default, toggleable); a work-group row condensing multi-step activity; interactive `ask_user` cards (clickable / multi-select) answered inline.
 - **Session config** — an inline toolbar (not a modal) for model, runtime vendor, repos + refs, plugins/skills, MCP servers. A new session is a client-side draft until the first message is sent.
-- **Side panels** — cumulative token usage (a running total, explicitly *not* a context-fullness meter) and a live agent task list that appears only once the agent uses the tool and collapses to a completed/total badge.
-- **Settings** — 6 pages (models, runtimes, skills, memory, integrations, account) split by save boundary, because `SettingsUpdate` fields replace per-collection. Plus admin model cards and agent presets.
+- **Side panels** — cumulative token usage (a running total, explicitly *not* a context-fullness meter) and a live agent task list, always reachable from a header key that lights once the agent has made a plan.
+- **Settings** — 7 pages (models, runtimes, skills, memory, integrations, appearance, account) split by save boundary, because `SettingsUpdate` fields replace per-collection. Appearance is the one that is per-browser rather than server-side: theme, skin, text size, transcript switches. Plus admin model cards and agent presets.
 - **Auth** — login, device approval, password change.
 
 Technical constraints:

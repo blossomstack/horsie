@@ -161,10 +161,10 @@ function BundleRow({ bundle }: { bundle: PluginView }) {
               {bundle.name}
             </span>
             {bundle.version && (
-              <span className="chip !py-0 text-[10px]">{bundle.version}</span>
+              <span className="chip !py-0 text-[0.625rem]">{bundle.version}</span>
             )}
             {bundle.hasHooks && (
-              <span className="chip !py-0 flex items-center gap-1 text-[10px]">
+              <span className="chip !py-0 flex items-center gap-1 text-[0.625rem]">
                 <Webhook size={11} /> hooks
               </span>
             )}
@@ -172,7 +172,7 @@ function BundleRow({ bundle }: { bundle: PluginView }) {
           {bundle.description && (
             <p className="mt-0.5 text-xs text-dim">{bundle.description}</p>
           )}
-          <p className="mt-0.5 text-[11px] text-faint">
+          <p className="mt-0.5 text-[0.6875rem] text-faint">
             {bundle.skillCount} skill{bundle.skillCount === 1 ? "" : "s"}
           </p>
         </div>

@@ -30,7 +30,7 @@ function SessionRow({ s }: { s: SessionSummary }) {
     >
       <StatusDot status={s.status} className="mt-[7px]" />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] leading-5">{title}</span>
+        <span className="block truncate text-[0.8125rem] leading-5">{title}</span>
         <span className="legend mt-0.5 block truncate">
           {meta.label !== "—" ? `${meta.label} · ` : ""}
           {relativeTime(s.createdAt)}
@@ -59,7 +59,7 @@ function PrimaryLink({
       data-testid={testId}
       className={({ isActive }) =>
         cn(
-          "flex items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 py-2 text-[13px] transition-colors",
+          "flex items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 py-2 text-[0.8125rem] transition-colors",
           isActive
             ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
             : "text-dim hover:bg-raised hover:text-legend",
@@ -116,11 +116,11 @@ export function Sidebar() {
       <div className="flex h-[3.25rem] shrink-0 items-center gap-2.5 border-b px-4">
         <span
           aria-hidden
-          className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-orange font-mono text-[13px] font-bold text-orange-ink shadow-[var(--cap-lift)]"
+          className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-orange font-mono text-[0.8125rem] font-bold text-orange-ink shadow-[var(--cap-lift)]"
         >
           h
         </span>
-        <span className="font-mono text-[13px] font-semibold tracking-[0.16em] text-legend">
+        <span className="font-mono text-[0.8125rem] font-semibold tracking-[0.16em] text-legend">
           HORSIE
         </span>
         {/* Only the fault state earns a place here. "N running" restated what
@@ -176,13 +176,13 @@ export function Sidebar() {
       >
         {isLoading && <div className="legend px-2.5 py-6">Loading…</div>}
         {isError && (
-          <p className="px-2.5 py-6 text-[13px] leading-relaxed text-red-ink">
+          <p className="px-2.5 py-6 text-[0.8125rem] leading-relaxed text-red-ink">
             Can’t reach the server. Check that horsie-server is running, then
             reload.
           </p>
         )}
         {!isLoading && !isError && sessions?.length === 0 && (
-          <p className="px-2.5 py-8 text-[13px] leading-relaxed text-faint">
+          <p className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint">
             No sessions yet. Press <span className="text-legend">+</span> to
             start one.
           </p>

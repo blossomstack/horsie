@@ -23,6 +23,7 @@ import {
   useAgent,
   useStopSession,
 } from "../hooks/useSessions";
+import { cn } from "../lib/cn";
 import { sessionTitle } from "../lib/format";
 import { statusMeta } from "../lib/status";
 
@@ -240,7 +241,13 @@ export function SessionView() {
       }}
     >
       <div className="relative flex h-full">
-        <div className="flex h-full min-w-0 flex-1 flex-col">
+        {/* The column a config menu has to stay inside. Overflow cannot say
+            this — nothing between here and the app shell clips — so the
+            boundary is declared. */}
+        <div
+          className="flex h-full min-w-0 flex-1 flex-col"
+          data-popover-boundary
+        >
           {/* One row, at the same 3.25rem as the rail and task-panel headers,
               so the three columns read as one instrument face. Only live state
               earns a place here: what this is, what it is doing, and how full
@@ -275,10 +282,22 @@ export function SessionView() {
                 sessionTotal={detail?.usageTotal}
               />
               {/* The plan is always reachable, so a session with no list
-                  still has somewhere for one to appear. The badge reports
-                  progress without the panel having to be open. */}
+                  still has somewhere for one to appear. That there IS a plan
+                  is the control's own colour, not a badge stuck on it — a
+                  two-digit fraction in the corner of a 2rem key stretched
+                  outside the key and pushed the row out of line with the two
+                  column headers beside it. The count is in the tooltip, and
+                  the panel one click away has it in full. */}
               <button
-                className="key-icon relative"
+                className={cn(
+                  "key-icon",
+                  // Three states have to stay apart, and `bg-raised` is
+                  // already what hover paints: a plan exists (ring + full
+                  // ink), the panel is open (filled), hovered (filled).
+                  tasks.length > 0 &&
+                    "!text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]",
+                  tasksOpen && "bg-raised !text-legend",
+                )}
                 onClick={() => setTasksOpen(!tasksOpen)}
                 aria-pressed={tasksOpen}
                 title={
@@ -286,18 +305,15 @@ export function SessionView() {
                     ? `${tasksOpen ? "Hide" : "Show"} the plan — ${tasksDone}/${tasks.length} done`
                     : `${tasksOpen ? "Hide" : "Show"} the plan`
                 }
-                aria-label="Toggle the agent's plan"
+                aria-label={
+                  tasks.length
+                    ? `Toggle the agent's plan — ${tasksDone} of ${tasks.length} done`
+                    : "Toggle the agent's plan"
+                }
                 data-testid="task-list-toggle"
+                data-has-plan={tasks.length > 0 ? "true" : undefined}
               >
                 <ListTodo size={15} aria-hidden />
-                {tasks.length > 0 && (
-                  <span
-                    className="readout absolute -right-0.5 -top-0.5 text-[9px] leading-none"
-                    data-testid="task-list-badge"
-                  >
-                    {tasksDone}/{tasks.length}
-                  </span>
-                )}
               </button>
               <SettingsMenu />
               <button

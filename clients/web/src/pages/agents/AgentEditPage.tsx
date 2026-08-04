@@ -80,7 +80,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
         </h1>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto" data-popover-boundary>
         <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6 sm:px-6">
           <section className="panel space-y-4 p-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

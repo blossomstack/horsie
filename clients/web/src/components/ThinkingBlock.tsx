@@ -24,7 +24,7 @@ export function ThinkingBlock({ text }: { text: string }) {
       </button>
       {open && (
         <pre
-          className="screen mt-1.5 ml-[26px] overflow-x-auto px-2.5 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-faint"
+          className="screen mt-1.5 ml-[26px] overflow-x-auto px-2.5 py-2 font-mono text-[0.6875rem] leading-relaxed whitespace-pre-wrap text-faint"
           data-testid="thinking-content"
         >
           {text}

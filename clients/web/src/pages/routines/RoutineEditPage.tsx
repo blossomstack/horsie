@@ -161,7 +161,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                 </option>
               ))}
             </select>
-            <span className="mt-1 block text-[11px] text-faint">
+            <span className="mt-1 block text-[0.6875rem] text-faint">
               The routine runs with this agent’s runtime, model, repos, skills
               and memory. Edit those on the Agents page.
             </span>
@@ -240,7 +240,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                 Timer active
               </label>
             )}
-            <p className="text-[11px] text-faint">
+            <p className="text-[0.6875rem] text-faint">
               The run button and the API work either way — pausing only stops
               the timer. Runs are not prevented from overlapping, so leave the
               interval room to finish.

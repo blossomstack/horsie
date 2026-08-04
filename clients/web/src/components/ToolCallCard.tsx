@@ -78,11 +78,11 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
             <Wrench size={12} className="text-faint" aria-hidden />
           )}
         </span>
-        <span className="shrink-0 font-mono text-[11px] font-medium tracking-[0.02em] text-legend">
+        <span className="shrink-0 font-mono text-[0.6875rem] font-medium tracking-[0.02em] text-legend">
           {call.name}
         </span>
         {preview && (
-          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">
+          <span className="min-w-0 flex-1 truncate font-mono text-[0.6875rem] text-faint">
             {preview}
           </span>
         )}
@@ -98,7 +98,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
           {inputStr && (
             <div>
               <span className="legend">Input</span>
-              <pre className="screen mt-1 overflow-x-auto px-2.5 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-dim">
+              <pre className="screen mt-1 overflow-x-auto px-2.5 py-2 font-mono text-[0.6875rem] leading-relaxed whitespace-pre-wrap text-dim">
                 {inputStr}
               </pre>
             </div>
@@ -111,7 +111,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
               <pre
                 data-testid="tool-call-output"
                 className={cn(
-                  "screen mt-1 max-h-72 overflow-auto px-2.5 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap",
+                  "screen mt-1 max-h-72 overflow-auto px-2.5 py-2 font-mono text-[0.6875rem] leading-relaxed whitespace-pre-wrap",
                   call.isError ? "text-red-ink" : "text-dim",
                 )}
               >

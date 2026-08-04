@@ -109,7 +109,7 @@ export function TurnActions({
 
       {atMs !== undefined && (
         <span
-          className="readout ml-0.5 text-[10px] tabular-nums"
+          className="readout ml-0.5 text-[0.625rem] tabular-nums"
           data-testid="turn-time"
           title={new Date(atMs).toLocaleString()}
         >
