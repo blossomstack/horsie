@@ -126,5 +126,6 @@ pub async fn build_session_spec(
         vendor: vendor.unwrap_or_else(|| config.default_vendor()),
         plugins,
         origin,
+        workflow: None,
     })
 }

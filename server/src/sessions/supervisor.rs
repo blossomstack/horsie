@@ -744,6 +744,7 @@ mod tests {
             vendor: "mock".into(),
             plugins: vec![],
             origin: crate::sessions::spec::SessionOrigin::User,
+            workflow: None,
         }
     }
 

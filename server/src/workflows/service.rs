@@ -196,12 +196,24 @@ impl WorkflowService {
                 }
                 // A condition reads `output`; with no schema the step ends its
                 // turn with plain text and there is nothing to read.
-                if t.condition.is_some() && step.output_schema.is_none() {
-                    return Err(WorkflowError::Invalid(format!(
-                        "step '{}' has a conditional transition but no output schema — \
-                         a condition reads the step's structured output",
-                        step.name
-                    )));
+                if let Some(condition) = &t.condition {
+                    if step.output_schema.is_none() {
+                        return Err(WorkflowError::Invalid(format!(
+                            "step '{}' has a conditional transition but no output schema — \
+                             a condition reads the step's structured output",
+                            step.name
+                        )));
+                    }
+                    // Parseability only: whether it is *true* depends on output
+                    // this workflow has not produced yet. Worth checking here
+                    // because an unparseable expression unwinds the evaluator,
+                    // and catching it at save beats failing a run halfway.
+                    if let Err(e) =
+                        crate::sessions::workflow::eval_condition(condition, &serde_json::json!({}))
+                        && e.contains("not a valid expression")
+                    {
+                        return Err(WorkflowError::Invalid(format!("step '{}': {e}", step.name)));
+                    }
                 }
             }
             // Checked here so a workflow cannot be saved broken; resolved
@@ -401,6 +413,37 @@ mod tests {
             s.create(i, 1).await,
             Err(WorkflowError::Invalid(m)) if m.contains("no output schema")
         ));
+    }
+
+    /// An unparseable expression unwinds the evaluator at run time. Catching
+    /// it at save turns a run that dies halfway into a 422 on the form.
+    #[tokio::test]
+    async fn an_unparseable_condition_is_refused() {
+        let s = service().await;
+        let mut i = input("a");
+        i.steps[0].output_schema = Some(serde_json::json!({"type": "object"}));
+        i.steps[0].transitions = Some(vec![WorkflowTransition {
+            to: "fix".into(),
+            condition: Some("!!!".into()),
+        }]);
+        assert!(matches!(
+            s.create(i, 1).await,
+            Err(WorkflowError::Invalid(m)) if m.contains("not a valid expression")
+        ));
+    }
+
+    /// A condition that merely reads a field the probe has no value for is
+    /// fine: whether it holds depends on output no run has produced yet.
+    #[tokio::test]
+    async fn a_condition_reading_an_absent_field_is_allowed() {
+        let s = service().await;
+        let mut i = input("a");
+        i.steps[0].output_schema = Some(serde_json::json!({"type": "object"}));
+        i.steps[0].transitions = Some(vec![WorkflowTransition {
+            to: "fix".into(),
+            condition: Some("output.severity == \"p0\"".into()),
+        }]);
+        assert!(s.create(i, 1).await.is_ok());
     }
 
     #[tokio::test]

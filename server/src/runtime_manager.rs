@@ -309,6 +309,7 @@ mod tests {
             vendor: vendor.into(),
             plugins: vec![],
             origin: crate::sessions::spec::SessionOrigin::User,
+            workflow: None,
         }
     }
 

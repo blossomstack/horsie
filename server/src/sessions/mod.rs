@@ -17,6 +17,7 @@ pub mod spec;
 pub mod subagents;
 pub mod supervisor;
 pub mod title_tool;
+pub mod workflow;
 
 /// Live broadcast frames for one session's SSE stream — session-scoped current
 /// values only. A transcript belongs to an agent, not a session, so it is not

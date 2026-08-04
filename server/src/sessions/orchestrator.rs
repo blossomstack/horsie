@@ -9,6 +9,7 @@ use crate::sessions::session_actor::{AgentKey, SessionState};
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::subagents::SubAgentParent;
 use horsie_models::agent::ToolResultInput;
+use serde_json::Value;
 use uuid::Uuid;
 
 /// Separator between messages merged into one turn.
@@ -35,6 +36,22 @@ pub struct TurnInput {
 /// journal the action, so the actor never re-derives a decision.
 #[derive(Debug, Clone)]
 pub enum AgentAction {
+    /// Begin one execution of one workflow step. Carries everything needed to
+    /// both spawn the agent and journal the log entry, so the actor never
+    /// re-derives a decision.
+    StartStep {
+        index: u32,
+        step: String,
+        agent: Uuid,
+        attempt: u32,
+        from: Option<u32>,
+        via: Option<String>,
+        input: String,
+    },
+    /// The run is over and succeeded, carrying the last step's output.
+    Finish { output: Value },
+    /// The run is over and failed.
+    Fail { error: String },
     StartTurn {
         who: AgentKey,
         input: TurnInput,
@@ -194,7 +211,10 @@ mod tests {
             input,
             consumed,
             ..
-        } = only_turn(&with_inbox(&["hello"]));
+        } = only_turn(&with_inbox(&["hello"]))
+        else {
+            panic!("an interactive session starts turns, not steps");
+        };
         assert_eq!(who, AgentKey::Main);
         assert_eq!(input.message.as_deref(), Some("hello"));
         assert_eq!(consumed, vec!["m0".to_string()]);
@@ -206,7 +226,10 @@ mod tests {
     fn several_queued_messages_merge_into_one_turn() {
         let AgentAction::StartTurn {
             input, consumed, ..
-        } = only_turn(&with_inbox(&["a", "b"]));
+        } = only_turn(&with_inbox(&["a", "b"]))
+        else {
+            panic!("an interactive session starts turns, not steps");
+        };
         assert_eq!(input.message.as_deref(), Some("a\n\nb"));
         assert_eq!(consumed.len(), 2);
     }
@@ -239,7 +262,9 @@ mod tests {
         s.status = SessionStatus::AwaitingInput {
             asks: s.pending_asks.clone(),
         };
-        let AgentAction::StartTurn { input, .. } = only_turn(&s);
+        let AgentAction::StartTurn { input, .. } = only_turn(&s) else {
+            panic!("an interactive session starts turns, not steps");
+        };
         assert_eq!(input.results.len(), 1);
         assert_eq!(input.results[0].tool_call_id, "call_1");
         assert!(input.results[0].is_error);
