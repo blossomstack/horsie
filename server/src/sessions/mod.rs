@@ -80,4 +80,9 @@ pub enum UserMessageError {
     NotFound,
     #[error("session is unrecoverable: {0}")]
     Unrecoverable(String),
+    /// This session kind takes no messages — a workflow run works from its
+    /// definition. Comes from `Orchestrator::accepts`, so the rule lives in one
+    /// place rather than in a handler guard.
+    #[error("{0}")]
+    Rejected(String),
 }

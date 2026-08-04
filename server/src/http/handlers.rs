@@ -390,6 +390,7 @@ pub async fn send_message(
         Ok(message_id) => Ok((StatusCode::ACCEPTED, Json(SessionAck { message_id }))),
         Err(UserMessageError::NotFound) => Err(Api::not_found("no such session")),
         Err(UserMessageError::Unrecoverable(reason)) => Err(Api::conflict("unrecoverable", reason)),
+        Err(UserMessageError::Rejected(why)) => Err(Api::conflict("not-a-conversation", why)),
     }
 }
 

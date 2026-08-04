@@ -12,12 +12,14 @@
 
 mod driver;
 pub mod spec;
+mod toolbox;
 
 pub use driver::{WorkflowOrchestrator, eval_condition, next_transition};
 pub use spec::{
     DEFAULT_MAX_STEPS, TransitionSpec, WorkflowRunSpec, WorkflowStepSpec, compose_step_input,
     output_as_input,
 };
+pub use toolbox::StepConcludeToolbox;
 
 use crate::sessions::subagents::SubAgentTree;
 use serde::{Deserialize, Serialize};

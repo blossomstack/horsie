@@ -229,6 +229,15 @@ pub fn app(state: AppState) -> Router {
                 .put(workflows::replace_workflow)
                 .delete(workflows::delete_workflow),
         )
+        .route(
+            "/api/workflows/:name/runs",
+            get(workflows::list_runs).post(workflows::start_run),
+        )
+        .route("/api/sessions/:id/workflow", get(workflows::get_run_graph))
+        .route(
+            "/api/sessions/:id/workflow/retry",
+            post(workflows::retry_step),
+        )
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
         .route("/api/auth/status", get(auth::status))
         .route("/api/auth/login", post(auth::login))

@@ -62,9 +62,12 @@ impl WorkflowOrchestrator {
 
 impl Orchestrator for WorkflowOrchestrator {
     fn next_actions(&self, state: &SessionState) -> Vec<AgentAction> {
-        let Some(run) = self.run(state) else {
-            return Vec::new();
-        };
+        // A run that has not folded a `StepStarted` yet still reads as
+        // `Interactive` — `initial_state` is static and cannot see the spec.
+        // This driver is only ever installed on a run, so an absent run means
+        // "nothing has happened yet", not "this is a conversation".
+        let empty = WorkflowRunState::default();
+        let run = self.run(state).unwrap_or(&empty);
         // A step in flight, a park, a suspension and a terminal run all mean
         // the same thing here: nothing starts by itself. Only a retry moves a
         // suspended run, and only an answer moves a parked one.
@@ -528,9 +531,18 @@ mod tests {
         assert!(d.accepts(SessionCommandKind::Answer).is_ok());
     }
 
+    /// The driver is installed only on a run, so a state that has folded no
+    /// step yet means the run is about to begin — not that it is a
+    /// conversation.
     #[test]
-    fn an_interactive_state_yields_nothing() {
+    fn a_state_with_no_run_folded_yet_starts_the_first_step() {
         let (d, _) = driver();
-        assert!(d.next_actions(&SessionState::default()).is_empty());
+        let actions = d.next_actions(&SessionState::default());
+        assert_eq!(actions.len(), 1);
+        let AgentAction::StartStep { step, index, .. } = &actions[0] else {
+            panic!("expected the start step, got {:?}", actions[0]);
+        };
+        assert_eq!(step, "triage");
+        assert_eq!(*index, 0);
     }
 }

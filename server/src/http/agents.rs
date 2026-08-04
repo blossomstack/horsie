@@ -160,6 +160,7 @@ pub async fn invoke_agent(
     .map_err(|e| match e {
         UserMessageError::NotFound => Api::not_found("no such session"),
         UserMessageError::Unrecoverable(reason) => Api::conflict("unrecoverable", reason),
+        UserMessageError::Rejected(why) => Api::conflict("not-a-conversation", why),
     })?;
     let rec = SessionRecord { spec, created_at };
     Ok((
