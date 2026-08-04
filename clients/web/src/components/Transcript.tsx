@@ -148,7 +148,11 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
       data-testid="message"
       data-role={msg.role}
       data-queued={msg.queued ? "true" : undefined}
-      actions={settled ? <TurnActions atMs={msg.createdAtMs} /> : undefined}
+      actions={
+        settled ? (
+          <TurnActions atMs={msg.createdAtMs} plainText={msg.text} />
+        ) : undefined
+      }
     >
       <div className="rounded-[var(--radius-control)] bg-raised px-3.5 py-2.5 shadow-[inset_0_0_0_1px_var(--row-ring)] text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
         {msg.text}
