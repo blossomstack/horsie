@@ -118,6 +118,12 @@ pub enum AgentCommand {
         events: Vec<AgentDomainEvent>,
         ack: tokio::sync::oneshot::Sender<Result<(), horsie_actor::JournalError>>,
     },
+    /// Plugin hooks ran against one of this agent's tool calls. A `tell` with no
+    /// ack: nothing waits on an audit trail, and recording what a hook did must
+    /// never be able to slow the call it describes.
+    HooksRan {
+        records: Vec<horsie_models::runtime::HookRecord>,
+    },
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
     /// Arm a timer; replies with the new timer id once recorded.
@@ -233,6 +239,19 @@ pub enum AgentDomainEvent {
         /// this variant rebuilds its `Message` in `apply_event`, so a recovered
         /// transcript would otherwise stamp every past tool result with the
         /// moment of recovery.
+        at_ms: u64,
+    },
+    /// A plugin hook ran against a tool call this agent made. Journaled beside
+    /// the call's own `ToolComplete` because a hook changes what the agent did,
+    /// and that must be auditable rather than invisible.
+    HookRan {
+        record: horsie_models::runtime::HookRecord,
+        /// How many records were already recorded against this same tool call.
+        /// Journaled rather than recomputed at fold time so the id is a fact of
+        /// the log: the live broadcast derives the entry from the event alone
+        /// and would otherwise have to guess, giving the stream different
+        /// cursors than `/history` for a call with more than one hook.
+        seq: usize,
         at_ms: u64,
     },
     RunComplete {
@@ -409,7 +428,47 @@ pub struct AgentStateView {
     pub context_tokens: u32,
 }
 
+/// Build the transcript entry for one hook record.
+///
+/// The id is derived, never generated: `hook:{tool_call_id}:{n}` where `n` counts
+/// the records already recorded against that same call. Journal replay therefore
+/// reproduces the ids it produced live, which a uuid could not — and a recovered
+/// transcript must page with the same cursors as the one it replaced.
+pub fn hook_entry(
+    record: horsie_models::runtime::HookRecord,
+    seq: usize,
+    at_ms: u64,
+) -> horsie_agentcore::HookEntry {
+    horsie_agentcore::HookEntry {
+        id: hook_entry_id(&record.tool_call_id, seq),
+        created_at_ms: at_ms,
+        record,
+    }
+}
+
+/// The cursor id of the `seq`-th hook record against `tool_call_id`.
+///
+/// One function, two callers — the fold and the live broadcast — because the
+/// stream and `/history` must name the same entry the same way.
+#[must_use]
+pub fn hook_entry_id(tool_call_id: &str, seq: usize) -> String {
+    format!("hook:{tool_call_id}:{seq}")
+}
+
 impl AgentState {
+    /// How many hook records this transcript already holds for `tool_call_id`.
+    /// The next one's `seq`.
+    #[must_use]
+    pub fn hook_records_for(&self, tool_call_id: &str) -> usize {
+        self.history
+            .iter()
+            .filter(|e| match e {
+                HistoryEntry::Hook(h) => h.record.tool_call_id == tool_call_id,
+                HistoryEntry::Llm(_) => false,
+            })
+            .count()
+    }
+
     /// What the model is allowed to see: the transcript with every non-LLM entry
     /// dropped.
     ///
@@ -1115,6 +1174,11 @@ impl EventSourcedActor for AgentActor {
             AgentDomainEvent::MessageComplete { message } => {
                 state.history.push(HistoryEntry::Llm(message));
             }
+            AgentDomainEvent::HookRan { record, seq, at_ms } => {
+                state
+                    .history
+                    .push(HistoryEntry::Hook(hook_entry(record, seq, at_ms)));
+            }
             AgentDomainEvent::ToolComplete {
                 tool_call_id,
                 output,
@@ -1215,6 +1279,25 @@ impl EventSourcedActor for AgentActor {
                     message: agent_input.to_message(now_ms()),
                 });
                 self.start_run(agent_input, ctx, history);
+                CommandEffect::persist(events)
+            }
+            AgentCommand::HooksRan { records } => {
+                let at_ms = now_ms();
+                // Counted here, against the state as it stands, and then carried
+                // on the event — a batch may hold several records for one call,
+                // so the running count has to advance within the batch too.
+                let mut seen = std::collections::HashMap::<String, usize>::new();
+                let events = records
+                    .into_iter()
+                    .map(|record| {
+                        let next = seen
+                            .entry(record.tool_call_id.clone())
+                            .or_insert_with(|| state.hook_records_for(&record.tool_call_id));
+                        let seq = *next;
+                        *next += 1;
+                        AgentDomainEvent::HookRan { record, seq, at_ms }
+                    })
+                    .collect();
                 CommandEffect::persist(events)
             }
             AgentCommand::PersistProgress { events, ack } => {

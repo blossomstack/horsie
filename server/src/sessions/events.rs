@@ -108,6 +108,13 @@ fn agent_frame(event: &AgentDomainEvent) -> Option<AgentFrame> {
                 *at_ms,
             )),
         }),
+        // A hook record is a transcript append like any other, which is what
+        // makes the live stream and `/history` one design rather than two: a
+        // client that accumulates appends ends up with the same transcript a
+        // reload would fetch, hook rows included.
+        AgentDomainEvent::HookRan { record, seq, at_ms } => Some(AgentFrame::Appended {
+            entry: HistoryEntry::Hook(horsie_workflow::hook_entry(record.clone(), *seq, *at_ms)),
+        }),
         AgentDomainEvent::RunComplete {
             usage,
             iterations,

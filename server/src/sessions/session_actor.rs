@@ -117,9 +117,13 @@ pub enum SessionCommand {
     PrepareOffload { reply: oneshot::Sender<bool> },
     /// Internal: an agent reported its terminal outcome.
     AgentOutcome(AgentOutcome),
-    /// Plugin hooks ran against a tool call. Journalled for the session's audit
-    /// trail; carries no reply because nothing waits on it.
-    HooksRan(Vec<HookRecord>),
+    /// Plugin hooks ran against one agent's tool call. Pure routing: the session
+    /// persists nothing here, it forwards to the agent whose transcript the
+    /// records belong in. Carries no reply because nothing waits on it.
+    HooksRan {
+        key: AgentKey,
+        records: Vec<HookRecord>,
+    },
     /// Internal: post-recovery reconciliation of a turn the process died in.
     ReconcileInterrupted,
     /// Set the session title from the built-in title tool.
@@ -222,12 +226,6 @@ pub enum SessionDomainEvent {
     /// inferred, so the transition is in the log like every other one.
     TurnInterrupted {
         at_ms: u64,
-    },
-    /// A plugin hook ran against a tool call. Journalled so the user can see
-    /// what a plugin blocked or rewrote — hooks change what the agent does, and
-    /// that must be auditable rather than invisible.
-    HookRan {
-        record: HookRecord,
     },
     /// Terminal: this session can never run again.
     SessionFailed {
@@ -485,6 +483,14 @@ impl SessionAgents {
         }
     }
 
+    /// The agent registered under `key`, if it is still resident.
+    fn get(&self, key: AgentKey) -> Option<&ActorRef<AgentCommand>> {
+        match key {
+            AgentKey::Main => self.main(),
+            AgentKey::Sub(id) | AgentKey::Step(id) => self.sub(id),
+        }
+    }
+
     fn insert_sub(&mut self, id: Uuid, agent: ActorRef<AgentCommand>) {
         match self {
             Self::Interactive { subs, .. } => {
@@ -539,17 +545,6 @@ pub struct SessionActor {
 }
 
 impl SessionActor {
-    /// One journalled event per hook record, in the order the hooks ran.
-    ///
-    /// Split out so the mapping is testable without standing up an actor: this
-    /// is the whole of what a hook contributes to the session's history.
-    fn fold_hooks(records: Vec<HookRecord>) -> Vec<SessionDomainEvent> {
-        records
-            .into_iter()
-            .map(|record| SessionDomainEvent::HookRan { record })
-            .collect()
-    }
-
     /// `frames` is owned by the supervisor and outlives this actor: a session
     /// that unloads under a watching client must not disconnect it.
     pub fn new(
@@ -1684,12 +1679,22 @@ struct SessionParent {
 /// must never be able to slow the tool call it describes.
 struct SessionHookSink {
     target: ActorRef<SessionCommand>,
+    /// Which agent's transcript these records belong in. A subagent's hooks are
+    /// its own; without this they would all pile into one log with no way to
+    /// tell whose call they guarded.
+    key: AgentKey,
 }
 
 #[async_trait]
 impl horsie_runtime_client::HookSink for SessionHookSink {
     async fn record(&self, hooks: Vec<HookRecord>) {
-        let _ = self.target.tell(SessionCommand::HooksRan(hooks)).await;
+        let _ = self
+            .target
+            .tell(SessionCommand::HooksRan {
+                key: self.key,
+                records: hooks,
+            })
+            .await;
     }
 }
 
@@ -1749,6 +1754,18 @@ enum SessionAgentKind {
     Main,
     Sub(Uuid),
     Step(Uuid),
+}
+
+impl SessionAgentKind {
+    /// The key this agent is registered under on the session. One vocabulary:
+    /// what the provider knows itself as is what the session looks it up by.
+    fn agent_key(&self) -> AgentKey {
+        match self {
+            Self::Main => AgentKey::Main,
+            Self::Sub(id) => AgentKey::Sub(*id),
+            Self::Step(id) => AgentKey::Step(*id),
+        }
+    }
 }
 
 /// The runtime client an agent runs with. Subagents share the session's
@@ -1878,6 +1895,7 @@ impl ContextProvider for SessionContextProvider {
         // visible to the user rather than silent.
         let runtime_client = runtime_client.with_hook_sink(Arc::new(SessionHookSink {
             target: self.session.clone(),
+            key: self.kind.agent_key(),
         }));
 
         if broadcast {
@@ -2008,9 +2026,6 @@ impl EventSourcedActor for SessionActor {
 
     fn apply_event(mut state: SessionState, event: SessionDomainEvent) -> SessionState {
         match event {
-            // Purely a record for the user: hooks change what the agent did,
-            // not what the session *is*, so nothing here folds into state.
-            SessionDomainEvent::HookRan { .. } => {}
             SessionDomainEvent::MessageQueued { id, text, at_ms } => {
                 state.inbox.push(InboxMessage { id, text, at_ms });
             }
@@ -2318,7 +2333,16 @@ impl EventSourcedActor for SessionActor {
             SessionCommand::RetryStep { index, reply } => {
                 self.on_retry_step(state, index, reply, ctx).await
             }
-            SessionCommand::HooksRan(records) => CommandEffect::persist(Self::fold_hooks(records)),
+            SessionCommand::HooksRan { key, records } => {
+                // The agent owns its own transcript, so the records go to it
+                // rather than into the session's log. An agent that has already
+                // gone is not an error: the records describe a call it made
+                // before it left, and there is nothing left to tell.
+                if let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)) {
+                    let _ = agent.tell(AgentCommand::HooksRan { records }).await;
+                }
+                CommandEffect::none()
+            }
             SessionCommand::SubAgentTree { reply } => {
                 let tree = state
                     .mode
@@ -3086,63 +3110,6 @@ mod tests {
             panic!("an interactive session starts turns, not steps");
         };
         assert_eq!(consumed, &vec!["m2".to_string()]);
-    }
-
-    fn hook_record(plugin: &str, blocked: bool) -> HookRecord {
-        HookRecord {
-            plugin: plugin.to_string(),
-            event: "PreToolUse".to_string(),
-            tool: "write_file".to_string(),
-            tool_call_id: "tc1".to_string(),
-            duration_ms: 12,
-            blocked,
-            reason: blocked.then(|| "not allowed".to_string()),
-            failed: false,
-            input_before: None,
-            input_after: None,
-            output_before: None,
-            output_after: None,
-            additional_context: None,
-            system_message: None,
-        }
-    }
-
-    /// Hook records are journalled verbatim, one event each, so the session's
-    /// audit trail shows every intervention a plugin made.
-    #[test]
-    fn hook_records_become_one_journalled_event_each() {
-        let events = SessionActor::fold_hooks(vec![
-            hook_record("guard", true),
-            hook_record("linter", false),
-        ]);
-        assert_eq!(events.len(), 2);
-        let SessionDomainEvent::HookRan { record } = &events[0] else {
-            panic!("expected HookRan, got {:?}", events[0]);
-        };
-        assert_eq!(record.plugin, "guard");
-        assert!(record.blocked);
-        assert_eq!(record.reason.as_deref(), Some("not allowed"));
-
-        let SessionDomainEvent::HookRan { record } = &events[1] else {
-            panic!("expected HookRan, got {:?}", events[1]);
-        };
-        assert_eq!(record.plugin, "linter");
-        assert!(!record.blocked, "a no-op hook is still recorded");
-    }
-
-    /// Folding a hook record must not disturb session state — it is a record of
-    /// what the agent did, not a change to what the session is.
-    #[test]
-    fn a_hook_record_does_not_alter_session_state() {
-        let before = SessionState::default();
-        let after = SessionActor::apply_event(
-            before.clone(),
-            SessionDomainEvent::HookRan {
-                record: hook_record("guard", true),
-            },
-        );
-        assert_eq!(after.status, before.status);
-        assert_eq!(after.inbox.len(), before.inbox.len());
     }
 
     #[tokio::test]

@@ -1,4 +1,12 @@
-#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+// `large_enum_variant`: `HistoryEntry::Hook` carries a whole `HookRecord` (a
+// dozen optional strings) and dwarfs `Llm(Message)`. Both types are
+// fluorite-generated, so boxing the variant isn't available here, and a
+// transcript entry is moved once per append — not on a hot path.
+#[allow(
+    clippy::doc_markdown,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant
+)]
 pub mod agent {
     include!(concat!(env!("OUT_DIR"), "/agent/mod.rs"));
 
@@ -87,7 +95,13 @@ pub mod workflow {
 // (workflow + caps + hackamore policy) and is intrinsically larger than the other
 // control variants. The enum is fluorite-generated, so boxing the variant isn't
 // available here; the size is acceptable for a one-shot control message.
-#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+// `large_enum_variant` here too: `AgentStreamEvent::Appended` carries a
+// `HistoryEntry`, so it inherits the imbalance described above.
+#[allow(
+    clippy::doc_markdown,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant
+)]
 pub mod session {
     include!(concat!(env!("OUT_DIR"), "/session/mod.rs"));
 }
