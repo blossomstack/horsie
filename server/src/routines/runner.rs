@@ -284,8 +284,7 @@ pub(crate) mod tests {
                 .unwrap();
             if let Some(page) = page
                 && page
-                    .messages
-                    .iter()
+                    .messages()
                     .any(|m| serde_json::to_string(m).is_ok_and(|json| json.contains(prompt)))
             {
                 return true;

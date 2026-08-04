@@ -20,6 +20,32 @@ pub mod agent {
             }
         }
     }
+
+    impl HistoryEntry {
+        /// This entry's cursor id — the same space `/history` pages with and the
+        /// SSE stream uses as its event id, whichever kind of entry it is.
+        ///
+        /// The two id spaces are disjoint by construction: a `Message` id is a
+        /// provider id or `result:{tool_call_id}`, a hook id is
+        /// `hook:{tool_call_id}:{n}`. That is what lets one lookup over the
+        /// transcript stay unambiguous.
+        #[must_use]
+        pub fn id(&self) -> &str {
+            match self {
+                Self::Llm(m) => &m.id,
+                Self::Hook(h) => &h.id,
+            }
+        }
+
+        /// When this entry joined the transcript.
+        #[must_use]
+        pub fn created_at_ms(&self) -> u64 {
+            match self {
+                Self::Llm(m) => m.created_at_ms,
+                Self::Hook(h) => h.created_at_ms,
+            }
+        }
+    }
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]

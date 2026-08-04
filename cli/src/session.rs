@@ -70,7 +70,7 @@ struct Envelope<'a> {
 /// live run noise, and neither can be resumed from.
 fn append_id(event: &AgentStreamEvent) -> Option<&str> {
     match event {
-        AgentStreamEvent::Appended(e) => Some(e.message.id.as_str()),
+        AgentStreamEvent::Appended(e) => Some(e.entry.id()),
         AgentStreamEvent::Delta(_)
         | AgentStreamEvent::ToolStart(_)
         | AgentStreamEvent::TurnCompleted(_)
@@ -495,7 +495,9 @@ mod tests {
 
     fn appended(id: &str) -> String {
         serde_json::to_string(&AgentStreamEvent::Appended(AppendedEvent {
-            message: horsie_models::agent::Message::user(id, "hi", 0),
+            entry: horsie_models::agent::HistoryEntry::Llm(horsie_models::agent::Message::user(
+                id, "hi", 0,
+            )),
         }))
         .unwrap()
     }
@@ -509,7 +511,11 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["id"], serde_json::json!("m1"));
         assert_eq!(got[0]["event"]["type"], serde_json::json!("Appended"));
-        assert!(got[0]["event"]["value"]["message"].is_object());
+        // The append carries a transcript entry, itself a tagged union: not
+        // every append is a message the model saw.
+        let entry = &got[0]["event"]["value"]["entry"];
+        assert_eq!(entry["type"], serde_json::json!("Llm"));
+        assert!(entry["value"].is_object());
         assert_eq!(s.cursor().as_deref(), Some("m1"));
     }
 

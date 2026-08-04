@@ -3956,7 +3956,7 @@ mod tests {
         frames
             .iter()
             .filter_map(|f| match f {
-                AgentFrame::Appended { message } => Some(message.id.clone()),
+                AgentFrame::Appended { entry } => Some(entry.id().to_string()),
                 AgentFrame::Delta { .. }
                 | AgentFrame::ToolStart { .. }
                 | AgentFrame::TurnCompleted { .. }
@@ -3995,9 +3995,9 @@ mod tests {
         let streamed = appended_ids(&drain_frames(&mut rx));
         let stored: Vec<String> = main_history(&session)
             .await
-            .messages
+            .entries
             .iter()
-            .map(|m| m.id.clone())
+            .map(|e| e.id().to_string())
             .collect();
         assert!(!streamed.is_empty(), "the turn must produce appends");
         assert_eq!(
@@ -4332,8 +4332,7 @@ mod tests {
     }
 
     fn user_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
-        page.messages
-            .iter()
+        page.messages()
             .filter(|m| m.role == horsie_agentcore::Role::User)
             .flat_map(|m| m.parts.iter())
             .filter_map(|p| match p {
@@ -4350,8 +4349,7 @@ mod tests {
     /// them — the counterpart to `user_texts` now that a result is a part of
     /// its own rather than text merged into what the person said.
     fn subagent_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
-        page.messages
-            .iter()
+        page.messages()
             .flat_map(|m| m.parts.iter())
             .filter_map(|p| match p {
                 horsie_agentcore::ContentPart::SubAgentResult(r) => Some(r.to_wire_text()),
@@ -4552,7 +4550,7 @@ mod tests {
         let (results, texts): (Vec<String>, Vec<String>) = {
             let mut results = Vec::new();
             let mut texts = Vec::new();
-            for part in page.messages.iter().flat_map(|m| m.parts.iter()) {
+            for part in page.messages().flat_map(|m| m.parts.iter()) {
                 match part {
                     horsie_agentcore::ContentPart::ToolResult(r) => results.push(r.output.clone()),
                     horsie_agentcore::ContentPart::Text(t) => texts.push(t.text.clone()),

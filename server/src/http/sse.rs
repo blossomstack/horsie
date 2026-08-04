@@ -114,9 +114,9 @@ pub async fn agent_events(
                     .ok()
                     .flatten();
                 let Some(page) = page else { break };
-                for message in page.messages {
-                    at = message.id.clone();
-                    let frame = wire_agent_frame(AgentFrame::Appended { message });
+                for entry in page.entries {
+                    at = entry.id().to_string();
+                    let frame = wire_agent_frame(AgentFrame::Appended { entry });
                     if let Some(ev) = encode(Some(&at), &frame)
                         && tx.send(Ok(ev)).await.is_err()
                     {
@@ -135,7 +135,7 @@ pub async fn agent_events(
                 Ok(frame) => {
                     // Only an append is a log entry, so only an append gets an id.
                     let id = match &frame {
-                        AgentFrame::Appended { message } => Some(message.id.clone()),
+                        AgentFrame::Appended { entry } => Some(entry.id().to_string()),
                         AgentFrame::Delta { .. }
                         | AgentFrame::ToolStart { .. }
                         | AgentFrame::TurnCompleted { .. }

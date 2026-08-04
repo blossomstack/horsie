@@ -1,7 +1,7 @@
 //! Wire-boundary redaction: fields that exist only for provider replay and are
 //! meaningless to API clients.
 
-use horsie_models::agent::{ContentPart, Message};
+use horsie_models::agent::{ContentPart, HistoryEntry, Message};
 
 /// Drop thinking-block signatures from messages on their way to a client.
 ///
@@ -10,9 +10,13 @@ use horsie_models::agent::{ContentPart, Message};
 /// renders `text` only (`clients/web/src/components/ThinkingBlock.tsx`). They
 /// stay in the agent's in-memory state and journal, where provider replay needs
 /// them; this strips only the copies handed to HTTP and SSE clients.
-pub fn strip_thinking_signatures(messages: &mut [Message]) {
-    for message in messages.iter_mut() {
-        strip_message_signature(message);
+/// A hook entry has no signature to strip — it never came from a provider — so
+/// only the LLM entries are touched.
+pub fn strip_entry_signatures(entries: &mut [HistoryEntry]) {
+    for entry in entries.iter_mut() {
+        if let HistoryEntry::Llm(message) = entry {
+            strip_message_signature(message);
+        }
     }
 }
 
@@ -36,6 +40,17 @@ mod tests {
     use super::*;
     use horsie_models::agent::{Role, TextPart, ThinkingPart};
 
+    fn entries(signature: Option<&str>) -> Vec<HistoryEntry> {
+        vec![HistoryEntry::Llm(assistant_with_thinking(signature))]
+    }
+
+    fn parts(entries: &[HistoryEntry]) -> &[ContentPart] {
+        match &entries[0] {
+            HistoryEntry::Llm(m) => &m.parts,
+            other => panic!("expected an Llm entry, got {other:?}"),
+        }
+    }
+
     fn assistant_with_thinking(signature: Option<&str>) -> Message {
         Message {
             created_at_ms: 0,
@@ -56,9 +71,9 @@ mod tests {
 
     #[test]
     fn strips_signature_and_keeps_thinking_text() {
-        let mut msgs = vec![assistant_with_thinking(Some("opaque-blob"))];
-        strip_thinking_signatures(&mut msgs);
-        match &msgs[0].parts[0] {
+        let mut es = entries(Some("opaque-blob"));
+        strip_entry_signatures(&mut es);
+        match &parts(&es)[0] {
             ContentPart::Thinking(th) => {
                 assert_eq!(th.signature, None);
                 assert_eq!(th.text, "step by step");
@@ -69,9 +84,9 @@ mod tests {
 
     #[test]
     fn leaves_non_thinking_parts_untouched() {
-        let mut msgs = vec![assistant_with_thinking(Some("opaque-blob"))];
-        strip_thinking_signatures(&mut msgs);
-        match &msgs[0].parts[1] {
+        let mut es = entries(Some("opaque-blob"));
+        strip_entry_signatures(&mut es);
+        match &parts(&es)[1] {
             ContentPart::Text(t) => assert_eq!(t.text, "the answer"),
             other => panic!("expected Text, got {other:?}"),
         }
@@ -79,12 +94,47 @@ mod tests {
 
     #[test]
     fn tolerates_already_absent_signature() {
-        let mut msgs = vec![assistant_with_thinking(None)];
-        strip_thinking_signatures(&mut msgs);
-        match &msgs[0].parts[0] {
+        let mut es = entries(None);
+        strip_entry_signatures(&mut es);
+        match &parts(&es)[0] {
             ContentPart::Thinking(th) => assert_eq!(th.signature, None),
             other => panic!("expected Thinking, got {other:?}"),
         }
+    }
+
+    /// Redaction walks entries it cannot destructure as messages. A hook entry
+    /// has no provider artifacts, so it must pass through byte-identical rather
+    /// than be skipped by accident of ordering.
+    #[test]
+    fn a_hook_entry_passes_through_untouched() {
+        use horsie_models::agent::HookEntry;
+        let record = horsie_models::runtime::HookRecord {
+            plugin: "guard".into(),
+            event: "PreToolUse".into(),
+            tool: "bash".into(),
+            tool_call_id: "tc1".into(),
+            duration_ms: 3,
+            blocked: true,
+            reason: Some("denied".into()),
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        };
+        let hook = HistoryEntry::Hook(HookEntry {
+            id: "hook:tc1:0".into(),
+            created_at_ms: 7,
+            record,
+        });
+        let mut es = vec![hook.clone()];
+        strip_entry_signatures(&mut es);
+        assert_eq!(
+            serde_json::to_string(&es[0]).unwrap(),
+            serde_json::to_string(&hook).unwrap()
+        );
     }
 
     #[test]

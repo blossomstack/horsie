@@ -1,6 +1,8 @@
 /// Protocol types for agent messages
 package agent;
 
+use runtime.HookRecord;
+
 /// Role of the message sender
 enum Role {
     User,
@@ -74,6 +76,32 @@ struct Message {
     /// Unix-epoch ms when the provider call that produced this message was
     /// issued. Assistant messages only; absent elsewhere.
     started_at_ms: Option<u64>,
+}
+
+/// A plugin hook's intervention, as it appears in an agent's transcript.
+struct HookEntry {
+    /// Cursor id, in the same space as `Message.id`. Derived from the record
+    /// rather than generated (`hook:{tool_call_id}:{n}`, `n` being the record's
+    /// index in the batch reported for that call) so journal replay produces the
+    /// ids it produced the first time. A uuid would give a recovered transcript
+    /// different cursors than the live one.
+    id: String,
+    created_at_ms: u64,
+    record: HookRecord,
+}
+
+/// One item in an agent's transcript.
+///
+/// Not everything in a transcript is something the model saw: `Hook` entries are
+/// recorded for the *user* and are filtered out on the way to a provider by
+/// `AgentState::prompt_messages`. Because the union sits above `Message` rather
+/// than inside `ContentPart`, no provider ever holds an arm for a value that must
+/// never reach it — and a future non-model entry inherits that guarantee by
+/// adding a variant here.
+#[type_tag = "type"]
+union HistoryEntry {
+    Llm(Message),
+    Hook(HookEntry),
 }
 
 /// Token usage for a model turn

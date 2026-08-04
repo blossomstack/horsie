@@ -539,7 +539,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
                 .await
                 .unwrap();
             let page = rx.await.unwrap();
-            if page.messages.iter().any(|m| m.role == Role::Tool) {
+            if page.messages().any(|m| m.role == Role::Tool) {
                 return page;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -549,15 +549,14 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     .expect("recovery must journal a result for the interrupted call");
 
     let results: Vec<&str> = page
-        .messages
-        .iter()
+        .messages()
         .flat_map(|m| m.parts.iter())
         .filter_map(|p| match p {
             ContentPart::ToolResult(r) => Some(r.tool_call_id.as_str()),
             _ => None,
         })
         .collect();
-    assert_eq!(results, vec!["interrupted-call"], "{:?}", page.messages);
+    assert_eq!(results, vec!["interrupted-call"], "{:?}", page.entries);
 
     // Durable, not merely in memory: a second incarnation sees the same repair
     // and has nothing left to fix.
@@ -596,14 +595,10 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         .await
         .unwrap();
     let page2 = rx.await.unwrap();
-    let tool_msgs = page2
-        .messages
-        .iter()
-        .filter(|m| m.role == Role::Tool)
-        .count();
+    let tool_msgs = page2.messages().filter(|m| m.role == Role::Tool).count();
     assert_eq!(
         tool_msgs, 1,
         "the repair is recorded once, not re-applied on every load: {:?}",
-        page2.messages
+        page2.entries
     );
 }

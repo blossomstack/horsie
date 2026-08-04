@@ -10,6 +10,7 @@ use session.UsageView;
 use session.SubAgentView;
 use agent.Usage;
 use agent.Message;
+use agent.HistoryEntry;
 
 /// One repository to provision into the session workspace.
 struct RepoConfig {
@@ -45,7 +46,7 @@ struct CreateSessionRequest {
 /// exists on each side; a backfilling client pages until `has_more_after` is
 /// false.
 struct HistoryPage {
-    messages: Vec<Message>,
+    entries: Vec<HistoryEntry>,
     has_more_before: bool,
     has_more_after: bool,
 }

@@ -2,6 +2,7 @@
 package session;
 
 use agent.Message;
+use agent.HistoryEntry;
 use agent.Usage;
 
 /// User-visible lifecycle state of a session. Failure reasons ride separately
@@ -154,7 +155,7 @@ struct SubAgentView {
 /// One transcript append — a user message, an assistant message, or a tool
 /// result. Carries the SSE id `message.id`, which is also the history cursor:
 /// one vocabulary for the log, whichever way you read it.
-struct AppendedEvent { message: Message }
+struct AppendedEvent { entry: HistoryEntry }
 
 /// The stream lagged and dropped frames. The client must backfill with
 /// `history?after=<its cursor>` and re-read the documents; the server does not

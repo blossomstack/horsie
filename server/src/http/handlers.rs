@@ -250,10 +250,10 @@ pub struct HistoryParams {
 }
 
 fn to_wire_history(page: AgentHistoryPage) -> HistoryPage {
-    let mut messages = page.messages;
-    crate::wire_redact::strip_thinking_signatures(&mut messages);
+    let mut entries = page.entries;
+    crate::wire_redact::strip_entry_signatures(&mut entries);
     HistoryPage {
-        messages,
+        entries,
         has_more_before: page.has_more_before,
         has_more_after: page.has_more_after,
     }
