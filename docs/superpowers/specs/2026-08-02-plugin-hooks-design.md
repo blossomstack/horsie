@@ -28,25 +28,64 @@ that reader.
 - The `matcher` field is parsed by nobody: only `SessionStart` runs, and it has
   no tool matcher.
 
-### The three seams
+### Where hooks run — revised
 
-Issue #105 predicted "a structural change to `agentcore`/`workflow`". It is not
-one. Three existing seams carry the whole feature:
+An earlier draft of this spec put tool hooks server-side: a `HookedToolbox`
+decorator, a manifest fetched at session start, and server-evaluated matchers
+round-tripping a `RunHook` message. That was wrong, and the revision is worth
+recording because the reasoning generalises.
 
-1. **`agentcore/src/agent.rs:539`** is the single tool-dispatch site, and it
-   calls through the `Toolbox` trait. `DefaultToolboxFactory`
-   (`workflow/src/context.rs:252`) already stacks decorators —
-   `CompositeToolbox` → `FilteredToolbox` → `AgentToolbox`. A `HookedToolbox`
-   slots into that stack and sees a tool's input on the way in and its output on
-   the way out, which is exactly what `updatedInput` and `updatedToolOutput`
-   need. **No change to the agent loop.**
-2. **`server/src/sessions/session_actor.rs`** owns the turn boundary. It calls
-   the agent and handles `AgentOutcome::{Concluded, Asked, Failed}`. Turn events
-   attach here.
-3. **The runtime** is where hook commands must actually execute, because that is
-   where the plugin files and the workspace are. The `SessionStart` message is
-   already precisely this: a request that runs hooks in the right place and
-   returns their output. This phase generalises that one message.
+Every runtime vendor's responsibility ends at materialising `plugins_dir`
+(`runtime/src/main.rs` — velos fetches bundles, local passes `--plugins-dir`,
+both converge on one directory). After that the runtime is the *only* component
+that can see plugin files. Running a hook anywhere else means shipping the
+decision away from the data.
+
+So tool hooks run **inside the runtime, inline with the tool call they guard**:
+
+1. **`agentcore` is untouched.** The runtime already receives a `ToolCall`; the
+   hook wraps `tools::dispatch` rather than the `Toolbox` trait.
+2. **No extra round-trip.** A server-side hook cost a WS hop per tool call,
+   which is why the earlier draft needed a manifest to skip it. Inline, there is
+   nothing to skip.
+3. **No version negotiation.** The manifest doubled as a protocol-version probe.
+   A runtime that predates hooks simply runs none — correct degradation, nothing
+   to negotiate.
+4. **Cancellation is free.** A `RunHook` round-trip was outside the `CancelCall`
+   path, so a 30s hook ignored a user pressing Stop. Inline, a hook is
+   interrupted by the same cancel that interrupts the tool.
+
+Most of the control protocol then needs no new wire types at all: a denial is
+`ToolResult::Err`, which the agent loop already turns into an `is_error` tool
+result the model reads; `updatedInput` is applied before dispatch; and
+`updatedToolOutput` is simply what the runtime returns.
+
+Turn and session events cannot move: the runtime has no idea a turn ended. Those
+stay server-initiated, as `SessionStart` already is.
+
+### Visibility
+
+Hooks change what the agent does, so what they did must be auditable rather than
+invisible. Every hook that runs — including one that changed nothing, because
+"a guard ran and allowed this" is part of the trail — produces a `HookRecord`
+riding back on `ToolCallResponse`:
+
+```
+plugin, event, tool, duration_ms,
+blocked, reason, failed,
+input_before / input_after,      // the diff when a hook rewrote the call
+output_before / output_after,
+additional_context, system_message
+```
+
+Records reach the server out of band, through a `HookSink` on `RuntimeClient`,
+rather than through `invoke`'s return type: the tools neither know nor care that
+hooks ran, and the records are for the *user*, not the model. The session
+journals one `SessionDomainEvent::HookRan` per record. Before/after payloads are
+clamped so a large file write cannot bloat the journal.
+
+`HookRan` deliberately folds to nothing in `apply_event`: it records what the
+agent did, not what the session *is*.
 
 ## Goals
 
@@ -101,8 +140,8 @@ subagent events Codex and Cursor both ship, rather than from "the seam exists".
 | `SessionStart` | already wired; migrates onto the new dispatch |
 | `SessionEnd` | `delete_session` (`server/src/http/handlers.rs:406`) |
 | `UserPromptSubmit` | session actor, before the agent run |
-| `PreToolUse` | `HookedToolbox`, before `inner.execute` |
-| `PostToolUse` | `HookedToolbox`, after `inner.execute` |
+| `PreToolUse` | `runtime::hooks`, before `tools::dispatch` |
+| `PostToolUse` | `runtime::hooks`, after `tools::dispatch` |
 | `Stop` | session actor, `AgentOutcome::Concluded` |
 | `SubagentStart` / `SubagentStop` | `workflow/src/workflow_actor.rs` `spawn_agent` |
 
@@ -178,13 +217,17 @@ A matcher is a regex, consistent with Claude Code — one real matcher in the
 wild, `^claude-security:claude-security$`, uses anchors, so simple alternation
 splitting is not enough. An empty or absent matcher matches every tool.
 
-**Matchers are evaluated server-side**, in `horsie-support::plugin::hooks`
-against the manifest, because that is what lets the server skip the round-trip
-when nothing matches. `horsie-support` therefore gains a `regex` dependency;
-`regex` is already in the workspace tree (`runtime/Cargo.toml`), so this adds no
-new third-party crate, only a new edge to it. Evaluating matchers runtime-side
-instead would mean a round-trip on every tool call to discover that no hook
-applies, which defeats the manifest.
+**Matchers are evaluated runtime-side**, in the same pass that runs the hook,
+because that is where both the plugin declarations and the tool call already
+are. `horsie-support` gains a `regex` dependency; `regex` is already in the
+workspace tree (`runtime/Cargo.toml`), so this adds an edge rather than a new
+crate.
+
+One wrinkle the runtime must bridge: the wire `ToolCall` union is tagged in
+PascalCase (`Bash`, `FindAndReplace`), while the LLM, the matcher alias table
+and the user all see snake_case (`bash`, `find_and_replace`). `runtime::hooks`
+maps the tag to the agent-facing name with an exhaustive match, so adding a tool
+fails to compile until it is named.
 
 ### The hook reader
 
@@ -243,63 +286,23 @@ Two gates, because either alone leaves a silent-no-op path:
 
 ### Protocol
 
-`models/fluorite/runtime.fl` gains a manifest request and a general hook call.
-`SessionStart` is left in place and is the fallback described below.
+`models/fluorite/runtime.fl` gains only `HookRecord` and one field on
+`ToolCallResponse`:
 
 ```
-struct HookDeclWire { event: String, matcher: Option<String> }
-
-struct HookManifestRequest  { call_id: String }
-struct HookManifestResponse {
+struct ToolCallResponse {
     call_id: String,
-    entries: Vec<HookDeclWire>,
-    /// Event names the plugins declared that this runtime cannot run.
-    unsupported: Vec<String>,
+    result: ToolResult,
+    /// Every hook that ran for this call, in execution order. Empty for the
+    /// overwhelmingly common case of a session with no matching hooks.
+    hooks: Vec<HookRecord>,
 }
-
-struct RunHookRequest {
-    call_id: String,
-    event: String,
-    /// The event payload as JSON, fed to the hook on stdin.
-    payload: String,
-}
-
-struct HookOutcomeWire {
-    /// The hook blocked the action (exit 2, `decision: "block"`, or
-    /// `permissionDecision: "deny"`).
-    blocked: bool,
-    reason: Option<String>,
-    additional_context: Option<String>,
-    /// Replacement tool input / output, as JSON.
-    updated_input: Option<String>,
-    updated_tool_output: Option<String>,
-    system_message: Option<String>,
-    /// `continue: false` — end the turn.
-    stop: bool,
-    stop_reason: Option<String>,
-    /// The hook could not be run to completion (spawn failure, timeout, or a
-    /// non-zero exit other than 2). Distinct from `blocked`, because the two
-    /// carry different intent and the caller treats them differently.
-    failed: bool,
-}
-
-struct RunHookResponse { call_id: String, outcome: HookOutcomeWire }
 ```
 
-### Manifest as optimisation and as negotiation
-
-At session start the server requests the manifest once. It then round-trips to
-the runtime only when a declaration's event and matcher match the thing about to
-happen. A session whose plugins declare no `PreToolUse` hook pays nothing per
-tool call — which is the common case, and the reason this is a manifest rather
-than an unconditional call.
-
-The manifest doubles as version negotiation, which matters because
-`RuntimeReady { runtime_id }` carries no protocol version and users install the
-CLI independently of the server. A runtime that does not answer the manifest —
-an older `horsie connect` — is recorded as not supporting hooks, and the server
-falls back to calling the existing `SessionStart` message alone. Behaviour is
-then exactly what ships today, rather than an error on an unknown message.
+No manifest message, no `RunHook` message, and no new outbound variant. A denial
+is `ToolResult::Err`; the mutations are applied by the runtime before and after
+dispatch. The record exists for the user's audit trail, not to carry the
+decision — the decision is already in the result.
 
 ### Control protocol
 
@@ -373,7 +376,8 @@ Two stacked PRs.
 **PR1 — dispatch layer and tool events.** The reader with all 31 event names
 classified, tool-name aliasing, matcher evaluation, the manifest and `RunHook`
 protocol, the runtime-side executor and control-protocol parser, the
-`HookedToolbox` decorator, and the unsupported-event failure at both gates.
+the runtime-side hook dispatcher, and the record path that journals what hooks
+did.
 Wires `PreToolUse` and `PostToolUse` — the two events that need the decorator,
 and the two that carry blocking and mutation.
 
@@ -394,9 +398,12 @@ onto the new dispatch.
   `find_and_replace` and does not match `bash`.
 - Control-protocol tests over fixture scripts: exit 0 with each JSON shape, exit
   2, non-zero exit, and a timeout — asserting `blocked` versus `failed`.
-- A `HookedToolbox` test proving a denying `PreToolUse` hook prevents the inner
-  toolbox from being called at all, and that the denial reaches the model as an
-  error tool result.
+- A `runtime::hooks` test proving a denying `PreToolUse` hook prevents the tool
+  from running at all, and that the denial reaches the model as an error tool
+  result naming the plugin.
+- A test that a hook rewriting `updatedInput` changes what actually executes,
+  and that an input a hook mangles into something undeserializable is ignored
+  rather than corrupting the call.
 - A test that a failing `PreToolUse` hook denies, and that a failing
   `PostToolUse` hook does not.
 - An end-to-end test with a real plugin fixture whose hook rewrites a tool's
@@ -416,9 +423,9 @@ onto the new dispatch.
   claim to run a guard it silently drops. The cost is brittleness against Claude
   Code adding events, since a plugin adopting a new one fails until horsie
   learns it. The error names the event, so diagnosis is immediate.
-- `PostToolUseFailure` is nearly free to add later — the `HookedToolbox` already
-  distinguishes `Err` from `Ok` — so if a plugin ever needs it, promoting it out
-  of group B is a small change rather than new machinery.
+- `PostToolUseFailure` is nearly free to add later — the runtime dispatcher
+  already distinguishes `Err` from `Ok` — so if a plugin ever needs it,
+  promoting it out of group B is a small change rather than new machinery.
 - `PreToolUse` adds a runtime round-trip per matching tool call. Sessions whose
   plugins declare no matching hook are unaffected.
 - Hooks can now change what a tool does. A buggy hook can corrupt a tool call in
