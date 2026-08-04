@@ -8,7 +8,7 @@
 use crate::sessions::session_actor::{AgentKey, SessionState};
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::subagents::SubAgentParent;
-use horsie_models::agent::ToolResultInput;
+use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -30,6 +30,10 @@ pub enum SessionCommandKind {
 pub struct TurnInput {
     pub message: Option<String>,
     pub results: Vec<ToolResultInput>,
+    /// Finished subagents' results riding this turn. Kept apart from `message`
+    /// rather than joined into it: merged, a client cannot tell a subagent's
+    /// report from what the person typed, and both rendered as a user bubble.
+    pub subagent_results: Vec<SubAgentResultPart>,
 }
 
 /// Something the actor should do. Every field is what the actor needs to
@@ -108,13 +112,11 @@ fn wake_owed_parents(state: &SessionState) -> Vec<AgentAction> {
         .map(|(parent, owed)| AgentAction::StartTurn {
             who: AgentKey::Sub(parent),
             input: TurnInput {
-                message: Some(
-                    owed.iter()
-                        .map(|(_, text)| text.as_str())
-                        .collect::<Vec<_>>()
-                        .join(MERGE_SEPARATOR),
-                ),
+                // A woken parent is resumed by its children and nothing else —
+                // there is no person in this loop to have typed anything.
+                message: None,
                 results: Vec::new(),
+                subagent_results: owed.iter().map(|(_, part)| part.clone()).collect(),
             },
             consumed: Vec::new(),
             answered: Vec::new(),
@@ -142,12 +144,24 @@ fn main_turn(state: &SessionState) -> Option<AgentAction> {
     // One user message, not several: Anthropic requires alternating roles, so
     // consecutive user turns are not portable. Provenance survives in the
     // `MessageQueued` events.
-    let mut parts: Vec<&str> = state.inbox.iter().map(|m| m.text.as_str()).collect();
-    parts.extend(owed.iter().map(|(_, text)| text.as_str()));
+    //
+    // Owed subagent results ride the same message but stay their own parts —
+    // joined into the text they were indistinguishable from what the person
+    // typed, which is exactly what a reader of the transcript needs to tell
+    // apart. `None` when the inbox is empty: an owed-only turn has no text.
+    let message = (!state.inbox.is_empty()).then(|| {
+        state
+            .inbox
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join(MERGE_SEPARATOR)
+    });
     Some(AgentAction::StartTurn {
         who: AgentKey::Main,
         input: TurnInput {
-            message: Some(parts.join(MERGE_SEPARATOR)),
+            message,
+            subagent_results: owed.iter().map(|(_, part)| part.clone()).collect(),
             // A message sent while the agent is waiting on questions abandons
             // them: "never mind, do this instead". Every parked call still gets
             // a result, so nothing dangles on the wire — answering them for
@@ -268,6 +282,96 @@ mod tests {
         assert_eq!(input.results.len(), 1);
         assert_eq!(input.results[0].tool_call_id, "call_1");
         assert!(input.results[0].is_error);
+    }
+
+    /// Build a state whose main agent is owed one finished subagent's result.
+    fn owing_main(inbox: &[&str], label: &str, output: &str) -> SessionState {
+        let mut s = with_inbox(inbox);
+        let id = Uuid::new_v4();
+        let tree = s
+            .mode
+            .subagents_mut()
+            .expect("an interactive session has a tree");
+        tree.apply_spawned(id, SubAgentParent::Main, label.into(), "t".into(), 1, 100);
+        tree.apply_completed(id, output.into(), 400);
+        s
+    }
+
+    /// The typed text and the result stay apart. Merged, a client could not
+    /// tell a subagent's report from what the person actually said — which is
+    /// the whole reason results became their own parts.
+    #[test]
+    fn owed_results_ride_a_turn_without_joining_its_text() {
+        let s = owing_main(&["check the lockfile too"], "audit", "three stale crates");
+        let AgentAction::StartTurn {
+            input, notified, ..
+        } = only_turn(&s)
+        else {
+            panic!("an interactive session starts turns, not steps");
+        };
+        assert_eq!(input.message.as_deref(), Some("check the lockfile too"));
+        assert_eq!(input.subagent_results.len(), 1);
+        assert_eq!(input.subagent_results[0].label, "audit");
+        assert_eq!(input.subagent_results[0].text, "three stale crates");
+        assert_eq!(notified.len(), 1);
+    }
+
+    /// Nothing was typed, so there is no user text at all — not an empty one,
+    /// which Anthropic rejects as a content block.
+    #[test]
+    fn an_owed_only_turn_has_no_message() {
+        let s = owing_main(&[], "audit", "three stale crates");
+        let AgentAction::StartTurn { input, .. } = only_turn(&s) else {
+            panic!("an interactive session starts turns, not steps");
+        };
+        assert_eq!(input.message, None);
+        assert_eq!(input.subagent_results.len(), 1);
+    }
+
+    #[test]
+    fn a_woken_subagent_parent_is_resumed_with_results_and_no_message() {
+        let mut s = SessionState::default();
+        let parent = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        {
+            let tree = s
+                .mode
+                .subagents_mut()
+                .expect("an interactive session has a tree");
+            tree.apply_spawned(
+                parent,
+                SubAgentParent::Main,
+                "lead".into(),
+                "t".into(),
+                1,
+                100,
+            );
+            tree.apply_completed(parent, "waiting".into(), 200);
+            tree.apply_notified(parent);
+            tree.apply_spawned(
+                child,
+                SubAgentParent::SubAgent(parent),
+                "helper".into(),
+                "t".into(),
+                2,
+                300,
+            );
+            tree.apply_completed(child, "kid done".into(), 600);
+        }
+        let actions = InteractiveOrchestrator.next_actions(&s);
+        let woken = actions
+            .into_iter()
+            .find(|a| {
+                matches!(a, AgentAction::StartTurn { who, .. } if matches!(who, AgentKey::Sub(_)))
+            })
+            .expect("the woken parent's turn");
+        let AgentAction::StartTurn { who, input, .. } = woken else {
+            panic!("an interactive session starts turns, not steps");
+        };
+        assert_eq!(who, AgentKey::Sub(parent));
+        assert_eq!(input.message, None);
+        assert_eq!(input.subagent_results.len(), 1);
+        assert_eq!(input.subagent_results[0].text, "kid done");
     }
 
     #[test]

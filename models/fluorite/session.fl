@@ -142,6 +142,11 @@ struct SubAgentView {
     /// "running" | "completed" | "failed".
     status: String,
     error: Option<String>,
+    /// When this agent was spawned and when it reached its current result.
+    /// Zero when unrecorded — journaled before these were kept, or (for
+    /// `ended_at_ms`) still running.
+    spawned_at_ms: u64,
+    ended_at_ms: u64,
 }
 
 // --- SSE event payloads ---

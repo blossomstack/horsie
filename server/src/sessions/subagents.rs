@@ -2,6 +2,7 @@
 //! each. Pure data — the session actor folds its journal events through these
 //! methods, so live operation and recovery follow the exact same path.
 
+use horsie_models::agent::SubAgentResultPart;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -69,6 +70,13 @@ pub struct SubAgentRecord {
     /// completion resets it; every actual send re-marks it — that pair is what
     /// makes notification delivery exactly-once across offloads.
     pub notified: bool,
+    /// When the node was spawned, and when it reached its current terminal
+    /// state. Zero on rows journaled before these fields existed — a client
+    /// then shows no duration rather than one it made up.
+    #[serde(default)]
+    pub spawned_at_ms: u64,
+    #[serde(default)]
+    pub ended_at_ms: u64,
 }
 
 /// The whole tree, keyed by subagent id. Iteration order is uuid order —
@@ -78,22 +86,29 @@ pub struct SubAgentTree {
     nodes: BTreeMap<Uuid, SubAgentRecord>,
 }
 
-/// The message injected into a parent when a child reaches a terminal state.
-pub fn notification_text(label: &str, output: Option<&str>, error: Option<&str>) -> String {
-    match (output, error) {
-        (Some(output), _) => {
-            format!(
-                "[subagent \"{label}\" completed]\n\n{}",
-                truncate_result(output)
-            )
+/// What a parent is handed when a child reaches a terminal state.
+///
+/// A structured part rather than a rendered string: a client needs to tell a
+/// subagent's report from what the person typed, and the two used to arrive as
+/// one indistinguishable blob of text. The providers flatten it back through
+/// [`SubAgentResultPart::to_wire_text`], so the model's view is unchanged.
+fn result_part(id: &Uuid, rec: &SubAgentRecord) -> SubAgentResultPart {
+    // Status is the source of truth, not which of output/error happens to be
+    // populated: a node that completed once and failed on a later cycle still
+    // holds the earlier output.
+    let (status, body) = match rec.status {
+        SubAgentStatus::Failed => ("failed", rec.error.as_deref().unwrap_or_default()),
+        SubAgentStatus::Running | SubAgentStatus::Completed => {
+            ("completed", rec.output.as_deref().unwrap_or_default())
         }
-        (None, Some(error)) => {
-            format!(
-                "[subagent \"{label}\" failed]\n\n{}",
-                truncate_result(error)
-            )
-        }
-        (None, None) => format!("[subagent \"{label}\" completed]"),
+    };
+    SubAgentResultPart {
+        subagent_id: id.to_string(),
+        label: rec.label.clone(),
+        status: status.to_string(),
+        text: truncate_result(body),
+        spawned_at_ms: rec.spawned_at_ms,
+        ended_at_ms: rec.ended_at_ms,
     }
 }
 
@@ -105,6 +120,7 @@ impl SubAgentTree {
         label: String,
         task: String,
         depth: u32,
+        at_ms: u64,
     ) {
         self.nodes.insert(
             id,
@@ -117,31 +133,39 @@ impl SubAgentTree {
                 output: None,
                 error: None,
                 notified: false,
+                spawned_at_ms: at_ms,
+                ended_at_ms: 0,
             },
         );
     }
 
     /// A terminal node started another run (woken to consume child results).
-    pub fn apply_running(&mut self, id: Uuid) {
+    /// The span restarts with it: a node that concludes twice reports the cycle
+    /// the parent is being told about, not the whole life of the node.
+    pub fn apply_running(&mut self, id: Uuid, at_ms: u64) {
         if let Some(rec) = self.nodes.get_mut(&id) {
             rec.status = SubAgentStatus::Running;
+            rec.spawned_at_ms = at_ms;
+            rec.ended_at_ms = 0;
         }
     }
 
-    pub fn apply_completed(&mut self, id: Uuid, output: String) {
+    pub fn apply_completed(&mut self, id: Uuid, output: String, at_ms: u64) {
         if let Some(rec) = self.nodes.get_mut(&id) {
             rec.status = SubAgentStatus::Completed;
             rec.output = Some(output);
             rec.error = None;
             rec.notified = false;
+            rec.ended_at_ms = at_ms;
         }
     }
 
-    pub fn apply_failed(&mut self, id: Uuid, error: String) {
+    pub fn apply_failed(&mut self, id: Uuid, error: String, at_ms: u64) {
         if let Some(rec) = self.nodes.get_mut(&id) {
             rec.status = SubAgentStatus::Failed;
             rec.error = Some(error);
             rec.notified = false;
+            rec.ended_at_ms = at_ms;
         }
     }
 
@@ -203,35 +227,30 @@ impl SubAgentTree {
             .collect()
     }
 
-    /// Terminal results `parent` has not been sent yet, rendered for injection.
-    pub fn owed_for(&self, parent: SubAgentParent) -> Vec<(Uuid, String)> {
+    /// Terminal results `parent` has not been sent yet.
+    pub fn owed_for(&self, parent: SubAgentParent) -> Vec<(Uuid, SubAgentResultPart)> {
         self.nodes
             .iter()
             .filter(|(_, rec)| {
                 rec.parent == parent && rec.status != SubAgentStatus::Running && !rec.notified
             })
-            .map(|(id, rec)| {
-                (
-                    *id,
-                    notification_text(&rec.label, rec.output.as_deref(), rec.error.as_deref()),
-                )
-            })
+            .map(|(id, rec)| (*id, result_part(id, rec)))
             .collect()
     }
 
     /// Owed results grouped by their subagent parent (Main excluded — the main
-    /// agent's owed results merge into its next turn instead of a wake).
-    pub fn owed_by_sub_parent(&self) -> BTreeMap<Uuid, Vec<(Uuid, String)>> {
-        let mut grouped: BTreeMap<Uuid, Vec<(Uuid, String)>> = BTreeMap::new();
+    /// agent's owed results ride its next turn instead of a wake).
+    pub fn owed_by_sub_parent(&self) -> BTreeMap<Uuid, Vec<(Uuid, SubAgentResultPart)>> {
+        let mut grouped: BTreeMap<Uuid, Vec<(Uuid, SubAgentResultPart)>> = BTreeMap::new();
         for (id, rec) in &self.nodes {
             if rec.status == SubAgentStatus::Running || rec.notified {
                 continue;
             }
             if let SubAgentParent::SubAgent(parent) = rec.parent {
-                grouped.entry(parent).or_default().push((
-                    *id,
-                    notification_text(&rec.label, rec.output.as_deref(), rec.error.as_deref()),
-                ));
+                grouped
+                    .entry(parent)
+                    .or_default()
+                    .push((*id, result_part(id, rec)));
             }
         }
         grouped
@@ -325,7 +344,7 @@ mod tests {
     use super::*;
 
     fn spawn(tree: &mut SubAgentTree, id: Uuid, parent: SubAgentParent, depth: u32) {
-        tree.apply_spawned(id, parent, "label".into(), "task".into(), depth);
+        tree.apply_spawned(id, parent, "label".into(), "task".into(), depth, 100);
     }
 
     #[test]
@@ -346,12 +365,12 @@ mod tests {
         let mut tree = SubAgentTree::default();
         let id = Uuid::new_v4();
         spawn(&mut tree, id, SubAgentParent::Main, 1);
-        tree.apply_completed(id, "done".into());
+        tree.apply_completed(id, "done".into(), 400);
         assert_eq!(tree.active_count(), 0);
         // Terminal and not yet notified → owed to Main.
         let owed = tree.owed_for(SubAgentParent::Main);
         assert_eq!(owed.len(), 1);
-        assert!(owed[0].1.contains("done"));
+        assert_eq!(owed[0].1.text, "done");
         tree.apply_notified(id);
         assert!(tree.owed_for(SubAgentParent::Main).is_empty());
     }
@@ -363,13 +382,13 @@ mod tests {
         let mut tree = SubAgentTree::default();
         let id = Uuid::new_v4();
         spawn(&mut tree, id, SubAgentParent::Main, 1);
-        tree.apply_completed(id, "first".into());
+        tree.apply_completed(id, "first".into(), 400);
         tree.apply_notified(id);
-        tree.apply_running(id);
-        tree.apply_completed(id, "second".into());
+        tree.apply_running(id, 500);
+        tree.apply_completed(id, "second".into(), 900);
         let owed = tree.owed_for(SubAgentParent::Main);
         assert_eq!(owed.len(), 1);
-        assert!(owed[0].1.contains("second"));
+        assert_eq!(owed[0].1.text, "second");
     }
 
     #[test]
@@ -392,7 +411,7 @@ mod tests {
         let child = Uuid::new_v4();
         spawn(&mut tree, parent, SubAgentParent::Main, 1);
         spawn(&mut tree, child, SubAgentParent::SubAgent(parent), 2);
-        tree.apply_completed(child, "kid done".into());
+        tree.apply_completed(child, "kid done".into(), 400);
         let grouped = tree.owed_by_sub_parent();
         assert_eq!(grouped.len(), 1);
         let (pid, owed) = grouped.into_iter().next().unwrap();
@@ -407,7 +426,7 @@ mod tests {
         let b = Uuid::new_v4();
         spawn(&mut tree, a, SubAgentParent::Main, 1);
         spawn(&mut tree, b, SubAgentParent::Main, 1);
-        tree.apply_completed(a, "ok".into());
+        tree.apply_completed(a, "ok".into(), 400);
         assert_eq!(tree.interrupted(), vec![b]);
     }
 
@@ -418,7 +437,7 @@ mod tests {
         let child = Uuid::new_v4();
         spawn(&mut tree, parent, SubAgentParent::Main, 1);
         spawn(&mut tree, child, SubAgentParent::SubAgent(parent), 2);
-        tree.apply_failed(child, "boom".into());
+        tree.apply_failed(child, "boom".into(), 400);
         let node = tree.render_node(&child).unwrap();
         assert!(node.contains("boom"), "{node}");
         assert!(node.contains("failed"), "{node}");
@@ -430,22 +449,117 @@ mod tests {
         );
     }
 
+    /// The part is what a client reads; `to_wire_text` is what the model still
+    /// reads. Both are pinned, because the two used to be the same string.
     #[test]
-    fn notification_text_shapes_completed_and_failed() {
+    fn an_owed_part_shapes_completed_and_failed() {
+        let mut tree = SubAgentTree::default();
+        let done = Uuid::new_v4();
+        let boom = Uuid::new_v4();
+        tree.apply_spawned(
+            done,
+            SubAgentParent::Main,
+            "research".into(),
+            "t".into(),
+            1,
+            100,
+        );
+        tree.apply_spawned(
+            boom,
+            SubAgentParent::Main,
+            "research".into(),
+            "t".into(),
+            1,
+            100,
+        );
+        tree.apply_completed(done, "answer".into(), 400);
+        tree.apply_failed(boom, "boom".into(), 400);
+        let owed = tree.owed_for(SubAgentParent::Main);
+        let by_status = |s: &str| {
+            owed.iter()
+                .find(|(_, p)| p.status == s)
+                .map(|(_, p)| p.clone())
+                .unwrap()
+        };
+        let completed = by_status("completed");
+        assert_eq!(completed.text, "answer");
         assert_eq!(
-            notification_text("research", Some("answer"), None),
+            completed.to_wire_text(),
             "[subagent \"research\" completed]\n\nanswer"
         );
+        let failed = by_status("failed");
+        assert_eq!(failed.text, "boom");
         assert_eq!(
-            notification_text("research", None, Some("boom")),
+            failed.to_wire_text(),
             "[subagent \"research\" failed]\n\nboom"
         );
     }
 
+    /// A node that concluded once and failed on a later cycle still holds the
+    /// earlier output. Status decides which body the parent hears, so the stale
+    /// success cannot mask the failure.
     #[test]
-    fn notification_text_caps_a_huge_result() {
+    fn a_later_failure_reports_the_failure_not_the_earlier_output() {
+        let mut tree = SubAgentTree::default();
+        let id = Uuid::new_v4();
+        spawn(&mut tree, id, SubAgentParent::Main, 1);
+        tree.apply_completed(id, "first pass".into(), 400);
+        tree.apply_notified(id);
+        tree.apply_running(id, 500);
+        tree.apply_failed(id, "second pass blew up".into(), 900);
+        let owed = tree.owed_for(SubAgentParent::Main);
+        assert_eq!(owed[0].1.status, "failed");
+        assert_eq!(owed[0].1.text, "second pass blew up");
+    }
+
+    #[test]
+    fn a_terminal_node_records_when_it_started_and_finished() {
+        let mut tree = SubAgentTree::default();
+        let id = Uuid::new_v4();
+        spawn(&mut tree, id, SubAgentParent::Main, 1);
+        tree.apply_completed(id, "done".into(), 400);
+        let owed = tree.owed_for(SubAgentParent::Main);
+        assert_eq!((owed[0].1.spawned_at_ms, owed[0].1.ended_at_ms), (100, 400));
+        assert_eq!(owed[0].1.subagent_id, id.to_string());
+        assert_eq!(owed[0].1.label, "label");
+    }
+
+    /// A woken node reports the cycle its parent is being told about, not the
+    /// whole life of the node — otherwise a parent that waits an hour between
+    /// wakes reads as an hour of work.
+    #[test]
+    fn a_second_cycle_reports_its_own_span() {
+        let mut tree = SubAgentTree::default();
+        let id = Uuid::new_v4();
+        spawn(&mut tree, id, SubAgentParent::Main, 1);
+        tree.apply_completed(id, "first".into(), 400);
+        tree.apply_notified(id);
+        tree.apply_running(id, 5_000);
+        tree.apply_completed(id, "second".into(), 5_200);
+        let owed = tree.owed_for(SubAgentParent::Main);
+        assert_eq!(
+            (owed[0].1.spawned_at_ms, owed[0].1.ended_at_ms),
+            (5_000, 5_200)
+        );
+    }
+
+    /// Rows journaled before spans were kept must still load.
+    #[test]
+    fn a_record_without_timestamps_deserializes() {
+        let json = r#"{"parent":"Main","label":"a","task":"t","depth":1,
+            "status":"Completed","output":"o","error":null,"notified":false}"#;
+        let rec: SubAgentRecord = serde_json::from_str(json).unwrap();
+        assert_eq!((rec.spawned_at_ms, rec.ended_at_ms), (0, 0));
+    }
+
+    #[test]
+    fn an_owed_part_caps_a_huge_result() {
+        let mut tree = SubAgentTree::default();
+        let id = Uuid::new_v4();
         let huge = "x".repeat(MAX_RESULT_BYTES + 10_000);
-        let text = notification_text("w", Some(&huge), None);
+        tree.apply_spawned(id, SubAgentParent::Main, "w".into(), "t".into(), 1, 100);
+        tree.apply_completed(id, huge.clone(), 400);
+        let text = tree.owed_for(SubAgentParent::Main)[0].1.to_wire_text();
         assert!(text.contains("[truncated:"), "{text:.200}");
         assert!(text.len() < huge.len());
         // No mid-character split: the kept prefix is valid and bounded.

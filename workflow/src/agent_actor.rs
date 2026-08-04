@@ -91,10 +91,15 @@ pub enum AgentCommand {
     ///
     /// With no `message`, the results themselves are the turn's input, which is
     /// how an answered park resumes. With no `results`, it is an ordinary turn.
-    /// At least one of the two must be present.
+    /// At least one of the three must be present.
+    ///
+    /// `subagent_results` ride the user message alongside `message` as parts of
+    /// their own, so a reader can tell a subagent's report from what the person
+    /// typed. A turn carrying only these has no `message` at all.
     Resume {
         results: Vec<horsie_models::agent::ToolResultInput>,
         message: Option<String>,
+        subagent_results: Vec<horsie_models::agent::SubAgentResultPart>,
     },
     /// Cancel an in-flight run. `ack`, if given, fires once the run has actually
     /// terminated — immediately when none is in flight — so a caller that must
@@ -1117,12 +1122,16 @@ impl EventSourcedActor for AgentActor {
         ctx: &mut ActorContext<Self>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            AgentCommand::Resume { results, message } => {
+            AgentCommand::Resume {
+                results,
+                message,
+                subagent_results,
+            } => {
                 if let Some(reason) = self.reject_if_running("Resume") {
                     return reason;
                 }
-                if results.is_empty() && message.is_none() {
-                    tracing::warn!("Resume with neither results nor a message; ignoring");
+                if results.is_empty() && message.is_none() && subagent_results.is_empty() {
+                    tracing::warn!("Resume with nothing to resume on; ignoring");
                     return CommandEffect::none();
                 }
                 // The ids answered here are not dangling, whatever the recovered
@@ -1138,18 +1147,22 @@ impl EventSourcedActor for AgentActor {
                 // Results that precede a user message belong to the history, not
                 // to the input: the turn is started by what the user said.
                 let mut events = Vec::new();
-                let agent_input = match message {
-                    Some(text) => {
-                        if !results.is_empty() {
-                            let recorded = AgentInput::tool_results(results).to_message(now_ms());
-                            events.push(AgentDomainEvent::InputMessage {
-                                message: recorded.clone(),
-                            });
-                            history.push(recorded);
-                        }
-                        AgentInput::user_message(new_message_id(), text)
+                let starts_a_user_turn = message.is_some() || !subagent_results.is_empty();
+                let agent_input = if starts_a_user_turn {
+                    if !results.is_empty() {
+                        let recorded = AgentInput::tool_results(results).to_message(now_ms());
+                        events.push(AgentDomainEvent::InputMessage {
+                            message: recorded.clone(),
+                        });
+                        history.push(recorded);
                     }
-                    None => AgentInput::tool_results(results),
+                    AgentInput::user_message_with_results(
+                        new_message_id(),
+                        message.unwrap_or_default(),
+                        subagent_results,
+                    )
+                } else {
+                    AgentInput::tool_results(results)
                 };
                 // Persist the input message here (not via the streaming sink), so a
                 // turn-restarting provider retry that re-emits it can never
@@ -3214,6 +3227,7 @@ mod fence_tests {
             .tell(AgentCommand::Resume {
                 results: Vec::new(),
                 message: Some("first".into()),
+                subagent_results: Vec::new(),
             })
             .await
             .unwrap();
@@ -3237,6 +3251,7 @@ mod fence_tests {
             .tell(AgentCommand::Resume {
                 results: Vec::new(),
                 message: Some("second".into()),
+                subagent_results: Vec::new(),
             })
             .await
             .unwrap();

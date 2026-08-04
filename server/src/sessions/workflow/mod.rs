@@ -306,6 +306,7 @@ mod tests {
             "reader".into(),
             "read".into(),
             1,
+            100,
         );
         let (index, tree) = s.tree_of(child).unwrap();
         assert_eq!(index, 1);
