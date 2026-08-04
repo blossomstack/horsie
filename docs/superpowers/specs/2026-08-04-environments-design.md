@@ -72,7 +72,9 @@ Generated Rust lands in `horsie_models::models::environments`; TS in
 script in `clients/web/package.json` lists `.fl` files explicitly — add
 `environments.fl` there.
 
-## Storage — migration `0018_environments.sql` (sqlite + postgres mirrors)
+## Storage — migration `0019_environments.sql` (sqlite + postgres mirrors)
+
+(Planned as 0018; renumbered because `0018_agent_vendor.sql` landed first.)
 
 Follows `0015_agents.sql`: list-typed columns are JSON text. `repos` elements
 are `{"url", "git_ref"?, "dir"?}`; `env_vars` are `{"name", "value"}`;
@@ -129,7 +131,8 @@ the store, as `agents/store.rs` does.
 - `clients/web/src/pages/environments/EnvironmentEditPage.tsx` — create/edit
   form cloned from `AgentEditPage`, trimmed to: name, description, vendor
   (text input; no picker in this step), repos as editable rows (url +
-  optional gitRef + optional dir — the agents GitHub-checkbox picker is
+  optional gitRef; `dir` is supported by the API but the form omits it —
+  the agents GitHub-checkbox picker is
   gated on the server default vendor's provisioning capability and GitHub
   connection, neither of which fits a named-vendor form), env-vars key/value
   rows, provision steps as a JSON textarea (raw `uses`/`with` structure — a
