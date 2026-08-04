@@ -6,46 +6,101 @@
 
 use crate::{
     connected_registry::ConnectedRuntimeRegistry,
-    runtime_listener::{AcceptedConn, RuntimeListenerServer},
+    runtime_listener::{AcceptedStream, RuntimeListenerServer},
     socket_transport::SocketRuntimeTransport,
+    vendor::note,
 };
 use futures_util::StreamExt;
 use horsie_models::runtime::RuntimeOutboundMessage;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 
 /// How long a runtime may spend in provision steps (e.g. cloning) between its
 /// Provisioning announce and Ready before the link is dropped.
 const PROVISION_WINDOW: Duration = Duration::from_secs(900);
 
+/// How long a peer may take to complete the WebSocket handshake. Bounded so a
+/// connection that never speaks costs one task, not a listener.
+const HANDSHAKE_WINDOW: Duration = Duration::from_secs(10);
+
+/// Consecutive `accept()` failures that mean the listener itself is gone rather
+/// than one peer misbehaving. Below this, accepting simply carries on.
+const FATAL_ACCEPT_FAILURES: usize = 10;
+
+/// How long to wait after a failed accept, so a permanently broken listener
+/// cannot spin this loop hot on its way to [`FATAL_ACCEPT_FAILURES`].
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(200);
+
 /// Accept runtime connections on `listener` and register each as a direct transport,
 /// until `cancel` fires. Used by CLI mode (which drives lifecycle via
 /// [`InMemExecutorTransport`](crate::InMemExecutorTransport)) to run the listener loop.
+///
+/// The loop outlives bad peers by construction. It ends only on `cancel` or on a
+/// listener that has failed [`FATAL_ACCEPT_FAILURES`] times in a row — and that
+/// case cancels the token rather than returning quietly, because an agent that
+/// keeps serving with no listener spawns runtimes that can never dial in.
 pub fn serve_runtime_connections(
     listener: RuntimeListenerServer,
     registry: Arc<ConnectedRuntimeRegistry>,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
+        let mut consecutive_failures = 0usize;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 result = listener.accept() => match result {
-                    Ok(AcceptedConn::Tcp(ws)) => {
-                        tokio::spawn(handle_runtime_connection(ws, registry.clone()));
+                    Ok(AcceptedStream::Tcp(stream)) => {
+                        consecutive_failures = 0;
+                        tokio::spawn(upgrade_and_serve(stream, registry.clone()));
                     }
-                    Ok(AcceptedConn::Unix(ws)) => {
-                        tokio::spawn(handle_runtime_connection(ws, registry.clone()));
+                    Ok(AcceptedStream::Unix(stream)) => {
+                        consecutive_failures = 0;
+                        tokio::spawn(upgrade_and_serve(stream, registry.clone()));
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        note(&format!(
+                            "vendor agent: accepting a runtime connection failed \
+                             ({consecutive_failures}/{FATAL_ACCEPT_FAILURES}): {e}"
+                        ));
+                        if consecutive_failures >= FATAL_ACCEPT_FAILURES {
+                            note(
+                                "vendor agent: the runtime listener has stopped accepting; \
+                                 shutting down so this agent can be restarted rather than \
+                                 serving sessions no runtime can reach",
+                            );
+                            cancel.cancel();
+                            break;
+                        }
+                        tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                    }
                 }
             }
         }
         // Dropping `listener` here unlinks the unix socket (its Drop impl).
     });
+}
+
+/// Complete the WebSocket handshake for one accepted socket, then serve it.
+///
+/// Off the accept path on purpose: a runtime child that is killed between
+/// `connect()` and its first byte fails here, where it costs one task, instead
+/// of taking the listener down with it.
+async fn upgrade_and_serve<S>(stream: S, registry: Arc<ConnectedRuntimeRegistry>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    match tokio::time::timeout(HANDSHAKE_WINDOW, accept_async(stream)).await {
+        Ok(Ok(ws)) => handle_runtime_connection(ws, registry).await,
+        Ok(Err(e)) => note(&format!(
+            "vendor agent: a runtime connection failed its handshake: {e}"
+        )),
+        Err(_) => note("vendor agent: a runtime connection never completed its handshake"),
+    }
 }
 
 /// Handshake on an accepted runtime link, then register it as a direct transport.
@@ -242,5 +297,86 @@ mod tests {
             "the original transport must still be registered"
         );
         cancel.cancel();
+    }
+
+    /// A runtime child that dies between `connect()` and the WebSocket
+    /// handshake must cost only its own connection: the agent stays able to
+    /// accept the runtimes it spawns next, and the socket file it told them to
+    /// dial must still be there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_peer_that_hangs_up_before_the_handshake_leaves_the_listener_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("vendor-runtimes.sock");
+        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Unix(sock.clone()))
+            .await
+            .unwrap();
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let cancel = CancellationToken::new();
+        serve_runtime_connections(listener, registry.clone(), cancel.clone());
+
+        drop(tokio::net::UnixStream::connect(&sock).await.unwrap());
+        tokio::time::sleep(StdDuration::from_millis(300)).await;
+
+        assert!(
+            sock.exists(),
+            "the socket file was unlinked, so every runtime spawned from here on \
+             dials a path that no longer exists"
+        );
+        assert!(
+            tokio::net::UnixStream::connect(&sock).await.is_ok(),
+            "the next runtime must still be able to dial in"
+        );
+        cancel.cancel();
+    }
+
+    /// The same, one layer up: after a peer hangs up mid-handshake, a real
+    /// runtime still gets registered. Bad peers must not cost registrations.
+    #[tokio::test]
+    async fn a_bad_peer_does_not_stop_the_next_runtime_from_registering() {
+        let listener =
+            RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+                .await
+                .unwrap();
+        let addr = listener.tcp_addr().unwrap();
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let cancel = CancellationToken::new();
+        serve_runtime_connections(listener, registry.clone(), cancel.clone());
+
+        // Connects, speaks no WebSocket, hangs up.
+        drop(tokio::net::TcpStream::connect(addr).await.unwrap());
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+
+        let (_sink, _stream) = announce(addr, "after-bad-peer").await;
+        wait_registered(&registry, "after-bad-peer").await;
+        cancel.cancel();
+    }
+
+    /// Shutdown still takes the socket file with it, so the next agent does not
+    /// inherit a path nothing is listening on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_unlinks_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("vendor-runtimes-1.sock");
+        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Unix(sock.clone()))
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        serve_runtime_connections(
+            listener,
+            Arc::new(ConnectedRuntimeRegistry::new()),
+            cancel.clone(),
+        );
+        assert!(sock.exists());
+
+        cancel.cancel();
+        for _ in 0..50 {
+            if !sock.exists() {
+                return;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        panic!("the socket file outlived the listener");
     }
 }

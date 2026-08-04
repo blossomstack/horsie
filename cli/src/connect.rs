@@ -187,6 +187,26 @@ fn probe_sandbox_support(runtime_bin: &Path, state_dir: &Path) -> Result<(), Cli
     probe_verdict(status.code())
 }
 
+/// The socket this agent's runtimes dial.
+///
+/// One file per process, not one per state dir: `horsie connect` is routinely
+/// run more than once on a machine (a second server, a scratch vendor), and
+/// every invocation without its own `--config` resolves the same default state
+/// dir. Under a shared name each start unlinked and rebound the file out from
+/// under the agent already serving it, and each shutdown deleted whichever file
+/// was there — leaving a live agent whose every runtime then failed to dial
+/// with "No such file or directory".
+///
+/// An agent killed hard leaves its file behind. Nothing sweeps those: no live
+/// runtime dials them, and the next agent to be given that pid unlinks the
+/// stale file when it binds, so they are inert and self-reclaiming. Any sweep
+/// would have to decide, from the outside, whether another process is still
+/// serving a socket — a question worth no code compared to a leftover empty
+/// file.
+fn runtime_socket_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(format!("vendor-runtimes-{}.sock", std::process::id()))
+}
+
 /// Run this machine as a vendor agent until the socket closes or the process is
 /// interrupted.
 #[allow(clippy::too_many_arguments)]
@@ -256,9 +276,9 @@ pub async fn run(
     if sandbox {
         probe_sandbox_support(runtime_bin, state_dir)?;
     }
-    let socket = state_dir.join("vendor-runtimes.sock");
-    // A stale socket from a previous run would make bind fail.
-    let _ = std::fs::remove_file(&socket);
+    // Ours alone: no other live agent can hold this name, and `bind` unlinks a
+    // same-pid file left behind by an agent that is long gone.
+    let socket = runtime_socket_path(state_dir);
 
     // Bound once, for the whole life of the process: the agent reconnects to
     // the server without disturbing this socket. Rebinding it per connection
@@ -380,6 +400,36 @@ fn install_signal_handler() -> Result<impl std::future::Future<Output = ()> + Se
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Two agents sharing a state dir must not share a socket file: that is
+    /// what let one agent's start (or shutdown) strand the other's runtimes.
+    #[test]
+    fn the_socket_path_is_this_process_only() {
+        let dir = std::path::Path::new("/state");
+        let path = runtime_socket_path(dir);
+        assert_eq!(
+            path,
+            dir.join(format!("vendor-runtimes-{}.sock", std::process::id()))
+        );
+        // The name every version before this one used, shared by every agent on
+        // the machine.
+        assert_ne!(path, dir.join("vendor-runtimes.sock"));
+    }
+
+    /// A stale file under our own name (an agent long gone that happened to
+    /// hold this pid) must not stop us from binding.
+    #[tokio::test]
+    async fn binding_replaces_a_leftover_socket_with_our_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = runtime_socket_path(dir.path());
+        std::fs::write(&socket, b"").unwrap();
+
+        let listener = RuntimeListenerServer::bind(RuntimeEndpoint::Unix(socket.clone()))
+            .await
+            .expect("a leftover file must not block the bind");
+        assert!(tokio::net::UnixStream::connect(&socket).await.is_ok());
+        drop(listener);
+    }
 
     #[test]
     fn probe_verdict_accepts_only_exit_zero() {
