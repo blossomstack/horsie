@@ -6,7 +6,6 @@ import { RepoConfig } from '../session_api';
 export interface AgentPresetInput {
   name: string;
   description?: string;
-  vendor?: string;
   model: string;
   repos?: RepoConfig[];
   plugins?: string[];

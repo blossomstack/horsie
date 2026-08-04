@@ -833,7 +833,6 @@ mod agents_tests {
         let view = AgentView {
             name: "reviewer".into(),
             description: "reviews PRs".into(),
-            vendor: Some("local".into()),
             model: "sonnet".into(),
             repos: vec![],
             plugins: vec!["superpowers".into()],

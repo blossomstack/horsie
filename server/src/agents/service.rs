@@ -1,7 +1,7 @@
 //! Validation, timestamps, and row↔wire mapping over `AgentStore`. Save-time
 //! validation covers only what's stable at save: the name slug, the model
-//! alias, and the thinking effort the model offers. Vendors, plugins, MCP
-//! servers, and memory spaces are live/external rosters — validated at invoke.
+//! alias, and the thinking effort the model offers. Plugins, MCP servers, and
+//! memory spaces are live/external rosters — validated at invoke.
 
 use crate::agents::store::{AgentRepo, AgentRow, AgentStore};
 use crate::config::ConfigStore;
@@ -151,7 +151,6 @@ fn row_from_input(input: AgentPresetInput, created_at: String, updated_at: Strin
     AgentRow {
         name: input.name,
         description: input.description.unwrap_or_default(),
-        vendor: input.vendor.filter(|v| !v.trim().is_empty()),
         model: input.model,
         repos: input
             .repos
@@ -176,7 +175,6 @@ fn agent_view(row: &AgentRow) -> AgentView {
     AgentView {
         name: row.name.clone(),
         description: row.description.clone(),
-        vendor: row.vendor.clone(),
         model: row.model.clone(),
         repos: row
             .repos
@@ -279,7 +277,6 @@ mod tests {
         AgentPresetInput {
             name: name.into(),
             description: Some("d".into()),
-            vendor: None,
             model: model.into(),
             repos: None,
             plugins: None,
@@ -295,7 +292,6 @@ mod tests {
         let v = s.create(input("a", "sonnet")).await.unwrap();
         assert_eq!(v.name, "a");
         assert_eq!(v.description, "d");
-        assert_eq!(v.vendor, None);
         assert!(v.repos.is_empty() && v.plugins.is_empty());
         assert!(!v.created_at.is_empty());
         assert_eq!(v.created_at, v.updated_at);

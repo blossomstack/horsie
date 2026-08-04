@@ -1,6 +1,11 @@
-/// Named agent presets: a saved session configuration (runtime vendor, model,
-/// repos, skills, MCP servers, memory spaces, thinking effort) that is invoked
-/// with a message to create a session.
+/// Named agent presets: a saved session configuration (model, repos, skills,
+/// MCP servers, memory spaces, thinking effort) that is invoked with a message
+/// to create a session.
+///
+/// A preset deliberately does not name a runtime vendor. Which machine runs the
+/// work is a property of the invocation, not of the saved configuration, and a
+/// pinned vendor is invisible once it disconnects but fatal at invoke — which
+/// surfaces as a routine that silently stopped working.
 package agents;
 
 use session.SessionSummary;
@@ -11,8 +16,6 @@ struct AgentView {
     /// Slug; the id of record, used in API paths and CLI invocations.
     name: String,
     description: String,
-    /// Runtime vendor name; absent → the server's default vendor at invoke.
-    vendor: Option<String>,
     /// Configured model alias.
     model: String,
     /// Repositories cloned into the session workspace at provision time.
@@ -39,7 +42,6 @@ struct AgentView {
 struct AgentPresetInput {
     name: String,
     description: Option<String>,
-    vendor: Option<String>,
     model: String,
     repos: Option<Vec<RepoConfig>>,
     plugins: Option<Vec<String>>,

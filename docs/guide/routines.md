@@ -11,7 +11,7 @@ Sweep a repo for stale dependencies once a week.
 ## What a routine is made of
 
 ```
-routine = an agent preset  (runtime, model, repos, skills, MCP, memory)
+routine = an agent preset  (model, repos, skills, MCP, memory)
         + a prompt         (the whole instruction each run gets)
         + a trigger        (manually · repeatedly · once, at a time)
 ```
@@ -24,8 +24,10 @@ one preset, and editing the preset changes all of them at once.
 ## Creating one
 
 1. **Agents → New agent** — if you don't already have a preset, make one. It
-   holds the runtime vendor, model, repositories, skills, MCP servers, memory
-   spaces and thinking effort every run will use.
+   holds the model, repositories, skills, MCP servers, memory spaces and
+   thinking effort every run will use. It does not name a runtime: every run
+   uses the server's default vendor, so a routine cannot be stranded on a
+   machine you forgot it was pinned to.
 2. **Routines → New routine.**
    - **Name** — a slug (`nightly-triage`). It is the id: routines are addressed
      by name in the API, and the name cannot be changed later.

@@ -85,10 +85,11 @@ impl RoutineRunner {
             RoutineError::Invalid(format!("unknown agent preset '{}'", routine.agent))
         })?;
 
-        let vendor = agent
-            .vendor
-            .clone()
-            .unwrap_or_else(|| self.config.default_vendor());
+        // A preset names no vendor, so every run resolves the server default.
+        // Deliberately not a per-routine pin: a routine is unattended, so a pin
+        // that goes stale fails every interval with nobody watching, and
+        // `next_run` waits the interval out rather than disabling the routine.
+        let vendor = self.config.default_vendor();
         if !self.vendors.connected_names().contains(&vendor) {
             return Err(RoutineError::Invalid(format!(
                 "runtime vendor '{vendor}' is not connected"

@@ -56,16 +56,16 @@ fn render_agent_table(agents: &[AgentView]) -> String {
         return "no agents\n".to_string();
     }
     let mut out = format!(
-        "{:<20} {:<14} {:<12} {:>6} {:>7}  DESCRIPTION\n",
-        "NAME", "MODEL", "VENDOR", "SKILLS", "MEMORY"
+        "{:<20} {:<14} {:>6} {:>4} {:>7}  DESCRIPTION\n",
+        "NAME", "MODEL", "SKILLS", "MCP", "MEMORY"
     );
     for a in agents {
         out.push_str(&format!(
-            "{:<20} {:<14} {:<12} {:>6} {:>7}  {}\n",
+            "{:<20} {:<14} {:>6} {:>4} {:>7}  {}\n",
             truncate(&a.name, 20),
             truncate(&a.model, 14),
-            a.vendor.as_deref().unwrap_or("-"),
             a.plugins.len(),
+            a.mcp_servers.len(),
             a.memory_spaces.len(),
             truncate(&a.description, 60),
         ));
@@ -75,11 +75,8 @@ fn render_agent_table(agents: &[AgentView]) -> String {
 
 fn render_agent_detail(a: &AgentView) -> String {
     let mut out = format!(
-        "name        {}\ndescription {}\nmodel       {}\nvendor      {}\n",
-        a.name,
-        a.description,
-        a.model,
-        a.vendor.as_deref().unwrap_or("-"),
+        "name        {}\ndescription {}\nmodel       {}\n",
+        a.name, a.description, a.model,
     );
     if let Some(e) = a.thinking_effort.as_deref() {
         out.push_str(&format!("thinking    {e}\n"));
@@ -118,7 +115,6 @@ mod tests {
         AgentView {
             name: name.into(),
             description: "reviews PRs".into(),
-            vendor: Some("local".into()),
             model: "sonnet".into(),
             repos: vec![],
             plugins: vec!["superpowers".into()],

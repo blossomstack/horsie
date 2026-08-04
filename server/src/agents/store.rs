@@ -6,7 +6,7 @@ use crate::db::Db;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
-const COLS: &str = "name, description, vendor, model, repos, plugins, \
+const COLS: &str = "name, description, model, repos, plugins, \
                     mcp_servers, memory_spaces, thinking_effort, created_at, updated_at";
 
 /// One repo to clone at provision time (storage twin of wire `RepoConfig`).
@@ -24,7 +24,6 @@ pub struct AgentRepo {
 pub struct AgentRow {
     pub name: String,
     pub description: String,
-    pub vendor: Option<String>,
     pub model: String,
     pub repos: Vec<AgentRepo>,
     pub plugins: Vec<String>,
@@ -73,11 +72,10 @@ impl AgentStore {
     /// would discard the existing preset).
     pub async fn insert(&self, row: &AgentRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO agents ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO agents ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(&row.name)
         .bind(&row.description)
-        .bind(&row.vendor)
         .bind(&row.model)
         .bind(to_json(&row.repos)?)
         .bind(to_json(&row.plugins)?)
@@ -95,12 +93,11 @@ impl AgentStore {
     /// Full replace. Returns false when no agent has that name.
     pub async fn replace(&self, row: &AgentRow) -> Result<bool, String> {
         let res = sqlx::query(&self.db.q(
-            "UPDATE agents SET description = ?, vendor = ?, model = ?, repos = ?, \
+            "UPDATE agents SET description = ?, model = ?, repos = ?, \
              plugins = ?, mcp_servers = ?, memory_spaces = ?, thinking_effort = ?, \
              updated_at = ? WHERE name = ?",
         ))
         .bind(&row.description)
-        .bind(&row.vendor)
         .bind(&row.model)
         .bind(to_json(&row.repos)?)
         .bind(to_json(&row.plugins)?)
@@ -142,7 +139,6 @@ fn row_to_agent(row: &AnyRow) -> Result<AgentRow, String> {
     Ok(AgentRow {
         name: get("name")?,
         description: get("description")?,
-        vendor: get_opt("vendor")?,
         model: get("model")?,
         repos: from_json("repos", get("repos")?)?,
         plugins: from_json("plugins", get("plugins")?)?,
@@ -169,7 +165,6 @@ mod tests {
         AgentRow {
             name: name.into(),
             description: "d".into(),
-            vendor: Some("local".into()),
             model: "sonnet".into(),
             repos: vec![AgentRepo {
                 url: "https://github.com/o/api".into(),
@@ -227,14 +222,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn null_vendor_and_effort_round_trip() {
+    async fn null_effort_round_trips() {
         let (s, _t) = store().await;
         let mut r = row("a");
-        r.vendor = None;
         r.thinking_effort = None;
         s.insert(&r).await.unwrap();
         let got = s.get("a").await.unwrap().unwrap();
-        assert_eq!(got.vendor, None);
         assert_eq!(got.thinking_effort, None);
     }
 }
