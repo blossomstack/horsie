@@ -178,6 +178,10 @@ async fn start_server_with(
     let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
         shared_vendors,
     ));
+    let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
+        horsie_server::workflows::WorkflowStore::new(opened.db.clone()),
+        agents.clone(),
+    ));
     let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
         routines.clone(),
         agents.clone(),
@@ -199,6 +203,7 @@ async fn start_server_with(
         memory,
         agents,
         routines,
+        workflows,
         routine_runner,
         environments,
         vendor_agents,
@@ -344,6 +349,10 @@ async fn start_server_with_live_vendors(
     let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
         opened.vendors.clone(),
     ));
+    let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
+        horsie_server::workflows::WorkflowStore::new(opened.db.clone()),
+        agents.clone(),
+    ));
     let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
         routines.clone(),
         agents.clone(),
@@ -365,6 +374,7 @@ async fn start_server_with_live_vendors(
         memory,
         agents,
         routines,
+        workflows,
         routine_runner,
         environments,
         vendor_agents,

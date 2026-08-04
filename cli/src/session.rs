@@ -595,6 +595,7 @@ mod tests {
             status: Some(horsie_models::session::SessionStatusKind::Running),
             created_at: 1_000,
             last_error: None,
+            workflow: None,
         }
     }
 

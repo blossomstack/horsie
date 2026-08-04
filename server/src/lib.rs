@@ -14,5 +14,6 @@ pub mod runtime_manager;
 pub mod runtime_vendor;
 pub mod sessions;
 mod wire_redact;
+pub mod workflows;
 
 pub use error::ServerError;

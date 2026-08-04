@@ -114,6 +114,18 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: oneshot::Sender<Option<SessionUsageStats>>,
     },
+    /// Read a session's workflow run (`None` when the session is unknown or
+    /// is not a run).
+    RunState {
+        id: SessionId,
+        reply: oneshot::Sender<Option<crate::sessions::workflow::WorkflowRunState>>,
+    },
+    /// Re-run one execution of a run's step.
+    RetryStep {
+        id: SessionId,
+        index: u32,
+        reply: oneshot::Sender<Option<Result<(), String>>>,
+    },
     /// Read a session's subagent tree (`None` when the session is unknown).
     SubAgents {
         id: SessionId,
@@ -570,6 +582,38 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
+            SessionSupervisorCommand::RunState { id, reply } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child.tell(SessionCommand::RunState { reply: tx }).await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok().flatten());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::RetryStep { id, index, reply } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child
+                            .tell(SessionCommand::RetryStep { index, reply: tx })
+                            .await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
             SessionSupervisorCommand::SubAgents { id, reply } => {
                 match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
@@ -744,6 +788,7 @@ mod tests {
             vendor: "mock".into(),
             plugins: vec![],
             origin: crate::sessions::spec::SessionOrigin::User,
+            workflow: None,
         }
     }
 

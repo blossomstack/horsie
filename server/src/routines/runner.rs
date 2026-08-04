@@ -156,6 +156,9 @@ impl RoutineRunner {
                     RoutineError::Internal("the session vanished before its prompt".into())
                 }
                 UserMessageError::Unrecoverable(reason) => RoutineError::Conflict(reason),
+                // A routine invokes an agent preset, never a workflow, so this
+                // is unreachable rather than merely unlikely.
+                UserMessageError::Rejected(why) => RoutineError::Conflict(why),
             })?;
 
         let status = SessionStatus::Idle;
@@ -165,6 +168,8 @@ impl RoutineRunner {
             status: Some(status_kind(&status)),
             created_at: now_ms,
             last_error: status_reason(&status),
+            // A routine invokes an agent preset, never a workflow.
+            workflow: None,
         })
     }
 }

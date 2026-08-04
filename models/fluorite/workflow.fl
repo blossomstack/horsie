@@ -1,48 +1,185 @@
-/// Protocol/config types describing a multi-agent workflow.
+/// Workflows: a named graph of steps, each step an agent preset with a fixed
+/// prompt, wired together by conditions over the step's structured output.
+///
+/// A definition is only the graph. Where it runs (runtime vendor) and what it
+/// runs against (repos) are properties of the invocation, not of the saved
+/// configuration — a pinned vendor is invisible once it disconnects and fatal
+/// at invoke, and a hardcoded checkout can only ever be run one way. A step's
+/// preset supplies the model, MCP servers, memory spaces and thinking effort;
+/// its `repos` are ignored, because the workflow owns one runtime shared by
+/// every step.
 package workflow;
 
-/// A directed edge to the next agent, optionally gated by a condition.
+use session.SessionSummary;
+use session_api.RepoConfig;
+
+/// A directed edge out of a step, optionally gated by a condition.
 ///
-/// `condition` is an expression evaluated against the producing agent's
-/// structured output (bound to `output`); it must evaluate to a boolean. A
+/// `condition` is an expression evaluated against the producing step's
+/// structured output, bound to `output`; it must evaluate to a boolean. A
 /// `None` condition is an unconditional catch-all. Transitions are tried in
-/// order and the first match wins.
+/// order and the first match wins. A step whose transitions all fail to match
+/// ends the run, carrying that step's output as the run's.
 struct WorkflowTransition {
     to: String,
     condition: Option<String>,
 }
 
-/// One agent in a workflow graph.
-struct WorkflowAgentDef {
+/// One step in a workflow graph.
+struct WorkflowStepDef {
     name: String,
-    system_prompt: Option<String>,
-    /// Key into the runtime provider registry.
-    model: String,
-    /// JSON Schema for the agent's structured output. When present, the agent
-    /// finishes by calling the builtin terminal tool with output conforming to it.
+    /// Agent preset this step runs as.
+    agent: String,
+    /// The step's instruction. Whatever the step is handed — the run's input
+    /// for the start step, the previous step's output for every other — is
+    /// appended below it under a header.
+    prompt: String,
+    /// JSON Schema for the step's structured output. When present, the step
+    /// finishes by calling the builtin terminal tool with output conforming to
+    /// it. Required when the step has any conditional transition, since there
+    /// would otherwise be nothing for the condition to read.
     output_schema: Option<Any>,
-    /// Whether the agent may pause to ask the user a question.
-    allow_ask_user: bool,
-    /// Whether the agent may arm timers (set_timer/list_timers/cancel_timer) and
-    /// park itself to await them. Optional for back-compat; absent means false.
-    allow_timers: Option<bool>,
-    /// Outgoing transitions evaluated against this agent's output.
+    /// Outgoing transitions, evaluated against this step's output.
     transitions: Option<Vec<WorkflowTransition>>,
+    /// Cap on agent-loop iterations for this step.
     max_iterations: Option<u32>,
-    /// Retry budget for transient provider errors before the run is treated as failed.
+    /// Retry budget for transient provider errors within this step.
     max_retries: Option<u32>,
-    /// Tool allowlist; `None` means all tools are available.
-    allowed_tools: Option<Vec<String>>,
-    /// Whether this agent sees the shared plugin library (skills + SessionStart
-    /// bootstrap). `None` inherits the workflow-level default.
-    use_plugins: Option<bool>,
 }
 
-/// A complete workflow graph.
-struct WorkflowDefinition {
+/// A workflow as shown to clients.
+struct WorkflowView {
+    /// Slug; the id of record, used in API paths.
+    name: String,
+    description: String,
+    /// Name of the step every run begins at.
     start: String,
-    agents: Vec<WorkflowAgentDef>,
-    /// Default for agents that don't set `use_plugins`. `None` means on — installed
-    /// shared plugins are available to every agent unless it opts out.
-    default_use_plugins: Option<bool>,
+    steps: Vec<WorkflowStepDef>,
+    /// Unix epoch seconds.
+    created_at: String,
+    updated_at: String,
 }
+
+/// Create or fully replace a workflow. `description` defaults to "".
+struct WorkflowInput {
+    name: String,
+    description: Option<String>,
+    start: String,
+    steps: Vec<WorkflowStepDef>,
+}
+
+/// Start a run: the configuration creating a session takes, plus the input the
+/// start step is handed.
+struct WorkflowRunRequest {
+    input: String,
+    /// Runtime vendor for the run's single shared runtime; absent → the
+    /// server's default vendor at invoke.
+    vendor: Option<String>,
+    /// Repositories cloned into the run's shared workspace.
+    repos: Option<Vec<RepoConfig>>,
+    /// Optional run title.
+    name: Option<String>,
+}
+
+/// The session a run created. It is running by the time this is returned.
+struct WorkflowRunResponse { session: SessionSummary }
+
+/// A workflow's runs, newest first.
+struct WorkflowRunsResponse { sessions: Vec<SessionSummary> }
+
+/// Lifecycle of one run. `Suspended` means stopped part-way and resumable by
+/// retrying a step — cancelled, or a step interrupted by a restart. `Finished`
+/// carries the last step's output; `Failed` ended on an error no retry clears
+/// by itself.
+#[type_tag = "type"]
+union WorkflowStatus {
+    Pending(PendingStatus),
+    Running(RunningStatus),
+    Suspended(SuspendedStatus),
+    AwaitingInput(AwaitingInputStatus),
+    Finished(FinishedStatus),
+    Failed(FailedStatus),
+}
+
+struct PendingStatus {}
+struct RunningStatus {}
+struct SuspendedStatus {}
+struct AwaitingInputStatus {}
+struct FinishedStatus {}
+struct FailedStatus {}
+
+/// What became of one step execution.
+#[type_tag = "type"]
+union StepRunStatus {
+    Running(StepRunning),
+    Concluded(StepConcluded),
+    Failed(StepFailed),
+    Cancelled(StepCancelled),
+}
+
+struct StepRunning {}
+struct StepConcluded {}
+struct StepFailed {}
+struct StepCancelled {}
+
+/// One execution of one step. A step visited twice — by a loop or by a retry —
+/// has two of these.
+struct StepRunView {
+    /// Position in the run log; the id a retry names.
+    index: u32,
+    /// Which step of the definition ran.
+    step: String,
+    /// The agent this execution is, addressable at
+    /// `/sessions/:id/agents/:agent_id`.
+    agent_id: String,
+    /// 1 for the first execution of this step on this path.
+    attempt: u32,
+    status: StepRunStatus,
+    /// The structured output it concluded with.
+    output: Option<Any>,
+    error: Option<String>,
+    started_at_ms: u64,
+    ended_at_ms: Option<u64>,
+    /// Tokens this execution spent.
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+/// One node of the run graph: a step of the definition, plus every execution
+/// that landed on it. `runs` is empty for a step the run never reached.
+struct RunNode {
+    step: String,
+    runs: Vec<StepRunView>,
+}
+
+/// One edge of the run graph: a transition of the definition, plus which
+/// executions took it. `traversals` is empty for an edge never taken.
+struct RunEdge {
+    from: String,
+    to: String,
+    condition: Option<String>,
+    traversals: Vec<u32>,
+}
+
+/// A run, projected onto the definition's graph.
+struct WorkflowRunGraph {
+    /// The workflow this run was started from. The definition is snapshotted
+    /// at run creation, so editing or deleting it does not change this run.
+    workflow: String,
+    status: WorkflowStatus,
+    /// Index into the run log of the execution in flight.
+    current: Option<u32>,
+    start: String,
+    nodes: Vec<RunNode>,
+    edges: Vec<RunEdge>,
+    /// The last step's output, once the run has finished.
+    output: Option<Any>,
+    error: Option<String>,
+    /// Every step's tokens, summed.
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+/// Re-run one step execution. The new attempt appends to the run log; earlier
+/// attempts are kept. A live run's current step is cancelled first.
+struct WorkflowRetryRequest { step_index: u32 }

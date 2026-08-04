@@ -13,7 +13,6 @@ members = [
     "providers/mock-llm",
     "runtime-client",
     "mcp-client",
-    "supervisor",
     "cli",
     "velos-runtime",
     "tests",
@@ -40,7 +39,7 @@ tokio-stream      = { version = "0.1", features = ["sync"] }
 # self-hosted server behind a private CA works once that CA is trusted here.
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 futures-util      = "0.3"
-uuid              = { version = "1", features = ["v4", "serde"] }
+uuid              = { version = "1", features = ["v4", "v5", "serde"] }
 rand              = "0.8"
 argon2            = "0.5"
 async-llm         = "0.8.0"

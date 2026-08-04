@@ -1,18 +1,19 @@
-//! Multi-agent orchestration on top of the event-sourced `actor` runtime.
+//! The agent loop on top of the event-sourced `actor` runtime.
 //!
-//! A [`WorkflowActor`] drives a [`WorkflowDefinition`](horsie_models::workflow::WorkflowDefinition):
-//! it spawns one [`AgentActor`] per agent session, routes handoff tools to the
-//! next agent via the workflow's transitions, and owns the error and
-//! interruption model — cancel, resume, ask/reply, fork, and crash recovery.
-//! Both actors are event-sourced, so a restarted process recovers in-flight
-//! workflows and conversations from the journal.
+//! An [`AgentActor`] runs one agent: it calls the provider, executes tools
+//! through a [`Toolbox`](horsie_agentcore::Toolbox), and reports a terminal
+//! [`AgentOutcome`] to whoever spawned it. It is event-sourced, so a restarted
+//! process recovers an in-flight conversation from the journal.
+//!
+//! Sequencing several agents — an interactive session's main agent and its
+//! subagents, or a workflow run's steps — belongs to the owner that spawns
+//! them, not here.
 
 mod agent_actor;
 mod context;
 mod mcp_toolbox;
 mod task_list;
 mod timers;
-mod workflow_actor;
 mod workspace;
 
 pub use agent_actor::{
@@ -22,17 +23,13 @@ pub use agent_actor::{
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL, ContextError,
     ContextProvider, Contexts, DefaultToolboxFactory, FixedContextProvider, INSPECT_WORKSPACE_TOOL,
-    SKILL_TOOL, ToolboxFactory, WorkflowRuntimeContext, conclude_tool_spec,
+    SKILL_TOOL, ToolboxFactory, conclude_tool_spec,
 };
 pub use mcp_toolbox::{CompositeToolbox, McpToolbox};
 pub use task_list::{
     TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, TaskStatus, task_list_tool_spec,
 };
 pub use timers::{CancelSelector, TimerId, TimerKind, TimerRecord, TimerView, timer_tool_specs};
-pub use workflow_actor::{
-    WorkflowActor, WorkflowCommand, WorkflowDomainEvent, WorkflowNotification, WorkflowState,
-    WorkflowStatus,
-};
 pub use workspace::{
     SharedContext, SharedScan, Skill, SkillSet, WorkspaceContext, compose_system_prompt,
     scan as scan_workspace,

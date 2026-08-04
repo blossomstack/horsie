@@ -1,5 +1,12 @@
-//! What drives a session's agents. One variant today; workflow runs add a
-//! second.
+//! What drives a session's agents: a person talking to one resident main
+//! agent, or a workflow definition driving a sequence of step agents.
+//!
+//! The two differ in where subagent trees hang. An interactive session roots
+//! one, at its main agent. A run roots one per step, because a step agent may
+//! spawn subagents exactly as a main agent may and they belong to that step —
+//! which is why the fold routes a subagent event through
+//! [`SessionModeState::tree_of_parent_mut`] and
+//! [`SessionModeState::tree_of_node_mut`] rather than at a single tree.
 //!
 //! Serialized through [`SessionModeWire`] so that snapshots written before this
 //! type existed — which carried `subagents` at the top level of
@@ -8,8 +15,10 @@
 //! durability contract: a plain field move would load every deployed session
 //! with an empty subagent tree.
 
-use crate::sessions::subagents::SubAgentTree;
+use crate::sessions::subagents::{SubAgentParent, SubAgentTree};
+use crate::sessions::workflow::WorkflowRunState;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// What drives a session's agents. Fixed at creation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -18,6 +27,9 @@ pub enum SessionModeState {
     /// A person or a routine talks to one resident main agent, which may spawn
     /// subagents.
     Interactive { subagents: SubAgentTree },
+    /// A workflow definition drives a sequence of step agents. There is no main
+    /// agent; each step roots its own subagent tree.
+    Workflow(WorkflowRunState),
 }
 
 impl Default for SessionModeState {
@@ -29,19 +41,91 @@ impl Default for SessionModeState {
 }
 
 impl SessionModeState {
-    /// The subagent tree rooted at this session's main agent.
+    /// The subagent tree rooted at this session's main agent. Empty for a run,
+    /// whose trees hang off its steps — ask [`Self::tree_of_node`] instead.
     pub fn subagents(&self) -> &SubAgentTree {
         match self {
             Self::Interactive { subagents } => subagents,
+            Self::Workflow(_) => empty_tree(),
         }
     }
 
-    /// Mutable access, for the event fold.
-    pub fn subagents_mut(&mut self) -> &mut SubAgentTree {
+    /// Mutable access to the interactive tree. `None` for a run.
+    pub fn subagents_mut(&mut self) -> Option<&mut SubAgentTree> {
         match self {
-            Self::Interactive { subagents } => subagents,
+            Self::Interactive { subagents } => Some(subagents),
+            Self::Workflow(_) => None,
         }
     }
+
+    /// The tree a node with this id belongs to.
+    pub fn tree_of_node(&self, id: Uuid) -> Option<&SubAgentTree> {
+        match self {
+            Self::Interactive { subagents } => subagents.get(&id).map(|_| subagents),
+            Self::Workflow(run) => run.tree_of(id).map(|(_, tree)| tree),
+        }
+    }
+
+    /// The tree a node with this id belongs to, for the fold.
+    pub fn tree_of_node_mut(&mut self, id: Uuid) -> Option<&mut SubAgentTree> {
+        match self {
+            Self::Interactive { subagents } => Some(subagents),
+            Self::Workflow(run) => {
+                let index = run.tree_of(id).map(|(i, _)| i)?;
+                run.steps.get_mut(index as usize).map(|s| &mut s.subagents)
+            }
+        }
+    }
+
+    /// The tree a spawn by `parent` belongs in. In a run, `Main` means the step
+    /// currently in flight — the only agent that can be spawning.
+    pub fn tree_of_parent_mut(&mut self, parent: SubAgentParent) -> Option<&mut SubAgentTree> {
+        match parent {
+            SubAgentParent::Main => match self {
+                Self::Interactive { subagents } => Some(subagents),
+                Self::Workflow(run) => {
+                    let index = run.current()?;
+                    run.steps.get_mut(index as usize).map(|s| &mut s.subagents)
+                }
+            },
+            SubAgentParent::SubAgent(id) => self.tree_of_node_mut(id),
+        }
+    }
+
+    /// Every tree this session holds, for readers that span the whole session.
+    pub fn trees(&self) -> Vec<&SubAgentTree> {
+        match self {
+            Self::Interactive { subagents } => vec![subagents],
+            Self::Workflow(run) => run.steps.iter().map(|s| &s.subagents).collect(),
+        }
+    }
+
+    /// The run, when this session is one.
+    pub fn run(&self) -> Option<&WorkflowRunState> {
+        match self {
+            Self::Workflow(run) => Some(run),
+            Self::Interactive { .. } => None,
+        }
+    }
+
+    /// Mutable access to the run, for the event fold.
+    pub fn run_mut(&mut self) -> Option<&mut WorkflowRunState> {
+        match self {
+            Self::Workflow(run) => Some(run),
+            Self::Interactive { .. } => None,
+        }
+    }
+
+    /// Whether this session is a workflow run.
+    pub fn is_workflow(&self) -> bool {
+        matches!(self, Self::Workflow(_))
+    }
+}
+
+/// A tree with no nodes, for the modes that root none of their own.
+fn empty_tree() -> &'static SubAgentTree {
+    static EMPTY: std::sync::OnceLock<SubAgentTree> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(SubAgentTree::default)
 }
 
 /// The serialized shape. `kind` is absent in every snapshot written before this
@@ -54,15 +138,21 @@ struct SessionModeWire {
     kind: Option<String>,
     #[serde(default)]
     subagents: SubAgentTree,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run: Option<WorkflowRunState>,
 }
 
 impl From<SessionModeWire> for SessionModeState {
     fn from(w: SessionModeWire) -> Self {
-        // Only one kind exists. An unknown one from a future version reads as
-        // Interactive rather than failing the whole snapshot load — a session
-        // that cannot deserialize is a session that cannot be opened at all.
-        Self::Interactive {
-            subagents: w.subagents,
+        // The run decides, not the tag: a snapshot carrying one is a run
+        // whatever it claims. An unrecognised kind reads as Interactive rather
+        // than failing the load — a session that cannot deserialize is a
+        // session that cannot be opened at all.
+        match w.run {
+            Some(run) => Self::Workflow(run),
+            None => Self::Interactive {
+                subagents: w.subagents,
+            },
         }
     }
 }
@@ -73,6 +163,12 @@ impl From<SessionModeState> for SessionModeWire {
             SessionModeState::Interactive { subagents } => Self {
                 kind: Some("Interactive".to_string()),
                 subagents,
+                run: None,
+            },
+            SessionModeState::Workflow(run) => Self {
+                kind: Some("Workflow".to_string()),
+                subagents: SubAgentTree::default(),
+                run: Some(run),
             },
         }
     }

@@ -9,4 +9,8 @@ export interface SessionSummary {
   status?: SessionStatusKind;
   createdAt: number;
   lastError?: string;
+  /**
+   * The workflow this session is a run of. Present only for a run, which is
+   */
+  workflow?: string;
 }

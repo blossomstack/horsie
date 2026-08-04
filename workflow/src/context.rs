@@ -1,12 +1,10 @@
 use crate::agent_actor::UsageTotal;
 use crate::mcp_toolbox::CompositeToolbox;
-use crate::workflow_actor::WorkflowNotification;
 use async_trait::async_trait;
 use horsie_agentcore::{EventSink, LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
-use horsie_models::workflow::WorkflowAgentDef;
 use horsie_runtime_client::{RuntimeClient, add_runtime_tools};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -16,10 +14,9 @@ pub const CONCLUDE_TOOL: &str = "conclude";
 
 /// The subset of an agent's configuration that [`ToolboxFactory::for_agent`] and
 /// [`AgentParams::from_def`](crate::AgentParams::from_def) actually need: tool
-/// shape and turn-shape, nothing about *where this agent sits* (a workflow
-/// graph node's `name`/`model`/`transitions`, none of which those two care
-/// about). A [`WorkflowAgentDef`] converts into one via [`From`]; an interactive
-/// session (which is not a workflow graph node at all) builds one directly.
+/// shape and turn-shape, and nothing about *where this agent sits*. A workflow
+/// step builds one from its definition and preset; an interactive session
+/// builds one from its settings.
 #[derive(Debug, Clone, Default)]
 pub struct AgentRunDef {
     pub system_prompt: Option<String>,
@@ -31,20 +28,6 @@ pub struct AgentRunDef {
     pub allowed_tools: Option<Vec<String>>,
 }
 
-impl From<&WorkflowAgentDef> for AgentRunDef {
-    fn from(def: &WorkflowAgentDef) -> Self {
-        Self {
-            system_prompt: def.system_prompt.clone(),
-            output_schema: def.output_schema.clone(),
-            allow_ask_user: def.allow_ask_user,
-            allow_timers: def.allow_timers,
-            max_iterations: def.max_iterations,
-            max_retries: def.max_retries,
-            allowed_tools: def.allowed_tools.clone(),
-        }
-    }
-}
-
 /// Name of the builtin tool an agent calls to load a skill's full instructions on
 /// demand (progressive disclosure). Always advertised; re-scans the workspace live.
 pub const SKILL_TOOL: &str = "skill";
@@ -53,32 +36,6 @@ pub const SKILL_TOOL: &str = "skill";
 /// catalog (path, git status, instruction presence, skills). Always advertised, like
 /// `skill`. Replaces the former `list_skills`.
 pub const INSPECT_WORKSPACE_TOOL: &str = "inspect_workspace";
-
-/// Resources injected into a [`WorkflowActor`](crate::WorkflowActor) at construction.
-///
-/// These are runtime wiring, not persisted state — they are recreated on every
-/// spawn or restart and never written to the journal.
-#[derive(Clone)]
-pub struct WorkflowRuntimeContext {
-    /// LLM providers keyed by the `model` field of a [`WorkflowAgentDef`].
-    pub provider_registry: HashMap<String, Arc<dyn LlmProvider>>,
-    /// Builds a per-agent toolbox, applying the agent's tool allowlist and the
-    /// synthesized `conclude` tool.
-    pub toolbox_factory: Arc<dyn ToolboxFactory>,
-    /// Client for executing tools inside a managed runtime.
-    pub runtime_client: RuntimeClient,
-    /// Sink for streaming observation events (never journaled).
-    pub event_sink: Arc<dyn EventSink>,
-    /// Live push channel for workflow status transitions (never journaled).
-    pub workflow_events: tokio::sync::mpsc::Sender<WorkflowNotification>,
-}
-
-impl WorkflowRuntimeContext {
-    /// Resolve the provider for an agent's `model` key.
-    pub fn provider_for(&self, model: &str) -> Option<Arc<dyn LlmProvider>> {
-        self.provider_registry.get(model).cloned()
-    }
-}
 
 /// One question an agent parked on, and the call that asked it.
 #[derive(Debug, Clone)]
@@ -207,10 +164,9 @@ impl std::fmt::Display for ContextError {
 }
 
 /// A [`ContextProvider`] that hands back the same contexts every time — built
-/// once and reused. Workflow agents use this: their runtime/toolbox are
-/// provisioned by the `WorkflowActor` at spawn and stay fixed for the agent's
-/// life, so `provide` is a trivial clone (and a recovery self-resume gets them
-/// back unchanged).
+/// once and reused, by any owner whose agent's runtime and toolbox are
+/// fixed for the agent's life, so `provide` is a trivial clone (and a recovery
+/// self-resume gets them back unchanged).
 pub struct FixedContextProvider {
     pub provider: Arc<dyn LlmProvider>,
     pub toolbox: Arc<dyn Toolbox>,

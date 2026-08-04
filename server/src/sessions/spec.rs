@@ -92,6 +92,9 @@ pub enum SessionOrigin {
     User,
     /// Created by a routine trigger — timer, run endpoint, or the UI button.
     Routine { routine: String },
+    /// A run of a workflow. Unlike a routine's, these sessions stay in the
+    /// ordinary session list, annotated with the workflow they came from.
+    Workflow { workflow: String },
 }
 
 /// Persisted, self-contained description of one session (lives in the
@@ -115,14 +118,27 @@ pub struct SessionSpec {
     /// journal row loads as [`SessionOrigin::User`].
     #[serde(default)]
     pub origin: SessionOrigin,
+    /// The workflow this session is a run of, snapshotted at creation:
+    /// the graph and each step's resolved preset. `None` for every ordinary
+    /// session, which is what makes the field additive.
+    #[serde(default)]
+    pub workflow: Option<Arc<crate::sessions::workflow::WorkflowRunSpec>>,
 }
 
 impl SessionSpec {
     /// The routine this session is a run of, if any.
     pub fn routine(&self) -> Option<&str> {
         match &self.origin {
-            SessionOrigin::User => None,
+            SessionOrigin::User | SessionOrigin::Workflow { .. } => None,
             SessionOrigin::Routine { routine } => Some(routine),
+        }
+    }
+
+    /// The workflow this session is a run of, if any.
+    pub fn workflow_name(&self) -> Option<&str> {
+        match &self.origin {
+            SessionOrigin::User | SessionOrigin::Routine { .. } => None,
+            SessionOrigin::Workflow { workflow } => Some(workflow),
         }
     }
 
@@ -264,6 +280,7 @@ mod tests {
             vendor: "mock".into(),
             plugins: vec![],
             origin: SessionOrigin::User,
+            workflow: None,
         };
         let mut row = serde_json::to_value(&spec).unwrap();
         row["plugins_dir"] = serde_json::json!("/home/u/.local/share/horsie/plugins");
@@ -312,6 +329,7 @@ mod tests {
             origin: SessionOrigin::Routine {
                 routine: "nightly".into(),
             },
+            workflow: None,
         };
         let loaded: SessionSpec =
             serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();

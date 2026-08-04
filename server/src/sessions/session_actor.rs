@@ -13,7 +13,9 @@ use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::{AgentEventSink, BroadcastObserver};
 use crate::sessions::mode::SessionModeState;
-use crate::sessions::orchestrator::{AgentAction, InteractiveOrchestrator, Orchestrator};
+use crate::sessions::orchestrator::{
+    AgentAction, InteractiveOrchestrator, Orchestrator, SessionCommandKind,
+};
 use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::{AgentSettings, PendingAsk, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::subagents::{INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent};
@@ -33,6 +35,7 @@ use horsie_workflow::{
     compose_system_prompt, scan_workspace,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{broadcast, oneshot};
@@ -134,6 +137,18 @@ pub enum SessionCommand {
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Read the whole subagent tree (backs `GET /api/sessions/:id/subagents`).
+    /// Read this session's workflow run, if it is one.
+    RunState {
+        reply: oneshot::Sender<Option<crate::sessions::workflow::WorkflowRunState>>,
+    },
+    /// Let the orchestrator start whatever it wants started. Sent to a run at
+    /// load so a pending one begins, and after a retry.
+    AdvanceRun,
+    /// Re-run one execution from the run log.
+    RetryStep {
+        index: u32,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     SubAgentTree {
         reply: oneshot::Sender<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>,
     },
@@ -247,6 +262,46 @@ pub enum SessionDomainEvent {
     SubAgentNotified {
         at_ms: u64,
         id: Uuid,
+    },
+    /// One execution of one workflow step began. Appended, never replacing: a
+    /// loop back onto a step and a retry of one are both new entries, which is
+    /// what keeps the log replayable and the graph projection lossless.
+    StepStarted {
+        at_ms: u64,
+        index: u32,
+        step: String,
+        agent: Uuid,
+        attempt: u32,
+        /// The entry this came out of; `None` for the start step.
+        from: Option<u32>,
+        /// The transition condition that matched, if any.
+        via: Option<String>,
+        input: String,
+    },
+    StepConcluded {
+        at_ms: u64,
+        index: u32,
+        output: Value,
+    },
+    StepFailed {
+        at_ms: u64,
+        index: u32,
+        error: String,
+    },
+    /// A step was cancelled — by an interrupt, or by a retry taking its place.
+    /// Suspends the run: a person decides between retrying and abandoning,
+    /// because the step's effect on the shared workspace is unknown.
+    StepCancelled {
+        at_ms: u64,
+        index: u32,
+    },
+    RunFinished {
+        at_ms: u64,
+        output: Value,
+    },
+    RunFailed {
+        at_ms: u64,
+        error: String,
     },
 }
 
@@ -369,6 +424,10 @@ fn derive_title(text: &str) -> Option<String> {
 pub enum AgentKey {
     Main,
     Sub(Uuid),
+    /// One execution of a workflow step. Its own key, not `Sub`: a step is not
+    /// spawned by an agent, it is chosen by the definition, and it roots a
+    /// subagent tree of its own.
+    Step(Uuid),
 }
 
 /// The agent actors a session hosts.
@@ -380,6 +439,11 @@ enum SessionAgents {
         main: ActorRef<AgentCommand>,
         subs: HashMap<Uuid, ActorRef<AgentCommand>>,
     },
+    /// A workflow run: step agents and their subagents, all keyed by id. There
+    /// is no main agent — the definition, not a person, decides who runs.
+    Workflow {
+        live: HashMap<Uuid, ActorRef<AgentCommand>>,
+    },
 }
 
 impl SessionAgents {
@@ -390,16 +454,24 @@ impl SessionAgents {
         }
     }
 
+    fn workflow() -> Self {
+        Self::Workflow {
+            live: HashMap::new(),
+        }
+    }
+
     /// The session's primary agent, for the kinds that have one.
     fn main(&self) -> Option<&ActorRef<AgentCommand>> {
         match self {
             Self::Interactive { main, .. } => Some(main),
+            Self::Workflow { .. } => None,
         }
     }
 
     fn sub(&self, id: Uuid) -> Option<&ActorRef<AgentCommand>> {
         match self {
             Self::Interactive { subs, .. } => subs.get(&id),
+            Self::Workflow { live } => live.get(&id),
         }
     }
 
@@ -407,6 +479,9 @@ impl SessionAgents {
         match self {
             Self::Interactive { subs, .. } => {
                 subs.insert(id, agent);
+            }
+            Self::Workflow { live } => {
+                live.insert(id, agent);
             }
         }
     }
@@ -419,6 +494,7 @@ impl SessionAgents {
                 out.push(main.clone());
                 out
             }
+            Self::Workflow { live } => live.drain().map(|(_, a)| a).collect(),
         }
     }
 }
@@ -434,6 +510,10 @@ pub struct SessionActor {
     /// which is why the topology inside is a value rather than a second
     /// `Option`: a session's shape is decided at creation and never changes.
     agents: Option<SessionAgents>,
+    /// The step being started, for the instant between the orchestrator naming
+    /// it and the `StepStarted` event landing in the log. Only
+    /// `perform_run_action` sets it, and it clears it in the same call.
+    pending_step: Option<(u32, String)>,
     /// Decides what this session runs next. Chosen at construction from the
     /// spec; the actor only performs what it returns.
     orchestrator: Arc<dyn Orchestrator>,
@@ -458,6 +538,14 @@ impl SessionActor {
         parent: ActorRef<SessionSupervisorCommand>,
         frames: broadcast::Sender<SessionFrame>,
     ) -> Self {
+        // The spec decides which of the two this session is, once and for all.
+        let orchestrator: Arc<dyn Orchestrator> = match &spec.workflow {
+            Some(run) => Arc::new(crate::sessions::workflow::WorkflowOrchestrator::new(
+                id,
+                run.clone(),
+            )),
+            None => Arc::new(InteractiveOrchestrator),
+        };
         Self {
             id,
             spec,
@@ -465,7 +553,8 @@ impl SessionActor {
             parent,
             frames,
             agents: None,
-            orchestrator: Arc::new(InteractiveOrchestrator),
+            pending_step: None,
+            orchestrator,
             context_provider: None,
             agent_frames: HashMap::new(),
         }
@@ -552,6 +641,7 @@ impl SessionActor {
             mcp: self.deps.mcp.clone(),
             memory: self.deps.memory.clone(),
             settings: self.spec.agent.clone(),
+            step_output_schema: None,
             session_id: self.id,
             kind: SessionAgentKind::Main,
             unattended: self.spec.is_unattended(),
@@ -588,6 +678,173 @@ impl SessionActor {
         self.agents = Some(SessionAgents::interactive(ctx.spawn(
             AgentActor::with_observer(agent_ctx, params, Arc::new(BroadcastObserver { frames })),
         )));
+    }
+
+    /// Spawn the agent for one execution of a workflow step.
+    ///
+    /// Differs from a subagent in three ways, all of them the point: it runs
+    /// with its *own* preset's settings rather than the session's, it carries
+    /// the step's output schema so `conclude` is typed, and it is keyed as a
+    /// step so it roots its own subagent tree.
+    fn spawn_step_agent(
+        &mut self,
+        ctx: &ActorContext<Self>,
+        index: u32,
+        agent_id: Uuid,
+    ) -> Option<ActorRef<AgentCommand>> {
+        let run_spec = self.spec.workflow.clone()?;
+        let step_name = {
+            // The name comes from the log when the entry exists (recovery), and
+            // from the definition's order otherwise.
+            let by_index = run_spec.steps.get(index as usize).map(|s| s.name.clone());
+            self.pending_step
+                .as_ref()
+                .filter(|(i, _)| *i == index)
+                .map(|(_, name)| name.clone())
+                .or(by_index)?
+        };
+        let step = run_spec.step(&step_name)?.clone();
+        let context_provider = Arc::new(SessionContextProvider {
+            runtimes: self
+                .deps
+                .runtimes
+                .provider(self.id.to_string(), self.spec.vendor.clone()),
+            registry: self.deps.provider_registry.clone(),
+            mcp: self.deps.mcp.clone(),
+            memory: self.deps.memory.clone(),
+            settings: step.settings.clone(),
+            step_output_schema: step.output_schema.clone(),
+            session_id: self.id,
+            kind: SessionAgentKind::Step(agent_id),
+            unattended: self.spec.is_unattended(),
+            session: ctx.self_ref(),
+            frames: self.frames.clone(),
+            last_client: Mutex::new(None),
+        });
+        let mut params = AgentParams::from_def(&AgentRunDef {
+            system_prompt: None,
+            // The schema is what makes `conclude` typed, and typed output is
+            // what a transition condition reads.
+            output_schema: step.output_schema.clone(),
+            // Asking rides on `conclude`, so only a step that already has one
+            // can ask. A step that declares no output ends its turn with plain
+            // text, and that text is its output — forcing a terminal tool on it
+            // would fail the run the moment the model simply answered.
+            allow_ask_user: step.output_schema.is_some() && !self.spec.is_unattended(),
+            allow_timers: None,
+            max_iterations: step.settings.max_iterations,
+            max_retries: Some(step.settings.max_retries),
+            allowed_tools: step.settings.allowed_tools.clone(),
+        });
+        params.interactive = true;
+        // Deliberately no handoff tool. A step's terminal tool is `conclude`,
+        // synthesized from its output schema; naming `ask_user` here would stop
+        // the loop treating `conclude` as terminal, so it would try to *execute*
+        // it, get "the conclude tool is terminal and is not executed" back, and
+        // keep going. A step asks through `conclude(kind=ask)` instead.
+        params.thinking_effort = step
+            .settings
+            .thinking_effort
+            .as_deref()
+            .and_then(horsie_agentcore::ThinkingEffort::parse);
+        let frames = self.agent_frames(AgentKey::Step(agent_id));
+        let agent_ctx = AgentRuntimeContext {
+            context_provider,
+            event_sink: Arc::new(AgentEventSink {
+                frames: frames.clone(),
+            }),
+            parent: Arc::new(SessionParent {
+                target: ctx.self_ref(),
+            }),
+            session_id: agent_id,
+        };
+        let actor = ctx.spawn(AgentActor::with_observer(
+            agent_ctx,
+            params,
+            Arc::new(BroadcastObserver { frames }),
+        ));
+        if let Some(agents) = self.agents.as_mut() {
+            agents.insert_sub(agent_id, actor.clone());
+        }
+        Some(actor)
+    }
+
+    /// Carry out a decision that belongs to a workflow run rather than to a
+    /// turn: start a step, or end the run.
+    async fn perform_run_action(
+        &mut self,
+        action: AgentAction,
+        ctx: &ActorContext<Self>,
+    ) -> Vec<SessionDomainEvent> {
+        match action {
+            AgentAction::StartStep {
+                index,
+                step,
+                agent,
+                attempt,
+                from,
+                via,
+                input,
+            } => {
+                // The name is not in the log yet — this event is what puts it
+                // there — so hand it to the spawner directly.
+                self.pending_step = Some((index, step.clone()));
+                let spawned = self.spawn_step_agent(ctx, index, agent);
+                self.pending_step = None;
+                let Some(actor) = spawned else {
+                    return vec![SessionDomainEvent::RunFailed {
+                        at_ms: now_ms(),
+                        error: format!("step '{step}' is no longer in this workflow"),
+                    }];
+                };
+                if actor
+                    .tell(AgentCommand::Resume {
+                        results: Vec::new(),
+                        message: Some(input.clone()),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return vec![SessionDomainEvent::RunFailed {
+                        at_ms: now_ms(),
+                        error: format!("step '{step}' could not be started"),
+                    }];
+                }
+                emit_progress(&self.frames, "step_started", Some(step.clone()));
+                self.report(SessionStatus::Running).await;
+                vec![SessionDomainEvent::StepStarted {
+                    at_ms: now_ms(),
+                    index,
+                    step,
+                    agent,
+                    attempt,
+                    from,
+                    via,
+                    input,
+                }]
+            }
+            AgentAction::Finish { output } => {
+                self.report(SessionStatus::Idle).await;
+                vec![SessionDomainEvent::RunFinished {
+                    at_ms: now_ms(),
+                    output,
+                }]
+            }
+            AgentAction::Fail { error } => {
+                let _ = self.frames.send(SessionFrame::Error {
+                    message: error.clone(),
+                });
+                self.report(SessionStatus::Failed {
+                    reason: error.clone(),
+                })
+                .await;
+                vec![SessionDomainEvent::RunFailed {
+                    at_ms: now_ms(),
+                    error,
+                }]
+            }
+            AgentAction::StartTurn { .. } => unreachable!("handled by `perform`"),
+        }
     }
 
     /// The broadcast for one agent, created on first use. Held by the session
@@ -643,6 +900,7 @@ impl SessionActor {
             mcp: self.deps.mcp.clone(),
             memory: self.deps.memory.clone(),
             settings: self.spec.agent.clone(),
+            step_output_schema: None,
             session_id: self.id,
             kind: SessionAgentKind::Sub(id),
             unattended: self.spec.is_unattended(),
@@ -737,11 +995,17 @@ impl SessionActor {
             answered,
             notified,
             mark_running,
-        } = action;
+        } = action
+        else {
+            return self.perform_run_action(action, ctx).await;
+        };
         match who {
             // A subagent parent waking to consume its children's results. It
             // is skipped, not failed, when its actor cannot be reached: the
             // results stay owed and the next boundary retries.
+            // A step is resumed only by `perform_run_action`; the turn path
+            // never names one.
+            AgentKey::Step(_) => Vec::new(),
             AgentKey::Sub(id) => {
                 let agent = match self.agents.as_ref().and_then(|a| a.sub(id)) {
                     Some(agent) => agent.clone(),
@@ -945,6 +1209,15 @@ impl SessionActor {
             | AgentOutcome::Failed { session_id, .. }
             | AgentOutcome::UsageRecorded { session_id, .. } => *session_id,
         };
+        // In a run, an outcome is a step's or one of a step's subagents'.
+        if let Some(run) = state.mode.run() {
+            if let Some(index) = run.index_of_agent(outcome_session) {
+                return self.on_step_outcome(state, index, outcome, ctx).await;
+            }
+            return self
+                .on_sub_agent_outcome(state, outcome_session, outcome, ctx)
+                .await;
+        }
         if outcome_session != self.id {
             return self
                 .on_sub_agent_outcome(state, outcome_session, outcome, ctx)
@@ -1058,6 +1331,200 @@ impl SessionActor {
             events.extend(self.flush_then_drain(&next, ctx).await);
         }
         self.publish_inbox(state, &events);
+        CommandEffect::persist(events)
+    }
+
+    /// Re-run one execution from the log.
+    ///
+    /// Appends rather than truncating: earlier attempts stay readable, and the
+    /// graph renders them stacked on their node. A run still in flight has its
+    /// current step cancelled first — the run's workspace is shared, so two
+    /// steps must never be writing to it at once.
+    ///
+    /// The workspace itself is *not* rolled back. A retried step re-runs
+    /// against whatever the previous attempt left on disk; that is the honest
+    /// behaviour and the guide says so.
+    async fn on_retry_step(
+        &mut self,
+        state: &SessionState,
+        index: u32,
+        reply: oneshot::Sender<Result<(), String>>,
+        ctx: &ActorContext<Self>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        let Some(run) = state.mode.run() else {
+            let _ = reply.send(Err("this session is not a workflow run".into()));
+            return CommandEffect::none();
+        };
+        let Some(target) = run.get(index).cloned() else {
+            let _ = reply.send(Err(format!("no step execution at index {index}")));
+            return CommandEffect::none();
+        };
+        let mut events = Vec::new();
+        // Cancel whatever is in flight first, so the retry is the only writer.
+        if let Some(current) = run.current() {
+            if let Some(agent) = run
+                .get(current)
+                .and_then(|s| self.agents.as_ref().and_then(|a| a.sub(s.agent)))
+                .cloned()
+            {
+                let (tx, rx) = oneshot::channel();
+                let _ = agent.tell(AgentCommand::Cancel { ack: Some(tx) }).await;
+                if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
+                    tracing::warn!(
+                        session = %self.id,
+                        "cancelled step did not finish within {CANCEL_TIMEOUT:?}; proceeding"
+                    );
+                }
+            }
+            events.push(SessionDomainEvent::StepCancelled {
+                at_ms: now_ms(),
+                index: current,
+            });
+        }
+        let mut next = state.clone();
+        for e in &events {
+            next = Self::apply_event(next, e.clone());
+        }
+        let new_index = next
+            .mode
+            .run()
+            .map(|r| r.steps.len() as u32)
+            .unwrap_or_default();
+        let attempt = next
+            .mode
+            .run()
+            .map(|r| r.attempts_of(&target.step) + 1)
+            .unwrap_or(1);
+        let action = AgentAction::StartStep {
+            index: new_index,
+            step: target.step.clone(),
+            agent: crate::sessions::workflow::WorkflowRunSpec::step_agent_id(self.id, new_index),
+            attempt,
+            // The retry sits where the original sat, so the graph draws it on
+            // the same edge rather than inventing a new one.
+            from: target.from,
+            via: target.via.clone(),
+            input: target.input.clone(),
+        };
+        let _ = reply.send(Ok(()));
+        events.extend(self.perform_run_action(action, ctx).await);
+        CommandEffect::persist(events)
+    }
+
+    /// One step's outcome. Mechanical: map it onto the log entry that records
+    /// it, then let the orchestrator read the folded state and decide what runs
+    /// next. Every branching decision — which transition, whether the run is
+    /// over — is in the driver, not here.
+    async fn on_step_outcome(
+        &mut self,
+        state: &SessionState,
+        index: u32,
+        outcome: AgentOutcome,
+        ctx: &ActorContext<Self>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        // Usage is always recorded: the tokens were spent whatever became of
+        // the step that spent them.
+        if let AgentOutcome::UsageRecorded {
+            usage_total,
+            session_id,
+        } = outcome
+        {
+            return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
+                at_ms: now_ms(),
+                agent_id: session_id.to_string(),
+                usage_total,
+            }]);
+        }
+        let step_name = state
+            .mode
+            .run()
+            .and_then(|r| r.get(index))
+            .map(|s| s.step.clone())
+            .unwrap_or_default();
+        let (mut events, advance) = match outcome {
+            AgentOutcome::UsageRecorded { .. } => unreachable!("handled above"),
+            AgentOutcome::Concluded { output, .. } => {
+                emit_progress(&self.frames, "step_concluded", Some(step_name));
+                (
+                    vec![SessionDomainEvent::StepConcluded {
+                        at_ms: now_ms(),
+                        index,
+                        output,
+                    }],
+                    true,
+                )
+            }
+            AgentOutcome::Asked { asks, .. } => {
+                self.report(SessionStatus::AwaitingInput {
+                    asks: asks
+                        .iter()
+                        .map(|a| PendingAsk {
+                            tool_call_id: a.tool_call_id.clone(),
+                            question: a.question.clone(),
+                        })
+                        .collect(),
+                })
+                .await;
+                (
+                    asks.into_iter()
+                        .map(|a| SessionDomainEvent::AskRecorded {
+                            at_ms: now_ms(),
+                            tool_call_id: a.tool_call_id,
+                            question: a.question,
+                        })
+                        .collect::<Vec<_>>(),
+                    // The step is still running, parked on its question. The
+                    // answer resumes it; nothing else starts meanwhile.
+                    false,
+                )
+            }
+            AgentOutcome::Failed { error, .. } => {
+                let _ = self.frames.send(SessionFrame::Error {
+                    message: error.clone(),
+                });
+                self.report(SessionStatus::Failed {
+                    reason: error.clone(),
+                })
+                .await;
+                // A step that fails fails the run. Retrying it is a decision
+                // for a person: the shared workspace holds whatever the failed
+                // attempt left behind, so re-running blind would redo
+                // half-finished work.
+                (
+                    vec![SessionDomainEvent::StepFailed {
+                        at_ms: now_ms(),
+                        index,
+                        error,
+                    }],
+                    false,
+                )
+            }
+            AgentOutcome::Parked { .. } => {
+                let error = "step parked; timers are not supported in workflows".to_string();
+                let _ = self.frames.send(SessionFrame::Error {
+                    message: error.clone(),
+                });
+                self.report(SessionStatus::Failed {
+                    reason: error.clone(),
+                })
+                .await;
+                (
+                    vec![SessionDomainEvent::StepFailed {
+                        at_ms: now_ms(),
+                        index,
+                        error,
+                    }],
+                    false,
+                )
+            }
+        };
+        if advance {
+            let mut next = state.clone();
+            for e in &events {
+                next = Self::apply_event(next, e.clone());
+            }
+            events.extend(self.flush_then_drain(&next, ctx).await);
+        }
         CommandEffect::persist(events)
     }
 
@@ -1241,6 +1708,7 @@ async fn build_memory_layer(
 enum SessionAgentKind {
     Main,
     Sub(Uuid),
+    Step(Uuid),
 }
 
 /// The runtime client an agent runs with. Subagents share the session's
@@ -1249,7 +1717,12 @@ enum SessionAgentKind {
 fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> RuntimeClient {
     match kind {
         SessionAgentKind::Main => client,
-        SessionAgentKind::Sub(id) => client.with_agent_id(id.to_string()),
+        // Steps share the run's sandbox — that is the point — but never its
+        // cwd/env bucket: the runtime keys that state by agent id, so each acts
+        // under its own identity, exactly as a subagent does.
+        SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
+            client.with_agent_id(id.to_string())
+        }
     }
 }
 
@@ -1260,6 +1733,17 @@ You are a subagent, spawned to work on one task. Your final message is your repo
 it is delivered to the agent that spawned you — make it self-contained. You may spawn \
 your own subagents with spawn_agent and check on them with subagent_status. You cannot \
 ask the user or rename the session; if you are blocked, report that instead.";
+
+/// Appended to a workflow step's system prompt: what a step is, and that its
+/// structured output is what decides where the run goes next. Deliberately
+/// short — the `conclude` tool carries its own schema.
+const STEP_PROMPT_SUFFIX: &str = "\n\n# Workflow step\n\
+You are one step of a workflow, not a conversation. Your instruction and the previous \
+step's result are in the message above. Finish by calling `conclude` — what you submit \
+is both this step's result and what the workflow reads to decide which step runs next, \
+so make it accurate and self-contained. You share one workspace with every other step: \
+what you change on disk is what the next step sees. You may spawn subagents with \
+spawn_agent. You cannot rename the session.";
 
 /// Appended to an unattended session's system prompt (a routine run). It has
 /// no `ask_user` tool, so the prompt says why rather than leaving the model to
@@ -1282,6 +1766,9 @@ struct SessionContextProvider {
     mcp: Option<Arc<crate::mcp::McpService>>,
     memory: Option<Arc<crate::memory::MemoryService>>,
     settings: AgentSettings,
+    /// A workflow step's declared output schema, which becomes the input
+    /// schema of its `conclude` tool. `None` for every other kind of agent.
+    step_output_schema: Option<Value>,
     session_id: Uuid,
     kind: SessionAgentKind,
     /// Whether nobody is watching this session (a routine run). Decides one
@@ -1324,7 +1811,10 @@ impl ContextProvider for SessionContextProvider {
         let def = session_run_def(settings);
         let use_plugins = settings.use_plugins.unwrap_or(true);
         // Preparation progress is main-only: subagents are quiet by design.
-        let broadcast = matches!(self.kind, SessionAgentKind::Main);
+        let broadcast = matches!(
+            self.kind,
+            SessionAgentKind::Main | SessionAgentKind::Step(_)
+        );
 
         if broadcast {
             emit_progress(&self.frames, "acquiring_runtime", None);
@@ -1388,7 +1878,8 @@ impl ContextProvider for SessionContextProvider {
         let (with_memory, memory_index) =
             build_memory_layer(base, self.memory.clone(), settings).await?;
         let caller = match self.kind {
-            SessionAgentKind::Main => SubAgentParent::Main,
+            // A step roots its own tree, so its spawns are that tree's `Main`.
+            SessionAgentKind::Main | SessionAgentKind::Step(_) => SubAgentParent::Main,
             SessionAgentKind::Sub(id) => SubAgentParent::SubAgent(id),
         };
         // A zero cap disables subagents outright: no tools advertised, so the
@@ -1412,12 +1903,23 @@ impl ContextProvider for SessionContextProvider {
                 let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
                 Arc::new(SessionTitleToolbox::new(inner, self.session.clone()))
             }
+            // A step gets `conclude` instead of the ask and title layers: it
+            // asks through `conclude(kind=ask)`, and its title belongs to the
+            // run rather than to one step.
+            SessionAgentKind::Step(_) => crate::sessions::workflow::StepConcludeToolbox::wrap(
+                with_spawn,
+                self.step_output_schema.as_ref(),
+                // Same rule as the run def: asking rides on `conclude`, which
+                // only a step with a declared output has.
+                self.step_output_schema.is_some() && !self.unattended,
+            ),
             SessionAgentKind::Sub(_) => with_spawn,
         };
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
         let suffix = match self.kind {
             SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
             SessionAgentKind::Main => None,
+            SessionAgentKind::Step(_) => Some(STEP_PROMPT_SUFFIX),
             SessionAgentKind::Sub(_) => Some(SUBAGENT_PROMPT_SUFFIX),
         };
         let system_prompt = match suffix {
@@ -1487,6 +1989,9 @@ impl EventSourcedActor for SessionActor {
                 state.status = SessionStatus::AwaitingInput {
                     asks: state.pending_asks.clone(),
                 };
+                if let Some(run) = state.mode.run_mut() {
+                    run.apply_awaiting();
+                }
             }
             SessionDomainEvent::TurnEnded { .. }
             | SessionDomainEvent::TurnStopped { .. }
@@ -1520,22 +2025,95 @@ impl EventSourcedActor for SessionActor {
                 depth,
                 ..
             } => {
-                state
-                    .mode
-                    .subagents_mut()
-                    .apply_spawned(id, parent, label, task, depth);
+                if let Some(tree) = state.mode.tree_of_parent_mut(parent) {
+                    tree.apply_spawned(id, parent, label, task, depth);
+                }
             }
             SessionDomainEvent::SubAgentRunning { id, .. } => {
-                state.mode.subagents_mut().apply_running(id);
+                if let Some(tree) = state.mode.tree_of_node_mut(id) {
+                    tree.apply_running(id);
+                }
             }
             SessionDomainEvent::SubAgentCompleted { id, output, .. } => {
-                state.mode.subagents_mut().apply_completed(id, output);
+                if let Some(tree) = state.mode.tree_of_node_mut(id) {
+                    tree.apply_completed(id, output);
+                }
             }
             SessionDomainEvent::SubAgentFailed { id, error, .. } => {
-                state.mode.subagents_mut().apply_failed(id, error);
+                if let Some(tree) = state.mode.tree_of_node_mut(id) {
+                    tree.apply_failed(id, error);
+                }
             }
             SessionDomainEvent::SubAgentNotified { id, .. } => {
-                state.mode.subagents_mut().apply_notified(id);
+                if let Some(tree) = state.mode.tree_of_node_mut(id) {
+                    tree.apply_notified(id);
+                }
+            }
+            SessionDomainEvent::StepStarted {
+                at_ms,
+                step,
+                agent,
+                attempt,
+                from,
+                via,
+                input,
+                ..
+            } => {
+                // The first step is what turns the state into a run:
+                // `initial_state` is static and cannot see the spec, so the mode
+                // is established by the log rather than at construction.
+                if !state.mode.is_workflow() {
+                    state.mode = SessionModeState::Workflow(Default::default());
+                }
+                if let Some(run) = state.mode.run_mut() {
+                    run.apply_started(step, agent, attempt, from, via, input, at_ms);
+                }
+                state.status = SessionStatus::Running;
+                state.last_error = None;
+            }
+            SessionDomainEvent::StepConcluded {
+                at_ms,
+                index,
+                output,
+            } => {
+                if let Some(run) = state.mode.run_mut() {
+                    run.apply_concluded(index, output, at_ms);
+                }
+            }
+            SessionDomainEvent::StepFailed {
+                at_ms,
+                index,
+                error,
+            } => {
+                if let Some(run) = state.mode.run_mut() {
+                    run.apply_step_failed(index, error.clone(), at_ms);
+                    run.apply_failed(error.clone());
+                }
+                state.status = SessionStatus::Failed {
+                    reason: error.clone(),
+                };
+                state.last_error = Some(error);
+            }
+            SessionDomainEvent::StepCancelled { at_ms, index } => {
+                if let Some(run) = state.mode.run_mut() {
+                    run.apply_cancelled(index, at_ms);
+                }
+                state.status = SessionStatus::Idle;
+            }
+            SessionDomainEvent::RunFinished { output, .. } => {
+                if let Some(run) = state.mode.run_mut() {
+                    run.apply_finished(output);
+                }
+                state.status = SessionStatus::Idle;
+            }
+            SessionDomainEvent::RunFailed { error, .. } => {
+                if let Some(run) = state.mode.run_mut() {
+                    run.apply_failed(error.clone());
+                }
+                state.status = SessionStatus::Failed {
+                    reason: error.clone(),
+                };
+                state.last_error = Some(error);
             }
         }
         state
@@ -1567,6 +2145,10 @@ impl EventSourcedActor for SessionActor {
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             SessionCommand::UserMessage { text, reply } => {
+                if let Err(why) = self.orchestrator.accepts(SessionCommandKind::UserMessage) {
+                    let _ = reply.send(Err(UserMessageError::Rejected(why.to_string())));
+                    return CommandEffect::none();
+                }
                 self.on_user_message(state, text, reply, ctx).await
             }
             SessionCommand::Stop { reply } => {
@@ -1676,6 +2258,16 @@ impl EventSourcedActor for SessionActor {
             }
             SessionCommand::AgentOutcome(outcome) => {
                 self.on_agent_outcome(state, outcome, ctx).await
+            }
+            SessionCommand::RunState { reply } => {
+                let _ = reply.send(state.mode.run().cloned());
+                CommandEffect::none()
+            }
+            SessionCommand::AdvanceRun => {
+                CommandEffect::persist(self.flush_then_drain(state, ctx).await)
+            }
+            SessionCommand::RetryStep { index, reply } => {
+                self.on_retry_step(state, index, reply, ctx).await
             }
             SessionCommand::SubAgentTree { reply } => {
                 let tree = state
@@ -1824,7 +2416,28 @@ impl EventSourcedActor for SessionActor {
     /// interrupted assistant turn is over, and queued user messages wait for
     /// the next turn the user starts.
     async fn on_recovery_complete(&mut self, state: &SessionState, ctx: &mut ActorContext<Self>) {
-        self.spawn_main_agent(ctx);
+        if self.spec.workflow.is_some() {
+            // A run has no main agent. Step actors, like subagent actors, stay
+            // cold: they spawn on demand for a history read, a retry, or the
+            // next step the orchestrator picks.
+            self.agents = Some(SessionAgents::workflow());
+            // The one place a session starts work at load, and only for a run
+            // that has never started a step: a workflow is created and then
+            // left to begin by itself, with no first message to trigger it. A
+            // run whose log is empty still reads as `Interactive` here — the
+            // mode is established by the first `StepStarted` — so an absent run
+            // means "never started", exactly like `Pending`. A run that is
+            // Running, Suspended or terminal is left alone.
+            let unstarted = match state.mode.run() {
+                None => true,
+                Some(run) => run.status == crate::sessions::workflow::WorkflowRunStatus::Pending,
+            };
+            if unstarted {
+                let _ = ctx.self_ref().tell(SessionCommand::AdvanceRun).await;
+            }
+        } else {
+            self.spawn_main_agent(ctx);
+        }
         // Subagent actors stay cold: a session that spawned hundreds of them
         // must not replay hundreds of journals on open. They spawn lazily —
         // on a history read or an owed-result flush — and recovery starts no
@@ -2175,6 +2788,7 @@ mod tests {
             vendor: "mock".into(),
             plugins: vec![],
             origin: crate::sessions::spec::SessionOrigin::User,
+            workflow: None,
         }
     }
 
@@ -2417,7 +3031,9 @@ mod tests {
         assert_eq!(stopped.status, SessionStatus::Idle);
         let actions = decisions(&actor, &stopped);
         assert_eq!(actions.len(), 1, "{actions:?}");
-        let AgentAction::StartTurn { consumed, .. } = &actions[0];
+        let AgentAction::StartTurn { consumed, .. } = &actions[0] else {
+            panic!("an interactive session starts turns, not steps");
+        };
         assert_eq!(consumed, &vec!["m2".to_string()]);
     }
 
@@ -2435,7 +3051,9 @@ mod tests {
         let state = fold(vec![queued("m1", "one"), queued("m2", "two")]);
         let actions = decisions(&actor, &state);
         assert_eq!(actions.len(), 1);
-        let AgentAction::StartTurn { consumed, .. } = &actions[0];
+        let AgentAction::StartTurn { consumed, .. } = &actions[0] else {
+            panic!("an interactive session starts turns, not steps");
+        };
         assert_eq!(consumed, &vec!["m1".to_string(), "m2".to_string()]);
     }
 
@@ -2465,7 +3083,10 @@ mod tests {
             answered,
             input,
             ..
-        } = &actions[0];
+        } = &actions[0]
+        else {
+            panic!("an interactive session starts turns, not steps");
+        };
         assert_eq!(consumed, &vec!["m1".to_string()]);
         assert_eq!(
             input.results.len(),
@@ -2788,6 +3409,289 @@ mod tests {
             journal.clone(),
         );
         (f, session, id, journal)
+    }
+
+    /// A two-step run: `triage` branches on its output to `fix` or `file`.
+    fn run_spec_fixture(input: &str) -> crate::sessions::workflow::WorkflowRunSpec {
+        use crate::sessions::workflow::{TransitionSpec, WorkflowRunSpec, WorkflowStepSpec};
+        let settings = |()| AgentSettings {
+            model: "mock".into(),
+            allowed_tools: None,
+            use_plugins: None,
+            max_iterations: None,
+            max_retries: 0,
+            mcp_servers: vec![],
+            memory_spaces: vec![],
+            thinking_effort: None,
+            max_concurrent_subagents: None,
+        };
+        WorkflowRunSpec {
+            workflow: "fix-bug".into(),
+            start: "triage".into(),
+            steps: vec![
+                WorkflowStepSpec {
+                    name: "triage".into(),
+                    agent: "triager".into(),
+                    prompt: "Triage it.".into(),
+                    output_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {"severity": {"type": "string"}}
+                    })),
+                    transitions: vec![
+                        TransitionSpec {
+                            to: "fix".into(),
+                            condition: Some("output.severity == \"p0\"".into()),
+                        },
+                        TransitionSpec {
+                            to: "file".into(),
+                            condition: None,
+                        },
+                    ],
+                    settings: settings(()),
+                },
+                WorkflowStepSpec {
+                    name: "fix".into(),
+                    agent: "coder".into(),
+                    prompt: "Fix it.".into(),
+                    output_schema: None,
+                    transitions: vec![],
+                    settings: settings(()),
+                },
+                WorkflowStepSpec {
+                    name: "file".into(),
+                    agent: "writer".into(),
+                    prompt: "File it.".into(),
+                    output_schema: None,
+                    transitions: vec![],
+                    settings: settings(()),
+                },
+            ],
+            input: input.to_string(),
+            max_steps: 100,
+        }
+    }
+
+    /// A session that is a run of [`run_spec_fixture`], on a scripted provider.
+    async fn spawn_run_with_provider(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (
+        ActorFixture,
+        ActorRef<SessionCommand>,
+        Uuid,
+        Arc<dyn horsie_actor::Journal>,
+    ) {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let mut spec = actor_spec_fixture();
+        spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
+            workflow: "fix-bug".into(),
+        };
+        spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "mock", &spec)
+            .await
+            .expect("create");
+        f.deps
+            .provider_registry
+            .write()
+            .unwrap()
+            .insert("mock".to_string(), provider);
+        let parent = spawn_deaf_supervisor();
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(id, spec, f.deps.clone(), parent, test_frames()),
+            journal.clone(),
+        );
+        (f, session, id, journal)
+    }
+
+    /// Poll the folded run until `pred` holds (2s cap).
+    async fn wait_for_run(
+        journal: &Arc<dyn horsie_actor::Journal>,
+        session_id: Uuid,
+        pred: impl Fn(&crate::sessions::workflow::WorkflowRunState) -> bool,
+    ) -> crate::sessions::workflow::WorkflowRunState {
+        for _ in 0..200 {
+            let state = crate::sessions::events::fold_session_state(journal, session_id).await;
+            if let Some(run) = state.mode.run()
+                && pred(run)
+            {
+                return run.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let state = crate::sessions::events::fold_session_state(journal, session_id).await;
+        panic!("run never satisfied the predicate: {:?}", state.mode.run());
+    }
+
+    /// A scripted `conclude` call carrying this output.
+    ///
+    /// A step that has an output schema *and* may ask gets the kind-tagged
+    /// conclude schema, so the output nests under `output` rather than being
+    /// the payload — sending it bare submits `null`, and every condition reads
+    /// false.
+    fn concludes(output: serde_json::Value) -> horsie_agentcore::CompletionResponse {
+        horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                horsie_agentcore::ToolCallPart {
+                    id: "c-1".into(),
+                    name: "conclude".into(),
+                    input: serde_json::json!({"kind": "submit", "output": output}),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::ToolUse,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        }
+    }
+
+    /// The whole point: a run starts itself, its first step's output picks the
+    /// branch, and the branch's step ends the run.
+    #[tokio::test]
+    async fn a_run_starts_itself_and_routes_on_its_first_steps_output() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+                || {
+                    Ok(horsie_agentcore::CompletionResponse {
+                        parts: vec![horsie_agentcore::ContentPart::Text(
+                            horsie_agentcore::TextPart {
+                                text: "fixed".to_string(),
+                            },
+                        )],
+                        stop_reason: horsie_agentcore::StopReason::EndTurn,
+                        usage: horsie_agentcore::Usage::without_cache(1, 1),
+                    })
+                },
+            ),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+
+        // Nobody sent a message: creating the run is what starts it.
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+
+        let visited: Vec<&str> = run.steps.iter().map(|s| s.step.as_str()).collect();
+        assert_eq!(
+            visited,
+            vec!["triage", "fix"],
+            "p0 must route to `fix`; triage concluded with {:?}",
+            run.steps[0].output
+        );
+        // The condition that matched is recorded, which is what draws the edge.
+        assert_eq!(
+            run.steps[1].via.as_deref(),
+            Some("output.severity == \"p0\"")
+        );
+        assert_eq!(run.steps[1].from, Some(0));
+        // Each step is its own agent, derived from the session and the index.
+        assert_eq!(
+            run.steps[0].agent,
+            crate::sessions::workflow::WorkflowRunSpec::step_agent_id(id, 0)
+        );
+        assert_ne!(run.steps[0].agent, run.steps[1].agent);
+        // The second step was handed the first's output under a header.
+        assert!(
+            run.steps[1].input.contains("## Input from step `triage`"),
+            "{}",
+            run.steps[1].input
+        );
+        assert!(run.steps[1].input.starts_with("Fix it."));
+    }
+
+    /// The `else` branch, and the run's output being the last step's.
+    #[tokio::test]
+    async fn a_non_matching_condition_takes_the_catch_all() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p2"})))]).then_repeating_with(
+                || {
+                    Ok(horsie_agentcore::CompletionResponse {
+                        parts: vec![horsie_agentcore::ContentPart::Text(
+                            horsie_agentcore::TextPart {
+                                text: "filed".to_string(),
+                            },
+                        )],
+                        stop_reason: horsie_agentcore::StopReason::EndTurn,
+                        usage: horsie_agentcore::Usage::without_cache(1, 1),
+                    })
+                },
+            ),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+        let visited: Vec<&str> = run.steps.iter().map(|s| s.step.as_str()).collect();
+        assert_eq!(visited, vec!["triage", "file"]);
+        assert!(run.steps[1].via.is_none());
+    }
+
+    /// A run works from its definition; there is nobody to send a message to.
+    #[tokio::test]
+    async fn a_run_refuses_a_user_message() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(Script::of([Ok(concludes(
+            serde_json::json!({"severity": "p0"}),
+        ))]));
+        let (_f, session, _id, _journal) = spawn_run_with_provider(provider).await;
+        let err = session
+            .ask(|reply| SessionCommand::UserMessage {
+                text: "hello".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, UserMessageError::Rejected(_)), "{err:?}");
+    }
+
+    /// Retrying appends an attempt rather than replacing one, so the earlier
+    /// attempt stays readable and the graph can stack them.
+    #[tokio::test]
+    async fn retrying_a_step_appends_an_attempt_on_the_same_edge() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+                || {
+                    Ok(horsie_agentcore::CompletionResponse {
+                        parts: vec![horsie_agentcore::ContentPart::Text(
+                            horsie_agentcore::TextPart {
+                                text: "fixed".to_string(),
+                            },
+                        )],
+                        stop_reason: horsie_agentcore::StopReason::EndTurn,
+                        usage: horsie_agentcore::Usage::without_cache(1, 1),
+                    })
+                },
+            ),
+        );
+        let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
+        wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+
+        session
+            .ask(|reply| SessionCommand::RetryStep { index: 1, reply })
+            .await
+            .unwrap()
+            .unwrap();
+        let run = wait_for_run(&journal, id, |r| r.steps.len() == 3).await;
+        assert_eq!(run.steps[2].step, "fix");
+        assert_eq!(run.steps[2].attempt, 2, "the retry numbers itself");
+        // It sits where the original sat, so it draws on the same edge.
+        assert_eq!(run.steps[2].from, run.steps[1].from);
+        assert_eq!(run.steps[2].via, run.steps[1].via);
+        // The first attempt is untouched.
+        assert_eq!(
+            run.steps[1].status,
+            crate::sessions::workflow::StepStatus::Concluded
+        );
     }
 
     /// Poll the session's folded state until the tree satisfies `pred` (2s
@@ -3189,6 +4093,7 @@ mod tests {
             mcp: None,
             memory: None,
             settings: actor_spec_fixture().agent,
+            step_output_schema: None,
             session_id: id,
             kind,
             unattended: false,
@@ -3237,6 +4142,7 @@ mod tests {
             mcp: None,
             memory: None,
             settings,
+            step_output_schema: None,
             session_id: id,
             kind: SessionAgentKind::Main,
             unattended: false,
@@ -3272,6 +4178,7 @@ mod tests {
             mcp: None,
             memory: None,
             settings: actor_spec_fixture().agent,
+            step_output_schema: None,
             session_id: id,
             kind: SessionAgentKind::Main,
             unattended,
