@@ -271,7 +271,7 @@ mod tests {
             .invoke("call-2", "agent-1", bash())
             .await
             .expect("a reconnected vendor must serve the transport that outlived its link");
-        match result {
+        match result.0 {
             ToolResult::Ok(out) => assert_eq!(out.stdout, "back-again"),
             ToolResult::Err(ToolError { reason }) => panic!("expected success, got {reason}"),
         }
@@ -309,7 +309,7 @@ mod tests {
             .invoke("call-1", "agent-1", bash())
             .await
             .expect("the call must wait out a short absence rather than fail immediately");
-        match result {
+        match result.0 {
             ToolResult::Ok(out) => assert_eq!(out.stdout, "late-arrival"),
             ToolResult::Err(ToolError { reason }) => panic!("expected success, got {reason}"),
         }

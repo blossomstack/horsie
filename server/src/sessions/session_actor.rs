@@ -3093,6 +3093,7 @@ mod tests {
             plugin: plugin.to_string(),
             event: "PreToolUse".to_string(),
             tool: "write_file".to_string(),
+            tool_call_id: "tc1".to_string(),
             duration_ms: 12,
             blocked,
             reason: blocked.then(|| "not allowed".to_string()),
