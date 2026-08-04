@@ -380,20 +380,69 @@ pub enum AgentKey {
     Sub(Uuid),
 }
 
+/// The agent actors a session hosts.
+///
+/// An enum rather than an `Option` plus a map: a session's topology is decided
+/// at creation and never changes, and a workflow run has no main agent at all.
+enum SessionAgents {
+    Interactive {
+        main: ActorRef<AgentCommand>,
+        subs: HashMap<Uuid, ActorRef<AgentCommand>>,
+    },
+}
+
+impl SessionAgents {
+    fn interactive(main: ActorRef<AgentCommand>) -> Self {
+        Self::Interactive {
+            main,
+            subs: HashMap::new(),
+        }
+    }
+
+    /// The session's primary agent, for the kinds that have one.
+    fn main(&self) -> Option<&ActorRef<AgentCommand>> {
+        match self {
+            Self::Interactive { main, .. } => Some(main),
+        }
+    }
+
+    fn sub(&self, id: Uuid) -> Option<&ActorRef<AgentCommand>> {
+        match self {
+            Self::Interactive { subs, .. } => subs.get(&id),
+        }
+    }
+
+    fn insert_sub(&mut self, id: Uuid, agent: ActorRef<AgentCommand>) {
+        match self {
+            Self::Interactive { subs, .. } => {
+                subs.insert(id, agent);
+            }
+        }
+    }
+
+    /// Every agent, emptying the set. Used when the session unloads.
+    fn drain_all(&mut self) -> Vec<ActorRef<AgentCommand>> {
+        match self {
+            Self::Interactive { main, subs } => {
+                let mut out: Vec<_> = subs.drain().map(|(_, a)| a).collect();
+                out.push(main.clone());
+                out
+            }
+        }
+    }
+}
+
 pub struct SessionActor {
     id: Uuid,
     spec: SessionSpec,
     deps: ServerDeps,
     parent: ActorRef<SessionSupervisorCommand>,
     frames: broadcast::Sender<SessionFrame>,
-    /// The session's primary agent, resident for as long as this actor is
-    /// loaded. Spawned once, on recovery; `None` only in the instant before.
-    main_agent: Option<ActorRef<AgentCommand>>,
-    /// The subagents this session hosts, keyed by their node id in the
-    /// persisted tree. Resident for the session's loaded lifetime, exactly
-    /// like the main agent — the reason the session and agent stayed two
-    /// actors.
-    sub_agents: HashMap<Uuid, ActorRef<AgentCommand>>,
+    /// The agent actors this session hosts, resident for as long as this actor
+    /// is loaded. `None` means exactly one thing — recovery has not finished —
+    /// which is why the topology inside is a value rather than a second
+    /// `Option`: a session's shape is decided at creation and never changes.
+    agents: Option<SessionAgents>,
     /// The main agent's context provider, kept so [`Self::cancel_run`] can
     /// reach the runtime client the run already acquired instead of asking
     /// the manager for a fresh one.
@@ -421,8 +470,7 @@ impl SessionActor {
             deps,
             parent,
             frames,
-            main_agent: None,
-            sub_agents: HashMap::new(),
+            agents: None,
             context_provider: None,
             agent_frames: HashMap::new(),
         }
@@ -542,10 +590,8 @@ impl SessionActor {
             }),
             session_id: self.id,
         };
-        self.main_agent = Some(ctx.spawn(AgentActor::with_observer(
-            agent_ctx,
-            params,
-            Arc::new(BroadcastObserver { frames }),
+        self.agents = Some(SessionAgents::interactive(ctx.spawn(
+            AgentActor::with_observer(agent_ctx, params, Arc::new(BroadcastObserver { frames })),
         )));
     }
 
@@ -569,10 +615,15 @@ impl SessionActor {
         agent_id: Option<&str>,
     ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
         match agent_id {
-            None | Some("main") => self.main_agent.clone().map(|a| (AgentKey::Main, a)),
+            None | Some("main") => self
+                .agents
+                .as_ref()
+                .and_then(SessionAgents::main)
+                .cloned()
+                .map(|a| (AgentKey::Main, a)),
             Some(raw) => {
                 let id = Uuid::parse_str(raw).ok()?;
-                if let Some(agent) = self.sub_agents.get(&id) {
+                if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
                     return Some((AgentKey::Sub(id), agent.clone()));
                 }
                 state.mode.subagents().get(&id)?;
@@ -630,12 +681,14 @@ impl SessionActor {
             params,
             Arc::new(BroadcastObserver { frames }),
         ));
-        self.sub_agents.insert(id, actor.clone());
+        if let Some(agents) = self.agents.as_mut() {
+            agents.insert_sub(id, actor.clone());
+        }
         actor
     }
 
     fn agent(&self) -> Option<&ActorRef<AgentCommand>> {
-        self.main_agent.as_ref()
+        self.agents.as_ref().and_then(SessionAgents::main)
     }
 
     /// Aggregated usage. Totals come from this session's own durable record;
@@ -776,7 +829,7 @@ impl SessionActor {
             if state.mode.subagents().is_running(&parent_id) {
                 continue;
             }
-            let agent = match self.sub_agents.get(&parent_id) {
+            let agent = match self.agents.as_ref().and_then(|a| a.sub(parent_id)) {
                 Some(agent) => agent.clone(),
                 // A cold node woken for the first time since load: spawn its
                 // resident actor on demand (see `on_recovery_complete`).
@@ -1147,12 +1200,10 @@ impl SessionActor {
 
     /// Stop every agent this session hosts. Used when the session unloads.
     async fn stop_agents(&mut self) {
-        for agent in self
-            .main_agent
-            .take()
-            .into_iter()
-            .chain(self.sub_agents.drain().map(|(_, a)| a))
-        {
+        let Some(mut agents) = self.agents.take() else {
+            return;
+        };
+        for agent in agents.drain_all() {
             // Cancel first: a stopped mailbox makes the run task's next persist
             // fail, but an in-flight tool call would run to completion first.
             let _ = agent.tell(AgentCommand::Cancel { ack: None }).await;
