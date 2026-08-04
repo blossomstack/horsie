@@ -309,7 +309,6 @@ mod tests {
                 .create(AgentPresetInput {
                     name: name.into(),
                     description: None,
-                    vendor: None,
                     model: "sonnet".into(),
                     repos: None,
                     plugins: None,

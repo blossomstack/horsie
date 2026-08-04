@@ -43,6 +43,10 @@ struct SessionSummary {
     status: Option<SessionStatusKind>,
     created_at: u64,
     last_error: Option<String>,
+    /// The workflow this session is a run of. Present only for a run, which is
+    /// what lets the session list annotate one without a second request.
+    /// Routine runs carry nothing here — they are not in the list at all.
+    workflow: Option<String>,
 }
 
 /// A user message the server has accepted but not yet answered. It rides on

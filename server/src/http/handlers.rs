@@ -72,6 +72,7 @@ pub(crate) fn summary(
         status: status.map(status_kind),
         created_at: rec.created_at,
         last_error: status.and_then(status_reason),
+        workflow: rec.spec.workflow_name().map(str::to_string),
     }
 }
 
