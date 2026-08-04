@@ -45,7 +45,7 @@ rand              = "0.8"
 argon2            = "0.5"
 async-llm         = "0.8.0"
 axum              = { version = "0.7", features = ["macros"] }
-tower-http        = { version = "0.5", features = ["fs"] }
+tower-http        = { version = "0.6", features = ["fs"] }
 parking_lot       = "0.12"
 tracing           = "0.1"
 reqwest           = { version = "0.12", features = ["json"] }
