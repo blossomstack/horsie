@@ -9,7 +9,7 @@
 //! What each hook did rides back on the tool response as a [`HookRecord`], so
 //! the server can journal it and the user can see what a plugin changed.
 
-use horsie_models::runtime::{HookRecord, ToolCall, ToolError, ToolOutput, ToolResult};
+use horsie_models::runtime::{HookRecord, ToolCall, ToolError, ToolResult};
 use horsie_support::plugin::hooks::{HookDecl, HookEvent, matcher_applies};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -321,13 +321,273 @@ fn merge(stdout: &str, out: &mut Outcome) {
     }
 }
 
-/// A successful, unmodified tool output — used when a hook denies before the
-/// tool ever runs and the caller still wants a shaped result.
-#[allow(dead_code)]
-fn empty_output() -> ToolOutput {
-    ToolOutput {
-        stdout: String::new(),
-        stderr: String::new(),
-        exit_code: 0,
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use horsie_models::Workspace;
+    use horsie_models::runtime::BashInput;
+    use tempfile::TempDir;
+
+    /// A plugin declaring one hook whose command is a shell snippet.
+    fn plugin(plugins: &Path, name: &str, event: &str, matcher: &str, command: &str) {
+        let dir = plugins.join(name);
+        std::fs::create_dir_all(dir.join("hooks")).unwrap();
+        let m = if matcher.is_empty() {
+            String::new()
+        } else {
+            format!(r#""matcher":"{matcher}","#)
+        };
+        std::fs::write(
+            dir.join("hooks/hooks.json"),
+            format!(
+                r#"{{"hooks":{{"{event}":[{{{m}"hooks":[{{"type":"command","command":"{command}"}}]}}]}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    struct Env {
+        _work: TempDir,
+        _plugins: TempDir,
+        registry: WorkspaceRegistry,
+        state: RuntimeState,
+    }
+
+    fn env(plugins: TempDir) -> Env {
+        let work = TempDir::new().unwrap();
+        let registry = WorkspaceRegistry::new(vec![Workspace {
+            name: "main".into(),
+            path: work.path().to_path_buf(),
+        }])
+        .with_plugins(Some(plugins.path().to_path_buf()), Vec::new());
+        Env {
+            _work: work,
+            _plugins: plugins,
+            registry,
+            state: RuntimeState::new(),
+        }
+    }
+
+    fn echo() -> ToolCall {
+        ToolCall::Bash(BashInput {
+            command: "echo hello".to_string(),
+            timeout_secs: None,
+        })
+    }
+
+    async fn run(e: &Env, call: ToolCall) -> (ToolResult, Vec<HookRecord>) {
+        dispatch_with_hooks(&e.registry, &e.state, "agent-1", call).await
+    }
+
+    #[tokio::test]
+    async fn with_no_plugin_library_nothing_is_recorded() {
+        let work = TempDir::new().unwrap();
+        let registry = WorkspaceRegistry::new(vec![Workspace {
+            name: "main".into(),
+            path: work.path().to_path_buf(),
+        }]);
+        let (result, hooks) =
+            dispatch_with_hooks(&registry, &RuntimeState::new(), "a", echo()).await;
+        assert!(matches!(result, ToolResult::Ok(_)));
+        assert!(hooks.is_empty());
+    }
+
+    /// A matcher that does not select the tool must not run the hook at all.
+    #[tokio::test]
+    async fn a_non_matching_hook_neither_runs_nor_records() {
+        let plugins = TempDir::new().unwrap();
+        plugin(plugins.path(), "p", "PreToolUse", "Write", "exit 2");
+        let e = env(plugins);
+        let (result, hooks) = run(&e, echo()).await;
+        assert!(matches!(result, ToolResult::Ok(_)), "bash is not Write");
+        assert!(hooks.is_empty());
+    }
+
+    /// The Claude alias table in action: a `Bash` matcher selects horsie's
+    /// snake_case `bash`.
+    #[tokio::test]
+    async fn a_claude_named_matcher_selects_the_horsie_tool() {
+        let plugins = TempDir::new().unwrap();
+        plugin(
+            plugins.path(),
+            "p",
+            "PreToolUse",
+            "Bash",
+            "echo denied 1>&2; exit 2",
+        );
+        let e = env(plugins);
+        let (result, hooks) = run(&e, echo()).await;
+        match result {
+            ToolResult::Err(ToolError { reason }) => {
+                assert!(reason.contains("denied"), "{reason}");
+                assert!(reason.contains("'p'"), "the plugin must be named: {reason}");
+            }
+            ToolResult::Ok(o) => panic!("expected a denial, got {o:?}"),
+        }
+        assert_eq!(hooks.len(), 1);
+        assert!(hooks[0].blocked);
+        assert_eq!(hooks[0].tool, "bash");
+        assert_eq!(hooks[0].event, "PreToolUse");
+        assert_eq!(hooks[0].plugin, "p");
+    }
+
+    /// Fail closed, and recorded as an outage rather than a decision.
+    #[tokio::test]
+    async fn a_failing_pre_hook_denies_and_is_recorded_as_failed() {
+        let plugins = TempDir::new().unwrap();
+        plugin(plugins.path(), "p", "PreToolUse", "", "exit 1");
+        let e = env(plugins);
+        let (result, hooks) = run(&e, echo()).await;
+        match result {
+            ToolResult::Err(ToolError { reason }) => {
+                assert!(reason.contains("could not be run"), "{reason}");
+            }
+            ToolResult::Ok(o) => panic!("a guard that could not run must deny, got {o:?}"),
+        }
+        assert!(hooks[0].failed, "an outage, not a decision");
+    }
+
+    #[tokio::test]
+    async fn a_rewritten_input_changes_what_runs_and_is_recorded_as_a_diff() {
+        let plugins = TempDir::new().unwrap();
+        plugin(
+            plugins.path(),
+            "p",
+            "PreToolUse",
+            "",
+            r#"printf '{\"hookSpecificOutput\":{\"updatedInput\":{\"command\":\"echo rewritten\"}}}'"#,
+        );
+        let e = env(plugins);
+        let (result, hooks) = run(&e, echo()).await;
+        match result {
+            ToolResult::Ok(o) => assert!(
+                o.stdout.contains("rewritten"),
+                "the rewritten command must be what ran: {}",
+                o.stdout
+            ),
+            ToolResult::Err(e) => panic!("expected success, got {e:?}"),
+        }
+        let rec = &hooks[0];
+        assert!(rec.input_before.as_deref().unwrap().contains("echo hello"));
+        assert!(rec.input_after.as_deref().unwrap().contains("echo rewritten"));
+    }
+
+    /// A hook must not be able to corrupt a call into something unrunnable.
+    #[tokio::test]
+    async fn an_undeserializable_rewrite_is_ignored() {
+        let plugins = TempDir::new().unwrap();
+        plugin(
+            plugins.path(),
+            "p",
+            "PreToolUse",
+            "",
+            r#"printf '{\"hookSpecificOutput\":{\"updatedInput\":{\"nonsense\":true}}}'"#,
+        );
+        let e = env(plugins);
+        let (result, hooks) = run(&e, echo()).await;
+        match result {
+            ToolResult::Ok(o) => assert!(o.stdout.contains("hello"), "original must still run"),
+            ToolResult::Err(e) => panic!("expected success, got {e:?}"),
+        }
+        assert!(hooks[0].input_after.is_none(), "no diff to show");
+    }
+
+    #[tokio::test]
+    async fn post_hook_output_rewrite_is_applied_and_recorded() {
+        let plugins = TempDir::new().unwrap();
+        plugin(
+            plugins.path(),
+            "p",
+            "PostToolUse",
+            "",
+            r#"printf '{\"hookSpecificOutput\":{\"updatedToolOutput\":\"replaced\"}}'"#,
+        );
+        let e = env(plugins);
+        let (result, hooks) = run(&e, echo()).await;
+        match result {
+            ToolResult::Ok(o) => assert_eq!(o.stdout, "replaced"),
+            ToolResult::Err(e) => panic!("expected success, got {e:?}"),
+        }
+        let rec = &hooks[0];
+        assert!(rec.output_before.as_deref().unwrap().contains("hello"));
+        assert_eq!(rec.output_after.as_deref(), Some("replaced"));
+    }
+
+    /// A hook that changes nothing is still recorded: "a guard ran and allowed
+    /// this" is part of the audit trail.
+    #[tokio::test]
+    async fn a_no_op_hook_is_still_recorded() {
+        let plugins = TempDir::new().unwrap();
+        plugin(plugins.path(), "p", "PostToolUse", "", "true");
+        let e = env(plugins);
+        let (_, hooks) = run(&e, echo()).await;
+        assert_eq!(hooks.len(), 1);
+        let rec = &hooks[0];
+        assert!(!rec.blocked && !rec.failed);
+        assert!(rec.input_after.is_none() && rec.output_after.is_none());
+    }
+
+    /// PostToolUse runs after the fact, so its failure must not damage a result
+    /// that already exists.
+    #[tokio::test]
+    async fn a_failing_post_hook_leaves_the_result_intact() {
+        let plugins = TempDir::new().unwrap();
+        plugin(plugins.path(), "p", "PostToolUse", "", "exit 1");
+        let e = env(plugins);
+        let (result, hooks) = run(&e, echo()).await;
+        match result {
+            ToolResult::Ok(o) => assert!(o.stdout.contains("hello")),
+            ToolResult::Err(e) => panic!("a post-hook failure must not fail the call, got {e:?}"),
+        }
+        assert!(hooks[0].failed);
+    }
+
+    #[tokio::test]
+    async fn several_hooks_run_in_plugin_order_and_each_is_recorded() {
+        let plugins = TempDir::new().unwrap();
+        plugin(plugins.path(), "a-first", "PostToolUse", "", "true");
+        plugin(plugins.path(), "b-second", "PostToolUse", "", "true");
+        let e = env(plugins);
+        let (_, hooks) = run(&e, echo()).await;
+        assert_eq!(
+            hooks.iter().map(|h| h.plugin.as_str()).collect::<Vec<_>>(),
+            vec!["a-first", "b-second"]
+        );
+    }
+
+    /// The first denial stops the chain — a later hook cannot un-block it.
+    #[tokio::test]
+    async fn the_first_denial_stops_the_chain() {
+        let plugins = TempDir::new().unwrap();
+        plugin(plugins.path(), "a-blocks", "PreToolUse", "", "exit 2");
+        plugin(plugins.path(), "b-never", "PreToolUse", "", "true");
+        let e = env(plugins);
+        let (result, hooks) = run(&e, echo()).await;
+        assert!(matches!(result, ToolResult::Err(_)));
+        assert_eq!(hooks.len(), 1, "the second hook must not have run");
+        assert_eq!(hooks[0].plugin, "a-blocks");
+    }
+
+    /// horsie has no permission prompt, so `ask` allows rather than blocking.
+    #[tokio::test]
+    async fn permission_decision_ask_allows() {
+        let plugins = TempDir::new().unwrap();
+        plugin(
+            plugins.path(),
+            "p",
+            "PreToolUse",
+            "",
+            r#"printf '{\"hookSpecificOutput\":{\"permissionDecision\":\"ask\"}}'"#,
+        );
+        let e = env(plugins);
+        let (result, hooks) = run(&e, echo()).await;
+        assert!(matches!(result, ToolResult::Ok(_)));
+        assert!(!hooks[0].blocked && !hooks[0].failed);
     }
 }
