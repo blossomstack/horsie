@@ -14,8 +14,9 @@ No session, agent preset, or routine references an environment yet.
   and provision steps are included in this step even though nothing consumes
   them yet.
 - **Local runtime is not supported**: `vendor` is required and `"local"` is
-  rejected at the API boundary. (Contrast agents, where `vendor` is optional
-  and absent means "server default at invoke".)
+  rejected at the API boundary. (Agent presets deliberately name no vendor at
+  all — "where the work runs belongs to the invocation". Environments explore
+  the opposite pole: the runtime *is* the saved thing.)
 - **Env vars are plain text, non-sensitive.** A secrets concept comes later;
   it is not this step.
 - Full CRUD web UI: list page + create/edit form, cloned from the agents pages.
@@ -127,10 +128,12 @@ the store, as `agents/store.rs` does.
   affordances.
 - `clients/web/src/pages/environments/EnvironmentEditPage.tsx` — create/edit
   form cloned from `AgentEditPage`, trimmed to: name, description, vendor
-  (text input; no picker in this step), repos editor (same UI as agents'),
-  env-vars key/value rows, provision steps as a JSON textarea (raw
-  `uses`/`with` structure — a structured editor is not worth it for an
-  inert field).
+  (text input; no picker in this step), repos as editable rows (url +
+  optional gitRef + optional dir — the agents GitHub-checkbox picker is
+  gated on the server default vendor's provisioning capability and GitHub
+  connection, neither of which fits a named-vendor form), env-vars key/value
+  rows, provision steps as a JSON textarea (raw `uses`/`with` structure — a
+  structured editor is not worth it for an inert field).
 - API client functions + hooks mirroring the agents ones in `api/client.ts`
   and `hooks/`.
 - Routes in `App.tsx`: `/environments`, `/environments/new`,
@@ -153,9 +156,10 @@ the store, as `agents/store.rs` does.
   (never silently defaulted), both sqlite dialect tests via `db::testing`.
 - Service unit tests: vendor validation (`""`, `"local"` rejected), defaults
   for omitted optional fields.
-- No HTTP route tests: the agents/routines handlers have none, and
-  `server/tests/` holds only journal integration tests — handler behavior is
-  covered by the store + service tests, same as those modules.
+- An `environments_crud_over_http` test in `server/src/http/mod.rs`'s test
+  module, mirroring `routines_crud_over_http`: 201 on create, 409 duplicate,
+  422 invalid (bad slug, empty/`"local"` vendor, rename via body), 404 on
+  unknown names, 204 on delete.
 - Web: page tests mirroring `AgentsPage.test.tsx` / `RoutinesPage.test.tsx`.
 
 ## Pre-PR checks
