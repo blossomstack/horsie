@@ -27,6 +27,7 @@ use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, Per
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_models::agent::ToolResultInput;
 use horsie_models::now_ms;
+use horsie_models::runtime::HookRecord;
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
@@ -116,6 +117,9 @@ pub enum SessionCommand {
     PrepareOffload { reply: oneshot::Sender<bool> },
     /// Internal: an agent reported its terminal outcome.
     AgentOutcome(AgentOutcome),
+    /// Plugin hooks ran against a tool call. Journalled for the session's audit
+    /// trail; carries no reply because nothing waits on it.
+    HooksRan(Vec<HookRecord>),
     /// Internal: post-recovery reconciliation of a turn the process died in.
     ReconcileInterrupted,
     /// Set the session title from the built-in title tool.
@@ -218,6 +222,12 @@ pub enum SessionDomainEvent {
     /// inferred, so the transition is in the log like every other one.
     TurnInterrupted {
         at_ms: u64,
+    },
+    /// A plugin hook ran against a tool call. Journalled so the user can see
+    /// what a plugin blocked or rewrote — hooks change what the agent does, and
+    /// that must be auditable rather than invisible.
+    HookRan {
+        record: HookRecord,
     },
     /// Terminal: this session can never run again.
     SessionFailed {
@@ -1966,6 +1976,9 @@ impl EventSourcedActor for SessionActor {
 
     fn apply_event(mut state: SessionState, event: SessionDomainEvent) -> SessionState {
         match event {
+            // Purely a record for the user: hooks change what the agent did,
+            // not what the session *is*, so nothing here folds into state.
+            SessionDomainEvent::HookRan { .. } => {}
             SessionDomainEvent::MessageQueued { id, text, at_ms } => {
                 state.inbox.push(InboxMessage { id, text, at_ms });
             }
@@ -2273,6 +2286,12 @@ impl EventSourcedActor for SessionActor {
             SessionCommand::RetryStep { index, reply } => {
                 self.on_retry_step(state, index, reply, ctx).await
             }
+            SessionCommand::HooksRan(records) => CommandEffect::persist(
+                records
+                    .into_iter()
+                    .map(|record| SessionDomainEvent::HookRan { record })
+                    .collect(),
+            ),
             SessionCommand::SubAgentTree { reply } => {
                 let tree = state
                     .mode

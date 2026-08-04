@@ -475,7 +475,12 @@ mod tests {
         }
         let rec = &hooks[0];
         assert!(rec.input_before.as_deref().unwrap().contains("echo hello"));
-        assert!(rec.input_after.as_deref().unwrap().contains("echo rewritten"));
+        assert!(
+            rec.input_after
+                .as_deref()
+                .unwrap()
+                .contains("echo rewritten")
+        );
     }
 
     /// A hook must not be able to corrupt a call into something unrunnable.
