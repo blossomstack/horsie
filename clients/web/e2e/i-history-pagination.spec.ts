@@ -7,6 +7,18 @@
 import { test, expect } from "./fixtures";
 import { createSession, sendMessage, expectStatus } from "./helpers";
 
+/** How many LLM messages a `/history` page holds.
+ *
+ * A page is a list of transcript *entries*, and not every entry is a message the
+ * model saw — a plugin hook record is an entry too. Counting entries would make
+ * this test's turn arithmetic depend on whether a plugin happened to be loaded.
+ */
+function llmMessageCount(page: unknown): number {
+  const entries = (page as { entries?: { type?: string }[] }).entries ?? [];
+  return entries.filter((e) => e.type === "Llm").length;
+}
+
+
 test.beforeEach(async ({ mock }) => {
   await mock.reset();
 });
@@ -69,7 +81,7 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
           page.request.get(`${appBase}/api/sessions/${id}/agents/main/history?limit=200`),
           page.request.get(`${appBase}/api/sessions/${id}`),
         ]);
-        const count = ((await h.json()).messages as unknown[]).length;
+        const count = llmMessageCount(await h.json());
         const status = (await s.json()).session.status as string;
         return `${count}:${status}`;
       },
@@ -96,7 +108,7 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
             page.request.get(`${appBase}/api/sessions/${id}/agents/main/history?limit=200`),
             page.request.get(`${appBase}/api/sessions/${id}`),
           ]);
-          const count = ((await h.json()).messages as unknown[]).length;
+          const count = llmMessageCount(await h.json());
           const status = (await s.json()).session.status as string;
           return `${count}:${status}`;
         },
