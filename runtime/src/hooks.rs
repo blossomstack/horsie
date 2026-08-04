@@ -49,11 +49,12 @@ fn clamp(s: &str) -> String {
 }
 
 /// A blank record for a hook that is about to run.
-fn record(plugin: &str, event: HookEvent, tool: &str) -> HookRecord {
+fn record(plugin: &str, event: HookEvent, tool: &str, call_id: &str) -> HookRecord {
     HookRecord {
         plugin: plugin.to_string(),
         event: event.as_str().to_string(),
         tool: tool.to_string(),
+        tool_call_id: call_id.to_string(),
         duration_ms: 0,
         blocked: false,
         reason: None,
@@ -98,6 +99,7 @@ pub async fn dispatch_with_hooks(
     registry: &WorkspaceRegistry,
     state: &RuntimeState,
     agent: &str,
+    call_id: &str,
     call: ToolCall,
 ) -> (ToolResult, Vec<HookRecord>) {
     let Some(plugins_dir) = registry.plugins_dir() else {
@@ -121,7 +123,7 @@ pub async fn dispatch_with_hooks(
             "tool_input": input,
         })
         .to_string();
-        let (outcome, mut rec) = run_one(&root, &plugin, name, &decl, hook_path, &payload).await;
+        let (outcome, mut rec) = run_one(&root, &plugin, name, call_id, &decl, hook_path, &payload).await;
 
         if outcome.blocked || outcome.failed {
             rec.blocked = true;
@@ -160,7 +162,7 @@ pub async fn dispatch_with_hooks(
             "is_error": is_error,
         })
         .to_string();
-        let (outcome, mut rec) = run_one(&root, &plugin, name, &decl, hook_path, &payload).await;
+        let (outcome, mut rec) = run_one(&root, &plugin, name, call_id, &decl, hook_path, &payload).await;
 
         // The tool already ran: a failure here is recorded but never fatal, and
         // never rewrites a result the hook could not read.
@@ -230,11 +232,12 @@ async fn run_one(
     plugin_root: &Path,
     plugin: &str,
     tool: &str,
+    call_id: &str,
     decl: &HookDecl,
     hook_path: &[PathBuf],
     payload: &str,
 ) -> (Outcome, HookRecord) {
-    let mut rec = record(plugin, decl.event, tool);
+    let mut rec = record(plugin, decl.event, tool, call_id);
     let mut outcome = Outcome::default();
 
     let command = decl
@@ -382,7 +385,7 @@ mod tests {
     }
 
     async fn run(e: &Env, call: ToolCall) -> (ToolResult, Vec<HookRecord>) {
-        dispatch_with_hooks(&e.registry, &e.state, "agent-1", call).await
+        dispatch_with_hooks(&e.registry, &e.state, "agent-1", "call-1", call).await
     }
 
     #[tokio::test]
@@ -393,7 +396,7 @@ mod tests {
             path: work.path().to_path_buf(),
         }]);
         let (result, hooks) =
-            dispatch_with_hooks(&registry, &RuntimeState::new(), "a", echo()).await;
+            dispatch_with_hooks(&registry, &RuntimeState::new(), "a", "call-1", echo()).await;
         assert!(matches!(result, ToolResult::Ok(_)));
         assert!(hooks.is_empty());
     }

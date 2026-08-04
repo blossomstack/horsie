@@ -411,7 +411,7 @@ async fn run_loop<S>(
                             // extra round-trip, and a slow hook is interrupted by
                             // the same `CancelCall` that interrupts the tool.
                             let (result, hooks) = horsie_runtime::hooks::dispatch_with_hooks(
-                                &registry, &state, &agent_id, req.call,
+                                &registry, &state, &agent_id, &call_id, req.call,
                             )
                             .await;
                             let response = serde_json::to_string(

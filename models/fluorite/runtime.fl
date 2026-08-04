@@ -144,6 +144,9 @@ struct HookRecord {
     plugin: String,
     event: String,
     tool: String,
+    /// The call this record describes. The join key: without it a record cannot
+    /// be attached to the tool call it changed.
+    tool_call_id: String,
     /// Wall-clock, so a hook slowing every tool call is visible.
     duration_ms: u64,
     /// The hook refused the call: exit 2, `decision: "block"`, or
