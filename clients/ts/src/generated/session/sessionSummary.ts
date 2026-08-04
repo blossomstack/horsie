@@ -1,4 +1,5 @@
 
+import { AnnotationEntry } from './annotationEntry';
 import { SessionStatusKind } from './sessionStatusKind';
 export interface SessionSummary {
   id: string;
@@ -13,4 +14,8 @@ export interface SessionSummary {
    * The workflow this session is a run of. Present only for a run, which is
    */
   workflow?: string;
+  /**
+   * User-set key-value metadata (e.g. `group=&lt;name&gt;`). Empty when none.
+   */
+  annotations: AnnotationEntry[];
 }
