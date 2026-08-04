@@ -13,6 +13,7 @@ use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::{AgentEventSink, BroadcastObserver};
 use crate::sessions::mode::SessionModeState;
+use crate::sessions::orchestrator::{AgentAction, InteractiveOrchestrator, Orchestrator};
 use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::{AgentSettings, PendingAsk, ServerDeps, SessionSpec, SessionStatus};
 use crate::sessions::subagents::{INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent};
@@ -48,16 +49,6 @@ const MAIN_AGENT_ID: &str = "main";
 /// Cancellation is prompt (milliseconds); this is a backstop so a wedged run
 /// can never hold the mailbox — and with it the Stop button — hostage.
 const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// What an abandoned ask records as its result: the user was asked, chose to
-/// say something else, and the call still needs an answer for the wire to stay
-/// valid.
-const ABANDONED_ASK_RESULT: &str = "not answered — the user sent a new message instead";
-
-/// Separator between messages merged into one turn. Blank line, because the
-/// model is reading them as one message and paragraph breaks are what a human
-/// would have typed.
-const MERGE_SEPARATOR: &str = "\n\n";
 
 fn emit_progress(frames: &broadcast::Sender<SessionFrame>, stage: &str, detail: Option<String>) {
     let _ = frames.send(SessionFrame::Progression {
@@ -443,6 +434,9 @@ pub struct SessionActor {
     /// which is why the topology inside is a value rather than a second
     /// `Option`: a session's shape is decided at creation and never changes.
     agents: Option<SessionAgents>,
+    /// Decides what this session runs next. Chosen at construction from the
+    /// spec; the actor only performs what it returns.
+    orchestrator: Arc<dyn Orchestrator>,
     /// The main agent's context provider, kept so [`Self::cancel_run`] can
     /// reach the runtime client the run already acquired instead of asking
     /// the manager for a fresh one.
@@ -471,6 +465,7 @@ impl SessionActor {
             parent,
             frames,
             agents: None,
+            orchestrator: Arc::new(InteractiveOrchestrator),
             context_provider: None,
             agent_frames: HashMap::new(),
         }
@@ -723,147 +718,119 @@ impl SessionActor {
         }
     }
 
-    /// Start a turn from everything in the inbox, if there is anything and no
-    /// run is in flight. The single place a turn ever begins.
+    /// Carry out one orchestrator decision: resume the agent it names, report
+    /// the status it implies, and return the events that record it.
     ///
-    /// Called only at turn boundaries (a message arriving while idle, a turn
-    /// ending, a stop) — never on load, which is what keeps opening a session
-    /// free of side effects.
-    async fn drain(&mut self, state: &SessionState) -> Vec<SessionDomainEvent> {
-        // Owed subagent results ride every turn the main agent starts; with an
-        // empty inbox they can also *start* one, but only from Idle — never
-        // answering a pending ask, never chasing a failure.
-        let owed = state.mode.subagents().owed_for(SubAgentParent::Main);
-        if state.inbox.is_empty() && (owed.is_empty() || state.status != SessionStatus::Idle) {
-            return Vec::new();
-        }
-        if matches!(
-            state.status,
-            SessionStatus::Running | SessionStatus::Unrecoverable { .. }
-        ) {
-            return Vec::new();
-        }
-        let consumed: Vec<String> = state.inbox.iter().map(|m| m.id.clone()).collect();
-        // One user message, not several: Anthropic requires alternating roles,
-        // so consecutive user turns are not portable. Provenance survives in
-        // the `MessageQueued` events.
-        let mut parts: Vec<&str> = state.inbox.iter().map(|m| m.text.as_str()).collect();
-        parts.extend(owed.iter().map(|(_, text)| text.as_str()));
-        let merged = parts.join(MERGE_SEPARATOR);
-        // A message sent while the agent is waiting on questions abandons them:
-        // "never mind, do this instead". Every parked call still gets a result,
-        // so nothing dangles — answering them for real goes through `Answer`,
-        // which requires all of them at once.
-        let abandoned: Vec<ToolResultInput> = state
-            .pending_asks
-            .iter()
-            .filter_map(|ask| ask.tool_call_id.clone())
-            .map(|tool_call_id| ToolResultInput {
-                tool_call_id,
-                output: ABANDONED_ASK_RESULT.to_string(),
-                is_error: true,
-            })
-            .collect();
-
-        if let Some(agent) = self.agent() {
-            let _ = agent
-                .tell(AgentCommand::Resume {
-                    results: abandoned,
-                    message: Some(merged),
-                })
-                .await;
-        }
-        self.report(SessionStatus::Running).await;
-        // Tell-then-persist, like the user messages this turn also carries:
-        // a crash between the agent's `Run` and this write leaves the result
-        // owed, so the next turn re-delivers it. Delivery is at-least-once in
-        // that window (the parent may see a result twice), never lost —
-        // `spawn_agent`'s stricter persist-then-spawn is the deliberate
-        // exception, because an untracked agent is worse than a duplicate.
-        let mut events = vec![SessionDomainEvent::TurnBegan {
-            at_ms: now_ms(),
+    /// The single place a turn ever begins. Reached only at turn boundaries (a
+    /// message arriving while idle, a turn ending, a stop) — never on load,
+    /// which is what keeps opening a session free of side effects.
+    async fn perform(
+        &mut self,
+        action: AgentAction,
+        state: &SessionState,
+        ctx: &ActorContext<Self>,
+    ) -> Vec<SessionDomainEvent> {
+        let AgentAction::StartTurn {
+            who,
+            input,
             consumed,
-            answering: None,
-            answered: Vec::new(),
-        }];
-        events.extend(
-            owed.iter()
-                .map(|(child, _)| SessionDomainEvent::SubAgentNotified {
+            answered,
+            notified,
+            mark_running,
+        } = action;
+        match who {
+            // A subagent parent waking to consume its children's results. It
+            // is skipped, not failed, when its actor cannot be reached: the
+            // results stay owed and the next boundary retries.
+            AgentKey::Sub(id) => {
+                let agent = match self.agents.as_ref().and_then(|a| a.sub(id)) {
+                    Some(agent) => agent.clone(),
+                    // A cold node woken for the first time since load: spawn
+                    // its resident actor on demand (see `on_recovery_complete`).
+                    None if state.mode.subagents().get(&id).is_some() => {
+                        self.spawn_sub_agent_actor(ctx, id)
+                    }
+                    None => return Vec::new(),
+                };
+                if agent
+                    .tell(AgentCommand::Resume {
+                        results: input.results,
+                        message: input.message,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Vec::new();
+                }
+                let mut events = Vec::new();
+                if let Some(parent) = mark_running {
+                    events.push(SessionDomainEvent::SubAgentRunning {
+                        at_ms: now_ms(),
+                        id: parent,
+                    });
+                }
+                events.extend(notified.into_iter().map(|id| {
+                    SessionDomainEvent::SubAgentNotified {
+                        at_ms: now_ms(),
+                        id,
+                    }
+                }));
+                events
+            }
+            AgentKey::Main => {
+                if let Some(agent) = self.agent() {
+                    let _ = agent
+                        .tell(AgentCommand::Resume {
+                            results: input.results,
+                            message: input.message,
+                        })
+                        .await;
+                }
+                self.report(SessionStatus::Running).await;
+                // Tell-then-persist, like the user messages this turn also
+                // carries: a crash between the agent's `Run` and this write
+                // leaves the result owed, so the next turn re-delivers it.
+                // Delivery is at-least-once in that window (the parent may see
+                // a result twice), never lost — `spawn_agent`'s stricter
+                // persist-then-spawn is the deliberate exception, because an
+                // untracked agent is worse than a duplicate.
+                let mut events = vec![SessionDomainEvent::TurnBegan {
                     at_ms: now_ms(),
-                    id: *child,
-                }),
-        );
-        events
+                    consumed,
+                    answering: None,
+                    answered,
+                }];
+                events.extend(notified.into_iter().map(|id| {
+                    SessionDomainEvent::SubAgentNotified {
+                        at_ms: now_ms(),
+                        id,
+                    }
+                }));
+                events
+            }
+        }
     }
 
-    /// Everything deliverable at a turn boundary: wake idle subagent parents
-    /// whose children have results, then start the main agent's turn if one
-    /// is owed. Every turn boundary routes through here — without that, a
-    /// result owed to a subagent parent strands the moment no further
-    /// subagent outcome can arrive (every node terminal), since an outcome
-    /// was previously the only flush trigger.
+    /// Everything the orchestrator wants started at this turn boundary,
+    /// performed in order, each seeing the state the previous one produced.
+    ///
+    /// Every turn boundary routes through here — without that, a result owed to
+    /// a subagent parent strands the moment no further subagent outcome can
+    /// arrive (every node terminal), since an outcome was previously the only
+    /// flush trigger.
     async fn flush_then_drain(
         &mut self,
         state: &SessionState,
         ctx: &ActorContext<Self>,
     ) -> Vec<SessionDomainEvent> {
-        let mut events = self.flush_owed(state, ctx).await;
-        let next = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), Self::apply_event);
-        events.extend(self.drain(&next).await);
-        events
-    }
-
-    /// Wake every idle subagent parent whose children have results it has not
-    /// been sent. The main agent is deliberately excluded: its owed results
-    /// merge into its next turn inside `drain`.
-    async fn flush_owed(
-        &mut self,
-        state: &SessionState,
-        ctx: &ActorContext<Self>,
-    ) -> Vec<SessionDomainEvent> {
         let mut events = Vec::new();
-        for (parent_id, owed) in state.mode.subagents().owed_by_sub_parent() {
-            if state.mode.subagents().is_running(&parent_id) {
-                continue;
+        let mut next = state.clone();
+        for action in self.orchestrator.next_actions(&next) {
+            let produced = self.perform(action, &next, ctx).await;
+            for e in &produced {
+                next = Self::apply_event(next, e.clone());
             }
-            let agent = match self.agents.as_ref().and_then(|a| a.sub(parent_id)) {
-                Some(agent) => agent.clone(),
-                // A cold node woken for the first time since load: spawn its
-                // resident actor on demand (see `on_recovery_complete`).
-                None if state.mode.subagents().get(&parent_id).is_some() => {
-                    self.spawn_sub_agent_actor(ctx, parent_id)
-                }
-                None => continue,
-            };
-            let input = owed
-                .iter()
-                .map(|(_, text)| text.as_str())
-                .collect::<Vec<_>>()
-                .join(MERGE_SEPARATOR);
-            if agent
-                .tell(AgentCommand::Resume {
-                    results: Vec::new(),
-                    message: Some(input),
-                })
-                .await
-                .is_err()
-            {
-                continue;
-            }
-            events.push(SessionDomainEvent::SubAgentRunning {
-                at_ms: now_ms(),
-                id: parent_id,
-            });
-            events.extend(
-                owed.iter()
-                    .map(|(child, _)| SessionDomainEvent::SubAgentNotified {
-                        at_ms: now_ms(),
-                        id: *child,
-                    }),
-            );
+            events.extend(produced);
         }
         events
     }
@@ -1895,10 +1862,19 @@ mod tests {
         }
     }
 
+    use crate::sessions::orchestrator::MERGE_SEPARATOR;
+
     fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
         events
             .into_iter()
             .fold(SessionState::default(), SessionActor::apply_event)
+    }
+
+    /// What this actor's orchestrator decides for a state. `drain` used to be a
+    /// method here; the decision moved to the orchestrator and the actor only
+    /// performs it, so these tests assert on the decision.
+    fn decisions(actor: &SessionActor, state: &SessionState) -> Vec<AgentAction> {
+        actor.orchestrator.next_actions(state)
     }
 
     #[test]
@@ -2277,22 +2253,22 @@ mod tests {
     async fn drain_does_nothing_when_the_inbox_is_empty() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(
+        let actor = SessionActor::new(
             Uuid::new_v4(),
             actor_spec_fixture(),
             f.deps,
             parent,
             test_frames(),
         );
-        let events = actor.drain(&SessionState::default()).await;
-        assert!(events.is_empty());
+        let actions = decisions(&actor, &SessionState::default());
+        assert!(actions.is_empty());
     }
 
     #[tokio::test]
     async fn drain_does_nothing_while_a_turn_is_already_running() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(
+        let actor = SessionActor::new(
             Uuid::new_v4(),
             actor_spec_fixture(),
             f.deps,
@@ -2309,9 +2285,9 @@ mod tests {
             },
             queued("m2", "queued while running"),
         ]);
-        let events = actor.drain(&state).await;
+        let actions = decisions(&actor, &state);
         assert!(
-            events.is_empty(),
+            actions.is_empty(),
             "a run in flight must never be drained into a second one"
         );
     }
@@ -2320,7 +2296,7 @@ mod tests {
     async fn drain_refuses_once_the_session_is_unrecoverable() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(
+        let actor = SessionActor::new(
             Uuid::new_v4(),
             actor_spec_fixture(),
             f.deps,
@@ -2334,9 +2310,9 @@ mod tests {
                 reason: "runtime gone".into(),
             },
         ]);
-        let events = actor.drain(&state).await;
+        let actions = decisions(&actor, &state);
         assert!(
-            events.is_empty(),
+            actions.is_empty(),
             "a terminal session must never start another turn"
         );
     }
@@ -2418,7 +2394,7 @@ mod tests {
     async fn stop_then_a_queued_message_starts_the_next_turn() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(
+        let actor = SessionActor::new(
             Uuid::new_v4(),
             actor_spec_fixture(),
             f.deps,
@@ -2439,12 +2415,9 @@ mod tests {
         let stopped =
             SessionActor::apply_event(running, SessionDomainEvent::TurnStopped { at_ms: 0 });
         assert_eq!(stopped.status, SessionStatus::Idle);
-        let events = actor.drain(&stopped).await;
-
-        assert_eq!(events.len(), 1, "{events:?}");
-        let SessionDomainEvent::TurnBegan { consumed, .. } = &events[0] else {
-            panic!("a stop must let the queue start the next turn, got {events:?}");
-        };
+        let actions = decisions(&actor, &stopped);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        let AgentAction::StartTurn { consumed, .. } = &actions[0];
         assert_eq!(consumed, &vec!["m2".to_string()]);
     }
 
@@ -2452,7 +2425,7 @@ mod tests {
     async fn drain_consumes_the_whole_inbox_and_starts_a_turn() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(
+        let actor = SessionActor::new(
             Uuid::new_v4(),
             actor_spec_fixture(),
             f.deps,
@@ -2460,11 +2433,9 @@ mod tests {
             test_frames(),
         );
         let state = fold(vec![queued("m1", "one"), queued("m2", "two")]);
-        let events = actor.drain(&state).await;
-        assert_eq!(events.len(), 1);
-        let SessionDomainEvent::TurnBegan { consumed, .. } = &events[0] else {
-            panic!("expected TurnBegan, got {:?}", events[0]);
-        };
+        let actions = decisions(&actor, &state);
+        assert_eq!(actions.len(), 1);
+        let AgentAction::StartTurn { consumed, .. } = &actions[0];
         assert_eq!(consumed, &vec!["m1".to_string(), "m2".to_string()]);
     }
 
@@ -2472,7 +2443,7 @@ mod tests {
     async fn drain_abandons_pending_asks_rather_than_answering_them() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(
+        let actor = SessionActor::new(
             Uuid::new_v4(),
             actor_spec_fixture(),
             f.deps,
@@ -2487,15 +2458,21 @@ mod tests {
             },
             queued("m1", "main"),
         ]);
-        let events = actor.drain(&state).await;
-        assert_eq!(events.len(), 1);
-        let SessionDomainEvent::TurnBegan {
-            consumed, answered, ..
-        } = &events[0]
-        else {
-            panic!("expected TurnBegan, got {:?}", events[0]);
-        };
+        let actions = decisions(&actor, &state);
+        assert_eq!(actions.len(), 1);
+        let AgentAction::StartTurn {
+            consumed,
+            answered,
+            input,
+            ..
+        } = &actions[0];
         assert_eq!(consumed, &vec!["m1".to_string()]);
+        assert_eq!(
+            input.results.len(),
+            1,
+            "the parked call still gets a result"
+        );
+        assert!(input.results[0].is_error);
         assert!(
             answered.is_empty(),
             "a plain message abandons the question rather than answering it — \
