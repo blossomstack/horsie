@@ -5,6 +5,7 @@ mod admin;
 mod agents;
 mod auth;
 mod config;
+mod environments;
 pub mod error;
 mod github;
 mod handlers;
@@ -70,6 +71,9 @@ pub struct AppState {
     /// Turns a routine into a running session. Held here so the run endpoint
     /// and the background timer are the same code path.
     pub routine_runner: Arc<crate::routines::RoutineRunner>,
+    /// Named environments (experimental): CRUD over the definitions. Nothing
+    /// consumes an environment yet.
+    pub environments: Arc<crate::environments::EnvironmentService>,
     /// Every connected vendor agent, published into the same vendor map
     /// sessions select from. Held here so the connect route can register a
     /// freshly handshaken link.
@@ -186,6 +190,16 @@ pub fn app(state: AppState) -> Router {
                 .delete(agents::delete_agent),
         )
         .route("/api/agents/:name/invoke", post(agents::invoke_agent))
+        .route(
+            "/api/environments",
+            get(environments::list_environments).post(environments::create_environment),
+        )
+        .route(
+            "/api/environments/:name",
+            get(environments::get_environment)
+                .put(environments::replace_environment)
+                .delete(environments::delete_environment),
+        )
         .route(
             "/api/routines",
             get(routines::list_routines).post(routines::create_routine),
@@ -316,6 +330,9 @@ mod tests {
             crate::routines::RoutineStore::new(opened.db.clone()),
             agents.clone(),
         ));
+        let environments = Arc::new(crate::environments::EnvironmentService::new(
+            crate::environments::EnvironmentStore::new(opened.db.clone()),
+        ));
         let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
         let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
             shared_vendors.clone(),
@@ -363,6 +380,7 @@ mod tests {
             agents,
             routines,
             routine_runner,
+            environments,
             vendor_agents,
             web_dir: None,
         }
@@ -1565,6 +1583,105 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let res = app.oneshot(delete("/api/routines/nightly")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn environments_crud_over_http() {
+        use horsie_models::environments::EnvironmentView;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        let body = serde_json::json!({
+            "name": "staging", "description": "fly box", "vendor": "fly",
+            "repos": [{"url": "https://github.com/o/api", "gitRef": "dev"}],
+            "envVars": [{"name": "RUST_LOG", "value": "debug"}],
+            "provision": [{"name": "setup", "uses": "run", "with": [{"key": "cmd", "value": "make setup"}]}],
+        });
+
+        // Create -> 201 with the full view.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/environments", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v: EnvironmentView = read_json(res).await;
+        assert_eq!(v.name, "staging");
+        assert_eq!(v.vendor, "fly");
+        assert_eq!(v.repos[0].git_ref.as_deref(), Some("dev"));
+        assert_eq!(v.env_vars[0].name, "RUST_LOG");
+        assert_eq!(v.provision[0].uses, "run");
+
+        // Duplicate -> 409; bad slug, empty vendor, and "local" -> 422.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/environments", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        for bad in [
+            serde_json::json!({"name": "Bad Name", "vendor": "fly"}),
+            serde_json::json!({"name": "b", "vendor": ""}),
+            serde_json::json!({"name": "b", "vendor": "local"}),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json("/api/environments", &bad))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+        }
+
+        // List + get; unknown -> 404.
+        let res = app.clone().oneshot(get("/api/environments")).await.unwrap();
+        let list: Vec<EnvironmentView> = read_json(res).await;
+        assert_eq!(list.len(), 1);
+        let res = app
+            .clone()
+            .oneshot(get("/api/environments/staging"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .clone()
+            .oneshot(get("/api/environments/ghost"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // Replace -> 200, full replace; rename via body -> 422.
+        let upd = serde_json::json!({"name": "staging", "vendor": "docker"});
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/environments/staging", &upd))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: EnvironmentView = read_json(res).await;
+        assert_eq!(v.vendor, "docker");
+        assert!(v.repos.is_empty(), "PUT is a full replace");
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/environments/staging",
+                &serde_json::json!({"name": "other", "vendor": "fly"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Delete -> 204; again -> 404.
+        let res = app
+            .clone()
+            .oneshot(delete("/api/environments/staging"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = app
+            .oneshot(delete("/api/environments/staging"))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 

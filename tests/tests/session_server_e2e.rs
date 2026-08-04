@@ -162,6 +162,9 @@ async fn start_server_with(
         horsie_server::routines::RoutineStore::new(opened.db.clone()),
         agents.clone(),
     ));
+    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
+        horsie_server::environments::EnvironmentStore::new(opened.db.clone()),
+    ));
     // Auth off: this suite drives the HTTP API without a credential, and a
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
@@ -197,6 +200,7 @@ async fn start_server_with(
         agents,
         routines,
         routine_runner,
+        environments,
         vendor_agents,
         web_dir: None,
     };
@@ -324,6 +328,9 @@ async fn start_server_with_live_vendors(
         horsie_server::routines::RoutineStore::new(opened.db.clone()),
         agents.clone(),
     ));
+    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
+        horsie_server::environments::EnvironmentStore::new(opened.db.clone()),
+    ));
     // Auth off: this suite drives the HTTP API without a credential, and a
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
@@ -359,6 +366,7 @@ async fn start_server_with_live_vendors(
         agents,
         routines,
         routine_runner,
+        environments,
         vendor_agents,
         web_dir: None,
     };

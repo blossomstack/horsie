@@ -172,6 +172,9 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         horsie_server::routines::RoutineStore::new(opened.db.clone()),
         agents.clone(),
     ));
+    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
+        horsie_server::environments::EnvironmentStore::new(opened.db.clone()),
+    ));
 
     let auth = Arc::new(horsie_server::auth::AuthService::new(
         horsie_server::auth::AuthStore::new(opened.db.clone()),
@@ -261,6 +264,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         agents,
         routines,
         routine_runner,
+        environments,
         vendor_agents,
         web_dir: cli.web,
     };
