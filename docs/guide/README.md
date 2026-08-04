@@ -25,6 +25,9 @@ shared plugin library.
   available to sessions. → [Skills & plugins](skills-and-plugins.md)
 - **Run work on a schedule** — save an agent plus a fixed prompt as a *routine*
   and trigger it on a timer, from the API, or by hand. → [Routines](routines.md)
+- **Chain agents in a fixed order** — define a *workflow*: a graph of steps that
+  share one workspace, where each step's result decides the next.
+  → [Workflows](workflows.md)
 - **Choose where tools run** — on your own machine (the `local` runtime), or on
   managed containers the server provisions for you (`velos`).
   → [Runtime vendors](runtime-vendors.md)
@@ -80,6 +83,7 @@ cannot run a turn yet. Do these in order:
 | [MCP servers](mcp-servers.md) | Connect remote MCP servers; enable them per session |
 | [Skills & plugins](skills-and-plugins.md) | Install skill bundles; select them per session |
 | [Routines](routines.md) | Save an agent + prompt; run it on a timer, from the API, or by hand |
+| [Workflows](workflows.md) | Chain agents into a graph; branch on each step's result |
 | [Settings reference](settings-reference.md) | `config.json` vs. the Settings database; every field |
 
 > **Authentication is on by default.** On first boot the server creates an

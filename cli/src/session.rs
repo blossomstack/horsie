@@ -153,6 +153,10 @@ pub async fn tail(
     session_id: &str,
     output: &Path,
     mode: EventsMode,
+    // `agent` picks the stream: `None` is the session-scoped one (status,
+    // inbox, roster). A workflow run has no main agent, so reading one of its
+    // steps means naming that step's agent.
+    agent: Option<&str>,
 ) -> Result<(), CliError> {
     let path = output_path(output, session_id);
     let cursor = scan_last_message_id(&path)?;
@@ -167,10 +171,16 @@ pub async fn tail(
     // reconnect loop could not see anyway, and a tail that outlives its access
     // token reconnects and re-resolves from the top.
     let token = crate::auth::resolve_token(server).await?;
-    let url = format!(
-        "{}/api/sessions/{session_id}/events",
-        server.trim_end_matches('/')
-    );
+    let url = match agent {
+        None => format!(
+            "{}/api/sessions/{session_id}/events",
+            server.trim_end_matches('/')
+        ),
+        Some(agent) => format!(
+            "{}/api/sessions/{session_id}/agents/{agent}/events",
+            server.trim_end_matches('/')
+        ),
+    };
     let mut backoff = Duration::from_secs(1);
     // One pinned Ctrl-C future for the whole tail: a fresh `ctrl_c()` only
     // fires on signals received *after* its creation, so re-creating it per

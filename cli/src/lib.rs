@@ -8,3 +8,4 @@ pub mod plugins;
 pub mod routines;
 pub mod server_client;
 pub mod session;
+pub mod workflow;
