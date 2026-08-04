@@ -455,7 +455,13 @@ let optimisticSeq = 0;
  * with `loadMore`. Live events that arrive before the tail is seeded are
  * buffered and replayed after, so ordering stays correct without a gap.
  */
-export function useSessionStream(sessionId: string | undefined): {
+export function useSessionStream(
+  sessionId: string | undefined,
+  /** Which agent's transcript to follow. Defaults to the session's main agent;
+   * a workflow step or a subagent passes its own id. The session-scoped stream
+   * (status, inbox, roster) is the same either way. */
+  agentId: string = MAIN_AGENT,
+): {
   stream: SessionStream;
   addOptimisticUser: (text: string) => string;
   removeOptimisticUser: (id: string) => void;
@@ -469,7 +475,7 @@ export function useSessionStream(sessionId: string | undefined): {
   const { data: detail } = useSession(sessionId);
   // Shares `SessionView`'s cache entry, so this is a read of state already
   // fetched rather than a second request.
-  const { data: mainAgent } = useAgent(sessionId, MAIN_AGENT);
+  const { data: mainAgent } = useAgent(sessionId, agentId);
   const esRef = useRef<EventSource | null>(null);
   // Earliest loaded message id — the cursor for the next scroll-back page.
   const earliestRef = useRef<string | null>(null);
@@ -501,7 +507,7 @@ export function useSessionStream(sessionId: string | undefined): {
       switch (event.type) {
         case "StatusChanged":
           void queryClient.invalidateQueries({
-            queryKey: qk.agent(sessionId, MAIN_AGENT),
+            queryKey: qk.agent(sessionId, agentId),
           });
           void queryClient.invalidateQueries({
             queryKey: qk.session(sessionId),
@@ -545,14 +551,14 @@ export function useSessionStream(sessionId: string | undefined): {
     // id), which the server serves from the agent's state.
     const sessionEs = open(api.sessionEventsUrl(sessionId), "session");
     const agentEs = open(
-      api.agentEventsUrl(sessionId, MAIN_AGENT),
+      api.agentEventsUrl(sessionId, agentId),
       "agent",
     );
     esRef.current = agentEs;
 
     // Seed the latest window, then flush anything buffered during the fetch.
     api.sessions
-      .history(sessionId, MAIN_AGENT, { limit: HISTORY_LIMIT })
+      .history(sessionId, agentId, { limit: HISTORY_LIMIT })
       .then((page) => {
         if (cancelled) return;
         dispatch({ kind: "history", page, prepend: false });
@@ -593,11 +599,11 @@ export function useSessionStream(sessionId: string | undefined): {
     const after = latestRef.current;
     void queryClient.invalidateQueries({ queryKey: qk.session(sessionId) });
     void queryClient.invalidateQueries({
-      queryKey: qk.agent(sessionId, MAIN_AGENT),
+      queryKey: qk.agent(sessionId, agentId),
     });
     if (!after) return;
     api.sessions
-      .history(sessionId, MAIN_AGENT, { after, limit: HISTORY_LIMIT })
+      .history(sessionId, agentId, { after, limit: HISTORY_LIMIT })
       .then((page) =>
         dispatch({ kind: "history", page, prepend: false, forward: true }),
       )
@@ -623,7 +629,7 @@ export function useSessionStream(sessionId: string | undefined): {
     if (!sessionId || !before || !canLoadMoreRef.current) return;
     dispatch({ kind: "loading-more", value: true });
     api.sessions
-      .history(sessionId, MAIN_AGENT, { before, limit: HISTORY_LIMIT })
+      .history(sessionId, agentId, { before, limit: HISTORY_LIMIT })
       .then((page) => dispatch({ kind: "history", page, prepend: true }))
       .catch(() => dispatch({ kind: "loading-more", value: false }));
   }, [sessionId]);

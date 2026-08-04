@@ -662,6 +662,7 @@ mod tests {
             },
             agents: vec![],
             progression: None,
+            workflow: None,
         };
         let out = render_session_detail(&d, 0);
         assert!(out.contains("awaiting    which file?"));

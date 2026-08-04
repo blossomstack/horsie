@@ -52,6 +52,9 @@ export function SessionRow({
             {title}
           </span>
           <span className="legend mt-0.5 block truncate">
+            {/* A run says which workflow it came from: the rail holds runs and
+                ordinary sessions together, so the row has to say which it is. */}
+            {s.workflow ? `${s.workflow} · ` : ""}
             {meta.label !== "—" ? `${meta.label} · ` : ""}
             {relativeTime(s.createdAt)}
           </span>

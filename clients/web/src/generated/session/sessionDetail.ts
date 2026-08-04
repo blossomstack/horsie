@@ -62,4 +62,8 @@ export interface SessionDetail {
    * The resource-preparation stage a turn is currently at, when one is
    */
   progression?: ProgressionEvent;
+  /**
+   * The workflow this session is a run of, if it is one. Decides which view
+   */
+  workflow?: string;
 }

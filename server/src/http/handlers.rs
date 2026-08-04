@@ -199,6 +199,7 @@ pub async fn get_session(
         usage_total: to_wire_usage(usage_total),
         agents,
         progression: None,
+        workflow: rec.spec.workflow_name().map(str::to_string),
     };
     Ok(Json(GetSessionResponse { session: detail }))
 }
