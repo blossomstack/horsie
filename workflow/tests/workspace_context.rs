@@ -62,10 +62,17 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
     assert!(prompt.contains("# Workspaces"));
     assert!(prompt.contains("## october — /ws/october (git)"));
     assert!(prompt.contains("Project rules."));
-    // The intro states where relative paths land instead of advertising a
-    // `workspace` argument the tools no longer take.
+    // The intro names the directory the agent starts in; how that directory
+    // behaves — sticky, moved with set_working_dir, never with `cd` — is the
+    // `# Tool session state` section's job. Neither advertises a `workspace`
+    // argument the tools no longer take.
     assert!(
-        prompt.contains("Your working directory starts at /ws/october."),
+        prompt.contains("Your working directory starts at /ws/october;"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("# Tool session state"), "{prompt}");
+    assert!(
+        prompt.contains("relative paths resolve against it"),
         "{prompt}"
     );
     assert!(!prompt.contains("`workspace` argument"), "{prompt}");
