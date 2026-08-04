@@ -2,7 +2,6 @@ use crate::error::ExecutorError;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
-use tokio_tungstenite::{WebSocketStream, accept_async};
 
 /// Where the executor listens for runtime children to connect.
 #[derive(Debug, Clone)]
@@ -18,11 +17,16 @@ enum Listener {
     Unix(UnixListener),
 }
 
-/// One accepted runtime link, statically typed by socket family so the generic
+/// One accepted socket, statically typed by socket family so the generic
 /// connection handler can be monomorphized per socket type.
-pub enum AcceptedConn {
-    Tcp(WebSocketStream<TcpStream>),
-    Unix(WebSocketStream<UnixStream>),
+///
+/// Handed over before the WebSocket handshake deliberately: the handshake talks
+/// to the peer, so it fails for peer-shaped reasons (a runtime child killed
+/// between `connect()` and its first byte). Doing it on the accept path would
+/// make one such peer indistinguishable from the listener itself failing.
+pub enum AcceptedStream {
+    Tcp(TcpStream),
+    Unix(UnixStream),
 }
 
 /// Listens for incoming WebSocket connections from runtime binaries over either
@@ -74,27 +78,24 @@ impl RuntimeListenerServer {
         }
     }
 
-    pub async fn accept(&self) -> Result<AcceptedConn, ExecutorError> {
+    /// Accept the next connection. An error here is the listener's own — a peer
+    /// that connects and hangs up is a successful accept whose handshake fails
+    /// later, on its own task.
+    pub async fn accept(&self) -> Result<AcceptedStream, ExecutorError> {
         match &self.listener {
             Listener::Tcp(l) => {
                 let (stream, _) = l
                     .accept()
                     .await
                     .map_err(|e| ExecutorError::Connection(e.to_string()))?;
-                let ws = accept_async(stream)
-                    .await
-                    .map_err(|e| ExecutorError::Connection(e.to_string()))?;
-                Ok(AcceptedConn::Tcp(ws))
+                Ok(AcceptedStream::Tcp(stream))
             }
             Listener::Unix(l) => {
                 let (stream, _) = l
                     .accept()
                     .await
                     .map_err(|e| ExecutorError::Connection(e.to_string()))?;
-                let ws = accept_async(stream)
-                    .await
-                    .map_err(|e| ExecutorError::Connection(e.to_string()))?;
-                Ok(AcceptedConn::Unix(ws))
+                Ok(AcceptedStream::Unix(stream))
             }
         }
     }
@@ -102,7 +103,10 @@ impl RuntimeListenerServer {
 
 impl Drop for RuntimeListenerServer {
     fn drop(&mut self) {
-        // Unlink the unix socket on shutdown; missing-file is fine.
+        // Unlink the unix socket on shutdown; missing-file is fine. Safe to do
+        // unconditionally only because the path is this process's own (see
+        // `runtime_socket_path` in the CLI): a shared path would mean unlinking
+        // a file another live agent had just bound, leaving it unreachable.
         if let RuntimeEndpoint::Unix(path) = &self.endpoint {
             let _ = std::fs::remove_file(path);
         }

@@ -991,7 +991,7 @@ async fn send(sink: &Sink, msg: RuntimeVendorOutboundMessage) -> Result<(), Stri
 /// whoever is watching the agent — a terminal, or a process manager's log — so
 /// they go straight to stderr rather than through a subscriber that a vendor
 /// binary may never have installed.
-fn note(message: &str) {
+pub(crate) fn note(message: &str) {
     eprintln!("{message}");
 }
 
