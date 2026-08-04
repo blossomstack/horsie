@@ -12,10 +12,13 @@ test("J1: the New button opens an editable draft at /", async ({ page, appBase }
   await page.getByTestId("new-session-button").click();
   await page.waitForURL((url) => url.pathname === "/");
   await expect(page.getByTestId("session-config-bar")).toHaveAttribute("data-mode", "draft");
-  // Local (e2e) vendor does not provision, so no repo/skill/MCP controls show.
   await expect(page.getByTestId("config-runtime")).toBeVisible();
   await expect(page.getByTestId("config-model")).toBeVisible();
+  // The local (e2e) vendor does not provision, so there is nowhere to check a
+  // repo out — but skills and MCP are not workspace channels and stay offered.
   await expect(page.getByTestId("config-repos")).toHaveCount(0);
+  await expect(page.getByTestId("config-skills")).toBeVisible();
+  await expect(page.getByTestId("config-mcp")).toBeVisible();
 });
 
 test("J2: a created session keeps the same row, now read-only", async ({

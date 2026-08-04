@@ -77,7 +77,7 @@ export function AgentsPage() {
                       {a.name}
                     </span>
                     <span className="legend">
-                      {a.model} · {a.vendor ?? "default runtime"}
+                      {a.model}
                     </span>
                   </div>
                   {a.description && (

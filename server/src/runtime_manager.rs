@@ -83,7 +83,6 @@ impl RuntimeManager {
         &self,
         session: &str,
         spec: &SessionSpec,
-        vendor: &Arc<RuntimeVendorLink>,
     ) -> Result<RuntimeSpec, RuntimeError> {
         let dir = self.deps.state_dir.join("sessions").join(session);
         std::fs::create_dir_all(&dir).map_err(|e| RuntimeError::Provision(e.to_string()))?;
@@ -144,11 +143,21 @@ impl RuntimeManager {
         }
 
         // Resolve the session's selected bundles to fetch refs plus a scoped
-        // token; the runtime reads both from its environment at startup. Only
-        // vendors that provision a workspace participate.
-        if let Some(prov) = self.deps.plugins.as_ref()
-            && vendor.capabilities().supports_provisioning
-        {
+        // token; the runtime reads both from its environment at startup.
+        //
+        // Every vendor participates, including one that cannot provision a
+        // workspace. Bundles are not a workspace: the runtime fetches them over
+        // its own outbound connection into its own plugins dir, which it can do
+        // over a directory it did not create. `horsie connect` announces
+        // `supports_provisioning: false` yet already wires `with_bundles`, so
+        // gating here was the one thing keeping skills off the most common
+        // self-hosted vendor.
+        //
+        // The runtime resolves the overlap with a host `--plugins-dir` library:
+        // fetched bundles win, the host library is the fallback. So selecting
+        // bundles replaces the host library for that session, and selecting
+        // none leaves it in place.
+        if let Some(prov) = self.deps.plugins.as_ref() {
             let mut names = spec.plugins.clone();
             if names.is_empty() {
                 names = prov.default_names().await;
@@ -184,7 +193,7 @@ impl RuntimeManager {
         spec: &SessionSpec,
     ) -> Result<(), RuntimeError> {
         let link = self.vendor(vendor)?;
-        let rt_spec = self.runtime_spec(session, spec, &link).await?;
+        let rt_spec = self.runtime_spec(session, spec).await?;
         link.create(session, &rt_spec)
             .await
             .map(|_| ())
@@ -402,6 +411,77 @@ mod tests {
             .expect("create");
         let sent = agent.last_create_request().expect("create request");
         assert_eq!(sent.workspaces, vec!["main".to_string()]);
+    }
+
+    /// Resolves any name to a hash of itself, so a test can assert on the
+    /// manifest without a plugin store.
+    struct FakeProvisioner;
+
+    #[async_trait::async_trait]
+    impl crate::plugins::PluginProvisioner for FakeProvisioner {
+        async fn resolve(
+            &self,
+            names: &[String],
+        ) -> Result<Vec<crate::plugins::PluginArtifactRef>, String> {
+            Ok(names
+                .iter()
+                .map(|n| crate::plugins::PluginArtifactRef {
+                    name: n.clone(),
+                    hash: format!("hash-of-{n}"),
+                })
+                .collect())
+        }
+
+        fn mint_token(&self, session_id: &str, _hashes: &[String]) -> String {
+            format!("token-for-{session_id}")
+        }
+
+        async fn default_names(&self) -> Vec<String> {
+            vec![]
+        }
+    }
+
+    /// A vendor that cannot provision a workspace still gets the bundle
+    /// manifest. Bundles are not a workspace: the runtime fetches them over its
+    /// own outbound connection into its own plugins dir, which works over a
+    /// directory it did not create. `horsie connect` announces
+    /// `supports_provisioning: false` and is exactly this case — gating here is
+    /// what used to keep skills off the most common self-hosted vendor.
+    #[tokio::test]
+    async fn a_vendor_that_cannot_provision_still_receives_the_bundle_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = FakeRuntimeVendor::builder("v")
+            .supports_provisioning(false)
+            .serve_in_process()
+            .await
+            .unwrap();
+        let m = Arc::new(RuntimeManager::new(RuntimeDeps {
+            vendors: published(&agent, "v"),
+            state_dir: tmp.path().to_path_buf(),
+            github_tokens: None,
+            plugins: Some(Arc::new(FakeProvisioner)),
+        }));
+        let mut spec = session_spec("v");
+        spec.plugins = vec!["superpowers".to_string()];
+        m.create("s1", "v", &spec).await.expect("create");
+
+        let sent = agent.last_create_request().expect("create request");
+        let env = |name: &str| {
+            sent.env
+                .iter()
+                .find(|e| e.name == name)
+                .map(|e| e.value.clone())
+        };
+        let manifest = env(horsie_models::ENV_PLUGIN_MANIFEST)
+            .expect("a non-provisioning vendor must still be sent the manifest");
+        assert!(
+            manifest.contains("hash-of-superpowers"),
+            "the manifest names the selected bundle: {manifest}"
+        );
+        assert_eq!(
+            env(horsie_models::ENV_PLUGINS_TOKEN).as_deref(),
+            Some("token-for-s1")
+        );
     }
 
     /// Mints a distinct token every call, so a test can prove credentials are

@@ -32,9 +32,12 @@ export function AgentEditPage() {
  * and how it runs.
  *
  * The configuration used to be the session action row, rendered verbatim and
- * pinned to the bottom of the pane — so a preset's model and runtime sat
- * below the save button, separated from the name and description by the whole
- * height of the page. They are one form.
+ * pinned to the bottom of the pane — so a preset's model sat below the save
+ * button, separated from the name and description by the whole height of the
+ * page. They are one form.
+ *
+ * The channels here are the session's minus the runtime: a preset does not name
+ * one, because where the work runs belongs to the invocation.
  */
 function AgentForm({ initial }: { initial?: AgentView }) {
   const editing = !!initial;
@@ -47,7 +50,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
   const draft = useAgentDraft(initial);
   const busy = create.isPending || update.isPending;
   // Name the requirement rather than just greying the button out: the Model
-  // picker reads "Select" exactly like the optional Runtime and Memory pickers
+  // picker reads "Select" much like the optional Skills, MCP and Memory pickers
   // beside it, so a disabled Save with no message is a dead end.
   const blockedReason =
     agentName.trim() === ""

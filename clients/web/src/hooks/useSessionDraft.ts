@@ -21,9 +21,14 @@ import { useSettings } from "./useSettings";
 /** The picker state every session-config surface shares: the new-session
  * draft and the agent-preset form. `SessionDraft` adds what only sending a
  * first message needs. */
+/**
+ * The channels a session and an agent preset both configure.
+ *
+ * Deliberately no runtime vendor. A preset does not name one — where the work
+ * runs belongs to the invocation, not to the saved configuration — so the
+ * runtime channel lives in `RuntimeChannel`, which only a session draft has.
+ */
 export interface ConfigDraft {
-  vendor: string;
-  setVendor: (v: string) => void;
   model: string;
   setModel: (m: string) => void;
   /** fullName → gitRef ("" = default branch). */
@@ -47,7 +52,14 @@ export interface ConfigDraft {
   githubConnected: boolean;
 }
 
-export interface SessionDraft extends ConfigDraft {
+/** The runtime channel, which a session has and an agent preset does not. Its
+ * presence is what tells `useConfigPickers` to offer a Runtime picker. */
+export interface RuntimeChannel {
+  vendor: string;
+  setVendor: (v: string) => void;
+}
+
+export interface SessionDraft extends ConfigDraft, RuntimeChannel {
   canSend: boolean;
   blockedReason: string | null;
   buildRequest: () => CreateSessionRequest;

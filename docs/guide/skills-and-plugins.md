@@ -38,9 +38,13 @@ In the New Session dialog, under **Advanced**:
 2. Tick the **Skills** bundles to load. Bundles marked *Default for new sessions*
    are pre-checked.
 
-These options appear only when the session's runtime supports provisioning
-(velos). At session start, the runtime fetches the selected bundles and makes
-their skills available to the agent.
+At session start, the runtime fetches the selected bundles and makes their
+skills available to the agent. Every runtime can do this, including the local
+one — a runtime fetches bundles over its own outbound connection into its own
+plugins directory, which does not require it to have built a workspace.
+
+The same Skills picker sits on an agent preset, so every session that preset
+starts loads the same bundles.
 
 ## Skills on your own machine (host library)
 
@@ -105,9 +109,12 @@ pull rather than a fresh clone, and two plugins published from one repository
 share a single working copy. `horsie plugin remove` deletes the link and drops
 the clone once nothing else points at it.
 
-This is all-or-none: the whole library applies to every session on the runtime,
-independently of the server's bundle library (the Skills page remains
-velos-only).
+This is all-or-none: the whole library applies to every session on the runtime.
+
+**A session that selects server bundles gets exactly those, and the host library
+does not apply to it.** Selecting nothing leaves the host library in place. So
+the library is the default for sessions that express no preference, and an
+explicit selection replaces it rather than adding to it.
 
 > Hooks execute with the runtime's privileges on your machine — only install
 > plugins you trust.
@@ -115,6 +122,7 @@ velos-only).
 ## Notes
 
 - Bundles come from **git** — there's no upload; point the installer at a repo.
-- The **local** runtime does not provision server bundles, so the Skills
-  options are hidden for sessions using it — but it loads the CLI-installed
-  host library (above). Use velos for per-session bundle selection.
+- Per-session bundle selection works on every runtime, the local one included.
+  What the local runtime cannot do is check out **repos**, since it runs over a
+  directory you own rather than one it built — so that picker stays hidden for
+  it.

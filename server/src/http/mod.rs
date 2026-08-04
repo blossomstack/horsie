@@ -1326,10 +1326,14 @@ mod tests {
 
     /// PUT a provider + model so agent save-time validation has a model to
     /// reference; the alias is "mock".
+    /// Seed a usable server: one provider, one model, and `mock` as the default
+    /// vendor. The default vendor matters because a preset names none — every
+    /// invocation resolves it.
     async fn put_mock_model(app: &axum::Router) {
         let body = serde_json::json!({
             "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
             "models": [{"alias": "mock", "provider": "p", "modelId": "id"}],
+            "defaultVendor": "mock",
         });
         let res = app
             .clone()
@@ -1349,7 +1353,7 @@ mod tests {
         // Create -> 201 with the stored view.
         let body = serde_json::json!({
             "name": "reviewer", "description": "reviews PRs", "model": "mock",
-            "vendor": "mock", "plugins": ["superpowers"], "memorySpaces": ["default"]
+            "plugins": ["superpowers"], "memorySpaces": ["default"]
         });
         let res = app
             .clone()
@@ -1359,7 +1363,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::CREATED);
         let v: AgentView = read_json(res).await;
         assert_eq!(v.name, "reviewer");
-        assert_eq!(v.vendor.as_deref(), Some("mock"));
         assert_eq!(v.plugins, vec!["superpowers".to_string()]);
 
         // Duplicate -> 409; bad slug -> 422; unknown model -> 422.
@@ -1667,8 +1670,7 @@ mod tests {
         let app = app(test_state(&tmp).await);
         put_mock_model(&app).await;
         let body = serde_json::json!({
-            "name": "reviewer", "model": "mock", "vendor": "mock",
-            "memorySpaces": ["default"]
+            "name": "reviewer", "model": "mock", "memorySpaces": ["default"]
         });
         let res = app
             .clone()
@@ -1724,19 +1726,25 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-        // An agent naming a disconnected vendor is storable but not invocable.
+        // A preset names no vendor, so what makes it invocable is whether the
+        // server default is connected. Point the default at a vendor that is
+        // not, and the same preset stops being invocable.
         let res = app
             .clone()
-            .oneshot(post_json(
-                "/api/agents",
-                &serde_json::json!({"name": "remote", "model": "mock", "vendor": "ghost-vendor"}),
+            .oneshot(put_json(
+                "/api/config",
+                &serde_json::json!({
+                    "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
+                    "models": [{"alias": "mock", "provider": "p", "modelId": "id"}],
+                    "defaultVendor": "ghost-vendor",
+                }),
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::CREATED);
+        assert_eq!(res.status(), StatusCode::OK);
         let res = app
             .oneshot(post_json(
-                "/api/agents/remote/invoke",
+                "/api/agents/reviewer/invoke",
                 &serde_json::json!({"message": "hi"}),
             ))
             .await

@@ -107,10 +107,8 @@ pub async fn invoke_agent(
     if req.message.trim().is_empty() {
         return Err(Api::unprocessable("message must not be empty"));
     }
-    let vendor = agent
-        .vendor
-        .clone()
-        .unwrap_or_else(|| state.config_store.default_vendor());
+    // A preset names no vendor: where the work runs belongs to the invocation.
+    let vendor = state.config_store.default_vendor();
     if !state.vendor_agents.connected_names().contains(&vendor) {
         return Err(Api::unprocessable(format!(
             "runtime vendor '{vendor}' is not connected"

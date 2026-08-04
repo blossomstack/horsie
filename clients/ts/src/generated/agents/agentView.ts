@@ -10,10 +10,6 @@ export interface AgentView {
   name: string;
   description: string;
   /**
-   * Runtime vendor name; absent → the server&#x27;s default vendor at invoke.
-   */
-  vendor?: string;
-  /**
    * Configured model alias.
    */
   model: string;

@@ -354,7 +354,7 @@ pub(crate) mod tests {
                     thinking_dialect: None,
                     forced_tools_disable_thinking: None,
                 }]),
-                default_vendor: None,
+                default_vendor: Some("mock".into()),
             })
             .await
             .unwrap();
@@ -366,7 +366,6 @@ pub(crate) mod tests {
             .create(AgentPresetInput {
                 name: "reviewer".into(),
                 description: None,
-                vendor: Some("mock".into()),
                 model: "sonnet".into(),
                 repos: None,
                 plugins: None,

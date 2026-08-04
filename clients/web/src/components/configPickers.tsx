@@ -8,7 +8,7 @@ import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
 import type { SessionDetail } from "../api/types";
 import { basename } from "../lib/format";
-import type { ConfigDraft } from "../hooks/useSessionDraft";
+import type { ConfigDraft, RuntimeChannel } from "../hooks/useSessionDraft";
 
 /**
  * One configurable channel of a session or agent preset.
@@ -80,6 +80,13 @@ function EmptyLink({ to, children }: { to: string; children: ReactNode }) {
   );
 }
 
+/** A session draft carries a runtime channel; an agent-preset draft does not.
+ * The draft's own shape is the signal, so neither surface has to pass a flag
+ * saying which one it is. */
+function hasRuntime(draft: ConfigDraft): draft is ConfigDraft & RuntimeChannel {
+  return "setVendor" in draft;
+}
+
 /**
  * Every picker for a draft, in the order both surfaces render them.
  *
@@ -100,46 +107,53 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
 
   const pickers: PickerSpec[] = [];
 
-  pickers.push({
-    key: "runtime",
-    legend: "Runtime",
-    icon: <Server size={15} />,
-    label: draft.vendor || "Select",
-    marked: !!draft.vendor,
-    // The new-session page used to carry a whole roster panel answering "is my
-    // laptop connected?". The answer is one bit, and this is where it is
-    // actionable.
-    warn: activeVendors.length === 0,
-    width: "w-56",
-    testId: "config-runtime",
-    body: (close) =>
-      activeVendors.length === 0 ? (
-        <p className="px-2 py-1.5 text-sm leading-relaxed text-dim">
-          No runtime is connected, so a session can’t run a turn yet. Run{" "}
-          <code className="font-mono text-legend">horsie connect</code> on the
-          machine holding your code.
-        </p>
-      ) : (
-        activeVendors.map((v) => (
-          <button
-            key={v.name}
-            type="button"
-            className="flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm hover:bg-raised"
-            data-testid="runtime-option"
-            data-value={v.name}
-            onClick={() => {
-              draft.setVendor(v.name);
-              close();
-            }}
-          >
-            <span className="font-mono">{v.name}</span>
-            {v.isDefault && <span className="text-[0.6875rem] text-faint">default</span>}
-          </button>
-        ))
-      ),
-  });
+  if (hasRuntime(draft)) {
+    const d = draft;
+    pickers.push({
+      key: "runtime",
+      legend: "Runtime",
+      icon: <Server size={15} />,
+      label: d.vendor || "Select",
+      marked: !!d.vendor,
+      // The new-session page used to carry a whole roster panel answering "is my
+      // laptop connected?". The answer is one bit, and this is where it is
+      // actionable.
+      warn: activeVendors.length === 0,
+      width: "w-56",
+      testId: "config-runtime",
+      body: (close) =>
+        activeVendors.length === 0 ? (
+          <p className="px-2 py-1.5 text-sm leading-relaxed text-dim">
+            No runtime is connected, so a session can’t run a turn yet. Run{" "}
+            <code className="font-mono text-legend">horsie connect</code> on the
+            machine holding your code.
+          </p>
+        ) : (
+          activeVendors.map((v) => (
+            <button
+              key={v.name}
+              type="button"
+              className="flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm hover:bg-raised"
+              data-testid="runtime-option"
+              data-value={v.name}
+              onClick={() => {
+                d.setVendor(v.name);
+                close();
+              }}
+            >
+              <span className="font-mono">{v.name}</span>
+              {v.isDefault && <span className="text-[0.6875rem] text-faint">default</span>}
+            </button>
+          ))
+        ),
+    });
+  }
 
-  // Workspace channels only exist on a vendor that provisions one.
+  // Repos are the one channel a non-provisioning vendor genuinely cannot
+  // honour: it runs over a fixed, user-owned directory, so there is nothing to
+  // check a repo out into. Skills and MCP are not workspace channels — MCP is
+  // composed server-side and never reaches the runtime at all — so they are
+  // offered unconditionally, below.
   if (draft.provisions) {
     pickers.push({
       key: "repos",
@@ -172,59 +186,65 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           })
         ),
     });
-
-    pickers.push({
-      key: "skills",
-      legend: "Skills",
-      icon: <Boxes size={15} />,
-      label: draft.skills.size ? `${draft.skills.size} selected` : "None",
-      marked: draft.skills.size > 0,
-      width: "w-80",
-      testId: "config-skills",
-      body: () =>
-        checkList({
-          items: (bundles ?? []).map((b) => b.name),
-          selected: draft.skills,
-          onToggle: (name, checked) => {
-            const next = new Set(draft.skills);
-            if (checked) next.delete(name);
-            else next.add(name);
-            draft.setSkills(next);
-          },
-          empty: (
-            <EmptyLink to="/settings/skills">
-              Install skill bundles in Settings
-            </EmptyLink>
-          ),
-        }),
-    });
-
-    pickers.push({
-      key: "mcp",
-      legend: "MCP",
-      icon: <Plug size={15} />,
-      label: draft.mcp.size ? `${draft.mcp.size} selected` : "None",
-      marked: draft.mcp.size > 0,
-      width: "w-72",
-      testId: "config-mcp",
-      body: () =>
-        checkList({
-          items: enabledMcp.map((s) => s.name),
-          selected: draft.mcp,
-          onToggle: (name, checked) => {
-            const next = new Set(draft.mcp);
-            if (checked) next.delete(name);
-            else next.add(name);
-            draft.setMcp(next);
-          },
-          empty: (
-            <EmptyLink to="/settings/integrations">
-              Add MCP servers in Settings
-            </EmptyLink>
-          ),
-        }),
-    });
   }
+
+  // Skills and MCP are not workspace channels, so they are offered on every
+  // vendor. A runtime fetches its selected bundles over its own outbound
+  // connection into its own plugins dir — nothing it has to have built — and
+  // an MCP toolbox is composed server-side and never reaches the runtime at
+  // all. Gating these on `provisions` kept both off `horsie connect`, which
+  // is the most common self-hosted vendor.
+  pickers.push({
+    key: "skills",
+    legend: "Skills",
+    icon: <Boxes size={15} />,
+    label: draft.skills.size ? `${draft.skills.size} selected` : "None",
+    marked: draft.skills.size > 0,
+    width: "w-80",
+    testId: "config-skills",
+    body: () =>
+      checkList({
+        items: (bundles ?? []).map((b) => b.name),
+        selected: draft.skills,
+        onToggle: (name, checked) => {
+          const next = new Set(draft.skills);
+          if (checked) next.delete(name);
+          else next.add(name);
+          draft.setSkills(next);
+        },
+        empty: (
+          <EmptyLink to="/settings/skills">
+            Install skill bundles in Settings
+          </EmptyLink>
+        ),
+      }),
+  });
+
+  pickers.push({
+    key: "mcp",
+    legend: "MCP",
+    icon: <Plug size={15} />,
+    label: draft.mcp.size ? `${draft.mcp.size} selected` : "None",
+    marked: draft.mcp.size > 0,
+    width: "w-72",
+    testId: "config-mcp",
+    body: () =>
+      checkList({
+        items: enabledMcp.map((s) => s.name),
+        selected: draft.mcp,
+        onToggle: (name, checked) => {
+          const next = new Set(draft.mcp);
+          if (checked) next.delete(name);
+          else next.add(name);
+          draft.setMcp(next);
+        },
+        empty: (
+          <EmptyLink to="/settings/integrations">
+            Add MCP servers in Settings
+          </EmptyLink>
+        ),
+      }),
+  });
 
   // Not gated on `provisions`: the server owns memory, so it works on vendors
   // that cannot provision a workspace too.

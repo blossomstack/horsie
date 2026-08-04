@@ -26,7 +26,6 @@ function agent(name: string, over: Partial<AgentView> = {}): AgentView {
   return {
     name,
     description: `${name} description`,
-    vendor: "local",
     model: "sonnet",
     repos: [],
     plugins: ["superpowers"],
