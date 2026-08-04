@@ -801,6 +801,7 @@ impl SessionActor {
                     .tell(AgentCommand::Resume {
                         results: Vec::new(),
                         message: Some(input.clone()),
+                        subagent_results: Vec::new(),
                     })
                     .await
                     .is_err()
@@ -1020,6 +1021,7 @@ impl SessionActor {
                     .tell(AgentCommand::Resume {
                         results: input.results,
                         message: input.message,
+                        subagent_results: input.subagent_results,
                     })
                     .await
                     .is_err()
@@ -1047,6 +1049,7 @@ impl SessionActor {
                         .tell(AgentCommand::Resume {
                             results: input.results,
                             message: input.message,
+                            subagent_results: input.subagent_results,
                         })
                         .await;
                 }
@@ -1144,6 +1147,7 @@ impl SessionActor {
                 .tell(AgentCommand::Resume {
                     results,
                     message: None,
+                    subagent_results: Vec::new(),
                 })
                 .await;
         }
@@ -2023,25 +2027,25 @@ impl EventSourcedActor for SessionActor {
                 label,
                 task,
                 depth,
-                ..
+                at_ms,
             } => {
                 if let Some(tree) = state.mode.tree_of_parent_mut(parent) {
-                    tree.apply_spawned(id, parent, label, task, depth);
+                    tree.apply_spawned(id, parent, label, task, depth, at_ms);
                 }
             }
-            SessionDomainEvent::SubAgentRunning { id, .. } => {
+            SessionDomainEvent::SubAgentRunning { id, at_ms } => {
                 if let Some(tree) = state.mode.tree_of_node_mut(id) {
-                    tree.apply_running(id);
+                    tree.apply_running(id, at_ms);
                 }
             }
-            SessionDomainEvent::SubAgentCompleted { id, output, .. } => {
+            SessionDomainEvent::SubAgentCompleted { id, output, at_ms } => {
                 if let Some(tree) = state.mode.tree_of_node_mut(id) {
-                    tree.apply_completed(id, output);
+                    tree.apply_completed(id, output, at_ms);
                 }
             }
-            SessionDomainEvent::SubAgentFailed { id, error, .. } => {
+            SessionDomainEvent::SubAgentFailed { id, error, at_ms } => {
                 if let Some(tree) = state.mode.tree_of_node_mut(id) {
-                    tree.apply_failed(id, error);
+                    tree.apply_failed(id, error, at_ms);
                 }
             }
             SessionDomainEvent::SubAgentNotified { id, .. } => {
@@ -2383,6 +2387,7 @@ impl EventSourcedActor for SessionActor {
                     .tell(AgentCommand::Resume {
                         results: Vec::new(),
                         message: Some(task),
+                        subagent_results: Vec::new(),
                     })
                     .await;
                 emit_progress(
@@ -4232,6 +4237,24 @@ mod tests {
                 horsie_agentcore::ContentPart::Text(t) => Some(t.text.clone()),
                 horsie_agentcore::ContentPart::ToolCall(_)
                 | horsie_agentcore::ContentPart::ToolResult(_)
+                | horsie_agentcore::ContentPart::Thinking(_)
+                | horsie_agentcore::ContentPart::SubAgentResult(_) => None,
+            })
+            .collect()
+    }
+
+    /// A user message's subagent-result parts, rendered the way the wire sees
+    /// them — the counterpart to `user_texts` now that a result is a part of
+    /// its own rather than text merged into what the person said.
+    fn subagent_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+        page.messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                horsie_agentcore::ContentPart::SubAgentResult(r) => Some(r.to_wire_text()),
+                horsie_agentcore::ContentPart::Text(_)
+                | horsie_agentcore::ContentPart::ToolCall(_)
+                | horsie_agentcore::ContentPart::ToolResult(_)
                 | horsie_agentcore::ContentPart::Thinking(_) => None,
             })
             .collect()
@@ -4259,12 +4282,21 @@ mod tests {
         let sub = spawn_sub(&session, "research", "dig").await;
         // Owed, then delivered: the tree's notified flag flips exactly once.
         wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
-        let texts = user_texts(&main_history(&session).await);
+        let texts = subagent_texts(&main_history(&session).await);
         assert!(
             texts.iter().any(
                 |t| t.contains("[subagent \"research\" completed]") && t.contains("sub answer")
             ),
             "the main agent must be told the result: {texts:?}"
+        );
+        // The result is a part of its own, not text merged into the user's
+        // message: that separation is what lets a client render it as agent
+        // work instead of as something the person typed.
+        assert!(
+            user_texts(&main_history(&session).await)
+                .iter()
+                .all(|t| !t.contains("[subagent ")),
+            "a result must never land in the user text"
         );
     }
 
@@ -4324,7 +4356,7 @@ mod tests {
             crate::sessions::subagents::SubAgentStatus::Failed
         );
         assert!(rec.error.as_deref().unwrap().contains("bad key"));
-        let texts = user_texts(&main_history(&session).await);
+        let texts = subagent_texts(&main_history(&session).await);
         assert!(
             texts
                 .iter()
@@ -4422,17 +4454,24 @@ mod tests {
                     horsie_agentcore::ContentPart::ToolResult(r) => results.push(r.output.clone()),
                     horsie_agentcore::ContentPart::Text(t) => texts.push(t.text.clone()),
                     horsie_agentcore::ContentPart::ToolCall(_)
-                    | horsie_agentcore::ContentPart::Thinking(_) => {}
+                    | horsie_agentcore::ContentPart::Thinking(_)
+                    | horsie_agentcore::ContentPart::SubAgentResult(_) => {}
                 }
             }
             (results, texts)
         };
+        // One turn, two kinds of content: the person's words stay the user
+        // text, the subagent's report rides alongside as its own part.
         assert!(
-            texts
+            texts.iter().any(|t| t.contains("the first one")),
+            "the user's own message must survive the turn: {texts:?}"
+        );
+        let reports = subagent_texts(&main_history(&session).await);
+        assert!(
+            reports
                 .iter()
-                .any(|t| t.contains("the first one")
-                    && t.contains("[subagent \"research\" completed]")),
-            "the notification rides with the user's message: {texts:?}"
+                .any(|t| t.contains("[subagent \"research\" completed]")),
+            "the notification rides the same turn: {reports:?}"
         );
         assert!(
             results.iter().any(|r| r.contains("not answered")),
@@ -4540,7 +4579,7 @@ mod tests {
             .await
             .unwrap()
             .expect("P's transcript");
-        let texts = user_texts(&page);
+        let texts = subagent_texts(&page);
         assert!(
             texts
                 .iter()

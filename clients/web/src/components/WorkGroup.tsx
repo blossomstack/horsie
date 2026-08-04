@@ -3,32 +3,45 @@ import { useState } from "react";
 import type { WorkItem } from "../lib/transcriptSegments";
 import { cn } from "../lib/cn";
 import { formatDuration } from "../lib/time";
+import { SubAgentCard } from "./SubAgentCard";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard } from "./ToolCallCard";
 
 function getItemKey(item: WorkItem, originalIndex: number): string {
-  if (item.kind === "tool") {
-    return item.call.id;
-  }
+  if (item.kind === "tool") return item.call.id;
+  if (item.kind === "subagent") return `subagent-${item.result.subagentId}`;
   return `thinking-${originalIndex}`;
 }
 
 function renderItem(item: WorkItem, key: string) {
-  return item.kind === "thinking" ? (
-    <ThinkingBlock key={key} text={item.text} />
-  ) : (
-    <ToolCallCard key={key} call={item.call} />
-  );
+  switch (item.kind) {
+    case "thinking":
+      return <ThinkingBlock key={key} text={item.text} />;
+    case "tool":
+      return <ToolCallCard key={key} call={item.call} />;
+    case "subagent":
+      return <SubAgentCard key={key} result={item.result} />;
+  }
 }
 
+/** Reads back what the collapsed row is hiding. Every kind of work is counted:
+ * a group that summarised only its tools would tell the reader "ran 1 tool"
+ * while quietly holding three finished subagents. */
 function summary(items: WorkItem[]): string {
   const thinkingCount = items.filter((i) => i.kind === "thinking").length;
   const toolCount = items.filter((i) => i.kind === "tool").length;
-  if (thinkingCount > 0 && toolCount > 0) {
-    return `Thought and ran ${toolCount} tool${toolCount === 1 ? "" : "s"}`;
+  const subCount = items.filter((i) => i.kind === "subagent").length;
+  const clauses: string[] = [];
+  if (toolCount > 0) {
+    clauses.push(`ran ${toolCount} tool${toolCount === 1 ? "" : "s"}`);
   }
-  if (thinkingCount > 0) return "Thought for a moment";
-  return `Ran ${toolCount} tool${toolCount === 1 ? "" : "s"}`;
+  if (subCount > 0) {
+    clauses.push(`${subCount} subagent${subCount === 1 ? "" : "s"} finished`);
+  }
+  if (clauses.length === 0) return "Thought for a moment";
+  const body = clauses.join(" and ");
+  const phrase = thinkingCount > 0 ? `Thought and ${body}` : body;
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }
 
 /** Renders a `work` segment: a run of thinking blocks + regular tool calls.
@@ -55,7 +68,7 @@ export function WorkGroup({
   const [open, setOpen] = useState(false);
   const visibleWithIndices = items
     .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item.kind === "tool" || showThinking);
+    .filter(({ item }) => item.kind !== "thinking" || showThinking);
 
   if (visibleWithIndices.length === 0) {
     if (!live) return null;

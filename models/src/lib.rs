@@ -210,11 +210,43 @@ impl agent::Message {
     }
 }
 
+impl agent::SubAgentResultPart {
+    /// The text a provider sees. Before results became their own part this was
+    /// the exact string merged into the parent's user message, and it must stay
+    /// that string: the wire is not supposed to notice this change. Both
+    /// provider serializers render the part through here, so there is one
+    /// definition of the format rather than two that can drift.
+    #[must_use]
+    pub fn to_wire_text(&self) -> String {
+        let header = format!("[subagent \"{}\" {}]", self.label, self.status);
+        if self.text.is_empty() {
+            header
+        } else {
+            format!("{header}\n\n{}", self.text)
+        }
+    }
+}
+
 impl agent::AgentInput {
     pub fn user_message(id: impl Into<String>, text: impl Into<String>) -> Self {
         Self::UserMessage(agent::UserMessageInput {
             id: id.into(),
             text: text.into(),
+            subagent_results: Vec::new(),
+        })
+    }
+
+    /// A user turn that also delivers finished subagents' results. `text` may
+    /// be empty — a turn started purely by owed results has nothing typed.
+    pub fn user_message_with_results(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        subagent_results: Vec<agent::SubAgentResultPart>,
+    ) -> Self {
+        Self::UserMessage(agent::UserMessageInput {
+            id: id.into(),
+            text: text.into(),
+            subagent_results,
         })
     }
 
@@ -254,15 +286,30 @@ impl agent::AgentInput {
     /// stamped a matching event uses the same instant for both.
     pub fn to_message(&self, created_at_ms: u64) -> agent::Message {
         match self {
-            Self::UserMessage(u) => agent::Message {
-                id: u.id.clone(),
-                role: agent::Role::User,
-                parts: vec![agent::ContentPart::Text(agent::TextPart {
-                    text: u.text.clone(),
-                })],
-                created_at_ms,
-                started_at_ms: None,
-            },
+            Self::UserMessage(u) => {
+                // An owed-only turn carries results and nothing typed. The text
+                // part is omitted rather than left blank: Anthropic rejects an
+                // empty text block outright.
+                let mut parts = Vec::with_capacity(1 + u.subagent_results.len());
+                if !u.text.is_empty() {
+                    parts.push(agent::ContentPart::Text(agent::TextPart {
+                        text: u.text.clone(),
+                    }));
+                }
+                parts.extend(
+                    u.subagent_results
+                        .iter()
+                        .cloned()
+                        .map(agent::ContentPart::SubAgentResult),
+                );
+                agent::Message {
+                    id: u.id.clone(),
+                    role: agent::Role::User,
+                    parts,
+                    created_at_ms,
+                    started_at_ms: None,
+                }
+            }
             Self::ToolResult(t) => agent::Message {
                 id: format!("result:{}", t.tool_call_id),
                 role: agent::Role::Tool,
@@ -526,10 +573,75 @@ mod workspace_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::agent;
     use super::capabilities::{
         Access, AllowNetwork, BlockNetwork, CapabilitySpec, Grant, NetworkPolicy, ProxyOnlyNetwork,
     };
     use super::session;
+
+    fn result_part(label: &str) -> agent::SubAgentResultPart {
+        agent::SubAgentResultPart {
+            subagent_id: "11111111-1111-1111-1111-111111111111".into(),
+            label: label.into(),
+            status: "completed".into(),
+            text: "did the thing".into(),
+            spawned_at_ms: 10,
+            ended_at_ms: 50,
+        }
+    }
+
+    #[test]
+    fn a_user_message_appends_subagent_results_after_its_text() {
+        let input = agent::AgentInput::user_message_with_results(
+            "m1",
+            "keep going",
+            vec![result_part("audit")],
+        );
+        let msg = input.to_message(0);
+        assert_eq!(msg.parts.len(), 2);
+        assert!(matches!(&msg.parts[0], agent::ContentPart::Text(t) if t.text == "keep going"));
+        assert!(
+            matches!(&msg.parts[1], agent::ContentPart::SubAgentResult(r) if r.label == "audit")
+        );
+    }
+
+    /// An owed-only turn has no typed text. An empty text block is not merely
+    /// noise — Anthropic rejects it — so the part is omitted, not blanked.
+    #[test]
+    fn an_empty_user_text_produces_no_text_part() {
+        let input =
+            agent::AgentInput::user_message_with_results("m1", "", vec![result_part("audit")]);
+        let msg = input.to_message(0);
+        assert_eq!(msg.parts.len(), 1);
+        assert!(matches!(
+            &msg.parts[0],
+            agent::ContentPart::SubAgentResult(_)
+        ));
+    }
+
+    #[test]
+    fn a_plain_user_message_is_unchanged() {
+        let msg = agent::AgentInput::user_message("m1", "hello").to_message(0);
+        assert_eq!(msg.parts.len(), 1);
+        assert!(matches!(&msg.parts[0], agent::ContentPart::Text(t) if t.text == "hello"));
+    }
+
+    /// The one string the providers send. Pinned literally: this is the wire
+    /// contract that the whole change is built to leave alone.
+    #[test]
+    fn a_result_renders_the_notification_text_it_always_did() {
+        assert_eq!(
+            result_part("audit").to_wire_text(),
+            "[subagent \"audit\" completed]\n\ndid the thing"
+        );
+    }
+
+    #[test]
+    fn a_result_with_no_body_renders_the_header_alone() {
+        let mut part = result_part("audit");
+        part.text = String::new();
+        assert_eq!(part.to_wire_text(), "[subagent \"audit\" completed]");
+    }
 
     #[test]
     fn session_event_round_trips_with_type_tag() {

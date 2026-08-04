@@ -1,4 +1,5 @@
 
+import { SubAgentResultPart } from './subAgentResultPart';
 import { TextPart } from './textPart';
 import { ThinkingPart } from './thinkingPart';
 import { ToolCallPart } from './toolCallPart';
@@ -10,4 +11,5 @@ export type ContentPart =
   | { type: "Text"; value: TextPart }
   | { type: "ToolCall"; value: ToolCallPart }
   | { type: "ToolResult"; value: ToolResultPart }
-  | { type: "Thinking"; value: ThinkingPart };
+  | { type: "Thinking"; value: ThinkingPart }
+  | { type: "SubAgentResult"; value: SubAgentResultPart };

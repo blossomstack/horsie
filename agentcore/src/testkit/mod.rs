@@ -41,7 +41,9 @@ impl RequestSummary {
                 match part {
                     ContentPart::ToolCall(c) => tool_call_ids.push(c.id.clone()),
                     ContentPart::ToolResult(r) => tool_result_ids.push(r.tool_call_id.clone()),
-                    ContentPart::Text(_) | ContentPart::Thinking(_) => {}
+                    ContentPart::Text(_)
+                    | ContentPart::Thinking(_)
+                    | ContentPart::SubAgentResult(_) => {}
                 }
             }
         }

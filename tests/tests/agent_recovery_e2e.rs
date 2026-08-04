@@ -244,6 +244,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
         .tell(AgentCommand::Resume {
             results: Vec::new(),
             message: Some("carry on".into()),
+            subagent_results: Vec::new(),
         })
         .await
         .unwrap();
@@ -348,6 +349,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
                 is_error: false,
             }],
             message: None,
+            subagent_results: Vec::new(),
         })
         .await
         .unwrap();
@@ -367,6 +369,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
         .tell(AgentCommand::Resume {
             results: Vec::new(),
             message: Some("carry on".into()),
+            subagent_results: Vec::new(),
         })
         .await
         .unwrap();
@@ -440,6 +443,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
             .tell(AgentCommand::Resume {
                 results: Vec::new(),
                 message: Some("start something that wedges".into()),
+                subagent_results: Vec::new(),
             })
             .await
             .unwrap();

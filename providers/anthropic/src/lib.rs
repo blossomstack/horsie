@@ -433,6 +433,12 @@ impl AnthropicProvider {
                     signature: th.signature.clone(),
                     ..Default::default()
                 }),
+                // Flattened to the text block it has always been: this part is
+                // provenance for clients, not a new thing to show the model.
+                ContentPart::SubAgentResult(r) => MessageContent::Text(Text {
+                    text: r.to_wire_text(),
+                    ..Default::default()
+                }),
             })
             .collect();
         MessageContentList(items)
@@ -937,6 +943,27 @@ mod tests {
         let list = AnthropicProvider::parts_to_api_content(&parts);
         assert_eq!(list.len(), 1);
         assert!(matches!(&list[0], MessageContent::Text(t) if t.text == "hello"));
+    }
+
+    /// The whole point of the structured part is that the model never learns
+    /// about it. Pinned against the literal string, not just `to_wire_text`,
+    /// so a change to the format has to be a deliberate edit here.
+    #[test]
+    fn test_parts_to_api_content_subagent_result_is_a_text_block() {
+        let parts = vec![ContentPart::SubAgentResult(
+            horsie_models::agent::SubAgentResultPart {
+                subagent_id: "id".into(),
+                label: "audit".into(),
+                status: "completed".into(),
+                text: "three stale crates".into(),
+                spawned_at_ms: 100,
+                ended_at_ms: 400,
+            },
+        )];
+        let list = AnthropicProvider::parts_to_api_content(&parts);
+        assert_eq!(list.len(), 1);
+        assert!(matches!(&list[0], MessageContent::Text(t)
+                if t.text == "[subagent \"audit\" completed]\n\nthree stale crates"));
     }
 
     #[test]

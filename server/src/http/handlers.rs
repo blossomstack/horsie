@@ -270,6 +270,8 @@ fn agent_roster(tree: &[(Uuid, SubAgentRecord)]) -> Vec<SubAgentView> {
         depth: 0,
         status: "running".to_string(),
         error: None,
+        spawned_at_ms: 0,
+        ended_at_ms: 0,
     }];
     agents.extend(tree.iter().map(|(id, rec)| to_wire_subagent(*id, rec)));
     agents
@@ -482,6 +484,8 @@ fn to_wire_subagent(id: Uuid, rec: &SubAgentRecord) -> SubAgentView {
         }
         .to_string(),
         error: rec.error.clone(),
+        spawned_at_ms: rec.spawned_at_ms,
+        ended_at_ms: rec.ended_at_ms,
     }
 }
 
@@ -506,6 +510,8 @@ mod tests {
             output: Some("answer".into()),
             error: None,
             notified: true,
+            spawned_at_ms: 100,
+            ended_at_ms: 400,
         }
     }
 

@@ -4,6 +4,7 @@ export * from './textPart';
 export * from './toolCallPart';
 export * from './toolResultPart';
 export * from './thinkingPart';
+export * from './subAgentResultPart';
 export * from './contentPart';
 export * from './message';
 export * from './usage';
