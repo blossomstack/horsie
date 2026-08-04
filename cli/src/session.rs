@@ -286,7 +286,7 @@ pub async fn status(server: &str, session_id: &str) -> Result<(), CliError> {
 }
 
 /// "just now", "5m ago", "3h ago", "2d ago".
-fn relative(now_ms: u64, then_ms: u64) -> String {
+pub(crate) fn relative(now_ms: u64, then_ms: u64) -> String {
     let secs = now_ms.saturating_sub(then_ms) / 1000;
     if secs < 60 {
         "just now".to_string()

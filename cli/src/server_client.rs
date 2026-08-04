@@ -3,6 +3,7 @@
 
 use crate::error::CliError;
 use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentView};
+use horsie_models::routines::{RoutineRunResponse, RoutineView};
 use horsie_models::session::{SessionDetail, SessionSummary};
 use horsie_models::session_api::{ApiError, GetSessionResponse, ListSessionsResponse};
 use serde::Serialize;
@@ -122,5 +123,28 @@ impl ServerClient {
             )
             .await?;
         Ok(resp.session)
+    }
+
+    pub async fn list_routines(&self) -> Result<Vec<RoutineView>, CliError> {
+        self.send(reqwest::Method::GET, "/api/routines", None::<&str>)
+            .await
+    }
+
+    pub async fn get_routine(&self, name: &str) -> Result<RoutineView, CliError> {
+        self.send(
+            reqwest::Method::GET,
+            &format!("/api/routines/{name}"),
+            None::<&str>,
+        )
+        .await
+    }
+
+    pub async fn run_routine(&self, name: &str) -> Result<RoutineRunResponse, CliError> {
+        self.send(
+            reqwest::Method::POST,
+            &format!("/api/routines/{name}/run"),
+            None::<&str>,
+        )
+        .await
     }
 }
