@@ -42,6 +42,7 @@ describe("Transcript user turn", () => {
       text: "Show me the copy button",
       thinking: [],
       toolCalls: [],
+      subagentResults: [],
       createdAtMs: 1_000,
     };
     render(

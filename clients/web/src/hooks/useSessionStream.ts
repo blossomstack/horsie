@@ -31,12 +31,28 @@ export interface RenderedToolCall {
   endedAtMs?: number;
 }
 
+/** One finished subagent's report, as the transcript renders it. */
+export interface RenderedSubAgent {
+  subagentId: string;
+  label: string;
+  /** "completed" | "failed". Anything else renders neutral — an unrecognized
+   * status must not borrow success or failure styling it hasn't earned. */
+  status: string;
+  text: string;
+  /** Zero for subagents journaled before spans were recorded; the row then
+   * shows no duration rather than one invented from a missing stamp. */
+  spawnedAtMs: number;
+  endedAtMs: number;
+}
+
 export interface RenderedMessage {
   id: string;
   role: "User" | "Assistant";
   text: string;
   thinking: string[];
   toolCalls: RenderedToolCall[];
+  /** Finished subagents whose results this message delivered. */
+  subagentResults: RenderedSubAgent[];
   /** Server stamp for when this message was finalized. Absent on a message
    * this tab invented (an optimistic echo, a queued entry) — those have no
    * server time yet, and guessing one with the local clock would put them out
@@ -87,6 +103,7 @@ interface StoredMessage {
   text: string;
   thinking: string[];
   toolCalls: { id: string; name: string; input: unknown }[];
+  subagentResults: RenderedSubAgent[];
   createdAtMs: number;
   startedAtMs?: number;
 }
@@ -203,6 +220,25 @@ function toolCallsOf(parts: ContentPart[]) {
     .map((p) => ({ id: p.value.id, name: p.value.name, input: p.value.input }));
 }
 
+/** A finished subagent's report. It rides a user message on the wire — the
+ * providers require that — but it is the agent's own work landing, not
+ * something the person said, and the transcript renders it as such. */
+function subAgentResultsOf(parts: ContentPart[]): RenderedSubAgent[] {
+  return parts
+    .filter(
+      (p): p is Extract<ContentPart, { type: "SubAgentResult" }> =>
+        p.type === "SubAgentResult",
+    )
+    .map((p) => ({
+      subagentId: p.value.subagentId,
+      label: p.value.label,
+      status: p.value.status,
+      text: p.value.text,
+      spawnedAtMs: p.value.spawnedAtMs,
+      endedAtMs: p.value.endedAtMs,
+    }));
+}
+
 /** Fold one message's non-order state (byId, tool results) into the maps. */
 function storeMessage(
   msg: Message,
@@ -234,6 +270,7 @@ function storeMessage(
     text: textOf(msg.parts),
     thinking: thinkingOf(msg.parts),
     toolCalls: toolCallsOf(msg.parts),
+    subagentResults: subAgentResultsOf(msg.parts),
     createdAtMs: msg.createdAtMs,
     startedAtMs: msg.startedAtMs,
   };
@@ -679,6 +716,7 @@ export function useSessionStream(
         text: q.text,
         thinking: [],
         toolCalls: [],
+        subagentResults: [],
         queued: true,
       });
     }
@@ -690,6 +728,7 @@ export function useSessionStream(
         text: opt.text,
         thinking: [],
         toolCalls: [],
+        subagentResults: [],
         optimistic: true,
       });
     }

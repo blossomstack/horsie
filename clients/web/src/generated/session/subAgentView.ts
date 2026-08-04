@@ -15,4 +15,9 @@ export interface SubAgentView {
    */
   status: string;
   error?: string;
+  /**
+   * When this agent was spawned and when it reached its current result.
+   */
+  spawnedAtMs: number;
+  endedAtMs: number;
 }

@@ -168,20 +168,36 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
 
 /** Consecutive assistant messages collapse into one entry; user messages
  * always start a fresh one. */
-type TurnGroup =
+export type TurnGroup =
   | { kind: "user"; msg: RenderedMessage }
   | { kind: "assistant"; id: string; msgs: RenderedMessage[] };
 
-function groupTurns(messages: RenderedMessage[]): TurnGroup[] {
+export function groupTurns(messages: RenderedMessage[]): TurnGroup[] {
   const turns: TurnGroup[] = [];
-  for (const m of messages) {
-    if (m.role === "User") {
-      turns.push({ kind: "user", msg: m });
-      continue;
-    }
+  const intoAssistant = (m: RenderedMessage) => {
     const last = turns[turns.length - 1];
     if (last?.kind === "assistant") last.msgs.push(m);
     else turns.push({ kind: "assistant", id: m.id, msgs: [m] });
+  };
+  for (const m of messages) {
+    if (m.role === "User") {
+      // A subagent's result rides a user message because the providers demand
+      // it, but it is the agent's own work landing — not something the person
+      // said. It joins the assistant thread, and only what was actually typed
+      // gets a bubble. A turn carrying results alone gets no bubble at all.
+      if (m.subagentResults.length > 0) {
+        intoAssistant({
+          ...m,
+          id: `${m.id}:sub`,
+          text: "",
+          thinking: [],
+          toolCalls: [],
+        });
+      }
+      if (m.text) turns.push({ kind: "user", msg: m });
+      continue;
+    }
+    intoAssistant(m);
   }
   return turns;
 }

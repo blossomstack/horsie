@@ -1,9 +1,14 @@
-import type { RenderedMessage, RenderedToolCall } from "../hooks/useSessionStream";
+import type {
+  RenderedMessage,
+  RenderedSubAgent,
+  RenderedToolCall,
+} from "../hooks/useSessionStream";
 import { ASK_USER_TOOL } from "./askUser";
 
 export type WorkItem =
   | { kind: "thinking"; text: string }
-  | { kind: "tool"; call: RenderedToolCall };
+  | { kind: "tool"; call: RenderedToolCall }
+  | { kind: "subagent"; result: RenderedSubAgent };
 
 export type Segment =
   | { kind: "text"; key: string; text: string; streaming?: boolean }
@@ -74,6 +79,12 @@ export function buildSegments(
   };
 
   for (const m of msgs) {
+    // A subagent carries its own span — it ran outside this turn entirely, so
+    // the message's stamps say nothing about how long the work took.
+    for (const r of m.subagentResults) {
+      work.push({ kind: "subagent", result: r });
+      if (r.spawnedAtMs > 0 && r.endedAtMs > 0) extend(r.spawnedAtMs, r.endedAtMs);
+    }
     // The message's own span bounds whatever it contributed: thinking happened
     // during the provider call, and its tool calls were issued at the end of it.
     const contributes = m.thinking.length > 0 || m.toolCalls.length > 0;
