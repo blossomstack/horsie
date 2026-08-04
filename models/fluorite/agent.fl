@@ -33,6 +33,25 @@ struct ThinkingPart {
     signature: Option<String>,
 }
 
+/// A finished subagent's result, delivered to the agent that spawned it.
+/// Carried as its own part rather than merged into the user text so a client
+/// can render it as agent activity instead of as something the person said;
+/// providers flatten it back to the same text block they have always received.
+struct SubAgentResultPart {
+    subagent_id: String,
+    label: String,
+    /// "completed" | "failed" — the SubAgentView.status vocabulary.
+    status: String,
+    /// Output on success, error text on failure. Already capped at 50 KB by
+    /// the session, truncation marker included.
+    text: String,
+    /// When the subagent was spawned and when it reached this result. Zero on
+    /// rows journaled before these were recorded — a client shows no duration
+    /// rather than an invented one.
+    spawned_at_ms: u64,
+    ended_at_ms: u64,
+}
+
 /// Content variant within a message
 #[type_tag = "type"]
 union ContentPart {
@@ -40,6 +59,7 @@ union ContentPart {
     ToolCall(ToolCallPart),
     ToolResult(ToolResultPart),
     Thinking(ThinkingPart),
+    SubAgentResult(SubAgentResultPart),
 }
 
 /// A single message in the conversation
@@ -79,7 +99,11 @@ struct Usage {
 /// New user message — starts a new turn
 struct UserMessageInput {
     id: String,
+    /// May be empty: a turn started purely by owed subagent results carries
+    /// nothing the person typed.
     text: String,
+    /// Finished subagents' results delivered with this turn.
+    subagent_results: Vec<SubAgentResultPart>,
 }
 
 /// Tool result input — resumes the agent after a handoff
