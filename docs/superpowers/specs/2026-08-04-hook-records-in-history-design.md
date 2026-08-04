@@ -199,20 +199,22 @@ hooks were flattened into one log with no agent identity at all.
 
 ## Delivery
 
-Three PRs. The first two are behaviour-preserving and independently valuable, so
-the risky part lands last and small.
+All of it ships in **#140**, reworked. It therefore never ships
+`SessionDomainEvent::HookRan`: there is no introduce-then-remove of a persisted
+event variant, and no intermediate release where hooks run unrecorded.
 
-1. **Carry the tool call id.** `Toolbox::execute` takes it; `RuntimeClient`
-   stops minting a `Uuid`. No behaviour change.
+Implementation order within the branch, each step compiling before the next:
+
+1. **Carry the tool call id.** `Toolbox::execute` takes it; `RuntimeClient` stops
+   minting a `Uuid`. No behaviour change, no hooks involved.
 2. **`HistoryEntry`.** The union, `AgentState.history`, `prompt_messages()`, and
    the wire/TS renames. Still no hook records anywhere — this only makes the
-   transcript able to hold non-model entries. No behaviour change. This is where
-   old sessions lose their transcripts.
-3. **Hook records as history.** `AgentDomainEvent::HookRan`, the agent-aware
-   sink, the `agent_frame()` mapping, removal of the session-side journaling,
-   and the web transcript row.
-
-PR #140 merges as-is; PR 3 removes the session-side journaling it introduced.
+   transcript able to hold non-model entries. This is where old sessions lose
+   their transcripts.
+3. **Records into the agent journal.** `AgentDomainEvent::HookRan`, the
+   agent-aware sink, the `agent_frame()` mapping. `SessionDomainEvent::HookRan`
+   and `fold_hooks` are deleted, not deprecated.
+4. **The web transcript row**, plus the tests below.
 
 ## Testing
 
