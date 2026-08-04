@@ -91,7 +91,7 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
     assert!(names.contains(&"skill".to_string()));
     assert!(names.contains(&"inspect_workspace".to_string()));
     let body = tb
-        .execute("skill", serde_json::json!({ "name": "git-bisect" }))
+        .execute("skill", serde_json::json!({ "name": "git-bisect" }), "tc1")
         .await
         .unwrap();
     assert_eq!(

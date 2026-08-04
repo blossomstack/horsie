@@ -435,7 +435,12 @@ impl Toolbox for AgentToolbox {
         specs
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         if let Some(c) = &self.conclude
             && name == c.name
         {
@@ -516,7 +521,7 @@ impl Toolbox for AgentToolbox {
             }
             return Ok(Value::String(out));
         }
-        self.base.execute(name, input).await
+        self.base.execute(name, input, tool_call_id).await
     }
 }
 
@@ -558,13 +563,18 @@ impl Toolbox for FilteredToolbox {
             .collect()
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         if !self.allowed.contains(name) {
             return Err(ToolCallError::InvalidInput(format!(
                 "tool '{name}' is not permitted for this agent"
             )));
         }
-        self.inner.execute(name, input).await
+        self.inner.execute(name, input, tool_call_id).await
     }
 }
 
@@ -697,7 +707,10 @@ mod tests {
             false,
             Vec::new(),
         );
-        let err = tb.execute(CONCLUDE_TOOL, json!({})).await.unwrap_err();
+        let err = tb
+            .execute(CONCLUDE_TOOL, json!({}), "tc1")
+            .await
+            .unwrap_err();
         assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
     }
 
@@ -732,7 +745,7 @@ mod tests {
 
         // Single workspace → `workspace` may be omitted.
         let body = tb
-            .execute(SKILL_TOOL, json!({ "name": "git-bisect" }))
+            .execute(SKILL_TOOL, json!({ "name": "git-bisect" }), "tc1")
             .await
             .unwrap();
         // A workspace skill carries its directory too, so the agent can read
@@ -747,12 +760,15 @@ mod tests {
         );
 
         let err = tb
-            .execute(SKILL_TOOL, json!({ "name": "nope" }))
+            .execute(SKILL_TOOL, json!({ "name": "nope" }), "tc1")
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
 
-        let listed = tb.execute(INSPECT_WORKSPACE_TOOL, json!({})).await.unwrap();
+        let listed = tb
+            .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")
+            .await
+            .unwrap();
         let text = listed.as_str().unwrap();
         assert!(text.contains("## october — /ws/october"));
         // Directory relative to the workspace root named in the header above.
@@ -777,7 +793,7 @@ mod tests {
         );
         // Omitting `workspace` with several workspaces is rejected before any scan.
         let err = tb
-            .execute(SKILL_TOOL, json!({ "name": "git-bisect" }))
+            .execute(SKILL_TOOL, json!({ "name": "git-bisect" }), "tc1")
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
@@ -786,6 +802,7 @@ mod tests {
             .execute(
                 SKILL_TOOL,
                 json!({ "name": "git-bisect", "workspace": "zzz" }),
+                "tc1",
             )
             .await
             .unwrap_err();
@@ -819,6 +836,7 @@ mod tests {
             .execute(
                 SKILL_TOOL,
                 json!({ "name": "brainstorming", "workspace": "horsie_shared" }),
+                "tc1",
             )
             .await
             .unwrap();
@@ -850,6 +868,7 @@ mod tests {
             .execute(
                 SKILL_TOOL,
                 json!({ "name": "brainstorming", "workspace": "horsie_shared" }),
+                "tc1",
             )
             .await
             .unwrap_err();
@@ -869,7 +888,10 @@ mod tests {
             true,
             Vec::new(),
         );
-        let out = tb.execute(INSPECT_WORKSPACE_TOOL, json!({})).await.unwrap();
+        let out = tb
+            .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")
+            .await
+            .unwrap();
         let text = out.as_str().unwrap();
         assert!(text.contains("## horsie_shared"));
         assert!(text.contains("- brainstorming: explore first"));
@@ -883,7 +905,7 @@ mod tests {
             Vec::new(),
         );
         let out = tb_off
-            .execute(INSPECT_WORKSPACE_TOOL, json!({}))
+            .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")
             .await
             .unwrap();
         assert!(!out.as_str().unwrap().contains("horsie_shared"));

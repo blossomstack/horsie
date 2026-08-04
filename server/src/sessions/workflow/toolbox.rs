@@ -52,13 +52,18 @@ impl Toolbox for StepConcludeToolbox {
         specs
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        _tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         if name == CONCLUDE_TOOL && self.conclude.is_some() {
             return Err(ToolCallError::ExecutionFailed(
                 "the conclude tool is terminal and is not executed".to_string(),
             ));
         }
-        self.inner.execute(name, input).await
+        self.inner.execute(name, input, "tc1").await
     }
 }
 
@@ -109,7 +114,7 @@ mod tests {
         let schema = serde_json::json!({"type": "object"});
         let tb = StepConcludeToolbox::wrap(base(), Some(&schema), false);
         let err = tb
-            .execute(CONCLUDE_TOOL, serde_json::json!({}))
+            .execute(CONCLUDE_TOOL, serde_json::json!({}), "tc1")
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::ExecutionFailed(_)));

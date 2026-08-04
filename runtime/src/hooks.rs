@@ -123,7 +123,8 @@ pub async fn dispatch_with_hooks(
             "tool_input": input,
         })
         .to_string();
-        let (outcome, mut rec) = run_one(&root, &plugin, name, call_id, &decl, hook_path, &payload).await;
+        let (outcome, mut rec) =
+            run_one(&root, &plugin, name, call_id, &decl, hook_path, &payload).await;
 
         if outcome.blocked || outcome.failed {
             rec.blocked = true;
@@ -162,7 +163,8 @@ pub async fn dispatch_with_hooks(
             "is_error": is_error,
         })
         .to_string();
-        let (outcome, mut rec) = run_one(&root, &plugin, name, call_id, &decl, hook_path, &payload).await;
+        let (outcome, mut rec) =
+            run_one(&root, &plugin, name, call_id, &decl, hook_path, &payload).await;
 
         // The tool already ran: a failure here is recorded but never fatal, and
         // never rewrites a result the hook could not read.

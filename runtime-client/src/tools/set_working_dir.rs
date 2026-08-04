@@ -34,10 +34,13 @@ impl Tool for SetWorkingDirTool {
         }
     }
 
-    async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
         let path = input["path"].as_str().map(str::to_string);
         self.client
-            .invoke(ToolCall::SetWorkingDir(SetWorkingDirInput { path }))
+            .invoke(
+                tool_call_id,
+                ToolCall::SetWorkingDir(SetWorkingDirInput { path }),
+            )
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)
@@ -62,7 +65,7 @@ mod tests {
             MockTransport::ok("/ws/sub").observed_by(&probe),
             "test-agent",
         ));
-        let v = tool.execute(json!({"path": "sub"})).await.unwrap();
+        let v = tool.execute(json!({"path": "sub"}), "tc1").await.unwrap();
         assert_eq!(v.as_str().unwrap(), "/ws/sub");
         match &probe.invocations()[0] {
             ToolCall::SetWorkingDir(i) => assert_eq!(i.path.as_deref(), Some("sub")),
@@ -77,7 +80,7 @@ mod tests {
             MockTransport::ok("").observed_by(&probe),
             "test-agent",
         ));
-        tool.execute(json!({})).await.unwrap();
+        tool.execute(json!({}), "tc1").await.unwrap();
         match &probe.invocations()[0] {
             ToolCall::SetWorkingDir(i) => assert!(i.path.is_none()),
             other => panic!("expected SetWorkingDir, got {other:?}"),

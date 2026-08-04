@@ -311,7 +311,10 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
         )),
         "rt-1",
     );
-    client.invoke(bash("echo alive")).await.expect("first call");
+    client
+        .invoke("tc1", bash("echo alive"))
+        .await
+        .expect("first call");
 
     wire.cut();
     await_vendor(&vendors, "test-vendor", "reconnected", |link| {
@@ -320,7 +323,7 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
     .await;
 
     let output = client
-        .invoke(bash("echo alive"))
+        .invoke("tc2", bash("echo alive"))
         .await
         .expect("the same client must reach the runtime over the new link");
     assert_eq!(output.stdout, "ok");

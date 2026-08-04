@@ -220,7 +220,12 @@ impl Toolbox for MockToolbox {
         self.specs.clone()
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        _tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         (self.handler)(name, input)
     }
 }

@@ -29,10 +29,15 @@ impl Toolbox for CompositeToolbox {
         self.boxes.iter().flat_map(|b| b.specs()).collect()
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         for b in &self.boxes {
             if b.specs().iter().any(|s| s.name == name) {
-                return b.execute(name, input).await;
+                return b.execute(name, input, tool_call_id).await;
             }
         }
         Err(ToolCallError::InvalidInput(format!(
@@ -86,7 +91,12 @@ impl Toolbox for McpToolbox {
             .collect()
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        _tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         let prefix = self.prefix();
         let tool = name.strip_prefix(&prefix).ok_or_else(|| {
             ToolCallError::InvalidInput(format!(
@@ -129,7 +139,12 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             }]
         }
-        async fn execute(&self, name: &str, _input: Value) -> Result<Value, ToolCallError> {
+        async fn execute(
+            &self,
+            name: &str,
+            _input: Value,
+            _tool_call_id: &str,
+        ) -> Result<Value, ToolCallError> {
             Ok(Value::String(format!("ran {name}")))
         }
     }
@@ -173,11 +188,11 @@ mod tests {
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["alpha", "beta"]);
         assert_eq!(
-            tb.execute("beta", json!({})).await.unwrap(),
+            tb.execute("beta", json!({}), "tc1").await.unwrap(),
             json!("ran beta")
         );
         assert!(matches!(
-            tb.execute("gamma", json!({})).await,
+            tb.execute("gamma", json!({}), "tc1").await,
             Err(ToolCallError::InvalidInput(_))
         ));
     }
@@ -203,14 +218,18 @@ mod tests {
         assert_eq!(specs[0].description, "open a PR");
 
         let out = tb
-            .execute("mcp__github__create_pull_request", json!({ "title": "x" }))
+            .execute(
+                "mcp__github__create_pull_request",
+                json!({ "title": "x" }),
+                "tc1",
+            )
             .await
             .unwrap();
         assert_eq!(out, json!("PR #7 opened"));
 
         // A name outside this server's namespace is rejected without a call.
         assert!(matches!(
-            tb.execute("bash", json!({})).await,
+            tb.execute("bash", json!({}), "tc1").await,
             Err(ToolCallError::InvalidInput(_))
         ));
     }
@@ -229,7 +248,7 @@ mod tests {
             ),
         ]);
         let tb = McpToolbox::connect("srv".into(), client).await.unwrap();
-        match tb.execute("mcp__srv__boom", json!({})).await {
+        match tb.execute("mcp__srv__boom", json!({}), "tc1").await {
             Err(ToolCallError::ExecutionFailed(msg)) => assert_eq!(msg, "kaboom"),
             other => panic!("expected ExecutionFailed, got {other:?}"),
         }

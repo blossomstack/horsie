@@ -64,6 +64,7 @@ pub struct TransportProbe {
     cancels: Arc<Mutex<Vec<String>>>,
     invocations: Arc<Mutex<Vec<ToolCall>>>,
     agent_ids: Arc<Mutex<Vec<String>>>,
+    call_ids: Arc<Mutex<Vec<String>>>,
 }
 
 impl TransportProbe {
@@ -96,6 +97,16 @@ impl TransportProbe {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    /// The call id each observed invoke carried, in order. This is the model's
+    /// own `tool_call_id`, which is what makes a hook record joinable to the
+    /// tool result in the transcript.
+    pub fn call_ids(&self) -> Vec<String> {
+        self.call_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// Mock transport: a canned result by default, a [`Script`] of outcomes on demand.
@@ -113,6 +124,7 @@ pub struct MockTransport {
     cancels: Arc<Mutex<Vec<String>>>,
     invocations: Arc<Mutex<Vec<ToolCall>>>,
     agent_ids: Arc<Mutex<Vec<String>>>,
+    call_ids: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockTransport {
@@ -129,6 +141,7 @@ impl MockTransport {
             cancels: Arc::new(Mutex::new(Vec::new())),
             invocations: Arc::new(Mutex::new(Vec::new())),
             agent_ids: Arc::new(Mutex::new(Vec::new())),
+            call_ids: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -138,6 +151,7 @@ impl MockTransport {
         self.cancels = probe.cancels.clone();
         self.invocations = probe.invocations.clone();
         self.agent_ids = probe.agent_ids.clone();
+        self.call_ids = probe.call_ids.clone();
         self
     }
 
@@ -285,6 +299,10 @@ impl RuntimeTransport for MockTransport {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(req.agent_id.clone());
+                self.call_ids
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(req.call_id.clone());
                 if let Some(gate) = &self.invoke_gate {
                     gate.notified().await;
                 }

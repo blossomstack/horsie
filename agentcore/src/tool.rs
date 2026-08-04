@@ -12,14 +12,26 @@ pub struct ToolSpec {
 #[async_trait]
 pub trait Toolbox: Send + Sync {
     fn specs(&self) -> Vec<ToolSpec>;
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError>;
+    /// `tool_call_id` is the id the model gave this call. Carried so anything
+    /// downstream can name the call it acted on — a remote runtime keys its
+    /// cancellation by it, and a plugin hook's record joins back to the tool
+    /// result in the transcript through it. Most toolboxes ignore it.
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError>;
 }
 
 /// A single named tool.
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
-    async fn execute(&self, input: Value) -> Result<Value, ToolCallError>;
+    /// `tool_call_id` is the model's id for this call, forwarded from
+    /// [`Toolbox::execute`]. A tool that reaches a remote runtime passes it on;
+    /// the rest ignore it.
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError>;
 }
 
 /// Generic Toolbox impl — register individual Tool implementations into it.
@@ -51,9 +63,14 @@ impl Toolbox for ToolboxImpl {
         self.tools.iter().map(|t| t.spec()).collect()
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         match self.tools.iter().find(|t| t.spec().name == name) {
-            Some(tool) => tool.execute(input).await,
+            Some(tool) => tool.execute(input, tool_call_id).await,
             None => Err(ToolCallError::InvalidInput(format!(
                 "no tool named '{name}'"
             ))),
@@ -69,7 +86,12 @@ impl Toolbox for EmptyToolbox {
         vec![]
     }
 
-    async fn execute(&self, name: &str, _input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        _input: Value,
+        _tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         Err(ToolCallError::InvalidInput(format!(
             "no tool named '{name}'"
         )))
@@ -98,7 +120,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
             }
         }
-        async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
+        async fn execute(&self, input: Value, _tool_call_id: &str) -> Result<Value, ToolCallError> {
             Ok(input)
         }
     }
@@ -106,14 +128,14 @@ mod tests {
     #[tokio::test]
     async fn toolbox_impl_routes_by_name() {
         let tb = ToolboxImpl::new().add(EchoTool);
-        let result = tb.execute("echo", json!({"x": 1})).await.unwrap();
+        let result = tb.execute("echo", json!({"x": 1}), "tc1").await.unwrap();
         assert_eq!(result, json!({"x": 1}));
     }
 
     #[tokio::test]
     async fn toolbox_impl_unknown_tool_returns_error() {
         let tb = ToolboxImpl::new();
-        let err = tb.execute("nope", json!({})).await.unwrap_err();
+        let err = tb.execute("nope", json!({}), "tc1").await.unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
     }
 

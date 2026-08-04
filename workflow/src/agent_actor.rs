@@ -1388,6 +1388,7 @@ impl Toolbox for TimerToolbox {
         &self,
         name: &str,
         input: Value,
+        tool_call_id: &str,
     ) -> Result<Value, horsie_agentcore::ToolCallError> {
         use crate::timers::{CancelSelector, TimerId, TimerKind};
         use horsie_agentcore::ToolCallError;
@@ -1466,7 +1467,7 @@ impl Toolbox for TimerToolbox {
                 let ids: Vec<String> = ids.into_iter().map(|i| i.0).collect();
                 Ok(serde_json::json!({ "cancelled": ids }))
             }
-            _ => self.inner.execute(name, input).await,
+            _ => self.inner.execute(name, input, tool_call_id).await,
         }
     }
 }
@@ -1492,10 +1493,11 @@ impl Toolbox for TaskListToolbox {
         &self,
         name: &str,
         input: Value,
+        tool_call_id: &str,
     ) -> Result<Value, horsie_agentcore::ToolCallError> {
         use horsie_agentcore::ToolCallError;
         if name != crate::task_list::TASK_LIST_TOOL {
-            return self.inner.execute(name, input).await;
+            return self.inner.execute(name, input, tool_call_id).await;
         }
         let action = crate::task_list::TaskListAction::from_input(&input)?;
         let result = self

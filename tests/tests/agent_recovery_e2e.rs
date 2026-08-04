@@ -64,7 +64,12 @@ impl Toolbox for ReadFileToolbox {
         }]
     }
 
-    async fn execute(&self, name: &str, _input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        _input: Value,
+        _tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         Err(ToolCallError::ExecutionFailed(format!(
             "unexpected tool call: {name}"
         )))
@@ -289,7 +294,12 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
                 input_schema: json!({"type": "object"}),
             }]
         }
-        async fn execute(&self, name: &str, _input: Value) -> Result<Value, ToolCallError> {
+        async fn execute(
+            &self,
+            name: &str,
+            _input: Value,
+            _tool_call_id: &str,
+        ) -> Result<Value, ToolCallError> {
             Err(ToolCallError::ExecutionFailed(format!(
                 "unexpected tool call: {name}"
             )))

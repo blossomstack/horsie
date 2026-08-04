@@ -96,9 +96,14 @@ impl Toolbox for SessionTitleToolbox {
         specs
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         if name != SET_SESSION_TITLE_TOOL {
-            return self.inner.execute(name, input).await;
+            return self.inner.execute(name, input, tool_call_id).await;
         }
         let title = input
             .get("title")
@@ -190,6 +195,7 @@ mod tests {
             .execute(
                 SET_SESSION_TITLE_TOOL,
                 json!({"title": "  Improve session titles  "}),
+                "tc1",
             )
             .await
             .unwrap();
@@ -203,7 +209,7 @@ mod tests {
     async fn execute_delegates_other_tools() {
         let session = spawn_root(TitleActor, Arc::new(InMemoryJournal::new()));
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
-        let err = toolbox.execute("bash", json!({})).await.unwrap_err();
+        let err = toolbox.execute("bash", json!({}), "tc1").await.unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
     }
 

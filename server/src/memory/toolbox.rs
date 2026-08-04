@@ -154,14 +154,19 @@ impl Toolbox for MemoryToolbox {
         specs
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         match name {
             LOAD => self.load(input).await,
             CREATE => self.create(input).await,
             UPDATE => self.update(input).await,
             DELETE => self.delete(input).await,
             LIST => self.list(input).await,
-            _ => self.inner.execute(name, input).await,
+            _ => self.inner.execute(name, input, tool_call_id).await,
         }
     }
 }
@@ -400,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_tool_falls_through_to_the_inner_box() {
         let (tb, _t) = toolbox(&["default"]).await;
-        let err = tb.execute("bash", json!({})).await.unwrap_err();
+        let err = tb.execute("bash", json!({}), "tc1").await.unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
     }
 
@@ -411,12 +416,13 @@ mod tests {
             .execute(
                 "memory_create",
                 json!({"name": "alpha", "description": "a fact", "content": "the body"}),
+                "tc1",
             )
             .await
             .unwrap();
         assert_eq!(created["ref"], "default/alpha");
 
-        let listed = tb.execute("memory_list", json!({})).await.unwrap();
+        let listed = tb.execute("memory_list", json!({}), "tc1").await.unwrap();
         let items = listed["memories"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["ref"], "default/alpha");
@@ -427,7 +433,7 @@ mod tests {
         );
 
         let loaded = tb
-            .execute("memory_load", json!({"refs": ["default/alpha"]}))
+            .execute("memory_load", json!({"refs": ["default/alpha"]}), "tc1")
             .await
             .unwrap();
         let mems = loaded["memories"].as_array().unwrap();
@@ -441,6 +447,7 @@ mod tests {
             .execute(
                 "memory_create",
                 json!({"name": "alpha", "description": "d", "content": "c"}),
+                "tc1",
             )
             .await
             .unwrap_err();
@@ -455,6 +462,7 @@ mod tests {
             .execute(
                 "memory_create",
                 json!({"space": "ops", "name": "a", "description": "d", "content": "c"}),
+                "tc1",
             )
             .await
             .unwrap_err();
@@ -465,8 +473,10 @@ mod tests {
     async fn duplicate_name_points_at_memory_update() {
         let (tb, _t) = toolbox(&["default"]).await;
         let args = json!({"name": "alpha", "description": "d", "content": "c"});
-        tb.execute("memory_create", args.clone()).await.unwrap();
-        let err = tb.execute("memory_create", args).await.unwrap_err();
+        tb.execute("memory_create", args.clone(), "tc1")
+            .await
+            .unwrap();
+        let err = tb.execute("memory_create", args, "tc1").await.unwrap_err();
         assert!(err.to_string().contains("memory_update"));
     }
 
@@ -476,6 +486,7 @@ mod tests {
         tb.execute(
             "memory_create",
             json!({"name": "alpha", "description": "d", "content": "c"}),
+            "tc1",
         )
         .await
         .unwrap();
@@ -483,6 +494,7 @@ mod tests {
             .execute(
                 "memory_load",
                 json!({"refs": ["default/alpha", "default/ghost"]}),
+                "tc1",
             )
             .await
             .unwrap();
@@ -497,7 +509,7 @@ mod tests {
     async fn malformed_ref_is_an_input_error() {
         let (tb, _t) = toolbox(&["default"]).await;
         let err = tb
-            .execute("memory_load", json!({"refs": ["alpha"]}))
+            .execute("memory_load", json!({"refs": ["alpha"]}), "tc1")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("space/name"));
@@ -509,6 +521,7 @@ mod tests {
         tb.execute(
             "memory_create",
             json!({"name": "alpha", "description": "d", "content": "c"}),
+            "tc1",
         )
         .await
         .unwrap();
@@ -516,20 +529,21 @@ mod tests {
         tb.execute(
             "memory_update",
             json!({"ref": "default/alpha", "content": "rewritten"}),
+            "tc1",
         )
         .await
         .unwrap();
         let loaded = tb
-            .execute("memory_load", json!({"refs": ["default/alpha"]}))
+            .execute("memory_load", json!({"refs": ["default/alpha"]}), "tc1")
             .await
             .unwrap();
         assert_eq!(loaded["memories"][0]["content"], "rewritten");
         assert_eq!(loaded["memories"][0]["description"], "d");
 
-        tb.execute("memory_delete", json!({"ref": "default/alpha"}))
+        tb.execute("memory_delete", json!({"ref": "default/alpha"}), "tc1")
             .await
             .unwrap();
-        let listed = tb.execute("memory_list", json!({})).await.unwrap();
+        let listed = tb.execute("memory_list", json!({}), "tc1").await.unwrap();
         assert!(listed["memories"].as_array().unwrap().is_empty());
     }
 
@@ -538,7 +552,7 @@ mod tests {
         let (tb, _t) = toolbox(&["default"]).await;
         for tool in ["memory_update", "memory_delete"] {
             let err = tb
-                .execute(tool, json!({"ref": "ops/alpha", "content": "x"}))
+                .execute(tool, json!({"ref": "ops/alpha", "content": "x"}), "tc1")
                 .await
                 .unwrap_err();
             assert!(err.to_string().contains("ops"), "{tool}");
