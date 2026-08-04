@@ -47,6 +47,12 @@ import type {
   RoutineRunResponse,
   RoutineSessionsResponse,
   RoutineView,
+  WorkflowInput,
+  WorkflowRunGraph,
+  WorkflowRunRequest,
+  WorkflowRunResponse,
+  WorkflowRunsResponse,
+  WorkflowView,
   Ack,
   SessionAck,
   SetAnnotationsRequest,
@@ -318,6 +324,53 @@ export const api = {
      * the session list. */
     sessions: (name: string): Promise<RoutineSessionsResponse> =>
       request(`/routines/${encodeURIComponent(name)}/sessions`),
+  },
+
+  workflows: {
+    /** All workflow definitions. */
+    list: (): Promise<WorkflowView[]> => request("/workflows"),
+
+    get: (name: string): Promise<WorkflowView> =>
+      request(`/workflows/${encodeURIComponent(name)}`),
+
+    create: (body: WorkflowInput): Promise<WorkflowView> =>
+      request("/workflows", { method: "POST", body: JSON.stringify(body) }),
+
+    /** Full replace; the path is the id of record. A run already under way
+     * keeps the graph it started with. */
+    update: (name: string, body: WorkflowInput): Promise<WorkflowView> =>
+      request(`/workflows/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    remove: (name: string): Promise<void> =>
+      request(`/workflows/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+    /** Start a run. Returns as soon as the session exists; the first step is
+     * already on its way. */
+    run: (name: string, body: WorkflowRunRequest): Promise<WorkflowRunResponse> =>
+      request(`/workflows/${encodeURIComponent(name)}/runs`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    /** This workflow's runs, newest first. Unlike a routine's, these are also
+     * in the ordinary session list. */
+    runs: (name: string): Promise<WorkflowRunsResponse> =>
+      request(`/workflows/${encodeURIComponent(name)}/runs`),
+
+    /** A run, projected onto its definition's graph. Keyed by session id,
+     * because that is what a run is. */
+    graph: (sessionId: string): Promise<WorkflowRunGraph> =>
+      request(`/sessions/${encodeURIComponent(sessionId)}/workflow`),
+
+    /** Re-run one execution. Appends an attempt; never truncates. */
+    retry: (sessionId: string, stepIndex: number): Promise<void> =>
+      request(`/sessions/${encodeURIComponent(sessionId)}/workflow/retry`, {
+        method: "POST",
+        body: JSON.stringify({ stepIndex }),
+      }),
   },
 
   config: {

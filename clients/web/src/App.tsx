@@ -12,6 +12,9 @@ import { NewSessionView } from "./pages/NewSessionView";
 import { RoutineDetailPage } from "./pages/routines/RoutineDetailPage";
 import { RoutineEditPage } from "./pages/routines/RoutineEditPage";
 import { RoutinesPage } from "./pages/routines/RoutinesPage";
+import { WorkflowDetailPage } from "./pages/workflows/WorkflowDetailPage";
+import { WorkflowEditPage } from "./pages/workflows/WorkflowEditPage";
+import { WorkflowsPage } from "./pages/workflows/WorkflowsPage";
 import { SessionsLayout } from "./pages/SessionsLayout";
 import { SessionView } from "./pages/SessionView";
 import { SettingsLayout } from "./pages/settings/SettingsLayout";
@@ -56,6 +59,9 @@ export default function App() {
             <Route path="/" element={<SessionsLayout />}>
               <Route index element={<NewSessionView />} />
               <Route path="sessions/:id" element={<SessionView />} />
+              {/* One agent of a session, full page: a workflow step, or a
+                  subagent, which had no page of its own before. */}
+              <Route path="sessions/:id/agents/:agentId" element={<SessionView />} />
               <Route path="agents" element={<AgentsPage />} />
               <Route path="agents/new" element={<AgentEditPage />} />
               <Route path="agents/:name/edit" element={<AgentEditPage />} />
@@ -65,6 +71,10 @@ export default function App() {
                 path="environments/:name/edit"
                 element={<EnvironmentEditPage />}
               />
+              <Route path="workflows" element={<WorkflowsPage />} />
+              <Route path="workflows/new" element={<WorkflowEditPage />} />
+              <Route path="workflows/:name" element={<WorkflowDetailPage />} />
+              <Route path="workflows/:name/edit" element={<WorkflowEditPage />} />
               <Route path="routines" element={<RoutinesPage />} />
               <Route path="routines/new" element={<RoutineEditPage />} />
               <Route path="routines/:name" element={<RoutineDetailPage />} />

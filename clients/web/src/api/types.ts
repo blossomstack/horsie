@@ -15,3 +15,4 @@ export * from "../generated/routines";
 export * from "../generated/session";
 export * from "../generated/session_api";
 export * from "../generated/settings";
+export * from "../generated/workflow";

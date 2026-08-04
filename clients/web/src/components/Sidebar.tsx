@@ -6,6 +6,7 @@ import {
   Plus,
   Settings,
   ShieldCheck,
+  Workflow,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
@@ -169,6 +170,12 @@ export function Sidebar() {
           testId="routines-link"
           icon={<CalendarClock size={15} aria-hidden />}
           label="Routines"
+        />
+        <PrimaryLink
+          to="/workflows"
+          testId="workflows-link"
+          icon={<Workflow size={15} aria-hidden />}
+          label="Workflows"
         />
       </div>
 

@@ -12,6 +12,7 @@ import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
 import { Transcript } from "../components/Transcript";
+import { WorkflowRunView } from "./workflows/WorkflowRunView";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { useSessionStream } from "../hooks/useSessionStream";
 import { useUiSettings } from "../hooks/useUiSettings";
@@ -55,7 +56,7 @@ export interface PendingFirstMessageState {
 }
 
 export function SessionView() {
-  const { id } = useParams<{ id: string }>();
+  const { id, agentId } = useParams<{ id: string; agentId?: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const { data: detail, isLoading } = useSession(id);
@@ -65,8 +66,8 @@ export function SessionView() {
     removeOptimisticUser,
     ackOptimisticUser,
     loadMore,
-  } = useSessionStream(id);
-  const { data: mainAgent } = useAgent(id, MAIN_AGENT);
+  } = useSessionStream(id, agentId ?? MAIN_AGENT);
+  const { data: mainAgent } = useAgent(id, agentId ?? MAIN_AGENT);
   const send = useSendMessage();
   const answerAsks = useAnswerAsks();
   const stop = useStopSession();
@@ -228,6 +229,19 @@ export function SessionView() {
   // "for stopping a turn you have scrolled away from", which was never a real
   // case: the composer is pinned to the bottom of the pane and never scrolls.
 
+  // A run has no single conversation, so the graph is its page. Opening one of
+  // its steps routes back here with an agent id, and falls through to the
+  // transcript below — the same view, scoped to that agent.
+  if (id && detail?.workflow && !agentId) {
+    return (
+      <WorkflowRunView
+        sessionId={id}
+        onStop={handleStop}
+        onDelete={handleDelete}
+      />
+    );
+  }
+
   return (
     <AskAnswerProvider
       value={{
@@ -316,16 +330,20 @@ export function SessionView() {
                 <ListTodo size={15} aria-hidden />
               </button>
               <SettingsMenu />
-              <button
-                className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
-                onClick={handleDelete}
-                disabled={del.isPending}
-                title="Delete session"
-                aria-label="Delete session"
-                data-testid="session-delete"
-              >
-                <Trash2 size={15} aria-hidden />
-              </button>
+              {/* A step is not deletable on its own: the run is the unit, and
+                  its page carries the control. */}
+              {!agentId && (
+                <button
+                  className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
+                  onClick={handleDelete}
+                  disabled={del.isPending}
+                  title="Delete session"
+                  aria-label="Delete session"
+                  data-testid="session-delete"
+                >
+                  <Trash2 size={15} aria-hidden />
+                </button>
+              )}
             </div>
           </header>
 
@@ -450,12 +468,30 @@ export function SessionView() {
               row occupied before it existed. Read-only — each key opens its
               value rather than a picker. */}
           {detail && <SessionConfigBar mode="locked" detail={detail} />}
-          <Composer
-            status={status}
-            busy={send.isPending}
-            onSend={(text) => handleSend(id, text)}
-            onStop={handleStop}
-          />
+          {/* A workflow step takes no messages — the definition drives it — so
+              it gets the stop control without the send one. */}
+          {agentId && detail?.workflow ? (
+            <div className="flex items-center gap-3 border-t px-4 py-2">
+              <span className="text-xs text-faint">
+                This is a workflow step. It works from its definition, not from
+                messages.
+              </span>
+              <button
+                className="key key-stop ml-auto !px-2 !py-1 text-xs"
+                onClick={handleStop}
+                data-testid="step-stop"
+              >
+                Interrupt
+              </button>
+            </div>
+          ) : (
+            <Composer
+              status={status}
+              busy={send.isPending}
+              onSend={(text) => handleSend(id, text)}
+              onStop={handleStop}
+            />
+          )}
         </div>
 
         {tasksOpen && (
