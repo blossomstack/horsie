@@ -60,9 +60,9 @@ Send your first message to create the session and open it.
   session's lifetime.
 - **Delete** — remove the session.
 - **Tasks panel** — when the agent tracks a multi-step plan, a collapsible panel
-  on the right shows the task list live as it's created and updated. It appears
-  only once the agent has used the tool, and can be collapsed to a small badge
-  showing the completed/total count.
+  on the right shows the task list live as it's created and updated. The key
+  that opens it lights up once there is a plan behind it; hover it for the
+  completed/total count.
 
 ### When the agent asks you a question
 

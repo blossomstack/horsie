@@ -41,7 +41,7 @@ export function StatusBadge({
       title={meta.hint}
     >
       <StatusDot status={status} />
-      <span className="legend !text-[10px] text-current">{meta.label}</span>
+      <span className="legend !text-[0.625rem] text-current">{meta.label}</span>
     </span>
   );
 }

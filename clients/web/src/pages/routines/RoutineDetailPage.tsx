@@ -43,7 +43,7 @@ export function RoutineDetailPage() {
           {routine.name}
         </h1>
         {!routine.enabled && (
-          <span className="rounded-full border px-2 py-0.5 text-[11px] text-faint">
+          <span className="rounded-full border px-2 py-0.5 text-[0.6875rem] text-faint">
             paused
           </span>
         )}

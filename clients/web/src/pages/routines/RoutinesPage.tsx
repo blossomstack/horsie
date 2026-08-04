@@ -72,7 +72,7 @@ export function RoutinesPage() {
                     {r.description}
                   </div>
                 )}
-                <div className="mt-1 flex gap-2 text-[11px] text-faint">
+                <div className="mt-1 flex gap-2 text-[0.6875rem] text-faint">
                   {r.lastRunAtMs !== undefined && (
                     <span>ran {relativeTime(r.lastRunAtMs)}</span>
                   )}

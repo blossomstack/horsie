@@ -53,6 +53,14 @@ const contrast = (x, y) => {
   return (Math.max(A, B) + 0.05) / (Math.min(A, B) + 0.05);
 };
 
+/** A semi-transparent colour as the browser will actually paint it. A focus
+ * ring is declared with an alpha, so measuring the declared colour measures
+ * something that never reaches the screen. */
+const over = (fg, bg) =>
+  fg.alpha === undefined || fg.alpha >= 1
+    ? fg
+    : fg.map((c, i) => c * fg.alpha + bg[i] * (1 - fg.alpha));
+
 /* ---------- parsing ---------- */
 
 /** Every `selector { --token: oklch(...) }` in a file, as selector → tokens. */
@@ -66,10 +74,15 @@ function parseBlocks(css) {
     const selector = m[1].trim().replace(/\s+/g, " ");
     const body = m[2];
     const tokens = {};
-    const tre = /--([a-z-]+)\s*:\s*oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\)/g;
+    const tre =
+      /--([a-z-]+)\s*:\s*oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*(?:\/\s*([\d.]+)\s*)?\)/g;
     let t;
     while ((t = tre.exec(body))) {
-      tokens[t[1]] = oklchToSrgb(Number(t[2]), Number(t[3]), Number(t[4]));
+      const rgb = oklchToSrgb(Number(t[2]), Number(t[3]), Number(t[4]));
+      // Carried on the array rather than in a parallel map, so every existing
+      // consumer keeps treating a token as a plain [r,g,b].
+      if (t[5] !== undefined) rgb.alpha = Number(t[5]);
+      tokens[t[1]] = rgb;
     }
     if (Object.keys(tokens).length) {
       blocks.set(selector, { ...(blocks.get(selector) ?? {}), ...tokens });
@@ -114,6 +127,8 @@ const FIELDS = ["chassis", "panel", "panel-raised", "screen"];
 const INKS = ["legend", "legend-dim", "legend-faint", "amber-ink", "red-ink", "lamp-ok"];
 const CODE = ["code-keyword", "code-string", "code-number", "code-type"];
 const AA = 4.5;
+/** WCAG 1.4.11: a non-text indicator needs 3:1 against what surrounds it. */
+const NON_TEXT = 3;
 
 let failures = 0;
 const fail = (msg) => {
@@ -125,9 +140,16 @@ for (const [skin, mode, T] of PALETTES) {
   if (!T) continue;
   console.log(`\n=== ${skin} / ${mode} ===`);
 
-  const missing = [...FIELDS, ...INKS, ...CODE, "keycap", "keycap-ink"].filter(
-    (k) => !T[k],
-  );
+  const missing = [
+    ...FIELDS,
+    ...INKS,
+    ...CODE,
+    "keycap",
+    "keycap-ink",
+    "focus-ring",
+    "orange",
+    "orange-ink",
+  ].filter((k) => !T[k]);
   if (missing.length) {
     fail(`palette is missing: ${missing.join(", ")}`);
     continue;
@@ -144,6 +166,27 @@ for (const [skin, mode, T] of PALETTES) {
   for (const k of CODE) {
     const v = contrast(T[k], T.screen);
     if (v < AA) fail(`${k} ${v.toFixed(2)} on screen`);
+  }
+
+  // Keyboard focus has to be *seen*, and the ring is the only indicator on a
+  // control that has no other focus state. It is painted with an alpha, so it
+  // is measured composited over the surface behind it. Nothing else in this
+  // gate covers focus, which is how a light-mode ring at 1.40:1 shipped.
+  {
+    const worst = Math.min(
+      ...FIELDS.map((f) => contrast(over(T["focus-ring"], T[f]), T[f])),
+    );
+    if (worst < NON_TEXT) fail(`focus-ring worst ${worst.toFixed(2)} on a field`);
+    else console.log(`  ok    ${"focus-ring".padEnd(13)} worst ${worst.toFixed(2)}`);
+  }
+
+  // The commit and interrupt keys focus in their own ink, drawn *inside* the
+  // cap — so the pair that has to separate is ink against the key's own face,
+  // not against the panel the key sits on.
+  {
+    const v = contrast(T["orange-ink"], T.orange);
+    if (v < NON_TEXT) fail(`key-go focus ring ${v.toFixed(2)} on the orange face`);
+    else console.log(`  ok    ${"key-go focus".padEnd(13)} ${v.toFixed(2)}`);
   }
 
   // A keycap is a different material from its panel in every mode — this is

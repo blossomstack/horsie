@@ -1,6 +1,48 @@
 import { ChevronDown } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { cn } from "../lib/cn";
+
+/** Breathing room between a menu and whatever would otherwise clip it. */
+const EDGE = 8;
+
+/**
+ * The box a menu is actually allowed to occupy.
+ *
+ * Two constraints, intersected: the nearest `[data-popover-boundary]` — the
+ * column the control belongs to — and every ancestor whose overflow would
+ * clip it, down to the viewport.
+ *
+ * The declared boundary is the load-bearing one. Overflow alone is not enough:
+ * on a session route the content column has *visible* overflow all the way up
+ * to the app shell, whose box is the whole window, so a menu clamped by
+ * overflow is clamped to nothing and still runs under the rail on one side and
+ * across the plan column on the other. "Fits on screen" was never the
+ * requirement; "fits in this column" is.
+ */
+function clipBounds(from: HTMLElement): { left: number; right: number } {
+  let left = 0;
+  let right = window.innerWidth;
+  const narrow = (el: Element) => {
+    const r = el.getBoundingClientRect();
+    left = Math.max(left, r.left);
+    right = Math.min(right, r.right);
+  };
+  const boundary = from.closest("[data-popover-boundary]");
+  if (boundary) narrow(boundary);
+  for (let el = from.parentElement; el; el = el.parentElement) {
+    const { overflowX, overflowY } = getComputedStyle(el);
+    if (overflowX === "visible" && overflowY === "visible") continue;
+    narrow(el);
+  }
+  return { left, right };
+}
 
 /**
  * A panel selector.
@@ -48,6 +90,56 @@ export function PopoverMenu({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Horizontal correction and the width cap, both measured. The applied shift
+  // is mirrored in a ref so `place` can subtract it without depending on the
+  // state it sets — otherwise every measurement re-creates the callback and
+  // re-runs the effect.
+  const [box, setBox] = useState({ shift: 0, maxWidth: 0 });
+  const shiftRef = useRef(0);
+
+  /**
+   * Anchor the menu to the trigger's left edge, then slide it back inside its
+   * column.
+   *
+   * It used to be right-anchored for every icon key, on the assumption that
+   * those keys live at the right end of the row. Once the row grew a left
+   * group, a 20rem menu hanging leftward from a key an inch from the pane's
+   * edge went straight under the session rail.
+   */
+  const place = useCallback(() => {
+    const anchor = ref.current;
+    const panel = panelRef.current;
+    if (!anchor || !panel) return;
+    const bounds = clipBounds(anchor);
+    // Measure from the un-shifted position so the correction never compounds.
+    const r = panel.getBoundingClientRect();
+    const left = r.left - shiftRef.current;
+    const right = r.right - shiftRef.current;
+    let dx = 0;
+    if (right > bounds.right - EDGE) dx = bounds.right - EDGE - right;
+    if (left + dx < bounds.left + EDGE) dx = bounds.left + EDGE - left;
+    shiftRef.current = dx;
+    setBox({ shift: dx, maxWidth: Math.max(0, bounds.right - bounds.left - EDGE * 2) });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      shiftRef.current = 0;
+      setBox({ shift: 0, maxWidth: 0 });
+      return;
+    }
+    place();
+    window.addEventListener("resize", place);
+    // Capture phase: the transcript, the settings pane and the rail all scroll
+    // in their own containers, and a scroll on any of them moves the trigger
+    // out from under a menu measured before it.
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, place]);
 
   useEffect(() => {
     if (!open) return;
@@ -117,7 +209,7 @@ export function PopoverMenu({
           {icon && <span className="text-faint">{icon}</span>}
           <span className="min-w-0 flex-1">
             {legend && <span className="legend block leading-none">{legend}</span>}
-            <span className="block truncate font-mono text-[11px] text-legend">
+            <span className="block truncate font-mono text-[0.6875rem] text-legend">
               {label}
             </span>
           </span>
@@ -128,16 +220,27 @@ export function PopoverMenu({
       )}
       {open && !disabled && (
         <div
+          ref={panelRef}
           className={cn(
-            "panel absolute z-20 max-h-72 overflow-y-auto p-1.5 shadow-[var(--panel-lift)]",
+            // z-30, not z-20: the overlaid plan panel is also z-20 and later in
+            // the DOM, so a tie went to the panel. Its scrim happens to make
+            // the config bar unreachable while it is open, but a menu should
+            // not depend on that to be on top.
+            "panel absolute left-0 z-30 max-h-72 overflow-y-auto p-1.5 shadow-[var(--panel-lift)]",
             // The action row sits at the bottom of the screen, so its menus
             // open upward or they open off-screen; a form's open downward.
             placement === "up" ? "bottom-full mb-1.5" : "top-full mt-1.5",
-            // Right-anchored in `icon`: these keys sit at the right edge of
-            // the action row, and a left-anchored menu overflowed the viewport.
-            variant === "icon" ? "right-0" : "left-0",
             width,
           )}
+          // Anchored left, then measured back inside its column. A transform
+          // rather than a `left` override so the anchor stays declarative and
+          // only the correction is imperative — and always emitted, so a menu
+          // does not gain and lose a containing block depending on where it
+          // happened to land.
+          style={{
+            transform: `translateX(${box.shift}px)`,
+            maxWidth: box.maxWidth || undefined,
+          }}
         >
           {children(() => setOpen(false))}
         </div>

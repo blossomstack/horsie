@@ -32,10 +32,13 @@ test("H1: no widget until the agent has created a task list", async ({
 
   await expect(page.getByTestId("assistant-text")).toContainText("Hi there.");
   // The panel is reachable on every session now, so "no plan" is an empty
-  // state rather than a missing component — and the header key carries no
-  // progress badge until there is progress to report.
+  // state rather than a missing component — and the header key stays unlit
+  // until there is a plan behind it.
   await expect(page.getByTestId("task-list-panel")).toHaveCount(0);
-  await expect(page.getByTestId("task-list-badge")).toHaveCount(0);
+  await expect(page.getByTestId("task-list-toggle")).not.toHaveAttribute(
+    "data-has-plan",
+    /.+/,
+  );
   await openPlan(page);
   await expect(page.getByTestId("task-list-empty")).toBeVisible();
 });
@@ -54,7 +57,11 @@ test("H2: creating a task list shows it in the side widget", async ({
 
   await sendMessage(page, "make a plan");
 
-  await expect(page.getByTestId("task-list-badge")).toHaveText("0/3");
+  // The header key lights once a plan exists; the figures live in the panel
+  // and the tooltip, not in a badge on a 2rem key.
+  const toggle = page.getByTestId("task-list-toggle");
+  await expect(toggle).toHaveAttribute("data-has-plan", "true");
+  await expect(toggle).toHaveAttribute("title", /0\/3 done/);
   const panel = await openPlan(page);
   await expect(panel.getByTestId("task-list-progress")).toHaveText("0/3 done");
   await expect(panel.getByTestId("task-list-item")).toHaveCount(3);
@@ -112,7 +119,10 @@ test("H4: the plan hides and re-opens from the session header", async ({
   // stored preference seen from two places.
   await panel.getByTestId("task-list-collapse").click();
   await expect(page.getByTestId("task-list-panel")).toHaveCount(0);
-  await expect(page.getByTestId("task-list-badge")).toHaveText("0/1");
+  await expect(page.getByTestId("task-list-toggle")).toHaveAttribute(
+    "data-has-plan",
+    "true",
+  );
 
   await page.getByTestId("task-list-toggle").click();
   await expect(page.getByTestId("task-list-panel")).toBeVisible();

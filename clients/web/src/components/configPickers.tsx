@@ -133,7 +133,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
             }}
           >
             <span className="font-mono">{v.name}</span>
-            {v.isDefault && <span className="text-[11px] text-faint">default</span>}
+            {v.isDefault && <span className="text-[0.6875rem] text-faint">default</span>}
           </button>
         ))
       ),
@@ -277,7 +277,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
             }}
           >
             <span className="font-mono text-sm text-legend">{m.alias}</span>
-            <span className="text-[11px] text-faint">{m.modelId}</span>
+            <span className="text-[0.6875rem] text-faint">{m.modelId}</span>
           </button>
         ))
       ),
@@ -351,7 +351,7 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
       ) : (
         <ul className="space-y-0.5">
           {items.map((v) => (
-            <li key={v} className="font-mono text-[13px] break-words text-legend">
+            <li key={v} className="font-mono text-[0.8125rem] break-words text-legend">
               {v}
             </li>
           ))}

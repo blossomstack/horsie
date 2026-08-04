@@ -89,6 +89,7 @@ Open **Settings**. The left nav lists one page per group of settings:
 | **Integrations** | GitHub | GitHub App config + connection; the GitHub-tools-(MCP) toggle. See [GitHub](github.md). |
 | | MCP servers | Remote MCP servers: name, URL, auth. See [MCP servers](mcp-servers.md). |
 | | Server *(read-only)* | Config file path, database, journal backend, state dir, data dir, plugins dir, version. |
+| **Appearance** | Theme / Light or dark / Text size / Transcript | How this browser draws horsie: one of four themes, light/dark/system, a three-step text size that scales the whole interface, and the transcript display switches. Stored in the browser, not the settings database, so each browser you use can differ. |
 | **Account** | — | Change the admin password and sign out. Shows a notice while the deployment is still using its generated first-boot password. Says so plainly when authentication is disabled. |
 
 **Models** and **Runtimes** batch their edits behind a **Save changes** button —

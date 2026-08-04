@@ -67,4 +67,45 @@ test.describe("appearance", () => {
     await page.emulateMedia({ colorScheme: "dark" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   });
+
+  test("R4: text size scales the whole interface and survives a reload", async ({
+    page,
+    appBase,
+  }) => {
+    await page.goto(`${appBase}/settings/appearance`);
+
+    // Default carries no attribute, same convention as Console.
+    await expect(page.locator("html")).not.toHaveAttribute("data-text-size", /.+/);
+    const rootSize = () =>
+      page.evaluate(() =>
+        parseFloat(getComputedStyle(document.documentElement).fontSize),
+      );
+    const title = page.getByRole("heading", { level: 1, name: "Appearance" });
+    const base = await rootSize();
+    const baseTitle = await title.evaluate(
+      (el) => el.getBoundingClientRect().height,
+    );
+
+    await page.getByTestId("text-size-option-large").click();
+    await expect(page.locator("html")).toHaveAttribute("data-text-size", "large");
+    expect(await rootSize()).toBeGreaterThan(base);
+    // Not just the type: every rem in the build rides the same root, so the
+    // slots grow with what goes in them.
+    expect(
+      await title.evaluate((el) => el.getBoundingClientRect().height),
+    ).toBeGreaterThan(baseTitle);
+
+    await page.getByTestId("text-size-option-compact").click();
+    expect(await rootSize()).toBeLessThan(base);
+
+    // Resolved before first paint, like theme and skin — a text size settled
+    // after hydration would reflow the entire layout in front of the user.
+    await page.goto(`${appBase}/settings/appearance`, {
+      waitUntil: "domcontentloaded",
+    });
+    await expect(page.locator("html")).toHaveAttribute("data-text-size", "compact");
+
+    await page.getByTestId("text-size-option-default").click();
+    await expect(page.locator("html")).not.toHaveAttribute("data-text-size", /.+/);
+  });
 });

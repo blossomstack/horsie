@@ -35,7 +35,7 @@ colors:
 typography:
   title:
     fontFamily: "Archivo Variable, system-ui, sans-serif"
-    fontSize: "15px"
+    fontSize: "0.9375rem"
     fontWeight: 600
     letterSpacing: "-0.025em"
   body:
@@ -45,37 +45,37 @@ typography:
     lineHeight: 1.65
   ui:
     fontFamily: "Archivo Variable, system-ui, sans-serif"
-    fontSize: "13px"
+    fontSize: "0.8125rem"
     fontWeight: 400
     lineHeight: 1.25rem
   legend:
     fontFamily: "Martian Mono Variable, ui-monospace, SF Mono, monospace"
-    fontSize: "10px"
+    fontSize: "0.625rem"
     fontWeight: 500
     lineHeight: 1.4
     letterSpacing: "0.1em"
     fontVariation: "'wdth' 100"
   readout:
     fontFamily: "Martian Mono Variable, ui-monospace, SF Mono, monospace"
-    fontSize: "13px"
+    fontSize: "0.8125rem"
     letterSpacing: "0.01em"
     fontFeature: "tabular-nums"
     fontVariation: "'wdth' 87.5"
   key:
     fontFamily: "Martian Mono Variable, ui-monospace, SF Mono, monospace"
-    fontSize: "11px"
+    fontSize: "0.6875rem"
     fontWeight: 550
     letterSpacing: "0.06em"
     fontVariation: "'wdth' 87.5"
   chip:
     fontFamily: "Martian Mono Variable, ui-monospace, SF Mono, monospace"
-    fontSize: "10px"
+    fontSize: "0.625rem"
     fontWeight: 500
     letterSpacing: "0.04em"
     fontVariation: "'wdth' 87.5"
   code:
     fontFamily: "Martian Mono Variable, ui-monospace, SF Mono, monospace"
-    fontSize: "11px"
+    fontSize: "0.6875rem"
     lineHeight: 1.625
     fontVariation: "'wdth' 87.5"
   field:
@@ -84,7 +84,7 @@ typography:
     fontWeight: 400
   kbd:
     fontFamily: "Martian Mono Variable, ui-monospace, SF Mono, monospace"
-    fontSize: "9px"
+    fontSize: "0.5625rem"
     letterSpacing: "0.04em"
 rounded:
   chip: "3px"
@@ -102,7 +102,7 @@ components:
     textColor: "{colors.keycap-ink}"
     typography: "{typography.key}"
     rounded: "{rounded.cap}"
-    padding: "8px 14px"
+    padding: "0.5rem 0.875rem"
   key-hover:
     backgroundColor: "{colors.keycap-hover}"
   key-go:
@@ -110,7 +110,7 @@ components:
     textColor: "{colors.orange-ink}"
     typography: "{typography.key}"
     rounded: "{rounded.cap}"
-    padding: "8px 14px"
+    padding: "0.5rem 0.875rem"
   key-go-hover:
     backgroundColor: "{colors.orange-hover}"
   key-stop:
@@ -118,25 +118,25 @@ components:
     textColor: "{colors.orange-ink}"
     typography: "{typography.key}"
     rounded: "{rounded.cap}"
-    padding: "8px 14px"
+    padding: "0.5rem 0.875rem"
   key-blank:
     backgroundColor: "transparent"
     textColor: "{colors.legend-dim}"
     typography: "{typography.key}"
     rounded: "{rounded.cap}"
-    padding: "8px 14px"
+    padding: "0.5rem 0.875rem"
   key-flat:
     backgroundColor: "transparent"
     textColor: "{colors.legend-dim}"
     typography: "{typography.key}"
     rounded: "{rounded.cap}"
-    padding: "8px 14px"
+    padding: "0.5rem 0.875rem"
   key-danger:
     backgroundColor: "transparent"
     textColor: "{colors.red-ink}"
     typography: "{typography.key}"
     rounded: "{rounded.cap}"
-    padding: "8px 14px"
+    padding: "0.5rem 0.875rem"
   key-icon:
     backgroundColor: "transparent"
     textColor: "{colors.legend-dim}"
@@ -147,7 +147,7 @@ components:
     backgroundColor: "{colors.screen}"
     textColor: "{colors.legend}"
     rounded: "{rounded.control}"
-    padding: "8px 11px"
+    padding: "0.5rem 0.6875rem"
     size: "0.875rem"
   field-mono:
     typography: "{typography.code}"
@@ -165,13 +165,13 @@ components:
     textColor: "{colors.legend-dim}"
     typography: "{typography.chip}"
     rounded: "{rounded.chip}"
-    padding: "2px 7px"
+    padding: "0.125rem 0.4375rem"
   kbd:
     backgroundColor: "{colors.panel-raised}"
     textColor: "{colors.legend-faint}"
     rounded: "{rounded.chip}"
-    padding: "1px 5px"
-    size: "9px"
+    padding: "0.0625rem 0.3125rem"
+    size: "0.5625rem"
   lamp:
     height: "7px"
     width: "7px"
@@ -253,6 +253,8 @@ Two full renditions live in `clients/web/src/index.css`: dark on `:root, [data-t
 
 **The Material-Role Rule.** Material roles hold their meaning across themes, not their brightness. `screen` is always the most recessed, `panel-raised` is always the most lifted, and a keycap is always a *different material* from the panel it sits on. That is why light mode inverts the cap to machined charcoal on a bone chassis instead of pale-on-pale: measured keycap:panel is **6.81:1** in light and **9.55:1** in dark, where the pale-cap-on-pale-body reading collapsed to 1.16:1 (figure recorded in `index.css`).
 
+**The Layered-Defaults Rule.** A global default belongs in `@layer base`, never outside a layer. An unlayered author rule beats every layer regardless of specificity, so while `* { border-color: var(--rule) }` and the `:focus-visible` ring sat unlayered they silently defeated *every* `border-red`, `border-amber` and `outline-none` a call site wrote — error banners were grey, focused fields never went amber, and the composer drew a stray 2px line under its input where its suppressed outline escaped `overflow-hidden`. If a rule is a default, a utility must be able to beat it.
+
 **The AA Floor.** Every ink (`legend`, `legend-dim`, `legend-faint`, `amber-ink`, `red-ink`, `lamp-ok`) clears WCAG AA 4.5:1 against **all four** field colours (`chassis`, `panel`, `panel-raised`, `screen`) in **both** themes. Worst cases: **4.53** in dark (`legend-faint` on `panel-raised`) and **4.55** in light (`red-ink` on `screen`). The four code colours clear 4.5:1 on `screen` in both themes too. `clients/web/scripts/contrast.mjs` is the script that derives these — re-run it before shipping any token change.
 
 ## Typography
@@ -262,23 +264,33 @@ Two full renditions live in `clients/web/src/index.css`: dark on `:root, [data-t
 
 Both are self-hosted via `@fontsource-variable` and imported at the top of `index.css`. horsie servers routinely run on a LAN with no route to the public internet, so **no webfont may come from a CDN**. `font-synthesis-weight: none` is set globally, so only real variable weights render.
 
-**Character:** Martian Mono is measurement, not costume — it names channels and reports values on an instrument face, and it is squeezed to `wdth 87.5` almost everywhere so a legend fits a control. Archivo carries anything a human reads as a sentence. There is no display face; the largest type in the build is a 15px page title. Scale comes from density and material, not from size.
+**Character:** Martian Mono is measurement, not costume — it names channels and reports values on an instrument face, and it is squeezed to `wdth 87.5` almost everywhere so a legend fits a control. Archivo carries anything a human reads as a sentence. There is no display face: the page title is the *same size* as body and separates by weight alone (600 against 400). Scale comes from density and material, not from size.
+
+### The scale is root-relative
+
+**No `px` font size anywhere in the build.** `html { font-size: var(--text-root, 106.25%) }` in `@layer base` is the root of the scale, and `data-text-size` on `<html>` moves it: `compact` → 100%, absent → 106.25%, `large` → 115%. **Percentages, not pixels** — the steps are relative to the reader's own browser default, so raising that default still works; pinning `16px` here would overrule exactly the people the control exists for.
+
+Because Tailwind's spacing, widths and heights are rem too, that one value scales the padding, the 17.5rem rail and the 3.25rem header row along with the type — the instrument gets bigger rather than the type outgrowing its slots. What stays in px is what should not scale with reading size: the machined radii, the 7px lamp, the 10px scrollbar channel, hairline rules, and lucide's `size={n}`.
+
+The sizes below are quoted as rem, with the px they render at on a **stock 16px browser default at the `default` step** (a 17px root). A new size is written in rem or it silently opts out of the control.
 
 ### Hierarchy
-- **Title** (Archivo, 600, 15px, `tracking-tight`): page and session titles in header bars. The top of the type scale.
-- **Body** (Archivo, 400, 0.9375rem/1.65): agent prose, user messages, composer input, explanatory paragraphs. Prose is capped by the 54rem transcript column plus `max-w-prose` on standalone paragraphs.
-- **UI** (Archivo, 400, 13px/1.25rem): session rows, nav items, popover options, task-list items, settings switch labels.
-- **Legend** (`.legend` — Martian Mono, 500, 10px, `0.1em`, uppercase, `wdth 100`, `legend-faint`): the engraved panel label. Channel names ("TOKENS", "MODEL", "RUNTIME", "INPUT", "OUTPUT", "PLAN"), status words, timestamps, section captions, hints. The single most-used class in the build. It is the *only* legend at `wdth 100` — full width, because a label is read, not squeezed.
-- **Readout** (`.readout` — Martian Mono, `tabular-nums`, `wdth 87.5`, `0.01em`, `amber-ink`): a live measured value. Token totals, task counts, context-window figures, runtime counts. Tabular so digits never jitter as they tick. Size is set at the call site (10–13px).
-- **Key** (`.key` — Martian Mono, 550, 11px, `0.06em`, uppercase, `wdth 87.5`): every keycap legend.
-- **Chip** (`.chip` — Martian Mono, 500, 10px, `0.04em`, `wdth 87.5`): engraved tags — versions, "Default", "not tested", ask-user choices.
-- **Code** (Martian Mono, 11px/1.625, `wdth 87.5`): tool input/output, thinking text, `.field-mono`, prose `code` and `pre`. Section headings inside prose also use mono at 600 — a heading in an agent reply is machine structure, not editorial voice.
+- **Title** (Archivo, 600, `0.9375rem` → 16px, `tracking-tight`): page and session titles in header bars. The top of the scale, and it gets there on weight — body is the same size. Only `.prose h1` (`1.25em`) is ever larger, and that is the agent's own copy, not chrome.
+- **Body** (Archivo, 400, `0.9375rem`/1.65): agent prose, user messages, composer input, explanatory paragraphs. Prose is capped by the 54rem transcript column plus `max-w-prose` on standalone paragraphs.
+- **UI** (Archivo, 400, `0.8125rem` → 14px, `1.25rem`): session rows, nav items, popover options, task-list items, settings switch labels.
+- **Legend** (`.legend` — Martian Mono, 500, `0.625rem` → 10.6px, `0.1em`, uppercase, `wdth 100`, `legend-faint`): the engraved panel label. Channel names ("TOKENS", "MODEL", "RUNTIME", "INPUT", "OUTPUT", "PLAN"), status words, timestamps, section captions, hints. The single most-used class in the build. It is the *only* legend at `wdth 100` — full width, because a label is read, not squeezed.
+- **Readout** (`.readout` — Martian Mono, `tabular-nums`, `wdth 87.5`, `0.01em`, `amber-ink`): a live measured value. Token totals, task counts, context-window figures, runtime counts. Tabular so digits never jitter as they tick. Size is set at the call site (`0.625`–`0.8125rem`).
+- **Key** (`.key` — Martian Mono, 550, `0.6875rem` → 11.7px, `0.06em`, uppercase, `wdth 87.5`): every keycap legend.
+- **Chip** (`.chip` — Martian Mono, 500, `0.625rem`, `0.04em`, `wdth 87.5`): engraved tags — versions, "Default", "not tested", ask-user choices.
+- **Code** (Martian Mono, `0.6875rem`/1.625, `wdth 87.5`): tool input/output, thinking text, `.field-mono`, prose `code` and `pre`. Section headings inside prose also use mono at 600 — a heading in an agent reply is machine structure, not editorial voice.
 
 ### Named Rules
 
 **The Mono-Is-Measurement Rule.** Martian Mono is for legends, readouts, keycaps, and machine strings (model aliases, vendor names, repo names, paths, commands, IDs). Archivo is for anything that is a sentence. A machine string set in Archivo is a bug; a paragraph set in mono is a bug.
 
 **The Tabular Readout Rule.** Any number that changes while you watch it uses `.readout`, not `text-amber`. It buys `tabular-nums` so the layout does not twitch, and it pairs with `animate-latch` so the value re-lights instead of popping.
+
+**The Root-Relative Rule.** No `px` font size, anywhere. A hardcoded pixel size opts that one string out of the Text size control while everything around it moves, which is worse than either size on its own.
 
 ## Layout
 
@@ -316,6 +328,8 @@ Beyond these, depth is drawn with 1px inset rings rather than shadows: `shadow-[
 
 **The Ring-After-Recess Rule.** A focused `.field` composes `box-shadow: var(--screen-inset), 0 0 0 3px var(--focus-ring)`. Replacing the inset instead of appending to it flattens the field and breaks the recessed reading.
 
+**The Visible-Focus Rule.** Keyboard focus must be *seen*, and `--focus-ring` is often the only indicator a control has. It is semi-transparent, so what counts is the composite over the surface behind it, and `contrast.mjs` gates that at 3:1 (WCAG 1.4.11) across all 8 palettes — as it does the `orange-ink`-on-`orange` ring. Seven of the eight rings were below 3:1 before the gate existed; a ring you cannot measure is a ring nobody checked.
+
 ## Shapes
 
 Four machined radii, and nothing between them: **3px** (`--radius-chip`) for chips, `kbd`, inline prose code, and small hit-target hover shells; **4px** (`--radius-control`) for fields, screens, icon keys, nav rows, banners, code blocks; **6px** (`--radius-cap`) for keycaps; **8px** (`--radius-panel`) for panels. Reach them as `var(--radius-*)` or the Tailwind `rounded-[var(--radius-control)]` form.
@@ -330,18 +344,18 @@ The vocabulary is defined once in `clients/web/src/index.css` as Tailwind `@util
 
 ### Keys (`.key` and variants)
 Everything you press is a key: it has travel, an edge, and a legend.
-- **Shape:** machined cap corner (6px), padding `8px 14px`, `inline-flex` with `gap-0.5rem` for an icon.
+- **Shape:** machined cap corner (6px), padding `0.5rem 0.875rem`, `inline-flex` with `gap-0.5rem` for an icon.
 - **Default:** keycap material with keycap ink and `--cap-lift`. Hover raises to `keycap-hover`; `:active` translates 1px down and swaps to `--cap-flat`; `:disabled` drops to `opacity: 0.38` and `pointer-events: none`.
 - **`.key-go`** — the one control that commits: safety orange on orange ink. Used for Send, Save, Add, Create, New agent, and answering an ask.
 - **`.key-stop`** — interrupt and destroy: red, hover `brightness(1.08)`. Used for stopping a turn in the composer and in the session header.
-- **`.key-go` / `.key-stop` focus:** these two override the global amber ring with `outline-color: var(--orange-ink)` at `outline-offset: 3px`. Amber on safety orange is barely a ring, so the highest-stakes controls focus in their own ink.
+- **`.key-go` / `.key-stop` focus:** these two override the global amber ring with `outline-color: var(--orange-ink)` at `outline-offset: **-3px**`. Amber on safety orange is barely a ring, so the highest-stakes controls focus in their own ink — and that ink only works *on* the orange face (6.14:1). At a positive offset it lands on the chassis behind the key and measures 1.00:1, i.e. nothing. Negative offset is the whole rule.
 - **`.key-blank`** — an unpressed area of the panel that is still a control: transparent with a 1px inset rule, hover fills to `panel-raised`. The secondary action beside a `.key-go` (e.g. Discard).
 - **`.key-flat`** — bare legend text that responds: transparent, no shadow, no travel. Menu rows and inline toggles.
 - **`.key-danger`** — transparent with red ink, hover washes `red-quiet`. Defined and reserved for a destructive text action; currently unused in the app.
 - **`.key-icon`** — a 2rem square icon key at 4px radius, transparent, hover fills `panel-raised`. Rail toggle, theme toggle, display menu, delete, panel collapse. Delete buttons override hover to `red-quiet`/`red-ink`.
 
 ### Fields (`.field`, `.field-mono`)
-- **Style:** a slot cut into the panel — `screen` background, 1px rule, 4px radius, `--screen-inset`, `8px 11px` padding, Archivo 0.875rem. Placeholder is `legend-faint`.
+- **Style:** a slot cut into the panel — `screen` background, 1px rule, 4px radius, `--screen-inset`, `0.5rem 0.6875rem` padding, Archivo 0.875rem. Placeholder is `legend-faint`.
 - **Focus:** border shifts to `amber` and a 3px `--focus-ring` is appended after the inset.
 - **`.field-mono`:** the same slot at 0.8125rem in Martian Mono — for identifiers, endpoints, model names, URLs.
 - **`select.field`** ships its own two-gradient chevron so no browser control leaks through; `input[type=checkbox|radio]` are given `accent-color: var(--orange)` at 0.9375rem for the same reason.
@@ -352,8 +366,8 @@ Everything you press is a key: it has travel, an edge, and a legend.
 - **`.screen`** — `screen` background, 1px rule, 4px radius, `--screen-inset`. Wraps machine output only: tool input/output `<pre>`, thinking text, prose `<pre>`, the context meter track, empty-state wells.
 
 ### Chips and Keycaps of Text (`.chip`, `.kbd`)
-- **`.chip`** — `panel-raised` with a 1px rule at 3px radius, mono 10px, `legend-dim`. Versions, "Default", "not tested", and ask-user choices (which add `border-amber bg-amber/15` when selected).
-- **`.kbd`** — the same material with a 2px bottom border and 9px mono `legend-faint`. Defined for keyboard hints; currently unused.
+- **`.chip`** — `panel-raised` with a 1px rule at 3px radius, mono `0.625rem`, `legend-dim`. Versions, "Default", "not tested", and ask-user choices (which add `border-amber bg-amber/15` when selected).
+- **`.kbd`** — the same material with a 2px bottom border and `0.5625rem` mono `legend-faint`. Defined for keyboard hints; currently unused.
 
 ### Lamps (`.lamp`, `.lamp-live`, `.lamp-off`)
 The signature component. A 7px dot filled with `currentColor` and a 6px glow of the same colour, so a lamp's tone is set by putting a text colour on it (`text-amber-ink`, `text-lamp-ok`, `text-red-ink`, `text-orange`, `text-faint`).
@@ -362,11 +376,20 @@ The signature component. A 7px dot filled with `currentColor` and a 6px glow of 
 - Status tones map through `TONE_TEXT` in `src/lib/status.ts`: `live` → amber, `ready` → green, `attention` → orange, `fault` → red, `off` → faint. Add a status by adding a tone there, not by hard-coding a colour.
 
 ### Navigation
-- **Session rail:** a nameplate (orange `h` cap, `HORSIE` in mono at `0.16em`, plus the feed's own lamp and word), a mono search field beside a `.key`, a legend-captioned count, then one row per session — lamp, 13px title, and a legend line of "status · relative time". Active rows are `bg-raised text-legend` with a `rule-strong` inset ring; inactive are `text-dim` hovering to `bg-raised text-legend`. The footer carries three 10px mono links (Agents / Settings / Admin) and the theme toggle.
-- **Settings nav:** the same active/inactive treatment at 13px with a 14px icon, on `bg-chassis` so the nav column reads as chassis behind the panel content.
+- **Session rail:** a nameplate (orange `h` cap, `HORSIE` in mono at `0.16em`, plus the feed's own lamp and word), a mono search field beside a `.key`, a legend-captioned count, then one row per session — lamp, `0.8125rem` title, and a legend line of "status · relative time". Active rows are `bg-raised text-legend` with a `rule-strong` inset ring; inactive are `text-dim` hovering to `bg-raised text-legend`. The footer carries three `0.625rem` mono links (Agents / Settings / Admin) and the theme toggle.
+- **Settings nav:** the same active/inactive treatment at `0.8125rem` with a 14px icon, on `bg-chassis` so the nav column reads as chassis behind the panel content.
+
+### Popovers (`PopoverMenu`)
+A floating `.panel` with `--panel-lift`, `max-h-72` and its own scroll channel, anchored to the trigger's left edge and then **measured back inside its column** — `clipBounds()` intersects the nearest `[data-popover-boundary]` with every clipping ancestor and the viewport, and the menu translates by the smallest correction that clears both edges by 8px. It sits at `z-30`, above the overlaid plan panel.
+
+Three other menus (`SettingsMenu`, `ContextGauge`, the model-id autocomplete in `ModelsSettings`) still hand-roll `absolute right-0` with no measurement. They are known exceptions, not the pattern: each sits hard against the right edge of its own pane, so none clips today. Route the next one through `PopoverMenu`.
+
+**The Fits-The-Pane Rule.** A menu's constraint is the pane, not the viewport. The config keys sit at both ends of a row and their menus run up to 20rem wide, so no single fixed anchor serves both: right-anchoring every icon key threw the left group's menus 20rem leftward, under an opaque session rail that simply ate their left half. Measure; never assume the trigger is at the edge you designed for.
 
 ### Signature: the header strip
-A session header is an instrument face, not a toolbar. Row one is title + `StatusBadge` (lamp and word) + a "Reconnecting" lamp when the feed drops + the display menu, Stop, and Delete. Row two is a row of legend-over-value channels — `TOKENS` with its amber readout, then `MODEL`, `RUNTIME`, and the rest of the locked session config as engraved labels, deliberately not styled as buttons, because a settled channel is a description of the session and not a control.
+A session header is an instrument face, not a toolbar, and it is one row: title + `StatusBadge` (lamp and word) + a "Reconnecting" lamp when the feed drops + the context gauge, the plan key, the display menu and Delete. The session's settled configuration is not here at all — it lives in the config bar above the composer, in the same row you used to set it.
+
+**No badge on a key.** Whether the agent has a plan is the plan key's own colour — lit (`bg-raised`, full-strength ink) when there is one, faint when there is not — never a count stuck in its corner. A `2/5` badge on a 2rem key spills outside the key, stretches with the numbers, and pushes the header row out of line with the rail and task-panel headers it is supposed to match. The figure lives in the tooltip, the accessible name, and the panel one click away.
 
 ### Signature: the transcript
 One stamped gutter down the left (`Agent` / `You` plus the server's own timestamp, never a local clock), and content to its right. Consecutive assistant messages collapse into one entry. Multi-step work collapses into a single legend row — "Ran 2 tools", "Thought and ran 3 tools" — carrying a live lamp while running and a duration when finished; expanding reveals the ordered list against a left rule. Tool calls collapse to one line (chevron, state icon, mono name, truncated input preview) and expand to `INPUT` and `OUTPUT` on recessed screens. Thinking blocks are a legend row that expands to faint mono on a screen.
@@ -395,8 +418,12 @@ One authored gesture: things arrive by settling into the panel, and values cross
 - **Do** use `.page-title` / `.section-title` / `.item-title` for headings; hard-coding a face and size at a call site pins that heading to Console in every skin.
 - **Do** give a new floating surface `shadow-[var(--panel-lift)]` and a new recessed one `var(--screen-inset)`.
 - **Do** give any new column a below-`md` (or below-`lg`, for a third column) collapse — drawer, strip, or overlay — matching the rail, the settings nav, and the task panel.
+- **Do** write every font size in `rem`, so the Text size control moves it with everything around it.
+- **Do** put a new global default inside `@layer base`, so a utility at a call site can still beat it.
 
 ### Don't:
+- **Don't** hang a badge, a count or a dot off the corner of a `.key-icon`. A 2rem key states what it holds by lighting up; the figures go in the tooltip and in whatever the key opens.
+- **Don't** anchor a popover to a fixed side. Anchor it to the trigger and clamp it to its clipping ancestors — an assumption about where the trigger sits is the thing that breaks when the row gains a control.
 - **Don't** put a second `.key-go` on a screen. One orange control commits; secondary is `.key-blank`, inline is `.key-flat`, destructive is `.key-stop` or `.key-danger`.
 - **Don't** use amber for emphasis or red for importance. Amber means *measured and live*; red means *interrupt or destroy*.
 - **Don't** drive syntax highlighting, charts, or any decorative colour from `--orange` or `--amber`. Code has its own `--code-*` palette; anything else needs a new semantic token with a stated meaning.

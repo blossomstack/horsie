@@ -7,11 +7,12 @@
     <meta name="color-scheme" content="dark light" />
     <title>horsie</title>
     <script>
-      // Resolve theme AND skin before first paint. `useTheme` sets the same
-      // two attributes, but it runs after hydration, so a hardcoded default
-      // flashed the wrong instrument at every user whose OS disagreed with it
-      // — and, once skins existed, flashed Console at everyone who had chosen
-      // one of the others.
+      // Resolve theme, skin AND text size before first paint. `useTheme` sets
+      // the same three attributes, but it runs after hydration, so a hardcoded
+      // default flashed the wrong instrument at every user whose OS disagreed
+      // with it — and, once skins existed, flashed Console at everyone who had
+      // chosen one of the others. Text size is worse than a colour flash: it
+      // reflows the whole layout, so it has to be resolved here too.
       (function () {
         try {
           var t = localStorage.getItem("horsie-theme");
@@ -24,6 +25,10 @@
           var k = localStorage.getItem("horsie-skin");
           if (k === "paper" || k === "soft" || k === "slate") {
             document.documentElement.dataset.skin = k;
+          }
+          var z = localStorage.getItem("horsie-text-size");
+          if (z === "compact" || z === "large") {
+            document.documentElement.dataset.textSize = z;
           }
         } catch (e) {
           /* private mode: fall back to the attribute already on <html> */

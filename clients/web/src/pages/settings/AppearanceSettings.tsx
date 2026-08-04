@@ -1,6 +1,12 @@
 import { Check, Monitor, Moon, Sun } from "lucide-react";
 import { SETTINGS, useUiSettings } from "../../hooks/useUiSettings";
-import { SKINS, useTheme, type Skin, type ThemeChoice } from "../../hooks/useTheme";
+import {
+  SKINS,
+  TEXT_SIZES,
+  useTheme,
+  type Skin,
+  type ThemeChoice,
+} from "../../hooks/useTheme";
 import { cn } from "../../lib/cn";
 import { Section, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
@@ -55,7 +61,7 @@ function SkinSwatch({ skin, mode }: { skin: Skin; mode: "light" | "dark" }) {
 /** How the panel looks, and what it shows. Both are per-browser choices — the
  * server has no opinion about either. */
 export function AppearanceSettings() {
-  const { choice, mode, skin, setChoice, setSkin } = useTheme();
+  const { choice, mode, skin, textSize, setChoice, setSkin, setTextSize } = useTheme();
   const { values, toggle } = useUiSettings();
 
   return (
@@ -94,7 +100,7 @@ export function AppearanceSettings() {
                 <span className="flex items-center gap-1.5">
                   {/* Not `.item-title` — that is the mono face for machine
                       strings, and a theme's name is a word, not an id. */}
-                  <span className="text-[13px] font-semibold text-legend">
+                  <span className="text-[0.8125rem] font-semibold text-legend">
                     {s.name}
                   </span>
                   {skin === s.id && (
@@ -135,6 +141,32 @@ export function AppearanceSettings() {
         </Section>
 
         <Section
+          title="Text size"
+          desc="Scales every measurement in the interface, so the spacing grows with the type rather than the type outgrowing its slots."
+        >
+          <div
+            className="flex flex-wrap gap-2"
+            role="radiogroup"
+            aria-label="Text size"
+          >
+            {TEXT_SIZES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="radio"
+                aria-checked={textSize === t.id}
+                onClick={() => setTextSize(t.id)}
+                data-testid={`text-size-option-${t.id}`}
+                title={t.blurb}
+                className={cn("key", textSize === t.id ? "key-go" : "key-blank")}
+              >
+                {t.name}
+              </button>
+            ))}
+          </div>
+        </Section>
+
+        <Section
           title="Transcript"
           desc="What the session view shows. These are display switches, not session settings — they change nothing about how the agent runs."
         >
@@ -162,7 +194,7 @@ export function AppearanceSettings() {
                 {values[def.key] && <Check size={11} strokeWidth={3} />}
               </span>
               <span className="min-w-0">
-                <span className="block text-[13px] text-legend">{def.label}</span>
+                <span className="block text-[0.8125rem] text-legend">{def.label}</span>
                 <span className="mt-0.5 block text-xs leading-snug text-faint">
                   {def.description}
                 </span>

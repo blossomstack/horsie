@@ -62,7 +62,7 @@ export function TaskListPanel({
         <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b px-3">
           <h2 className="legend !text-dim">Plan</h2>
           {tasks.length > 0 && (
-            <span className="readout text-[11px]" data-testid="task-list-progress">
+            <span className="readout text-[0.6875rem]" data-testid="task-list-progress">
               {done}/{tasks.length} done
             </span>
           )}
@@ -91,7 +91,7 @@ export function TaskListPanel({
               <li
                 key={t.id}
                 className={cn(
-                  "flex items-start gap-2 rounded-[var(--radius-chip)] px-1.5 py-1.5 text-[13px] leading-snug",
+                  "flex items-start gap-2 rounded-[var(--radius-chip)] px-1.5 py-1.5 text-[0.8125rem] leading-snug",
                   t.status === TaskStatus.InProgress && "bg-raised",
                 )}
                 data-testid="task-list-item"

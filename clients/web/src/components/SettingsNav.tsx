@@ -34,7 +34,7 @@ export function SettingsNav({
             }}
             className={({ isActive }) =>
               cn(
-                "flex shrink-0 items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-2 text-[13px] transition-colors md:gap-2.5",
+                "flex shrink-0 items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-2 text-[0.8125rem] transition-colors md:gap-2.5",
                 isActive
                   ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
                   : "text-dim hover:bg-raised hover:text-legend",

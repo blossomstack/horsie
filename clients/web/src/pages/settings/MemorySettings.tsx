@@ -64,7 +64,7 @@ export function MemorySettings() {
 
             <div className="grid grid-cols-[1fr_auto] gap-3">
               <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold text-dim">
+                <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
                   New space
                 </span>
                 <input
@@ -201,7 +201,11 @@ function SpaceRow({
     <div
       className={cn(
         "flex items-center gap-3 rounded-[var(--radius-control)] border p-3",
-        active && "border-amber",
+        // Selection is a step in value, like every other selected row in the
+        // build. Amber is reserved for a measured, live value — this row is
+        // neither, and it only ever looked grey because a `border-color`
+        // utility could not win the cascade.
+        active && "border-rule-strong",
       )}
       style={{ background: "var(--panel-raised)" }}
     >
@@ -216,7 +220,7 @@ function SpaceRow({
         {space.description && (
           <p className="mt-0.5 text-xs text-dim">{space.description}</p>
         )}
-        <p className="mt-0.5 text-[11px] text-faint">
+        <p className="mt-0.5 text-[0.6875rem] text-faint">
           {space.memoryCount} {space.memoryCount === 1 ? "memory" : "memories"}
         </p>
       </button>
@@ -269,7 +273,7 @@ function NewMemoryForm({
     >
       <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-3">
         <label className="block">
-          <span className="mb-1 block text-[11px] font-semibold text-dim">
+          <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
             Name
           </span>
           <input
@@ -283,7 +287,7 @@ function NewMemoryForm({
           />
         </label>
         <label className="block">
-          <span className="mb-1 block text-[11px] font-semibold text-dim">
+          <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
             Description (one line, shown to the agent)
           </span>
           <input
@@ -295,7 +299,7 @@ function NewMemoryForm({
         </label>
       </div>
       <label className="mt-3 block">
-        <span className="mb-1 block text-[11px] font-semibold text-dim">
+        <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
           Content
         </span>
         <textarea
@@ -393,7 +397,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
       {open && (
         <div className="mt-3 border-t pt-3">
           <label className="block">
-            <span className="mb-1 block text-[11px] font-semibold text-dim">
+            <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
               Description
             </span>
             <input
@@ -403,7 +407,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
             />
           </label>
           <label className="mt-3 block">
-            <span className="mb-1 block text-[11px] font-semibold text-dim">
+            <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
               Content
             </span>
             <textarea

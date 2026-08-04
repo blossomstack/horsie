@@ -55,7 +55,7 @@ export function AgentsPage() {
                 <span className="text-legend">New agent</span> to define one,
                 then invoke it from any machine:
               </p>
-              <pre className="screen mt-3 overflow-x-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed text-legend select-all">
+              <pre className="screen mt-3 overflow-x-auto px-3 py-2.5 font-mono text-[0.6875rem] leading-relaxed text-legend select-all">
                 horsie agent invoke &lt;name&gt; -m "…"
               </pre>
             </section>
