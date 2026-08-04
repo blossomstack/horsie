@@ -1,5 +1,3 @@
--- PostgreSQL mirror of migrations/sqlite/0019_workflows.sql.
---
 -- Workflows: a named graph of steps, each step an agent preset plus a fixed
 -- prompt, wired by conditions over the step's structured output.
 --
@@ -13,9 +11,9 @@
 -- reference is validated by the service at save, which is where a useful error
 -- message naming the offending step can be produced.
 --
--- Numbered 0019, skipping 0018: that number is taken by the in-flight branch
--- that drops `agents.vendor`, and two migrations sharing a number is how main
--- went red once already.
+-- Numbered 0020: 0018 dropped `agents.vendor` and 0019 added environments,
+-- both of which landed while this was in flight. Two migrations sharing a
+-- number is how main went red once already.
 
 CREATE TABLE workflows (
     name        TEXT PRIMARY KEY,
