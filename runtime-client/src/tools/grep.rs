@@ -36,7 +36,7 @@ impl Tool for GrepTool {
             }),
         }
     }
-    async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
         let pattern = input["pattern"]
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'pattern'".into()))?
@@ -45,12 +45,15 @@ impl Tool for GrepTool {
         let file_pattern = input["file_pattern"].as_str().map(|s| s.to_string());
         let max_results = input["max_results"].as_u64();
         self.client
-            .invoke(ToolCall::Grep(GrepInput {
-                pattern,
-                path,
-                file_pattern,
-                max_results,
-            }))
+            .invoke(
+                tool_call_id,
+                ToolCall::Grep(GrepInput {
+                    pattern,
+                    path,
+                    file_pattern,
+                    max_results,
+                }),
+            )
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)

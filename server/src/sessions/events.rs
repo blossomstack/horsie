@@ -8,7 +8,7 @@
 
 use crate::sessions::AgentFrame;
 use async_trait::async_trait;
-use horsie_agentcore::{AgentEvent, EventSink, EventSinkError, Message};
+use horsie_agentcore::{AgentEvent, EventSink, EventSinkError, HistoryEntry, Message};
 use horsie_models::session::{
     AgentStreamEvent, AppendedEvent, DeltaEvent, ResyncEvent, TaskItem, TaskListEvent,
     TaskStatus as WireTaskStatus, ToolStartEvent, TurnCompletedEvent,
@@ -81,8 +81,8 @@ impl AgentObserver for BroadcastObserver {
 
 /// Map one durable agent event onto its broadcast frame (`None` = not surfaced).
 ///
-/// The three transcript-bearing events all become `Appended`, mirroring
-/// `AgentActor::apply_event`, which pushes exactly one message for each — that
+/// The transcript-bearing events all become `Appended`, mirroring
+/// `AgentActor::apply_event`, which pushes exactly one entry for each — that
 /// correspondence is what lets a client accumulate appends and get the same
 /// transcript `/history` would hand it.
 fn agent_frame(event: &AgentDomainEvent) -> Option<AgentFrame> {
@@ -91,7 +91,9 @@ fn agent_frame(event: &AgentDomainEvent) -> Option<AgentFrame> {
         | AgentDomainEvent::MessageComplete { message } => {
             let mut message = message.clone();
             crate::wire_redact::strip_message_signature(&mut message);
-            Some(AgentFrame::Appended { message })
+            Some(AgentFrame::Appended {
+                entry: HistoryEntry::Llm(message),
+            })
         }
         AgentDomainEvent::ToolComplete {
             tool_call_id,
@@ -99,7 +101,19 @@ fn agent_frame(event: &AgentDomainEvent) -> Option<AgentFrame> {
             is_error,
             at_ms,
         } => Some(AgentFrame::Appended {
-            message: Message::tool_result(tool_call_id, output, *is_error, *at_ms),
+            entry: HistoryEntry::Llm(Message::tool_result(
+                tool_call_id,
+                output,
+                *is_error,
+                *at_ms,
+            )),
+        }),
+        // A hook record is a transcript append like any other, which is what
+        // makes the live stream and `/history` one design rather than two: a
+        // client that accumulates appends ends up with the same transcript a
+        // reload would fetch, hook rows included.
+        AgentDomainEvent::HookRan { record, seq, at_ms } => Some(AgentFrame::Appended {
+            entry: HistoryEntry::Hook(horsie_workflow::hook_entry(record.clone(), *seq, *at_ms)),
         }),
         AgentDomainEvent::RunComplete {
             usage,
@@ -125,7 +139,7 @@ fn agent_frame(event: &AgentDomainEvent) -> Option<AgentFrame> {
 /// Map a broadcast frame onto the wire shape the agent stream sends.
 pub(crate) fn wire_agent_frame(frame: AgentFrame) -> AgentStreamEvent {
     match frame {
-        AgentFrame::Appended { message } => AgentStreamEvent::Appended(AppendedEvent { message }),
+        AgentFrame::Appended { entry } => AgentStreamEvent::Appended(AppendedEvent { entry }),
         AgentFrame::Delta { text } => AgentStreamEvent::Delta(DeltaEvent { text }),
         AgentFrame::ToolStart { tool_call_id, name } => {
             AgentStreamEvent::ToolStart(ToolStartEvent { tool_call_id, name })
@@ -217,7 +231,7 @@ mod tests {
         match agent_frame(&AgentDomainEvent::InputMessage {
             message: msg.clone(),
         }) {
-            Some(AgentFrame::Appended { message }) => assert_eq!(message.id, "m1"),
+            Some(AgentFrame::Appended { entry }) => assert_eq!(entry.id(), "m1"),
             other => panic!("expected Appended, got {other:?}"),
         }
         // A tool result is an append too — reconstructed exactly as the fold
@@ -228,7 +242,9 @@ mod tests {
             output: "ok".into(),
             is_error: false,
         }) {
-            Some(AgentFrame::Appended { message }) => {
+            Some(AgentFrame::Appended {
+                entry: HistoryEntry::Llm(message),
+            }) => {
                 assert_eq!(message.id, "result:tc");
                 assert_eq!(message.created_at_ms, 7);
             }
@@ -255,6 +271,44 @@ mod tests {
         }
     }
 
+    /// A hook record is an append, so a client watching live ends up with the
+    /// same transcript a reload would fetch. The id must match what the fold
+    /// derives, or the stream and `/history` disagree on the cursor.
+    #[test]
+    fn a_hook_record_is_an_append_with_the_id_the_fold_derives() {
+        let record = horsie_models::runtime::HookRecord {
+            plugin: "guard".into(),
+            event: "PreToolUse".into(),
+            tool: "bash".into(),
+            tool_call_id: "tc1".into(),
+            duration_ms: 4,
+            blocked: true,
+            reason: Some("not allowed".into()),
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        };
+        match agent_frame(&AgentDomainEvent::HookRan {
+            record: record.clone(),
+            seq: 1,
+            at_ms: 42,
+        }) {
+            Some(AgentFrame::Appended {
+                entry: HistoryEntry::Hook(hook),
+            }) => {
+                assert_eq!(hook.id, "hook:tc1:1");
+                assert_eq!(hook.created_at_ms, 42);
+                assert_eq!(hook.record.plugin, "guard");
+                assert!(hook.record.blocked);
+            }
+            other => panic!("expected a hook append, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_transcript_message_carries_its_own_stamps() {
         // `/history` is answered from agent state, so the stamps must live on
@@ -262,7 +316,9 @@ mod tests {
         let mut message = horsie_models::agent::Message::user("m1", "hello", 1_700_000_000_001);
         message.started_at_ms = Some(1_700_000_000_000);
         match agent_frame(&AgentDomainEvent::MessageComplete { message }) {
-            Some(AgentFrame::Appended { message }) => {
+            Some(AgentFrame::Appended {
+                entry: HistoryEntry::Llm(message),
+            }) => {
                 assert_eq!(message.created_at_ms, 1_700_000_000_001);
                 assert_eq!(message.started_at_ms, Some(1_700_000_000_000));
             }
@@ -316,7 +372,9 @@ mod tests {
         let frame = agent_frame(&AgentDomainEvent::MessageComplete { message })
             .expect("MessageComplete should surface");
         match frame {
-            AgentFrame::Appended { message } => match &message.parts[0] {
+            AgentFrame::Appended {
+                entry: HistoryEntry::Llm(message),
+            } => match &message.parts[0] {
                 ContentPart::Thinking(th) => {
                     assert_eq!(th.signature, None);
                     assert_eq!(th.text, "reasoning");

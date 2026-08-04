@@ -18,7 +18,8 @@ mod workspace;
 
 pub use agent_actor::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentHistoryPage, AgentObserver, AgentParams,
-    AgentState, AgentStateView, AgentUsageSnapshot, HistoryQuery, UsageTotal,
+    AgentState, AgentStateView, AgentUsageSnapshot, HistoryQuery, UsageTotal, hook_entry,
+    hook_entry_id,
 };
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL, ContextError,

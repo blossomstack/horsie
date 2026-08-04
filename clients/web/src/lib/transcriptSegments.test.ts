@@ -8,7 +8,7 @@ import type {
 } from "../hooks/useSessionStream";
 
 function tool(id: string, endedAtMs?: number): RenderedToolCall {
-  return { id, name: "read_file", input: {}, running: false, endedAtMs };
+  return { id, name: "read_file", input: {}, running: false, endedAtMs, hooks: [] };
 }
 
 function assistant(m: Partial<RenderedMessage> & { id: string }): RenderedMessage {

@@ -73,13 +73,18 @@ impl Toolbox for AskUserToolbox {
         specs
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         if name == ASK_USER_TOOL {
             return Err(ToolCallError::ExecutionFailed(
                 "the ask_user tool is terminal and is not executed".to_string(),
             ));
         }
-        self.inner.execute(name, input).await
+        self.inner.execute(name, input, tool_call_id).await
     }
 }
 
@@ -101,7 +106,12 @@ mod tests {
             vec![]
         }
 
-        async fn execute(&self, name: &str, _input: Value) -> Result<Value, ToolCallError> {
+        async fn execute(
+            &self,
+            name: &str,
+            _input: Value,
+            _tool_call_id: &str,
+        ) -> Result<Value, ToolCallError> {
             Err(ToolCallError::InvalidInput(format!(
                 "no tool named '{name}'"
             )))
@@ -154,14 +164,17 @@ mod tests {
     #[tokio::test]
     async fn ask_user_is_not_executable() {
         let tb = AskUserToolbox::new(Arc::new(EmptyToolbox));
-        let err = tb.execute(ASK_USER_TOOL, json!({})).await.unwrap_err();
+        let err = tb
+            .execute(ASK_USER_TOOL, json!({}), "tc1")
+            .await
+            .unwrap_err();
         assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
     }
 
     #[tokio::test]
     async fn delegates_other_calls_to_inner() {
         let tb = AskUserToolbox::new(Arc::new(EmptyToolbox));
-        let err = tb.execute("bash", json!({})).await.unwrap_err();
+        let err = tb.execute("bash", json!({}), "tc1").await.unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
     }
 }

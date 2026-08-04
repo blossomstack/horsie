@@ -130,7 +130,53 @@ struct ToolError  { reason: String }
 #[type_tag = "status"]
 union ToolResult { Ok(ToolOutput), Err(ToolError) }
 
-struct ToolCallResponse { call_id: String, result: ToolResult }
+/// What one plugin hook did to one tool call.
+///
+/// Hooks run runtime-side, inline with the call they guard, so this rides the
+/// tool response rather than costing a round-trip of its own. Every hook that
+/// runs is reported — including one that changed nothing — because "a guard ran
+/// and allowed this" is as much a part of the audit trail as an intervention.
+/// The server journals these, so the user can see what a plugin changed.
+struct HookRecord {
+    /// The plugin that declared the hook, the event it ran for, and the tool
+    /// call it guarded. Self-contained so a journalled record needs no context
+    /// to render.
+    plugin: String,
+    event: String,
+    tool: String,
+    /// The call this record describes. The join key: without it a record cannot
+    /// be attached to the tool call it changed.
+    tool_call_id: String,
+    /// Wall-clock, so a hook slowing every tool call is visible.
+    duration_ms: u64,
+    /// The hook refused the call: exit 2, `decision: "block"`, or
+    /// `permissionDecision: "deny"`.
+    blocked: bool,
+    reason: Option<String>,
+    /// The hook could not be run to completion — spawn failure, timeout, or a
+    /// non-zero exit other than 2. Distinct from `blocked`: one is a decision,
+    /// the other an outage, and only `PreToolUse` denies on both.
+    failed: bool,
+    /// Set only when the hook rewrote the call's arguments, so the UI can show
+    /// what the agent asked for next to what actually ran. Clamped.
+    input_before: Option<String>,
+    input_after: Option<String>,
+    /// Set only when the hook rewrote the result the model sees. Clamped.
+    output_before: Option<String>,
+    output_after: Option<String>,
+    /// Injected into the model's view of the result.
+    additional_context: Option<String>,
+    /// Addressed to the user, not the model.
+    system_message: Option<String>,
+}
+
+struct ToolCallResponse {
+    call_id: String,
+    result: ToolResult,
+    /// Every hook that ran for this call, in execution order. Empty for the
+    /// overwhelmingly common case of a session with no matching hooks.
+    hooks: Vec<HookRecord>,
+}
 
 /// First message the runtime sends after connecting.
 struct RuntimeReady { runtime_id: String }

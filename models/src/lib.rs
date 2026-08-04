@@ -1,4 +1,12 @@
-#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+// `large_enum_variant`: `HistoryEntry::Hook` carries a whole `HookRecord` (a
+// dozen optional strings) and dwarfs `Llm(Message)`. Both types are
+// fluorite-generated, so boxing the variant isn't available here, and a
+// transcript entry is moved once per append — not on a hot path.
+#[allow(
+    clippy::doc_markdown,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant
+)]
 pub mod agent {
     include!(concat!(env!("OUT_DIR"), "/agent/mod.rs"));
 
@@ -17,6 +25,32 @@ pub mod agent {
                 output_tokens,
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
+            }
+        }
+    }
+
+    impl HistoryEntry {
+        /// This entry's cursor id — the same space `/history` pages with and the
+        /// SSE stream uses as its event id, whichever kind of entry it is.
+        ///
+        /// The two id spaces are disjoint by construction: a `Message` id is a
+        /// provider id or `result:{tool_call_id}`, a hook id is
+        /// `hook:{tool_call_id}:{n}`. That is what lets one lookup over the
+        /// transcript stay unambiguous.
+        #[must_use]
+        pub fn id(&self) -> &str {
+            match self {
+                Self::Llm(m) => &m.id,
+                Self::Hook(h) => &h.id,
+            }
+        }
+
+        /// When this entry joined the transcript.
+        #[must_use]
+        pub fn created_at_ms(&self) -> u64 {
+            match self {
+                Self::Llm(m) => m.created_at_ms,
+                Self::Hook(h) => h.created_at_ms,
             }
         }
     }
@@ -61,7 +95,13 @@ pub mod workflow {
 // (workflow + caps + hackamore policy) and is intrinsically larger than the other
 // control variants. The enum is fluorite-generated, so boxing the variant isn't
 // available here; the size is acceptable for a one-shot control message.
-#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+// `large_enum_variant` here too: `AgentStreamEvent::Appended` carries a
+// `HistoryEntry`, so it inherits the imbalance described above.
+#[allow(
+    clippy::doc_markdown,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant
+)]
 pub mod session {
     include!(concat!(env!("OUT_DIR"), "/session/mod.rs"));
 }

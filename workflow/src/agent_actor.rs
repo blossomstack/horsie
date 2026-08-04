@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
-    EventSinkError, HandoffCall, LlmProvider, Message, Role, Toolbox, Usage,
+    EventSinkError, HandoffCall, HistoryEntry, LlmProvider, Message, Role, Toolbox, Usage,
 };
 use horsie_models::now_ms;
 use serde::{Deserialize, Serialize};
@@ -118,6 +118,12 @@ pub enum AgentCommand {
         events: Vec<AgentDomainEvent>,
         ack: tokio::sync::oneshot::Sender<Result<(), horsie_actor::JournalError>>,
     },
+    /// Plugin hooks ran against one of this agent's tool calls. A `tell` with no
+    /// ack: nothing waits on an audit trail, and recording what a hook did must
+    /// never be able to slow the call it describes.
+    HooksRan {
+        records: Vec<horsie_models::runtime::HookRecord>,
+    },
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
     /// Arm a timer; replies with the new timer id once recorded.
@@ -195,12 +201,24 @@ pub struct HistoryQuery {
 /// page means exactly one thing regardless of which cursor produced it.
 #[derive(Debug, Clone)]
 pub struct AgentHistoryPage {
-    pub messages: Vec<Message>,
+    pub entries: Vec<HistoryEntry>,
     /// Whether older messages exist before the returned window.
     pub has_more_before: bool,
     /// Whether newer messages exist after the returned window — how a forward
     /// backfill learns it must ask for another page.
     pub has_more_after: bool,
+}
+
+impl AgentHistoryPage {
+    /// Just the LLM messages in this window, for callers that reason about the
+    /// conversation rather than the transcript. Non-model entries are skipped,
+    /// so a page of `n` entries may yield fewer than `n` messages.
+    pub fn messages(&self) -> impl Iterator<Item = &Message> {
+        self.entries.iter().filter_map(|e| match e {
+            HistoryEntry::Llm(m) => Some(m),
+            HistoryEntry::Hook(_) => None,
+        })
+    }
 }
 
 /// Coarse events that alter persisted agent state. Streaming observation events
@@ -221,6 +239,19 @@ pub enum AgentDomainEvent {
         /// this variant rebuilds its `Message` in `apply_event`, so a recovered
         /// transcript would otherwise stamp every past tool result with the
         /// moment of recovery.
+        at_ms: u64,
+    },
+    /// A plugin hook ran against a tool call this agent made. Journaled beside
+    /// the call's own `ToolComplete` because a hook changes what the agent did,
+    /// and that must be auditable rather than invisible.
+    HookRan {
+        record: horsie_models::runtime::HookRecord,
+        /// How many records were already recorded against this same tool call.
+        /// Journaled rather than recomputed at fold time so the id is a fact of
+        /// the log: the live broadcast derives the entry from the event alone
+        /// and would otherwise have to guess, giving the stream different
+        /// cursors than `/history` for a call with more than one hook.
+        seq: usize,
         at_ms: u64,
     },
     RunComplete {
@@ -269,13 +300,23 @@ pub enum AgentDomainEvent {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentState {
+    /// The transcript: everything the user sees, whether or not the model saw
+    /// it. Read [`Self::prompt_messages`] to get what goes to a provider — this
+    /// field deliberately cannot be handed to one.
+    ///
     /// Every field here carries `#[serde(default)]`, including this one: state is
     /// snapshotted, so it is a durability contract. A field that fails to
     /// deserialize takes down `recover()` for every existing session — the way
     /// renamed event variants did on 2026-08-02. Add optional fields; never
     /// rename or repurpose one.
+    ///
+    /// This one *was* renamed, from `messages: Vec<Message>`, when the element
+    /// type became a union. Renaming rather than retyping in place is
+    /// deliberate: serde ignores the now-unknown `messages` key and defaults
+    /// this to empty, so a pre-change snapshot yields an empty transcript
+    /// instead of failing `recover()` and taking the supervisor down with it.
     #[serde(default)]
-    pub messages: Vec<Message>,
+    pub history: Vec<HistoryEntry>,
     /// Active timers — durable so they re-arm on recovery and back `list`/`cancel`.
     #[serde(default)]
     pub timers: Vec<crate::timers::TimerRecord>,
@@ -387,7 +428,64 @@ pub struct AgentStateView {
     pub context_tokens: u32,
 }
 
+/// Build the transcript entry for one hook record.
+///
+/// The id is derived, never generated: `hook:{tool_call_id}:{n}` where `n` counts
+/// the records already recorded against that same call. Journal replay therefore
+/// reproduces the ids it produced live, which a uuid could not — and a recovered
+/// transcript must page with the same cursors as the one it replaced.
+pub fn hook_entry(
+    record: horsie_models::runtime::HookRecord,
+    seq: usize,
+    at_ms: u64,
+) -> horsie_agentcore::HookEntry {
+    horsie_agentcore::HookEntry {
+        id: hook_entry_id(&record.tool_call_id, seq),
+        created_at_ms: at_ms,
+        record,
+    }
+}
+
+/// The cursor id of the `seq`-th hook record against `tool_call_id`.
+///
+/// One function, two callers — the fold and the live broadcast — because the
+/// stream and `/history` must name the same entry the same way.
+#[must_use]
+pub fn hook_entry_id(tool_call_id: &str, seq: usize) -> String {
+    format!("hook:{tool_call_id}:{seq}")
+}
+
 impl AgentState {
+    /// How many hook records this transcript already holds for `tool_call_id`.
+    /// The next one's `seq`.
+    #[must_use]
+    pub fn hook_records_for(&self, tool_call_id: &str) -> usize {
+        self.history
+            .iter()
+            .filter(|e| match e {
+                HistoryEntry::Hook(h) => h.record.tool_call_id == tool_call_id,
+                HistoryEntry::Llm(_) => false,
+            })
+            .count()
+    }
+
+    /// What the model is allowed to see: the transcript with every non-LLM entry
+    /// dropped.
+    ///
+    /// The only way to obtain a `Vec<Message>` from state. `self.history` cannot
+    /// be handed to a provider because the element types differ, so a hook record
+    /// leaking into a prompt is a compile error rather than a review rule — and
+    /// any future non-model entry inherits that for free.
+    pub fn prompt_messages(&self) -> Vec<Message> {
+        self.history
+            .iter()
+            .filter_map(|e| match e {
+                HistoryEntry::Llm(m) => Some(m.clone()),
+                HistoryEntry::Hook(_) => None,
+            })
+            .collect()
+    }
+
     /// This agent's current values, for the agent document.
     pub fn state_view(&self) -> AgentStateView {
         AgentStateView {
@@ -412,8 +510,8 @@ impl AgentState {
     /// unresolvable `before` falls back to the tail, preserving the existing
     /// scroll-back behaviour.
     pub fn history_page(&self, query: &HistoryQuery) -> AgentHistoryPage {
-        let len = self.messages.len();
-        let position = |id: &String| self.messages.iter().position(|m| &m.id == id);
+        let len = self.history.len();
+        let position = |id: &String| self.history.iter().position(|e| e.id() == id.as_str());
         let (start, end) = match (&query.after, &query.before) {
             (Some(id), _) => match position(id) {
                 Some(pos) => {
@@ -425,7 +523,7 @@ impl AgentState {
                 // never asked for.
                 None => {
                     return AgentHistoryPage {
-                        messages: Vec::new(),
+                        entries: Vec::new(),
                         has_more_before: false,
                         has_more_after: false,
                     };
@@ -438,7 +536,7 @@ impl AgentState {
             (None, None) => (len.saturating_sub(query.limit), len),
         };
         AgentHistoryPage {
-            messages: self.messages[start..end].to_vec(),
+            entries: self.history[start..end].to_vec(),
             has_more_before: start > 0,
             has_more_after: end < len,
         }
@@ -830,7 +928,7 @@ impl AgentActor {
                 // journal is then a faithful record of what the model was shown,
                 // and a mid-history dangle can no longer accumulate.
                 let mut events: Vec<AgentDomainEvent> =
-                    missing_tool_results(&state.messages, &self.params.handoff_tools())
+                    missing_tool_results(&state.prompt_messages(), &self.params.handoff_tools())
                         .into_iter()
                         .map(|message| AgentDomainEvent::InputMessage { message })
                         .collect();
@@ -933,7 +1031,7 @@ impl AgentActor {
             let input_event = AgentDomainEvent::InputMessage {
                 message: wake.to_message(now_ms()),
             };
-            self.start_run(wake, ctx, state.messages.clone());
+            self.start_run(wake, ctx, state.prompt_messages());
             return CommandEffect::persist(vec![input_event]);
         }
         parent.deliver(AgentOutcome::Parked { session_id }).await;
@@ -987,7 +1085,7 @@ impl AgentActor {
         let input_event = AgentDomainEvent::InputMessage {
             message: wake.to_message(now_ms()),
         };
-        self.start_run(wake, ctx, state.messages.clone());
+        self.start_run(wake, ctx, state.prompt_messages());
         CommandEffect::persist(vec![fired, input_event])
     }
 }
@@ -1071,17 +1169,27 @@ impl EventSourcedActor for AgentActor {
             AgentDomainEvent::InputMessage { message } => {
                 // A new turn began — the agent is no longer parked.
                 state.parked = false;
-                state.messages.push(message);
+                state.history.push(HistoryEntry::Llm(message));
             }
-            AgentDomainEvent::MessageComplete { message } => state.messages.push(message),
+            AgentDomainEvent::MessageComplete { message } => {
+                state.history.push(HistoryEntry::Llm(message));
+            }
+            AgentDomainEvent::HookRan { record, seq, at_ms } => {
+                state
+                    .history
+                    .push(HistoryEntry::Hook(hook_entry(record, seq, at_ms)));
+            }
             AgentDomainEvent::ToolComplete {
                 tool_call_id,
                 output,
                 is_error,
                 at_ms,
-            } => state
-                .messages
-                .push(Message::tool_result(tool_call_id, output, is_error, at_ms)),
+            } => state.history.push(HistoryEntry::Llm(Message::tool_result(
+                tool_call_id,
+                output,
+                is_error,
+                at_ms,
+            ))),
             AgentDomainEvent::TimerArmed { record, .. } => state.timers.push(record),
             AgentDomainEvent::TimerCancelled { ids, .. } => {
                 state.timers.retain(|t| !ids.contains(&t.id));
@@ -1142,7 +1250,7 @@ impl EventSourcedActor for AgentActor {
                 // mid-turn crash may carry dangling tool calls (a no-op when
                 // well-formed).
                 let mut history =
-                    repair_unanswered_tool_calls_except(state.messages.clone(), &answering);
+                    repair_unanswered_tool_calls_except(state.prompt_messages(), &answering);
 
                 // Results that precede a user message belong to the history, not
                 // to the input: the turn is started by what the user said.
@@ -1171,6 +1279,25 @@ impl EventSourcedActor for AgentActor {
                     message: agent_input.to_message(now_ms()),
                 });
                 self.start_run(agent_input, ctx, history);
+                CommandEffect::persist(events)
+            }
+            AgentCommand::HooksRan { records } => {
+                let at_ms = now_ms();
+                // Counted here, against the state as it stands, and then carried
+                // on the event — a batch may hold several records for one call,
+                // so the running count has to advance within the batch too.
+                let mut seen = std::collections::HashMap::<String, usize>::new();
+                let events = records
+                    .into_iter()
+                    .map(|record| {
+                        let next = seen
+                            .entry(record.tool_call_id.clone())
+                            .or_insert_with(|| state.hook_records_for(&record.tool_call_id));
+                        let seq = *next;
+                        *next += 1;
+                        AgentDomainEvent::HookRan { record, seq, at_ms }
+                    })
+                    .collect();
                 CommandEffect::persist(events)
             }
             AgentCommand::PersistProgress { events, ack } => {
@@ -1316,7 +1443,7 @@ impl EventSourcedActor for AgentActor {
         // Record the repair once, here, where it still belongs at the end of the
         // transcript — recomputing it per turn instead is what let it drift into
         // the middle of a history nobody could then repair in place.
-        let repairs = missing_tool_results(&state.messages, &self.params.handoff_tools());
+        let repairs = missing_tool_results(&state.prompt_messages(), &self.params.handoff_tools());
         if !repairs.is_empty() {
             let (ack, _) = tokio::sync::oneshot::channel();
             let _ = ctx
@@ -1339,10 +1466,10 @@ impl EventSourcedActor for AgentActor {
         if state.parked {
             return;
         }
-        if state.messages.is_empty() {
+        if state.history.is_empty() {
             return;
         }
-        let history = repair_unanswered_tool_calls(state.messages.clone());
+        let history = repair_unanswered_tool_calls(state.prompt_messages());
         self.start_run(
             AgentInput::user_message(new_message_id(), "continue the interrupted task"),
             ctx,
@@ -1388,6 +1515,7 @@ impl Toolbox for TimerToolbox {
         &self,
         name: &str,
         input: Value,
+        tool_call_id: &str,
     ) -> Result<Value, horsie_agentcore::ToolCallError> {
         use crate::timers::{CancelSelector, TimerId, TimerKind};
         use horsie_agentcore::ToolCallError;
@@ -1466,7 +1594,7 @@ impl Toolbox for TimerToolbox {
                 let ids: Vec<String> = ids.into_iter().map(|i| i.0).collect();
                 Ok(serde_json::json!({ "cancelled": ids }))
             }
-            _ => self.inner.execute(name, input).await,
+            _ => self.inner.execute(name, input, tool_call_id).await,
         }
     }
 }
@@ -1492,10 +1620,11 @@ impl Toolbox for TaskListToolbox {
         &self,
         name: &str,
         input: Value,
+        tool_call_id: &str,
     ) -> Result<Value, horsie_agentcore::ToolCallError> {
         use horsie_agentcore::ToolCallError;
         if name != crate::task_list::TASK_LIST_TOOL {
-            return self.inner.execute(name, input).await;
+            return self.inner.execute(name, input, tool_call_id).await;
         }
         let action = crate::task_list::TaskListAction::from_input(&input)?;
         let result = self
@@ -2053,7 +2182,7 @@ mod tests {
                 self.seen
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((label, state.messages.len()));
+                    .push((label, state.history.len()));
             }
         }
 
@@ -2130,10 +2259,10 @@ mod tests {
         };
         let first = fold();
         let second = fold();
-        assert_eq!(first.messages[0].created_at_ms, 1_700_000_000_123);
+        assert_eq!(first.history[0].created_at_ms(), 1_700_000_000_123);
         assert_eq!(
-            first.messages[0].created_at_ms,
-            second.messages[0].created_at_ms
+            first.history[0].created_at_ms(),
+            second.history[0].created_at_ms()
         );
     }
 
@@ -2165,6 +2294,170 @@ mod tests {
         ))
         .expect("RunComplete is journaled");
         assert!(matches!(run, AgentDomainEvent::RunComplete { at_ms, .. } if at_ms == 99));
+    }
+
+    fn hook_record(plugin: &str, call: &str) -> horsie_models::runtime::HookRecord {
+        horsie_models::runtime::HookRecord {
+            plugin: plugin.to_string(),
+            event: "PreToolUse".to_string(),
+            tool: "bash".to_string(),
+            tool_call_id: call.to_string(),
+            duration_ms: 3,
+            blocked: true,
+            reason: Some("not allowed".to_string()),
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        }
+    }
+
+    fn with_hook(state: AgentState, plugin: &str, call: &str, seq: usize) -> AgentState {
+        AgentActor::apply_event(
+            state,
+            AgentDomainEvent::HookRan {
+                record: hook_record(plugin, call),
+                seq,
+                at_ms: 5,
+            },
+        )
+    }
+
+    /// The whole point of the union: a hook record is in the transcript the user
+    /// reads and absent from the one the model is sent. If this ever passes a
+    /// hook to a provider it costs tokens on every call and ships a shape no
+    /// provider has an arm for.
+    #[test]
+    fn a_hook_entry_is_never_offered_to_the_model() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("hello"),
+            },
+        );
+        state = with_hook(state, "guard", "tc1", 0);
+
+        assert_eq!(state.history.len(), 2, "both entries are in the transcript");
+        let prompt = state.prompt_messages();
+        assert_eq!(prompt.len(), 1, "only the user message reaches the model");
+        assert_eq!(prompt[0].role, Role::User);
+    }
+
+    /// The id is a function of the record and its index, never of the clock or a
+    /// uuid — so replaying the journal reproduces the cursors the live stream
+    /// already handed out.
+    #[test]
+    fn hook_entry_ids_are_derived_and_stable_per_call() {
+        let mut state = AgentActor::initial_state();
+        state = with_hook(state, "guard", "tc1", 0);
+        state = with_hook(state, "linter", "tc1", 1);
+        state = with_hook(state, "guard", "tc2", 0);
+
+        let ids: Vec<&str> = state.history.iter().map(HistoryEntry::id).collect();
+        assert_eq!(ids, vec!["hook:tc1:0", "hook:tc1:1", "hook:tc2:0"]);
+    }
+
+    /// `seq` is what the fold and the live broadcast agree on. Counting it from
+    /// state at fold time instead would give a replayed transcript different
+    /// ids than the stream, and a client's cursor would stop resolving.
+    #[test]
+    fn the_next_seq_counts_only_that_calls_records() {
+        let mut state = AgentActor::initial_state();
+        state = with_hook(state, "guard", "tc1", 0);
+        state = with_hook(state, "linter", "tc1", 1);
+        state = with_hook(state, "guard", "tc2", 0);
+
+        assert_eq!(state.hook_records_for("tc1"), 2);
+        assert_eq!(state.hook_records_for("tc2"), 1);
+        assert_eq!(state.hook_records_for("tc-none"), 0);
+    }
+
+    /// A page is a window over the transcript, hook entries included, and the
+    /// cursor resolves against either kind — otherwise scroll-back would skip
+    /// or stall on a hook row.
+    #[test]
+    fn history_pages_across_mixed_entries() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("hello"),
+            },
+        );
+        state = with_hook(state, "guard", "tc1", 0);
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::ToolComplete {
+                tool_call_id: "tc1".into(),
+                output: "denied".into(),
+                is_error: true,
+                at_ms: 9,
+            },
+        );
+
+        let tail = state.history_page(&HistoryQuery {
+            before: None,
+            after: None,
+            limit: 2,
+        });
+        assert_eq!(page_ids(&tail), vec!["hook:tc1:0", "result:tc1"]);
+        assert!(tail.has_more_before, "the user message is still owed");
+
+        // The cursor resolves against a hook entry, not just a message.
+        let forward = state.history_page(&HistoryQuery {
+            before: None,
+            after: Some("hook:tc1:0".to_string()),
+            limit: 10,
+        });
+        assert_eq!(page_ids(&forward), vec!["result:tc1"]);
+
+        let back = state.history_page(&HistoryQuery {
+            before: Some("hook:tc1:0".to_string()),
+            after: None,
+            limit: 10,
+        });
+        assert_eq!(page_ids(&back), vec!["u"]);
+    }
+
+    /// State is snapshotted, so a mixed transcript has to survive a round trip
+    /// through serde or recovery loses every hook record it ever wrote.
+    #[test]
+    fn a_mixed_transcript_survives_a_snapshot_round_trip() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("hello"),
+            },
+        );
+        state = with_hook(state, "guard", "tc1", 0);
+
+        let json = serde_json::to_string(&state).unwrap();
+        let back: AgentState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            back.history
+                .iter()
+                .map(HistoryEntry::id)
+                .collect::<Vec<_>>(),
+            state
+                .history
+                .iter()
+                .map(HistoryEntry::id)
+                .collect::<Vec<_>>()
+        );
+        match &back.history[1] {
+            HistoryEntry::Hook(h) => {
+                assert_eq!(h.record.plugin, "guard");
+                assert!(h.record.blocked);
+                assert_eq!(h.record.reason.as_deref(), Some("not allowed"));
+            }
+            other => panic!("expected a hook entry, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2211,11 +2504,12 @@ mod tests {
             },
         );
 
-        assert_eq!(state.messages.len(), 3);
-        assert_eq!(state.messages[0].role, Role::User);
-        assert_eq!(state.messages[1].role, Role::Assistant);
-        assert_eq!(state.messages[2].role, Role::Tool);
-        match &state.messages[2].parts[0] {
+        assert_eq!(state.history.len(), 3);
+        let messages = state.prompt_messages();
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert_eq!(messages[2].role, Role::Tool);
+        match &messages[2].parts[0] {
             ContentPart::ToolResult(ToolResultPart {
                 tool_call_id,
                 output,
@@ -2237,9 +2531,9 @@ mod tests {
                 message: user_msg("hi"),
             },
         );
-        let before = state.messages.len();
+        let before = state.history.len();
         state = AgentActor::apply_event(state, AgentDomainEvent::RunCancelled { at_ms: 0 });
-        assert_eq!(state.messages.len(), before);
+        assert_eq!(state.history.len(), before);
     }
 
     #[test]
@@ -2654,7 +2948,7 @@ mod tests {
     }
 
     fn page_ids(page: &AgentHistoryPage) -> Vec<String> {
-        page.messages.iter().map(|m| m.id.clone()).collect()
+        page.entries.iter().map(|e| e.id().to_string()).collect()
     }
 
     #[test]
@@ -2722,7 +3016,7 @@ mod tests {
             after: Some("ghost".into()),
             limit: 10,
         });
-        assert!(page.messages.is_empty());
+        assert!(page.entries.is_empty());
         assert!(!page.has_more_after);
         assert!(!page.has_more_before);
     }
@@ -3270,10 +3564,10 @@ mod fence_tests {
             .unwrap();
         let page = rx.await.unwrap();
         assert_eq!(
-            page.messages.len(),
+            page.entries.len(),
             1,
             "the refused turn must journal nothing: {:?}",
-            page.messages
+            page.entries
         );
         assert!(
             outcomes.try_recv().is_err(),

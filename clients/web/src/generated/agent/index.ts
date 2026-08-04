@@ -7,6 +7,8 @@ export * from './thinkingPart';
 export * from './subAgentResultPart';
 export * from './contentPart';
 export * from './message';
+export * from './hookEntry';
+export * from './historyEntry';
 export * from './usage';
 export * from './userMessageInput';
 export * from './toolResultInput';

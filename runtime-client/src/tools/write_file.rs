@@ -29,7 +29,7 @@ impl Tool for WriteFileTool {
             }),
         }
     }
-    async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
         let path = input["path"]
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'path'".into()))?
@@ -39,7 +39,10 @@ impl Tool for WriteFileTool {
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'content'".into()))?
             .to_string();
         self.client
-            .invoke(ToolCall::WriteFile(WriteFileInput { path, content }))
+            .invoke(
+                tool_call_id,
+                ToolCall::WriteFile(WriteFileInput { path, content }),
+            )
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)

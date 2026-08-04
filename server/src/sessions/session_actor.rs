@@ -27,6 +27,7 @@ use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, Per
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_models::agent::ToolResultInput;
 use horsie_models::now_ms;
+use horsie_models::runtime::HookRecord;
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
@@ -116,6 +117,13 @@ pub enum SessionCommand {
     PrepareOffload { reply: oneshot::Sender<bool> },
     /// Internal: an agent reported its terminal outcome.
     AgentOutcome(AgentOutcome),
+    /// Plugin hooks ran against one agent's tool call. Pure routing: the session
+    /// persists nothing here, it forwards to the agent whose transcript the
+    /// records belong in. Carries no reply because nothing waits on it.
+    HooksRan {
+        key: AgentKey,
+        records: Vec<HookRecord>,
+    },
     /// Internal: post-recovery reconciliation of a turn the process died in.
     ReconcileInterrupted,
     /// Set the session title from the built-in title tool.
@@ -472,6 +480,14 @@ impl SessionAgents {
         match self {
             Self::Interactive { subs, .. } => subs.get(&id),
             Self::Workflow { live } => live.get(&id),
+        }
+    }
+
+    /// The agent registered under `key`, if it is still resident.
+    fn get(&self, key: AgentKey) -> Option<&ActorRef<AgentCommand>> {
+        match key {
+            AgentKey::Main => self.main(),
+            AgentKey::Sub(id) | AgentKey::Step(id) => self.sub(id),
         }
     }
 
@@ -1657,6 +1673,31 @@ struct SessionParent {
     target: ActorRef<SessionCommand>,
 }
 
+/// Routes what plugin hooks did into the session's journal.
+///
+/// A `tell`, not an `ask`: nothing waits on a record, and a hook's audit trail
+/// must never be able to slow the tool call it describes.
+struct SessionHookSink {
+    target: ActorRef<SessionCommand>,
+    /// Which agent's transcript these records belong in. A subagent's hooks are
+    /// its own; without this they would all pile into one log with no way to
+    /// tell whose call they guarded.
+    key: AgentKey,
+}
+
+#[async_trait]
+impl horsie_runtime_client::HookSink for SessionHookSink {
+    async fn record(&self, hooks: Vec<HookRecord>) {
+        let _ = self
+            .target
+            .tell(SessionCommand::HooksRan {
+                key: self.key,
+                records: hooks,
+            })
+            .await;
+    }
+}
+
 #[async_trait]
 impl AgentOutcomeSink for SessionParent {
     async fn deliver(&self, outcome: AgentOutcome) {
@@ -1713,6 +1754,18 @@ enum SessionAgentKind {
     Main,
     Sub(Uuid),
     Step(Uuid),
+}
+
+impl SessionAgentKind {
+    /// The key this agent is registered under on the session. One vocabulary:
+    /// what the provider knows itself as is what the session looks it up by.
+    fn agent_key(&self) -> AgentKey {
+        match self {
+            Self::Main => AgentKey::Main,
+            Self::Sub(id) => AgentKey::Sub(*id),
+            Self::Step(id) => AgentKey::Step(*id),
+        }
+    }
 }
 
 /// The runtime client an agent runs with. Subagents share the session's
@@ -1837,6 +1890,13 @@ impl ContextProvider for SessionContextProvider {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
         let runtime_client = scoped_client(&self.kind, runtime_client);
+        // Hooks run runtime-side and report what they did on the tool response.
+        // Routing those records here is what makes a plugin's interventions
+        // visible to the user rather than silent.
+        let runtime_client = runtime_client.with_hook_sink(Arc::new(SessionHookSink {
+            target: self.session.clone(),
+            key: self.kind.agent_key(),
+        }));
 
         if broadcast {
             emit_progress(&self.frames, "scanning_workspace", None);
@@ -2272,6 +2332,16 @@ impl EventSourcedActor for SessionActor {
             }
             SessionCommand::RetryStep { index, reply } => {
                 self.on_retry_step(state, index, reply, ctx).await
+            }
+            SessionCommand::HooksRan { key, records } => {
+                // The agent owns its own transcript, so the records go to it
+                // rather than into the session's log. An agent that has already
+                // gone is not an error: the records describe a call it made
+                // before it left, and there is nothing left to tell.
+                if let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)) {
+                    let _ = agent.tell(AgentCommand::HooksRan { records }).await;
+                }
+                CommandEffect::none()
             }
             SessionCommand::SubAgentTree { reply } => {
                 let tree = state
@@ -3853,7 +3923,7 @@ mod tests {
         frames
             .iter()
             .filter_map(|f| match f {
-                AgentFrame::Appended { message } => Some(message.id.clone()),
+                AgentFrame::Appended { entry } => Some(entry.id().to_string()),
                 AgentFrame::Delta { .. }
                 | AgentFrame::ToolStart { .. }
                 | AgentFrame::TurnCompleted { .. }
@@ -3892,9 +3962,9 @@ mod tests {
         let streamed = appended_ids(&drain_frames(&mut rx));
         let stored: Vec<String> = main_history(&session)
             .await
-            .messages
+            .entries
             .iter()
-            .map(|m| m.id.clone())
+            .map(|e| e.id().to_string())
             .collect();
         assert!(!streamed.is_empty(), "the turn must produce appends");
         assert_eq!(
@@ -4229,8 +4299,7 @@ mod tests {
     }
 
     fn user_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
-        page.messages
-            .iter()
+        page.messages()
             .filter(|m| m.role == horsie_agentcore::Role::User)
             .flat_map(|m| m.parts.iter())
             .filter_map(|p| match p {
@@ -4247,8 +4316,7 @@ mod tests {
     /// them — the counterpart to `user_texts` now that a result is a part of
     /// its own rather than text merged into what the person said.
     fn subagent_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
-        page.messages
-            .iter()
+        page.messages()
             .flat_map(|m| m.parts.iter())
             .filter_map(|p| match p {
                 horsie_agentcore::ContentPart::SubAgentResult(r) => Some(r.to_wire_text()),
@@ -4258,6 +4326,98 @@ mod tests {
                 | horsie_agentcore::ContentPart::Thinking(_) => None,
             })
             .collect()
+    }
+
+    fn hook_record(plugin: &str, call: &str) -> HookRecord {
+        HookRecord {
+            plugin: plugin.to_string(),
+            event: "PreToolUse".to_string(),
+            tool: "bash".to_string(),
+            tool_call_id: call.to_string(),
+            duration_ms: 4,
+            blocked: true,
+            reason: Some("not allowed".to_string()),
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        }
+    }
+
+    async fn agent_history(
+        session: &ActorRef<SessionCommand>,
+        agent_id: Option<String>,
+    ) -> horsie_workflow::AgentHistoryPage {
+        session
+            .ask(|reply| SessionCommand::History {
+                agent_id,
+                query: horsie_workflow::HistoryQuery {
+                    before: None,
+                    after: None,
+                    limit: 50,
+                },
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("agent history")
+    }
+
+    fn hook_ids(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+        page.entries
+            .iter()
+            .filter_map(|e| match e {
+                horsie_agentcore::HistoryEntry::Hook(h) => Some(h.id.clone()),
+                horsie_agentcore::HistoryEntry::Llm(_) => None,
+            })
+            .collect()
+    }
+
+    /// A hook guards one agent's call, so its record belongs in that agent's
+    /// transcript. Routed to the session instead, every agent's hooks would pile
+    /// into one log with no way to tell whose call they guarded — which is what
+    /// the session-scoped journal did before.
+    #[tokio::test]
+    async fn a_subagents_hooks_land_on_its_own_transcript() {
+        let gate = BlockingProvider::new();
+        let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
+        let sub = spawn_sub(&session, "research", "dig into it").await;
+        wait_for_tree(&journal, id, |t| {
+            t.get(&sub)
+                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
+        })
+        .await;
+
+        session
+            .tell(SessionCommand::HooksRan {
+                key: AgentKey::Sub(sub),
+                records: vec![hook_record("guard", "tc1")],
+            })
+            .await
+            .unwrap();
+
+        // `tell` is fire-and-forget through two mailboxes; poll rather than race.
+        let mut waited = 0;
+        loop {
+            let page = agent_history(&session, Some(sub.to_string())).await;
+            if !hook_ids(&page).is_empty() {
+                assert_eq!(hook_ids(&page), vec!["hook:tc1:0".to_string()]);
+                break;
+            }
+            assert!(waited < 100, "the subagent never recorded the hook");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            waited += 1;
+        }
+
+        let main = agent_history(&session, None).await;
+        assert!(
+            hook_ids(&main).is_empty(),
+            "the main agent made no such call: {:?}",
+            main.entries
+        );
     }
 
     async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::AgentHistoryPage {
@@ -4449,7 +4609,7 @@ mod tests {
         let (results, texts): (Vec<String>, Vec<String>) = {
             let mut results = Vec::new();
             let mut texts = Vec::new();
-            for part in page.messages.iter().flat_map(|m| m.parts.iter()) {
+            for part in page.messages().flat_map(|m| m.parts.iter()) {
                 match part {
                     horsie_agentcore::ContentPart::ToolResult(r) => results.push(r.output.clone()),
                     horsie_agentcore::ContentPart::Text(t) => texts.push(t.text.clone()),

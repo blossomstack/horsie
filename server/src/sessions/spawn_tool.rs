@@ -99,7 +99,12 @@ impl Toolbox for SubAgentToolbox {
         specs
     }
 
-    async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
         if name == SPAWN_AGENT_TOOL {
             let label = input
                 .get("label")
@@ -144,7 +149,7 @@ impl Toolbox for SubAgentToolbox {
                 .map_err(ToolCallError::ExecutionFailed)?;
             return Ok(Value::String(rendered));
         }
-        self.inner.execute(name, input).await
+        self.inner.execute(name, input, tool_call_id).await
     }
 }
 
@@ -235,6 +240,7 @@ mod tests {
             .execute(
                 SPAWN_AGENT_TOOL,
                 json!({"label": "research", "task": "dig"}),
+                "tc1",
             )
             .await
             .unwrap();
@@ -244,7 +250,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_surfaces_limit_errors_as_tool_errors() {
         let err = toolbox(Err("8 subagents already active".into()))
-            .execute(SPAWN_AGENT_TOOL, json!({"label": "x", "task": "y"}))
+            .execute(SPAWN_AGENT_TOOL, json!({"label": "x", "task": "y"}), "tc1")
             .await
             .unwrap_err();
         match err {
@@ -256,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_requires_label_and_task() {
         let err = toolbox(Ok(Uuid::new_v4()))
-            .execute(SPAWN_AGENT_TOOL, json!({"label": "x"}))
+            .execute(SPAWN_AGENT_TOOL, json!({"label": "x"}), "tc1")
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
@@ -267,14 +273,17 @@ mod tests {
         let tb = toolbox(Ok(Uuid::new_v4()));
         let id = Uuid::new_v4();
         let one = tb
-            .execute(SUBAGENT_STATUS_TOOL, json!({"id": id.to_string()}))
+            .execute(SUBAGENT_STATUS_TOOL, json!({"id": id.to_string()}), "tc1")
             .await
             .unwrap();
         assert!(one.as_str().unwrap().contains("completed"));
-        let all = tb.execute(SUBAGENT_STATUS_TOOL, json!({})).await.unwrap();
+        let all = tb
+            .execute(SUBAGENT_STATUS_TOOL, json!({}), "tc1")
+            .await
+            .unwrap();
         assert!(all.as_str().unwrap().contains("[running]"));
         let err = tb
-            .execute(SUBAGENT_STATUS_TOOL, json!({"id": "not-a-uuid"}))
+            .execute(SUBAGENT_STATUS_TOOL, json!({"id": "not-a-uuid"}), "tc1")
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
@@ -283,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn delegates_other_tools_to_inner() {
         let err = toolbox(Ok(Uuid::new_v4()))
-            .execute("bash", json!({}))
+            .execute("bash", json!({}), "tc1")
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));

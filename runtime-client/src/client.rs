@@ -1,7 +1,11 @@
 use crate::transport::{RuntimeTransport, TransportError};
-use horsie_models::runtime::{ScanResponse, ToolCall, ToolError, ToolOutput, ToolResult};
+use horsie_models::runtime::{
+    HookRecord, ScanResponse, ToolCall, ToolError, ToolOutput, ToolResult,
+};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
+// Still minted for the calls that have no model tool_call_id to borrow —
+// `scan_workspace` and `run_session_start` are server-initiated, not tool calls.
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -22,9 +26,22 @@ impl std::fmt::Display for RuntimeCallError {
 impl std::error::Error for RuntimeCallError {}
 
 /// Client handle for invoking tools on a remote runtime. Cheap to clone — Arc-backed.
+/// Receives what plugin hooks did to a tool call.
+///
+/// Out of band from the tool result because the tools are unaware of hooks and
+/// the records are for the *user*, not the model: the server journals them so a
+/// session can show what a plugin blocked or rewrote.
+#[async_trait::async_trait]
+pub trait HookSink: Send + Sync {
+    async fn record(&self, hooks: Vec<HookRecord>);
+}
+
 #[derive(Clone)]
 pub struct RuntimeClient {
     inner: Arc<dyn RuntimeTransport>,
+    /// Where hook records go. `None` outside a session — the CLI and tests have
+    /// nothing to journal them to.
+    hook_sink: Option<Arc<dyn HookSink>>,
     /// The agent this handle acts for. Stamped on every invoke; the runtime
     /// keys its per-agent cwd/env state by it, so an agent and its subagents
     /// never see each other's working directory or environment.
@@ -34,13 +51,13 @@ pub struct RuntimeClient {
     /// (also the main agent's journal id); a subagent derives its own handle
     /// with [`Self::with_agent_id`].
     agent_id: String,
-    /// Wire ids of calls currently awaiting a reply.
+    /// Ids of calls currently awaiting a reply — the model's own `tool_call_id`s.
     ///
-    /// `invoke` mints its own id rather than reusing the model's `tool_call_id`,
-    /// so nothing outside this client could name an in-flight call to cancel it —
-    /// which is why `cancel` had no caller and stopping a turn left the sandbox
-    /// running the command to completion (#61 item 23). Shared across clones so a
-    /// holder that did not issue the call can still stop it.
+    /// `invoke` used to mint a private id here, so nothing outside this client
+    /// could name an in-flight call to cancel it; that is why `cancel` had no
+    /// caller and stopping a turn left the sandbox running the command to
+    /// completion (#61 item 23). Shared across clones so a holder that did not
+    /// issue the call can still stop it.
     in_flight: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -48,6 +65,7 @@ impl RuntimeClient {
     pub fn new(transport: impl RuntimeTransport + 'static, agent_id: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(transport),
+            hook_sink: None,
             agent_id: agent_id.into(),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -59,9 +77,18 @@ impl RuntimeClient {
     pub fn from_arc(transport: Arc<dyn RuntimeTransport>, agent_id: impl Into<String>) -> Self {
         Self {
             inner: transport,
+            hook_sink: None,
             agent_id: agent_id.into(),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Route hook records to `sink`. Set once, by the session that journals
+    /// them; a client without one simply discards what hooks reported.
+    #[must_use]
+    pub fn with_hook_sink(mut self, sink: Arc<dyn HookSink>) -> Self {
+        self.hook_sink = Some(sink);
+        self
     }
 
     /// A handle onto the same runtime acting for a different agent.
@@ -84,14 +111,35 @@ impl RuntimeClient {
         &self.agent_id
     }
 
-    pub async fn invoke(&self, call: ToolCall) -> Result<ToolOutput, RuntimeCallError> {
-        let call_id = Uuid::new_v4().to_string();
-        self.track(&call_id);
-        let outcome = self.inner.invoke(&call_id, &self.agent_id, call).await;
-        self.untrack(&call_id);
+    /// `call_id` is the model's own tool-call id, not one minted here. One id
+    /// space for three consumers — cancellation, the runtime, and the hook
+    /// records that must join back to this call in the transcript — because two
+    /// spaces cannot be correlated after the fact under parallel tool use.
+    pub async fn invoke(
+        &self,
+        call_id: &str,
+        call: ToolCall,
+    ) -> Result<ToolOutput, RuntimeCallError> {
+        self.track(call_id);
+        let outcome = self.inner.invoke(call_id, &self.agent_id, call).await;
+        self.untrack(call_id);
         match outcome {
-            Ok(ToolResult::Ok(output)) => Ok(output),
-            Ok(ToolResult::Err(ToolError { reason })) => Err(RuntimeCallError::ToolFailed(reason)),
+            Ok((result, hooks)) => {
+                // Hook records ride the tool response but are not part of it:
+                // the tools themselves neither know nor care that a hook ran, so
+                // the records go out of band to whoever is recording them.
+                if !hooks.is_empty()
+                    && let Some(sink) = &self.hook_sink
+                {
+                    sink.record(hooks).await;
+                }
+                match result {
+                    ToolResult::Ok(output) => Ok(output),
+                    ToolResult::Err(ToolError { reason }) => {
+                        Err(RuntimeCallError::ToolFailed(reason))
+                    }
+                }
+            }
             Err(e) => Err(RuntimeCallError::Transport(e)),
         }
     }
@@ -204,7 +252,10 @@ mod tests {
         );
         let probe = c.clone();
         let calls = tokio::spawn(async move {
-            tokio::join!(probe.invoke(probe_call()), probe.invoke(probe_call()))
+            tokio::join!(
+                probe.invoke("tc1", probe_call()),
+                probe.invoke("tc2", probe_call())
+            )
         });
         // Let both reach the transport and register as in flight.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -213,8 +264,8 @@ mod tests {
         gate.release();
         let _ = calls.await;
 
-        // Two distinct wire ids cancelled, neither of them the model's tool_call_id
-        // (which `invoke` never sees).
+        // Both of the model's tool_call_ids were tracked and cancelled: `invoke`
+        // now uses that id directly rather than minting a wire id of its own.
         assert_eq!(
             c.in_flight_count(),
             0,
@@ -226,7 +277,7 @@ mod tests {
     async fn a_settled_call_is_no_longer_tracked() {
         let c = RuntimeClient::new(crate::testkit::MockTransport::ok(""), "test-agent");
         assert_eq!(c.in_flight_count(), 0);
-        assert!(c.invoke(probe_call()).await.is_ok());
+        assert!(c.invoke("tc1", probe_call()).await.is_ok());
         assert_eq!(
             c.in_flight_count(),
             0,
@@ -241,14 +292,14 @@ mod tests {
     #[tokio::test]
     async fn a_client_stays_usable_after_a_transport_error() {
         let c = RuntimeClient::new(MockTransport::disconnect_after(0), "test-agent");
-        assert!(c.invoke(probe_call()).await.is_err());
+        assert!(c.invoke("tc1", probe_call()).await.is_err());
         assert_eq!(
             c.in_flight_count(),
             0,
             "a failed call must not linger as in flight"
         );
         assert!(
-            c.invoke(probe_call()).await.is_err(),
+            c.invoke("tc2", probe_call()).await.is_err(),
             "the second call must reach the transport, not a local latch"
         );
     }
@@ -261,8 +312,76 @@ mod tests {
     async fn the_agent_id_is_stamped_on_invokes() {
         let probe = crate::testkit::TransportProbe::new();
         let client = RuntimeClient::new(MockTransport::ok("").observed_by(&probe), "agent-1");
-        client.invoke(probe_call()).await.unwrap();
+        client.invoke("tc1", probe_call()).await.unwrap();
         assert_eq!(probe.agent_ids(), vec!["agent-1".to_string()]);
+    }
+
+    /// The model's tool_call_id reaches the runtime verbatim. Everything
+    /// downstream depends on it: cancellation names a call by it, and a hook
+    /// record carries it back so the transcript can attach the record to the
+    /// tool result. A privately minted id would satisfy the first and silently
+    /// break the second.
+    #[tokio::test]
+    async fn the_models_call_id_reaches_the_runtime_unchanged() {
+        let probe = crate::testkit::TransportProbe::new();
+        let client = RuntimeClient::new(MockTransport::ok("").observed_by(&probe), "agent-1");
+        client.invoke("toolu_abc123", probe_call()).await.unwrap();
+        client.invoke("toolu_def456", probe_call()).await.unwrap();
+        assert_eq!(
+            probe.call_ids(),
+            vec!["toolu_abc123".to_string(), "toolu_def456".to_string()]
+        );
+    }
+
+    /// Hook records must reach their sink *before* `invoke` returns.
+    ///
+    /// This is what orders a hook entry ahead of the tool result it describes:
+    /// the agent loop journals `ToolComplete` only after `execute` — and so
+    /// `invoke` — has returned, so a sink that has already been told puts its
+    /// record on the actor's mailbox first. Let the sink be told afterwards and
+    /// the transcript shows a hook explaining a call the reader already scrolled
+    /// past.
+    #[tokio::test]
+    async fn hook_records_reach_the_sink_before_invoke_returns() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        struct Latch(Arc<AtomicBool>);
+        #[async_trait::async_trait]
+        impl HookSink for Latch {
+            async fn record(&self, hooks: Vec<HookRecord>) {
+                assert_eq!(hooks.len(), 1, "the response's records, verbatim");
+                self.0.store(true, AtomicOrdering::SeqCst);
+            }
+        }
+
+        let record = HookRecord {
+            plugin: "guard".into(),
+            event: "PreToolUse".into(),
+            tool: "bash".into(),
+            tool_call_id: "tc1".into(),
+            duration_ms: 1,
+            blocked: false,
+            reason: None,
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        };
+        let told = Arc::new(AtomicBool::new(false));
+        let client = RuntimeClient::new(
+            MockTransport::ok("done").with_hooks(vec![record]),
+            "agent-1",
+        )
+        .with_hook_sink(Arc::new(Latch(told.clone())));
+
+        client.invoke("tc1", probe_call()).await.unwrap();
+        assert!(
+            told.load(AtomicOrdering::SeqCst),
+            "the sink must be told before invoke hands the result back"
+        );
     }
 
     /// The subagent seam: a derived handle shares the runtime but carries its
@@ -272,8 +391,8 @@ mod tests {
         let probe = crate::testkit::TransportProbe::new();
         let parent = RuntimeClient::new(MockTransport::ok("").observed_by(&probe), "main");
         let sub = parent.clone().with_agent_id("sub-1");
-        parent.invoke(probe_call()).await.unwrap();
-        sub.invoke(probe_call()).await.unwrap();
+        parent.invoke("tc1", probe_call()).await.unwrap();
+        sub.invoke("tc2", probe_call()).await.unwrap();
         assert_eq!(
             probe.agent_ids(),
             vec!["main".to_string(), "sub-1".to_string()]
@@ -284,10 +403,13 @@ mod tests {
     async fn client_returns_ok_output() {
         let client = RuntimeClient::new(MockTransport::ok("hello"), "test-agent");
         let output = client
-            .invoke(ToolCall::Bash(BashInput {
-                command: "echo hello".into(),
-                timeout_secs: None,
-            }))
+            .invoke(
+                "tc1",
+                ToolCall::Bash(BashInput {
+                    command: "echo hello".into(),
+                    timeout_secs: None,
+                }),
+            )
             .await
             .unwrap();
         assert_eq!(output.stdout, "hello");
@@ -297,10 +419,13 @@ mod tests {
     async fn client_returns_err_on_tool_failure() {
         let client = RuntimeClient::new(MockTransport::err("oops"), "test-agent");
         let err = client
-            .invoke(ToolCall::Bash(BashInput {
-                command: "bad".into(),
-                timeout_secs: None,
-            }))
+            .invoke(
+                "tc1",
+                ToolCall::Bash(BashInput {
+                    command: "bad".into(),
+                    timeout_secs: None,
+                }),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, RuntimeCallError::ToolFailed(_)));

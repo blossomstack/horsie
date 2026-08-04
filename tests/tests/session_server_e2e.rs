@@ -32,6 +32,22 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The LLM messages on a `/history` page.
+///
+/// A page is a list of transcript *entries*, each a tagged union — a hook record
+/// is an entry too, and is deliberately not a message. Tests that reason about
+/// the conversation go through here so a new entry kind cannot silently change
+/// what they count.
+fn page_messages(page: &serde_json::Value) -> Vec<serde_json::Value> {
+    page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a history page must carry entries: {page}"))
+        .iter()
+        .filter(|e| e["type"] == serde_json::json!("Llm"))
+        .map(|e| e["value"].clone())
+        .collect()
+}
+
 // ── harness ──────────────────────────────────────────────────────────────────
 
 struct Server {
@@ -814,7 +830,7 @@ async fn history_endpoint_returns_windowed_messages() {
             let mut waited = 0;
             loop {
                 let all = history(100, None).await;
-                if all["messages"].as_array().unwrap().len() >= want {
+                if page_messages(&all).len() >= want {
                     break;
                 }
                 assert!(waited < 100, "history never reached {want} messages");
@@ -833,7 +849,7 @@ async fn history_endpoint_returns_windowed_messages() {
 
     // Tail page with a small limit: newest messages, older ones still owed.
     let page = history(2, None).await;
-    let msgs = page["messages"].as_array().unwrap();
+    let msgs = page_messages(&page);
     assert_eq!(msgs.len(), 2, "tail limit not honored: {page}");
     assert_eq!(page["hasMoreBefore"], serde_json::json!(true));
     assert_eq!(
@@ -852,9 +868,7 @@ async fn history_endpoint_returns_windowed_messages() {
     // forward in time — the property a duration readout or a stuck-turn
     // watchdog is built on.
     let all = history(100, None).await;
-    let stamps: Vec<u64> = all["messages"]
-        .as_array()
-        .unwrap()
+    let stamps: Vec<u64> = page_messages(&all)
         .iter()
         .map(|m| {
             m["createdAtMs"]
@@ -870,10 +884,8 @@ async fn history_endpoint_returns_windowed_messages() {
         stamps.windows(2).all(|w| w[0] <= w[1]),
         "history must run forward in time, got {stamps:?}"
     );
-    let assistant = all["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
+    let assistant = page_messages(&all)
+        .into_iter()
         .find(|m| m["role"] == serde_json::json!("Assistant"))
         .expect("an assistant reply");
     let started = assistant["startedAtMs"]
@@ -887,7 +899,7 @@ async fn history_endpoint_returns_windowed_messages() {
     // Scroll back before the oldest returned id → older messages.
     let oldest_id = msgs[0]["id"].as_str().unwrap().to_string();
     let older = history(2, Some(oldest_id.clone())).await;
-    assert_eq!(older["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(page_messages(&older).len(), 2);
     assert_eq!(older["hasMoreBefore"], serde_json::json!(false));
     assert_eq!(
         older["hasMoreAfter"],
@@ -898,9 +910,8 @@ async fn history_endpoint_returns_windowed_messages() {
     // Forward from that same id → the newer half, which is what a reconnecting
     // stream backfills with. The two cursors are one space read both ways.
     let newer = history_after(2, &oldest_id).await;
-    let newer_ids: Vec<&str> = newer["messages"]
-        .as_array()
-        .unwrap()
+    let newer_msgs = page_messages(&newer);
+    let newer_ids: Vec<&str> = newer_msgs
         .iter()
         .map(|m| m["id"].as_str().unwrap())
         .collect();
@@ -1061,9 +1072,7 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
         }
     };
     let before = history(server.addr).await;
-    let before_ids: Vec<String> = before["messages"]
-        .as_array()
-        .unwrap()
+    let before_ids: Vec<String> = page_messages(&before)
         .iter()
         .map(|m| m["id"].as_str().unwrap().to_string())
         .collect();
@@ -1078,9 +1087,7 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
     server.shutdown().await;
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let after = history(server2.addr).await;
-    let after_ids: Vec<String> = after["messages"]
-        .as_array()
-        .unwrap()
+    let after_ids: Vec<String> = page_messages(&after)
         .iter()
         .map(|m| m["id"].as_str().unwrap().to_string())
         .collect();
@@ -1685,7 +1692,7 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
             .await
             .unwrap();
         assert!(
-            !page["messages"].as_array().unwrap().is_empty(),
+            !page_messages(&page).is_empty(),
             "the resident agent still holds the transcript: {page}"
         );
         let usage: serde_json::Value = client
@@ -1764,9 +1771,7 @@ async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
         .json()
         .await
         .unwrap();
-    let user_texts: Vec<String> = page["messages"]
-        .as_array()
-        .unwrap()
+    let user_texts: Vec<String> = page_messages(&page)
         .iter()
         .filter(|m| m["role"] == "User")
         .map(|m| {

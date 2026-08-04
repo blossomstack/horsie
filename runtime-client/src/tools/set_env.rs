@@ -34,14 +34,14 @@ impl Tool for SetEnvTool {
         }
     }
 
-    async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
         let name = input["name"]
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'name'".into()))?
             .to_string();
         let value = input["value"].as_str().map(str::to_string);
         self.client
-            .invoke(ToolCall::SetEnv(SetEnvInput { name, value }))
+            .invoke(tool_call_id, ToolCall::SetEnv(SetEnvInput { name, value }))
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)
@@ -67,7 +67,7 @@ mod tests {
             "test-agent",
         ));
         let v = tool
-            .execute(json!({"name": "FOO", "value": "1"}))
+            .execute(json!({"name": "FOO", "value": "1"}), "tc1")
             .await
             .unwrap();
         assert_eq!(v.as_str().unwrap(), "set FOO");
@@ -87,7 +87,7 @@ mod tests {
             MockTransport::ok("").observed_by(&probe),
             "test-agent",
         ));
-        tool.execute(json!({"name": "FOO"})).await.unwrap();
+        tool.execute(json!({"name": "FOO"}), "tc1").await.unwrap();
         match &probe.invocations()[0] {
             ToolCall::SetEnv(i) => assert!(i.value.is_none()),
             other => panic!("expected SetEnv, got {other:?}"),
@@ -97,7 +97,7 @@ mod tests {
     #[tokio::test]
     async fn missing_name_is_an_input_error() {
         let tool = SetEnvTool::new(RuntimeClient::new(MockTransport::ok(""), "test-agent"));
-        let err = tool.execute(json!({})).await.unwrap_err();
+        let err = tool.execute(json!({}), "tc1").await.unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
     }
 

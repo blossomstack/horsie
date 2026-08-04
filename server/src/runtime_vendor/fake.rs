@@ -647,6 +647,9 @@ async fn run_agent<S>(
                                 stderr: String::new(),
                                 exit_code: 0,
                             }),
+                            // This fake serves sessions with no plugin library,
+                            // so no hook ever runs.
+                            hooks: Vec::new(),
                         }))
                     }
                     RuntimeInboundMessage::CancelCall(req) => {
@@ -803,10 +806,13 @@ mod tests {
         let client = RuntimeClient::from_arc(std::sync::Arc::new(transport), "main-agent");
 
         client
-            .invoke(ToolCall::Bash(BashInput {
-                command: "true".to_string(),
-                timeout_secs: None,
-            }))
+            .invoke(
+                "tc1",
+                ToolCall::Bash(BashInput {
+                    command: "true".to_string(),
+                    timeout_secs: None,
+                }),
+            )
             .await
             .expect("tool call");
         assert_eq!(agent.tool_agent_ids(), vec!["main-agent".to_string()]);
@@ -815,10 +821,13 @@ mod tests {
         client
             .clone()
             .with_agent_id("sub-1")
-            .invoke(ToolCall::Bash(BashInput {
-                command: "true".to_string(),
-                timeout_secs: None,
-            }))
+            .invoke(
+                "tc1",
+                ToolCall::Bash(BashInput {
+                    command: "true".to_string(),
+                    timeout_secs: None,
+                }),
+            )
             .await
             .expect("subagent tool call");
         assert_eq!(

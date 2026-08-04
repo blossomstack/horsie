@@ -34,7 +34,7 @@ impl Tool for ReplaceLinesTool {
             }),
         }
     }
-    async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
         let path = input["path"]
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'path'".into()))?
@@ -50,12 +50,15 @@ impl Tool for ReplaceLinesTool {
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'replacement'".into()))?
             .to_string();
         self.client
-            .invoke(ToolCall::ReplaceLines(ReplaceLinesInput {
-                path,
-                start_line,
-                end_line,
-                replacement,
-            }))
+            .invoke(
+                tool_call_id,
+                ToolCall::ReplaceLines(ReplaceLinesInput {
+                    path,
+                    start_line,
+                    end_line,
+                    replacement,
+                }),
+            )
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)

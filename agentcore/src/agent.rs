@@ -629,7 +629,8 @@ impl Agent {
                 }))
                 .await?;
 
-            let (output, is_error) = match toolbox.execute(name, input.clone()).await {
+            let (output, is_error) = match toolbox.execute(name, input.clone(), tool_call_id).await
+            {
                 // A string result is forwarded verbatim; re-encoding it as JSON
                 // would wrap it in quotes and escape every newline, wasting
                 // tokens and hurting readability. Non-string values are rendered
@@ -1576,7 +1577,12 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             }]
         }
-        async fn execute(&self, _name: &str, _input: Value) -> Result<Value, ToolCallError> {
+        async fn execute(
+            &self,
+            _name: &str,
+            _input: Value,
+            _tool_call_id: &str,
+        ) -> Result<Value, ToolCallError> {
             let _ = self.entered.send(());
             std::future::pending().await
         }
@@ -1948,7 +1954,12 @@ mod tests {
             vec![self.spec.clone()]
         }
 
-        async fn execute(&self, _name: &str, input: Value) -> Result<Value, ToolCallError> {
+        async fn execute(
+            &self,
+            _name: &str,
+            input: Value,
+            _tool_call_id: &str,
+        ) -> Result<Value, ToolCallError> {
             // Concurrent execution => both calls reach the barrier and proceed at
             // once. Sequential execution => the first call blocks here until the
             // timeout fires, flagging the regression.

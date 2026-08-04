@@ -38,17 +38,20 @@ impl Tool for BashTool {
         }
     }
 
-    async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
         let command = input["command"]
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'command'".into()))?
             .to_string();
         let timeout_secs = input["timeout_secs"].as_u64();
         self.client
-            .invoke(ToolCall::Bash(BashInput {
-                command,
-                timeout_secs,
-            }))
+            .invoke(
+                tool_call_id,
+                ToolCall::Bash(BashInput {
+                    command,
+                    timeout_secs,
+                }),
+            )
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)
@@ -89,7 +92,7 @@ mod tests {
             }),
             "test-agent",
         ));
-        let v = tool.execute(json!({"command": "x"})).await.unwrap();
+        let v = tool.execute(json!({"command": "x"}), "tc1").await.unwrap();
         let text = v.as_str().unwrap();
         assert!(text.contains("out"));
         assert!(text.contains("a warning"));
@@ -105,7 +108,10 @@ mod tests {
             }),
             "test-agent",
         ));
-        let err = tool.execute(json!({"command": "x"})).await.unwrap_err();
+        let err = tool
+            .execute(json!({"command": "x"}), "tc1")
+            .await
+            .unwrap_err();
         match err {
             ToolCallError::ExecutionFailed(msg) => {
                 assert!(msg.contains("status 1"), "msg: {msg}");

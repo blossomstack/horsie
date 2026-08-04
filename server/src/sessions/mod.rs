@@ -52,10 +52,17 @@ pub enum SessionFrame {
 /// broadcast, and no journal read is needed to serve it. The rest are current
 /// values or run-scoped noise.
 #[derive(Debug, Clone)]
+/// `large_enum_variant`: `Appended` carries a `HistoryEntry`, whose `Hook` arm
+/// holds a whole `HookRecord`. The type is fluorite-generated so the variant
+/// cannot be boxed, and a frame is moved once per append.
+#[allow(clippy::large_enum_variant)]
 pub enum AgentFrame {
-    /// One transcript append, durable. `message.id` is the stream's SSE id and
-    /// the history cursor — one vocabulary for both.
-    Appended { message: horsie_agentcore::Message },
+    /// One transcript append, durable. `entry.id()` is the stream's SSE id and
+    /// the history cursor — one vocabulary for both. Not every append is a
+    /// message the model saw; see `HistoryEntry`.
+    Appended {
+        entry: horsie_agentcore::HistoryEntry,
+    },
     /// Streaming text delta. Ephemeral: never journaled, never replayed.
     Delta { text: String },
     /// A tool call started. Ephemeral.

@@ -112,6 +112,7 @@ impl Toolbox for FixedToolbox {
         &self,
         name: &str,
         input: serde_json::Value,
+        _tool_call_id: &str,
     ) -> Result<serde_json::Value, ToolCallError> {
         self.calls.lock().unwrap().push((name.to_string(), input));
         Ok(self.output.clone())

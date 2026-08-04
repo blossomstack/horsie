@@ -30,7 +30,7 @@ impl Tool for GlobTool {
             }),
         }
     }
-    async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
         let pattern = input["pattern"]
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'pattern'".into()))?
@@ -38,11 +38,14 @@ impl Tool for GlobTool {
         let path = input["path"].as_str().map(|s| s.to_string());
         let max_results = input["max_results"].as_u64();
         self.client
-            .invoke(ToolCall::Glob(GlobInput {
-                pattern,
-                path,
-                max_results,
-            }))
+            .invoke(
+                tool_call_id,
+                ToolCall::Glob(GlobInput {
+                    pattern,
+                    path,
+                    max_results,
+                }),
+            )
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
             .and_then(super::render_output)

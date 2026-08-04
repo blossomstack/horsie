@@ -406,14 +406,19 @@ async fn run_loop<S>(
                         let in_flight_clone = in_flight.clone();
 
                         let handle = tokio::spawn(async move {
-                            let result = horsie_runtime::tools::dispatch(
-                                &registry, &state, &agent_id, req.call,
+                            // Tool hooks run here, inline with the call: this is
+                            // the only place the plugin files exist, it costs no
+                            // extra round-trip, and a slow hook is interrupted by
+                            // the same `CancelCall` that interrupts the tool.
+                            let (result, hooks) = horsie_runtime::hooks::dispatch_with_hooks(
+                                &registry, &state, &agent_id, &call_id, req.call,
                             )
                             .await;
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
                                     call_id: call_id.clone(),
                                     result,
+                                    hooks,
                                 }),
                             );
                             if let Ok(json) = response {
@@ -475,6 +480,9 @@ async fn run_loop<S>(
                                 result: ToolResult::Err(ToolError {
                                     reason: "cancelled".to_string(),
                                 }),
+                                // A cancelled call ran no hooks worth reporting:
+                                // whatever was in flight was aborted with it.
+                                hooks: Vec::new(),
                             }),
                         );
                         if let Ok(json) = response {
