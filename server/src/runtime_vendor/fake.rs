@@ -646,8 +646,10 @@ async fn run_agent<S>(
                                 stdout: bash_stdout.clone(),
                                 stderr: String::new(),
                                 exit_code: 0,
+                            }),
+                            // This fake serves sessions with no plugin library,
+                            // so no hook ever runs.
                             hooks: Vec::new(),
-                        }),
                         }))
                     }
                     RuntimeInboundMessage::CancelCall(req) => {

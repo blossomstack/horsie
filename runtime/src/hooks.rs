@@ -101,7 +101,10 @@ pub async fn dispatch_with_hooks(
     call: ToolCall,
 ) -> (ToolResult, Vec<HookRecord>) {
     let Some(plugins_dir) = registry.plugins_dir() else {
-        return (crate::tools::dispatch(registry, state, agent, call).await, Vec::new());
+        return (
+            crate::tools::dispatch(registry, state, agent, call).await,
+            Vec::new(),
+        );
     };
     let name = tool_name(&call);
     let hook_path = registry.hook_path();
@@ -161,7 +164,9 @@ pub async fn dispatch_with_hooks(
 
         // The tool already ran: a failure here is recorded but never fatal, and
         // never rewrites a result the hook could not read.
-        if !outcome.failed && let ToolResult::Ok(out) = &mut result {
+        if !outcome.failed
+            && let ToolResult::Ok(out) = &mut result
+        {
             if let Some(replacement) = &outcome.updated_tool_output {
                 rec.output_before = Some(clamp(&out.stdout));
                 rec.output_after = Some(clamp(replacement));

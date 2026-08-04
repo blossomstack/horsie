@@ -154,8 +154,8 @@ mod tests {
                                 stdout: "ok".into(),
                                 stderr: String::new(),
                                 exit_code: 0,
+                            }),
                             hooks: Vec::new(),
-                        }),
                         });
                         let _ = sink
                             .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
@@ -207,7 +207,7 @@ mod tests {
     async fn invoke_correlates_response() {
         let (t, _dir) = paired().await;
         let r = t.invoke("c1", "agent-1", bash()).await.unwrap();
-        assert!(matches!(r, ToolResult::Ok(o) if o.stdout == "ok"));
+        assert!(matches!(r, (ToolResult::Ok(o), _) if o.stdout == "ok"));
     }
 
     #[tokio::test]

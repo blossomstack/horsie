@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use horsie_models::runtime::{
-    CancelCallRequest, HookRecord, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
-    SessionStartRequest, ToolCall, ToolCallRequest, ToolResult,
+    CancelCallRequest, HookRecord, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest,
+    ScanResponse, SessionStartRequest, ToolCall, ToolCallRequest, ToolResult,
 };
 use thiserror::Error;
 

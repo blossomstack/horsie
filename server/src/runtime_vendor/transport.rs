@@ -198,8 +198,8 @@ mod tests {
                                 stdout: stdout.to_string(),
                                 stderr: String::new(),
                                 exit_code: 0,
+                            }),
                             hooks: Vec::new(),
-                        }),
                         }),
                     }),
                 };
@@ -239,7 +239,7 @@ mod tests {
             .invoke("call-1", "agent-1", bash())
             .await
             .expect("tool call");
-        match result {
+        match result.0 {
             ToolResult::Ok(out) => assert_eq!(out.stdout, "hello-from-agent"),
             ToolResult::Err(ToolError { reason }) => panic!("expected success, got {reason}"),
         }
