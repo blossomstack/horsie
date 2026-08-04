@@ -207,6 +207,9 @@ pub fn to_wire_messages(history: &[Message]) -> Vec<ChatMessage> {
                     out.push(m);
                 }
                 ContentPart::Thinking(_) => {}
+                // Flattened to the text it has always been: this part is
+                // provenance for clients, not a new thing to show the model.
+                ContentPart::SubAgentResult(r) => text.push_str(&r.to_wire_text()),
             }
         }
 
@@ -391,5 +394,65 @@ mod tests {
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0].role, "user");
         assert_eq!(wire[0].content.as_deref(), Some("hi"));
+    }
+
+    fn subagent_part() -> horsie_models::agent::SubAgentResultPart {
+        horsie_models::agent::SubAgentResultPart {
+            subagent_id: "id".into(),
+            label: "audit".into(),
+            status: "completed".into(),
+            text: "three stale crates".into(),
+            spawned_at_ms: 100,
+            ended_at_ms: 400,
+        }
+    }
+
+    /// The whole point of the structured part is that the model never learns
+    /// about it. Pinned against the literal string, not just `to_wire_text`,
+    /// so a change to the format has to be a deliberate edit here.
+    #[test]
+    fn a_subagent_result_reaches_the_wire_as_its_notification_text() {
+        let history = vec![Message {
+            created_at_ms: 0,
+            started_at_ms: None,
+            id: "m1".into(),
+            role: Role::User,
+            parts: vec![ContentPart::SubAgentResult(subagent_part())],
+        }];
+
+        let wire = to_wire_messages(&history);
+
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].role, "user");
+        assert_eq!(
+            wire[0].content.as_deref(),
+            Some("[subagent \"audit\" completed]\n\nthree stale crates")
+        );
+    }
+
+    /// A mixed turn: what the person typed, then what their subagent found —
+    /// one user message, exactly as before results became their own part.
+    #[test]
+    fn typed_text_and_a_result_share_one_user_message() {
+        let history = vec![Message {
+            created_at_ms: 0,
+            started_at_ms: None,
+            id: "m1".into(),
+            role: Role::User,
+            parts: vec![
+                ContentPart::Text(TextPart {
+                    text: "check the lockfile too\n\n".into(),
+                }),
+                ContentPart::SubAgentResult(subagent_part()),
+            ],
+        }];
+
+        let wire = to_wire_messages(&history);
+
+        assert_eq!(wire.len(), 1);
+        assert_eq!(
+            wire[0].content.as_deref(),
+            Some("check the lockfile too\n\n[subagent \"audit\" completed]\n\nthree stale crates")
+        );
     }
 }

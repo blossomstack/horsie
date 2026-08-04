@@ -180,7 +180,10 @@ fn extract_tool_calls(parts: &[ContentPart]) -> Vec<(String, String, Value)> {
         .iter()
         .filter_map(|p| match p {
             ContentPart::ToolCall(tc) => Some((tc.id.clone(), tc.name.clone(), tc.input.clone())),
-            ContentPart::Text(_) | ContentPart::ToolResult(_) | ContentPart::Thinking(_) => None,
+            ContentPart::Text(_)
+            | ContentPart::ToolResult(_)
+            | ContentPart::Thinking(_)
+            | ContentPart::SubAgentResult(_) => None,
         })
         .collect()
 }
@@ -190,9 +193,10 @@ fn extract_text(parts: &[ContentPart]) -> String {
         .iter()
         .filter_map(|p| match p {
             ContentPart::Text(t) => Some(t.text.as_str()),
-            ContentPart::ToolCall(_) | ContentPart::ToolResult(_) | ContentPart::Thinking(_) => {
-                None
-            }
+            ContentPart::ToolCall(_)
+            | ContentPart::ToolResult(_)
+            | ContentPart::Thinking(_)
+            | ContentPart::SubAgentResult(_) => None,
         })
         .collect::<Vec<_>>()
         .join("")

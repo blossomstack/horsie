@@ -613,7 +613,10 @@ mod tests {
             agent::AgentInput::user_message_with_results("m1", "", vec![result_part("audit")]);
         let msg = input.to_message(0);
         assert_eq!(msg.parts.len(), 1);
-        assert!(matches!(&msg.parts[0], agent::ContentPart::SubAgentResult(_)));
+        assert!(matches!(
+            &msg.parts[0],
+            agent::ContentPart::SubAgentResult(_)
+        ));
     }
 
     #[test]

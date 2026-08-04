@@ -1638,7 +1638,10 @@ fn missing_tool_results(messages: &[Message], handoff_tools: &[String]) -> Vec<M
         .flat_map(|m| m.parts.iter())
         .filter_map(|p| match p {
             ContentPart::ToolResult(r) => Some(r.tool_call_id.as_str()),
-            ContentPart::Text(_) | ContentPart::ToolCall(_) | ContentPart::Thinking(_) => None,
+            ContentPart::Text(_)
+            | ContentPart::ToolCall(_)
+            | ContentPart::Thinking(_)
+            | ContentPart::SubAgentResult(_) => None,
         })
         .collect();
     let dangling: Vec<String> = messages
@@ -1654,7 +1657,8 @@ fn missing_tool_results(messages: &[Message], handoff_tools: &[String]) -> Vec<M
             ContentPart::ToolCall(_)
             | ContentPart::Text(_)
             | ContentPart::ToolResult(_)
-            | ContentPart::Thinking(_) => None,
+            | ContentPart::Thinking(_)
+            | ContentPart::SubAgentResult(_) => None,
         })
         .collect();
     if dangling.is_empty() {
@@ -1709,7 +1713,10 @@ fn repair_dangling(
         .flat_map(|m| m.parts.iter())
         .filter_map(|p| match p {
             ContentPart::ToolResult(r) => Some(r.tool_call_id.clone()),
-            ContentPart::Text(_) | ContentPart::ToolCall(_) | ContentPart::Thinking(_) => None,
+            ContentPart::Text(_)
+            | ContentPart::ToolCall(_)
+            | ContentPart::Thinking(_)
+            | ContentPart::SubAgentResult(_) => None,
         })
         .collect();
     answered.extend(answering.iter().cloned());
@@ -1729,7 +1736,8 @@ fn repair_dangling(
                 ContentPart::ToolCall(_)
                 | ContentPart::Text(_)
                 | ContentPart::ToolResult(_)
-                | ContentPart::Thinking(_) => None,
+                | ContentPart::Thinking(_)
+                | ContentPart::SubAgentResult(_) => None,
             })
             .collect();
         if dangling.is_empty() {

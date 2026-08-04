@@ -4232,6 +4232,24 @@ mod tests {
                 horsie_agentcore::ContentPart::Text(t) => Some(t.text.clone()),
                 horsie_agentcore::ContentPart::ToolCall(_)
                 | horsie_agentcore::ContentPart::ToolResult(_)
+                | horsie_agentcore::ContentPart::Thinking(_)
+                | horsie_agentcore::ContentPart::SubAgentResult(_) => None,
+            })
+            .collect()
+    }
+
+    /// A user message's subagent-result parts, rendered the way the wire sees
+    /// them — the counterpart to `user_texts` now that a result is a part of
+    /// its own rather than text merged into what the person said.
+    fn subagent_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+        page.messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                horsie_agentcore::ContentPart::SubAgentResult(r) => Some(r.to_wire_text()),
+                horsie_agentcore::ContentPart::Text(_)
+                | horsie_agentcore::ContentPart::ToolCall(_)
+                | horsie_agentcore::ContentPart::ToolResult(_)
                 | horsie_agentcore::ContentPart::Thinking(_) => None,
             })
             .collect()
@@ -4422,7 +4440,8 @@ mod tests {
                     horsie_agentcore::ContentPart::ToolResult(r) => results.push(r.output.clone()),
                     horsie_agentcore::ContentPart::Text(t) => texts.push(t.text.clone()),
                     horsie_agentcore::ContentPart::ToolCall(_)
-                    | horsie_agentcore::ContentPart::Thinking(_) => {}
+                    | horsie_agentcore::ContentPart::Thinking(_)
+                    | horsie_agentcore::ContentPart::SubAgentResult(_) => {}
                 }
             }
             (results, texts)
