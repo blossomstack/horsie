@@ -235,7 +235,12 @@ pub async fn start_run(
         reply,
     })
     .await?;
-    let rec = SessionRecord { spec, created_at };
+    // Just created, so it carries no annotations yet.
+    let rec = SessionRecord {
+        spec,
+        created_at,
+        annotations: Default::default(),
+    };
     Ok((
         StatusCode::CREATED,
         Json(WorkflowRunResponse {
