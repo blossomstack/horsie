@@ -2,50 +2,25 @@ import {
   Bot,
   CalendarClock,
   Container,
+  FolderPlus,
   Plus,
   Settings,
   ShieldCheck,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import type { SessionSummary } from "../api/types";
-import { relativeTime, sessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
-import { statusMeta } from "../lib/status";
+import {
+  partitionSessions,
+  reconcileOrder,
+  UNGROUPED,
+  unionGroups,
+} from "../lib/sessionGroups";
+import { useCreateGroup, useGroupList } from "../hooks/useGroups";
+import { usePersistentState } from "../hooks/usePersistentState";
 import { useSessionList } from "../hooks/useSessions";
-import { StatusDot } from "./StatusBadge";
+import { SessionGroupSection } from "./SessionGroupSection";
 import { ThemeToggle } from "./ThemeToggle";
-
-/** One channel strip on the rail: lamp, name, and what the channel last did. */
-function SessionRow({ s }: { s: SessionSummary }) {
-  const title = sessionTitle(s.name);
-  const meta = statusMeta(s.status);
-  return (
-    <NavLink
-      to={`/sessions/${s.id}`}
-      data-testid="session-row"
-      data-session-id={s.id}
-      title={`${title} — ${meta.hint}`}
-      className={({ isActive }) =>
-        cn(
-          "group flex items-start gap-2.5 rounded-[var(--radius-control)] px-2.5 py-2 transition-colors",
-          isActive
-            ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
-            : "text-dim hover:bg-raised hover:text-legend",
-        )
-      }
-    >
-      <StatusDot status={s.status} className="mt-[7px]" />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[0.8125rem] leading-5">{title}</span>
-        <span className="legend mt-0.5 block truncate">
-          {meta.label !== "—" ? `${meta.label} · ` : ""}
-          {relativeTime(s.createdAt)}
-        </span>
-      </span>
-    </NavLink>
-  );
-}
 
 /** A standing destination, above the session list: the things you keep, as
  * opposed to the sessions you accumulate. */
@@ -113,6 +88,34 @@ function FooterLink({
 
 export function Sidebar() {
   const { data: sessions, isLoading, isError } = useSessionList();
+  const { data: registeredGroups } = useGroupList();
+  const createGroup = useCreateGroup();
+  const [addingGroup, setAddingGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
+  // Persisted section order; reconciled with live groups for display only —
+  // written back solely on an explicit drag reorder.
+  const [savedOrder, setSavedOrder] = usePersistentState<string[]>(
+    "horsie.session-group-order",
+    [],
+    {
+      deserialize: (raw) =>
+        Array.isArray(raw) && raw.every((x) => typeof x === "string")
+          ? (raw as string[])
+          : undefined,
+    },
+  );
+  const groups = useMemo(
+    () => unionGroups(registeredGroups ?? [], sessions ?? []),
+    [registeredGroups, sessions],
+  );
+  const ordered = useMemo(
+    () => reconcileOrder(savedOrder, groups),
+    [savedOrder, groups],
+  );
+  const parts = useMemo(
+    () => partitionSessions(sessions ?? [], groups),
+    [sessions, groups],
+  );
   const navigate = useNavigate();
 
   return (
@@ -169,18 +172,33 @@ export function Sidebar() {
         />
       </div>
 
-      {/* The + is the only control here, so it carries the row's right edge. */}
+      {/* The + is the only session control here, so it carries the row's
+          right edge; the group action sits to its left. */}
       <div className="flex items-center justify-between pb-1.5 pl-4 pr-2 pt-4">
         <span className="legend">Sessions</span>
-        <button
-          className="key-icon !h-6 !w-6"
-          onClick={() => navigate("/")}
-          data-testid="new-session-button"
-          title="Start a new session"
-          aria-label="Start a new session"
-        >
-          <Plus size={14} aria-hidden />
-        </button>
+        <div className="flex items-center gap-0.5">
+          <button
+            className="key-icon !h-6 !w-6"
+            onClick={() => {
+              setNewGroupName("");
+              setAddingGroup(true);
+            }}
+            data-testid="new-group-button"
+            title="Create a group"
+            aria-label="Create a group"
+          >
+            <FolderPlus size={14} aria-hidden />
+          </button>
+          <button
+            className="key-icon !h-6 !w-6"
+            onClick={() => navigate("/")}
+            data-testid="new-session-button"
+            title="Start a new session"
+            aria-label="Start a new session"
+          >
+            <Plus size={14} aria-hidden />
+          </button>
+        </div>
       </div>
 
       <nav
@@ -200,9 +218,38 @@ export function Sidebar() {
             start one.
           </p>
         )}
-        {sessions?.map((s) => (
-          <SessionRow key={s.id} s={s} />
-        ))}
+        {addingGroup && (
+          <input
+            data-testid="group-name-input"
+            className="mx-1 mb-1 w-[calc(100%-0.5rem)] rounded-[var(--radius-control)] border bg-panel px-2 py-1 text-[0.8125rem] text-legend outline-none focus:border-[var(--rule-strong)]"
+            placeholder="Group name"
+            value={newGroupName}
+            autoFocus
+            onChange={(e) => setNewGroupName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const name = newGroupName.trim();
+                if (name) createGroup.mutate(name);
+                setAddingGroup(false);
+              } else if (e.key === "Escape") {
+                setAddingGroup(false);
+              }
+            }}
+          />
+        )}
+        {!isLoading &&
+          !isError &&
+          ordered.map((g) => (
+            <SessionGroupSection
+              key={g}
+              name={g}
+              sessions={parts.get(g) ?? []}
+              groups={groups}
+              ungrouped={g === UNGROUPED}
+              order={ordered}
+              onReorder={setSavedOrder}
+            />
+          ))}
       </nav>
 
       <div className="flex items-center gap-0.5 border-t px-1.5 py-2">
