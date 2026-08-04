@@ -16,6 +16,7 @@ mod plugins;
 mod routines;
 mod sse;
 pub mod vendor_connect;
+mod workflows;
 
 use crate::auth::AuthService;
 use crate::config::ConfigStore;
@@ -74,6 +75,9 @@ pub struct AppState {
     /// Named environments (experimental): CRUD over the definitions. Nothing
     /// consumes an environment yet.
     pub environments: Arc<crate::environments::EnvironmentService>,
+    /// Workflow definitions: CRUD over the graphs. A *run* of one is a session,
+    /// reached through the session API like any other.
+    pub workflows: Arc<crate::workflows::WorkflowService>,
     /// Every connected vendor agent, published into the same vendor map
     /// sessions select from. Held here so the connect route can register a
     /// freshly handshaken link.
@@ -214,6 +218,16 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/routines/:name/sessions",
             get(routines::get_routine_sessions),
+        )
+        .route(
+            "/api/workflows",
+            get(workflows::list_workflows).post(workflows::create_workflow),
+        )
+        .route(
+            "/api/workflows/:name",
+            get(workflows::get_workflow)
+                .put(workflows::replace_workflow)
+                .delete(workflows::delete_workflow),
         )
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
         .route("/api/auth/status", get(auth::status))
@@ -360,6 +374,10 @@ mod tests {
                 state_dir: tmp.path().to_path_buf(),
             },
         ));
+        let workflows = Arc::new(crate::workflows::WorkflowService::new(
+            crate::workflows::WorkflowStore::new(opened.db.clone()),
+            agents.clone(),
+        ));
         let routine_runner = Arc::new(crate::routines::RoutineRunner::new(
             routines.clone(),
             agents.clone(),
@@ -379,6 +397,7 @@ mod tests {
             memory,
             agents,
             routines,
+            workflows,
             routine_runner,
             environments,
             vendor_agents,
@@ -1476,6 +1495,127 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         app
+    }
+
+    fn workflow_body() -> serde_json::Value {
+        serde_json::json!({
+            "name": "fix-bug",
+            "description": "triage then fix",
+            "start": "triage",
+            "steps": [
+                {
+                    "name": "triage",
+                    "agent": "reviewer",
+                    "prompt": "Triage it.",
+                    "outputSchema": {
+                        "type": "object",
+                        "properties": {"severity": {"type": "string"}}
+                    },
+                    "transitions": [
+                        {"to": "fix", "condition": "output.severity == \"p0\""},
+                        {"to": "fix"}
+                    ]
+                },
+                {"name": "fix", "agent": "reviewer", "prompt": "Fix it."}
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn workflows_crud_over_http() {
+        use horsie_models::workflow::WorkflowView;
+        let tmp = tempfile::tempdir().unwrap();
+        // Same fixture as routines: it creates the `reviewer` preset the steps
+        // reference.
+        let app = routine_app(&tmp).await;
+
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/workflows", &workflow_body()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v: WorkflowView = read_json(res).await;
+        assert_eq!(v.name, "fix-bug");
+        assert_eq!(v.start, "triage");
+        assert_eq!(v.steps.len(), 2);
+        // Transition order decides which condition wins, so it has to survive
+        // the wire.
+        let t = v.steps[0].transitions.as_ref().unwrap();
+        assert_eq!(t.len(), 2);
+        assert!(t[1].condition.is_none());
+
+        // Duplicate -> 409.
+        let res = app
+            .clone()
+            .oneshot(post_json("/api/workflows", &workflow_body()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+
+        // Every graph defect -> 422, rather than a workflow saved broken.
+        for bad in [
+            // start names no step
+            serde_json::json!({"name": "b", "start": "nowhere",
+                               "steps": [{"name": "a", "agent": "reviewer", "prompt": "x"}]}),
+            // transition to a step that does not exist
+            serde_json::json!({"name": "b", "start": "a",
+                               "steps": [{"name": "a", "agent": "reviewer", "prompt": "x",
+                                          "transitions": [{"to": "ghost"}]}]}),
+            // a condition with nothing to read
+            serde_json::json!({"name": "b", "start": "a",
+                               "steps": [{"name": "a", "agent": "reviewer", "prompt": "x",
+                                          "transitions": [{"to": "a", "condition": "output.ok"}]}]}),
+            // unknown preset
+            serde_json::json!({"name": "b", "start": "a",
+                               "steps": [{"name": "a", "agent": "ghost", "prompt": "x"}]}),
+            // duplicate step names
+            serde_json::json!({"name": "b", "start": "a",
+                               "steps": [{"name": "a", "agent": "reviewer", "prompt": "x"},
+                                         {"name": "a", "agent": "reviewer", "prompt": "y"}]}),
+            // no steps at all
+            serde_json::json!({"name": "b", "start": "a", "steps": []}),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json("/api/workflows", &bad))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "expected 422 for {bad}"
+            );
+        }
+
+        // List, get, replace, delete.
+        let res = app.clone().oneshot(get("/api/workflows")).await.unwrap();
+        let all: Vec<WorkflowView> = read_json(res).await;
+        assert_eq!(all.len(), 1);
+
+        let mut changed = workflow_body();
+        changed["description"] = serde_json::json!("changed");
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/workflows/fix-bug", &changed))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: WorkflowView = read_json(res).await;
+        assert_eq!(v.description, "changed");
+
+        let res = app
+            .clone()
+            .oneshot(delete("/api/workflows/fix-bug"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = app
+            .clone()
+            .oneshot(get("/api/workflows/fix-bug"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     fn routine_body() -> serde_json::Value {

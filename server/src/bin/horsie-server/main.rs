@@ -238,6 +238,10 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     );
 
     // Triggering a routine is one code path; the timer is a clock on top of it.
+    let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
+        horsie_server::workflows::WorkflowStore::new(opened.db.clone()),
+        agents.clone(),
+    ));
     let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
         routines.clone(),
         agents.clone(),
@@ -263,6 +267,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         memory,
         agents,
         routines,
+        workflows,
         routine_runner,
         environments,
         vendor_agents,
