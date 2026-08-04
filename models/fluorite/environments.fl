@@ -1,0 +1,41 @@
+/// Named environments (experimental): a reusable runtime + repos bundle. An
+/// environment names its runtime vendor — the opposite pole from agent
+/// presets, which deliberately name no vendor. Nothing consumes an
+/// environment yet: sessions, presets, and routines do not reference one.
+package environments;
+
+use session_api.RepoConfig;
+use executor.EnvVar;
+use executor.ProvisionStep;
+
+/// An environment as shown to clients.
+struct EnvironmentView {
+    /// Slug; the id of record, used in API paths.
+    name: String,
+    description: String,
+    /// Runtime vendor name. Required, and never "local": environments only
+    /// target vendor-managed, provisionable runtimes.
+    vendor: String,
+    /// Repositories cloned into the runtime workspace at provision time.
+    repos: Vec<RepoConfig>,
+    /// Plain-text, non-sensitive env vars for the runtime. Secrets are a
+    /// future, separate concept.
+    env_vars: Vec<EnvVar>,
+    /// Setup steps the runtime executes before its message loop. Inert today:
+    /// nothing provisions from an environment yet.
+    provision: Vec<ProvisionStep>,
+    /// Unix epoch seconds.
+    created_at: String,
+    updated_at: String,
+}
+
+/// Create or fully replace an environment. Omitted list fields default to
+/// empty; `description` defaults to "".
+struct EnvironmentInput {
+    name: String,
+    description: Option<String>,
+    vendor: String,
+    repos: Option<Vec<RepoConfig>>,
+    env_vars: Option<Vec<EnvVar>>,
+    provision: Option<Vec<ProvisionStep>>,
+}

@@ -116,6 +116,11 @@ pub mod agents {
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod environments {
+    include!(concat!(env!("OUT_DIR"), "/environments/mod.rs"));
+}
+
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod routines {
     include!(concat!(env!("OUT_DIR"), "/routines/mod.rs"));
 }

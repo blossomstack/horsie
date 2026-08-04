@@ -4,6 +4,8 @@ export * from "../generated/agent";
 export * from "../generated/agents";
 export * from "../generated/auth";
 export * from "../generated/capabilities";
+export * from "../generated/environments";
+export * from "../generated/executor";
 export * from "../generated/github";
 export * from "../generated/mcp";
 export * from "../generated/memory";

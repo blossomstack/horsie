@@ -8,6 +8,8 @@ import type {
   AuthStatus,
   DeviceApprovalRequest,
   CreateSessionRequest,
+  EnvironmentInput,
+  EnvironmentView,
   CreateSessionResponse,
   GetSessionResponse,
   GetAgentResponse,
@@ -229,6 +231,27 @@ export const api = {
 
     remove: (name: string): Promise<void> =>
       request(`/agents/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  },
+
+  environments: {
+    /** All environments. */
+    list: (): Promise<EnvironmentView[]> => request("/environments"),
+
+    get: (name: string): Promise<EnvironmentView> =>
+      request(`/environments/${encodeURIComponent(name)}`),
+
+    create: (body: EnvironmentInput): Promise<EnvironmentView> =>
+      request("/environments", { method: "POST", body: JSON.stringify(body) }),
+
+    /** Full replace; the path is the id of record. */
+    update: (name: string, body: EnvironmentInput): Promise<EnvironmentView> =>
+      request(`/environments/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    remove: (name: string): Promise<void> =>
+      request(`/environments/${encodeURIComponent(name)}`, { method: "DELETE" }),
   },
 
   routines: {

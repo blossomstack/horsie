@@ -1,4 +1,11 @@
-import { Bot, CalendarClock, Plus, Settings, ShieldCheck } from "lucide-react";
+import {
+  Bot,
+  CalendarClock,
+  Container,
+  Plus,
+  Settings,
+  ShieldCheck,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import type { SessionSummary } from "../api/types";
@@ -147,6 +154,12 @@ export function Sidebar() {
           testId="agents-link"
           icon={<Bot size={15} aria-hidden />}
           label="Agents"
+        />
+        <PrimaryLink
+          to="/environments"
+          testId="environments-link"
+          icon={<Container size={15} aria-hidden />}
+          label="Environments"
         />
         <PrimaryLink
           to="/routines"

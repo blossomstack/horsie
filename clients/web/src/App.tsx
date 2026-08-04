@@ -5,6 +5,8 @@ import { useAuthStatus } from "./hooks/useAuth";
 import { AgentEditPage } from "./pages/agents/AgentEditPage";
 import { AgentsPage } from "./pages/agents/AgentsPage";
 import { DeviceApprovalPage } from "./pages/DeviceApprovalPage";
+import { EnvironmentEditPage } from "./pages/environments/EnvironmentEditPage";
+import { EnvironmentsPage } from "./pages/environments/EnvironmentsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NewSessionView } from "./pages/NewSessionView";
 import { RoutineDetailPage } from "./pages/routines/RoutineDetailPage";
@@ -57,6 +59,12 @@ export default function App() {
               <Route path="agents" element={<AgentsPage />} />
               <Route path="agents/new" element={<AgentEditPage />} />
               <Route path="agents/:name/edit" element={<AgentEditPage />} />
+              <Route path="environments" element={<EnvironmentsPage />} />
+              <Route path="environments/new" element={<EnvironmentEditPage />} />
+              <Route
+                path="environments/:name/edit"
+                element={<EnvironmentEditPage />}
+              />
               <Route path="routines" element={<RoutinesPage />} />
               <Route path="routines/new" element={<RoutineEditPage />} />
               <Route path="routines/:name" element={<RoutineDetailPage />} />
