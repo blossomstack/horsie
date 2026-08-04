@@ -7,16 +7,13 @@
 //! unmatched id as a protocol error.
 
 use crate::auth::Principal;
-use crate::runtime_vendor::{
-    RuntimeSpec, RuntimeVendorTransport, VendorError, VendorRuntime, VendorRuntimeHandle,
-};
+use crate::runtime_vendor::{RuntimeSpec, VendorError};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime_vendor::{
     CreateRuntimeRequest, DeleteRuntimeRequest, GetRuntimeRequest, HibernateRuntimeRequest,
     RuntimeSpec as WireRuntimeSpec, RuntimeVendorCommand, RuntimeVendorEvent,
     RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage, VendorRegistered, VendorRejected,
 };
-use horsie_runtime_client::RuntimeClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -322,23 +319,6 @@ impl RuntimeVendorLink {
             provision: spec.provision.clone(),
         })
     }
-
-    /// Build the client + handle for a runtime the agent has just confirmed.
-    fn runtime_handle(self: &Arc<Self>, runtime_id: &str) -> VendorRuntime {
-        let transport = RuntimeVendorTransport::new(self.clone(), runtime_id.to_string());
-        VendorRuntime {
-            // The runtime's own id doubles as its main agent's identity: the
-            // server passes the session id as `runtime_id`, and that is also
-            // what the agent journal is keyed by (`agent/<session-uuid>`). A
-            // subagent sharing this runtime derives its own handle with
-            // `RuntimeClient::with_agent_id`.
-            runtime_client: RuntimeClient::from_arc(Arc::new(transport), runtime_id),
-            handle: Arc::new(LinkRuntimeHandle {
-                link: self.clone(),
-                runtime_id: runtime_id.to_string(),
-            }),
-        }
-    }
 }
 
 /// The vendor surface the session layer drives. These were a `RuntimeVendor`
@@ -356,11 +336,12 @@ impl RuntimeVendorLink {
 
     /// Provision a brand-new runtime. Called exactly once per session, at
     /// session creation; every later acquisition is [`Self::get`].
-    pub async fn create(
-        &self,
-        runtime_id: &str,
-        spec: &RuntimeSpec,
-    ) -> Result<VendorRuntime, VendorError> {
+    ///
+    /// Confirms the runtime exists and nothing more: the client that reaches it
+    /// is minted by [`RuntimeManager`](crate::runtime_manager::RuntimeManager),
+    /// over the vendor's *name* rather than this link, so it keeps working when
+    /// the agent reconnects on a new one.
+    pub async fn create(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), VendorError> {
         let Some(me) = self.arc_self() else {
             return Err(VendorError::Unavailable(
                 "vendor link was dropped".to_string(),
@@ -373,14 +354,14 @@ impl RuntimeVendorLink {
         }))
         .await
         .map_err(VendorError::Provision)?;
-        Ok(me.runtime_handle(runtime_id))
+        Ok(())
     }
 
-    /// Hand back an existing runtime, resuming it if the agent hibernated it.
+    /// Confirm an existing runtime, resuming it if the agent hibernated it.
     ///
     /// Never provisions. A failure here means the agent has nothing under this
     /// id, which is terminal for the owning session — see [`VendorError::Gone`].
-    pub async fn get(&self, runtime_id: &str) -> Result<VendorRuntime, VendorError> {
+    pub async fn get(&self, runtime_id: &str) -> Result<(), VendorError> {
         let Some(me) = self.arc_self() else {
             return Err(VendorError::Unavailable(
                 "vendor link was dropped".to_string(),
@@ -396,7 +377,7 @@ impl RuntimeVendorLink {
         }))
         .await
         .map_err(VendorError::Gone)?;
-        Ok(me.runtime_handle(runtime_id))
+        Ok(())
     }
 
     /// Advisory suspend, best effort: a vendor that cannot suspend keeps the
@@ -418,20 +399,6 @@ impl RuntimeVendorLink {
                 runtime_id: runtime_id.to_string(),
             }))
             .await;
-    }
-}
-
-/// Lifecycle handle for one runtime on one agent. `hibernate` is the explicit
-/// advisory suspend; the agent decides what, if anything, that means.
-struct LinkRuntimeHandle {
-    link: Arc<RuntimeVendorLink>,
-    runtime_id: String,
-}
-
-#[async_trait::async_trait]
-impl VendorRuntimeHandle for LinkRuntimeHandle {
-    async fn hibernate(&self) {
-        self.link.hibernate(&self.runtime_id).await;
     }
 }
 
@@ -708,8 +675,8 @@ mod tests {
         let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
-        let rt = link.create("rt-1", &spec_fixture()).await.expect("create");
-        rt.handle.hibernate().await;
+        link.create("rt-1", &spec_fixture()).await.expect("create");
+        link.hibernate("rt-1").await;
         link.delete("rt-1").await;
 
         assert_eq!(
