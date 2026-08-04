@@ -21,6 +21,7 @@ import { formatTime } from "../lib/time";
 export function TurnActions({
   atMs,
   markdown,
+  plainText,
   renderedRef,
 }: {
   /** Absent for an optimistic echo or a queued message — neither has a server
@@ -29,6 +30,10 @@ export function TurnActions({
   /** The turn's markdown source. Absent on a user turn, whose text is already
    * plain, so that turn shows a single copy button. */
   markdown?: string;
+  /** The text of a turn with no markdown source (a user message is already
+   * plain). The single copy button takes this; without it the button would
+   * silently copy the empty string. */
+  plainText?: string;
   /** The rendered prose node, read for the plain-text copy. */
   renderedRef?: RefObject<HTMLDivElement | null>;
 }) {
@@ -56,7 +61,7 @@ export function TurnActions({
   const copyPlain = async () => {
     const text = renderedRef
       ? renderedTextOf(renderedRef.current)
-      : (markdown ?? "");
+      : (markdown ?? plainText ?? "");
     if (await copyText(text)) flash("txt");
   };
 
