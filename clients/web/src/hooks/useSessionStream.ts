@@ -5,6 +5,7 @@ import {
   Role,
   SessionStatusKind,
   type ContentPart,
+  type HistoryEntry,
   type HistoryPage,
   type Message,
   type PendingAskView,
@@ -278,6 +279,12 @@ function storeMessage(
 
 /** Apply a batch of history messages, appending or prepending fresh ids in the
  * batch's own (chronological) order and deduping against what's loaded. */
+/** The LLM messages of a transcript window. A page carries entries, and not
+ * every entry is a message the model saw — a hook record is an entry too. */
+function llmMessages(entries: HistoryEntry[]): Message[] {
+  return entries.flatMap((e) => (e.type === "Llm" ? [e.value] : []));
+}
+
 function applyHistory(state: State, messages: Message[], prepend: boolean): State {
   const byId = { ...state.byId };
   const toolResults = { ...state.toolResults };
@@ -370,7 +377,7 @@ function reducer(state: State, action: Action): State {
       // current values on the agent document: usage is read straight off it
       // by the view, and the task list is seeded from it below. A page no
       // longer means two different things depending on its cursor.
-      const next = applyHistory(state, page.messages, prepend);
+      const next = applyHistory(state, llmMessages(page.entries), prepend);
       return {
         ...next,
         // A forward (backfill) page says nothing about what precedes the
@@ -386,7 +393,9 @@ function reducer(state: State, action: Action): State {
           // Real output began → the prep stage is done. A tool result is an
           // append like any other, so this one case covers the whole
           // transcript — the same fold `/history` feeds.
-          return { ...ingestMessage(state, ev.value.message), progression: null };
+          return ev.value.entry.type === "Llm"
+            ? { ...ingestMessage(state, ev.value.entry.value), progression: null }
+            : state;
         case "Resync":
           // The stream dropped frames. Say so; the effect below re-reads the
           // documents and backfills from the cursor rather than guessing.
