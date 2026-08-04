@@ -155,6 +155,11 @@ impl SubAgentTree {
         self.nodes.get(id)
     }
 
+    /// Whether this tree holds no nodes.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
     /// Every node id, for re-spawning resident actors at recovery.
     pub fn ids(&self) -> Vec<Uuid> {
         self.nodes.keys().copied().collect()
