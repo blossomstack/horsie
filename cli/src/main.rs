@@ -14,6 +14,7 @@ use horsie::config::HorsieConfig;
 use horsie::connect;
 use horsie::error::CliError;
 use horsie::session::{self, EventsMode};
+use horsie::workflow;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -53,6 +54,11 @@ enum Command {
     Agent {
         #[command(subcommand)]
         action: AgentAction,
+    },
+    /// Inspect and run workflows on a session server (`horsie-server`).
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowAction,
     },
     /// List routines and trigger runs on a session server.
     #[command(name = "routines")]
@@ -138,6 +144,11 @@ enum SessionAction {
         /// Which events to write.
         #[arg(long, value_enum, default_value = "messages")]
         events: EventsMode,
+        /// Which agent's transcript to follow. Omitted → the session's main
+        /// agent. A workflow run has no main agent: pass a step's agent id
+        /// from `horsie workflow status`.
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// List sessions on the server.
     List {
@@ -188,6 +199,52 @@ enum AgentAction {
         session_name: Option<String>,
         /// Session server base URL. Omitted → the configured default server,
         /// else `https://auth.horsie.dev`.
+        #[arg(long)]
+        server: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowAction {
+    /// List workflows.
+    List {
+        /// Session server base URL. Omitted → the configured default server,
+        /// else `https://auth.horsie.dev`.
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Show one workflow: its steps, their outputs, and where each one goes.
+    Get {
+        /// Workflow name.
+        name: String,
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Start a run. Prints the session id — a run is a session, so
+    /// `horsie session status` and `horsie session tail` work on it.
+    Run {
+        /// Workflow name.
+        name: String,
+        /// What the first step is handed (required).
+        #[arg(short = 'i', long)]
+        input: String,
+        /// Runtime vendor to host the run's shared runtime. Omitted → the
+        /// server's default.
+        #[arg(long)]
+        vendor: Option<String>,
+        /// Repeatable clone URL, cloned into the run's shared workspace.
+        #[arg(long = "repo")]
+        repo: Vec<String>,
+        /// Optional run title.
+        #[arg(long)]
+        session_name: Option<String>,
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Show where a run got to: every step execution, and what it did.
+    Status {
+        /// Session UUID of the run.
+        session_id: String,
         #[arg(long)]
         server: Option<String>,
     },
@@ -486,9 +543,10 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 output,
                 server,
                 events,
+                agent,
             } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                session::tail(&server, &session_id, &output, events).await?;
+                session::tail(&server, &session_id, &output, events, agent.as_deref()).await?;
                 Ok(0)
             }
             SessionAction::List { server } => {
@@ -499,6 +557,35 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             SessionAction::Status { session_id, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
                 session::status(&server, &session_id).await?;
+                Ok(0)
+            }
+        },
+        Command::Workflow { action } => match action {
+            WorkflowAction::List { server } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                workflow::list(&server).await?;
+                Ok(0)
+            }
+            WorkflowAction::Get { name, server } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                workflow::get(&server, &name).await?;
+                Ok(0)
+            }
+            WorkflowAction::Run {
+                name,
+                input,
+                vendor,
+                repo,
+                session_name,
+                server,
+            } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                workflow::run(&server, &name, input, vendor, repo, session_name).await?;
+                Ok(0)
+            }
+            WorkflowAction::Status { session_id, server } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                workflow::status(&server, &session_id).await?;
                 Ok(0)
             }
         },

@@ -6,6 +6,9 @@ use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentView};
 use horsie_models::routines::{RoutineRunResponse, RoutineView};
 use horsie_models::session::{SessionDetail, SessionSummary};
 use horsie_models::session_api::{ApiError, GetSessionResponse, ListSessionsResponse};
+use horsie_models::workflow::{
+    WorkflowRunGraph, WorkflowRunRequest, WorkflowRunResponse, WorkflowView,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -103,6 +106,44 @@ impl ServerClient {
             reqwest::Method::POST,
             &format!("/api/agents/{name}/invoke"),
             Some(req),
+        )
+        .await
+    }
+
+    pub async fn list_workflows(&self) -> Result<Vec<WorkflowView>, CliError> {
+        self.send(reqwest::Method::GET, "/api/workflows", None::<&str>)
+            .await
+    }
+
+    pub async fn get_workflow(&self, name: &str) -> Result<WorkflowView, CliError> {
+        self.send(
+            reqwest::Method::GET,
+            &format!("/api/workflows/{name}"),
+            None::<&str>,
+        )
+        .await
+    }
+
+    pub async fn run_workflow(
+        &self,
+        name: &str,
+        req: &WorkflowRunRequest,
+    ) -> Result<WorkflowRunResponse, CliError> {
+        self.send(
+            reqwest::Method::POST,
+            &format!("/api/workflows/{name}/runs"),
+            Some(req),
+        )
+        .await
+    }
+
+    /// A run, projected onto its graph. Keyed by session id: a run is a
+    /// session.
+    pub async fn workflow_run(&self, session_id: &str) -> Result<WorkflowRunGraph, CliError> {
+        self.send(
+            reqwest::Method::GET,
+            &format!("/api/sessions/{session_id}/workflow"),
+            None::<&str>,
         )
         .await
     }
