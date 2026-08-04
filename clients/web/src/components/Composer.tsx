@@ -37,11 +37,18 @@ export function Composer({
   const awaiting = status === SessionStatusKind.AwaitingInput;
   const blocked = blockedReason != null;
 
-  // Auto-grow the textarea up to a cap.
+  // Auto-grow the textarea up to a cap. The fractional line box
+  // (line-height 1.625 × 15px) leaves sub-pixel overflow below the cap, which
+  // browsers that paint scrollbars (Safari zoomed, classic-scrollbar setups)
+  // render as a permanent scrollbar on an empty input — so hide overflow
+  // until the cap, where the content genuinely overflows and `auto` lets the
+  // user scroll.
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     el.style.height = "auto";
+    const capped = el.scrollHeight > 200;
+    el.style.overflowY = capped ? "auto" : "hidden";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [text]);
 
