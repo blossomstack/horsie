@@ -125,6 +125,9 @@ pub struct MockTransport {
     invocations: Arc<Mutex<Vec<ToolCall>>>,
     agent_ids: Arc<Mutex<Vec<String>>>,
     call_ids: Arc<Mutex<Vec<String>>>,
+    /// Hook records every tool response carries back, as a runtime that ran
+    /// plugin hooks would report them.
+    hooks: Vec<horsie_models::runtime::HookRecord>,
 }
 
 impl MockTransport {
@@ -132,6 +135,7 @@ impl MockTransport {
         Self {
             script: None,
             result,
+            hooks: Vec::new(),
             scan: Vec::new(),
             shared: Vec::new(),
             shared_root: None,
@@ -143,6 +147,14 @@ impl MockTransport {
             agent_ids: Arc::new(Mutex::new(Vec::new())),
             call_ids: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Report `hooks` on every tool response, the way a runtime that ran plugin
+    /// hooks does.
+    #[must_use]
+    pub fn with_hooks(mut self, hooks: Vec<horsie_models::runtime::HookRecord>) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     /// Record this transport's calls into `probe` as well as returning them here.
@@ -320,7 +332,7 @@ impl RuntimeTransport for MockTransport {
                 Ok(RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
                     call_id: req.call_id,
                     result,
-                    hooks: Vec::new(),
+                    hooks: self.hooks.clone(),
                 }))
             }
             RuntimeInboundMessage::ScanWorkspace(req) => {

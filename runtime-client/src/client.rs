@@ -333,6 +333,57 @@ mod tests {
         );
     }
 
+    /// Hook records must reach their sink *before* `invoke` returns.
+    ///
+    /// This is what orders a hook entry ahead of the tool result it describes:
+    /// the agent loop journals `ToolComplete` only after `execute` — and so
+    /// `invoke` — has returned, so a sink that has already been told puts its
+    /// record on the actor's mailbox first. Let the sink be told afterwards and
+    /// the transcript shows a hook explaining a call the reader already scrolled
+    /// past.
+    #[tokio::test]
+    async fn hook_records_reach_the_sink_before_invoke_returns() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        struct Latch(Arc<AtomicBool>);
+        #[async_trait::async_trait]
+        impl HookSink for Latch {
+            async fn record(&self, hooks: Vec<HookRecord>) {
+                assert_eq!(hooks.len(), 1, "the response's records, verbatim");
+                self.0.store(true, AtomicOrdering::SeqCst);
+            }
+        }
+
+        let record = HookRecord {
+            plugin: "guard".into(),
+            event: "PreToolUse".into(),
+            tool: "bash".into(),
+            tool_call_id: "tc1".into(),
+            duration_ms: 1,
+            blocked: false,
+            reason: None,
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        };
+        let told = Arc::new(AtomicBool::new(false));
+        let client = RuntimeClient::new(
+            MockTransport::ok("done").with_hooks(vec![record]),
+            "agent-1",
+        )
+        .with_hook_sink(Arc::new(Latch(told.clone())));
+
+        client.invoke("tc1", probe_call()).await.unwrap();
+        assert!(
+            told.load(AtomicOrdering::SeqCst),
+            "the sink must be told before invoke hands the result back"
+        );
+    }
+
     /// The subagent seam: a derived handle shares the runtime but carries its
     /// own identity, so the runtime keys its cwd/env in a separate bucket.
     #[tokio::test]

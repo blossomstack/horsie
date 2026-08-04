@@ -218,18 +218,27 @@ Implementation order within the branch, each step compiling before the next:
 
 ## Testing
 
-- **runtime** — the existing hook tests, plus: a record carries the call id it
-  was dispatched with.
+- **runtime-client** — the model's `tool_call_id` reaches the runtime unchanged;
+  hook records reach their sink *before* `invoke` returns, which is the half of
+  the ordering guarantee that is actually testable in isolation (the other half
+  is tokio mailbox FIFO).
 - **workflow** — a `Hook` entry in `history` never appears in
-  `prompt_messages()`; a hook entry is journaled before its `ToolComplete`;
-  `history_page()` pages correctly across mixed entries in both directions; a
-  mixed history survives a snapshot round-trip.
-- **server** — a subagent's hooks land on the subagent's journal, not the main
-  agent's; `AgentDomainEvent::HookRan` maps to `AgentFrame::Appended`.
-- **web** — Vitest for the entry renderer; one Playwright case asserting a
-  blocking plugin's hook row is present **after a reload**, which is the
-  requirement an ephemeral frame alone cannot meet.
+  `prompt_messages()`; entry ids are derived and stable per call; `seq` counts
+  only that call's records; `history_page()` pages across mixed entries with the
+  cursor resolving against either kind; a mixed transcript survives a snapshot
+  round-trip.
+- **server** — a subagent's hooks land on the subagent's transcript and not the
+  main agent's; `AgentDomainEvent::HookRan` maps to an `Appended` frame carrying
+  the id the fold derives; a hook entry passes redaction untouched.
+- **web** — Vitest over the card: a denial names its plugin on the collapsed
+  row, allowed hooks are listed only when expanded, and a hook that failed to
+  run reads as an intervention.
 - CI's TypeScript drift check covers the regenerated types.
+
+**Not covered.** No Playwright case yet asserts a hook row survives a reload.
+That is the one requirement an ephemeral frame could not meet, and the reason
+records are journaled at all, so it is worth adding — it needs an e2e plugin
+fixture that declares a hook, which the harness does not have.
 
 ## Out of scope
 
