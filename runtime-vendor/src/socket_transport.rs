@@ -154,7 +154,8 @@ mod tests {
                                 stdout: "ok".into(),
                                 stderr: String::new(),
                                 exit_code: 0,
-                            }),
+                            hooks: Vec::new(),
+                        }),
                         });
                         let _ = sink
                             .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))

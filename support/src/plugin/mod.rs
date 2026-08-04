@@ -7,6 +7,7 @@
 #[cfg(feature = "git")]
 pub mod checkout;
 pub mod grants;
+pub mod hooks;
 pub mod layout;
 pub mod manifest;
 pub mod marketplace;

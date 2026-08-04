@@ -646,7 +646,8 @@ async fn run_agent<S>(
                                 stdout: bash_stdout.clone(),
                                 stderr: String::new(),
                                 exit_code: 0,
-                            }),
+                            hooks: Vec::new(),
+                        }),
                         }))
                     }
                     RuntimeInboundMessage::CancelCall(req) => {

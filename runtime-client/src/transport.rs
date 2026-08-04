@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use horsie_models::runtime::{
-    CancelCallRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
+    CancelCallRequest, HookRecord, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
     SessionStartRequest, ToolCall, ToolCallRequest, ToolResult,
 };
 use thiserror::Error;
@@ -44,7 +44,7 @@ pub trait RuntimeTransport: Send + Sync {
         call_id: &str,
         agent_id: &str,
         call: ToolCall,
-    ) -> Result<ToolResult, TransportError> {
+    ) -> Result<(ToolResult, Vec<HookRecord>), TransportError> {
         let reply = self
             .relay(RuntimeInboundMessage::ToolCall(ToolCallRequest {
                 call_id: call_id.to_string(),
@@ -53,7 +53,7 @@ pub trait RuntimeTransport: Send + Sync {
             }))
             .await?;
         match reply {
-            RuntimeOutboundMessage::ToolCallResponse(resp) => Ok(resp.result),
+            RuntimeOutboundMessage::ToolCallResponse(resp) => Ok((resp.result, resp.hooks)),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::Provisioning(_)
             | RuntimeOutboundMessage::ProvisionFailed(_)

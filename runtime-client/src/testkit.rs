@@ -302,7 +302,8 @@ impl RuntimeTransport for MockTransport {
                 Ok(RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
                     call_id: req.call_id,
                     result,
-                }))
+                hooks: Vec::new(),
+            }))
             }
             RuntimeInboundMessage::ScanWorkspace(req) => {
                 if let Some(gate) = &self.prep_gate {

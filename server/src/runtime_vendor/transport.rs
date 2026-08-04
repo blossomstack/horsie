@@ -198,7 +198,8 @@ mod tests {
                                 stdout: stdout.to_string(),
                                 stderr: String::new(),
                                 exit_code: 0,
-                            }),
+                            hooks: Vec::new(),
+                        }),
                         }),
                     }),
                 };

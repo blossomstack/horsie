@@ -1,5 +1,7 @@
 use crate::transport::{RuntimeTransport, TransportError};
-use horsie_models::runtime::{ScanResponse, ToolCall, ToolError, ToolOutput, ToolResult};
+use horsie_models::runtime::{
+    HookRecord, ScanResponse, ToolCall, ToolError, ToolOutput, ToolResult,
+};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use uuid::Uuid;
@@ -22,9 +24,22 @@ impl std::fmt::Display for RuntimeCallError {
 impl std::error::Error for RuntimeCallError {}
 
 /// Client handle for invoking tools on a remote runtime. Cheap to clone — Arc-backed.
+/// Receives what plugin hooks did to a tool call.
+///
+/// Out of band from the tool result because the tools are unaware of hooks and
+/// the records are for the *user*, not the model: the server journals them so a
+/// session can show what a plugin blocked or rewrote.
+#[async_trait::async_trait]
+pub trait HookSink: Send + Sync {
+    async fn record(&self, hooks: Vec<HookRecord>);
+}
+
 #[derive(Clone)]
 pub struct RuntimeClient {
     inner: Arc<dyn RuntimeTransport>,
+    /// Where hook records go. `None` outside a session — the CLI and tests have
+    /// nothing to journal them to.
+    hook_sink: Option<Arc<dyn HookSink>>,
     /// The agent this handle acts for. Stamped on every invoke; the runtime
     /// keys its per-agent cwd/env state by it, so an agent and its subagents
     /// never see each other's working directory or environment.
@@ -48,6 +63,7 @@ impl RuntimeClient {
     pub fn new(transport: impl RuntimeTransport + 'static, agent_id: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(transport),
+            hook_sink: None,
             agent_id: agent_id.into(),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -59,9 +75,18 @@ impl RuntimeClient {
     pub fn from_arc(transport: Arc<dyn RuntimeTransport>, agent_id: impl Into<String>) -> Self {
         Self {
             inner: transport,
+            hook_sink: None,
             agent_id: agent_id.into(),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Route hook records to `sink`. Set once, by the session that journals
+    /// them; a client without one simply discards what hooks reported.
+    #[must_use]
+    pub fn with_hook_sink(mut self, sink: Arc<dyn HookSink>) -> Self {
+        self.hook_sink = Some(sink);
+        self
     }
 
     /// A handle onto the same runtime acting for a different agent.
@@ -90,8 +115,22 @@ impl RuntimeClient {
         let outcome = self.inner.invoke(&call_id, &self.agent_id, call).await;
         self.untrack(&call_id);
         match outcome {
-            Ok(ToolResult::Ok(output)) => Ok(output),
-            Ok(ToolResult::Err(ToolError { reason })) => Err(RuntimeCallError::ToolFailed(reason)),
+            Ok((result, hooks)) => {
+                // Hook records ride the tool response but are not part of it:
+                // the tools themselves neither know nor care that a hook ran, so
+                // the records go out of band to whoever is recording them.
+                if !hooks.is_empty()
+                    && let Some(sink) = &self.hook_sink
+                {
+                    sink.record(hooks).await;
+                }
+                match result {
+                    ToolResult::Ok(output) => Ok(output),
+                    ToolResult::Err(ToolError { reason }) => {
+                        Err(RuntimeCallError::ToolFailed(reason))
+                    }
+                }
+            }
             Err(e) => Err(RuntimeCallError::Transport(e)),
         }
     }
