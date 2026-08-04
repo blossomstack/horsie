@@ -14,7 +14,7 @@
 //! user believes still exists.
 
 use crate::runtime_vendor::{
-    RuntimeSpec, RuntimeVendorLink, VendorError, VendorRuntime, WorkspaceSpec,
+    RuntimeSpec, RuntimeVendorLink, RuntimeVendorTransport, VendorError, WorkspaceSpec,
 };
 use crate::sessions::spec::{SessionSpec, SharedVendors};
 use horsie_runtime_client::RuntimeClient;
@@ -196,7 +196,6 @@ impl RuntimeManager {
         let rt_spec = self.runtime_spec(session, spec).await?;
         link.create(session, &rt_spec)
             .await
-            .map(|_| ())
             .map_err(|e: VendorError| match e {
                 VendorError::Gone(m) => RuntimeError::Gone(m),
                 VendorError::Unavailable(m) => RuntimeError::Unavailable(m),
@@ -206,14 +205,36 @@ impl RuntimeManager {
 
     /// Hand back a client for this session's runtime, resuming it if the
     /// vendor hibernated it. Never provisions.
+    ///
+    /// The client is bound to the vendor's *name*, not to the link this call
+    /// happened to resolve. A caller holds it for a whole run — the toolbox an
+    /// agent loop executes against is built once — and a vendor agent that
+    /// reconnects mid-run comes back on a different link. Binding to the name
+    /// means the next tool call finds it; binding to the link meant every tool
+    /// call for the rest of that turn failed on a dead socket.
     pub async fn get(&self, session: &str, vendor: &str) -> Result<RuntimeClient, RuntimeError> {
         let link = self.vendor(vendor)?;
-        let runtime: VendorRuntime = link.get(session).await.map_err(|e| match e {
+        link.get(session).await.map_err(|e| match e {
             VendorError::Gone(m) => RuntimeError::Gone(m),
             VendorError::Unavailable(m) => RuntimeError::Unavailable(m),
             VendorError::Provision(m) => RuntimeError::Provision(m),
         })?;
-        Ok(runtime.runtime_client)
+        Ok(self.client(session, vendor))
+    }
+
+    /// A client for a runtime the vendor has just confirmed.
+    ///
+    /// The runtime's own id doubles as its main agent's identity: the server
+    /// passes the session id as `runtime_id`, and that is also what the agent
+    /// journal is keyed by (`agent/<session-uuid>`). A subagent sharing this
+    /// runtime derives its own handle with `RuntimeClient::with_agent_id`.
+    fn client(&self, session: &str, vendor: &str) -> RuntimeClient {
+        let transport = RuntimeVendorTransport::new(
+            self.deps.vendors.clone(),
+            vendor.to_string(),
+            session.to_string(),
+        );
+        RuntimeClient::from_arc(Arc::new(transport), session)
     }
 
     /// Advisory: the session is going cold. Best effort — a vendor that is not

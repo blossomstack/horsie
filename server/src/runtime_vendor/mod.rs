@@ -23,10 +23,6 @@ pub use link::RuntimeVendorLink;
 pub use registry::{RegisterError, RuntimeVendorRegistry};
 pub use transport::RuntimeVendorTransport;
 
-use async_trait::async_trait;
-use horsie_runtime_client::RuntimeClient;
-use std::sync::Arc;
-
 /// A session workspace request. The directory is always vendor-allocated
 /// (velos: inside the container; local: the connected daemon's own dir), so a
 /// workspace is just a name the vendor maps to a path it owns.
@@ -58,31 +54,6 @@ pub struct RuntimeSpec {
     pub workspaces: Vec<WorkspaceSpec>,
     pub provision: Vec<horsie_models::executor::ProvisionStep>,
     pub env: Vec<horsie_models::executor::EnvVar>,
-}
-
-/// A live runtime a vendor handed back: the tool-call transport plus the
-/// lifecycle handle.
-pub struct VendorRuntime {
-    pub runtime_client: RuntimeClient,
-    pub handle: Arc<dyn VendorRuntimeHandle>,
-}
-
-impl std::fmt::Debug for VendorRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VendorRuntime")
-            .field("runtime_client", &"<RuntimeClient>")
-            .field("handle", &"<dyn VendorRuntimeHandle>")
-            .finish()
-    }
-}
-
-/// Lifecycle handle for one live runtime instance.
-#[async_trait]
-pub trait VendorRuntimeHandle: Send + Sync {
-    /// Advisory suspend. Idempotent; the runtime stays reachable via
-    /// [`RuntimeVendorLink::get`] afterwards, whether the vendor actually
-    /// suspended anything or kept it running.
-    async fn hibernate(&self);
 }
 
 #[derive(Debug, thiserror::Error)]

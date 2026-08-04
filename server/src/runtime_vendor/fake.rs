@@ -190,6 +190,21 @@ impl FakeRuntimeVendor {
         }
     }
 
+    /// A one-entry vendor registry publishing this agent under `name`.
+    ///
+    /// The shape everything that reaches a runtime needs: a client resolves its
+    /// vendor through the registry on every call, never through a link it
+    /// captured, so tests hand it the same map the server keeps.
+    ///
+    /// # Panics
+    /// If called on an agent built with `connect`, where the server owns the link.
+    #[must_use]
+    pub fn published_as(&self, name: &str) -> crate::sessions::spec::SharedVendors {
+        let mut map = std::collections::HashMap::new();
+        map.insert(name.to_string(), self.link());
+        Arc::new(std::sync::RwLock::new(map))
+    }
+
     /// Let blocked tool calls answer. No-op unless built with
     /// [`FakeRuntimeVendorBuilder::block_tool_calls`].
     pub fn release_tool_calls(&self) {
@@ -743,8 +758,11 @@ mod tests {
             .serve_in_process()
             .await
             .expect("agent");
-        let transport =
-            crate::runtime_vendor::RuntimeVendorTransport::new(agent.link(), "rt-1".to_string());
+        let transport = crate::runtime_vendor::RuntimeVendorTransport::new(
+            agent.published_as("test-agent"),
+            "test-agent".to_string(),
+            "rt-1".to_string(),
+        );
         let resp = transport
             .scan_workspace(
                 "scan-1",
@@ -777,8 +795,11 @@ mod tests {
             .serve_in_process()
             .await
             .expect("agent");
-        let transport =
-            crate::runtime_vendor::RuntimeVendorTransport::new(agent.link(), "rt-1".to_string());
+        let transport = crate::runtime_vendor::RuntimeVendorTransport::new(
+            agent.published_as("test-agent"),
+            "test-agent".to_string(),
+            "rt-1".to_string(),
+        );
         let client = RuntimeClient::from_arc(std::sync::Arc::new(transport), "main-agent");
 
         client
@@ -812,8 +833,11 @@ mod tests {
             .serve_in_process()
             .await
             .expect("agent");
-        let transport =
-            crate::runtime_vendor::RuntimeVendorTransport::new(agent.link(), "rt-1".to_string());
+        let transport = crate::runtime_vendor::RuntimeVendorTransport::new(
+            agent.published_as("test-agent"),
+            "test-agent".to_string(),
+            "rt-1".to_string(),
+        );
         transport.cancel("call-7").await.expect("cancel must send");
 
         // One-way by protocol: the send returns before the agent has read it.
@@ -837,9 +861,9 @@ mod tests {
             .expect("agent");
         let link = agent.link();
         let spec = runtime_spec_fixture("main");
-        let rt = link.create("rt-1", &spec).await.expect("create");
+        link.create("rt-1", &spec).await.expect("create");
         assert_eq!(agent.live_runtimes(), vec!["rt-1".to_string()]);
-        rt.handle.hibernate().await;
+        link.hibernate("rt-1").await;
         assert_eq!(
             agent.signals(),
             vec!["create:rt-1".to_string(), "hibernate:rt-1".to_string()]

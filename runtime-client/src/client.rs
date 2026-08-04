@@ -1,7 +1,6 @@
 use crate::transport::{RuntimeTransport, TransportError};
 use horsie_models::runtime::{ScanResponse, ToolCall, ToolError, ToolOutput, ToolResult};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use uuid::Uuid;
 
@@ -35,15 +34,6 @@ pub struct RuntimeClient {
     /// (also the main agent's journal id); a subagent derives its own handle
     /// with [`Self::with_agent_id`].
     agent_id: String,
-    /// Cleared the first time the transport reports [`TransportError::Disconnected`].
-    ///
-    /// A disconnect is terminal for this client: the socket is gone, and every
-    /// later call over it fails the same way. Callers that cache a client — the
-    /// session actor caches one per runtime — must consult [`Self::is_connected`]
-    /// before reuse and re-acquire the runtime when it returns `false`. Shared
-    /// across clones so the flag set on the agent's clone is visible to the
-    /// session's.
-    connected: Arc<AtomicBool>,
     /// Wire ids of calls currently awaiting a reply.
     ///
     /// `invoke` mints its own id rather than reusing the model's `tool_call_id`,
@@ -59,7 +49,6 @@ impl RuntimeClient {
         Self {
             inner: Arc::new(transport),
             agent_id: agent_id.into(),
-            connected: Arc::new(AtomicBool::new(true)),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -71,7 +60,6 @@ impl RuntimeClient {
         Self {
             inner: transport,
             agent_id: agent_id.into(),
-            connected: Arc::new(AtomicBool::new(true)),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -80,8 +68,8 @@ impl RuntimeClient {
     ///
     /// The seam subagents use: a subagent sharing its parent's runtime derives
     /// a client with its own id and gets its own cwd/env bucket, or reuses the
-    /// parent's id to share deliberately. Cheap — shares the inner Arcs, so the
-    /// disconnect latch and in-flight tracking stay common to both.
+    /// parent's id to share deliberately. Cheap — shares the inner Arcs, so
+    /// in-flight tracking stays common to both.
     #[must_use]
     pub fn with_agent_id(self, agent_id: impl Into<String>) -> Self {
         Self {
@@ -96,22 +84,6 @@ impl RuntimeClient {
         &self.agent_id
     }
 
-    /// Whether this client's transport is still usable.
-    ///
-    /// `false` once any call has reported `Disconnected`. Never returns to `true`:
-    /// recovering means acquiring a new runtime, not reviving this one.
-    #[must_use]
-    pub fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::Relaxed)
-    }
-
-    /// Latch the disconnect so cached holders of this client stop reusing it.
-    fn note_transport_error(&self, error: &TransportError) {
-        if matches!(error, TransportError::Disconnected) {
-            self.connected.store(false, Ordering::Relaxed);
-        }
-    }
-
     pub async fn invoke(&self, call: ToolCall) -> Result<ToolOutput, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.track(&call_id);
@@ -120,17 +92,12 @@ impl RuntimeClient {
         match outcome {
             Ok(ToolResult::Ok(output)) => Ok(output),
             Ok(ToolResult::Err(ToolError { reason })) => Err(RuntimeCallError::ToolFailed(reason)),
-            Err(e) => {
-                self.note_transport_error(&e);
-                Err(RuntimeCallError::Transport(e))
-            }
+            Err(e) => Err(RuntimeCallError::Transport(e)),
         }
     }
 
     pub async fn cancel(&self, call_id: &str) {
-        if let Err(e) = self.inner.cancel(call_id).await {
-            self.note_transport_error(&e);
-        }
+        let _ = self.inner.cancel(call_id).await;
     }
 
     fn track(&self, call_id: &str) {
@@ -197,20 +164,17 @@ impl RuntimeClient {
                 include_shared,
             )
             .await
-            .map_err(|e| {
-                self.note_transport_error(&e);
-                RuntimeCallError::Transport(e)
-            })
+            .map_err(RuntimeCallError::Transport)
     }
 
     /// Run the shared plugin library's `SessionStart` hooks and return the injected
     /// context (empty when there are none).
     pub async fn run_session_start(&self) -> Result<String, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
-        self.inner.run_session_start(&call_id).await.map_err(|e| {
-            self.note_transport_error(&e);
-            RuntimeCallError::Transport(e)
-        })
+        self.inner
+            .run_session_start(&call_id)
+            .await
+            .map_err(RuntimeCallError::Transport)
     }
 }
 
@@ -270,46 +234,22 @@ mod tests {
         );
     }
 
+    /// A transport error condemns the call, never the client. The server's
+    /// transport resolves its vendor link per call, so the socket that failed
+    /// this one says nothing about the next: a client that latched itself off
+    /// would turn a reconnect into a dead turn.
     #[tokio::test]
-    async fn a_healthy_client_reports_connected() {
-        let c = RuntimeClient::new(MockTransport::ok(""), "test-agent");
-        assert!(c.is_connected());
-        assert!(c.invoke(probe_call()).await.is_ok());
-        assert!(c.is_connected());
-    }
-
-    #[tokio::test]
-    async fn a_tool_level_failure_does_not_mark_the_client_disconnected() {
-        // `ToolResult::Err` is the tool failing, not the socket dropping — the
-        // runtime is still perfectly usable.
-        let c = RuntimeClient::new(MockTransport::err("exit 1"), "test-agent");
-        assert!(c.invoke(probe_call()).await.is_err());
-        assert!(
-            c.is_connected(),
-            "a failed tool must not condemn the runtime"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_disconnect_latches_and_never_clears() {
+    async fn a_client_stays_usable_after_a_transport_error() {
         let c = RuntimeClient::new(MockTransport::disconnect_after(0), "test-agent");
-        assert!(c.is_connected());
         assert!(c.invoke(probe_call()).await.is_err());
-        assert!(!c.is_connected(), "a disconnect must be latched");
-        // Still false on every later look — recovery means a new runtime.
-        assert!(!c.is_connected());
-    }
-
-    #[tokio::test]
-    async fn the_latch_is_shared_across_clones() {
-        // The agent gets a clone of the session's client; a disconnect seen there
-        // has to be visible to the session, which is what releases the runtime.
-        let session_side = RuntimeClient::new(MockTransport::disconnect_after(0), "test-agent");
-        let agent_side = session_side.clone();
-        assert!(agent_side.invoke(probe_call()).await.is_err());
+        assert_eq!(
+            c.in_flight_count(),
+            0,
+            "a failed call must not linger as in flight"
+        );
         assert!(
-            !session_side.is_connected(),
-            "the session's handle must see the agent's disconnect"
+            c.invoke(probe_call()).await.is_err(),
+            "the second call must reach the transport, not a local latch"
         );
     }
 

@@ -15,17 +15,20 @@
 
 use async_trait::async_trait;
 use horsie_models::executor::RuntimeConfig;
+use horsie_models::runtime::{BashInput, ToolCall};
 use horsie_models::runtime_vendor::{
     QueryRuntimesRequest, RuntimeVendorCommand, RuntimeVendorEvent,
 };
-use horsie_runtime_client::MockTransport;
+use horsie_runtime_client::{MockTransport, RuntimeClient};
 use horsie_runtime_vendor::{
     AgentExit, Backoff, ConnectedRuntimeRegistry, FixedWorkspaces, HealthStatus, ProviderFactory,
     RuntimeError, RuntimeHandle, RuntimeProvider, RuntimeVendor, no_credential,
 };
 use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::fake::runtime_spec_fixture;
-use horsie_server::runtime_vendor::{RuntimeVendorLink, RuntimeVendorRegistry};
+use horsie_server::runtime_vendor::{
+    RuntimeVendorLink, RuntimeVendorRegistry, RuntimeVendorTransport,
+};
 use horsie_server::sessions::spec::SharedVendors;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -141,6 +144,13 @@ impl Wire {
     }
 }
 
+fn bash(command: &str) -> ToolCall {
+    ToolCall::Bash(BashInput {
+        command: command.to_string(),
+        timeout_secs: None,
+    })
+}
+
 /// Poll until `predicate` accepts the published vendor, or give up. Polling
 /// rather than a notification because the agent reconnects on its own schedule
 /// and nothing in the production path announces it to a test.
@@ -240,6 +250,83 @@ async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes()
         .expect("cancellation must not have to wait out a backoff delay")
         .expect("the agent task must not panic")
         .expect("a cancelled agent exits cleanly");
+}
+
+/// The client an agent loop is executing against outlives a reconnect.
+///
+/// A run acquires its `RuntimeClient` once and bakes it into the toolbox for
+/// the whole turn, so this is the client's real lifetime, not a contrived one.
+/// Held against a link, every tool call after a blip failed `transport:
+/// disconnected` and the model kept trying until it ran out of iterations.
+#[tokio::test]
+async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
+    let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
+    let server =
+        serve_vendor_connections(Arc::new(RuntimeVendorRegistry::new(vendors.clone()))).await;
+    let wire = Wire::open(server).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let connected = Arc::new(ConnectedRuntimeRegistry::new());
+    let provider: ProviderFactory = {
+        let connected = connected.clone();
+        Arc::new(move |_id: &str, _caps: Option<PathBuf>| {
+            Arc::new(StubProvider {
+                connected: connected.clone(),
+            })
+        })
+    };
+    let workspaces = HashMap::from([("main".to_string(), tmp.path().to_path_buf())]);
+    let agent = RuntimeVendor::new(
+        "test-vendor".to_string(),
+        false,
+        provider,
+        connected,
+        Arc::new(FixedWorkspaces::new(workspaces)),
+        tmp.path().join("state"),
+    )
+    .with_backoff(Backoff::new(
+        Duration::from_millis(20),
+        Duration::from_millis(100),
+    ));
+
+    let cancel = CancellationToken::new();
+    let endpoint = format!("ws://{}/api/vendor/connect", wire.addr);
+    let agent_cancel = cancel.clone();
+    let agent_task =
+        tokio::spawn(async move { agent.run(&endpoint, no_credential(), agent_cancel).await });
+
+    let first = await_vendor(&vendors, "test-vendor", "registered", |_| true).await;
+    first
+        .create("rt-1", &runtime_spec_fixture("main"))
+        .await
+        .expect("the agent provisions a runtime over the first link");
+
+    // The client a run would hold: bound to the vendor's name, resolved through
+    // the same registry the server keeps.
+    let client = RuntimeClient::from_arc(
+        Arc::new(RuntimeVendorTransport::new(
+            vendors.clone(),
+            "test-vendor".to_string(),
+            "rt-1".to_string(),
+        )),
+        "rt-1",
+    );
+    client.invoke(bash("echo alive")).await.expect("first call");
+
+    wire.cut();
+    await_vendor(&vendors, "test-vendor", "reconnected", |link| {
+        !Arc::ptr_eq(link, &first) && link.is_connected()
+    })
+    .await;
+
+    let output = client
+        .invoke(bash("echo alive"))
+        .await
+        .expect("the same client must reach the runtime over the new link");
+    assert_eq!(output.stdout, "ok");
+
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), agent_task).await;
 }
 
 /// Two `horsie connect` processes, one name. The second must stop with a
