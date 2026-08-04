@@ -16,6 +16,7 @@ use axum::http::StatusCode;
 use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentPresetInput, AgentView};
 use horsie_models::now_ms;
 use horsie_models::session::AgentSettings as WireAgentSettings;
+use std::collections::BTreeMap;
 
 /// Map the typed service error onto the envelope without string matching.
 fn api_err(e: AgentError) -> Api {
@@ -162,7 +163,11 @@ pub async fn invoke_agent(
         UserMessageError::Unrecoverable(reason) => Api::conflict("unrecoverable", reason),
         UserMessageError::Rejected(why) => Api::conflict("not-a-conversation", why),
     })?;
-    let rec = SessionRecord { spec, created_at };
+    let rec = SessionRecord {
+        spec,
+        created_at,
+        annotations: BTreeMap::new(),
+    };
     Ok((
         StatusCode::CREATED,
         Json(AgentInvokeResponse {

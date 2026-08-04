@@ -14,6 +14,13 @@ enum SessionStatusKind {
     Unrecoverable,
 }
 
+/// One key-value annotation on a session. Annotations ride as a vec of
+/// entries (fluorite has no map type); keys are unique per session.
+struct AnnotationEntry {
+    key: String,
+    value: String,
+}
+
 /// Agent settings supplied at session creation.
 struct AgentSettings {
     model: String,
@@ -47,6 +54,8 @@ struct SessionSummary {
     /// what lets the session list annotate one without a second request.
     /// Routine runs carry nothing here — they are not in the list at all.
     workflow: Option<String>,
+    /// User-set key-value metadata (e.g. `group=<name>`). Empty when none.
+    annotations: Vec<AnnotationEntry>,
 }
 
 /// A user message the server has accepted but not yet answered. It rides on
@@ -82,6 +91,8 @@ struct SessionDetail {
     status: Option<SessionStatusKind>,
     created_at: u64,
     last_error: Option<String>,
+    /// User-set key-value metadata (e.g. `group=<name>`). Empty when none.
+    annotations: Vec<AnnotationEntry>,
     /// Every question the agent is awaiting an answer to, oldest first. All of
     /// them must be answered in one request before the turn can resume.
     pending_asks: Vec<PendingAskView>,

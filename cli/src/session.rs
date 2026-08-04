@@ -596,6 +596,7 @@ mod tests {
             created_at: 1_000,
             last_error: None,
             workflow: None,
+            annotations: vec![],
         }
     }
 
@@ -629,6 +630,7 @@ mod tests {
             status: Some(horsie_models::session::SessionStatusKind::AwaitingInput),
             created_at: 0,
             last_error: None,
+            annotations: vec![],
             pending_asks: vec![
                 horsie_models::session::PendingAskView {
                     tool_call_id: Some("t1".into()),

@@ -14,6 +14,7 @@ function detail(overrides: Partial<SessionDetail> = {}): SessionDetail {
     name: "Test",
     createdAt: 0,
     pendingAsks: [],
+    annotations: [],
     model: "sonnet",
     vendor: "local",
     repos: [],

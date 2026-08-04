@@ -1,4 +1,5 @@
 
+import { AnnotationEntry } from './annotationEntry';
 import { PendingAskView } from './pendingAskView';
 import { ProgressionEvent } from './progressionEvent';
 import { QueuedMessage } from './queuedMessage';
@@ -11,6 +12,10 @@ export interface SessionDetail {
   status?: SessionStatusKind;
   createdAt: number;
   lastError?: string;
+  /**
+   * User-set key-value metadata (e.g. `group=&lt;name&gt;`). Empty when none.
+   */
+  annotations: AnnotationEntry[];
   /**
    * Every question the agent is awaiting an answer to, oldest first. All of
    */

@@ -15,8 +15,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::now_ms;
 use horsie_models::session::{
-    AnswerAsksRequest, PendingAskView, QueuedMessage, SessionDetail, SessionStatusKind,
-    SessionSummary, SubAgentView, UsageView,
+    AnnotationEntry, AnswerAsksRequest, PendingAskView, QueuedMessage, SessionDetail,
+    SessionStatusKind, SessionSummary, SubAgentView, UsageView,
 };
 use horsie_models::session_api::{
     Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, GetAgentResponse,
@@ -24,6 +24,7 @@ use horsie_models::session_api::{
 };
 use horsie_workflow::{AgentHistoryPage, HistoryQuery};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// The path segment naming a session's primary agent, as opposed to a
@@ -42,6 +43,17 @@ pub fn wire_queued_message(m: InboxMessage) -> QueuedMessage {
         text: m.text,
         at_ms: m.at_ms,
     }
+}
+
+/// The wire shape of a session's annotations: sorted key-value pairs.
+pub(crate) fn wire_annotations(annotations: &BTreeMap<String, String>) -> Vec<AnnotationEntry> {
+    annotations
+        .iter()
+        .map(|(key, value)| AnnotationEntry {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect()
 }
 
 pub async fn health() -> impl IntoResponse {
@@ -73,6 +85,7 @@ pub(crate) fn summary(
         created_at: rec.created_at,
         last_error: status.and_then(status_reason),
         workflow: rec.spec.workflow_name().map(str::to_string),
+        annotations: wire_annotations(&rec.annotations),
     }
 }
 
@@ -97,7 +110,11 @@ pub async fn create_session(
         reply,
     })
     .await?;
-    let rec = SessionRecord { spec, created_at };
+    let rec = SessionRecord {
+        spec,
+        created_at,
+        annotations: BTreeMap::new(),
+    };
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
@@ -155,6 +172,7 @@ pub async fn get_session(
         status: status.as_ref().map(status_kind),
         created_at: rec.created_at,
         last_error: status.as_ref().and_then(status_reason),
+        annotations: wire_annotations(&rec.annotations),
         pending_asks,
         model: rec.spec.agent.model.clone(),
         vendor: rec.spec.vendor.clone(),
