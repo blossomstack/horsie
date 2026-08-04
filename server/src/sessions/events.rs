@@ -271,6 +271,44 @@ mod tests {
         }
     }
 
+    /// A hook record is an append, so a client watching live ends up with the
+    /// same transcript a reload would fetch. The id must match what the fold
+    /// derives, or the stream and `/history` disagree on the cursor.
+    #[test]
+    fn a_hook_record_is_an_append_with_the_id_the_fold_derives() {
+        let record = horsie_models::runtime::HookRecord {
+            plugin: "guard".into(),
+            event: "PreToolUse".into(),
+            tool: "bash".into(),
+            tool_call_id: "tc1".into(),
+            duration_ms: 4,
+            blocked: true,
+            reason: Some("not allowed".into()),
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        };
+        match agent_frame(&AgentDomainEvent::HookRan {
+            record: record.clone(),
+            seq: 1,
+            at_ms: 42,
+        }) {
+            Some(AgentFrame::Appended {
+                entry: HistoryEntry::Hook(hook),
+            }) => {
+                assert_eq!(hook.id, "hook:tc1:1");
+                assert_eq!(hook.created_at_ms, 42);
+                assert_eq!(hook.record.plugin, "guard");
+                assert!(hook.record.blocked);
+            }
+            other => panic!("expected a hook append, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_transcript_message_carries_its_own_stamps() {
         // `/history` is answered from agent state, so the stamps must live on

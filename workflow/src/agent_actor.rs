@@ -2296,6 +2296,170 @@ mod tests {
         assert!(matches!(run, AgentDomainEvent::RunComplete { at_ms, .. } if at_ms == 99));
     }
 
+    fn hook_record(plugin: &str, call: &str) -> horsie_models::runtime::HookRecord {
+        horsie_models::runtime::HookRecord {
+            plugin: plugin.to_string(),
+            event: "PreToolUse".to_string(),
+            tool: "bash".to_string(),
+            tool_call_id: call.to_string(),
+            duration_ms: 3,
+            blocked: true,
+            reason: Some("not allowed".to_string()),
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        }
+    }
+
+    fn with_hook(state: AgentState, plugin: &str, call: &str, seq: usize) -> AgentState {
+        AgentActor::apply_event(
+            state,
+            AgentDomainEvent::HookRan {
+                record: hook_record(plugin, call),
+                seq,
+                at_ms: 5,
+            },
+        )
+    }
+
+    /// The whole point of the union: a hook record is in the transcript the user
+    /// reads and absent from the one the model is sent. If this ever passes a
+    /// hook to a provider it costs tokens on every call and ships a shape no
+    /// provider has an arm for.
+    #[test]
+    fn a_hook_entry_is_never_offered_to_the_model() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("hello"),
+            },
+        );
+        state = with_hook(state, "guard", "tc1", 0);
+
+        assert_eq!(state.history.len(), 2, "both entries are in the transcript");
+        let prompt = state.prompt_messages();
+        assert_eq!(prompt.len(), 1, "only the user message reaches the model");
+        assert_eq!(prompt[0].role, Role::User);
+    }
+
+    /// The id is a function of the record and its index, never of the clock or a
+    /// uuid — so replaying the journal reproduces the cursors the live stream
+    /// already handed out.
+    #[test]
+    fn hook_entry_ids_are_derived_and_stable_per_call() {
+        let mut state = AgentActor::initial_state();
+        state = with_hook(state, "guard", "tc1", 0);
+        state = with_hook(state, "linter", "tc1", 1);
+        state = with_hook(state, "guard", "tc2", 0);
+
+        let ids: Vec<&str> = state.history.iter().map(HistoryEntry::id).collect();
+        assert_eq!(ids, vec!["hook:tc1:0", "hook:tc1:1", "hook:tc2:0"]);
+    }
+
+    /// `seq` is what the fold and the live broadcast agree on. Counting it from
+    /// state at fold time instead would give a replayed transcript different
+    /// ids than the stream, and a client's cursor would stop resolving.
+    #[test]
+    fn the_next_seq_counts_only_that_calls_records() {
+        let mut state = AgentActor::initial_state();
+        state = with_hook(state, "guard", "tc1", 0);
+        state = with_hook(state, "linter", "tc1", 1);
+        state = with_hook(state, "guard", "tc2", 0);
+
+        assert_eq!(state.hook_records_for("tc1"), 2);
+        assert_eq!(state.hook_records_for("tc2"), 1);
+        assert_eq!(state.hook_records_for("tc-none"), 0);
+    }
+
+    /// A page is a window over the transcript, hook entries included, and the
+    /// cursor resolves against either kind — otherwise scroll-back would skip
+    /// or stall on a hook row.
+    #[test]
+    fn history_pages_across_mixed_entries() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("hello"),
+            },
+        );
+        state = with_hook(state, "guard", "tc1", 0);
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::ToolComplete {
+                tool_call_id: "tc1".into(),
+                output: "denied".into(),
+                is_error: true,
+                at_ms: 9,
+            },
+        );
+
+        let tail = state.history_page(&HistoryQuery {
+            before: None,
+            after: None,
+            limit: 2,
+        });
+        assert_eq!(page_ids(&tail), vec!["hook:tc1:0", "result:tc1"]);
+        assert!(tail.has_more_before, "the user message is still owed");
+
+        // The cursor resolves against a hook entry, not just a message.
+        let forward = state.history_page(&HistoryQuery {
+            before: None,
+            after: Some("hook:tc1:0".to_string()),
+            limit: 10,
+        });
+        assert_eq!(page_ids(&forward), vec!["result:tc1"]);
+
+        let back = state.history_page(&HistoryQuery {
+            before: Some("hook:tc1:0".to_string()),
+            after: None,
+            limit: 10,
+        });
+        assert_eq!(page_ids(&back), vec!["u"]);
+    }
+
+    /// State is snapshotted, so a mixed transcript has to survive a round trip
+    /// through serde or recovery loses every hook record it ever wrote.
+    #[test]
+    fn a_mixed_transcript_survives_a_snapshot_round_trip() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("hello"),
+            },
+        );
+        state = with_hook(state, "guard", "tc1", 0);
+
+        let json = serde_json::to_string(&state).unwrap();
+        let back: AgentState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            back.history
+                .iter()
+                .map(HistoryEntry::id)
+                .collect::<Vec<_>>(),
+            state
+                .history
+                .iter()
+                .map(HistoryEntry::id)
+                .collect::<Vec<_>>()
+        );
+        match &back.history[1] {
+            HistoryEntry::Hook(h) => {
+                assert_eq!(h.record.plugin, "guard");
+                assert!(h.record.blocked);
+                assert_eq!(h.record.reason.as_deref(), Some("not allowed"));
+            }
+            other => panic!("expected a hook entry, got {other:?}"),
+        }
+    }
+
     #[test]
     fn apply_event_rebuilds_history_in_order() {
         let mut state = AgentActor::initial_state();

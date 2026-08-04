@@ -7,6 +7,7 @@ import {
   type ContentPart,
   type HistoryEntry,
   type HistoryPage,
+  type HookRecord,
   type Message,
   type PendingAskView,
   type QueuedMessage,
@@ -30,6 +31,9 @@ export interface RenderedToolCall {
   running: boolean;
   /** Server stamp for when the tool finished; absent while it still runs. */
   endedAtMs?: number;
+  /** What plugin hooks did to this call, in the order they ran. Empty for the
+   * overwhelmingly common case of a call no hook matched. */
+  hooks: HookRecord[];
 }
 
 /** One finished subagent's report, as the transcript renders it. */
@@ -123,6 +127,11 @@ interface State {
   byId: Record<string, StoredMessage>;
   toolResults: Record<string, ToolResultEntry>;
   liveTools: Record<string, { name: string; running: boolean }>;
+  /** Hook records by the tool call they guarded. Keyed rather than ordered
+   * because a record names its call: the server guarantees a record is
+   * journaled before its tool result, but a client that reconnects mid-turn
+   * may still see them in either order. */
+  hooks: Record<string, HookRecord[]>;
   /** Local echoes of messages this tab sent, shown until the server's own
    * account of them arrives — either in the queue or in the transcript.
    * `serverId` is the id the send was acknowledged with, once it resolves. */
@@ -157,6 +166,7 @@ const INITIAL: State = {
   byId: {},
   toolResults: {},
   liveTools: {},
+  hooks: {},
   optimistic: [],
   queued: null,
   streaming: "",
@@ -285,6 +295,30 @@ function llmMessages(entries: HistoryEntry[]): Message[] {
   return entries.flatMap((e) => (e.type === "Llm" ? [e.value] : []));
 }
 
+/** Index hook entries by the call they guarded, de-duplicated by entry id so a
+ * backfill that overlaps what the live stream already delivered cannot double a
+ * row. */
+function withHooks(
+  current: Record<string, HookRecord[]>,
+  entries: HistoryEntry[],
+): Record<string, HookRecord[]> {
+  const hooks = { ...current };
+  const seen = new Set(
+    Object.values(current).flatMap((rs) =>
+      rs.map((r) => `${r.toolCallId}:${r.plugin}:${r.event}`),
+    ),
+  );
+  for (const e of entries) {
+    if (e.type !== "Hook") continue;
+    const r = e.value.record;
+    const key = `${r.toolCallId}:${r.plugin}:${r.event}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hooks[r.toolCallId] = [...(hooks[r.toolCallId] ?? []), r];
+  }
+  return hooks;
+}
+
 function applyHistory(state: State, messages: Message[], prepend: boolean): State {
   const byId = { ...state.byId };
   const toolResults = { ...state.toolResults };
@@ -380,6 +414,7 @@ function reducer(state: State, action: Action): State {
       const next = applyHistory(state, llmMessages(page.entries), prepend);
       return {
         ...next,
+        hooks: withHooks(next.hooks, page.entries),
         // A forward (backfill) page says nothing about what precedes the
         // window already loaded, so it must not overwrite that.
         hasMoreBefore: prepend || !action.forward ? page.hasMoreBefore : state.hasMoreBefore,
@@ -395,7 +430,11 @@ function reducer(state: State, action: Action): State {
           // transcript — the same fold `/history` feeds.
           return ev.value.entry.type === "Llm"
             ? { ...ingestMessage(state, ev.value.entry.value), progression: null }
-            : state;
+            : {
+                ...state,
+                hooks: withHooks(state.hooks, [ev.value.entry]),
+                progression: null,
+              };
         case "Resync":
           // The stream dropped frames. Say so; the effect below re-reads the
           // documents and backfills from the cursor rather than guessing.
@@ -708,6 +747,7 @@ export function useSessionStream(
         isError: result?.isError,
         endedAtMs: result?.atMs,
         running: result === undefined && (live?.running ?? false),
+        hooks: state.hooks[tc.id] ?? [],
       };
     };
 
@@ -752,6 +792,7 @@ export function useSessionStream(
         id,
         name: t.name,
         input: undefined,
+        hooks: state.hooks[id] ?? [],
         output: state.toolResults[id]?.output,
         isError: state.toolResults[id]?.isError,
         endedAtMs: state.toolResults[id]?.atMs,

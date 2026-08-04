@@ -1,5 +1,13 @@
-import { ChevronRight, CircleAlert, CircleCheck, Wrench } from "lucide-react";
+import {
+  ChevronRight,
+  CircleAlert,
+  CircleCheck,
+  ShieldBan,
+  ShieldCheck,
+  Wrench,
+} from "lucide-react";
 import { useState } from "react";
+import type { HookRecord } from "../api/types";
 import type { RenderedToolCall } from "../hooks/useSessionStream";
 import { ASK_USER_TOOL } from "../lib/askUser";
 import { cn } from "../lib/cn";
@@ -37,6 +45,19 @@ function inputPreview(input: unknown): string | null {
   return null;
 }
 
+/** What a hook did, in a few words. The record is the audit trail; this is the
+ * line a person reads without unpacking it. */
+function hookSummary(h: HookRecord): string {
+  if (h.failed) return h.reason ?? "could not run — the call was denied";
+  if (h.blocked) return h.reason ?? "denied the call";
+  const rewrote = [
+    h.inputBefore != null || h.inputAfter != null ? "input" : null,
+    h.outputBefore != null || h.outputAfter != null ? "output" : null,
+  ].filter(Boolean);
+  if (rewrote.length > 0) return `rewrote the ${rewrote.join(" and ")}`;
+  return "allowed";
+}
+
 /** A logged tool call. Collapsed it is one line of the recording; expanded it
  * shows the raw input and output on recessed screens, because these operators
  * came to read exactly what the machine sent and got back. */
@@ -45,6 +66,9 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
   if (call.name === ASK_USER_TOOL) return <AskUserCard call={call} />;
   const preview = inputPreview(call.input);
   const hasOutput = call.output !== undefined && call.output.length > 0;
+  // A denial the model saw as an error is the one hook outcome that changes what
+  // the row means, so it is named on the collapsed line.
+  const blocked = call.hooks.find((h) => h.blocked || h.failed);
   const inputStr = stringifyInput(call.input);
 
   return (
@@ -91,6 +115,17 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
         {call.isError && !call.running && (
           <span className="legend shrink-0 !text-red-ink">Failed</span>
         )}
+        {/* A hook that changed the call is state the collapsed row must carry:
+            "this is not what the agent asked for" cannot wait behind a toggle.
+            A hook that merely watched is detail, and stays inside. */}
+        {blocked && (
+          <span
+            className="legend shrink-0 !text-red-ink"
+            data-testid="tool-call-hook-blocked"
+          >
+            Blocked by {blocked.plugin}
+          </span>
+        )}
       </button>
 
       {open && (
@@ -121,6 +156,44 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
           )}
           {!hasOutput && !call.running && (
             <p className="legend">Returned nothing</p>
+          )}
+          {call.hooks.length > 0 && (
+            <div data-testid="tool-call-hooks">
+              <span className="legend">Plugin hooks</span>
+              <ul className="mt-1 space-y-1">
+                {call.hooks.map((h, i) => (
+                  <li
+                    key={`${h.plugin}:${h.event}:${i}`}
+                    className="flex items-start gap-1.5 font-mono text-[0.6875rem] leading-relaxed"
+                    data-testid="tool-call-hook"
+                  >
+                    {h.blocked || h.failed ? (
+                      <ShieldBan
+                        size={12}
+                        className="mt-px shrink-0 text-red-ink"
+                        aria-hidden
+                      />
+                    ) : (
+                      <ShieldCheck
+                        size={12}
+                        className="mt-px shrink-0 text-lamp-ok"
+                        aria-hidden
+                      />
+                    )}
+                    <span className="text-legend">{h.plugin}</span>
+                    <span className="text-faint">{h.event}</span>
+                    <span
+                      className={cn(
+                        "min-w-0 flex-1",
+                        h.blocked || h.failed ? "text-red-ink" : "text-dim",
+                      )}
+                    >
+                      {hookSummary(h)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
       )}

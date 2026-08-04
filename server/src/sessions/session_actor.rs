@@ -4328,6 +4328,98 @@ mod tests {
             .collect()
     }
 
+    fn hook_record(plugin: &str, call: &str) -> HookRecord {
+        HookRecord {
+            plugin: plugin.to_string(),
+            event: "PreToolUse".to_string(),
+            tool: "bash".to_string(),
+            tool_call_id: call.to_string(),
+            duration_ms: 4,
+            blocked: true,
+            reason: Some("not allowed".to_string()),
+            failed: false,
+            input_before: None,
+            input_after: None,
+            output_before: None,
+            output_after: None,
+            additional_context: None,
+            system_message: None,
+        }
+    }
+
+    async fn agent_history(
+        session: &ActorRef<SessionCommand>,
+        agent_id: Option<String>,
+    ) -> horsie_workflow::AgentHistoryPage {
+        session
+            .ask(|reply| SessionCommand::History {
+                agent_id,
+                query: horsie_workflow::HistoryQuery {
+                    before: None,
+                    after: None,
+                    limit: 50,
+                },
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("agent history")
+    }
+
+    fn hook_ids(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+        page.entries
+            .iter()
+            .filter_map(|e| match e {
+                horsie_agentcore::HistoryEntry::Hook(h) => Some(h.id.clone()),
+                horsie_agentcore::HistoryEntry::Llm(_) => None,
+            })
+            .collect()
+    }
+
+    /// A hook guards one agent's call, so its record belongs in that agent's
+    /// transcript. Routed to the session instead, every agent's hooks would pile
+    /// into one log with no way to tell whose call they guarded — which is what
+    /// the session-scoped journal did before.
+    #[tokio::test]
+    async fn a_subagents_hooks_land_on_its_own_transcript() {
+        let gate = BlockingProvider::new();
+        let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
+        let sub = spawn_sub(&session, "research", "dig into it").await;
+        wait_for_tree(&journal, id, |t| {
+            t.get(&sub)
+                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
+        })
+        .await;
+
+        session
+            .tell(SessionCommand::HooksRan {
+                key: AgentKey::Sub(sub),
+                records: vec![hook_record("guard", "tc1")],
+            })
+            .await
+            .unwrap();
+
+        // `tell` is fire-and-forget through two mailboxes; poll rather than race.
+        let mut waited = 0;
+        loop {
+            let page = agent_history(&session, Some(sub.to_string())).await;
+            if !hook_ids(&page).is_empty() {
+                assert_eq!(hook_ids(&page), vec!["hook:tc1:0".to_string()]);
+                break;
+            }
+            assert!(waited < 100, "the subagent never recorded the hook");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            waited += 1;
+        }
+
+        let main = agent_history(&session, None).await;
+        assert!(
+            hook_ids(&main).is_empty(),
+            "the main agent made no such call: {:?}",
+            main.entries
+        );
+    }
+
     async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::AgentHistoryPage {
         session
             .ask(|reply| SessionCommand::History {
