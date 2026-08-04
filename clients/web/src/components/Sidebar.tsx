@@ -212,7 +212,10 @@ export function Sidebar() {
             reload.
           </p>
         )}
-        {!isLoading && !isError && sessions?.length === 0 && (
+        {/* Only when there is nothing at all to show. With a group present the
+            sections speak for themselves, and the invitation would compete with
+            them. */}
+        {!isLoading && !isError && sessions?.length === 0 && !groups.length && (
           <p className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint">
             No sessions yet. Press <span className="text-legend">+</span> to
             start one.
@@ -246,6 +249,11 @@ export function Sidebar() {
               sessions={parts.get(g) ?? []}
               groups={groups}
               ungrouped={g === UNGROUPED}
+              // Until a group exists there is nothing to be un-grouped from,
+              // so the Ungrouped header would be a label with no job — and
+              // grouping chrome nobody asked for. The rows render bare, and
+              // the header appears the moment the first group does.
+              bare={g === UNGROUPED && groups.length === 0}
               order={ordered}
               onReorder={setSavedOrder}
             />

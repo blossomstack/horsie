@@ -19,6 +19,7 @@ export function SessionGroupSection({
   sessions,
   groups,
   ungrouped,
+  bare = false,
   order,
   onReorder,
 }: {
@@ -26,6 +27,9 @@ export function SessionGroupSection({
   sessions: SessionSummary[];
   groups: string[];
   ungrouped: boolean;
+  /** Render the rows with no header — for an Ungrouped section that is the
+   * only section, where the header would name a distinction nobody has made. */
+  bare?: boolean;
   order: string[];
   onReorder: (next: string[]) => void;
 }) {
@@ -50,120 +54,124 @@ export function SessionGroupSection({
 
   return (
     <div data-testid={`group-section-${name}`} data-group-name={name}>
-      <div
-        className={cn(
-          "group/header flex items-center gap-1 rounded-[var(--radius-control)] px-1.5 py-1",
-          dropHint &&
-            "bg-raised shadow-[inset_0_0_0_1px_var(--rule-strong)]",
-        )}
-        draggable={!renaming}
-        onDragStart={(e) => {
-          e.dataTransfer.setData(GROUP_DRAG_MIME, name);
-          e.dataTransfer.effectAllowed = "move";
-        }}
-        onDragOver={(e) => {
-          const t = e.dataTransfer.types;
-          if (t.includes(SESSION_DRAG_MIME) || t.includes(GROUP_DRAG_MIME)) {
-            e.preventDefault();
-            setDropHint(true);
-          }
-        }}
-        onDragLeave={() => setDropHint(false)}
-        onDrop={(e) => {
-          setDropHint(false);
-          const sessionId = e.dataTransfer.getData(SESSION_DRAG_MIME);
-          if (sessionId) {
-            e.preventDefault();
-            setAnnotations.mutate(
-              ungrouped
-                ? { id: sessionId, set: [], remove: ["group"] }
-                : {
-                    id: sessionId,
-                    set: [{ key: "group", value: name }],
-                    remove: [],
-                  },
-            );
-            return;
-          }
-          const dragged = e.dataTransfer.getData(GROUP_DRAG_MIME);
-          if (dragged && dragged !== name) {
-            e.preventDefault();
-            onReorder(moveBefore(order, dragged, name));
-          }
-        }}
-      >
-        <button
-          type="button"
-          className="key-icon !h-5 !w-5 shrink-0"
-          onClick={() => setCollapsed((v) => !v)}
-          aria-label={collapsed ? `Expand ${label}` : `Collapse ${label}`}
-        >
-          {collapsed ? (
-            <ChevronRight size={12} aria-hidden />
-          ) : (
-            <ChevronDown size={12} aria-hidden />
+      {!bare && (
+        <div
+          className={cn(
+            "group/header flex items-center gap-1 rounded-[var(--radius-control)] px-1.5 py-1",
+            dropHint && "bg-raised shadow-[inset_0_0_0_1px_var(--rule-strong)]",
           )}
-        </button>
-        {renaming ? (
-          <input
-            data-testid="group-rename-input"
-            className="min-w-0 flex-1 rounded-[var(--radius-control)] border bg-panel px-1.5 py-0.5 text-[0.8125rem] text-legend outline-none focus:border-[var(--rule-strong)]"
-            value={renameValue}
-            autoFocus
-            onChange={(e) => setRenameValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                const next = renameValue.trim();
-                if (next && next !== name) {
-                  renameGroup.mutate({ oldName: name, name: next });
+          draggable={!renaming}
+          onDragStart={(e) => {
+            e.dataTransfer.setData(GROUP_DRAG_MIME, name);
+            e.dataTransfer.effectAllowed = "move";
+          }}
+          onDragOver={(e) => {
+            const t = e.dataTransfer.types;
+            if (t.includes(SESSION_DRAG_MIME) || t.includes(GROUP_DRAG_MIME)) {
+              e.preventDefault();
+              setDropHint(true);
+            }
+          }}
+          onDragLeave={() => setDropHint(false)}
+          onDrop={(e) => {
+            setDropHint(false);
+            const sessionId = e.dataTransfer.getData(SESSION_DRAG_MIME);
+            if (sessionId) {
+              e.preventDefault();
+              setAnnotations.mutate(
+                ungrouped
+                  ? { id: sessionId, set: [], remove: ["group"] }
+                  : {
+                      id: sessionId,
+                      set: [{ key: "group", value: name }],
+                      remove: [],
+                    },
+              );
+              return;
+            }
+            const dragged = e.dataTransfer.getData(GROUP_DRAG_MIME);
+            if (dragged && dragged !== name) {
+              e.preventDefault();
+              onReorder(moveBefore(order, dragged, name));
+            }
+          }}
+        >
+          <button
+            type="button"
+            className="key-icon !h-5 !w-5 shrink-0"
+            onClick={() => setCollapsed((v) => !v)}
+            aria-label={collapsed ? `Expand ${label}` : `Collapse ${label}`}
+          >
+            {collapsed ? (
+              <ChevronRight size={12} aria-hidden />
+            ) : (
+              <ChevronDown size={12} aria-hidden />
+            )}
+          </button>
+          {renaming ? (
+            <input
+              data-testid="group-rename-input"
+              className="min-w-0 flex-1 rounded-[var(--radius-control)] border bg-panel px-1.5 py-0.5 text-[0.8125rem] text-legend outline-none focus:border-[var(--rule-strong)]"
+              value={renameValue}
+              autoFocus
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const next = renameValue.trim();
+                  if (next && next !== name) {
+                    renameGroup.mutate({ oldName: name, name: next });
+                  }
+                  setRenaming(false);
+                } else if (e.key === "Escape") {
+                  setRenaming(false);
                 }
-                setRenaming(false);
-              } else if (e.key === "Escape") {
-                setRenaming(false);
-              }
-            }}
-            onBlur={() => setRenaming(false)}
-          />
-        ) : (
-          <span className="legend min-w-0 flex-1 truncate">{label}</span>
-        )}
-        {!ungrouped && !renaming && (
-          <span className="opacity-0 transition-opacity focus-within:opacity-100 group-hover/header:opacity-100">
-            <Menu label={`${label} actions`} testId={`group-menu-button-${name}`}>
-              <MenuItem
-                testId="rename-group-item"
-                onSelect={() => {
-                  setRenameValue(name);
-                  setRenaming(true);
-                }}
+              }}
+              onBlur={() => setRenaming(false)}
+            />
+          ) : (
+            <span className="legend min-w-0 flex-1 truncate">{label}</span>
+          )}
+          {!ungrouped && !renaming && (
+            <span className="opacity-0 transition-opacity focus-within:opacity-100 group-hover/header:opacity-100">
+              <Menu
+                label={`${label} actions`}
+                testId={`group-menu-button-${name}`}
               >
-                Rename
-              </MenuItem>
-              {deleteArmed ? (
                 <MenuItem
-                  danger
-                  testId="confirm-delete-group-item"
+                  testId="rename-group-item"
                   onSelect={() => {
-                    setDeleteArmed(false);
-                    deleteGroup.mutate(name);
+                    setRenameValue(name);
+                    setRenaming(true);
                   }}
                 >
-                  Confirm delete?
+                  Rename
                 </MenuItem>
-              ) : (
-                <MenuItem
-                  danger
-                  testId="delete-group-item"
-                  onSelect={() => setDeleteArmed(true)}
-                >
-                  Delete
-                </MenuItem>
-              )}
-            </Menu>
-          </span>
-        )}
-      </div>
-      {!collapsed &&
+                {deleteArmed ? (
+                  <MenuItem
+                    danger
+                    testId="confirm-delete-group-item"
+                    onSelect={() => {
+                      setDeleteArmed(false);
+                      deleteGroup.mutate(name);
+                    }}
+                  >
+                    Confirm delete?
+                  </MenuItem>
+                ) : (
+                  <MenuItem
+                    danger
+                    testId="delete-group-item"
+                    onSelect={() => setDeleteArmed(true)}
+                  >
+                    Delete
+                  </MenuItem>
+                )}
+              </Menu>
+            </span>
+          )}
+        </div>
+      )}
+      {(bare || !collapsed) &&
         sessions.map((s) => <SessionRow key={s.id} s={s} groups={groups} />)}
     </div>
   );

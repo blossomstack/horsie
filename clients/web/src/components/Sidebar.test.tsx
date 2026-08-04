@@ -74,9 +74,20 @@ describe("Sidebar groups", () => {
       expect(screen.getByTestId("group-section-web")).toBeDefined();
       expect(screen.getByTestId("group-section-ungrouped")).toBeDefined();
     });
-    expect(
-      screen.getByTestId("group-section-ungrouped").textContent,
-    ).toContain("session 2");
+    expect(screen.getByTestId("group-section-ungrouped").textContent).toContain(
+      "session 2",
+    );
+  });
+
+  it("stays flat until a group exists: no Ungrouped header, no row menu", async () => {
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1")],
+    });
+    renderSidebar();
+    await screen.findByTestId("session-row");
+    expect(screen.queryByLabelText("Collapse Ungrouped")).toBeNull();
+    expect(screen.queryByTestId("session-row-menu-1")).toBeNull();
   });
 
   it("creates a group from the header button", async () => {
@@ -100,7 +111,9 @@ describe("Sidebar groups", () => {
     vi.mocked(api.sessionGroups.list).mockResolvedValue({
       groups: [{ name: "web" }],
     });
-    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [session("1")] });
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1")],
+    });
     vi.mocked(api.sessions.setAnnotations).mockResolvedValue({});
     renderSidebar();
     fireEvent.click(await screen.findByTestId("session-row-menu-1"));
