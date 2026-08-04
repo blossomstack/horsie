@@ -306,16 +306,19 @@ pub fn compose_system_prompt(
     if let Some(p) = &ws.platform {
         sections.push(environment_section(p));
     }
+    if !ws.is_empty() {
+        sections.push(tool_session_state_section());
+    }
     if !ws.workspaces.is_empty() {
         // Where a relative path lands. The runtime resolves a tool call against
         // the agent's `set_working_dir` override, else the first workspace — so
         // this is the one directory the agent starts from, and the reason the
-        // tools need no `workspace` argument.
+        // tools need no `workspace` argument. How that directory *behaves* is
+        // the tool-session-state section's job, not this one's.
         let default_root = ws.workspaces.first().map_or("", |w| w.path.as_str());
         let mut block = format!(
-            "# Workspaces\nYour working directory starts at {default_root}. Filesystem \
-             and bash tools resolve relative paths against it; use an absolute path to \
-             reach another workspace, or set_working_dir to move."
+            "# Workspaces\nYour working directory starts at {default_root}; use an \
+             absolute path to reach another workspace."
         );
         for w in &ws.workspaces {
             block.push_str(&format!(
@@ -361,6 +364,32 @@ pub fn compose_system_prompt(
     } else {
         Some(sections.join("\n\n"))
     }
+}
+
+/// The `# Tool session state` section: the runtime tools share shell-like state
+/// — a working directory and an env overlay — that persists across calls and is
+/// changed with `set_working_dir` / `set_env`.
+///
+/// Stated here, once, rather than in the tool descriptions. The rule spans every
+/// runtime tool, so per-tool it would be the same paragraph copied ten times and
+/// re-sent with the tool specs on every request; here it rides the cache-stable
+/// prompt prefix. It is a section of its own, named for what it governs, because
+/// neither neighbour fits: `# Workspaces` is about which directories exist (and
+/// env is not a workspace concern), and `# Environment` means which OS userland.
+///
+/// The prohibitions carry the section. Every mainstream harness gives a bash
+/// call a fresh shell, so a model's trained reflex is to re-establish state
+/// inline — `cd <dir> && …`, `export VAR=… && …` — on every call. Absent an
+/// explicit contradiction that prior wins, and the state tools go unused however
+/// plainly they are advertised.
+fn tool_session_state_section() -> String {
+    "# Tool session state\nYour tool calls share persistent state, like one \
+     long-lived shell.\n- Working directory: bash and the file tools all run in \
+     it, and relative paths resolve against it. Change it with set_working_dir. \
+     Do NOT prefix a command with `cd` — each bash call is a fresh shell, so the \
+     `cd` lasts only for that one command.\n- Environment variables: set_env \
+     applies to every later bash command. Do NOT repeat `export` in each command."
+        .to_string()
 }
 
 /// The `# Environment` section: one line telling the model which OS userland
@@ -635,6 +664,34 @@ mod tests {
             compose_system_prompt(Some("just role"), &ctx, None).as_deref(),
             Some("just role")
         );
+    }
+
+    /// The one place the sticky-state rule is stated. It governs every runtime
+    /// tool, so it lives here rather than being copied into ten tool
+    /// descriptions that ride every request — and it is named for what it
+    /// governs, so a model looking for "how do I set an env var" can find it.
+    #[test]
+    fn compose_states_tool_session_state_ahead_of_the_workspace_list() {
+        let ctx = interpret(vec![ws_scan("alpha", None, vec![])]);
+        let prompt = compose_system_prompt(None, &ctx, None).unwrap();
+        let state = prompt.find("# Tool session state").unwrap();
+        assert!(state < prompt.find("# Workspaces").unwrap(), "{prompt}");
+        // Both halves, and the negative instruction that is the whole point:
+        // without it the model falls back to its stateless-shell prior and
+        // re-establishes the state inline on every single call.
+        assert!(prompt.contains("set_working_dir"), "{prompt}");
+        assert!(prompt.contains("`cd`"), "{prompt}");
+        assert!(prompt.contains("set_env"), "{prompt}");
+        assert!(prompt.contains("`export`"), "{prompt}");
+    }
+
+    /// No runtime scanned means no runtime tools, so the rule would describe
+    /// tools the agent does not have.
+    #[test]
+    fn compose_omits_tool_session_state_without_a_runtime_scan() {
+        let ctx = WorkspaceContext::default();
+        let prompt = compose_system_prompt(Some("just role"), &ctx, None).unwrap();
+        assert!(!prompt.contains("# Tool session state"), "{prompt}");
     }
 
     #[test]

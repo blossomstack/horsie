@@ -19,7 +19,9 @@ impl Tool for BashTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash".to_string(),
-            description: "Execute a bash command in the runtime's working directory. \
+            description: "Execute a bash command in the runtime's persistent working \
+                directory (change it with set_working_dir; do not prefix the command \
+                with `cd`). \
                 Optionally set 'timeout_secs' to bound how long the command may run. \
                 Pipelines run with pipefail: the command fails if any stage fails, \
                 except when a consumer closes early (`| head`), which is not a failure. \
@@ -64,6 +66,18 @@ mod tests {
     use super::*;
     use crate::testkit::MockTransport;
     use horsie_models::runtime::ToolOutput;
+
+    /// The system prompt owns the full sticky-state rule, but this description
+    /// is what the model reads at the moment it writes the command — the point
+    /// where the `cd <dir> && …` reflex fires. The prohibition is worth its ten
+    /// tokens here even though it is stated once already.
+    #[test]
+    fn the_description_names_the_cwd_tool_and_forbids_cd() {
+        let tool = BashTool::new(RuntimeClient::new(MockTransport::ok(""), "test-agent"));
+        let d = tool.spec().description;
+        assert!(d.contains("set_working_dir"), "{d}");
+        assert!(d.contains("do not prefix the command with `cd`"), "{d}");
+    }
 
     #[tokio::test]
     async fn surfaces_stderr_on_success() {
