@@ -9,6 +9,7 @@ pub mod ask_tool;
 pub mod builder;
 pub mod clock;
 pub mod events;
+pub mod mode;
 pub mod session_actor;
 pub mod spawn_tool;
 pub mod spec;

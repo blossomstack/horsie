@@ -12,11 +12,10 @@
 use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
 use crate::sessions::events::{AgentEventSink, BroadcastObserver};
+use crate::sessions::mode::SessionModeState;
 use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::{AgentSettings, PendingAsk, ServerDeps, SessionSpec, SessionStatus};
-use crate::sessions::subagents::{
-    INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent, SubAgentTree,
-};
+use crate::sessions::subagents::{INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
 use crate::sessions::{AgentFrame, SessionFrame, UserMessageError};
@@ -325,9 +324,11 @@ pub struct SessionState {
     pub last_error: Option<String>,
     #[serde(default)]
     pub agent_usage: HashMap<String, UsageTotal>,
-    /// The subagent tree — which agent spawned which, and what became of it.
+    /// What drives this session's agents, and the subagent tree beneath it.
+    /// Was a bare `subagents` field; [`SessionModeState`] still reads that
+    /// shape, so snapshots written before the move load unchanged.
     #[serde(default)]
-    pub subagents: SubAgentTree,
+    pub mode: SessionModeState,
 }
 
 /// One agent's own usage/context-size snapshot, labeled with the model it ran.
@@ -574,7 +575,7 @@ impl SessionActor {
                 if let Some(agent) = self.sub_agents.get(&id) {
                     return Some((AgentKey::Sub(id), agent.clone()));
                 }
-                state.subagents.get(&id)?;
+                state.mode.subagents().get(&id)?;
                 Some((AgentKey::Sub(id), self.spawn_sub_agent_actor(ctx, id)))
             }
         }
@@ -679,7 +680,7 @@ impl SessionActor {
         // Owed subagent results ride every turn the main agent starts; with an
         // empty inbox they can also *start* one, but only from Idle — never
         // answering a pending ask, never chasing a failure.
-        let owed = state.subagents.owed_for(SubAgentParent::Main);
+        let owed = state.mode.subagents().owed_for(SubAgentParent::Main);
         if state.inbox.is_empty() && (owed.is_empty() || state.status != SessionStatus::Idle) {
             return Vec::new();
         }
@@ -771,15 +772,15 @@ impl SessionActor {
         ctx: &ActorContext<Self>,
     ) -> Vec<SessionDomainEvent> {
         let mut events = Vec::new();
-        for (parent_id, owed) in state.subagents.owed_by_sub_parent() {
-            if state.subagents.is_running(&parent_id) {
+        for (parent_id, owed) in state.mode.subagents().owed_by_sub_parent() {
+            if state.mode.subagents().is_running(&parent_id) {
                 continue;
             }
             let agent = match self.sub_agents.get(&parent_id) {
                 Some(agent) => agent.clone(),
                 // A cold node woken for the first time since load: spawn its
                 // resident actor on demand (see `on_recovery_complete`).
-                None if state.subagents.get(&parent_id).is_some() => {
+                None if state.mode.subagents().get(&parent_id).is_some() => {
                     self.spawn_sub_agent_actor(ctx, parent_id)
                 }
                 None => continue,
@@ -1057,7 +1058,7 @@ impl SessionActor {
                 usage_total,
             }]);
         }
-        let Some(rec) = state.subagents.get(&id).cloned() else {
+        let Some(rec) = state.mode.subagents().get(&id).cloned() else {
             tracing::warn!(subagent = %id, "outcome from an unknown subagent; ignored");
             return CommandEffect::none();
         };
@@ -1502,20 +1503,21 @@ impl EventSourcedActor for SessionActor {
                 ..
             } => {
                 state
-                    .subagents
+                    .mode
+                    .subagents_mut()
                     .apply_spawned(id, parent, label, task, depth);
             }
             SessionDomainEvent::SubAgentRunning { id, .. } => {
-                state.subagents.apply_running(id);
+                state.mode.subagents_mut().apply_running(id);
             }
             SessionDomainEvent::SubAgentCompleted { id, output, .. } => {
-                state.subagents.apply_completed(id, output);
+                state.mode.subagents_mut().apply_completed(id, output);
             }
             SessionDomainEvent::SubAgentFailed { id, error, .. } => {
-                state.subagents.apply_failed(id, error);
+                state.mode.subagents_mut().apply_failed(id, error);
             }
             SessionDomainEvent::SubAgentNotified { id, .. } => {
-                state.subagents.apply_notified(id);
+                state.mode.subagents_mut().apply_notified(id);
             }
         }
         state
@@ -1639,7 +1641,7 @@ impl EventSourcedActor for SessionActor {
                 // let the idle clock start again. This is the invariant that
                 // keeps a forty-minute tool call from being unloaded out from
                 // under itself — the main agent's run, or any subagent's.
-                if state.status == SessionStatus::Running || state.subagents.has_active() {
+                if state.status == SessionStatus::Running || state.mode.subagents().has_active() {
                     let _ = reply.send(false);
                     return CommandEffect::none();
                 }
@@ -1659,16 +1661,17 @@ impl EventSourcedActor for SessionActor {
             }
             SessionCommand::SubAgentTree { reply } => {
                 let tree = state
-                    .subagents
+                    .mode
+                    .subagents()
                     .ids()
                     .into_iter()
-                    .filter_map(|id| state.subagents.get(&id).map(|rec| (id, rec.clone())))
+                    .filter_map(|id| state.mode.subagents().get(&id).map(|rec| (id, rec.clone())))
                     .collect();
                 let _ = reply.send(tree);
                 CommandEffect::none()
             }
             SessionCommand::ReconcileSubAgents => {
-                let interrupted = state.subagents.interrupted();
+                let interrupted = state.mode.subagents().interrupted();
                 if interrupted.is_empty() {
                     return CommandEffect::none();
                 }
@@ -1707,7 +1710,7 @@ impl EventSourcedActor for SessionActor {
                 task,
                 reply,
             } => {
-                let Some(parent_depth) = state.subagents.depth_of(caller) else {
+                let Some(parent_depth) = state.mode.subagents().depth_of(caller) else {
                     let _ = reply.send(Err("caller is not a known agent".to_string()));
                     return CommandEffect::none();
                 };
@@ -1718,7 +1721,7 @@ impl EventSourcedActor for SessionActor {
                     return CommandEffect::none();
                 }
                 let max = self.spec.agent.max_subagents();
-                if state.subagents.active_count() >= max {
+                if state.mode.subagents().active_count() >= max {
                     let _ = reply.send(Err(format!("{max} subagents already active")));
                     return CommandEffect::none();
                 }
@@ -1782,14 +1785,15 @@ impl EventSourcedActor for SessionActor {
             }
             SessionCommand::SubAgentStatus { caller, id, reply } => {
                 let rendered = match id {
-                    Some(id) if state.subagents.visible_to(caller, &id) => state
-                        .subagents
+                    Some(id) if state.mode.subagents().visible_to(caller, &id) => state
+                        .mode
+                        .subagents()
                         .render_node(&id)
                         .ok_or_else(|| format!("no such subagent: {id}")),
                     // Out-of-subtree and unknown ids are indistinguishable —
                     // neither confirms the node exists.
                     Some(id) => Err(format!("no such subagent: {id}")),
-                    None => Ok(state.subagents.render_subtree(caller)),
+                    None => Ok(state.mode.subagents().render_subtree(caller)),
                 };
                 let _ = reply.send(rendered);
                 CommandEffect::none()
@@ -1807,7 +1811,7 @@ impl EventSourcedActor for SessionActor {
         // must not replay hundreds of journals on open. They spawn lazily —
         // on a history read or an owed-result flush — and recovery starts no
         // runs either way.
-        if !state.subagents.interrupted().is_empty() {
+        if !state.mode.subagents().interrupted().is_empty() {
             let _ = ctx
                 .self_ref()
                 .tell(SessionCommand::ReconcileSubAgents)
@@ -2055,7 +2059,7 @@ mod tests {
             task: "look into it".into(),
             depth: 1,
         }]);
-        assert_eq!(s.subagents.active_count(), 1);
+        assert_eq!(s.mode.subagents().active_count(), 1);
 
         let s = SessionActor::apply_event(
             s,
@@ -2065,12 +2069,12 @@ mod tests {
                 output: "answer".into(),
             },
         );
-        let rec = s.subagents.get(&id).unwrap();
+        let rec = s.mode.subagents().get(&id).unwrap();
         assert_eq!(rec.status, SubAgentStatus::Completed);
         assert!(!rec.notified);
 
         let s = SessionActor::apply_event(s, SessionDomainEvent::SubAgentNotified { at_ms: 0, id });
-        assert!(s.subagents.get(&id).unwrap().notified);
+        assert!(s.mode.subagents().get(&id).unwrap().notified);
     }
 
     #[test]
@@ -2085,7 +2089,7 @@ mod tests {
             task: "t".into(),
             depth: 1,
         }]);
-        assert_eq!(s.subagents.interrupted(), vec![id]);
+        assert_eq!(s.mode.subagents().interrupted(), vec![id]);
         let s = SessionActor::apply_event(
             s,
             SessionDomainEvent::SubAgentFailed {
@@ -2094,7 +2098,7 @@ mod tests {
                 error: "interrupted by restart".into(),
             },
         );
-        assert!(s.subagents.interrupted().is_empty());
+        assert!(s.mode.subagents().interrupted().is_empty());
     }
 
     #[test]
@@ -2768,7 +2772,7 @@ mod tests {
     ) {
         for _ in 0..200 {
             let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-            if pred(&state.subagents) {
+            if pred(state.mode.subagents()) {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -3070,7 +3074,7 @@ mod tests {
         })
         .await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        let rec = state.subagents.get(&sub).unwrap();
+        let rec = state.mode.subagents().get(&sub).unwrap();
         assert_eq!(rec.depth, 1);
         assert_eq!(rec.parent, crate::sessions::subagents::SubAgentParent::Main);
         assert_eq!(rec.label, "research");
@@ -3379,7 +3383,7 @@ mod tests {
         let sub = spawn_sub(&session, "risky", "doomed task").await;
         wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        let rec = state.subagents.get(&sub).unwrap();
+        let rec = state.mode.subagents().get(&sub).unwrap();
         assert_eq!(
             rec.status,
             crate::sessions::subagents::SubAgentStatus::Failed
@@ -3561,9 +3565,9 @@ mod tests {
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        assert!(!state.subagents.get(&c).unwrap().notified);
+        assert!(!state.mode.subagents().get(&c).unwrap().notified);
         assert_eq!(
-            state.subagents.get(&p).unwrap().status,
+            state.mode.subagents().get(&p).unwrap().status,
             SubAgentStatus::Completed
         );
 
@@ -3645,7 +3649,7 @@ mod tests {
         .await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert_eq!(
-            state.subagents.get(&sub).unwrap().error.as_deref(),
+            state.mode.subagents().get(&sub).unwrap().error.as_deref(),
             Some(crate::sessions::subagents::INTERRUPTED_ERROR)
         );
         // The transcript stays pageable: the resident actor answers history.
