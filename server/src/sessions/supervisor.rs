@@ -168,6 +168,35 @@ pub enum SessionSupervisorCommand {
     },
     /// Internal: publish an already-journaled title to the global live feed.
     PublishSessionTitle { id: SessionId, name: String },
+    /// Register a group. `created_at` is unix epoch millis (caller-supplied for
+    /// deterministic tests, like `Create`).
+    CreateGroup {
+        name: String,
+        created_at: u64,
+        reply: oneshot::Sender<Result<(), GroupError>>,
+    },
+    /// Rename a registered *or annotation-only* group; sessions follow.
+    RenameGroup {
+        old: String,
+        new: String,
+        reply: oneshot::Sender<Result<(), GroupError>>,
+    },
+    /// Delete a group and strip its annotation from every session.
+    DeleteGroup {
+        name: String,
+        reply: oneshot::Sender<Result<(), GroupError>>,
+    },
+    /// The group registry, name-sorted.
+    ListGroups {
+        reply: oneshot::Sender<Vec<(String, GroupRecord)>>,
+    },
+    /// Merge-update one session's annotations. Err when the session is unknown.
+    SetSessionAnnotations {
+        id: SessionId,
+        set: BTreeMap<String, String>,
+        remove: Vec<String>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Events recording which sessions exist. Status is deliberately absent — it
@@ -208,6 +237,52 @@ pub enum SessionSupervisorEvent {
         set: BTreeMap<String, String>,
         remove: Vec<String>,
     },
+}
+
+/// Why a group command was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupError {
+    /// Neither registered nor referenced by any session annotation.
+    NotFound(String),
+    /// The name is already taken (create, or rename target).
+    NameTaken(String),
+    /// Empty or over-long.
+    Invalid(String),
+}
+
+impl std::fmt::Display for GroupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GroupError::NotFound(name) => write!(f, "no such group: {name}"),
+            GroupError::NameTaken(name) => write!(f, "group already exists: {name}"),
+            GroupError::Invalid(reason) => write!(f, "invalid group name: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for GroupError {}
+
+const GROUP_NAME_MAX_LEN: usize = 128;
+
+fn validate_group_name(name: &str) -> Result<(), GroupError> {
+    if name.is_empty() {
+        return Err(GroupError::Invalid("empty".into()));
+    }
+    if name.len() > GROUP_NAME_MAX_LEN {
+        return Err(GroupError::Invalid(format!(
+            "longer than {GROUP_NAME_MAX_LEN} characters"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether the group is registered or any session carries `group=<name>`.
+fn group_exists(state: &SessionSupervisorState, name: &str) -> bool {
+    state.groups.contains_key(name)
+        || state
+            .sessions
+            .values()
+            .any(|rec| rec.annotations.get("group").is_some_and(|g| g == name))
 }
 
 /// One registry row.
@@ -795,6 +870,78 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
+            SessionSupervisorCommand::CreateGroup {
+                name,
+                created_at,
+                reply,
+            } => {
+                if let Err(e) = validate_group_name(&name) {
+                    let _ = reply.send(Err(e));
+                    return CommandEffect::none();
+                }
+                if state.groups.contains_key(&name) {
+                    let _ = reply.send(Err(GroupError::NameTaken(name)));
+                    return CommandEffect::none();
+                }
+                let _ = reply.send(Ok(()));
+                CommandEffect::persist(vec![SessionSupervisorEvent::GroupCreated {
+                    name,
+                    created_at,
+                }])
+            }
+            SessionSupervisorCommand::RenameGroup { old, new, reply } => {
+                if let Err(e) = validate_group_name(&new) {
+                    let _ = reply.send(Err(e));
+                    return CommandEffect::none();
+                }
+                // The fold inserts `new` unconditionally; without this guard a
+                // rename onto an existing group silently overwrites it.
+                if state.groups.contains_key(&new) {
+                    let _ = reply.send(Err(GroupError::NameTaken(new)));
+                    return CommandEffect::none();
+                }
+                if !group_exists(state, &old) {
+                    let _ = reply.send(Err(GroupError::NotFound(old)));
+                    return CommandEffect::none();
+                }
+                let _ = reply.send(Ok(()));
+                CommandEffect::persist(vec![SessionSupervisorEvent::GroupRenamed { old, new }])
+            }
+            SessionSupervisorCommand::DeleteGroup { name, reply } => {
+                if !group_exists(state, &name) {
+                    let _ = reply.send(Err(GroupError::NotFound(name)));
+                    return CommandEffect::none();
+                }
+                let _ = reply.send(Ok(()));
+                CommandEffect::persist(vec![SessionSupervisorEvent::GroupDeleted { name }])
+            }
+            SessionSupervisorCommand::ListGroups { reply } => {
+                let _ = reply.send(
+                    state
+                        .groups
+                        .iter()
+                        .map(|(name, rec)| (name.clone(), rec.clone()))
+                        .collect(),
+                );
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::SetSessionAnnotations {
+                id,
+                set,
+                remove,
+                reply,
+            } => {
+                if !state.sessions.contains_key(&id) {
+                    let _ = reply.send(Err(format!("no such session: {id}")));
+                    return CommandEffect::none();
+                }
+                let _ = reply.send(Ok(()));
+                CommandEffect::persist(vec![SessionSupervisorEvent::SessionAnnotationsSet {
+                    id,
+                    set,
+                    remove,
+                }])
+            }
         }
     }
 
@@ -911,6 +1058,16 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    async fn spawn_supervisor(f: &Fixture) -> ActorRef<SessionSupervisorCommand> {
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        spawn_root(
+            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            journal,
+        )
     }
 
     async fn await_signal(agent: &FakeRuntimeVendor, signal: &str) -> bool {
@@ -1401,5 +1558,136 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn group_create_list_and_duplicate_conflict() {
+        let f = fixture().await;
+        let sup = spawn_supervisor(&f).await;
+
+        sup.ask(|reply| SessionSupervisorCommand::CreateGroup {
+            name: "web".into(),
+            created_at: 1,
+            reply,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let dup = sup
+            .ask(|reply| SessionSupervisorCommand::CreateGroup {
+                name: "web".into(),
+                created_at: 2,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(dup, Err(GroupError::NameTaken("web".into())));
+
+        let groups = sup
+            .ask(|reply| SessionSupervisorCommand::ListGroups { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            groups,
+            vec![("web".to_string(), GroupRecord { created_at: 1 })]
+        );
+    }
+
+    #[tokio::test]
+    async fn group_validation_rejects_empty_and_overlong_names() {
+        let f = fixture().await;
+        let sup = spawn_supervisor(&f).await;
+        for bad in ["", &"x".repeat(129)] {
+            let err = sup
+                .ask(|reply| SessionSupervisorCommand::CreateGroup {
+                    name: bad.to_string(),
+                    created_at: 1,
+                    reply,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(err, Err(GroupError::Invalid(_))));
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_unregistered_group_rewrites_annotations() {
+        let f = fixture().await;
+        let sup = spawn_supervisor(&f).await;
+        let id = create(&sup).await;
+        sup.ask(|reply| SessionSupervisorCommand::SetSessionAnnotations {
+            id: id.clone(),
+            set: BTreeMap::from([("group".to_string(), "web".to_string())]),
+            remove: vec![],
+            reply,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // "web" was never registered; the rename still fixes the annotation.
+        sup.ask(|reply| SessionSupervisorCommand::RenameGroup {
+            old: "web".into(),
+            new: "frontend".into(),
+            reply,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let sessions = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions[0].1.annotations.get("group"),
+            Some(&"frontend".to_string())
+        );
+        assert!(
+            sup.ask(|reply| SessionSupervisorCommand::ListGroups { reply })
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_group_rename_and_delete_are_not_found() {
+        let f = fixture().await;
+        let sup = spawn_supervisor(&f).await;
+        let err = sup
+            .ask(|reply| SessionSupervisorCommand::RenameGroup {
+                old: "nope".into(),
+                new: "x".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(err, Err(GroupError::NotFound("nope".into())));
+        let err = sup
+            .ask(|reply| SessionSupervisorCommand::DeleteGroup {
+                name: "nope".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(err, Err(GroupError::NotFound("nope".into())));
+    }
+
+    #[tokio::test]
+    async fn set_annotations_on_unknown_session_errors() {
+        let f = fixture().await;
+        let sup = spawn_supervisor(&f).await;
+        let err = sup
+            .ask(|reply| SessionSupervisorCommand::SetSessionAnnotations {
+                id: "nope".into(),
+                set: BTreeMap::new(),
+                remove: vec![],
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(err.is_err());
     }
 }
