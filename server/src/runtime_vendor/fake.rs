@@ -50,7 +50,39 @@ struct Recorder {
     /// Every `ServerHookEvent` this fake was asked to run, in order — how a test
     /// proves what went on the wire, `stop_hook_active` above all.
     server_hook_events: Mutex<Vec<horsie_models::runtime::ServerHookEvent>>,
-    hook_runs: Mutex<usize>,
+    hook_runs: Mutex<std::collections::HashMap<String, usize>>,
+}
+
+/// The event a `ServerHookEvent` names.
+fn event_name(event: &horsie_models::runtime::ServerHookEvent) -> &'static str {
+    use horsie_models::runtime::ServerHookEvent as E;
+    match event {
+        E::SessionStart(_) => "SessionStart",
+        E::UserPromptSubmit(_) => "UserPromptSubmit",
+        E::Stop(_) => "Stop",
+    }
+}
+
+/// The event a `HookAction` records.
+fn action_name(action: &horsie_models::hooks::HookAction) -> &'static str {
+    use horsie_models::hooks::HookAction as A;
+    match action {
+        A::PreToolUse(_) => "PreToolUse",
+        A::PostToolUse(_) => "PostToolUse",
+        A::PostToolUseFailure(_) => "PostToolUseFailure",
+        A::PostToolBatch(_) => "PostToolBatch",
+        A::SessionStart(_) => "SessionStart",
+        A::SessionEnd(_) => "SessionEnd",
+        A::UserPromptSubmit(_) => "UserPromptSubmit",
+        A::Stop(_) => "Stop",
+        A::StopFailure(_) => "StopFailure",
+        A::SubagentStart(_) => "SubagentStart",
+        A::SubagentStop(_) => "SubagentStop",
+        A::TaskCreated(_) => "TaskCreated",
+        A::TaskCompleted(_) => "TaskCompleted",
+        A::Notification(_) => "Notification",
+        A::CwdChanged(_) => "CwdChanged",
+    }
 }
 
 impl Recorder {
@@ -704,17 +736,36 @@ async fn run_agent<S>(
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
                             .push(req.event.clone());
+                        // Scripted per event, not per call: a `SessionStart`
+                        // fires before the first turn, and a script shared with
+                        // `Stop` would have its first entry eaten by it. A
+                        // scripted `Stop` record is also not an answer any real
+                        // runtime would give to a `SessionStart`, so filtering
+                        // is the faithful reading rather than a convenience.
+                        let want = event_name(&req.event);
+                        let script: Vec<Vec<horsie_models::hooks::HookRecord>> = hook_records
+                            .iter()
+                            .map(|batch| {
+                                batch
+                                    .iter()
+                                    .filter(|r| action_name(&r.action) == want)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            })
+                            .filter(|b| !b.is_empty())
+                            .collect();
                         let n = {
                             let mut g = recorder
                                 .hook_runs
                                 .lock()
                                 .unwrap_or_else(PoisonError::into_inner);
-                            *g += 1;
-                            *g - 1
+                            let seen = g.entry(want.to_string()).or_insert(0);
+                            *seen += 1;
+                            *seen - 1
                         };
-                        let records = hook_records
+                        let records = script
                             .get(n)
-                            .or_else(|| hook_records.last())
+                            .or_else(|| script.last())
                             .cloned()
                             .unwrap_or_default();
                         Some(RuntimeOutboundMessage::HookRecords(RunHooksResponse {

@@ -27,8 +27,9 @@ use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, Per
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_models::agent::ToolResultInput;
 use horsie_models::hooks::HookRecord;
+use horsie_models::hooks::{HookAction, StopOutcome};
 use horsie_models::now_ms;
-use horsie_models::runtime::{ServerHookEvent, SessionStartInput};
+use horsie_models::runtime::{ServerHookEvent, SessionStartInput, StopInput};
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
@@ -39,6 +40,7 @@ use horsie_workflow::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
@@ -125,6 +127,12 @@ pub enum SessionCommand {
         key: AgentKey,
         records: Vec<HookRecord>,
     },
+    /// A `Stop` hook blocked, so the turn continues with `reason` as its input.
+    ///
+    /// Routed through the session for the same reason `HooksRan` is: the sink is
+    /// built before its `AgentActor` is spawned, so it holds a key rather than
+    /// an `ActorRef`.
+    ContinueAfterStop { key: AgentKey, reason: String },
     /// Internal: post-recovery reconciliation of a turn the process died in.
     ReconcileInterrupted,
     /// Set the session title from the built-in title tool.
@@ -683,12 +691,18 @@ impl SessionActor {
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let frames = self.agent_frames(AgentKey::Main);
         let agent_ctx = AgentRuntimeContext {
-            context_provider,
+            context_provider: context_provider.clone(),
             event_sink: Arc::new(AgentEventSink {
                 frames: frames.clone(),
             }),
-            parent: Arc::new(SessionParent {
-                target: ctx.self_ref(),
+            parent: Arc::new(StopHookParent {
+                inner: Arc::new(SessionParent {
+                    target: ctx.self_ref(),
+                }),
+                session: ctx.self_ref(),
+                key: AgentKey::Main,
+                provider: context_provider.clone(),
+                continuations: Arc::new(AtomicUsize::new(0)),
             }),
             session_id: self.id,
         };
@@ -766,12 +780,18 @@ impl SessionActor {
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let frames = self.agent_frames(AgentKey::Step(agent_id));
         let agent_ctx = AgentRuntimeContext {
-            context_provider,
+            context_provider: context_provider.clone(),
             event_sink: Arc::new(AgentEventSink {
                 frames: frames.clone(),
             }),
-            parent: Arc::new(SessionParent {
-                target: ctx.self_ref(),
+            parent: Arc::new(StopHookParent {
+                inner: Arc::new(SessionParent {
+                    target: ctx.self_ref(),
+                }),
+                session: ctx.self_ref(),
+                key: AgentKey::Step(agent_id),
+                provider: context_provider.clone(),
+                continuations: Arc::new(AtomicUsize::new(0)),
             }),
             session_id: agent_id,
         };
@@ -938,12 +958,18 @@ impl SessionActor {
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let frames = self.agent_frames(AgentKey::Sub(id));
         let agent_ctx = AgentRuntimeContext {
-            context_provider,
+            context_provider: context_provider.clone(),
             event_sink: Arc::new(AgentEventSink {
                 frames: frames.clone(),
             }),
-            parent: Arc::new(SessionParent {
-                target: ctx.self_ref(),
+            parent: Arc::new(StopHookParent {
+                inner: Arc::new(SessionParent {
+                    target: ctx.self_ref(),
+                }),
+                session: ctx.self_ref(),
+                key: AgentKey::Sub(id),
+                provider: context_provider.clone(),
+                continuations: Arc::new(AtomicUsize::new(0)),
             }),
             session_id: id,
         };
@@ -1709,6 +1735,152 @@ impl AgentOutcomeSink for SessionParent {
     }
 }
 
+/// How many times a `Stop` hook may hold a turn open before horsie ends it
+/// regardless.
+///
+/// Not advisory. horsie runs unattended sessions, and `stop_hook_active` only
+/// stops a hook that reads it — this exists for the ones that do not.
+const MAX_STOP_CONTINUATIONS: usize = 3;
+
+/// Runs `Stop` hooks when a turn concludes, and honours what they say.
+///
+/// A decorator on the outcome sink rather than a branch in the session's
+/// `AgentOutcome` handler, because `deliver` is called from the *agent's*
+/// `RunFinished` handler. A slow hook therefore delays that agent's own mailbox
+/// and never the session's command loop, which stays able to serve a cancel or
+/// another agent while a 30-second `Stop` hook runs.
+struct StopHookParent {
+    inner: Arc<dyn AgentOutcomeSink>,
+    session: ActorRef<SessionCommand>,
+    key: AgentKey,
+    /// The provider whose `provide()` cached this agent's client. `Stop` never
+    /// acquires a runtime of its own: a turn that already concluded must not be
+    /// able to fail on provisioning, and there is nothing to guard if no runtime
+    /// ever ran.
+    provider: Arc<SessionContextProvider>,
+    /// Consecutive continuations. Reset whenever a turn concludes without a
+    /// block, so a long interactive session that legitimately continues a few
+    /// times never accumulates toward the cap.
+    continuations: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AgentOutcomeSink for StopHookParent {
+    async fn deliver(&self, outcome: AgentOutcome) {
+        // `Stop` fires when a turn *ends*. An ask or a park is a turn still in
+        // progress, and a failure is not a stop the hook could act on.
+        let AgentOutcome::Concluded { output, .. } = &outcome else {
+            return self.inner.deliver(outcome).await;
+        };
+        // No plugins, or no runtime this turn: nothing declared a hook, so the
+        // round-trip would be pure latency on every single turn.
+        let Some(client) = self
+            .provider
+            .use_plugins()
+            .then(|| self.provider.cached_client())
+            .flatten()
+        else {
+            return self.inner.deliver(outcome).await;
+        };
+
+        let used = self.continuations.load(Ordering::Relaxed);
+        let records = client
+            .run_hooks(ServerHookEvent::Stop(StopInput {
+                last_assistant_message: output.as_str().map(str::to_string),
+                // The spec's own definition: true when horsie would normally
+                // stop but is being held in the loop by a blocking hook. A
+                // cooperative hook returns early on it.
+                stop_hook_active: used > 0,
+            }))
+            .await
+            .unwrap_or_default();
+
+        match stop_verdict(&records) {
+            // Blocked *from stopping*, with budget left: the turn does not
+            // conclude. The parent never hears about it, so the session never
+            // marks the turn done and never drains its queue early.
+            Some(reason) if used < MAX_STOP_CONTINUATIONS => {
+                self.continuations.fetch_add(1, Ordering::Relaxed);
+                let _ = self
+                    .session
+                    .tell(SessionCommand::ContinueAfterStop {
+                        key: self.key,
+                        reason,
+                    })
+                    .await;
+            }
+            // Blocked, but out of budget. The turn ends, and a second record
+            // says why — otherwise this reads as a turn that stopped on its own.
+            Some(_) => {
+                self.continuations.store(0, Ordering::Relaxed);
+                let _ = self
+                    .session
+                    .tell(SessionCommand::HooksRan {
+                        key: self.key,
+                        records: cap_reached(records),
+                    })
+                    .await;
+                self.inner.deliver(outcome).await;
+            }
+            None => {
+                self.continuations.store(0, Ordering::Relaxed);
+                self.inner.deliver(outcome).await;
+            }
+        }
+    }
+}
+
+/// Why a `Stop` hook is holding this turn open, if one is.
+fn stop_verdict(records: &[HookRecord]) -> Option<String> {
+    records.iter().find_map(|r| match &r.action {
+        HookAction::Stop(s) => match &s.outcome {
+            StopOutcome::Blocked(b) => Some(
+                b.reason
+                    .clone()
+                    // An empty input is not a turn, so a hook that blocked
+                    // without saying why still has to say something.
+                    .unwrap_or_else(|| "a Stop hook asked for another iteration".to_string()),
+            ),
+            // A failure is never fatal here: `Stop` runs after the fact, so a
+            // guard that could not run cannot deny anything. Only `PreToolUse`
+            // fails closed.
+            StopOutcome::Ran(_) | StopOutcome::Failed(_) | StopOutcome::CapReached(_) => None,
+        },
+        // Listed rather than `_`: a future event that can hold a turn open must
+        // fail to compile here rather than be silently ignored.
+        HookAction::PreToolUse(_)
+        | HookAction::PostToolUse(_)
+        | HookAction::PostToolUseFailure(_)
+        | HookAction::PostToolBatch(_)
+        | HookAction::SessionStart(_)
+        | HookAction::SessionEnd(_)
+        | HookAction::UserPromptSubmit(_)
+        | HookAction::StopFailure(_)
+        | HookAction::SubagentStart(_)
+        | HookAction::SubagentStop(_)
+        | HookAction::TaskCreated(_)
+        | HookAction::TaskCompleted(_)
+        | HookAction::Notification(_)
+        | HookAction::CwdChanged(_) => None,
+    })
+}
+
+/// Narrow a blocking record's outcome to name the cap.
+///
+/// The only place `CapReached` is produced: `HookInvocation::record` sees one
+/// hook's reply and cannot know the budget, so the outcome is narrowed here
+/// rather than invented in the library.
+fn cap_reached(mut records: Vec<HookRecord>) -> Vec<HookRecord> {
+    for r in &mut records {
+        if let HookAction::Stop(s) = &mut r.action
+            && let StopOutcome::Blocked(b) = &s.outcome
+        {
+            s.outcome = StopOutcome::CapReached(b.clone());
+        }
+    }
+    records
+}
+
 /// The interactive session's `AgentRunDef`.
 fn session_run_def(settings: &AgentSettings) -> AgentRunDef {
     AgentRunDef {
@@ -1859,6 +2031,12 @@ impl SessionContextProvider {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    /// Whether this agent loads the shared plugin library — and so whether any
+    /// hook could possibly be declared for it.
+    fn use_plugins(&self) -> bool {
+        self.settings.use_plugins.unwrap_or(true)
+    }
 }
 
 #[async_trait]
@@ -1886,10 +2064,6 @@ impl ContextProvider for SessionContextProvider {
                 ContextError::retryable(other.to_string())
             }
         })?;
-        *self
-            .last_client
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
         let runtime_client = scoped_client(&self.kind, runtime_client);
         // Hooks run runtime-side and report what they did on the tool response.
         // Routing those records here is what makes a plugin's interventions
@@ -1898,6 +2072,14 @@ impl ContextProvider for SessionContextProvider {
             target: self.session.clone(),
             key: self.kind.agent_key(),
         }));
+        // Cached *after* the sink is attached, not before: `Stop` runs its hooks
+        // through this handle once the turn is over, and a sink-less clone would
+        // run them and drop every record on the floor. Cancellation is
+        // unaffected — in-flight tracking is shared across clones.
+        *self
+            .last_client
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
 
         if broadcast {
             emit_progress(&self.frames, "scanning_workspace", None);
@@ -2351,6 +2533,20 @@ impl EventSourcedActor for SessionActor {
                 }
                 CommandEffect::none()
             }
+            SessionCommand::ContinueAfterStop { key, reason } => {
+                // The same path recovery uses to continue an interrupted task:
+                // a plain user-message turn whose input is the hook's reason.
+                if let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)) {
+                    let _ = agent
+                        .tell(AgentCommand::Resume {
+                            results: Vec::new(),
+                            message: Some(reason),
+                            subagent_results: Vec::new(),
+                        })
+                        .await;
+                }
+                CommandEffect::none()
+            }
             SessionCommand::SubAgentTree { reply } => {
                 let tree = state
                     .mode
@@ -2546,7 +2742,12 @@ impl EventSourcedActor for SessionActor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::*;
 
@@ -4384,6 +4585,252 @@ mod tests {
                 horsie_agentcore::HistoryEntry::Llm(_) => None,
             })
             .collect()
+    }
+
+    // --- `Stop` continuation ---
+    //
+    // `Stop` is the only event whose two capabilities are both ways of *not*
+    // ending a turn, so these assert on what happens to the turn rather than on
+    // what was recorded. `FakeRuntimeVendor` answers the protocol itself, so
+    // they script records; real command execution is covered one layer down, in
+    // `runtime/src/hooks/server.rs`.
+
+    fn stop_record(outcome: StopOutcome) -> HookRecord {
+        HookRecord {
+            plugin: "stopper".into(),
+            duration_ms: 1,
+            action: HookAction::Stop(horsie_models::hooks::StopRecord {
+                system_message: None,
+                outcome,
+            }),
+        }
+    }
+
+    fn stop_blocked(reason: &str) -> Vec<HookRecord> {
+        vec![stop_record(StopOutcome::Blocked(
+            horsie_models::hooks::HookBlocked {
+                reason: Some(reason.to_string()),
+            },
+        ))]
+    }
+
+    /// A session whose runtime answers every `RunHooks` from `records`, with an
+    /// LLM that concludes on the first call.
+    async fn stop_harness(
+        records: Vec<Vec<HookRecord>>,
+    ) -> (ActorFixture, ActorRef<SessionCommand>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
+            .hook_records(records)
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        let mut vendors = HashMap::new();
+        vendors.insert("mock".to_string(), agent.link());
+        let vendors = Arc::new(std::sync::RwLock::new(vendors));
+        let deps = ServerDeps {
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
+            provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            vendors,
+            state_dir: tmp.path().to_path_buf(),
+            github_tokens: None,
+            mcp: None,
+            plugins: None,
+            memory: None,
+        };
+        let f = ActorFixture {
+            deps,
+            agent,
+            _tmp: tmp,
+        };
+        let id = Uuid::new_v4();
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "mock", &actor_spec_fixture())
+            .await
+            .expect("create");
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+        );
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                test_frames(),
+            ),
+            Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
+        );
+        (f, session)
+    }
+
+    /// Every user-role message in the main agent's transcript, in order — which
+    /// is one per turn, so its length is the number of turns that ran.
+    async fn turn_inputs(session: &ActorRef<SessionCommand>) -> Vec<String> {
+        agent_history(session, None)
+            .await
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                horsie_agentcore::HistoryEntry::Llm(m)
+                    if m.role == horsie_agentcore::Role::User =>
+                {
+                    Some(m.parts.iter().fold(String::new(), |mut acc, p| {
+                        if let horsie_agentcore::ContentPart::Text(t) = p {
+                            acc.push_str(&t.text);
+                        }
+                        acc
+                    }))
+                }
+                horsie_agentcore::HistoryEntry::Llm(_)
+                | horsie_agentcore::HistoryEntry::Hook(_) => None,
+            })
+            .collect()
+    }
+
+    /// The `Stop` outcomes journaled on the main agent's transcript.
+    async fn stop_outcomes(session: &ActorRef<SessionCommand>) -> Vec<StopOutcome> {
+        agent_history(session, None)
+            .await
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                horsie_agentcore::HistoryEntry::Hook(h) => match &h.record.action {
+                    HookAction::Stop(r) => Some(r.outcome.clone()),
+                    other => panic!("only Stop hooks run in these tests, got {other:?}"),
+                },
+                horsie_agentcore::HistoryEntry::Llm(_) => None,
+            })
+            .collect()
+    }
+
+    /// Wait until the transcript stops growing, so a test asserting "no further
+    /// turn ran" observes a real stop rather than a race it won.
+    async fn settled_inputs(session: &ActorRef<SessionCommand>) -> Vec<String> {
+        let mut last = turn_inputs(session).await;
+        let mut stable = 0;
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let now = turn_inputs(session).await;
+            if now == last {
+                stable += 1;
+                if stable == 5 {
+                    return now;
+                }
+            } else {
+                stable = 0;
+                last = now;
+            }
+        }
+        last
+    }
+
+    async fn send(session: &ActorRef<SessionCommand>, text: &str) {
+        session
+            .ask(|reply| SessionCommand::UserMessage {
+                text: text.into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A blocking `Stop` means *blocked from stopping*: the turn does not
+    /// conclude, and the reason becomes the input to another run. The opposite
+    /// of a `PreToolUse` refusal.
+    #[tokio::test]
+    async fn a_blocking_stop_hook_starts_another_run_with_its_reason() {
+        let (_f, session) = stop_harness(vec![
+            stop_blocked("tests still failing"),
+            vec![stop_record(StopOutcome::Ran(
+                horsie_models::hooks::ContextInjected {
+                    additional_context: None,
+                },
+            ))],
+        ])
+        .await;
+        send(&session, "do the thing").await;
+        let inputs = settled_inputs(&session).await;
+        assert_eq!(inputs.len(), 2, "the turn continued once: {inputs:?}");
+        assert!(inputs[0].contains("do the thing"), "{inputs:?}");
+        assert!(inputs[1].contains("tests still failing"), "{inputs:?}");
+    }
+
+    /// The loop guard that must not be optional: horsie runs unattended
+    /// sessions, so a hook ignoring `stop_hook_active` would spin forever with
+    /// nobody watching.
+    #[tokio::test]
+    async fn an_unconditionally_blocking_stop_hook_is_stopped_by_the_cap() {
+        let (_f, session) = stop_harness(vec![stop_blocked("again")]).await;
+        send(&session, "go").await;
+        let inputs = settled_inputs(&session).await;
+        assert_eq!(
+            inputs.len(),
+            1 + MAX_STOP_CONTINUATIONS,
+            "the original turn plus exactly the cap: {inputs:?}"
+        );
+    }
+
+    /// And the record says the cap ended it, rather than looking like a turn
+    /// that ended on its own.
+    #[tokio::test]
+    async fn the_capped_continuation_is_recorded_as_cap_reached() {
+        let (_f, session) = stop_harness(vec![stop_blocked("again")]).await;
+        send(&session, "go").await;
+        settled_inputs(&session).await;
+        let outcomes = stop_outcomes(&session).await;
+        assert!(
+            matches!(outcomes.last(), Some(StopOutcome::CapReached(_))),
+            "the last record must name the cap, got {outcomes:?}"
+        );
+    }
+
+    /// Non-blocking feedback informs the model; it does not force a turn.
+    /// Starting a run on it would make every advisory `Stop` hook an infinite
+    /// session.
+    #[tokio::test]
+    async fn non_blocking_additional_context_does_not_start_a_run() {
+        let (_f, session) = stop_harness(vec![vec![stop_record(StopOutcome::Ran(
+            horsie_models::hooks::ContextInjected {
+                additional_context: Some("consider the tests".into()),
+            },
+        ))]])
+        .await;
+        send(&session, "go").await;
+        let inputs = settled_inputs(&session).await;
+        assert_eq!(inputs.len(), 1, "informed, not forced: {inputs:?}");
+    }
+
+    /// `Stop` runs after the fact, so a guard that could not run cannot deny
+    /// anything. Only `PreToolUse` fails closed.
+    #[tokio::test]
+    async fn a_failing_stop_hook_concludes_the_turn_anyway() {
+        let (_f, session) = stop_harness(vec![vec![stop_record(StopOutcome::Failed(
+            horsie_models::hooks::HookFailed {
+                reason: "spawn failed".into(),
+            },
+        ))]])
+        .await;
+        send(&session, "go").await;
+        assert_eq!(settled_inputs(&session).await.len(), 1);
+    }
+
+    /// Every `Stop` hook that ran reaches the transcript, which is the point of
+    /// running them at all.
+    #[tokio::test]
+    async fn every_stop_hook_run_reaches_the_transcript() {
+        let (_f, session) = stop_harness(vec![vec![stop_record(StopOutcome::Ran(
+            horsie_models::hooks::ContextInjected {
+                additional_context: None,
+            },
+        ))]])
+        .await;
+        send(&session, "go").await;
+        settled_inputs(&session).await;
+        assert_eq!(stop_outcomes(&session).await.len(), 1);
     }
 
     /// A hook guards one agent's call, so its record belongs in that agent's
