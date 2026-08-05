@@ -37,13 +37,15 @@ pub fn apply(
     let spec = CapabilitySpec::load(caps_file)?;
     let caps = build_capability_set(&spec, working_dirs, socket_path)?;
 
-    // `apply` returns `Result<SeccompNetFallback>` on Linux and `Result<()>` on
-    // macOS. Bind the Linux payload (it is `#[must_use]`); on other platforms the
-    // unit result is discarded as a statement (binding it would trip `let_unit_value`).
+    // `apply_auto` (nono 0.71 renamed it from `apply`; same behaviour — Landlock
+    // where the kernel supports it, seccomp otherwise) returns
+    // `Result<SeccompNetFallback>` on Linux and `Result<()>` on macOS. Bind the
+    // Linux payload (it is `#[must_use]`); on other platforms the unit result is
+    // discarded as a statement (binding it would trip `let_unit_value`).
     #[cfg(target_os = "linux")]
-    let _net_fallback = Sandbox::apply(&caps).map_err(|e| e.to_string())?;
+    let _net_fallback = Sandbox::apply_auto(&caps).map_err(|e| e.to_string())?;
     #[cfg(not(target_os = "linux"))]
-    Sandbox::apply(&caps).map_err(|e| e.to_string())?;
+    Sandbox::apply_auto(&caps).map_err(|e| e.to_string())?;
     Ok(())
 }
 
