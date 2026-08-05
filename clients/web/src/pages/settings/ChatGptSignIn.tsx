@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiRequestError, api, type ChatGptStartedLogin } from "../../api/client";
-import { RowLabel } from "./fields";
 
 /** Sign a `kind: "chatgpt"` provider into a ChatGPT plan.
  *
@@ -9,8 +8,22 @@ import { RowLabel } from "./fields";
  * callback. Here the server talks to OpenAI outbound and the operator approves
  * on OpenAI's own site; the two halves meet at an eight-character code. Nothing
  * on this screen ever handles a ChatGPT password.
+ *
+ * Lives on the provider's row rather than inside its editor: connecting is not
+ * an edit to the provider record, and putting it behind the pencil meant a
+ * provider you had just created had to be opened a second time to be made
+ * usable.
  */
-export function ChatGptSignIn({ provider }: { provider: string }) {
+export function ChatGptSignIn({
+  provider,
+  onChanged,
+}: {
+  provider: string;
+  /** Signing in or out changes `hasCredential`, which the row lamp and the
+   * Add-model gate both read from the settings query — without this they keep
+   * showing the state from before. */
+  onChanged?: () => void;
+}) {
   const [accountId, setAccountId] = useState<string | null>(null);
   const [login, setLogin] = useState<ChatGptStartedLogin | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +63,7 @@ export function ChatGptSignIn({ provider }: { provider: string }) {
               setAccountId(r.accountId ?? "");
               setLogin(null);
               stopPolling();
+              onChanged?.();
             } else {
               poll(intervalMs);
             }
@@ -63,7 +77,7 @@ export function ChatGptSignIn({ provider }: { provider: string }) {
           });
       }, intervalMs);
     },
-    [provider, stopPolling],
+    [provider, stopPolling, onChanged],
   );
 
   const start = async () => {
@@ -90,6 +104,7 @@ export function ChatGptSignIn({ provider }: { provider: string }) {
       setAccountId(null);
       setLogin(null);
       stopPolling();
+      onChanged?.();
     } catch (e) {
       setError(e instanceof ApiRequestError ? e.message : "Could not sign out.");
     } finally {
@@ -98,9 +113,11 @@ export function ChatGptSignIn({ provider }: { provider: string }) {
   };
 
   return (
-    <div className="col-span-1 sm:col-span-2">
-      <RowLabel>ChatGPT plan</RowLabel>
-      <div className="rounded-[var(--radius-control)] bg-raised p-3 shadow-[inset_0_0_0_1px_var(--rule-strong)]">
+    <div data-testid="chatgpt-signin">
+      {/* Recessed rather than raised: this sits inside a row that is already
+          `bg-raised`, and a second raised surface on top of it reads as a
+          detached card rather than as part of the row. */}
+      <div className="screen p-3">
         {accountId !== null ? (
           <div
             className="flex flex-wrap items-center gap-2"

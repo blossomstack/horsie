@@ -1,4 +1,4 @@
-import { Pencil, Trash2, X } from "lucide-react";
+import { Pencil, Plug, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import type {
@@ -10,7 +10,11 @@ import type {
 } from "../../api/types";
 import { ChatGptSignIn } from "./ChatGptSignIn";
 import { useModelCardSearch } from "../../hooks/useModelCards";
-import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import {
+  useRefreshSettings,
+  useSettings,
+  useUpdateSettings,
+} from "../../hooks/useSettings";
 import {
   ListRow,
   RowAction,
@@ -59,12 +63,37 @@ const DIALECTS = [
   "none",
 ] as const;
 
+/** What a provider's credential lamp says, given its kind. A ChatGPT plan is
+ * authorized by signing in, so "No key" would be both wrong and unactionable. */
+const credentialWords = (kind: string, has: boolean): string =>
+  kind === "chatgpt" ? (has ? "Connected" : "Not connected") : has ? "Key set" : "No key";
+
+const credentialHint = (kind: string, has: boolean): string =>
+  kind === "chatgpt"
+    ? has
+      ? "Signed in to a ChatGPT plan."
+      : "Not signed in — connect this provider before adding models to it."
+    : has
+      ? "An API key is stored for this provider."
+      : "No API key stored — add one before adding models to it.";
+
+/** Why Add model is unavailable, or null when it is available. The server
+ * refuses to build a provider without its credential, so a model added here
+ * would fail the settings write anyway; saying so up front beats a rejection. */
+const blockedReason = (p: ProviderView | undefined): string | null => {
+  if (!p) return "Select a provider first.";
+  if (p.hasCredential) return null;
+  return p.kind === "chatgpt"
+    ? `Connect “${p.name}” to a ChatGPT plan first.`
+    : `Add an API key to “${p.name}” first.`;
+};
+
 type ProviderDraft = {
   name: string;
   kind: ProviderKind;
   baseUrl: string;
   apiKeyInput: string; // "" = leave the stored key unchanged
-  hasInlineKey: boolean;
+  hasCredential: boolean;
   keepThinkingSignature: boolean;
 };
 
@@ -87,7 +116,7 @@ const providerToDraft = (p: ProviderView): ProviderDraft => ({
     : "anthropic",
   baseUrl: p.baseUrl ?? "",
   apiKeyInput: "",
-  hasInlineKey: p.hasInlineKey,
+  hasCredential: p.hasCredential,
   keepThinkingSignature: p.keepThinkingSignature,
 });
 
@@ -108,7 +137,7 @@ const newProvider = (): ProviderDraft => ({
   kind: "anthropic",
   baseUrl: "",
   apiKeyInput: "",
-  hasInlineKey: false,
+  hasCredential: false,
   keepThinkingSignature: false,
 });
 
@@ -167,6 +196,9 @@ export function ModelsSettings() {
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [addingModel, setAddingModel] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  /** The provider whose ChatGPT sign-in panel is expanded, if any. */
+  const [signingIn, setSigningIn] = useState<string | null>(null);
+  const refreshSettings = useRefreshSettings();
 
   const providers = useMemo(() => settings?.providers ?? [], [settings]);
   const models = useMemo(() => settings?.models ?? [], [settings]);
@@ -180,6 +212,7 @@ export function ModelsSettings() {
   }, [providers, selected]);
 
   const providerModels = models.filter((m) => m.provider === selected);
+  const addModelBlocked = blockedReason(providers.find((p) => p.name === selected));
 
   const commit = (next: { providers?: ProviderInput[]; models?: ModelInput[] }) =>
     update.mutateAsync({
@@ -217,6 +250,10 @@ export function ModelsSettings() {
       setSelected(name);
       setEditingProvider(null);
       setAddingProvider(false);
+      // A ChatGPT provider that has just been created cannot do anything until
+      // it is signed in, and the sign-in needs a saved provider to attach to.
+      // Opening it here is what makes that one pass instead of two.
+      if (draft.kind === "chatgpt" && !draft.hasCredential) setSigningIn(name);
     } catch (e) {
       setLocalError(e instanceof ApiRequestError ? e.message : "Save failed.");
     }
@@ -368,27 +405,24 @@ export function ModelsSettings() {
                     onActivate={() => setSelected(p.name)}
                     meta={
                       <span className="flex shrink-0 items-center gap-2">
-                        {/* Whether a key is set is the one thing here that
-                            decides if this provider works at all, so it is a
-                            lamp and a word rather than a detail in the editor. */}
+                        {/* Whether this provider can authenticate is the one
+                            thing here that decides if it works at all, so it is
+                            a lamp and a word rather than a detail in the
+                            editor. */}
                         <span
                           className={
-                            p.hasInlineKey
+                            p.hasCredential
                               ? "flex items-center gap-1.5 text-lamp-ok"
                               : "flex items-center gap-1.5 text-amber-ink"
                           }
-                          title={
-                            p.hasInlineKey
-                              ? "An API key is stored for this provider."
-                              : "No API key stored — calls to this provider will fail unless the key comes from the environment."
-                          }
+                          title={credentialHint(p.kind, p.hasCredential)}
                         >
                           <span
-                            className={p.hasInlineKey ? "lamp" : "lamp lamp-off"}
+                            className={p.hasCredential ? "lamp" : "lamp lamp-off"}
                             aria-hidden
                           />
                           <span className="legend text-current">
-                            {p.hasInlineKey ? "Key set" : "No key"}
+                            {credentialWords(p.kind, p.hasCredential)}
                           </span>
                         </span>
                         <span className="chip">
@@ -401,6 +435,31 @@ export function ModelsSettings() {
                     }
                     actions={
                       <>
+                        {p.kind === "chatgpt" &&
+                          (p.hasCredential ? (
+                            <RowAction
+                              icon={<Plug size={14} />}
+                              label={`ChatGPT sign-in for ${p.name}`}
+                              pressed={signingIn === p.name}
+                              onClick={() =>
+                                setSigningIn(signingIn === p.name ? null : p.name)
+                              }
+                              testId={`provider-connect-${p.name}`}
+                            />
+                          ) : (
+                            // Named and worded, not an icon: this is the one
+                            // thing standing between a new ChatGPT provider and
+                            // a working one.
+                            <button
+                              className="key key-go shrink-0"
+                              onClick={() =>
+                                setSigningIn(signingIn === p.name ? null : p.name)
+                              }
+                              data-testid={`provider-connect-${p.name}`}
+                            >
+                              <Plug size={13} aria-hidden /> Connect
+                            </button>
+                          ))}
                         <RowAction
                           icon={<Pencil size={14} />}
                           label={`Edit ${p.name}`}
@@ -424,7 +483,14 @@ export function ModelsSettings() {
                         />
                       </>
                     }
-                  />
+                  >
+                    {signingIn === p.name && (
+                      <ChatGptSignIn
+                        provider={p.name}
+                        onChanged={() => refreshSettings()}
+                      />
+                    )}
+                  </ListRow>
                 );
               })}
             </Section>
@@ -438,9 +504,14 @@ export function ModelsSettings() {
                   setEditingModel(null);
                 }}
                 addLabel="Add model"
+                addDisabled={addModelBlocked !== null}
+                addTitle={addModelBlocked ?? undefined}
                 empty={
                   providerModels.length === 0 && !addingModel
-                    ? `No models route through ${selected} yet.`
+                    ? // The reason goes here as well as in the tooltip: a
+                      // disabled button with a hover-only explanation is a dead
+                      // end on touch and for a keyboard.
+                      (addModelBlocked ?? `No models route through ${selected} yet.`)
                     : null
                 }
               >
@@ -606,17 +677,15 @@ function ProviderEditor({
             type="password"
             value={draft.apiKeyInput}
             onChange={(v) => set({ apiKeyInput: v })}
-            placeholder={draft.hasInlineKey ? "•••• stored — blank keeps it" : "not set"}
+            placeholder={draft.hasCredential ? "•••• stored — blank keeps it" : "not set"}
           />
         )}
-        {draft.kind === "chatgpt" &&
-          (initial.name ? (
-            <ChatGptSignIn provider={initial.name} />
-          ) : (
-            <p className="col-span-1 text-xs text-dim sm:col-span-2">
-              Save this provider first, then sign in to your ChatGPT plan.
-            </p>
-          ))}
+        {draft.kind === "chatgpt" && (
+          <p className="col-span-1 text-xs text-dim sm:col-span-2">
+            A ChatGPT plan is authorized by signing in, not by a key. Connect it
+            from its row in the list{initial.name ? "" : " once this is saved"}.
+          </p>
+        )}
         {draft.kind === "anthropic" && (
           <label className="col-span-1 flex items-start gap-2 text-sm sm:col-span-2">
             <input

@@ -12,12 +12,12 @@ horsie-models = { version = "0.1.6", path = "../../models" }
 async-trait         = { workspace = true }
 base64              = { workspace = true }
 tokio               = { workspace = true, features = ["time", "sync"] }
+eventsource-stream  = { workspace = true }
 futures-util        = { workspace = true }
 serde               = { workspace = true }
 serde_json          = { workspace = true }
 tracing             = { workspace = true }
 reqwest             = { workspace = true, features = ["json", "stream", "cookies"] }
-reqwest-eventsource = { workspace = true }
 
 [dev-dependencies]
 horsie-mock-llm = { path = "../mock-llm" }

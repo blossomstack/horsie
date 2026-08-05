@@ -704,7 +704,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
         assert_eq!(view.models.len(), 1);
-        assert!(view.providers[0].has_inline_key);
+        assert!(view.providers[0].has_credential);
         // A model referencing a missing provider is a 422.
         let bad =
             serde_json::json!({ "models": [{"alias": "x", "provider": "ghost", "modelId": "y"}] });
