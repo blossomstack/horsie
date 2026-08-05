@@ -20,6 +20,8 @@ export * from './sessionStartOutcome';
 export * from './sessionStartRecord';
 export * from './userPromptSubmitOutcome';
 export * from './userPromptSubmitRecord';
+export * from './userPromptExpansionOutcome';
+export * from './userPromptExpansionRecord';
 export * from './stopOutcome';
 export * from './stopRecord';
 export * from './subagentStartOutcome';

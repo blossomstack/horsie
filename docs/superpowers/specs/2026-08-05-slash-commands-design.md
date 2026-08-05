@@ -102,7 +102,13 @@ does). That takes horsie to eight wired events.
   `TurnPreparation { records, message }` rather than a bare `Vec<HookRecord>` — the seam
   already carries the turn's message through `PreparedStart`, so a rewritten one has somewhere
   to go without new machinery.
-- `GET /api/sessions/:id/commands` returns the catalogue for a picker.
+**`GET /api/sessions/:id/commands` is deferred to the picker**, not built here. The
+catalogue comes from the library scan, which happens in `provide()` — so an endpoint has two
+honest implementations: answer from the last turn's scan, which is empty on a session's first
+message and so useless exactly when a picker is most wanted; or scan on demand, which is
+correct but costs a runtime round-trip per read. Choosing between those is a decision the
+picker's own behaviour should drive, and until a picker exists the endpoint has no caller.
+Typing `/name` works from every client without it.
 
 ## Testing
 

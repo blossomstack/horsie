@@ -50,6 +50,11 @@ pub enum HookInvocation<'a> {
     UserPromptSubmit {
         prompt: &'a str,
     },
+    /// A slash command about to be expanded into its template.
+    UserPromptExpansion {
+        prompt: &'a str,
+        command: &'a str,
+    },
     Stop {
         last_assistant_message: Option<&'a str>,
         /// True when horsie is only still running because a previous `Stop`
@@ -74,6 +79,7 @@ impl HookInvocation<'_> {
             HookInvocation::SessionStart { .. } => HookEvent::SessionStart,
             HookInvocation::SubagentStart { .. } => HookEvent::SubagentStart,
             HookInvocation::UserPromptSubmit { .. } => HookEvent::UserPromptSubmit,
+            HookInvocation::UserPromptExpansion { .. } => HookEvent::UserPromptExpansion,
             HookInvocation::Stop { .. } => HookEvent::Stop,
             HookInvocation::SubagentStop { .. } => HookEvent::SubagentStop,
         }
@@ -96,6 +102,7 @@ impl HookInvocation<'_> {
             // selecting a single run is not a thing the spec offers.
             HookInvocation::SubagentStart { agent_type, .. }
             | HookInvocation::SubagentStop { agent_type, .. } => vec![*agent_type],
+            HookInvocation::UserPromptExpansion { command, .. } => vec![*command],
             HookInvocation::UserPromptSubmit { .. } | HookInvocation::Stop { .. } => Vec::new(),
         }
     }
@@ -148,6 +155,11 @@ impl HookInvocation<'_> {
             HookInvocation::UserPromptSubmit { prompt } => json!({
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": prompt,
+            }),
+            HookInvocation::UserPromptExpansion { prompt, command } => json!({
+                "hook_event_name": "UserPromptExpansion",
+                "prompt": prompt,
+                "command": command,
             }),
             HookInvocation::Stop {
                 last_assistant_message,
@@ -329,6 +341,24 @@ impl HookInvocation<'_> {
                     }
                 };
                 rec::HookAction::UserPromptSubmit(rec::UserPromptSubmitRecord {
+                    system_message: sys,
+                    outcome,
+                })
+            }
+            HookInvocation::UserPromptExpansion { command, .. } => {
+                let outcome = match &out.verdict {
+                    Verdict::Proceed => rec::UserPromptExpansionOutcome::Ran(ctx()),
+                    Verdict::Block { reason } => {
+                        rec::UserPromptExpansionOutcome::Blocked(rec::HookBlocked {
+                            reason: reason.clone(),
+                        })
+                    }
+                    Verdict::Failed { reason } => {
+                        rec::UserPromptExpansionOutcome::Failed(failed(reason))
+                    }
+                };
+                rec::HookAction::UserPromptExpansion(rec::UserPromptExpansionRecord {
+                    command: (*command).to_string(),
                     system_message: sys,
                     outcome,
                 })

@@ -1426,11 +1426,14 @@ impl EventSourcedActor for AgentActor {
                 let self_ref = ctx.self_ref();
                 tokio::spawn(async move {
                     let prepared = match provider.start_hooks(turn).await {
-                        Ok(records) => PreparedStart {
-                            abandon: crate::start_blocked(&records).map(AbandonedStart::Blocked),
-                            records,
+                        Ok(prep) => PreparedStart {
+                            abandon: crate::start_blocked(&prep.records)
+                                .map(AbandonedStart::Blocked),
+                            records: prep.records,
                             results,
-                            message,
+                            // A rewritten prompt replaces the turn's input; an
+                            // absent one leaves what the user actually sent.
+                            message: prep.message.or(message),
                             subagent_results,
                         },
                         Err(error) => PreparedStart {
@@ -2563,9 +2566,12 @@ mod tests {
             async fn start_hooks(
                 &self,
                 turn: crate::StartTurn,
-            ) -> Result<Vec<HookRecord>, crate::ContextError> {
+            ) -> Result<crate::TurnPreparation, crate::ContextError> {
                 self.seen.lock().unwrap().push(turn);
-                Ok(self.records.clone())
+                Ok(crate::TurnPreparation {
+                    records: self.records.clone(),
+                    message: None,
+                })
             }
         }
 
@@ -2774,7 +2780,7 @@ mod tests {
                 async fn start_hooks(
                     &self,
                     _: crate::StartTurn,
-                ) -> Result<Vec<HookRecord>, crate::ContextError> {
+                ) -> Result<crate::TurnPreparation, crate::ContextError> {
                     Err(crate::ContextError::terminal("runtime is gone"))
                 }
             }

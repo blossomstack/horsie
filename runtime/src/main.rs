@@ -452,12 +452,15 @@ async fn run_loop<S>(
                                 horsie_runtime::scan::shared_root(&registry, include_shared);
                             let shared_agents =
                                 horsie_runtime::scan::shared_agents(&registry, include_shared);
+                            let shared_commands =
+                                horsie_runtime::scan::shared_commands(&registry, include_shared);
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ScanResult(ScanResponse {
                                     call_id: call_id.clone(),
                                     workspaces,
                                     shared_skills,
                                     shared_agents: Some(shared_agents),
+                                    shared_commands: Some(shared_commands),
                                     shared_root,
                                 }),
                             );

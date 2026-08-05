@@ -267,7 +267,7 @@ pub fn install(
             .map(|p| format!(" in {p}"))
             .unwrap_or_default();
         // A plugin whose only content is hooks horsie cannot fire deserves to
-        // be told *which* ones, rather than the generic "no skills" — that is
+        // be told *which* ones, rather than the generic rejection — that is
         // the difference between "wrong plugin" and "wrong version of horsie".
         let hooks = hook_report(&root_dir);
         let because = if hooks.is_empty() {
@@ -276,8 +276,9 @@ pub fn install(
             format!(" Its hooks cannot run either: {}.", hooks.join("; "))
         };
         return Err(CliError::Config(format!(
-            "'{}'{checked} provides no skills to install: {}. \
-             horsie loads plugin skills; plugin agents, commands and MCP servers are not supported yet.{because}",
+            "'{}'{checked} provides nothing horsie can install: {}. \
+             horsie loads plugin skills, hooks, agents and commands; MCP servers \
+             are not supported yet.{because}",
             resolved.label,
             root.rejection()
         )));
@@ -926,11 +927,15 @@ mod tests {
         );
     }
 
-    /// Most published plugins ship only agents/commands/MCP, which horsie does
-    /// not load yet. The error must name the plugin and say so, rather than
-    /// reading like a failure to find the repo.
+    /// A plugin that provides nothing at all must be named, along with the
+    /// subtree that was checked, rather than reading like a failure to find the
+    /// repo. Its sibling in the same marketplace must still install.
+    ///
+    /// This used to use a commands-only plugin as its example of "nothing".
+    /// Commands are loaded now, so the example is an empty directory — which is
+    /// the only shape left that genuinely provides nothing.
     #[test]
-    fn a_marketplace_plugin_with_no_skills_says_what_is_missing() {
+    fn a_marketplace_plugin_with_nothing_to_install_says_what_is_missing() {
         let src = TempDir::new().unwrap();
         let cp = src.path().join(".claude-plugin");
         std::fs::create_dir_all(&cp).unwrap();
@@ -941,10 +946,10 @@ mod tests {
                  {"name":"other","source":"./plugins/other"}]}"#,
         )
         .unwrap();
-        // Ships commands, no skills — the agent-sdk-dev shape.
-        let d = src.path().join("plugins/cmdsonly/commands");
+        // A README and nothing horsie runs.
+        let d = src.path().join("plugins/cmdsonly");
         std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("go.md"), "---\ndescription: go\n---\n").unwrap();
+        std::fs::write(d.join("README.md"), "just docs").unwrap();
         let o = src.path().join("plugins/other/skills/other");
         std::fs::create_dir_all(&o).unwrap();
         std::fs::write(o.join("SKILL.md"), "---\nname: other\n---\nb").unwrap();
@@ -969,8 +974,8 @@ mod tests {
             "must name the subtree it checked: {err}"
         );
         assert!(
-            err.contains("not supported yet"),
-            "must explain that agents/commands are unsupported: {err}"
+            err.contains("nothing horsie can install"),
+            "must say the plugin is empty rather than missing: {err}"
         );
         // The failure must not strand the marketplace's own checkout.
         assert!(!crate::marketplace::list(&p).is_empty());

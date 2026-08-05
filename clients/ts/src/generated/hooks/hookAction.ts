@@ -13,6 +13,7 @@ import { SubagentStartRecord } from './subagentStartRecord';
 import { SubagentStopRecord } from './subagentStopRecord';
 import { TaskCompletedRecord } from './taskCompletedRecord';
 import { TaskCreatedRecord } from './taskCreatedRecord';
+import { UserPromptExpansionRecord } from './userPromptExpansionRecord';
 import { UserPromptSubmitRecord } from './userPromptSubmitRecord';
 /**
  * What one hook did, tagged by the event it ran for.
@@ -25,6 +26,7 @@ export type HookAction =
   | { event: "SessionStart"; value: SessionStartRecord }
   | { event: "SessionEnd"; value: SessionEndRecord }
   | { event: "UserPromptSubmit"; value: UserPromptSubmitRecord }
+  | { event: "UserPromptExpansion"; value: UserPromptExpansionRecord }
   | { event: "Stop"; value: StopRecord }
   | { event: "StopFailure"; value: StopFailureRecord }
   | { event: "SubagentStart"; value: SubagentStartRecord }

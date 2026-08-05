@@ -25,7 +25,7 @@ pub use agent_actor::{
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL, ContextError,
     ContextProvider, Contexts, DefaultToolboxFactory, FixedContextProvider, INSPECT_WORKSPACE_TOOL,
-    SKILL_TOOL, StartTurn, ToolboxFactory, conclude_tool_spec,
+    SKILL_TOOL, StartTurn, ToolboxFactory, TurnPreparation, conclude_tool_spec,
 };
 pub use hook_translation::{start_blocked, translate};
 pub use mcp_toolbox::{CompositeToolbox, McpToolbox};
@@ -34,6 +34,6 @@ pub use task_list::{
 };
 pub use timers::{CancelSelector, TimerId, TimerKind, TimerRecord, TimerView, timer_tool_specs};
 pub use workspace::{
-    AgentCatalog, CatalogAgent, SharedContext, SharedScan, Skill, SkillSet, WorkspaceContext,
-    compose_system_prompt, scan as scan_workspace,
+    AgentCatalog, CatalogAgent, CatalogCommand, CommandCatalog, SharedContext, SharedScan, Skill,
+    SkillSet, WorkspaceContext, compose_system_prompt, scan as scan_workspace,
 };

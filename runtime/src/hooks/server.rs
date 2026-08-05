@@ -33,6 +33,10 @@ pub async fn run_hooks(registry: &WorkspaceRegistry, event: &ServerHookEvent) ->
         ServerHookEvent::UserPromptSubmit(i) => {
             HookInvocation::UserPromptSubmit { prompt: &i.prompt }
         }
+        ServerHookEvent::UserPromptExpansion(i) => HookInvocation::UserPromptExpansion {
+            prompt: &i.prompt,
+            command: &i.command,
+        },
         ServerHookEvent::Stop(i) => HookInvocation::Stop {
             last_assistant_message: i.last_assistant_message.as_deref(),
             stop_hook_active: i.stop_hook_active,

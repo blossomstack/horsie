@@ -88,10 +88,11 @@ Every session on that runtime then sees the library's skills, and the plugin
 hooks horsie supports run on your machine. Installs and updates are picked up on
 the next session scan — no reconnect needed.
 
-horsie runs seven hook events today: `SessionStart` once per agent load and
-`SubagentStart` once per subagent, `UserPromptSubmit` on every prompt, `Stop`
-when a turn ends and `SubagentStop` when a subagent's does, and
-`PreToolUse`/`PostToolUse` around every tool call. A bundle declaring an event
+horsie runs eight hook events today: `SessionStart` once per agent load and
+`SubagentStart` once per subagent, `UserPromptSubmit` on every prompt and
+`UserPromptExpansion` on every slash command, `Stop` when a turn ends and
+`SubagentStop` when a subagent's does, and `PreToolUse`/`PostToolUse` around
+every tool call. A bundle declaring an event
 horsie cannot fire still installs — its skills work — and the events it cannot
 run are named rather than silently ignored.
 
@@ -137,6 +138,17 @@ and the memory tools sit outside it and stay available. A declared `model` is
 honoured only when it names a model your horsie actually has; in practice agents
 declare `inherit`, `sonnet` or `opus`, so they inherit the session's model rather
 than silently switching your provider.
+
+A bundle's `commands/*.md` become **slash commands**. Send `/name args` as your
+message and horsie expands it into that file's template before the model sees
+anything — `$ARGUMENTS` becomes everything you typed after the name, `$1`, `$2`
+… the individual words, and `` !`cmd` `` the output of running `cmd` in the
+sandbox. A command's name is its filename, so `commands/review.md` is `/review`.
+
+`` !`cmd` `` runs only when the command's `allowed-tools` names `Bash`, so a
+template cannot reach a shell it did not ask for. A `/name` horsie does not
+recognise is sent as you wrote it — a message may legitimately start with a
+slash.
 
 Any hook, on any event, may answer `{"continue": false, "stopReason": "…"}`.
 horsie stops the agent that ran it and shows the reason: a tool hook's halt
