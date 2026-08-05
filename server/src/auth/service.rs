@@ -490,15 +490,15 @@ impl AuthService {
 }
 
 fn generate_user_code() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let alphabet: Vec<char> = USER_CODE_ALPHABET.chars().collect();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut out = String::with_capacity(USER_CODE_LEN + 1);
     for i in 0..USER_CODE_LEN {
         if i == USER_CODE_LEN / 2 {
             out.push('-');
         }
-        out.push(alphabet[rng.gen_range(0..alphabet.len())]);
+        out.push(alphabet[rng.random_range(0..alphabet.len())]);
     }
     out
 }
