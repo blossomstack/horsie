@@ -213,6 +213,25 @@ happened.
 A prepare step that cannot get a runtime reports a recoverable run failure —
 the same outcome `provide()` produces today for the same cause, one step earlier.
 
+## What implementation changed
+
+Three things the design did not anticipate, recorded here rather than left to
+the diff:
+
+- **`AbandonedStart::Failed` must carry `ContextError::terminal`.** Flattening it
+  left a session whose sandbox is gone reporting a retryable error, so it never
+  reached `Unrecoverable` — caught by an existing e2e test, and now pinned by
+  `a_terminal_preparation_failure_stays_terminal`.
+- **A turn that fires start hooks resolves the runtime twice.** The seam needs a
+  handle before the snapshot and `provide` still resolves its own, so a
+  hibernated runtime is resumed on every run. `start_hooks` reuses the cached
+  handle when one exists, so only the first turn of a load pays it; `get` never
+  provisions. `RuntimeClient::without_hook_sink` exists for that reuse — the
+  cached handle carries a sink, and these records must not travel on it.
+- **`SubagentStart`'s `agent_type` is the constant `"subagent"`.** horsie has no
+  agent-*type* concept until #105's Phase 2, and reporting the model name would
+  give a matcher something false to match on.
+
 ## What is deleted
 
 - `runtime_client::injected_context` and its tests. Its only caller was the
@@ -237,7 +256,9 @@ exhaustive match is the design; the test is the design restated.
 Behavioural tests, each pinning a specific claim above:
 
 - A fresh session's **first** run sees `SessionStart` context. This is the
-  regression the ordering problem would cause, and it pins the whole seam.
+  regression the ordering problem would cause, and it pins the whole seam —
+  verified load-bearing by reading `state` instead of the locally-folded copy,
+  which makes exactly this test fail.
 - Two turns produce **one** `SessionStart` record, not two.
 - An agent recovered from the journal fires `SessionStart` with `source: "resume"`.
 - A `Stop` hook's `additionalContext` reaches the next run's prompt. Write this

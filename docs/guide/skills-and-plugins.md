@@ -88,10 +88,11 @@ Every session on that runtime then sees the library's skills, and the plugin
 hooks horsie supports run on your machine. Installs and updates are picked up on
 the next session scan — no reconnect needed.
 
-horsie runs four hook events today: `SessionStart` and `Stop` around a turn, and
-`PreToolUse`/`PostToolUse` around every tool call. A bundle declaring an event
-horsie cannot fire still installs — its skills work — and the events it cannot
-run are named rather than silently ignored.
+horsie runs six hook events today: `SessionStart` once per session (and
+`SubagentStart` once per subagent), `UserPromptSubmit` on every prompt, `Stop`
+when a turn ends, and `PreToolUse`/`PostToolUse` around every tool call. A bundle
+declaring an event horsie cannot fire still installs — its skills work — and the
+events it cannot run are named rather than silently ignored.
 
 ### Where horsie looks for skills
 
@@ -157,8 +158,10 @@ explicit selection replaces it rather than adding to it.
 > Hooks execute with the runtime's privileges on your machine, and they are not
 > only observers: a `PreToolUse` hook can deny a tool call or rewrite its input
 > before it runs, a `PostToolUse` hook can rewrite its output before the agent
-> reads it, and a `Stop` hook can refuse to let a turn end and send the agent
-> back for another round. Only install plugins you trust.
+> reads it, a `UserPromptSubmit` hook can refuse a prompt outright, and a `Stop`
+> hook can refuse to let a turn end and send the agent back for another round.
+> `SessionStart`, `SubagentStart`, `UserPromptSubmit` and `Stop` can also inject
+> text straight into the model's context. Only install plugins you trust.
 
 ## Notes
 
