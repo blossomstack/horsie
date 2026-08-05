@@ -409,13 +409,22 @@ carries forward.
 3. **The server-initiated path.** `RunHooks` replaces the `SessionStart` RPC and
    `SessionStart` starts producing records. Behaviour-preserving apart from
    records appearing.
-4. **`Stop` and `UserPromptSubmit`**, the two events with real demand, plus the
-   unsupported-event gates from `ec4127e` (install refusal and session-start
-   re-check). This is the largest and riskiest step: `Stop` continuation changes
-   the turn lifecycle, and the loop guard has to hold for unattended sessions.
-   Worth splitting again if it grows — the gates are independent of `Stop`.
-5. **The remaining ten**, sequenced afterwards, each one a call site against a
-   library that already knows the event.
+4. **`Stop`**, plus the unsupported-event gates from `ec4127e` (install refusal
+   and re-check). This is the largest and riskiest step: `Stop` continuation
+   changes the turn lifecycle, and the loop guard has to hold for unattended
+   sessions.
+5. **The remaining eleven**, sequenced afterwards, each one a call site against
+   a library that already knows the event.
+
+**`UserPromptSubmit` moved from step 4 to step 5 during implementation.** It is
+modelled end to end — payload, processing, record, `ServerHookEvent` arm, and the
+runtime side of `RunHooks` — but firing it needs the prompt *and* a runtime, and
+on a session's first message no runtime has been acquired yet. Wiring it where a
+client happens to be cached would leave the first prompt of every session
+silently unhooked, which is the exact failure this classification exists to
+prevent. It needs a seam on the agent's run path, which is its own change. So
+horsie wires **four** events, not five, and `UserPromptSubmit` stays
+`NotImplemented` and refused at install.
 
 ## Testing
 
