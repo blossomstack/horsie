@@ -250,6 +250,11 @@ impl MockLlmServerBuilder {
                 "/v1/chat/completions",
                 post(crate::openai::handle_chat_completions),
             )
+            // Both spellings: a provider configured with a bare host reaches
+            // `/responses`, one configured api.openai.com-style reaches
+            // `/v1/responses`.
+            .route("/responses", post(crate::responses::handle_responses))
+            .route("/v1/responses", post(crate::responses::handle_responses))
             .route("/queue", post(handle_queue))
             .route("/received", get(handle_received))
             .route("/reset", post(handle_reset))

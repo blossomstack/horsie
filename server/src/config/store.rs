@@ -22,6 +22,8 @@ use horsie_models::settings::{
     VendorView,
 };
 use horsie_openai::OpenAiProvider;
+use horsie_openai_responses::ResponsesProvider;
+use horsie_openai_responses::chatgpt::{ChatGptTokens, DEFAULT_ISSUER, StoredTokens, TokenStore};
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -84,8 +86,14 @@ impl DbConfigStore {
         let mods = read_models(&db, db.pool())
             .await
             .map_err(|e| e.to_string())?;
+        let chatgpt = live_chatgpt_tokens(
+            &db,
+            read_provider_oauth(&db, db.pool())
+                .await
+                .map_err(|e| e.to_string())?,
+        );
         let registry: SharedProviderRegistry =
-            Arc::new(RwLock::new(build_registry(&provs, &mods)?));
+            Arc::new(RwLock::new(build_registry(&provs, &mods, &chatgpt)?));
 
         // The server builds no vendors: every vendor is an agent that dials in
         // and publishes itself into this map. It starts empty at boot and is
@@ -179,9 +187,13 @@ impl ConfigStore for DbConfigStore {
                 if name.is_empty() {
                     return Err("provider name cannot be empty".into());
                 }
-                if !matches!(p.kind.as_str(), "anthropic" | "openai") {
+                if !matches!(
+                    p.kind.as_str(),
+                    "anthropic" | "openai" | "openai-responses" | "chatgpt"
+                ) {
                     return Err(format!(
-                        "unsupported provider kind '{}' (expected 'anthropic' or 'openai')",
+                        "unsupported provider kind '{}' (expected 'anthropic', 'openai', \
+                         'openai-responses' or 'chatgpt')",
                         p.kind
                     ));
                 }
@@ -200,6 +212,24 @@ impl ConfigStore for DbConfigStore {
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
+            }
+
+            // Providers are rewritten wholesale, so a removed or renamed one
+            // would otherwise leave its sign-in behind — a live refresh token
+            // belonging to nothing, which a later provider of the same name
+            // would silently inherit.
+            let orphans: Vec<String> = read_provider_oauth(&self.db, &mut *tx)
+                .await
+                .map_err(|e| e.to_string())?
+                .into_keys()
+                .filter(|p| !seen.contains(p))
+                .collect();
+            for provider in orphans {
+                sqlx::query(&self.db.q("DELETE FROM provider_oauth WHERE provider = ?"))
+                    .bind(&provider)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
         }
 
@@ -289,7 +319,13 @@ impl ConfigStore for DbConfigStore {
         let mods = read_models(&self.db, &mut *tx)
             .await
             .map_err(|e| e.to_string())?;
-        let new_registry = build_registry(&provs, &mods)?;
+        let chatgpt = live_chatgpt_tokens(
+            &self.db,
+            read_provider_oauth(&self.db, &mut *tx)
+                .await
+                .map_err(|e| e.to_string())?,
+        );
+        let new_registry = build_registry(&provs, &mods, &chatgpt)?;
 
         tx.commit().await.map_err(|e| e.to_string())?;
 
@@ -352,7 +388,11 @@ fn default_context_window(model_id: &str) -> Option<u32> {
 
 /// Build the model→provider registry. Keyed by model alias, so each model's
 /// provider is resolved and an Anthropic client built with its credentials.
-fn build_registry(providers: &[ProviderRow], models: &[ModelRow]) -> Result<Registry, String> {
+fn build_registry(
+    providers: &[ProviderRow],
+    models: &[ModelRow],
+    chatgpt: &HashMap<String, Arc<ChatGptTokens>>,
+) -> Result<Registry, String> {
     let by_name: HashMap<&str, &ProviderRow> =
         providers.iter().map(|p| (p.name.as_str(), p)).collect();
     let mut reg: Registry = HashMap::new();
@@ -389,6 +429,29 @@ fn build_registry(providers: &[ProviderRow], models: &[ModelRow]) -> Result<Regi
                 dialect,
                 m.forced_tools_disable_thinking,
             )?,
+            "openai-responses" => build_responses(
+                p.base_url.as_deref(),
+                p.api_key.as_deref(),
+                &m.model_id,
+                max_tokens,
+                dialect,
+            )?,
+            "chatgpt" => {
+                let tokens = chatgpt.get(p.name.as_str()).ok_or_else(|| {
+                    format!(
+                        "provider '{}' is a ChatGPT plan but has no sign-in yet — \
+                         sign in from settings before using its models",
+                        p.name
+                    )
+                })?;
+                build_chatgpt(
+                    tokens.clone(),
+                    p.base_url.as_deref(),
+                    &m.model_id,
+                    max_tokens,
+                    dialect,
+                )?
+            }
             other => {
                 return Err(format!(
                     "provider '{}' has unsupported kind '{other}'",
@@ -455,6 +518,138 @@ fn build_openai(
         p = p.with_base_url(u);
     }
     Ok(Arc::new(p))
+}
+
+fn build_responses(
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+    model_id: &str,
+    max_tokens: Option<u32>,
+    thinking_dialect: ThinkingDialect,
+) -> Result<Arc<dyn LlmProvider>, String> {
+    let key: Option<Secret> = match api_key {
+        Some(k) if !k.is_empty() => Some(Secret::from(k)),
+        Some(_) => return Err("inline api_key is empty".into()),
+        None => None,
+    };
+    let mut p = match key {
+        Some(k) => ResponsesProvider::with_api_key(k).map_err(|e| e.to_string())?,
+        None => ResponsesProvider::new().map_err(|e| e.to_string())?,
+    };
+    p = p
+        .with_model(model_id)
+        .with_max_tokens(max_tokens)
+        .with_thinking_dialect(thinking_dialect);
+    if let Some(u) = base_url {
+        p = p.with_base_url(u);
+    }
+    Ok(Arc::new(p))
+}
+
+/// A provider that spends a ChatGPT subscription.
+///
+/// Every model on the same provider shares one `Arc<ChatGptTokens>`, so a
+/// refresh triggered by one model's turn is immediately visible to the others —
+/// otherwise each model would refresh separately and they would race to rotate
+/// the same refresh token.
+fn build_chatgpt(
+    tokens: Arc<ChatGptTokens>,
+    base_url: Option<&str>,
+    model_id: &str,
+    max_tokens: Option<u32>,
+    thinking_dialect: ThinkingDialect,
+) -> Result<Arc<dyn LlmProvider>, String> {
+    let mut p = ResponsesProvider::with_chatgpt(tokens)
+        .map_err(|e| e.to_string())?
+        .with_model(model_id)
+        .with_max_tokens(max_tokens)
+        .with_thinking_dialect(thinking_dialect);
+    // Overriding the Codex backend is for tests and for a proxy in front of it;
+    // an ordinary deployment leaves it unset.
+    if let Some(u) = base_url {
+        p = p.with_base_url(u);
+    }
+    Ok(Arc::new(p))
+}
+
+/// Persists refreshed ChatGPT tokens back into `provider_oauth`.
+///
+/// The provider refreshes on its own schedule, so this is the only writer that
+/// runs outside a settings edit.
+struct DbTokenStore {
+    db: Db,
+    provider: String,
+}
+
+// `Db` is not `Debug`, and the trait needs one. Naming the provider is all a
+// log line wants anyway — the pool is not interesting and the tokens must never
+// be printed.
+impl std::fmt::Debug for DbTokenStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbTokenStore")
+            .field("provider", &self.provider)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl TokenStore for DbTokenStore {
+    async fn save(&self, tokens: &StoredTokens) -> Result<(), String> {
+        write_provider_oauth(&self.db, &self.provider, tokens)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Upsert one provider's credential.
+pub(crate) async fn write_provider_oauth(
+    db: &Db,
+    provider: &str,
+    tokens: &StoredTokens,
+) -> Result<(), sqlx::Error> {
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or(i64::MAX);
+    sqlx::query(&db.q(
+        "INSERT INTO provider_oauth (provider, access, refresh, expires_at, account_id, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(provider) DO UPDATE SET access = excluded.access, \
+         refresh = excluded.refresh, expires_at = excluded.expires_at, \
+         account_id = excluded.account_id, updated_at = excluded.updated_at",
+    ))
+    .bind(provider)
+    .bind(&tokens.access)
+    .bind(&tokens.refresh)
+    .bind(tokens.expires_at)
+    .bind(&tokens.account_id)
+    .bind(now)
+    .execute(db.pool())
+    .await
+    .map(|_| ())
+}
+
+/// Build the live `ChatGptTokens` for every stored credential.
+fn live_chatgpt_tokens(
+    db: &Db,
+    stored: HashMap<String, StoredTokens>,
+) -> HashMap<String, Arc<ChatGptTokens>> {
+    stored
+        .into_iter()
+        .map(|(provider, tokens)| {
+            let store = Arc::new(DbTokenStore {
+                db: db.clone(),
+                provider: provider.clone(),
+            });
+            (
+                provider,
+                Arc::new(ChatGptTokens::new(tokens, store, DEFAULT_ISSUER)),
+            )
+        })
+        .collect()
 }
 
 // ── secret + value helpers ───────────────────────────────────────────────────
@@ -529,6 +724,35 @@ pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 // These take the `Db` for its dialect and the executor separately, because the
 // caller is sometimes a pool and sometimes an open transaction — the dialect is
 // a property of the database, not of whichever handle is running the statement.
+/// Load every stored OAuth credential, keyed by provider name.
+///
+/// Read as a batch before the registry is built so that `build_registry` stays
+/// synchronous — it is called inside a transaction during an edit, where an
+/// await on a second connection would be a deadlock waiting to happen.
+async fn read_provider_oauth<'e, E>(
+    db: &Db,
+    ex: E,
+) -> Result<HashMap<String, StoredTokens>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
+    let sql = db.q("SELECT provider, access, refresh, expires_at, account_id FROM provider_oauth");
+    let rows = sqlx::query(&sql).fetch_all(ex).await?;
+    let mut out = HashMap::with_capacity(rows.len());
+    for r in &rows {
+        out.insert(
+            r.try_get::<String, _>("provider")?,
+            StoredTokens {
+                access: r.try_get("access")?,
+                refresh: r.try_get("refresh")?,
+                expires_at: r.try_get("expires_at")?,
+                account_id: r.try_get("account_id")?,
+            },
+        );
+    }
+    Ok(out)
+}
+
 async fn read_providers<'e, E>(db: &Db, ex: E) -> Result<Vec<ProviderRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
@@ -696,6 +920,155 @@ mod tests {
         assert_eq!(view.models.len(), 1);
         assert!(view.providers[0].has_inline_key);
         assert!(o.registry.read().unwrap().contains_key("m"));
+    }
+
+    fn provider_of_kind(name: &str, kind: &str, key: Option<&str>) -> ProviderInput {
+        ProviderInput {
+            name: name.into(),
+            kind: kind.into(),
+            base_url: None,
+            api_key: key.map(str::to_string),
+            keep_thinking_signature: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_api_key_responses_provider_builds() {
+        let o = open().await;
+
+        o.store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider_of_kind(
+                    "p",
+                    "openai-responses",
+                    Some("sk-inline"),
+                )]),
+                models: Some(vec![model("m", "p")]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+
+        assert!(o.registry.read().unwrap().contains_key("m"));
+    }
+
+    /// A ChatGPT provider is unusable until someone signs in, and the error has
+    /// to say so — "unsupported kind" or a silent empty registry would send the
+    /// operator looking in the wrong place.
+    #[tokio::test]
+    async fn a_chatgpt_provider_without_a_sign_in_is_rejected_with_a_useful_message() {
+        let o = open().await;
+
+        let err = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
+                models: Some(vec![model("m", "p")]),
+                default_vendor: None,
+            })
+            .await
+            .expect_err("no credential yet");
+
+        assert!(err.contains("sign in"), "unhelpful error: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_chatgpt_provider_builds_once_a_credential_is_stored() {
+        let o = open().await;
+
+        // A provider with no models: accepted, since nothing needs building yet.
+        o.store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
+                models: Some(vec![]),
+                default_vendor: None,
+            })
+            .await
+            .expect("provider alone is fine");
+
+        write_provider_oauth(
+            &o.db,
+            "p",
+            &StoredTokens {
+                access: "a".into(),
+                refresh: "r".into(),
+                expires_at: 9_999_999_999,
+                account_id: "acct_1".into(),
+            },
+        )
+        .await
+        .expect("stored");
+
+        o.store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
+                models: Some(vec![model("m", "p")]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+
+        assert!(o.registry.read().unwrap().contains_key("m"));
+    }
+
+    /// A credential must not outlive the provider it belongs to: a later
+    /// provider reusing the name would otherwise silently inherit a live
+    /// refresh token.
+    #[tokio::test]
+    async fn removing_a_provider_drops_its_sign_in() {
+        let o = open().await;
+        o.store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
+                models: Some(vec![]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+        write_provider_oauth(
+            &o.db,
+            "p",
+            &StoredTokens {
+                access: "a".into(),
+                refresh: "r".into(),
+                expires_at: 9_999_999_999,
+                account_id: "acct_1".into(),
+            },
+        )
+        .await
+        .expect("stored");
+
+        o.store
+            .update(SettingsUpdate {
+                providers: Some(vec![]),
+                models: Some(vec![]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+
+        let left = read_provider_oauth(&o.db, o.db.pool()).await.unwrap();
+        assert!(
+            left.is_empty(),
+            "the orphaned credential survived: {left:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_provider_kind_is_still_rejected() {
+        let o = open().await;
+
+        let err = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider_of_kind("p", "nonsense", None)]),
+                models: Some(vec![]),
+                default_vendor: None,
+            })
+            .await
+            .expect_err("unknown kind");
+
+        assert!(err.contains("unsupported provider kind"), "got: {err}");
     }
 
     #[tokio::test]

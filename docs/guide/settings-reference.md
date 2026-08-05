@@ -80,7 +80,7 @@ Open **Settings**. The left nav lists one page per group of settings:
 
 | Page | Sections | What you configure |
 | --- | --- | --- |
-| **Models** | Providers | Model providers: name, **kind** (Anthropic or OpenAI-compatible), optional base URL, inline API key. See [Provider kinds](#provider-kinds). |
+| **Models** | Providers | Model providers: name, **kind** (Anthropic, OpenAI-compatible, OpenAI Responses, or ChatGPT plan), optional base URL, inline API key. See [Provider kinds](#provider-kinds). |
 | | Models | Models you can pick per session: alias, provider, model id, optional max tokens. |
 | **Runtimes** | Default vendor | Which runtime vendor new sessions use (only *active* vendors are selectable). Falls back to `local`. |
 | | Connected vendors | Read-only: the vendor agents connected right now and what each announced it can do. Vendors are configured in their own agent process, not here. See [Runtime vendors](runtime-vendors.md). |
@@ -109,6 +109,8 @@ to it. The same provider fields (name, base URL, inline key) apply to both.
 | --- | --- | --- |
 | **Anthropic** | the Anthropic Messages API | Claude models, or any endpoint that speaks the Anthropic wire (set a base URL). |
 | **OpenAI-compatible** | `/v1/chat/completions` | OpenAI, plus self-hosted and third-party servers that expose the same API — Ollama, vLLM, llama.cpp, OpenRouter, DeepSeek. |
+| **OpenAI Responses** | `/responses` | OpenAI's Responses API with a platform API key. Unlike chat completions it carries reasoning across turns, so a reasoning model keeps its train of thought through a tool loop. |
+| **ChatGPT plan** | `/responses` on OpenAI's Codex backend | Spending a ChatGPT subscription instead of API credit. Signs in rather than storing a key — see [ChatGPT plan](#chatgpt-plan). |
 
 **Example — a local Ollama server** (no API key needed): add a provider with
 kind **OpenAI-compatible** and base URL `http://127.0.0.1:11434`, then a model
@@ -116,6 +118,38 @@ whose model id is a tag you have pulled (e.g. `qwen2.5`).
 
 **Example — a hosted OpenAI-compatible service**: kind **OpenAI-compatible**,
 base URL the service's endpoint, and an inline API key.
+
+#### ChatGPT plan
+
+A **ChatGPT plan** provider spends a ChatGPT subscription's Codex allowance
+rather than API credit. It has no API key field: you sign in instead.
+
+Add the provider (kind **ChatGPT plan**, no base URL), save it, then reopen it
+and press **Sign in with ChatGPT**. horsie shows an eight-character code and a
+link to `auth.openai.com/codex/device`. Open that link on any device — your
+laptop, your phone — sign in to ChatGPT there and enter the code. horsie polls
+until you approve, then stores the credential and refreshes it from then on
+without asking again.
+
+The sign-in is deliberately code-based rather than a browser redirect: the
+OAuth client belongs to OpenAI and only redirects to `localhost`, so a horsie
+reachable at a public domain could never receive the callback. With the device
+flow every call runs outbound from the server, which means **no callback URL, no
+inbound route, and no reverse-proxy change** — it works the same on a laptop and
+on a hosted deployment.
+
+Two things worth knowing:
+
+- **Usage counts against that ChatGPT plan's Codex limits**, not against an API
+  bill. When the plan's window is exhausted, turns fail with a rate-limit error
+  until it resets.
+- **Model ids are the ones the plan offers** (the Codex line), not the platform
+  API's. A model the subscription cannot reach fails with the backend's own
+  error rather than being silently substituted.
+
+horsie identifies itself honestly to OpenAI (as `horsie`, not as Codex) and
+sends no client-attestation header, since only OpenAI's own clients can produce
+a valid one. This is a personal-use path: sign in with your own plan.
 
 #### DeepSeek
 
@@ -149,10 +183,12 @@ Two behaviors differ by kind, and are handled automatically:
   vLLM started with a reasoning parser, and OpenRouter
   stream a reasoning trace over `/v1/chat/completions`, which horsie displays as
   a thinking block. **Genuine OpenAI** models (the o-series, GPT-5) keep their
-  reasoning hidden on chat completions — only OpenAI's separate Responses API
-  exposes summaries — so with those you see the answer but not the thinking. In
-  all cases the reasoning is shown but never sent back to the model on the next
-  turn, since some backends reject that.
+  reasoning hidden on chat completions, so on that kind you see the answer but
+  not the thinking; use **OpenAI Responses** or **ChatGPT plan** to get
+  summaries. On the chat wire the reasoning is shown but never sent back on the
+  next turn, since some backends reject that. The Responses kinds are the
+  exception: they replay the model's own reasoning in encrypted form, which is
+  what lets a reasoning model keep its thread across a tool loop.
 - **Streaming is required.** Both kinds stream responses; a backend that cannot
   stream `/v1/chat/completions` is not supported.
 

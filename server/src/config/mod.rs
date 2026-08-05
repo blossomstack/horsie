@@ -6,6 +6,7 @@
 
 pub(crate) mod store;
 
+pub mod chatgpt_login;
 pub mod model_cards;
 
 use async_trait::async_trait;

@@ -209,10 +209,16 @@ async fn start_server_with(
         supervisor: supervisor.clone(),
         global_events: gtx,
         auth,
-        config_store: opened.store,
+        config_store: opened.store.clone(),
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
             opened.db.clone(),
         )),
+        chatgpt: Arc::new(
+            horsie_server::config::chatgpt_login::ChatGptLoginService::new(
+                opened.db.clone(),
+                opened.store.clone(),
+            ),
+        ),
         github,
         mcp,
         plugins,
@@ -380,10 +386,16 @@ async fn start_server_with_live_vendors(
         supervisor: supervisor.clone(),
         global_events: gtx,
         auth,
-        config_store: opened.store,
+        config_store: opened.store.clone(),
         model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
             opened.db.clone(),
         )),
+        chatgpt: Arc::new(
+            horsie_server::config::chatgpt_login::ChatGptLoginService::new(
+                opened.db.clone(),
+                opened.store.clone(),
+            ),
+        ),
         github,
         mcp,
         plugins,

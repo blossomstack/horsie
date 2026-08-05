@@ -65,6 +65,26 @@ import type {
 // same-origin, so a relative base works everywhere.
 const BASE = "/api";
 
+// The ChatGPT sign-in bodies are declared here rather than in a `.fl` schema:
+// they are three small admin-only shapes with no other client, and adding them
+// to fluorite would regenerate both type trees for nothing.
+
+/** Whether a `chatgpt` provider has a stored sign-in. */
+export type ChatGptStatus = { signedIn: boolean; accountId?: string };
+
+/** A device-code login waiting to be approved in a browser. */
+export type ChatGptStartedLogin = {
+  userCode: string;
+  verificationUrl: string;
+  /** How often OpenAI wants to be polled. Faster earns a rate limit. */
+  intervalSecs: number;
+};
+
+export type ChatGptPoll = {
+  status: "pending" | "complete";
+  accountId?: string;
+};
+
 /** A structured error carrying the server's `ApiError` envelope when present. */
 export class ApiRequestError extends Error {
   readonly status: number;
@@ -393,6 +413,33 @@ export const api = {
   },
 
   admin: {
+    /** ChatGPT-plan sign-in for `kind: "chatgpt"` providers. Device code, so
+     * the browser half happens on OpenAI's site and this server never sees a
+     * ChatGPT password. */
+    chatgpt: {
+      status: (provider: string): Promise<ChatGptStatus> =>
+        request(`/admin/providers/${encodeURIComponent(provider)}/chatgpt`),
+
+      /** Ask OpenAI for a user code. The operator types it at `verificationUrl`. */
+      start: (provider: string): Promise<ChatGptStartedLogin> =>
+        request(`/admin/providers/${encodeURIComponent(provider)}/chatgpt/login`, {
+          method: "POST",
+          body: "{}",
+        }),
+
+      /** One poll. `pending` until the operator approves it in their browser. */
+      poll: (provider: string): Promise<ChatGptPoll> =>
+        request(`/admin/providers/${encodeURIComponent(provider)}/chatgpt/poll`, {
+          method: "POST",
+          body: "{}",
+        }),
+
+      signOut: (provider: string): Promise<void> =>
+        request(`/admin/providers/${encodeURIComponent(provider)}/chatgpt/login`, {
+          method: "DELETE",
+        }),
+    },
+
     modelCards: {
       list: (): Promise<ModelCard[]> => request("/admin/model-cards"),
 

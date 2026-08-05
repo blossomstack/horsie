@@ -8,6 +8,7 @@ import type {
   ProviderInput,
   ProviderView,
 } from "../../api/types";
+import { ChatGptSignIn } from "./ChatGptSignIn";
 import { useModelCardSearch } from "../../hooks/useModelCards";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import {
@@ -20,7 +21,31 @@ import {
 } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
-type ProviderKind = "anthropic" | "openai";
+type ProviderKind = "anthropic" | "openai" | "openai-responses" | "chatgpt";
+
+const PROVIDER_KINDS: ProviderKind[] = [
+  "anthropic",
+  "openai",
+  "openai-responses",
+  "chatgpt",
+];
+
+const KIND_LABELS: Record<ProviderKind, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI-compatible",
+  "openai-responses": "OpenAI Responses",
+  chatgpt: "ChatGPT plan",
+};
+
+const KIND_PLACEHOLDERS: Record<ProviderKind, string> = {
+  anthropic: "https://api.anthropic.com",
+  openai: "http://127.0.0.1:11434",
+  "openai-responses": "https://api.openai.com/v1",
+  chatgpt: "https://chatgpt.com/backend-api/codex",
+};
+
+/** A ChatGPT provider is authorised by signing in, not by a stored key. */
+const usesApiKey = (kind: ProviderKind) => kind !== "chatgpt";
 
 const EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const DIALECTS = [
@@ -57,7 +82,9 @@ type ModelDraft = {
 
 const providerToDraft = (p: ProviderView): ProviderDraft => ({
   name: p.name,
-  kind: p.kind === "openai" ? "openai" : "anthropic",
+  kind: (PROVIDER_KINDS as string[]).includes(p.kind)
+    ? (p.kind as ProviderKind)
+    : "anthropic",
   baseUrl: p.baseUrl ?? "",
   apiKeyInput: "",
   hasInlineKey: p.hasInlineKey,
@@ -365,7 +392,7 @@ export function ModelsSettings() {
                           </span>
                         </span>
                         <span className="chip">
-                          {p.kind === "openai" ? "OpenAI" : "Anthropic"}
+                          {KIND_LABELS[p.kind as ProviderKind] ?? p.kind}
                         </span>
                         <span className="legend">
                           {count} {count === 1 ? "model" : "models"}
@@ -481,9 +508,8 @@ export function ModelsSettings() {
 }
 
 function defaultEndpoint(kind: string): string {
-  return kind === "openai"
-    ? "OpenAI-compatible endpoint"
-    : "https://api.anthropic.com";
+  if (kind === "openai") return "OpenAI-compatible endpoint";
+  return KIND_PLACEHOLDERS[kind as ProviderKind] ?? "https://api.anthropic.com";
 }
 
 /** The shell both entity forms sit in. Each commits on its own now, so each
@@ -561,27 +587,36 @@ function ProviderEditor({
             value={draft.kind}
             onChange={(e) => set({ kind: e.target.value as ProviderKind })}
           >
-            <option value="anthropic">Anthropic</option>
-            <option value="openai">OpenAI-compatible</option>
+            {PROVIDER_KINDS.map((k) => (
+              <option key={k} value={k}>
+                {KIND_LABELS[k]}
+              </option>
+            ))}
           </select>
         </label>
         <TextField
           label="Base URL (optional)"
           value={draft.baseUrl}
           onChange={(v) => set({ baseUrl: v })}
-          placeholder={
-            draft.kind === "openai"
-              ? "http://127.0.0.1:11434"
-              : "https://api.anthropic.com"
-          }
+          placeholder={KIND_PLACEHOLDERS[draft.kind]}
         />
-        <TextField
-          label="Inline key"
-          type="password"
-          value={draft.apiKeyInput}
-          onChange={(v) => set({ apiKeyInput: v })}
-          placeholder={draft.hasInlineKey ? "•••• stored — blank keeps it" : "not set"}
-        />
+        {usesApiKey(draft.kind) && (
+          <TextField
+            label="Inline key"
+            type="password"
+            value={draft.apiKeyInput}
+            onChange={(v) => set({ apiKeyInput: v })}
+            placeholder={draft.hasInlineKey ? "•••• stored — blank keeps it" : "not set"}
+          />
+        )}
+        {draft.kind === "chatgpt" &&
+          (initial.name ? (
+            <ChatGptSignIn provider={initial.name} />
+          ) : (
+            <p className="col-span-1 text-xs text-dim sm:col-span-2">
+              Save this provider first, then sign in to your ChatGPT plan.
+            </p>
+          ))}
         {draft.kind === "anthropic" && (
           <label className="col-span-1 flex items-start gap-2 text-sm sm:col-span-2">
             <input

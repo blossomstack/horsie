@@ -255,12 +255,20 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     ))
     .spawn();
 
+    let chatgpt = std::sync::Arc::new(
+        horsie_server::config::chatgpt_login::ChatGptLoginService::new(
+            opened.db.clone(),
+            opened.store.clone(),
+        ),
+    );
+
     let state = AppState {
         supervisor,
         global_events: global_tx,
         auth,
         config_store: opened.store,
         model_cards,
+        chatgpt,
         github,
         mcp,
         plugins,
