@@ -1,8 +1,10 @@
 
 /**
- * Install a publicly shared bundle from a git repo.
+ * Install a bundle, or register the catalogue a URL turned out to be.
  */
 export interface PluginInstallInput {
-  sourceUrl: string;
+  sourceUrl?: string;
   sourceRef?: string;
+  marketplace?: string;
+  pluginName?: string;
 }
