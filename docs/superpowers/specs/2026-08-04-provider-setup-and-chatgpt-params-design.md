@@ -54,6 +54,25 @@ max_output_tokens: match self.credential {
 A model's configured max-tokens is silently unused on a plan. That is what the
 backend allows, and it matches Codex.
 
+## 1b. Read the stream off the body — the Codex backend sends no `Content-Type`
+
+Removing the rejected parameter exposed a second failure that the 400 had been
+hiding: every plan turn then died with `network error: Invalid header value: ""`.
+
+That message is `reqwest_eventsource`'s `InvalidContentType`, and the empty value
+is its stand-in for *no `Content-Type` header at all*. The Codex backend answers
+a streaming request with `200`, `server: cloudflare`, a full set of `x-codex-*`
+limit headers — and no content type. `EventSource` refuses the response before
+reading a frame, so the `chatgpt` provider kind could never have streamed;
+nothing downstream of the 400 had ever run.
+
+The wrapper was doing two things: gating on content type, and surfacing a
+non-2xx status with its body. Only the second is wanted. So the request is sent
+directly, the status is classified as before, and the body is parsed with
+`eventsource-stream` — the same SSE parser `reqwest-eventsource` itself uses.
+`reqwest-eventsource` leaves this crate entirely; the chat-completions and
+Anthropic providers keep it, since those backends do send a content type.
+
 ## 2. Credentials come from the settings store, never the process environment
 
 `store.rs` falls through to `AnthropicProvider::new()` / `OpenAiProvider::new()`
@@ -153,8 +172,27 @@ provider can lose its credential after its models exist.
 - `clients/web`: a vitest over `ModelsSettings` — a `chatgpt` provider without a
   credential shows Connect and a disabled Add model; with one, Add model is
   enabled.
+- `openai-responses`: a `200` SSE response carrying no `Content-Type` is read
+  rather than rejected. Served from a raw socket, because the point is a header
+  the mock server's `Sse` response cannot be made to omit.
 - Live: rebuild the server image on the homelab host, swap the container in
   place, and run a real turn through `codex` / `gpt-5.6-luna`.
+
+## Verified live, after implementation
+
+Built on the homelab host and swapped in place, against the real plan:
+
+- The pinned image reproduces the reported `400 Unsupported parameter:
+  max_output_tokens`; this branch does not.
+- A full turn on `gpt-5.6-luna` reaches `Idle` with no error — thinking, two
+  tool calls executed in the runtime, and the final text. A second turn in the
+  same session answers from the first turn's content, so reasoning replays.
+- `PUT /api/config` round-tripping the live settings cleared `codex`'s leftover
+  15-character `api_key` to empty while leaving its `provider_oauth` row intact,
+  and left the `deepseek` (35) and `kimi` (72) keys untouched. A turn after the
+  clear still succeeds, so the plan was never authorized by that key.
+- The settings view reports `hasCredential: true` for all three providers and
+  no longer carries `hasInlineKey`.
 
 ## Filed separately, not fixed here
 
