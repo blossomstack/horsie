@@ -5,7 +5,11 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import type { SettingsView } from "../api/types";
 import { settingsKey } from "../hooks/useSettings";
-import type { ConfigDraft, RuntimeChannel } from "../hooks/useSessionDraft";
+import type {
+  ConfigDraft,
+  RuntimeChannel,
+  WorkflowChannel,
+} from "../hooks/useSessionDraft";
 import { useConfigPickers } from "./configPickers";
 
 // The default vendor cannot provision — the shape of a `horsie connect` setup,
@@ -57,6 +61,18 @@ function sessionDraft(overrides: Partial<ConfigDraft> = {}): ConfigDraft & Runti
   return { ...draft(overrides), vendor: "local", setVendor: () => {} };
 }
 
+function workflowDraft(
+  workflow: string,
+  overrides: Partial<ConfigDraft> = {},
+): ConfigDraft & RuntimeChannel & WorkflowChannel {
+  return {
+    ...sessionDraft(overrides),
+    workflow,
+    setWorkflow: () => {},
+    workflows: ["triage", "release"],
+  };
+}
+
 function keys(d: ConfigDraft): string[] {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
@@ -94,5 +110,35 @@ describe("useConfigPickers", () => {
   it("offers Repos only when the vendor provisions a workspace", () => {
     expect(keys(draft({ provisions: false }))).not.toContain("repos");
     expect(keys(draft({ provisions: true }))).toContain("repos");
+  });
+
+  it("offers Workflow only to a draft that has a workflow channel", () => {
+    expect(keys(workflowDraft(""))).toContain("workflow");
+    expect(keys(sessionDraft())).not.toContain("workflow");
+  });
+
+  it("puts Workflow first — it decides what the rest mean", () => {
+    expect(keys(workflowDraft(""))[0]).toBe("workflow");
+  });
+
+  // A run takes its model, thinking effort, skills, MCP and memory from each
+  // step's own agent preset, and the run request carries none of them. Showing
+  // those controls would promise something the button cannot send.
+  it("drops the agent channels once a workflow is selected", () => {
+    const k = keys(workflowDraft("triage", { provisions: true }));
+    expect(k).toEqual(["workflow", "runtime", "repos"]);
+  });
+
+  it("keeps every channel while no workflow is selected", () => {
+    const k = keys(workflowDraft("", { provisions: true }));
+    expect(k).toEqual([
+      "workflow",
+      "runtime",
+      "repos",
+      "skills",
+      "mcp",
+      "memory",
+      "model",
+    ]);
   });
 });

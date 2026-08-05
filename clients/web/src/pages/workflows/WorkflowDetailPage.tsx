@@ -1,27 +1,22 @@
 import { Pencil, Play } from "lucide-react";
-import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { StatusBadge } from "../../components/StatusBadge";
 import { WorkflowGraph } from "../../components/WorkflowGraph";
 import { relativeTime } from "../../lib/format";
-import { useRunWorkflow, useWorkflow, useWorkflowRuns } from "../../hooks/useWorkflows";
+import { useWorkflow, useWorkflowRuns } from "../../hooks/useWorkflows";
 
 /**
  * A workflow's page: the graph it will run, and the runs it has had.
  *
- * Starting one asks for the two things a run needs and a definition
- * deliberately does not hold — where it runs and what it runs against — plus
- * the input its first step is handed.
+ * Running one is not configured here. A run needs a runtime and a workspace,
+ * which is exactly what the new-session page already asks for — so `Run` hands
+ * the workflow to that page rather than growing a second launch form that
+ * would have to learn the same channels.
  */
 export function WorkflowDetailPage() {
   const { name } = useParams<{ name: string }>();
   const { data: workflow, isLoading, isError } = useWorkflow(name);
   const { data: runs } = useWorkflowRuns(name);
-  const run = useRunWorkflow();
-  const navigate = useNavigate();
-
-  const [input, setInput] = useState("");
-  const [error, setError] = useState<string | null>(null);
 
   if (isLoading) return <p className="p-6 text-sm text-faint">Loading…</p>;
   if (isError || !workflow) {
@@ -37,17 +32,6 @@ export function WorkflowDetailPage() {
     })),
   );
 
-  const start = () => {
-    setError(null);
-    run.mutate(
-      { name: workflow.name, body: { input } },
-      {
-        onSuccess: (r) => navigate(`/sessions/${r.session.id}`),
-        onError: (e) => setError(e instanceof Error ? e.message : String(e)),
-      },
-    );
-  };
-
   return (
     <div className="flex h-full flex-col" data-testid="workflow-detail-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
@@ -60,6 +44,14 @@ export function WorkflowDetailPage() {
           <Pencil size={14} />
           Edit
         </Link>
+        <Link
+          to={`/?workflow=${encodeURIComponent(workflow.name)}`}
+          className="key key-go !px-2.5 !py-1.5 text-xs"
+          data-testid="run-workflow"
+        >
+          <Play size={14} />
+          Run
+        </Link>
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
@@ -68,33 +60,12 @@ export function WorkflowDetailPage() {
         )}
 
         <section className="panel p-4">
-          <h2 className="legend">Run it</h2>
-          <p className="mt-2 max-w-prose text-xs text-faint">
-            Every step shares one runtime and one workspace. The run starts on
-            the server’s default runtime; the input below is what{" "}
-            <span className="text-dim">{workflow.start}</span> is handed.
-          </p>
-          <textarea
-            className="field mt-3 min-h-20 w-full"
-            value={input}
-            placeholder="What this run is about."
-            onChange={(e) => setInput(e.target.value)}
-            data-testid="run-input"
-          />
-          {error && <p className="mt-2 text-sm text-red-ink">{error}</p>}
-          <button
-            className="key key-go mt-3 !px-2.5 !py-1.5 text-xs"
-            disabled={!input.trim() || run.isPending}
-            onClick={start}
-            data-testid="start-run"
-          >
-            <Play size={14} />
-            {run.isPending ? "Starting…" : "Start run"}
-          </button>
-        </section>
-
-        <section className="panel p-4">
           <h2 className="legend">Graph</h2>
+          <p className="mt-1 text-xs text-faint">
+            Every step shares one runtime and one workspace.{" "}
+            <span className="text-dim">{workflow.start}</span> is handed the
+            input the run starts with.
+          </p>
           <div className="mt-3 overflow-auto">
             <WorkflowGraph nodes={nodes} edges={edges} start={workflow.start} />
           </div>

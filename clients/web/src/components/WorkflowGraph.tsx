@@ -36,11 +36,32 @@ interface Props {
   className?: string;
 }
 
+/**
+ * The graph flows left to right: rank on x, order within the rank on y.
+ *
+ * Horizontal because that is the axis a workflow grows along — steps chain far
+ * more often than they fan out — and because a horizontal edge has room for its
+ * condition above it, which a vertical one does not.
+ */
 const NODE_W = 168;
 const NODE_H = 56;
-const GAP_X = 32;
-const GAP_Y = 56;
+/** Between ranks: wide enough for a condition label to sit on the edge. */
+const GAP_X = 116;
+/** Between siblings in one rank. */
+const GAP_Y = 28;
 const PAD = 16;
+/** Martian Mono at 10px, `wdth 87.5`, measured off the rendered graph. */
+const LABEL_CHAR_W = 6;
+const LABEL_H = 14;
+/** What fits in the gap between two ranks without touching either node. */
+const LABEL_MAX = Math.floor((GAP_X - 10) / LABEL_CHAR_W);
+
+/** A condition, cut to what the gap between two ranks can hold. */
+function labelText(condition: string): string {
+  return condition.length > LABEL_MAX
+    ? `${condition.slice(0, LABEL_MAX - 1)}…`
+    : condition;
+}
 
 /** A node reads as a panel key, lit by the same lamp colours the rest of the
  * console uses: amber for work in motion, ok for a step that landed, red for a
@@ -65,23 +86,63 @@ export function WorkflowGraph({
   const byStep = new Map(nodes.map((n) => [n.step, n]));
   const placed = new Map(layout.nodes.map((n) => [n.step, n]));
 
-  // Centre each rank, so a branch reads as a fork rather than as a left edge.
-  const widest = Math.max(layout.width, 1);
-  const centreX = (rank: number) => {
+  // Centre each rank on the cross axis, so a branch reads as a fork rather
+  // than as a row that starts at the top.
+  const breadth = Math.max(layout.breadth, 1);
+  const centreY = (rank: number) => {
     const count = layout.nodes.filter((n) => n.rank === rank).length;
-    return ((widest - count) * (NODE_W + GAP_X)) / 2;
+    return ((breadth - count) * (NODE_H + GAP_Y)) / 2;
   };
   const position = (step: string) => {
     const p = placed.get(step);
     if (!p) return { x: 0, y: 0 };
     return {
-      x: PAD + centreX(p.rank) + p.order * (NODE_W + GAP_X),
-      y: PAD + p.rank * (NODE_H + GAP_Y),
+      x: PAD + p.rank * (NODE_W + GAP_X),
+      y: PAD + centreY(p.rank) + p.order * (NODE_H + GAP_Y),
     };
   };
 
-  const width = PAD * 2 + widest * NODE_W + (widest - 1) * GAP_X;
-  const height = PAD * 2 + layout.height * NODE_H + Math.max(0, layout.height - 1) * GAP_Y;
+  const width = PAD * 2 + layout.depth * NODE_W + Math.max(0, layout.depth - 1) * GAP_X;
+  // A loop dips below the deepest row, and its condition sits below that, so
+  // the canvas grows a lane for them rather than clipping.
+  const backLane = layout.edges.some((e) => e.back) ? NODE_H * 0.7 + 12 : 0;
+  const height = PAD * 2 + breadth * NODE_H + (breadth - 1) * GAP_Y + backLane;
+
+  // Geometry once, so the labels can be drawn in their own pass on top of the
+  // nodes: a condition painted under a node is a condition nobody can read.
+  const drawn = layout.edges.map((e) => {
+    const from = position(e.from);
+    const to = position(e.to);
+    const meta = edges.find((x) => x.from === e.from && x.to === e.to);
+    // Forward: out of the right edge, into the left edge, label riding above
+    // the middle of the run.
+    const x1 = from.x + NODE_W;
+    const y1 = from.y + NODE_H / 2;
+    const x2 = to.x;
+    const y2 = to.y + NODE_H / 2;
+    // A back-edge dips under the row it returns across, so it cannot be
+    // mistaken for forward progress. A self-loop has nowhere to travel, so it
+    // becomes a small arc under its own node.
+    const dip = NODE_H * 0.7;
+    const self = e.from === e.to;
+    const bx1 = self ? from.x + NODE_W * 0.35 : from.x + NODE_W / 2;
+    const bx2 = self ? to.x + NODE_W * 0.65 : to.x + NODE_W / 2;
+    const by1 = from.y + NODE_H;
+    const by2 = to.y + NODE_H;
+    return {
+      from: e.from,
+      to: e.to,
+      back: e.back,
+      taken: !!meta?.taken,
+      condition: meta?.condition ? labelText(meta.condition) : null,
+      fullCondition: meta?.condition ?? null,
+      d: e.back
+        ? `M ${bx1} ${by1} C ${bx1} ${by1 + dip}, ${bx2} ${by2 + dip}, ${bx2} ${by2}`
+        : `M ${x1} ${y1} C ${x1 + GAP_X / 2} ${y1}, ${x2 - GAP_X / 2} ${y2}, ${x2} ${y2}`,
+      labelX: e.back ? (bx1 + bx2) / 2 : (x1 + x2) / 2,
+      labelY: e.back ? Math.max(by1, by2) + dip : (y1 + y2) / 2 - 8,
+    };
+  });
 
   if (layout.nodes.length === 0) {
     return (
@@ -115,47 +176,19 @@ export function WorkflowGraph({
         </marker>
       </defs>
 
-      {layout.edges.map((e, i) => {
-        const from = position(e.from);
-        const to = position(e.to);
-        const meta = edges.find((x) => x.from === e.from && x.to === e.to);
-        const x1 = from.x + NODE_W / 2;
-        const y1 = from.y + NODE_H;
-        const x2 = to.x + NODE_W / 2;
-        const y2 = to.y;
-        // A back-edge bows out to the side so it cannot be mistaken for
-        // forward progress through the graph.
-        const d = e.back
-          ? `M ${x1} ${from.y + NODE_H / 2} C ${x1 + NODE_W} ${from.y + NODE_H / 2}, ${
-              x2 + NODE_W
-            } ${to.y + NODE_H / 2}, ${x2 + NODE_W / 2 + 4} ${to.y + NODE_H / 2}`
-          : `M ${x1} ${y1} C ${x1} ${y1 + GAP_Y / 2}, ${x2} ${y2 - GAP_Y / 2}, ${x2} ${y2}`;
-        return (
-          <g key={`${e.from}-${e.to}-${i}`}>
-            <path
-              d={d}
-              fill="none"
-              markerEnd="url(#wf-arrow)"
-              className={cn(
-                "stroke-[1.5]",
-                meta?.taken ? "stroke-amber" : "stroke-rule-strong opacity-60",
-              )}
-              strokeDasharray={e.back ? "4 3" : undefined}
-            />
-            {meta?.condition ? (
-              <text
-                x={(x1 + x2) / 2 + 6}
-                y={(y1 + y2) / 2}
-                className="fill-faint text-[10px] font-mono"
-              >
-                {meta.condition.length > 24
-                  ? `${meta.condition.slice(0, 23)}…`
-                  : meta.condition}
-              </text>
-            ) : null}
-          </g>
-        );
-      })}
+      {drawn.map((e, i) => (
+        <path
+          key={`${e.from}-${e.to}-${i}`}
+          d={e.d}
+          fill="none"
+          markerEnd="url(#wf-arrow)"
+          className={cn(
+            "stroke-[1.5]",
+            e.taken ? "stroke-amber" : "stroke-rule-strong opacity-60",
+          )}
+          strokeDasharray={e.back ? "4 3" : undefined}
+        />
+      ))}
 
       {layout.nodes.map((p) => {
         const node = byStep.get(p.step);
@@ -224,6 +257,35 @@ export function WorkflowGraph({
           </g>
         );
       })}
+
+      {/* Conditions last, on a plate cut out of the panel: an edge label is a
+          legend engraved beside the run it names, and it has to survive
+          crossing a node or another edge. */}
+      {drawn.map((e, i) =>
+        e.condition ? (
+          <g key={`label-${e.from}-${e.to}-${i}`}>
+            <rect
+              x={e.labelX - (e.condition.length * LABEL_CHAR_W) / 2 - 4}
+              y={e.labelY - LABEL_H + 4}
+              width={e.condition.length * LABEL_CHAR_W + 8}
+              height={LABEL_H}
+              rx={3}
+              className="fill-panel"
+            />
+            <text
+              x={e.labelX}
+              y={e.labelY}
+              textAnchor="middle"
+              className="fill-faint text-[10px] font-mono"
+            >
+              {/* The gap holds a fingerprint, not the whole expression — the
+                  condition itself is one click away in the step's form. */}
+              <title>{e.fullCondition}</title>
+              {e.condition}
+            </text>
+          </g>
+        ) : null,
+      )}
     </svg>
   );
 }

@@ -16,6 +16,7 @@ import { mcpKeys } from "./useMcp";
 import { pluginsKey } from "./usePlugins";
 import { useSessionDraft } from "./useSessionDraft";
 import { settingsKey } from "./useSettings";
+import { workflowKeys } from "./useWorkflows";
 
 const settings: SettingsView = {
   providers: [],
@@ -84,11 +85,14 @@ function makeClient(): QueryClient {
   client.setQueryData(mcpKeys.servers, mcpServers);
   client.setQueryData(memorySpacesKey, memorySpaces);
   client.setQueryData(githubKeys.status, ghStatus);
+  client.setQueryData(workflowKeys.all, [
+    { name: "triage", description: "", start: "a", steps: [], createdAt: "0", updatedAt: "0" },
+  ]);
   return client;
 }
 
-function render(client: QueryClient) {
-  return renderHook(() => useSessionDraft(), {
+function render(client: QueryClient, workflow?: string) {
+  return renderHook(() => useSessionDraft(workflow), {
     wrapper: ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     ),
@@ -162,5 +166,75 @@ describe("useSessionDraft persistence", () => {
     act(() => result.current.setModel("opus"));
     const stored = JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY)!) as DraftPayload;
     expect(stored.model).toBe("opus");
+  });
+});
+
+describe("useSessionDraft workflow channel", () => {
+  it("starts at none, and preselects the one the Run link named", async () => {
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.model).toBe("sonnet"));
+    expect(result.current.workflow).toBe("");
+
+    const preselected = render(makeClient(), "triage");
+    await waitFor(() => expect(preselected.result.current.workflow).toBe("triage"));
+  });
+
+  // A `Run` link for a workflow deleted since, or a hand-typed query string.
+  it("ignores a preselection that names no workflow", async () => {
+    const { result } = render(makeClient(), "gone");
+    await waitFor(() => expect(result.current.model).toBe("sonnet"));
+    expect(result.current.workflow).toBe("");
+  });
+
+  // The whole point of not persisting it: this must not come back next visit.
+  it("keeps the selection out of the stored draft", async () => {
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.model).toBe("sonnet"));
+    act(() => result.current.setWorkflow("triage"));
+    expect(result.current.workflow).toBe("triage");
+    const stored = JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY)!);
+    expect(stored.workflow).toBeUndefined();
+  });
+
+  // A run's model comes from each step's preset, so the model channel is
+  // neither shown nor required.
+  it("does not require a model to start a run", async () => {
+    storeDraft({ vendor: "local", model: "" });
+    const { result } = render(makeClient(), "triage");
+    await waitFor(() => expect(result.current.workflow).toBe("triage"));
+    expect(result.current.blockedReason).toBeNull();
+    expect(result.current.canSend).toBe(true);
+  });
+
+  // Dropping the model requirement must not drop the runtime one: a run needs
+  // somewhere to run exactly as much as a session does. Reconciliation puts the
+  // server default back on any draft, so the only way to have no runtime is for
+  // the server to have none connected.
+  it("still requires a runtime to start a run", async () => {
+    const client = makeClient();
+    client.setQueryData(settingsKey, { ...settings, vendors: [], defaultVendor: "" });
+    const { result } = render(client, "triage");
+    await waitFor(() => expect(result.current.workflow).toBe("triage"));
+    expect(result.current.blockedReason).toBe("Select a runtime to start.");
+  });
+
+  it("builds a run request carrying the input and the runtime", async () => {
+    storeDraft({ vendor: "velos", model: "opus" });
+    const { result } = render(makeClient(), "triage");
+    await waitFor(() => expect(result.current.vendor).toBe("velos"));
+    expect(result.current.buildRunRequest("ship it")).toEqual({
+      input: "ship it",
+      vendor: "velos",
+      repos: undefined,
+    });
+  });
+
+  it("sends the picked repos with a run on a provisioning runtime", async () => {
+    storeDraft({ vendor: "velos", model: "opus", repos: { "o/r": "" } });
+    const { result } = render(makeClient(), "triage");
+    await waitFor(() => expect(result.current.provisions).toBe(true));
+    expect(result.current.buildRunRequest("ship it").repos).toEqual([
+      { url: "https://github.com/o/r", gitRef: undefined },
+    ]);
   });
 });

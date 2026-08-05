@@ -41,10 +41,10 @@ export interface PlacedEdge {
 export interface Layout {
   nodes: PlacedNode[];
   edges: PlacedEdge[];
-  /** Widest rank, for sizing the viewport. */
-  width: number;
-  /** Number of ranks. */
-  height: number;
+  /** Nodes in the fullest rank — the graph's cross-axis size. */
+  breadth: number;
+  /** Number of ranks — the graph's flow-axis size. */
+  depth: number;
 }
 
 /**
@@ -114,7 +114,7 @@ export function layoutGraph(
   return {
     nodes: placed,
     edges: placedEdges,
-    width: counts.size === 0 ? 0 : Math.max(...counts.values()),
-    height: counts.size,
+    breadth: counts.size === 0 ? 0 : Math.max(...counts.values()),
+    depth: counts.size,
   };
 }

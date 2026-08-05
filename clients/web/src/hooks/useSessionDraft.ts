@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import type { CreateSessionRequest, RepoConfig } from "../api/types";
+import type {
+  CreateSessionRequest,
+  RepoConfig,
+  WorkflowRunRequest,
+} from "../api/types";
 import {
   DRAFT_STORAGE_KEY,
   emptyDraft,
@@ -17,6 +21,7 @@ import { useMcpServers } from "./useMcp";
 import { usePersistentState } from "./usePersistentState";
 import { usePlugins } from "./usePlugins";
 import { useSettings } from "./useSettings";
+import { useWorkflows } from "./useWorkflows";
 
 /** The picker state every session-config surface shares: the new-session
  * draft and the agent-preset form. `SessionDraft` adds what only sending a
@@ -59,18 +64,41 @@ export interface RuntimeChannel {
   setVendor: (v: string) => void;
 }
 
-export interface SessionDraft extends ConfigDraft, RuntimeChannel {
+/**
+ * The workflow channel: what the new-session page starts, rather than how it
+ * is configured.
+ *
+ * `""` means an ordinary session. Naming a workflow replaces the model and
+ * toolbox channels instead of adding to them — a run takes those from each
+ * step's own agent preset, and `WorkflowRunRequest` has no field to override
+ * them — so `useConfigPickers` drops them while one is selected.
+ */
+export interface WorkflowChannel {
+  workflow: string;
+  setWorkflow: (w: string) => void;
+  /** Every definition on the server, for the picker. */
+  workflows: string[];
+}
+
+export interface SessionDraft extends ConfigDraft, RuntimeChannel, WorkflowChannel {
   canSend: boolean;
   blockedReason: string | null;
   buildRequest: () => CreateSessionRequest;
+  /** The same channels as a workflow run. Only meaningful when `workflow` is set. */
+  buildRunRequest: (input: string) => WorkflowRunRequest;
 }
 
-export function useSessionDraft(): SessionDraft {
+/**
+ * @param initialWorkflow preselects the workflow channel — the workflow page's
+ * `Run` link arrives here with one in the query string.
+ */
+export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const { data: settings } = useSettings();
   const { data: ghStatus } = useGithubStatus();
   const { data: bundles } = usePlugins();
   const { data: mcpServers } = useMcpServers();
   const { data: memorySpaces } = useMemorySpaces();
+  const { data: workflows } = useWorkflows();
   const models = settings?.models ?? [];
   const activeVendors = useMemo(
     () => (settings?.vendors ?? []),
@@ -86,6 +114,20 @@ export function useSessionDraft(): SessionDraft {
     storedAtMount ?? emptyDraft(),
     { deserialize: parseDraftPayload },
   );
+
+  // Deliberately outside the persisted payload: every other channel tunes a
+  // session, but this one replaces what the page starts. Coming back days
+  // later and silently being in workflow mode is not a setting anyone chose.
+  const [workflow, setWorkflow] = useState(initialWorkflow);
+  const workflowNames = useMemo(
+    () => (workflows ?? []).map((w) => w.name),
+    [workflows],
+  );
+  // A name from the query string, or one deleted since it was picked, is not a
+  // workflow. Until the list arrives nothing is known to be missing, so the
+  // preselection holds rather than flickering through plain-session mode.
+  const selectedWorkflow =
+    workflows === undefined || workflowNames.includes(workflow) ? workflow : "";
 
   // Keep model/vendor on still-existing choices as server config changes.
   useEffect(() => {
@@ -135,12 +177,14 @@ export function useSessionDraft(): SessionDraft {
   const githubConnected = !!ghStatus?.connected;
 
   const blockedReason = useMemo(() => {
-    if (!draft.model.trim()) return "Select a model to start.";
+    // A run takes its model from each step's preset, so the model channel is
+    // neither shown nor required while a workflow is selected.
+    if (!selectedWorkflow && !draft.model.trim()) return "Select a model to start.";
     if (!draft.vendor.trim()) return "Select a runtime to start.";
     if (provisions && !githubConnected)
       return "Connect GitHub to use this runtime.";
     return null;
-  }, [draft.model, draft.vendor, provisions, githubConnected]);
+  }, [draft.model, draft.vendor, provisions, githubConnected, selectedWorkflow]);
 
   // The menu belongs to the model, so a persisted draft can name an effort the
   // currently-selected model no longer offers. Treat that as "use the default"
@@ -151,13 +195,16 @@ export function useSessionDraft(): SessionDraft {
     ? draft.thinkingEffort
     : "";
 
-  const buildRequest = (): CreateSessionRequest => {
-    const repoList: RepoConfig[] = provisions
+  const repoList = (): RepoConfig[] =>
+    provisions
       ? Object.entries(draft.repos).map(([fullName, ref]) => ({
           url: `https://github.com/${fullName}`,
           gitRef: ref.trim() || undefined,
         }))
       : [];
+
+  const buildRequest = (): CreateSessionRequest => {
+    const repos = repoList();
     return {
       agent: {
         model: draft.model.trim(),
@@ -169,12 +216,26 @@ export function useSessionDraft(): SessionDraft {
         thinkingEffort: effectiveThinkingEffort || undefined,
       },
       vendor: draft.vendor.trim() || undefined,
-      repos: repoList.length ? repoList : undefined,
+      repos: repos.length ? repos : undefined,
       plugins: provisions && draft.skills.length ? draft.skills : undefined,
     };
   };
 
+  // A run carries no agent configuration: the graph names a preset per step,
+  // and the snapshot taken at creation resolves each one server-side.
+  const buildRunRequest = (input: string): WorkflowRunRequest => {
+    const repos = repoList();
+    return {
+      input,
+      vendor: draft.vendor.trim() || undefined,
+      repos: repos.length ? repos : undefined,
+    };
+  };
+
   return {
+    workflow: selectedWorkflow,
+    setWorkflow,
+    workflows: workflowNames,
     vendor: draft.vendor,
     setVendor: (vendor) => setDraft({ ...draft, vendor }),
     model: draft.model,
@@ -196,5 +257,6 @@ export function useSessionDraft(): SessionDraft {
     canSend: blockedReason === null,
     blockedReason,
     buildRequest,
+    buildRunRequest,
   };
 }
