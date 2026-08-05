@@ -86,10 +86,27 @@ struct PluginSkill {
     rel_dir: String,
     content: String,
 }
+
+/// An agent definition discovered in the shared plugin library: one `*.md` with
+/// frontmatter naming it, and a body that is its system prompt. `rel_path` is
+/// relative to the plugins root, so it identifies the file without depending on
+/// where the library happens to be mounted.
+///
+/// The bytes travel and the *server* parses them, exactly as skills do: the
+/// runtime is the only process that can see plugin files, and reading
+/// frontmatter is not file access.
+struct PluginAgent {
+    plugin: String,
+    rel_path: String,
+    content: String,
+}
 struct ScanResponse {
     call_id: String,
     workspaces: Vec<WorkspaceScan>,
     shared_skills: Vec<PluginSkill>,
+    /// Agent definitions from the same library. Optional so an older runtime
+    /// binary still deserializes against a newer server.
+    shared_agents: Option<Vec<PluginAgent>>,
     /// Absolute path of the shared plugin library root, when one is configured
     /// and the request asked for it. Optional so an older runtime binary still
     /// deserializes against a newer server.

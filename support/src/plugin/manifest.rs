@@ -1,7 +1,7 @@
 //! `.claude-plugin/plugin.json`.
 //!
-//! Only the fields horsie uses today are modelled. Agents, commands, hooks and
-//! `mcpServers` are added here — in one place — by later phases of #105.
+//! Only the fields horsie uses today are modelled. Commands and `mcpServers`
+//! are added here — in one place — by later phases of #105.
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,10 @@ pub struct PluginManifest {
     /// Skill roots relative to the plugin root. Empty means "not declared" —
     /// callers fall back to the conventional `skills/`.
     pub skills: Vec<String>,
+    /// Agent locations relative to the plugin root — a directory of `*.md`, or
+    /// a single `.md` file. Empty means "not declared", so callers fall back to
+    /// the conventional `agents/`.
+    pub agents: Vec<String>,
 }
 
 /// Raw wire shape. `skills` is a string or an array of strings.
@@ -23,6 +27,7 @@ struct RawManifest {
     version: Option<String>,
     description: Option<String>,
     skills: Option<StringOrList>,
+    agents: Option<StringOrList>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +72,7 @@ impl PluginManifest {
             version: raw.version,
             description: raw.description,
             skills: raw.skills.map(StringOrList::into_vec).unwrap_or_default(),
+            agents: raw.agents.map(StringOrList::into_vec).unwrap_or_default(),
         }))
     }
 }

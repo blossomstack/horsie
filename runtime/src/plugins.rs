@@ -3,10 +3,11 @@
 //! `SessionStart` hooks inside the sandbox.
 //!
 //! A plugin is a directory under `plugins_dir`. Its skills live under `skills/`
-//! by default, or wherever its `.claude-plugin/plugin.json` `skills` field points
-//! (string or array of paths). Hooks are declared in `hooks/hooks.json`.
+//! and its agents under `agents/` by default, or wherever the matching
+//! `.claude-plugin/plugin.json` field points (string or array of paths). Hooks
+//! are declared in `hooks/hooks.json`.
 
-use horsie_models::runtime::PluginSkill;
+use horsie_models::runtime::{PluginAgent, PluginSkill};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -62,6 +63,41 @@ pub fn discover_skills(plugins_dir: &Path) -> Vec<PluginSkill> {
                 out.push(PluginSkill {
                     plugin: name.clone(),
                     rel_dir: rel.to_string_lossy().into_owned(),
+                    content,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Enumerate every installed plugin's agent definitions.
+///
+/// `rel_path` is each file's path relative to `plugins_dir`, so it identifies
+/// the definition without depending on where the library is mounted. The bytes
+/// travel unparsed: reading frontmatter is the server's job, exactly as it is
+/// for skills.
+pub fn discover_agents(plugins_dir: &Path) -> Vec<PluginAgent> {
+    let mut out = Vec::new();
+    for plugin_root in plugin_dirs(plugins_dir) {
+        // Best-effort, like `discover_skills`: one bad manifest contributes
+        // nothing rather than blanking the library.
+        let Ok(root) = horsie_support::plugin::PluginRoot::inspect(&plugin_root) else {
+            continue;
+        };
+        let fallback = plugin_root
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = root.name(&fallback);
+        for file in &root.agent_files {
+            let Ok(rel) = file.strip_prefix(plugins_dir) else {
+                continue;
+            };
+            if let Ok(content) = std::fs::read_to_string(file) {
+                out.push(PluginAgent {
+                    plugin: name.clone(),
+                    rel_path: rel.to_string_lossy().into_owned(),
                     content,
                 });
             }

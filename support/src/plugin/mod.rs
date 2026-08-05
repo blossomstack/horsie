@@ -1,9 +1,10 @@
 //! Reading Claude Code plugin packaging: `.claude-plugin/plugin.json`,
-//! `.claude-plugin/marketplace.json`, and the skills they point at.
+//! `.claude-plugin/marketplace.json`, and the skills and agents they point at.
 //!
 //! horsie reads this format and never writes it. See
 //! `docs/superpowers/specs/2026-08-02-plugin-marketplace-design.md`.
 
+pub mod agents;
 #[cfg(feature = "git")]
 pub mod checkout;
 pub mod grants;

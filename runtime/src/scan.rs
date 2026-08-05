@@ -1,5 +1,5 @@
 use crate::workspace::{WorkspaceRegistry, is_git_repo};
-use horsie_models::runtime::{PluginSkill, ScanRequest, ScannedFile, WorkspaceScan};
+use horsie_models::runtime::{PluginAgent, PluginSkill, ScanRequest, ScannedFile, WorkspaceScan};
 
 /// Discover the shared plugin library's skills when `include_shared` is set and a
 /// `plugins_dir` is configured. Best-effort and convention-aware (see [`crate::plugins`]).
@@ -9,6 +9,19 @@ pub fn shared_skills(registry: &WorkspaceRegistry, include_shared: bool) -> Vec<
     }
     match registry.plugins_dir() {
         Some(dir) => crate::plugins::discover_skills(dir),
+        None => Vec::new(),
+    }
+}
+
+/// The shared plugin library's agent definitions, behind the same gate its
+/// skills are: both are the library's contents, and a caller that did not opt in
+/// gets neither.
+pub fn shared_agents(registry: &WorkspaceRegistry, include_shared: bool) -> Vec<PluginAgent> {
+    if !include_shared {
+        return Vec::new();
+    }
+    match registry.plugins_dir() {
+        Some(dir) => crate::plugins::discover_agents(dir),
         None => Vec::new(),
     }
 }
