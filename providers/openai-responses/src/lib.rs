@@ -306,10 +306,19 @@ impl ResponsesProvider {
             input: to_input_items(request.messages),
             tools,
             tool_choice,
-            max_output_tokens: self
-                .max_tokens
-                .or(request.max_tokens)
-                .or(Some(DEFAULT_MAX_TOKENS)),
+            // The Codex backend rejects this outright — `400 Unsupported
+            // parameter: max_output_tokens` — and Codex itself never sends it,
+            // so a plan's model runs to the backend's own limit and whatever a
+            // model card says about max tokens goes unused there. Keyed on the
+            // credential rather than the base URL, so a test pointing a ChatGPT
+            // credential at a mock still takes this branch.
+            max_output_tokens: match self.credential {
+                Credential::ChatGpt(_) => None,
+                Credential::ApiKey(_) | Credential::None => self
+                    .max_tokens
+                    .or(request.max_tokens)
+                    .or(Some(DEFAULT_MAX_TOKENS)),
+            },
             reasoning,
             store: false,
             stream: true,
@@ -1129,6 +1138,52 @@ mod tests {
         assert!(!body.store, "store must be false: horsie owns the history");
         assert!(body.stream);
         assert_eq!(body.include, vec!["reasoning.encrypted_content"]);
+    }
+
+    /// Verified against the live Codex backend: the same body is a `400
+    /// {"detail":"Unsupported parameter: max_output_tokens"}` with the field and
+    /// a streaming `200` without it.
+    #[test]
+    fn a_chatgpt_credential_sends_no_max_output_tokens() {
+        use crate::chatgpt::{ChatGptTokens, StoredTokens, tests::RecordingStore};
+
+        let tokens = Arc::new(ChatGptTokens::new(
+            StoredTokens {
+                access: "live".into(),
+                refresh: "r".into(),
+                expires_at: i64::MAX,
+                account_id: "acct_1".into(),
+            },
+            Arc::new(RecordingStore::default()),
+            "https://issuer.invalid",
+        ));
+        let p = ResponsesProvider::with_chatgpt(tokens)
+            .unwrap()
+            // Even an explicitly configured limit is dropped: the backend
+            // rejects the parameter, not a particular value.
+            .with_max_tokens(Some(128_000));
+        let history = vec![user("hi")];
+
+        assert_eq!(p.build_body(&request(&history)).max_output_tokens, None);
+    }
+
+    #[test]
+    fn an_api_key_credential_still_sends_max_output_tokens() {
+        let p = ResponsesProvider::with_api_key("k").unwrap();
+        let history = vec![user("hi")];
+
+        assert_eq!(
+            p.build_body(&request(&history)).max_output_tokens,
+            Some(64),
+            "the platform API accepts the field; only the Codex backend does not"
+        );
+        assert_eq!(
+            p.with_max_tokens(Some(128_000))
+                .build_body(&request(&history))
+                .max_output_tokens,
+            Some(128_000),
+            "a provider-level limit still outranks the request's"
+        );
     }
 
     #[test]

@@ -29,6 +29,8 @@ export function Section({
   onAdd,
   addLabel,
   addTestId,
+  addDisabled = false,
+  addTitle,
   empty,
 }: {
   title: string;
@@ -37,6 +39,10 @@ export function Section({
   onAdd?: () => void;
   addLabel?: string;
   addTestId?: string;
+  /** Adding is not possible yet. Say why in `addTitle` — and say it in `empty`
+   * too, since a tooltip is not discoverable by everyone. */
+  addDisabled?: boolean;
+  addTitle?: string;
   empty?: string | null;
 }) {
   return (
@@ -49,7 +55,13 @@ export function Section({
           </p>
         </div>
         {onAdd && (
-          <button className="key shrink-0" onClick={onAdd} data-testid={addTestId}>
+          <button
+            className="key shrink-0"
+            onClick={onAdd}
+            disabled={addDisabled}
+            title={addTitle}
+            data-testid={addTestId}
+          >
             <Plus size={13} aria-hidden /> {addLabel}
           </button>
         )}

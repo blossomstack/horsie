@@ -5,7 +5,7 @@ import { MarketplacePluginView } from './marketplacePluginView';
  */
 export interface MarketplaceView {
   /**
-   * The index&#x27;s declared name, else the repo basename. Primary key.
+   * The index&#39;s declared name, else the repo basename. Primary key.
    */
   name: string;
   sourceUrl: string;

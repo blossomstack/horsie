@@ -13,9 +13,9 @@ export interface ProviderView {
   kind: string;
   baseUrl?: string;
   /**
-   * True when an inline `api_key` is stored.
+   * Whether this provider can authenticate at all: a ChatGPT plan is signed
    */
-  hasInlineKey: boolean;
+  hasCredential: boolean;
   /**
    * Retain thinking-block signatures from this provider. Required for
    */

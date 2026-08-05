@@ -112,20 +112,30 @@ to it. The same provider fields (name, base URL, inline key) apply to both.
 | **OpenAI Responses** | `/responses` | OpenAI's Responses API with a platform API key. Unlike chat completions it carries reasoning across turns, so a reasoning model keeps its train of thought through a tool loop. |
 | **ChatGPT plan** | `/responses` on OpenAI's Codex backend | Spending a ChatGPT subscription instead of API credit. Signs in rather than storing a key — see [ChatGPT plan](#chatgpt-plan). |
 
-**Example — a local Ollama server** (no API key needed): add a provider with
-kind **OpenAI-compatible** and base URL `http://127.0.0.1:11434`, then a model
-whose model id is a tag you have pulled (e.g. `qwen2.5`).
+**Example — a local Ollama server**: add a provider with kind
+**OpenAI-compatible**, base URL `http://127.0.0.1:11434`, and any placeholder
+for the inline key (Ollama ignores it), then a model whose model id is a tag you
+have pulled (e.g. `qwen2.5`).
 
 **Example — a hosted OpenAI-compatible service**: kind **OpenAI-compatible**,
 base URL the service's endpoint, and an inline API key.
+
+Every provider must carry its own credential. horsie does **not** fall back to
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the server's environment, and does not
+let `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` redirect a provider whose base URL
+is unset here: a provider is exactly what this page says it is, and nothing in
+the server's environment can quietly lend it a key or move where that key is
+sent. A provider with no credential is rejected when you save a model against
+it, and **Add model** is unavailable until it has one.
 
 #### ChatGPT plan
 
 A **ChatGPT plan** provider spends a ChatGPT subscription's Codex allowance
 rather than API credit. It has no API key field: you sign in instead.
 
-Add the provider (kind **ChatGPT plan**, no base URL), save it, then reopen it
-and press **Sign in with ChatGPT**. horsie shows an eight-character code and a
+Add the provider (kind **ChatGPT plan**, no base URL) and save it. Its row
+appears with a **Connect** button and the sign-in already open; press **Sign in
+with ChatGPT**. horsie shows an eight-character code and a
 link to `auth.openai.com/codex/device`. Open that link on any device — your
 laptop, your phone — sign in to ChatGPT there and enter the code. horsie polls
 until you approve, then stores the credential and refreshes it from then on
@@ -146,6 +156,9 @@ Two things worth knowing:
 - **Model ids are the ones the plan offers** (the Codex line), not the platform
   API's. A model the subscription cannot reach fails with the backend's own
   error rather than being silently substituted.
+- **A model's max-tokens is ignored on a plan.** The Codex backend rejects the
+  parameter outright, so horsie does not send it and the model runs to whatever
+  limit the backend applies. The field still applies to every other kind.
 
 horsie identifies itself honestly to OpenAI (as `horsie`, not as Codex) and
 sends no client-attestation header, since only OpenAI's own clients can produce

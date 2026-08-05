@@ -130,9 +130,18 @@ impl DbConfigStore {
         let mods = read_models(&self.db, self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
+        // A ChatGPT plan's credential lives in `provider_oauth`, not in the
+        // provider row, so the view cannot answer "is this usable" from
+        // `providers` alone.
+        let signed_in = read_provider_oauth(&self.db, self.db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
         let default_vendor = self.default_vendor();
         Ok(SettingsView {
-            providers: provs.iter().map(provider_view).collect(),
+            providers: provs
+                .iter()
+                .map(|r| provider_view(r, signed_in.contains_key(&r.name)))
+                .collect(),
             models: mods.iter().map(model_view).collect(),
             vendors: self.vendors_view(&default_vendor),
             default_vendor,
@@ -178,6 +187,7 @@ impl ConfigStore for DbConfigStore {
                 .filter_map(|r| r.api_key.as_deref().map(|k| (r.name.as_str(), k)))
                 .collect();
             let mut seen = HashSet::new();
+            let mut chatgpt_now = HashSet::new();
             sqlx::query(&self.db.q("DELETE FROM providers"))
                 .execute(&mut *tx)
                 .await
@@ -200,7 +210,17 @@ impl ConfigStore for DbConfigStore {
                 if !seen.insert(name.to_string()) {
                     return Err(format!("duplicate provider '{name}'"));
                 }
-                let api_key = resolve_secret(&p.api_key, keep.get(name).copied());
+                // A ChatGPT plan authorizes with an OAuth token and has no key
+                // field in the UI at all, so any key on that row is a leftover
+                // from the kind it used to be — kept alive until now by
+                // `resolve_secret`'s "omitted means unchanged" rule. Dropping it
+                // here is what lets `has_credential` mean one thing.
+                let api_key = if p.kind == "chatgpt" {
+                    chatgpt_now.insert(name.to_string());
+                    None
+                } else {
+                    resolve_secret(&p.api_key, keep.get(name).copied())
+                };
                 sqlx::query(&self.db.q(
                     "INSERT INTO providers (name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?)",
                 ))
@@ -214,15 +234,17 @@ impl ConfigStore for DbConfigStore {
                 .map_err(|e| e.to_string())?;
             }
 
-            // Providers are rewritten wholesale, so a removed or renamed one
-            // would otherwise leave its sign-in behind — a live refresh token
-            // belonging to nothing, which a later provider of the same name
-            // would silently inherit.
+            // A sign-in outlives its provider in two ways, and both leave a live
+            // refresh token that the next provider of that name would silently
+            // inherit: the provider is removed or renamed (providers are
+            // rewritten wholesale), or it is still there under a kind that no
+            // longer signs in. Keeping only the names that are ChatGPT plans
+            // *now* covers both without asking which happened.
             let orphans: Vec<String> = read_provider_oauth(&self.db, &mut *tx)
                 .await
                 .map_err(|e| e.to_string())?
                 .into_keys()
-                .filter(|p| !seen.contains(p))
+                .filter(|p| !chatgpt_now.contains(p))
                 .collect();
             for provider in orphans {
                 sqlx::query(&self.db.q("DELETE FROM provider_oauth WHERE provider = ?"))
@@ -411,6 +433,7 @@ fn build_registry(
             .unwrap_or(ThinkingDialect::NoControl);
         let built = match p.kind.as_str() {
             "anthropic" => build_anthropic(
+                &p.name,
                 p.base_url.as_deref(),
                 p.api_key.as_deref(),
                 &m.model_id,
@@ -422,6 +445,7 @@ fn build_registry(
             // accepts a pinned tool_choice with thinking enabled, so there is
             // nothing to reconcile there.
             "openai" => build_openai(
+                &p.name,
                 p.base_url.as_deref(),
                 p.api_key.as_deref(),
                 &m.model_id,
@@ -430,6 +454,7 @@ fn build_registry(
                 m.forced_tools_disable_thinking,
             )?,
             "openai-responses" => build_responses(
+                &p.name,
                 p.base_url.as_deref(),
                 p.api_key.as_deref(),
                 &m.model_id,
@@ -464,7 +489,25 @@ fn build_registry(
     Ok(reg)
 }
 
+/// The key a provider row configures, or an error naming the provider.
+///
+/// A row without one is never allowed to fall through to the provider crate's
+/// `new()`, because every one of those reads a key out of the process
+/// environment — `OPENAI_API_KEY` directly, `ANTHROPIC_API_KEY` inside
+/// `async-llm`'s client. That would have a provider the operator left blank
+/// silently spend whatever credential the server happens to have inherited,
+/// under a name that claims to carry none.
+fn required_key(provider: &str, api_key: Option<&str>) -> Result<Secret, String> {
+    match api_key {
+        Some(k) if !k.is_empty() => Ok(Secret::from(k)),
+        _ => Err(format!(
+            "provider '{provider}' has no API key — add one in settings"
+        )),
+    }
+}
+
 fn build_anthropic(
+    provider: &str,
     base_url: Option<&str>,
     api_key: Option<&str>,
     model_id: &str,
@@ -472,27 +515,21 @@ fn build_anthropic(
     keep_thinking_signature: bool,
     thinking_dialect: ThinkingDialect,
 ) -> Result<Arc<dyn LlmProvider>, String> {
-    let key: Option<Secret> = match api_key {
-        Some(k) if !k.is_empty() => Some(Secret::from(k)),
-        Some(_) => return Err("inline api_key is empty".into()),
-        None => None,
-    };
-    let mut p = match key {
-        Some(k) => AnthropicProvider::with_api_key(k).map_err(|e| e.to_string())?,
-        None => AnthropicProvider::new().map_err(|e| e.to_string())?,
-    };
-    p = p
+    let key = required_key(provider, api_key)?;
+    let p = AnthropicProvider::with_api_key(key)
+        .map_err(|e| e.to_string())?
         .with_model(model_id)
         .with_max_tokens(max_tokens)
         .with_keep_thinking_signature(keep_thinking_signature)
-        .with_thinking_dialect(thinking_dialect);
-    if let Some(u) = base_url {
-        p = p.with_base_url(u);
-    }
+        .with_thinking_dialect(thinking_dialect)
+        // Always explicit. Left unset, `ANTHROPIC_BASE_URL` would redirect this
+        // provider — and the key with it — to a host the settings never named.
+        .with_base_url(base_url.unwrap_or(horsie_anthropic::DEFAULT_BASE_URL));
     Ok(Arc::new(p))
 }
 
 fn build_openai(
+    provider: &str,
     base_url: Option<&str>,
     api_key: Option<&str>,
     model_id: &str,
@@ -500,49 +537,32 @@ fn build_openai(
     thinking_dialect: ThinkingDialect,
     forced_tools_disable_thinking: bool,
 ) -> Result<Arc<dyn LlmProvider>, String> {
-    let key: Option<Secret> = match api_key {
-        Some(k) if !k.is_empty() => Some(Secret::from(k)),
-        Some(_) => return Err("inline api_key is empty".into()),
-        None => None,
-    };
-    let mut p = match key {
-        Some(k) => OpenAiProvider::with_api_key(k).map_err(|e| e.to_string())?,
-        None => OpenAiProvider::new().map_err(|e| e.to_string())?,
-    };
-    p = p
+    let key = required_key(provider, api_key)?;
+    let p = OpenAiProvider::with_api_key(key)
+        .map_err(|e| e.to_string())?
         .with_model(model_id)
         .with_max_tokens(max_tokens)
         .with_thinking_dialect(thinking_dialect)
-        .with_forced_tools_disable_thinking(forced_tools_disable_thinking);
-    if let Some(u) = base_url {
-        p = p.with_base_url(u);
-    }
+        .with_forced_tools_disable_thinking(forced_tools_disable_thinking)
+        .with_base_url(base_url.unwrap_or(horsie_openai::DEFAULT_BASE_URL));
     Ok(Arc::new(p))
 }
 
 fn build_responses(
+    provider: &str,
     base_url: Option<&str>,
     api_key: Option<&str>,
     model_id: &str,
     max_tokens: Option<u32>,
     thinking_dialect: ThinkingDialect,
 ) -> Result<Arc<dyn LlmProvider>, String> {
-    let key: Option<Secret> = match api_key {
-        Some(k) if !k.is_empty() => Some(Secret::from(k)),
-        Some(_) => return Err("inline api_key is empty".into()),
-        None => None,
-    };
-    let mut p = match key {
-        Some(k) => ResponsesProvider::with_api_key(k).map_err(|e| e.to_string())?,
-        None => ResponsesProvider::new().map_err(|e| e.to_string())?,
-    };
-    p = p
+    let key = required_key(provider, api_key)?;
+    let p = ResponsesProvider::with_api_key(key)
+        .map_err(|e| e.to_string())?
         .with_model(model_id)
         .with_max_tokens(max_tokens)
-        .with_thinking_dialect(thinking_dialect);
-    if let Some(u) = base_url {
-        p = p.with_base_url(u);
-    }
+        .with_thinking_dialect(thinking_dialect)
+        .with_base_url(base_url.unwrap_or(horsie_openai_responses::DEFAULT_BASE_URL));
     Ok(Arc::new(p))
 }
 
@@ -681,12 +701,18 @@ fn vendor_caps_view(caps: crate::runtime_vendor::VendorCapabilities) -> VendorCa
     }
 }
 
-fn provider_view(r: &ProviderRow) -> ProviderView {
+fn provider_view(r: &ProviderRow, signed_in: bool) -> ProviderView {
     ProviderView {
         name: r.name.clone(),
         kind: r.kind.clone(),
         base_url: r.base_url.clone(),
-        has_inline_key: r.api_key.as_deref().is_some_and(|s| !s.is_empty()),
+        // Whichever credential this kind actually uses. A stored key on a
+        // ChatGPT row would be a leftover the write path now clears, and it
+        // never authorized anything even while it was there.
+        has_credential: match r.kind.as_str() {
+            "chatgpt" => signed_in,
+            _ => r.api_key.as_deref().is_some_and(|s| !s.is_empty()),
+        },
         keep_thinking_signature: r.keep_thinking_signature,
     }
 }
@@ -918,7 +944,7 @@ mod tests {
             .await
             .expect("update ok");
         assert_eq!(view.models.len(), 1);
-        assert!(view.providers[0].has_inline_key);
+        assert!(view.providers[0].has_credential);
         assert!(o.registry.read().unwrap().contains_key("m"));
     }
 
@@ -1009,6 +1035,97 @@ mod tests {
             .expect("update ok");
 
         assert!(o.registry.read().unwrap().contains_key("m"));
+    }
+
+    /// The provider crates all read a key out of the process environment when
+    /// none is passed. A blank provider row must never reach that fallback: it
+    /// would spend a credential the operator never attached to this provider.
+    #[tokio::test]
+    async fn a_provider_without_a_key_is_rejected_rather_than_reading_the_environment() {
+        // SAFETY: single-threaded test process section; the value is removed
+        // again before any other provider test could observe it.
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-from-the-environment") };
+        let o = open().await;
+
+        let err = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("p", None)]),
+                models: Some(vec![model("m", "p")]),
+                default_vendor: None,
+            })
+            .await
+            .expect_err("a key-less provider must not build");
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+
+        assert!(err.contains("no API key"), "unhelpful error: {err}");
+        assert!(err.contains('p'), "the error names the provider: {err}");
+    }
+
+    /// Both directions of a kind change. A credential belongs to the kind that
+    /// uses it, and neither one may outlive the switch: the leftover key made
+    /// the settings list report "Key set" for a provider authorized by OAuth,
+    /// and a leftover token would be inherited by whatever the name becomes.
+    #[tokio::test]
+    async fn a_kind_change_drops_the_credential_the_new_kind_cannot_use() {
+        let o = open().await;
+        o.store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("p", Some("sk-inline"))]),
+                models: Some(vec![]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+
+        // anthropic → chatgpt: the API key goes.
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
+                models: Some(vec![]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+        assert!(
+            !view.providers[0].has_credential,
+            "a stale API key must not read as a ChatGPT sign-in"
+        );
+
+        write_provider_oauth(
+            &o.db,
+            "p",
+            &StoredTokens {
+                access: "a".into(),
+                refresh: "r".into(),
+                expires_at: 9_999_999_999,
+                account_id: "acct_1".into(),
+            },
+        )
+        .await
+        .expect("stored");
+        assert!(o.store.view().await.unwrap().providers[0].has_credential);
+
+        // chatgpt → anthropic: the sign-in goes, and the key it once had does
+        // not come back with it.
+        let view = o
+            .store
+            .update(SettingsUpdate {
+                providers: Some(vec![provider("p", None)]),
+                models: Some(vec![]),
+                default_vendor: None,
+            })
+            .await
+            .expect("update ok");
+        assert!(!view.providers[0].has_credential);
+        assert!(
+            read_provider_oauth(&o.db, o.db.pool())
+                .await
+                .unwrap()
+                .is_empty(),
+            "a provider that is no longer a ChatGPT plan kept its refresh token"
+        );
     }
 
     /// A credential must not outlive the provider it belongs to: a later
@@ -1137,7 +1254,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(view.providers[0].has_inline_key);
+        assert!(view.providers[0].has_credential);
     }
 
     #[tokio::test]

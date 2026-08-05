@@ -19,6 +19,10 @@ use tokio_stream::StreamExt;
 
 pub const DEFAULT_MODEL: &str = "claude-3-5-sonnet-20241022";
 pub const DEFAULT_MAX_TOKENS: u32 = 16_384;
+/// Where a request goes when nothing configures otherwise. Named here so a
+/// caller that refuses to let the environment pick — the settings store — can
+/// pass it explicitly instead of relying on the client's internal default.
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// The `anthropic-version` header value sent on every request. Required by the API.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const MAX_STREAM_RETRIES: u32 = 6;
