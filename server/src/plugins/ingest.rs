@@ -4,12 +4,63 @@
 //! (sorted entries, fixed mtime) makes re-clones of an unchanged tree hash
 //! identically, so `update` is a no-op when nothing changed.
 
+use horsie_support::plugin::{
+    Marketplace, MarketplaceEntry, PluginRoot, join_declared, source_location,
+};
 use sha2::{Digest, Sha256};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-/// Result of a successful ingest — everything needed to persist a bundle.
-pub struct Ingested {
+/// What to ingest, and how much freedom ingest has to reinterpret it.
+///
+/// The split is load-bearing: only a URL a person pasted may turn out to be a
+/// catalogue. Anything already resolved — through an index, or from a bundle's
+/// remembered source — is cloned and packed verbatim, so an entry pointing at a
+/// repo that is itself a marketplace cannot send us round again.
+pub enum IngestTarget {
+    /// A URL with no interpretation yet: bundle repo, or marketplace.
+    Url {
+        url: String,
+        git_ref: Option<String>,
+    },
+    /// Clone this, descend into `subpath`, pack what is there.
+    Resolved {
+        url: String,
+        git_ref: Option<String>,
+        subpath: Option<String>,
+        /// The index's name for this entry, used when the plugin's own manifest
+        /// declares none. The two differ often enough to matter:
+        /// `42crunch-api-security-testing` installs as `api-security-testing`,
+        /// and a repo directory name is a worse guess than either.
+        name_hint: Option<String>,
+    },
+}
+
+impl IngestTarget {
+    fn url(&self) -> &str {
+        match self {
+            IngestTarget::Url { url, .. } | IngestTarget::Resolved { url, .. } => url,
+        }
+    }
+
+    /// Trimmed, and `None` rather than empty — an empty `--branch` is a clone
+    /// failure rather than "the default branch".
+    fn git_ref(&self) -> Option<&str> {
+        match self {
+            IngestTarget::Url { git_ref, .. } | IngestTarget::Resolved { git_ref, .. } => {
+                git_ref.as_deref().map(str::trim).filter(|r| !r.is_empty())
+            }
+        }
+    }
+}
+
+/// A packed bundle — everything needed to persist a `plugins` row.
+///
+/// `url`/`git_ref`/`subpath` are what was *actually* cloned and descended into,
+/// which is not always what the caller asked for: a marketplace entry may name
+/// another repo. Storing the resolved triple is what makes `update` re-clone
+/// the same tree.
+pub struct PluginBundle {
     pub name: String,
     pub version: Option<String>,
     pub description: Option<String>,
@@ -22,46 +73,154 @@ pub struct Ingested {
     pub unsupported_hooks: Vec<String>,
     pub zip_bytes: Vec<u8>,
     pub hash: String,
+    pub url: String,
+    pub git_ref: Option<String>,
+    pub subpath: Option<String>,
 }
 
-/// Clone `url` (optionally at `git_ref`), validate it is a plugin, and pack it.
-/// Synchronous (shells `git`, walks the fs); callers run it on a blocking task.
-pub fn ingest_git(url: &str, git_ref: Option<&str>) -> Result<Ingested, String> {
-    let url = url.trim();
+/// A catalogue as read from a checkout — everything a `marketplaces` row stores.
+///
+/// `Debug`, unlike [`PluginBundle`], which holds the zip bytes.
+#[derive(Debug)]
+pub struct ParsedMarketplace {
+    /// The index's declared `name`, else the repo basename.
+    pub name: String,
+    pub url: String,
+    pub git_ref: Option<String>,
+    /// HEAD at the time it was read, so a refresh can report a no-op.
+    pub sha: Option<String>,
+    pub entries: Vec<MarketplaceEntry>,
+    /// Human-readable reasons for entries that could not be understood.
+    pub skipped: Vec<String>,
+}
+
+/// What a cloned repo turned out to be.
+pub enum Ingested {
+    Plugin(PluginBundle),
+    /// Only reachable from [`IngestTarget::Url`].
+    Marketplace(ParsedMarketplace),
+}
+
+/// Clone, classify, and pack. Synchronous (shells `git`, walks the fs); callers
+/// run it on a blocking task.
+pub fn ingest_git(target: &IngestTarget) -> Result<Ingested, String> {
+    let url = target.url().trim();
     if url.is_empty() {
         return Err("source_url is required".to_string());
     }
     let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let dest = tmp.path().join("repo");
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["clone", "--depth", "1"]);
-    if let Some(r) = git_ref.map(str::trim).filter(|r| !r.is_empty()) {
-        cmd.args(["--branch", r]);
-    }
-    cmd.arg(url).arg(&dest);
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git clone failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
+    horsie_support::git::clone(url, target.git_ref(), &dest)?;
 
-    let root = horsie_support::plugin::PluginRoot::inspect(&dest)?;
+    // Where inside the checkout the plugin sits, and what to call it when its
+    // own manifest does not say. A one-entry index names its plugin, which is a
+    // better fallback than the repo basename.
+    let (subpath, fallback) = match target {
+        IngestTarget::Resolved {
+            subpath, name_hint, ..
+        } => (
+            subpath.clone(),
+            name_hint.clone().unwrap_or_else(|| repo_basename(url)),
+        ),
+        IngestTarget::Url { .. } => match Marketplace::read(&dest)? {
+            // Not a catalogue: the repo root is the plugin root, as before.
+            None => (None, repo_basename(url)),
+            Some(m) => match m.plugins.as_slice() {
+                // An index that declares nothing is not a catalogue worth
+                // recording; fall back to inspecting the repo itself, as the
+                // CLI does.
+                [] => (None, repo_basename(url)),
+                [only] => {
+                    let (entry_url, entry_ref, sub) =
+                        source_location(&only.source, url, target.git_ref());
+                    if entry_url != url {
+                        // The entry points elsewhere: clone that instead, and
+                        // never read *its* index.
+                        return ingest_git(&IngestTarget::Resolved {
+                            url: entry_url,
+                            git_ref: entry_ref,
+                            subpath: sub,
+                            name_hint: Some(only.name.clone()),
+                        });
+                    }
+                    (sub, only.name.clone())
+                }
+                _ => {
+                    return Ok(Ingested::Marketplace(ParsedMarketplace {
+                        name: m.name.clone().unwrap_or_else(|| repo_basename(url)),
+                        url: url.to_string(),
+                        git_ref: target.git_ref().map(str::to_string),
+                        sha: horsie_support::git::head_sha(&dest),
+                        entries: m.plugins,
+                        skipped: m.skipped,
+                    }));
+                }
+            },
+        },
+    };
+
+    let plugin_root = match subpath.as_deref() {
+        Some(s) => join_declared(&dest, s),
+        None => dest.clone(),
+    };
+    let bundle = pack(
+        &dest,
+        &plugin_root,
+        url,
+        target.git_ref(),
+        subpath,
+        &fallback,
+    )?;
+    Ok(Ingested::Plugin(bundle))
+}
+
+/// Clone `url` and parse its marketplace index. Used by refresh, which must not
+/// silently accept a source that has stopped being a catalogue.
+pub fn read_marketplace(url: &str, git_ref: Option<&str>) -> Result<ParsedMarketplace, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("source_url is required".to_string());
+    }
+    let git_ref = git_ref.map(str::trim).filter(|r| !r.is_empty());
+    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let dest = tmp.path().join("repo");
+    horsie_support::git::clone(url, git_ref, &dest)?;
+    let m = Marketplace::read(&dest)?.ok_or_else(|| {
+        format!("'{url}' is not a marketplace: it has no .claude-plugin/marketplace.json")
+    })?;
+    Ok(ParsedMarketplace {
+        name: m.name.clone().unwrap_or_else(|| repo_basename(url)),
+        url: url.to_string(),
+        git_ref: git_ref.map(str::to_string),
+        sha: horsie_support::git::head_sha(&dest),
+        entries: m.plugins,
+        skipped: m.skipped,
+    })
+}
+
+/// Inspect a plugin root and pack it. `checkout` is the clone's root — the sha
+/// fallback for a version comes from there, not from the plugin subtree.
+fn pack(
+    checkout: &Path,
+    plugin_root: &Path,
+    url: &str,
+    git_ref: Option<&str>,
+    subpath: Option<String>,
+    fallback_name: &str,
+) -> Result<PluginBundle, String> {
+    let root = PluginRoot::inspect(plugin_root)?;
     if !root.is_installable() {
         return Err(format!("not a plugin bundle: {}", root.rejection()));
     }
-    let name = root.name(&repo_basename(url));
+    let name = root.name(fallback_name);
     let version = root
         .version()
         .map(str::to_string)
-        .or_else(|| horsie_support::git::head_sha(&dest));
+        .or_else(|| horsie_support::git::head_sha(checkout));
     let description = root.description().map(str::to_string);
     let skill_count = u32::try_from(root.skill_dirs.len()).unwrap_or(u32::MAX);
-    let has_hooks = dest.join("hooks").join("hooks.json").is_file();
-    let unsupported_hooks = horsie_support::plugin::hooks::read(&dest)
+    let has_hooks = plugin_root.join("hooks").join("hooks.json").is_file();
+    let unsupported_hooks = horsie_support::plugin::hooks::read(plugin_root)
         .map(|h| {
             h.unsupported
                 .iter()
@@ -69,9 +228,9 @@ pub fn ingest_git(url: &str, git_ref: Option<&str>) -> Result<Ingested, String> 
                 .collect()
         })
         .unwrap_or_default();
-    let zip_bytes = zip_dir(&dest)?;
+    let zip_bytes = zip_dir(plugin_root)?;
     let hash = sha256_hex(&zip_bytes);
-    Ok(Ingested {
+    Ok(PluginBundle {
         name,
         version,
         description,
@@ -80,6 +239,9 @@ pub fn ingest_git(url: &str, git_ref: Option<&str>) -> Result<Ingested, String> 
         unsupported_hooks,
         zip_bytes,
         hash,
+        url: url.to_string(),
+        git_ref: git_ref.map(str::to_string),
+        subpath,
     })
 }
 
@@ -178,6 +340,60 @@ mod tests {
         );
     }
 
+    /// Write `.claude-plugin/marketplace.json` at `root`.
+    fn write_marketplace(root: &Path, json: &str) {
+        let dir = root.join(".claude-plugin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marketplace.json"), json).unwrap();
+    }
+
+    /// Write a minimal skill-only plugin tree at `dir`.
+    fn write_skill(dir: &Path, name: &str) {
+        let s = dir.join("skills").join(name);
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("SKILL.md"), format!("---\nname: {name}\n---\nbody")).unwrap();
+    }
+
+    /// Commit whatever is at `root` and return a `file://` URL for it.
+    fn commit_repo(root: &Path) -> String {
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "t@t"]);
+        git(root, &["config", "user.name", "t"]);
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+        format!("file://{}", root.display())
+    }
+
+    fn url_target(url: &str) -> IngestTarget {
+        IngestTarget::Url {
+            url: url.to_string(),
+            git_ref: None,
+        }
+    }
+
+    /// `Ingested` holds zip bytes and deliberately isn't `Debug`, so unwrap by
+    /// matching rather than with `unwrap`/`unwrap_err`.
+    fn expect_plugin(ing: Ingested) -> PluginBundle {
+        match ing {
+            Ingested::Plugin(p) => p,
+            Ingested::Marketplace(m) => panic!("expected a plugin, got marketplace {}", m.name),
+        }
+    }
+
+    fn expect_marketplace(ing: Ingested) -> ParsedMarketplace {
+        match ing {
+            Ingested::Marketplace(m) => m,
+            Ingested::Plugin(p) => panic!("expected a marketplace, got plugin {}", p.name),
+        }
+    }
+
+    fn zip_entry_names(bytes: &[u8]) -> Vec<String> {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect()
+    }
+
     #[test]
     fn inspect_reads_manifest_and_counts_skills() {
         let tmp = tempfile::tempdir().unwrap();
@@ -211,7 +427,8 @@ mod tests {
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", "init"]);
 
-        let ing = ingest_git(&format!("file://{}", root.display()), None).unwrap();
+        let ing =
+            expect_plugin(ingest_git(&url_target(&format!("file://{}", root.display()))).unwrap());
         assert!(ing.has_hooks);
         assert_eq!(
             ing.unsupported_hooks.len(),
@@ -247,7 +464,8 @@ mod tests {
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-q", "-m", "init"]);
 
-        let ing = ingest_git(&format!("file://{}", repo.display()), None).unwrap();
+        let ing =
+            expect_plugin(ingest_git(&url_target(&format!("file://{}", repo.display()))).unwrap());
         assert!(ing.has_hooks, "PreToolUse-only hooks must count as hooks");
     }
 
@@ -273,7 +491,8 @@ mod tests {
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-q", "-m", "init"]);
 
-        let ing = ingest_git(&format!("file://{}", repo.display()), None).unwrap();
+        let ing =
+            expect_plugin(ingest_git(&url_target(&format!("file://{}", repo.display()))).unwrap());
         assert_eq!(ing.name, "impeccable");
         assert_eq!(ing.skill_count, 1);
     }
@@ -292,7 +511,7 @@ mod tests {
 
         // `.err().unwrap()` rather than `.unwrap_err()`: `Ingested` holds the
         // zip bytes and deliberately isn't `Debug`.
-        let err = ingest_git(&format!("file://{}", repo.display()), None)
+        let err = ingest_git(&url_target(&format!("file://{}", repo.display())))
             .err()
             .unwrap();
         assert!(err.contains("SKILL.md"), "err: {err}");
@@ -322,11 +541,172 @@ mod tests {
         git(&repo, &["commit", "-q", "-m", "init"]);
 
         let url = format!("file://{}", repo.display());
-        let ing = ingest_git(&url, None).unwrap();
+        let ing = expect_plugin(ingest_git(&url_target(&url)).unwrap());
         assert_eq!(ing.name, "demo");
         assert_eq!(ing.skill_count, 2);
         assert!(ing.has_hooks);
         assert!(!ing.hash.is_empty());
         assert!(ing.version.is_some());
+    }
+
+    /// THE REGRESSION TEST. `pbakaus/impeccable`'s shape: a marketplace index at
+    /// the repo root declaring exactly one plugin at `./plugin`, whose manifest
+    /// puts its skills somewhere non-default. This is what the web UI could not
+    /// install and the CLI could.
+    #[test]
+    fn a_marketplace_with_one_entry_installs_that_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("src");
+        std::fs::create_dir_all(&repo).unwrap();
+        write_marketplace(
+            &repo,
+            r#"{"name":"impeccable","plugins":[
+                 {"name":"impeccable","version":"4.0.4","source":"./plugin"}]}"#,
+        );
+        let plugin = repo.join("plugin");
+        let cp = plugin.join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("plugin.json"),
+            r#"{"name":"impeccable","version":"4.0.4","skills":"./.claude/skills/"}"#,
+        )
+        .unwrap();
+        let s = plugin.join(".claude/skills/impeccable");
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("SKILL.md"), "---\nname: impeccable\n---\nb").unwrap();
+        // A file at the repo root that must NOT end up in the artifact.
+        std::fs::write(repo.join("README.md"), "not part of the bundle").unwrap();
+        let url = commit_repo(&repo);
+
+        let b = expect_plugin(ingest_git(&url_target(&url)).unwrap());
+        assert_eq!(b.name, "impeccable");
+        assert_eq!(b.skill_count, 1);
+        assert_eq!(b.subpath.as_deref(), Some("./plugin"));
+        assert_eq!(
+            b.url, url,
+            "a path entry stays in the marketplace's own repo"
+        );
+        let names = zip_entry_names(&b.zip_bytes);
+        assert!(
+            !names.iter().any(|n| n == "README.md"),
+            "packed the repo root, not the plugin root: {names:?}"
+        );
+    }
+
+    /// Several entries is not an install: it is a catalogue the caller has to
+    /// pick from.
+    #[test]
+    fn a_marketplace_with_several_entries_is_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("src");
+        std::fs::create_dir_all(&repo).unwrap();
+        write_marketplace(
+            &repo,
+            r#"{"name":"catalogue","plugins":[
+                 {"name":"alpha","description":"the first","source":"./plugins/alpha"},
+                 {"name":"beta","source":"./plugins/beta"}]}"#,
+        );
+        write_skill(&repo.join("plugins/alpha"), "a");
+        write_skill(&repo.join("plugins/beta"), "b");
+        let url = commit_repo(&repo);
+
+        let m = expect_marketplace(ingest_git(&url_target(&url)).unwrap());
+        assert_eq!(m.name, "catalogue");
+        assert_eq!(m.entries.len(), 2);
+        assert_eq!(m.entries[0].description.as_deref(), Some("the first"));
+        assert!(m.sha.is_some(), "the sha is what refresh compares against");
+    }
+
+    /// A malformed entry must not brick its siblings — the 276-entry case.
+    #[test]
+    fn a_malformed_entry_is_skipped_and_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("src");
+        std::fs::create_dir_all(&repo).unwrap();
+        write_marketplace(
+            &repo,
+            r#"{"name":"catalogue","plugins":[
+                 {"name":"alpha","source":"./plugins/alpha"},
+                 {"name":"broken"},
+                 {"name":"beta","source":"./plugins/beta"}]}"#,
+        );
+        write_skill(&repo.join("plugins/alpha"), "a");
+        write_skill(&repo.join("plugins/beta"), "b");
+        let url = commit_repo(&repo);
+
+        let m = expect_marketplace(ingest_git(&url_target(&url)).unwrap());
+        assert_eq!(m.entries.len(), 2);
+        assert_eq!(m.skipped.len(), 1);
+        assert!(m.skipped[0].contains("source"), "{:?}", m.skipped);
+    }
+
+    /// A resolved target clones exactly what it was told and never consults an
+    /// index — the guarantee that lets a marketplace entry point at a repo that
+    /// is itself a marketplace.
+    #[test]
+    fn a_resolved_target_ignores_the_repos_own_marketplace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("src");
+        std::fs::create_dir_all(&repo).unwrap();
+        write_marketplace(
+            &repo,
+            r#"{"name":"catalogue","plugins":[
+                 {"name":"alpha","source":"./plugins/alpha"},
+                 {"name":"beta","source":"./plugins/beta"}]}"#,
+        );
+        write_skill(&repo.join("plugins/alpha"), "a");
+        write_skill(&repo.join("plugins/beta"), "b");
+        let url = commit_repo(&repo);
+
+        let b = expect_plugin(
+            ingest_git(&IngestTarget::Resolved {
+                url: url.clone(),
+                git_ref: None,
+                subpath: Some("./plugins/beta".into()),
+                name_hint: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(b.skill_count, 1);
+        assert_eq!(b.subpath.as_deref(), Some("./plugins/beta"));
+    }
+
+    /// A one-entry index whose entry points at ANOTHER repo: the second repo is
+    /// cloned, and the bundle records that repo as its source so `update`
+    /// re-clones the right thing.
+    #[test]
+    fn a_one_entry_index_can_point_at_another_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let other = tmp.path().join("other");
+        write_skill(&other, "x");
+        let other_url = commit_repo(&other);
+
+        let repo = tmp.path().join("src");
+        std::fs::create_dir_all(&repo).unwrap();
+        write_marketplace(
+            &repo,
+            &format!(
+                r#"{{"name":"m","plugins":[{{"name":"x","source":{{"source":"git","url":"{other_url}"}}}}]}}"#
+            ),
+        );
+        let url = commit_repo(&repo);
+
+        let b = expect_plugin(ingest_git(&url_target(&url)).unwrap());
+        assert_eq!(b.name, "x");
+        assert_eq!(b.url, other_url);
+        assert!(b.subpath.is_none());
+    }
+
+    /// `read_marketplace` is refresh's entry point: it must refuse a repo that
+    /// has no index rather than silently reporting an empty catalogue.
+    #[test]
+    fn read_marketplace_refuses_a_plain_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("src");
+        write_skill(&repo, "a");
+        let url = commit_repo(&repo);
+
+        let err = read_marketplace(&url, None).unwrap_err();
+        assert!(err.contains("marketplace.json"), "err: {err}");
     }
 }

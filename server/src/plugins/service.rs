@@ -4,7 +4,7 @@
 //! `PluginProvisioner`, for `ensure_runtime`).
 
 use super::artifact::ArtifactStore;
-use super::ingest::{self, Ingested};
+use super::ingest::{self, PluginBundle};
 use super::store::{PluginRow, PluginStore};
 use super::token;
 use super::{PluginArtifactRef, PluginProvisioner};
@@ -97,7 +97,7 @@ impl PluginService {
     async fn persist(
         &self,
         input: &PluginInstallInput,
-        ing: Ingested,
+        ing: PluginBundle,
         existing: Option<PluginRow>,
     ) -> Result<PluginView, String> {
         self.artifacts
@@ -174,22 +174,32 @@ impl PluginProvisioner for PluginService {
 }
 
 /// Run the blocking git clone + pack off the async runtime.
-async fn clone_and_pack(url: String, git_ref: Option<String>) -> Result<Ingested, String> {
-    let ingested =
-        tokio::task::spawn_blocking(move || ingest::ingest_git(&url, git_ref.as_deref()))
-            .await
-            .map_err(|e| e.to_string())??;
-    // A bundle whose skills are fine but whose hooks horsie cannot fire installs
-    // anyway; saying nothing would leave a guard that silently never runs, which
-    // is what classifying events rather than ignoring them is for.
-    for reason in &ingested.unsupported_hooks {
-        tracing::warn!(
-            plugin = ingested.name,
-            reason,
-            "plugin declares a hook horsie cannot run"
-        );
+async fn clone_and_pack(url: String, git_ref: Option<String>) -> Result<PluginBundle, String> {
+    let target = ingest::IngestTarget::Url { url, git_ref };
+    let ingested = tokio::task::spawn_blocking(move || ingest::ingest_git(&target))
+        .await
+        .map_err(|e| e.to_string())??;
+    match ingested {
+        // A bundle whose skills are fine but whose hooks horsie cannot fire
+        // installs anyway; saying nothing would leave a guard that silently
+        // never runs, which is what classifying events rather than ignoring
+        // them is for.
+        ingest::Ingested::Plugin(b) => {
+            for reason in &b.unsupported_hooks {
+                tracing::warn!(
+                    plugin = b.name,
+                    reason,
+                    "plugin declares a hook horsie cannot run"
+                );
+            }
+            Ok(b)
+        }
+        ingest::Ingested::Marketplace(m) => Err(format!(
+            "'{}' is a marketplace listing {} plugins",
+            m.url,
+            m.entries.len()
+        )),
     }
-    Ok(ingested)
 }
 
 fn row_to_view(row: PluginRow) -> PluginView {
