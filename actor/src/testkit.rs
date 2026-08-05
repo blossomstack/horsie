@@ -118,49 +118,10 @@ impl<J: Journal> Journal for FaultyJournal<J> {
     }
 }
 
-/// Write a `FileJournal`-format log for `pid` under `root`, replacing the line at
-/// index `corrupt_at` with bytes that cannot be base64-decoded.
-///
-/// Mirrors `FileJournal::persist`'s framing exactly: one line per batch, each line
-/// `base64(JSON([base64(event0), base64(event1), ...]))`.
-#[cfg(any(test, feature = "file-journal"))]
-pub fn write_corrupt_journal(
-    root: &std::path::Path,
-    pid: &PersistenceId,
-    batches: &[Vec<Vec<u8>>],
-    corrupt_at: usize,
-) -> std::io::Result<()> {
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD;
-    use std::io::Write;
-
-    let path = root
-        .join("actors")
-        .join(&pid.kind)
-        .join(&pid.id)
-        .join("journal.jsonl");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = std::fs::File::create(&path)?;
-    for (index, batch) in batches.iter().enumerate() {
-        let line = if index == corrupt_at {
-            "!!!not-base64!!!".to_string()
-        } else {
-            let encoded: Vec<String> = batch.iter().map(|e| STANDARD.encode(e)).collect();
-            let json =
-                serde_json::to_vec(&encoded).map_err(|e| std::io::Error::other(e.to_string()))?;
-            STANDARD.encode(&json)
-        };
-        writeln!(file, "{line}")?;
-    }
-    file.flush()
-}
-
 /// The `Journal` contract, as executable assertions.
 ///
 /// Lives here rather than in a test file so every backend can be held to it —
-/// including `SqliteJournal`, which lives in the server crate and so cannot be
+/// including `SqlJournal`, which lives in the server crate and so cannot be
 /// reached from `actor/tests/`. The assertions come from the trait's own doc
 /// comments, which are the real spec: they are behavioural, never about storage
 /// layout, which is what makes them portable.
@@ -295,10 +256,9 @@ pub mod conformance {
     }
 
     /// Asserts both that recovery starts from the snapshot and that the log was
-    /// compacted. The second half is what a `spawn_root`-based version of this test
-    /// would need: `FileJournal` recovers the correct *value* via a full replay from
-    /// event 0 even with snapshotting disabled, so asserting state alone would pass
-    /// and hide the bug.
+    /// compacted. Asserting the recovered state alone would not do: a journal
+    /// that never compacts recovers the correct *value* by replaying from event
+    /// 0, so the state assertion passes while the bug stands.
     pub async fn snapshot_then_compact_leaves_only_later_events(j: &dyn Journal) {
         j.persist(&pid("e2e"), &[vec![1], vec![2]]).await.unwrap();
         j.save_snapshot(&pid("e2e"), vec![42], 2).await.unwrap();
@@ -371,28 +331,5 @@ mod tests {
         let mut s = j.replay(&pid(), 0).await;
         assert!(s.next().await.unwrap().is_ok()); // seq 1
         assert!(s.next().await.unwrap().is_err()); // seq 2 → injected failure
-    }
-
-    #[cfg(feature = "file-journal")]
-    #[tokio::test]
-    async fn corrupt_fixture_produces_a_file_that_stops_decoding_midway() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid = PersistenceId::new("t", "corrupt");
-        write_corrupt_journal(
-            dir.path(),
-            &pid,
-            &[vec![vec![1]], vec![vec![2]], vec![vec![3]]],
-            1,
-        )
-        .unwrap();
-
-        let j = crate::file_journal::FileJournal::new(dir.path());
-        let mut s = j.replay(&pid, 0).await;
-        let first = s.next().await.unwrap().unwrap();
-        assert_eq!(first, (1, vec![1]));
-        // Everything past the corrupt line is unreachable — that is the fixture
-        // working, and separately it is the bug (#61 item 13), asserted in
-        // actor/tests/journal_corruption.rs.
-        assert!(s.next().await.is_none());
     }
 }

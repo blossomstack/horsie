@@ -13,7 +13,7 @@ test-util = ["horsie-runtime-client/test-util"]
 [dependencies]
 horsie-models          = { path = "../models" }
 horsie-support         = { path = "../support", features = ["git"] }
-horsie-actor           = { path = "../actor", features = ["file-journal"] }
+horsie-actor           = { path = "../actor" }
 horsie-agentcore       = { path = "../agentcore" }
 horsie-anthropic       = { path = "../providers/anthropic" }
 horsie-openai          = { path = "../providers/openai" }
@@ -53,7 +53,7 @@ tempfile          = { workspace = true }
 [dev-dependencies]
 # The journal conformance suite lives in the actor testkit, so SqlJournal is held
 # to exactly the same contract as InMemoryJournal and FileJournal.
-horsie-actor           = { path = "../actor", features = ["file-journal", "test-util"] }
+horsie-actor           = { path = "../actor", features = ["test-util"] }
 tempfile = { workspace = true }
 # `start_paused` runtimes, so a test about a 45s idle timeout takes no wall time.
 tokio    = { workspace = true, features = ["test-util"] }

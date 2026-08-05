@@ -44,7 +44,6 @@ const settings: SettingsView = {
     dataDir: "",
     pluginsDir: "",
     version: "0",
-    journalBackend: "file",
   },
   restartRequired: false,
 };

@@ -19,8 +19,8 @@
 mod config;
 
 use clap::Parser;
-use config::{BootConfig, BootError, JournalBackend};
-use horsie_actor::{FileJournal, Journal, spawn_root};
+use config::{BootConfig, BootError};
+use horsie_actor::{Journal, spawn_root};
 use horsie_models::settings::ServerInfo;
 use horsie_server::config::{DbConfigStore, StoreDeps, model_cards};
 use horsie_server::db::journal::SqlJournal;
@@ -75,7 +75,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     std::fs::create_dir_all(&data_dir).map_err(|e| BootError::Io(e.to_string()))?;
 
     let db_url = resolve_db_url(&cfg, &data_dir);
-    let journal_backend = config::journal_backend(&cfg);
     let info = ServerInfo {
         config_path: config_path
             .as_ref()
@@ -86,7 +85,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         data_dir: cfg.storage.data_dir.display().to_string(),
         plugins_dir: data_dir.join("plugins").display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        journal_backend: journal_backend.as_str().to_string(),
     };
     // The pool comes up on its own first. Every store below binds a user, and
     // the user comes from the account `bootstrap` creates — which needs the
@@ -149,24 +147,9 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         .await
         .map_err(BootError::Config)?;
 
-    // Built after the store, because the database backend shares its handle —
-    // one database, one migrator, one set of connections.
-    //
-    // Which journal a deployment gets is load-bearing and partly defaulted, so
-    // say it out loud: switching an existing deployment from `file` to
-    // `database` starts from an empty log and leaves the old sessions on disk.
-    let journal: Arc<dyn Journal> = match journal_backend {
-        JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
-        JournalBackend::Database => Arc::new(SqlJournal::new(opened.db.clone(), user.clone())),
-    };
-    eprintln!(
-        "journal backend: {} ({})",
-        journal_backend.as_str(),
-        match journal_backend {
-            JournalBackend::File => data_dir.join("actors").display().to_string(),
-            JournalBackend::Database => redact_db_url(&db_url),
-        }
-    );
+    // Built after the store, because it shares that handle — one database, one
+    // migrator, one set of connections.
+    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(opened.db.clone(), user.clone()));
 
     // Seed the model-card catalog: bundled defaults plus an optional operator
     // file. Seed-file parse/read errors are fatal (operator input should fail

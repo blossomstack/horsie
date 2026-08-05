@@ -1,5 +1,5 @@
 //! End-to-end tests for the session server: real axum HTTP + real event-sourced
-//! actors + real FileJournal, driven over HTTP with reqwest. Only the sandbox
+//! actors + a real `SqlJournal`, driven over HTTP with reqwest. Only the sandbox
 //! runtime (a FakeRuntimeVendor over a real WebSocket) and the LLM
 //! (MockLlmServer) are doubled.
 
@@ -128,7 +128,6 @@ async fn start_server_with(
                 data_dir: String::new(),
                 plugins_dir: String::new(),
                 version: "test".into(),
-                journal_backend: "file".into(),
             },
         },
         horsie_server::auth::UserId::new("1"),
@@ -338,7 +337,6 @@ async fn start_server_with_live_vendors(
                 data_dir: String::new(),
                 plugins_dir: String::new(),
                 version: "test".into(),
-                journal_backend: "file".into(),
             },
         },
         horsie_server::auth::UserId::new("1"),
