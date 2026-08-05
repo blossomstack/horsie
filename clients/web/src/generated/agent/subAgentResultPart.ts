@@ -1,12 +1,12 @@
 
 /**
- * A finished subagent&#x27;s result, delivered to the agent that spawned it.
+ * A finished subagent&#39;s result, delivered to the agent that spawned it.
  */
 export interface SubAgentResultPart {
   subagentId: string;
   label: string;
   /**
-   * &quot;completed&quot; | &quot;failed&quot; — the SubAgentView.status vocabulary.
+   * &#34;completed&#34; | &#34;failed&#34; — the SubAgentView.status vocabulary.
    */
   status: string;
   /**

@@ -1,7 +1,7 @@
 
 import { HookAction } from './hookAction';
 /**
- * One hook&#x27;s run, as the transcript records it.
+ * One hook&#39;s run, as the transcript records it.
  */
 export interface HookRecord {
   plugin: string;

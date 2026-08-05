@@ -131,7 +131,7 @@ jobs:
       # — bump this in lockstep with the `fluorite_codegen` workspace dep. Node is
       # preinstalled on the GitHub-hosted runner.
       - name: Install fluorite CLI
-        run: cargo install fluorite_codegen --version =0.6.0
+        run: cargo install fluorite_codegen --version =0.6.2
 
       - name: Regenerate and typecheck
         run: make ts-types

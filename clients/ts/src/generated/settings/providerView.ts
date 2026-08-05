@@ -4,11 +4,11 @@
  */
 export interface ProviderView {
   /**
-   * Provider name — the key a model&#x27;s `provider` references.
+   * Provider name — the key a model&#39;s `provider` references.
    */
   name: string;
   /**
-   * Provider kind: &quot;anthropic&quot; or &quot;openai&quot;.
+   * Provider kind: &#34;anthropic&#34; or &#34;openai&#34;.
    */
   kind: string;
   baseUrl?: string;

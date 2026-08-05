@@ -5,11 +5,11 @@ import { StepParam } from './stepParam';
  */
 export interface ProvisionStep {
   /**
-   * Display label, e.g. &quot;checkout horsie&quot;.
+   * Display label, e.g. &#34;checkout horsie&#34;.
    */
   name: string;
   /**
-   * Step kind: &quot;git_checkout&quot;.
+   * Step kind: &#34;git_checkout&#34;.
    */
   uses: string;
   /**

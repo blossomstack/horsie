@@ -10,15 +10,15 @@ export interface WorkflowStepDef {
    */
   agent: string;
   /**
-   * The step&#x27;s instruction. Whatever the step is handed — the run&#x27;s input
+   * The step&#39;s instruction. Whatever the step is handed — the run&#39;s input
    */
   prompt: string;
   /**
-   * JSON Schema for the step&#x27;s structured output. When present, the step
+   * JSON Schema for the step&#39;s structured output. When present, the step
    */
   outputSchema?: unknown;
   /**
-   * Outgoing transitions, evaluated against this step&#x27;s output.
+   * Outgoing transitions, evaluated against this step&#39;s output.
    */
   transitions?: WorkflowTransition[];
   /**

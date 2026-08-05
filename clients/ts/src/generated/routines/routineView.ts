@@ -14,7 +14,7 @@ export interface RoutineView {
    */
   agent: string;
   /**
-   * The message queued as each run&#x27;s first user message.
+   * The message queued as each run&#39;s first user message.
    */
   prompt: string;
   schedule: RoutineSchedule;

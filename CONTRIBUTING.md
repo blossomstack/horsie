@@ -24,7 +24,7 @@ make check   # cargo fmt --check, clippy -D warnings, cargo test --workspace
 ```
 
 Wire and protocol types are generated with
-[fluorite](https://github.com/zhxiaogg/fluorite) from the schemas under
+[fluorite](https://github.com/blossomstack/fluorite) from the schemas under
 `models/fluorite/` — edit the schema, not the generated Rust or TypeScript.
 Production code denies `unwrap`, `expect`, `panic`, and wildcard match arms;
 tests opt out per file.

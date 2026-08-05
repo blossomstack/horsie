@@ -4,7 +4,7 @@
  */
 export interface ModelView {
   /**
-   * The alias sessions select (e.g. &quot;sonnet&quot;).
+   * The alias sessions select (e.g. &#34;sonnet&#34;).
    */
   alias: string;
   /**
@@ -12,12 +12,12 @@ export interface ModelView {
    */
   provider: string;
   /**
-   * The provider&#x27;s model identifier (e.g. &quot;claude-sonnet-4-6&quot;).
+   * The provider&#39;s model identifier (e.g. &#34;claude-sonnet-4-6&#34;).
    */
   modelId: string;
   maxTokens?: number;
   /**
-   * The model&#x27;s total context window, in tokens. A built-in default is
+   * The model&#39;s total context window, in tokens. A built-in default is
    */
   contextWindow?: number;
   /**
@@ -33,7 +33,7 @@ export interface ModelView {
    */
   forcedToolsDisableThinking?: boolean;
   /**
-   * Wire encoding for this model&#x27;s thinking control.
+   * Wire encoding for this model&#39;s thinking control.
    */
   thinkingDialect?: string;
 }

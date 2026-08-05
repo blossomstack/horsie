@@ -1,6 +1,6 @@
 
 /**
- * A skill discovered in the shared plugin library. `rel_dir` is the skill&#x27;s
+ * A skill discovered in the shared plugin library. `rel_dir` is the skill&#39;s
  */
 export interface PluginSkill {
   plugin: string;

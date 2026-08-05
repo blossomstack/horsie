@@ -5,13 +5,13 @@
 export interface SubAgentView {
   id: string;
   /**
-   * Parent agent id; absent → the session&#x27;s main agent.
+   * Parent agent id; absent → the session&#39;s main agent.
    */
   parent?: string;
   label?: string;
   depth: number;
   /**
-   * &quot;running&quot; | &quot;completed&quot; | &quot;failed&quot;.
+   * &#34;running&#34; | &#34;completed&#34; | &#34;failed&#34;.
    */
   status: string;
   error?: string;

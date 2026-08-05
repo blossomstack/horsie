@@ -1,6 +1,6 @@
 
 /**
- * Every other event&#x27;s refusal, via top-level `decision: &quot;block&quot;` or exit 2.
+ * Every other event&#39;s refusal, via top-level `decision: &#34;block&#34;` or exit 2.
  */
 export interface HookBlocked {
   reason?: string;

@@ -12,7 +12,7 @@ export interface EnvironmentView {
   name: string;
   description: string;
   /**
-   * Runtime vendor name. Required, and never &quot;local&quot;: environments only
+   * Runtime vendor name. Required, and never &#34;local&#34;: environments only
    */
   vendor: string;
   /**
