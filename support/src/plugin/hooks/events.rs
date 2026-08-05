@@ -283,7 +283,7 @@ pub fn claude_aliases(horsie_tool: &str) -> &'static [&'static str] {
 pub fn horsie_tools_for(claude_tool: &str) -> Vec<&'static str> {
     HORSIE_TOOLS
         .iter()
-        .filter(|t| claude_aliases(t).iter().any(|a| *a == claude_tool))
+        .filter(|t| claude_aliases(t).contains(&claude_tool))
         .copied()
         .collect()
 }

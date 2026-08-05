@@ -382,9 +382,6 @@ impl FakeRuntimeVendorBuilder {
         self
     }
 
-    /// Canned stdout every `ToolCall` answers with.
-    #[must_use]
-    /// Answer each `RunHooks` with the next entry, repeating the last.
     /// Script the plugin library's agent definitions, so a test can exercise
     /// the whole selection path — spawn, resolve, prompt — over the real wire.
     #[must_use]
@@ -393,11 +390,15 @@ impl FakeRuntimeVendorBuilder {
         self
     }
 
+    /// Answer each `RunHooks` with the next entry, repeating the last.
+    #[must_use]
     pub fn hook_records(mut self, records: Vec<Vec<horsie_models::hooks::HookRecord>>) -> Self {
         self.hook_records = records;
         self
     }
 
+    /// Canned stdout every `ToolCall` answers with.
+    #[must_use]
     pub fn bash_stdout(mut self, value: &str) -> Self {
         self.bash_stdout = value.to_string();
         self

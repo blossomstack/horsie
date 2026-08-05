@@ -69,7 +69,15 @@ leaves a subagent with no tools, which is allowed — it can still answer from i
 logged.
 
 `allowed_tools` is an existing `AgentSettings` field, so honouring it is passing a different
-value, not new machinery.
+value, not new machinery. It is **intersected** with the session's own allowlist, never
+substituted for it: an agent definition is a file inside a plugin, so it may say which of the
+tools this session already grants it wants, and must not be able to grant itself one the
+operator withheld.
+
+The allowlist gates the file, shell and MCP tools — the toolbox `FilteredToolbox` wraps.
+`conclude`, the memory tools and `spawn_agent`/`subagent_status` are layered outside it and
+stay available whatever `tools` says. That is narrower than Claude Code's reading of the
+field, and is stated in the guide rather than left to be discovered.
 
 ### `model`
 
@@ -100,9 +108,13 @@ already survives offload and recovery, and the definition is a property of the p
 as it is *now* — an agent whose plugin was removed between spawn and wake must fail loudly
 rather than run with a prompt nobody can point at.
 
-The subagent's system prompt becomes the agent's body in place of `SUBAGENT_PROMPT_SUFFIX`;
-the workspace and skill sections around it are unchanged, because a named agent still works in
-the same workspace with the same skills.
+The agent's body is appended **after** `SUBAGENT_PROMPT_SUFFIX`, as its own `# Agent type:
+<name>` section, not in place of it. The generic suffix is the only place a subagent is told
+that its final message is its report, that the report must be self-contained, and that it
+cannot ask the user — and no definition measured in the wild says any of that; they open "you
+are an expert code reviewer" and stop. Replacing it would leave a typed subagent not knowing
+where its output goes. The workspace and skill sections around both are unchanged, because a
+named agent still works in the same workspace with the same skills.
 
 ## Two things that fall out
 

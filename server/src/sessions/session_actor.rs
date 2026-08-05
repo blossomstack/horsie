@@ -2382,7 +2382,17 @@ impl ContextProvider for SessionContextProvider {
                     "agent's tool allowlist names no tool horsie has; it will run with none"
                 );
             }
-            def.allowed_tools = Some(allowed);
+            // Intersected with the session's own allowlist, never substituted
+            // for it. An agent definition is a file inside a plugin: it may say
+            // which of the tools this session already grants it wants, and must
+            // not be able to grant itself one the session withheld.
+            def.allowed_tools = Some(match &def.allowed_tools {
+                None => allowed,
+                Some(session) => allowed
+                    .into_iter()
+                    .filter(|t| session.contains(t))
+                    .collect(),
+            });
         }
         // A declared `model` is honoured only when horsie actually has it.
         // Every model declared in the wild is an alias (`inherit`, `sonnet`,
@@ -2471,12 +2481,19 @@ impl ContextProvider for SessionContextProvider {
             SessionAgentKind::Sub(_) => with_spawn,
         };
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
-        // A typed subagent's role section is its plugin's prompt. The workspace
-        // and skill sections around it are untouched: a named agent still works
-        // in the same workspace, with the same skills.
-        let subagent_role = plugin_agent
-            .as_ref()
-            .map(|a| format!("\n\n# Subagent role: {}\n\n{}\n", a.def.name, a.def.prompt));
+        // A typed subagent's own section follows the generic one, it does not
+        // replace it: `SUBAGENT_PROMPT_SUFFIX` is the only place an agent is
+        // told its final message is its report and that it cannot ask the user,
+        // and no definition in the wild says either — they open "you are an
+        // expert code reviewer" and stop. The workspace and skill sections
+        // around both are untouched: a named agent still works in the same
+        // workspace, with the same skills.
+        let subagent_role = plugin_agent.as_ref().map(|a| {
+            format!(
+                "{SUBAGENT_PROMPT_SUFFIX}\n\n# Agent type: {}\n\n{}\n",
+                a.def.name, a.def.prompt
+            )
+        });
         let suffix: Option<&str> = match &self.kind {
             SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
             SessionAgentKind::Main => None,
@@ -5388,20 +5405,23 @@ mod tests {
             .unwrap()
     }
 
-    /// The agent's body replaces the generic subagent role, and its `tools`
-    /// allowlist reaches the toolbox through the same alias table hook matchers
-    /// use.
-    #[tokio::test]
-    async fn a_typed_subagent_runs_with_its_plugins_prompt() {
-        let (f, session, id) = agent_harness().await;
-        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
-
-        let provider = SessionContextProvider {
+    /// A provider for one subagent of `agent_harness`'s session, optionally
+    /// carrying a session-level tool allowlist.
+    fn typed_provider(
+        f: &ActorFixture,
+        session: &ActorRef<SessionCommand>,
+        id: Uuid,
+        sub: Uuid,
+        allowed_tools: Option<Vec<String>>,
+    ) -> SessionContextProvider {
+        let mut settings = actor_spec_fixture().agent;
+        settings.allowed_tools = allowed_tools;
+        SessionContextProvider {
             runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
-            settings: actor_spec_fixture().agent,
+            settings,
             step_output_schema: None,
             session_id: id,
             kind: SessionAgentKind::Sub(sub),
@@ -5410,12 +5430,29 @@ mod tests {
             session: session.clone(),
             frames: test_frames(),
             last_client: Mutex::new(None),
-        };
+        }
+    }
+
+    /// The agent's body is added to the generic subagent role, and its `tools`
+    /// allowlist reaches the toolbox through the same alias table hook matchers
+    /// use.
+    #[tokio::test]
+    async fn a_typed_subagent_runs_with_its_plugins_prompt() {
+        let (f, session, id) = agent_harness().await;
+        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
+
+        let provider = typed_provider(&f, &session, id, sub, None);
         let contexts = provider.provide().await.expect("contexts");
         let prompt = contexts.system_prompt.unwrap_or_default();
         assert!(
-            prompt.contains("# Subagent role: code-reviewer"),
-            "the plugin's agent names the role: {prompt}"
+            prompt.contains("# Agent type: code-reviewer"),
+            "the plugin's agent names its own section: {prompt}"
+        );
+        // The generic framing is the only place a subagent is told where its
+        // output goes; a plugin's prompt never says it, so it must survive.
+        assert!(
+            prompt.contains("Your final message is your report"),
+            "a typed subagent must still know it reports to its parent: {prompt}"
         );
         assert!(
             prompt.contains("Report only high-confidence bugs."),
@@ -5433,6 +5470,30 @@ mod tests {
         assert!(
             !tools.contains(&"bash".to_string()),
             "the allowlist must exclude what it did not name: {tools:?}"
+        );
+    }
+
+    /// An agent definition is a file inside a plugin. It may narrow the tools
+    /// the session already grants it and must not be able to widen them —
+    /// otherwise installing a plugin would hand back what an operator withheld.
+    #[tokio::test]
+    async fn an_agents_tools_cannot_widen_the_sessions_own_allowlist() {
+        let (f, session, id) = agent_harness().await;
+        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
+
+        // The session grants `grep` only; the agent asks for `Read, Grep`.
+        let provider = typed_provider(&f, &session, id, sub, Some(vec!["grep".to_string()]));
+        let contexts = provider.provide().await.expect("contexts");
+        let tools: Vec<String> = contexts
+            .toolbox
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(tools.contains(&"grep".to_string()), "{tools:?}");
+        assert!(
+            !tools.contains(&"read_file".to_string()),
+            "an agent must not grant itself a tool the session withheld: {tools:?}"
         );
     }
 

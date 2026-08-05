@@ -29,18 +29,23 @@ fn spawn_agent_spec(catalog: &AgentCatalog) -> ToolSpec {
         Spawning fails when the session's subagent limits (depth or concurrency) are \
         reached."
         .to_string();
-    let mut properties = json!({
-        "label": {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "label".to_string(),
+        json!({
             "type": "string",
             "description": "A short human-readable label for the subagent (a few words)."
-        },
-        "task": {
+        }),
+    );
+    properties.insert(
+        "task".to_string(),
+        json!({
             "type": "string",
             "description": "The complete, self-contained task for the subagent. It \
                 inherits your model and tools but not your conversation — include \
                 everything it needs to know."
-        }
-    });
+        }),
+    );
     // The catalogue goes in the description, not in a JSON `enum`: a bare list
     // of names says nothing about when to pick one, and `description` is the
     // whole point of the frontmatter field. With no agents installed the
@@ -57,17 +62,15 @@ fn spawn_agent_spec(catalog: &AgentCatalog) -> ToolSpec {
              expertise. Pass one as `agent_type` when its description fits the task \
              better than a general-purpose subagent would:\n{listing}"
         ));
-        if let Some(map) = properties.as_object_mut() {
-            map.insert(
-                "agent_type".to_string(),
-                json!({
-                    "type": "string",
-                    "description": "Name of an installed agent type, from the list above. \
-                        Omit for a general-purpose subagent that inherits your own \
-                        instructions and tools."
-                }),
-            );
-        }
+        properties.insert(
+            "agent_type".to_string(),
+            json!({
+                "type": "string",
+                "description": "Name of an installed agent type, from the list above. \
+                    Omit for a general-purpose subagent that inherits your own \
+                    instructions and tools."
+            }),
+        );
     }
     ToolSpec {
         name: SPAWN_AGENT_TOOL.to_string(),
