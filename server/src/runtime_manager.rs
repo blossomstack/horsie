@@ -18,7 +18,6 @@ use crate::runtime_vendor::{
 };
 use crate::sessions::spec::{SessionSpec, SharedVendors};
 use horsie_runtime_client::RuntimeClient;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// What can go wrong acquiring a runtime, split by what the session should do
@@ -43,8 +42,6 @@ pub enum RuntimeError {
 #[derive(Clone)]
 pub struct RuntimeDeps {
     pub vendors: SharedVendors,
-    /// Per-session server state (capability files) under `<state_dir>/sessions/<id>/`.
-    pub state_dir: PathBuf,
     pub github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,
     pub plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
 }
@@ -84,9 +81,6 @@ impl RuntimeManager {
         session: &str,
         spec: &SessionSpec,
     ) -> Result<RuntimeSpec, RuntimeError> {
-        let dir = self.deps.state_dir.join("sessions").join(session);
-        std::fs::create_dir_all(&dir).map_err(|e| RuntimeError::Provision(e.to_string()))?;
-
         let mut rt_spec = RuntimeSpec {
             workspaces: spec
                 .workspaces
@@ -278,17 +272,15 @@ impl RuntimeClientProvider {
     }
 }
 
-/// A `RuntimeManager` over the same vendor map and state dir the deps carry.
+/// A `RuntimeManager` over the vendor map the deps carry.
 /// Test-only: production builds it once in `main`.
 #[cfg(test)]
 pub(crate) fn test_runtime_manager(
     vendors: &crate::sessions::spec::SharedVendors,
-    state_dir: &std::path::Path,
 ) -> std::sync::Arc<crate::runtime_manager::RuntimeManager> {
     std::sync::Arc::new(crate::runtime_manager::RuntimeManager::new(
         crate::runtime_manager::RuntimeDeps {
             vendors: vendors.clone(),
-            state_dir: state_dir.to_path_buf(),
             github_tokens: None,
             plugins: None,
         },
@@ -334,10 +326,9 @@ mod tests {
         }
     }
 
-    fn manager(tmp: &tempfile::TempDir, vendors: SharedVendors) -> Arc<RuntimeManager> {
+    fn manager(vendors: SharedVendors) -> Arc<RuntimeManager> {
         Arc::new(RuntimeManager::new(RuntimeDeps {
             vendors,
-            state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             plugins: None,
         }))
@@ -351,8 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_when_the_vendor_name_is_not_registered() {
-        let tmp = tempfile::tempdir().unwrap();
-        let m = manager(&tmp, Arc::new(RwLock::new(HashMap::new())));
+        let m = manager(Arc::new(RwLock::new(HashMap::new())));
         let Err(err) = m.get("s1", "nope").await else {
             panic!("an unregistered vendor must not yield a client")
         };
@@ -364,12 +354,11 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_when_the_link_is_disconnected() {
-        let tmp = tempfile::tempdir().unwrap();
         let agent = FakeRuntimeVendor::builder("v")
             .serve_in_process()
             .await
             .unwrap();
-        let m = manager(&tmp, published(&agent, "v"));
+        let m = manager(published(&agent, "v"));
         agent.disconnect();
         // The link notices asynchronously; poll briefly rather than sleep-and-hope.
         let mut err = None;
@@ -387,12 +376,11 @@ mod tests {
 
     #[tokio::test]
     async fn gone_when_the_vendor_has_no_runtime() {
-        let tmp = tempfile::tempdir().unwrap();
         let agent = FakeRuntimeVendor::builder("v")
             .serve_in_process()
             .await
             .unwrap();
-        let m = manager(&tmp, published(&agent, "v"));
+        let m = manager(published(&agent, "v"));
         let Err(err) = m.get("s1", "v").await else {
             panic!("a get must never provision")
         };
@@ -404,12 +392,11 @@ mod tests {
 
     #[tokio::test]
     async fn get_returns_a_client_after_create() {
-        let tmp = tempfile::tempdir().unwrap();
         let agent = FakeRuntimeVendor::builder("v")
             .serve_in_process()
             .await
             .unwrap();
-        let m = manager(&tmp, published(&agent, "v"));
+        let m = manager(published(&agent, "v"));
         m.create("s1", "v", &session_spec("v"))
             .await
             .expect("create");
@@ -422,12 +409,11 @@ mod tests {
 
     #[tokio::test]
     async fn create_sends_the_vendor_workspace_names_not_paths() {
-        let tmp = tempfile::tempdir().unwrap();
         let agent = FakeRuntimeVendor::builder("v")
             .serve_in_process()
             .await
             .unwrap();
-        let m = manager(&tmp, published(&agent, "v"));
+        let m = manager(published(&agent, "v"));
         m.create("s1", "v", &session_spec("v"))
             .await
             .expect("create");
@@ -471,7 +457,6 @@ mod tests {
     /// what used to keep skills off the most common self-hosted vendor.
     #[tokio::test]
     async fn a_vendor_that_cannot_provision_still_receives_the_bundle_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
         let agent = FakeRuntimeVendor::builder("v")
             .supports_provisioning(false)
             .serve_in_process()
@@ -479,7 +464,6 @@ mod tests {
             .unwrap();
         let m = Arc::new(RuntimeManager::new(RuntimeDeps {
             vendors: published(&agent, "v"),
-            state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             plugins: Some(Arc::new(FakeProvisioner)),
         }));
@@ -530,7 +514,6 @@ mod tests {
 
     #[tokio::test]
     async fn create_assembles_env_fresh_each_time() {
-        let tmp = tempfile::tempdir().unwrap();
         let agent = FakeRuntimeVendor::builder("v")
             .serve_in_process()
             .await
@@ -538,7 +521,6 @@ mod tests {
         let minter = CountingMinter::new();
         let m = Arc::new(RuntimeManager::new(RuntimeDeps {
             vendors: published(&agent, "v"),
-            state_dir: tmp.path().to_path_buf(),
             github_tokens: Some(minter.clone() as Arc<dyn crate::github::GithubTokenMinter>),
             plugins: None,
         }));
@@ -579,12 +561,11 @@ mod tests {
 
     #[tokio::test]
     async fn provider_is_a_thin_handle_over_the_same_calls() {
-        let tmp = tempfile::tempdir().unwrap();
         let agent = FakeRuntimeVendor::builder("v")
             .serve_in_process()
             .await
             .unwrap();
-        let m = manager(&tmp, published(&agent, "v"));
+        let m = manager(published(&agent, "v"));
         m.create("s1", "v", &session_spec("v"))
             .await
             .expect("create");

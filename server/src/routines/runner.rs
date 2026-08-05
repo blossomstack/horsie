@@ -222,10 +222,9 @@ pub(crate) mod tests {
         let vendors = Arc::new(std::sync::RwLock::new(map));
         let registry = Arc::new(RuntimeVendorRegistry::new(vendors.clone()));
         let deps = ServerDeps {
-            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, f.tmp.path()),
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
             provider_registry: f.provider_registry.clone(),
             vendors,
-            state_dir: f.tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: None,
             plugins: None,
