@@ -1,6 +1,8 @@
 /// Protocol types for executor ↔ runtime communication
 package runtime;
 
+use hooks.HookRecord;
+
 // --- Tool inputs ---
 
 // Paths are absolute, or relative to the caller's working directory — its
@@ -94,12 +96,33 @@ struct ScanResponse {
     shared_root: Option<String>,
 }
 
-// --- SessionStart hooks ---
+// --- Server-initiated hooks ---
 
-/// Run every installed plugin's SessionStart hook inside the sandbox and return
-/// the concatenated injected context (empty when there are no hooks / no plugins).
-struct SessionStartRequest { call_id: String }
-struct SessionStartResponse { call_id: String, context: String }
+struct SessionStartInput { source: String }
+struct UserPromptSubmitInput { prompt: String }
+/// `stop_hook_active` is true when horsie is only still running because a
+/// previous `Stop` hook blocked. A cooperative hook returns early rather than
+/// looping; the server's hard cap exists for the hooks that do not.
+struct StopInput { last_assistant_message: Option<String>, stop_hook_active: bool }
+
+/// An event the server initiates, carrying that event's input.
+///
+/// Tool events are absent by construction: they run inline in the runtime with
+/// the call they guard, so asking for one out of band is unrepresentable rather
+/// than merely wrong. Only wired events have arms — promoting one of the ten
+/// described-but-unwired events adds its arm here alongside its call site.
+#[type_tag = "event"]
+union ServerHookEvent {
+    SessionStart(SessionStartInput),
+    UserPromptSubmit(UserPromptSubmitInput),
+    Stop(StopInput),
+}
+
+/// Run every matching hook for one server-initiated event inside the sandbox.
+struct RunHooksRequest  { call_id: String, event: ServerHookEvent }
+/// Every hook that ran, in execution order. Injected context is derived from
+/// these rather than carried beside them, so no event is recorded specially.
+struct RunHooksResponse { call_id: String, records: Vec<HookRecord> }
 
 // --- Inbound (executor → runtime) ---
 
@@ -119,7 +142,7 @@ union RuntimeInboundMessage {
     ToolCall(ToolCallRequest),
     CancelCall(CancelCallRequest),
     ScanWorkspace(ScanRequest),
-    SessionStart(SessionStartRequest),
+    RunHooks(RunHooksRequest),
 }
 
 // --- Outbound (runtime → executor) ---
@@ -129,46 +152,6 @@ struct ToolError  { reason: String }
 
 #[type_tag = "status"]
 union ToolResult { Ok(ToolOutput), Err(ToolError) }
-
-/// What one plugin hook did to one tool call.
-///
-/// Hooks run runtime-side, inline with the call they guard, so this rides the
-/// tool response rather than costing a round-trip of its own. Every hook that
-/// runs is reported — including one that changed nothing — because "a guard ran
-/// and allowed this" is as much a part of the audit trail as an intervention.
-/// The server journals these, so the user can see what a plugin changed.
-struct HookRecord {
-    /// The plugin that declared the hook, the event it ran for, and the tool
-    /// call it guarded. Self-contained so a journalled record needs no context
-    /// to render.
-    plugin: String,
-    event: String,
-    tool: String,
-    /// The call this record describes. The join key: without it a record cannot
-    /// be attached to the tool call it changed.
-    tool_call_id: String,
-    /// Wall-clock, so a hook slowing every tool call is visible.
-    duration_ms: u64,
-    /// The hook refused the call: exit 2, `decision: "block"`, or
-    /// `permissionDecision: "deny"`.
-    blocked: bool,
-    reason: Option<String>,
-    /// The hook could not be run to completion — spawn failure, timeout, or a
-    /// non-zero exit other than 2. Distinct from `blocked`: one is a decision,
-    /// the other an outage, and only `PreToolUse` denies on both.
-    failed: bool,
-    /// Set only when the hook rewrote the call's arguments, so the UI can show
-    /// what the agent asked for next to what actually ran. Clamped.
-    input_before: Option<String>,
-    input_after: Option<String>,
-    /// Set only when the hook rewrote the result the model sees. Clamped.
-    output_before: Option<String>,
-    output_after: Option<String>,
-    /// Injected into the model's view of the result.
-    additional_context: Option<String>,
-    /// Addressed to the user, not the model.
-    system_message: Option<String>,
-}
 
 struct ToolCallResponse {
     call_id: String,
@@ -198,5 +181,5 @@ union RuntimeOutboundMessage {
     ProvisionFailed(RuntimeProvisionFailed),
     ToolCallResponse(ToolCallResponse),
     ScanResult(ScanResponse),
-    SessionStartResult(SessionStartResponse),
+    HookRecords(RunHooksResponse),
 }

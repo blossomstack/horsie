@@ -15,6 +15,11 @@ pub struct Ingested {
     pub description: Option<String>,
     pub skill_count: u32,
     pub has_hooks: bool,
+    /// One sentence per hook event this bundle declares that horsie cannot fire.
+    /// Surfaced rather than dropped: a bundle that ingests cleanly and then has
+    /// a guard silently never run is the failure the event classification is
+    /// there to prevent.
+    pub unsupported_hooks: Vec<String>,
     pub zip_bytes: Vec<u8>,
     pub hash: String,
 }
@@ -56,6 +61,14 @@ pub fn ingest_git(url: &str, git_ref: Option<&str>) -> Result<Ingested, String> 
     let description = root.description().map(str::to_string);
     let skill_count = u32::try_from(root.skill_dirs.len()).unwrap_or(u32::MAX);
     let has_hooks = dest.join("hooks").join("hooks.json").is_file();
+    let unsupported_hooks = horsie_support::plugin::hooks::read(&dest)
+        .map(|h| {
+            h.unsupported
+                .iter()
+                .map(|(name, why)| why.explain(name))
+                .collect()
+        })
+        .unwrap_or_default();
     let zip_bytes = zip_dir(&dest)?;
     let hash = sha256_hex(&zip_bytes);
     Ok(Ingested {
@@ -64,6 +77,7 @@ pub fn ingest_git(url: &str, git_ref: Option<&str>) -> Result<Ingested, String> 
         description,
         skill_count,
         has_hooks,
+        unsupported_hooks,
         zip_bytes,
         hash,
     })
@@ -172,6 +186,44 @@ mod tests {
         assert_eq!(root.name("fallback"), "demo");
         assert_eq!(root.skill_dirs.len(), 2);
         assert!(root.is_installable());
+    }
+
+    /// A bundle whose hooks horsie cannot fire still ingests — its skills work —
+    /// but the events are named, so nothing installs to silence.
+    #[test]
+    fn unsupported_hook_events_are_reported_not_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("src");
+        let root = root.as_path();
+        std::fs::create_dir_all(root.join("skills/s")).unwrap();
+        std::fs::write(root.join("skills/s/SKILL.md"), "---\nname: s\n---\nb").unwrap();
+        std::fs::create_dir_all(root.join("hooks")).unwrap();
+        std::fs::write(
+            root.join("hooks/hooks.json"),
+            r#"{"hooks":{
+                 "PostToolUse":[{"hooks":[{"type":"command","command":"ok"}]}],
+                 "WorktreeCreate":[{"hooks":[{"type":"command","command":"x"}]}]}}"#,
+        )
+        .unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "t@t"]);
+        git(root, &["config", "user.name", "t"]);
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        let ing = ingest_git(&format!("file://{}", root.display()), None).unwrap();
+        assert!(ing.has_hooks);
+        assert_eq!(
+            ing.unsupported_hooks.len(),
+            1,
+            "{:?}",
+            ing.unsupported_hooks
+        );
+        assert!(
+            ing.unsupported_hooks[0].contains("WorktreeCreate"),
+            "{:?}",
+            ing.unsupported_hooks
+        );
     }
 
     /// `has_hooks` used to be a substring match for `"SessionStart"` in the raw

@@ -7,10 +7,10 @@ import {
   Wrench,
 } from "lucide-react";
 import { useState } from "react";
-import type { HookRecord } from "../api/types";
 import type { RenderedToolCall } from "../hooks/useSessionStream";
 import { ASK_USER_TOOL } from "../lib/askUser";
 import { cn } from "../lib/cn";
+import { deniesCall, hookSummary, systemMessage } from "../lib/hookSummary";
 import { AskUserCard } from "./AskUserCard";
 
 function stringifyInput(input: unknown): string {
@@ -45,19 +45,6 @@ function inputPreview(input: unknown): string | null {
   return null;
 }
 
-/** What a hook did, in a few words. The record is the audit trail; this is the
- * line a person reads without unpacking it. */
-function hookSummary(h: HookRecord): string {
-  if (h.failed) return h.reason ?? "could not run — the call was denied";
-  if (h.blocked) return h.reason ?? "denied the call";
-  const rewrote = [
-    h.inputBefore != null || h.inputAfter != null ? "input" : null,
-    h.outputBefore != null || h.outputAfter != null ? "output" : null,
-  ].filter(Boolean);
-  if (rewrote.length > 0) return `rewrote the ${rewrote.join(" and ")}`;
-  return "allowed";
-}
-
 /** A logged tool call. Collapsed it is one line of the recording; expanded it
  * shows the raw input and output on recessed screens, because these operators
  * came to read exactly what the machine sent and got back. */
@@ -68,7 +55,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
   const hasOutput = call.output !== undefined && call.output.length > 0;
   // A denial the model saw as an error is the one hook outcome that changes what
   // the row means, so it is named on the collapsed line.
-  const blocked = call.hooks.find((h) => h.blocked || h.failed);
+  const blocked = call.hooks.find(deniesCall);
   const inputStr = stringifyInput(call.input);
 
   return (
@@ -161,37 +148,48 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
             <div data-testid="tool-call-hooks">
               <span className="legend">Plugin hooks</span>
               <ul className="mt-1 space-y-1">
-                {call.hooks.map((h, i) => (
-                  <li
-                    key={`${h.plugin}:${h.event}:${i}`}
-                    className="flex items-start gap-1.5 font-mono text-[0.6875rem] leading-relaxed"
-                    data-testid="tool-call-hook"
-                  >
-                    {h.blocked || h.failed ? (
-                      <ShieldBan
-                        size={12}
-                        className="mt-px shrink-0 text-red-ink"
-                        aria-hidden
-                      />
-                    ) : (
-                      <ShieldCheck
-                        size={12}
-                        className="mt-px shrink-0 text-lamp-ok"
-                        aria-hidden
-                      />
-                    )}
-                    <span className="text-legend">{h.plugin}</span>
-                    <span className="text-faint">{h.event}</span>
-                    <span
-                      className={cn(
-                        "min-w-0 flex-1",
-                        h.blocked || h.failed ? "text-red-ink" : "text-dim",
-                      )}
+                {call.hooks.map((h, i) => {
+                  const { text, intervened } = hookSummary(h);
+                  const note = systemMessage(h);
+                  return (
+                    <li
+                      key={`${h.plugin}:${h.action.event}:${i}`}
+                      className="font-mono text-[0.6875rem] leading-relaxed"
+                      data-testid="tool-call-hook"
                     >
-                      {hookSummary(h)}
-                    </span>
-                  </li>
-                ))}
+                      <div className="flex items-start gap-1.5">
+                        {intervened ? (
+                          <ShieldBan
+                            size={12}
+                            className="mt-px shrink-0 text-red-ink"
+                            aria-hidden
+                          />
+                        ) : (
+                          <ShieldCheck
+                            size={12}
+                            className="mt-px shrink-0 text-lamp-ok"
+                            aria-hidden
+                          />
+                        )}
+                        <span className="text-legend">{h.plugin}</span>
+                        <span className="text-faint">{h.action.event}</span>
+                        <span
+                          className={cn(
+                            "min-w-0 flex-1",
+                            intervened ? "text-red-ink" : "text-dim",
+                          )}
+                        >
+                          {text}
+                        </span>
+                      </div>
+                      {/* Addressed to the user, not the model — captured since
+                          #140 and shown to nobody until now. */}
+                      {note && (
+                        <p className="mt-0.5 pl-[18px] text-amber-ink">{note}</p>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}

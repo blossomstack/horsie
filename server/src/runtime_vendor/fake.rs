@@ -14,7 +14,7 @@
 use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, WorkspaceSpec};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
+    RunHooksResponse, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse,
     ToolCallResponse, ToolOutput, ToolResult, WorkspaceScan,
 };
 use horsie_models::runtime_vendor::{
@@ -47,6 +47,42 @@ struct Recorder {
     cancels: Mutex<Vec<String>>,
     /// Why the server refused to publish this agent, if it did.
     rejection: Mutex<Option<String>>,
+    /// Every `ServerHookEvent` this fake was asked to run, in order — how a test
+    /// proves what went on the wire, `stop_hook_active` above all.
+    server_hook_events: Mutex<Vec<horsie_models::runtime::ServerHookEvent>>,
+    hook_runs: Mutex<std::collections::HashMap<String, usize>>,
+}
+
+/// The event a `ServerHookEvent` names.
+fn event_name(event: &horsie_models::runtime::ServerHookEvent) -> &'static str {
+    use horsie_models::runtime::ServerHookEvent as E;
+    match event {
+        E::SessionStart(_) => "SessionStart",
+        E::UserPromptSubmit(_) => "UserPromptSubmit",
+        E::Stop(_) => "Stop",
+    }
+}
+
+/// The event a `HookAction` records.
+fn action_name(action: &horsie_models::hooks::HookAction) -> &'static str {
+    use horsie_models::hooks::HookAction as A;
+    match action {
+        A::PreToolUse(_) => "PreToolUse",
+        A::PostToolUse(_) => "PostToolUse",
+        A::PostToolUseFailure(_) => "PostToolUseFailure",
+        A::PostToolBatch(_) => "PostToolBatch",
+        A::SessionStart(_) => "SessionStart",
+        A::SessionEnd(_) => "SessionEnd",
+        A::UserPromptSubmit(_) => "UserPromptSubmit",
+        A::Stop(_) => "Stop",
+        A::StopFailure(_) => "StopFailure",
+        A::SubagentStart(_) => "SubagentStart",
+        A::SubagentStop(_) => "SubagentStop",
+        A::TaskCreated(_) => "TaskCreated",
+        A::TaskCompleted(_) => "TaskCompleted",
+        A::Notification(_) => "Notification",
+        A::CwdChanged(_) => "CwdChanged",
+    }
 }
 
 impl Recorder {
@@ -133,6 +169,7 @@ impl FakeRuntimeVendor {
             instance_id: uuid::Uuid::new_v4().to_string(),
             supports_provisioning: true,
             bash_stdout: "ok".to_string(),
+            hook_records: Vec::new(),
             faults: Faults::default(),
             block: false,
             resume: None,
@@ -261,6 +298,10 @@ pub struct FakeRuntimeVendorBuilder {
     instance_id: String,
     supports_provisioning: bool,
     bash_stdout: String,
+    /// Records this fake answers each `RunHooks` with, in order; the last entry
+    /// repeats once exhausted. A `Stop` continuation loop asks many times, and a
+    /// script that ran dry would look like a hook that stopped blocking.
+    hook_records: Vec<Vec<horsie_models::hooks::HookRecord>>,
     faults: Faults,
     block: bool,
     /// Runtime state carried over from a previous agent process — see
@@ -312,6 +353,12 @@ impl FakeRuntimeVendorBuilder {
 
     /// Canned stdout every `ToolCall` answers with.
     #[must_use]
+    /// Answer each `RunHooks` with the next entry, repeating the last.
+    pub fn hook_records(mut self, records: Vec<Vec<horsie_models::hooks::HookRecord>>) -> Self {
+        self.hook_records = records;
+        self
+    }
+
     pub fn bash_stdout(mut self, value: &str) -> Self {
         self.bash_stdout = value.to_string();
         self
@@ -482,6 +529,7 @@ async fn run_agent<S>(
         instance_id,
         supports_provisioning,
         bash_stdout,
+        hook_records,
         faults,
         block: _,
         resume: _,
@@ -682,12 +730,49 @@ async fn run_agent<S>(
                             shared_root: None,
                         }))
                     }
-                    RuntimeInboundMessage::SessionStart(req) => Some(
-                        RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
+                    RuntimeInboundMessage::RunHooks(req) => {
+                        recorder
+                            .server_hook_events
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(req.event.clone());
+                        // Scripted per event, not per call: a `SessionStart`
+                        // fires before the first turn, and a script shared with
+                        // `Stop` would have its first entry eaten by it. A
+                        // scripted `Stop` record is also not an answer any real
+                        // runtime would give to a `SessionStart`, so filtering
+                        // is the faithful reading rather than a convenience.
+                        let want = event_name(&req.event);
+                        let script: Vec<Vec<horsie_models::hooks::HookRecord>> = hook_records
+                            .iter()
+                            .map(|batch| {
+                                batch
+                                    .iter()
+                                    .filter(|r| action_name(&r.action) == want)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            })
+                            .filter(|b| !b.is_empty())
+                            .collect();
+                        let n = {
+                            let mut g = recorder
+                                .hook_runs
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            let seen = g.entry(want.to_string()).or_insert(0);
+                            *seen += 1;
+                            *seen - 1
+                        };
+                        let records = script
+                            .get(n)
+                            .or_else(|| script.last())
+                            .cloned()
+                            .unwrap_or_default();
+                        Some(RuntimeOutboundMessage::HookRecords(RunHooksResponse {
                             call_id: req.call_id,
-                            context: String::new(),
-                        }),
-                    ),
+                            records,
+                        }))
+                    }
                 };
                 answer.map(|message| {
                     RuntimeVendorEvent::Runtime(RuntimeRelayResponse {

@@ -5,6 +5,7 @@ import type {
   RenderedMessage,
   RenderedSubAgent,
   RenderedToolCall,
+  TranscriptItem,
 } from "../hooks/useSessionStream";
 
 function tool(id: string, endedAtMs?: number): RenderedToolCall {
@@ -122,13 +123,19 @@ function user(m: Partial<RenderedMessage> & { id: string }): RenderedMessage {
   };
 }
 
+/** `groupTurns` reads transcript items, of which a message is one kind. */
+const item = (m: RenderedMessage): TranscriptItem => ({
+  kind: "message",
+  value: m,
+});
+
 describe("subagent results in a turn", () => {
   /** The point of the whole change: a delegating session must not read as if
    *  the person kept pasting reports to themselves. */
   it("attaches an owed-only result to the preceding assistant entry", () => {
     const turns = groupTurns([
-      assistant({ id: "a1", text: "delegating" }),
-      user({ id: "u1", subagentResults: [sub("audit")] }),
+      item(assistant({ id: "a1", text: "delegating" })),
+      item(user({ id: "u1", subagentResults: [sub("audit")] })),
     ]);
     expect(turns).toHaveLength(1);
     expect(turns[0].kind).toBe("assistant");
@@ -136,12 +143,14 @@ describe("subagent results in a turn", () => {
 
   it("puts results above the bubble when a turn carries both", () => {
     const turns = groupTurns([
-      assistant({ id: "a1", text: "delegating" }),
-      user({
-        id: "u1",
-        text: "check the lockfile too",
-        subagentResults: [sub("audit")],
-      }),
+      item(assistant({ id: "a1", text: "delegating" })),
+      item(
+        user({
+          id: "u1",
+          text: "check the lockfile too",
+          subagentResults: [sub("audit")],
+        }),
+      ),
     ]);
     expect(turns.map((t) => t.kind)).toEqual(["assistant", "user"]);
     const first = turns[0];
@@ -153,7 +162,9 @@ describe("subagent results in a turn", () => {
   });
 
   it("opens an assistant entry when a result has nothing to attach to", () => {
-    const turns = groupTurns([user({ id: "u1", subagentResults: [sub("audit")] })]);
+    const turns = groupTurns([
+      item(user({ id: "u1", subagentResults: [sub("audit")] })),
+    ]);
     expect(turns).toHaveLength(1);
     expect(turns[0].kind).toBe("assistant");
   });

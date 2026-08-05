@@ -8,17 +8,25 @@ import { ToolCallCard } from "./ToolCallCard";
 // fires; without this the second render's queries see the first test's DOM.
 afterEach(cleanup);
 
-function hook(overrides: Partial<HookRecord> = {}): HookRecord {
-  return {
-    plugin: "guard",
-    event: "PreToolUse",
-    tool: "bash",
-    toolCallId: "tc1",
-    durationMs: 4,
-    blocked: false,
-    failed: false,
-    ...overrides,
-  };
+const CALL = { tool: "bash", toolCallId: "tc1" };
+
+function hook(action: HookRecord["action"], plugin = "guard"): HookRecord {
+  return { plugin, durationMs: 4, action };
+}
+
+/** The common case: a `PreToolUse` guard that let the call through. */
+function allowed(plugin = "guard"): HookRecord {
+  return hook(
+    {
+      event: "PreToolUse",
+      value: {
+        call: CALL,
+        systemMessage: undefined,
+        outcome: { outcome: "Allowed", value: { input: undefined } },
+      },
+    },
+    plugin,
+  );
 }
 
 function call(overrides: Partial<RenderedToolCall> = {}): RenderedToolCall {
@@ -46,7 +54,19 @@ describe("ToolCallCard hook records", () => {
     render(
       <ToolCallCard
         call={call({
-          hooks: [hook({ blocked: true, reason: "writes are not allowed" })],
+          hooks: [
+            hook({
+              event: "PreToolUse",
+              value: {
+                call: CALL,
+                systemMessage: undefined,
+                outcome: {
+                  outcome: "Denied",
+                  value: { reason: "writes are not allowed" },
+                },
+              },
+            }),
+          ],
         })}
       />,
     );
@@ -60,19 +80,42 @@ describe("ToolCallCard hook records", () => {
   it("lists every hook that ran once expanded, allowed ones included", () => {
     render(
       <ToolCallCard
-        call={{
-          ...call(),
+        call={call({
           hooks: [
-            hook(),
-            hook({ plugin: "linter", event: "PostToolUse" }),
-            hook({
-              plugin: "redactor",
-              event: "PostToolUse",
-              outputBefore: "secret",
-              outputAfter: "***",
-            }),
+            allowed(),
+            hook(
+              {
+                event: "PostToolUse",
+                value: {
+                  call: CALL,
+                  systemMessage: undefined,
+                  outcome: {
+                    outcome: "Ran",
+                    value: { output: undefined, additionalContext: undefined },
+                  },
+                },
+              },
+              "linter",
+            ),
+            hook(
+              {
+                event: "PostToolUse",
+                value: {
+                  call: CALL,
+                  systemMessage: undefined,
+                  outcome: {
+                    outcome: "Ran",
+                    value: {
+                      output: { before: "secret", after: "***" },
+                      additionalContext: undefined,
+                    },
+                  },
+                },
+              },
+              "redactor",
+            ),
           ],
-        }}
+        })}
       />,
     );
     expect(screen.queryByTestId("tool-call-hook-blocked")).toBeNull();
@@ -87,7 +130,23 @@ describe("ToolCallCard hook records", () => {
   // an intervention rather than as a hook that quietly passed.
   it("treats a hook that failed to run as an intervention", () => {
     render(
-      <ToolCallCard call={call({ hooks: [hook({ failed: true })] })} />,
+      <ToolCallCard
+        call={call({
+          hooks: [
+            hook({
+              event: "PreToolUse",
+              value: {
+                call: CALL,
+                systemMessage: undefined,
+                outcome: {
+                  outcome: "Failed",
+                  value: { reason: "spawn failed" },
+                },
+              },
+            }),
+          ],
+        })}
+      />,
     );
     expect(screen.getByTestId("tool-call-hook-blocked").textContent).toContain(
       "Blocked by guard",
@@ -95,6 +154,34 @@ describe("ToolCallCard hook records", () => {
     fireEvent.click(screen.getByTestId("tool-call-toggle"));
     expect(screen.getByTestId("tool-call-hook").textContent).toContain(
       "could not run",
+    );
+  });
+
+  // The field that has been parsed, stored, put on the wire and read by nobody
+  // since #140.
+  it("shows a system message addressed to the user", () => {
+    render(
+      <ToolCallCard
+        call={call({
+          hooks: [
+            hook({
+              event: "PostToolUse",
+              value: {
+                call: CALL,
+                systemMessage: "this repo pins node 22",
+                outcome: {
+                  outcome: "Ran",
+                  value: { output: undefined, additionalContext: undefined },
+                },
+              },
+            }),
+          ],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("tool-call-toggle"));
+    expect(screen.getByTestId("tool-call-hook").textContent).toContain(
+      "this repo pins node 22",
     );
   });
 });

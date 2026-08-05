@@ -97,7 +97,24 @@ export default async function globalSetup(): Promise<void> {
     path.join(hooksDir, "hooks.json"),
     JSON.stringify({
       hooks: {
-        SessionStart: [{ hooks: [{ type: "command", command: "echo E2E_BOOTSTRAP_MARKER" }] }],
+        SessionStart: [
+          { hooks: [{ type: "command", command: "echo E2E_BOOTSTRAP_MARKER" }] },
+        ],
+        // A tool-scoped record alongside the standalone one, so both transcript
+        // renderings come from one fixture. `systemMessage` is addressed to the
+        // user, which is what group T asserts survives a reload.
+        PostToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [
+              {
+                type: "command",
+                command: `printf '{"systemMessage":"E2E_HOOK_NOTE"}'`,
+                timeout: 5,
+              },
+            ],
+          },
+        ],
       },
     }),
   );

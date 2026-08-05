@@ -1,10 +1,13 @@
 import { useRef } from "react";
+import type { HookRecord } from "../api/types";
 import { cn } from "../lib/cn";
 import type {
   RenderedMessage,
   RenderedToolCall,
+  TranscriptItem,
 } from "../hooks/useSessionStream";
 import { buildSegments, type Segment } from "../lib/transcriptSegments";
+import { HookNoticeRow } from "./HookNoticeRow";
 import { Prose } from "./Prose";
 import { ToolCallCard } from "./ToolCallCard";
 import { TurnActions } from "./TurnActions";
@@ -170,16 +173,28 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
  * always start a fresh one. */
 export type TurnGroup =
   | { kind: "user"; msg: RenderedMessage }
-  | { kind: "assistant"; id: string; msgs: RenderedMessage[] };
+  | { kind: "assistant"; id: string; msgs: RenderedMessage[] }
+  // Never folded into an assistant turn: a plugin acting *around* the
+  // conversation is not something the agent said.
+  | { kind: "notice"; id: string; record: HookRecord };
 
-export function groupTurns(messages: RenderedMessage[]): TurnGroup[] {
+export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
   const turns: TurnGroup[] = [];
   const intoAssistant = (m: RenderedMessage) => {
     const last = turns[turns.length - 1];
     if (last?.kind === "assistant") last.msgs.push(m);
     else turns.push({ kind: "assistant", id: m.id, msgs: [m] });
   };
-  for (const m of messages) {
+  for (const item of items) {
+    if (item.kind === "notice") {
+      turns.push({
+        kind: "notice",
+        id: item.value.id,
+        record: item.value.record,
+      });
+      continue;
+    }
+    const m = item.value;
     if (m.role === "User") {
       // A subagent's result rides a user message because the providers demand
       // it, but it is the agent's own work landing — not something the person
@@ -203,19 +218,19 @@ export function groupTurns(messages: RenderedMessage[]): TurnGroup[] {
 }
 
 export function Transcript({
-  messages,
+  items,
   streaming,
   orphanTools,
   showLive,
   showThinking,
 }: {
-  messages: RenderedMessage[];
+  items: TranscriptItem[];
   streaming: string;
   orphanTools: RenderedToolCall[];
   showLive: boolean;
   showThinking: boolean;
 }) {
-  const turns = groupTurns(messages);
+  const turns = groupTurns(items);
   // Gated on session status alone (not on whether content has arrived yet) so
   // the live tail — and its caret — is reachable during the gap between
   // "Running" and the first token or tool.
@@ -227,7 +242,9 @@ export function Transcript({
   return (
     <div className="mx-auto flex w-full max-w-[54rem] flex-col gap-7 px-4 py-7 sm:px-6">
       {turns.map((t, i) =>
-        t.kind === "user" ? (
+        t.kind === "notice" ? (
+          <HookNoticeRow key={t.id} record={t.record} />
+        ) : t.kind === "user" ? (
           <UserTurn key={t.msg.id} msg={t.msg} />
         ) : (
           <AssistantTurn

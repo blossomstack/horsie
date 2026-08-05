@@ -1,7 +1,8 @@
 use async_trait::async_trait;
+use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
-    CancelCallRequest, HookRecord, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest,
-    ScanResponse, SessionStartRequest, ToolCall, ToolCallRequest, ToolResult,
+    CancelCallRequest, RunHooksRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest,
+    ScanResponse, ServerHookEvent, ToolCall, ToolCallRequest, ToolResult,
 };
 use thiserror::Error;
 
@@ -58,7 +59,7 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::Provisioning(_)
             | RuntimeOutboundMessage::ProvisionFailed(_)
             | RuntimeOutboundMessage::ScanResult(_)
-            | RuntimeOutboundMessage::SessionStartResult(_) => Err(wrong_reply("a tool call")),
+            | RuntimeOutboundMessage::HookRecords(_) => Err(wrong_reply("a tool call")),
         }
     }
 
@@ -97,25 +98,33 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::Provisioning(_)
             | RuntimeOutboundMessage::ProvisionFailed(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
-            | RuntimeOutboundMessage::SessionStartResult(_) => Err(wrong_reply("a workspace scan")),
+            | RuntimeOutboundMessage::HookRecords(_) => Err(wrong_reply("a workspace scan")),
         }
     }
 
-    /// Run the shared plugin library's `SessionStart` hooks in the sandbox and return
-    /// their concatenated injected context (empty when there are none).
-    async fn run_session_start(&self, call_id: &str) -> Result<String, TransportError> {
+    /// Run every hook matching a server-initiated `event` in the sandbox.
+    ///
+    /// The general form of what used to be a `SessionStart`-only RPC. Injected
+    /// context is derived from the records by the caller rather than carried
+    /// beside them, so no event is reported specially.
+    async fn run_hooks(
+        &self,
+        call_id: &str,
+        event: &ServerHookEvent,
+    ) -> Result<Vec<HookRecord>, TransportError> {
         let reply = self
-            .relay(RuntimeInboundMessage::SessionStart(SessionStartRequest {
+            .relay(RuntimeInboundMessage::RunHooks(RunHooksRequest {
                 call_id: call_id.to_string(),
+                event: event.clone(),
             }))
             .await?;
         match reply {
-            RuntimeOutboundMessage::SessionStartResult(resp) => Ok(resp.context),
+            RuntimeOutboundMessage::HookRecords(resp) => Ok(resp.records),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::Provisioning(_)
             | RuntimeOutboundMessage::ProvisionFailed(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
-            | RuntimeOutboundMessage::ScanResult(_) => Err(wrong_reply("a session start")),
+            | RuntimeOutboundMessage::ScanResult(_) => Err(wrong_reply("a hook run")),
         }
     }
 }
@@ -137,7 +146,7 @@ pub fn inbound_call_id(message: &RuntimeInboundMessage) -> &str {
         RuntimeInboundMessage::ToolCall(req) => &req.call_id,
         RuntimeInboundMessage::CancelCall(req) => &req.call_id,
         RuntimeInboundMessage::ScanWorkspace(req) => &req.call_id,
-        RuntimeInboundMessage::SessionStart(req) => &req.call_id,
+        RuntimeInboundMessage::RunHooks(req) => &req.call_id,
     }
 }
 
@@ -148,7 +157,7 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
     match message {
         RuntimeOutboundMessage::ToolCallResponse(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::ScanResult(resp) => Some(&resp.call_id),
-        RuntimeOutboundMessage::SessionStartResult(resp) => Some(&resp.call_id),
+        RuntimeOutboundMessage::HookRecords(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::Ready(_)
         | RuntimeOutboundMessage::Provisioning(_)
         | RuntimeOutboundMessage::ProvisionFailed(_) => None,

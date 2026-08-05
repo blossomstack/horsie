@@ -126,6 +126,18 @@ pub mod github {
     include!(concat!(env!("OUT_DIR"), "/github/mod.rs"));
 }
 
+// `large_enum_variant`: `HookAction`'s arms differ by a few optional strings
+// each. The types are fluorite-generated, so boxing a variant isn't available
+// here, and a record is moved once per hook run — not on a hot path.
+#[allow(
+    clippy::doc_markdown,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant
+)]
+pub mod hooks {
+    include!(concat!(env!("OUT_DIR"), "/hooks/mod.rs"));
+}
+
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod mcp {
     include!(concat!(env!("OUT_DIR"), "/mcp/mod.rs"));

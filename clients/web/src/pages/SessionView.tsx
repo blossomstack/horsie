@@ -196,7 +196,7 @@ export function SessionView() {
       return;
     }
     if (stick.current) el.scrollTop = el.scrollHeight;
-  }, [stream.messages, stream.streaming, stream.orphanTools.length]);
+  }, [stream.items, stream.streaming, stream.orphanTools.length]);
 
   // Reset scroll intent when switching sessions.
   useEffect(() => {
@@ -354,12 +354,12 @@ export function SessionView() {
             data-testid="transcript-scroll"
             className="flex-1 overflow-y-auto"
           >
-            {isLoading && stream.messages.length === 0 ? (
+            {isLoading && stream.items.length === 0 ? (
               <div className="flex h-full items-center justify-center gap-2">
                 <span className="lamp lamp-live text-amber-ink" aria-hidden />
                 <span className="legend">Loading transcript</span>
               </div>
-            ) : stream.messages.length === 0 &&
+            ) : stream.items.length === 0 &&
               stream.streaming.length === 0 &&
               status !== SessionStatusKind.Running ? (
               // No status badge here: the header strip carries the session's
@@ -400,7 +400,7 @@ export function SessionView() {
                   </div>
                 )}
                 <Transcript
-                  messages={stream.messages}
+                  items={stream.items}
                   streaming={stream.streaming}
                   orphanTools={stream.orphanTools}
                   showLive={status === SessionStatusKind.Running}

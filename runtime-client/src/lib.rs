@@ -4,7 +4,7 @@ pub mod testkit;
 pub mod tools;
 mod transport;
 
-pub use client::{HookSink, RuntimeCallError, RuntimeClient};
+pub use client::{HookSink, RuntimeCallError, RuntimeClient, injected_context};
 #[cfg(any(test, feature = "test-util"))]
 pub use testkit::{BlockHandle, MockTransport, TransportOutcome, TransportProbe};
 pub use tools::add_runtime_tools;
