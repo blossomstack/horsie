@@ -75,9 +75,16 @@ export class MockLlm {
   }
 }
 
-export const test = base.extend<{ appBase: string; mock: MockLlm }>({
+export const test = base.extend<{
+  appBase: string;
+  mock: MockLlm;
+  marketplaceUrl: string;
+}>({
   appBase: async ({}, use) => {
     await use(readRuntimeInfo().baseURL);
+  },
+  marketplaceUrl: async ({}, use) => {
+    await use(readRuntimeInfo().marketplaceUrl);
   },
   mock: async ({}, use) => {
     await use(new MockLlm(readRuntimeInfo().mockUrl));

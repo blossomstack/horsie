@@ -21,6 +21,8 @@ export interface RuntimeInfo {
   mockUrl: string;
   /** Temp root holding config, storage, scratch workspace, and process logs. */
   tmpDir: string;
+  /** `file://` URL of a two-entry git marketplace fixture (group U). */
+  marketplaceUrl: string;
   /** PIDs of the spawned processes (mock, server, runtime) to kill at teardown. */
   pids: number[];
 }

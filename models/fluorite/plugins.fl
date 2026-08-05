@@ -3,7 +3,8 @@ package plugins;
 
 /// A library entry as shown in the web UI (metadata only — never the bytes).
 struct PluginView {
-    /// Canonical bundle name (from plugin.json, else repo basename).
+    /// Canonical bundle name (from plugin.json, else the marketplace entry's
+    /// name, else the repo basename).
     name: String,
     description: Option<String>,
     /// Resolved version (manifest version, else the cloned commit sha).
@@ -12,17 +13,64 @@ struct PluginView {
     source_ref: Option<String>,
     /// Number of SKILL.md skills the bundle provides.
     skill_count: u32,
-    /// Whether the bundle ships a SessionStart hook.
+    /// Whether the bundle ships hooks horsie will run.
     has_hooks: bool,
     /// Pre-checked in the new-session bundle picker.
     enabled_default: bool,
     artifact_size: u64,
+    /// The marketplace this bundle came from, when it came from one. A bundle
+    /// installed from a plain git URL has none.
+    marketplace: Option<String>,
 }
 
-/// Install a publicly shared bundle from a git repo.
-struct PluginInstallInput {
+/// One plugin a marketplace offers, as cached from its index.
+struct MarketplacePluginView {
+    name: String,
+    description: Option<String>,
+    version: Option<String>,
+    /// True when a bundle installed from this entry is already in the library,
+    /// so the picker can say "installed" instead of offering it again.
+    installed: bool,
+}
+
+/// A registered marketplace and the catalogue it last offered.
+struct MarketplaceView {
+    /// The index's declared name, else the repo basename. Primary key.
+    name: String,
     source_url: String,
     source_ref: Option<String>,
+    plugin_count: u32,
+    /// When the index was last read, epoch millis as a string.
+    updated_at: String,
+    plugins: Vec<MarketplacePluginView>,
+    /// Entries the index declared that could not be parsed. Shown rather than
+    /// dropped: a catalogue that quietly lost three plugins is a bug report
+    /// nobody files.
+    skipped: Vec<String>,
+}
+
+/// Install a bundle, or register the catalogue a URL turned out to be.
+///
+/// Exactly one of `source_url` and the `(marketplace, plugin_name)` pair must be
+/// given; the other two fields are then absent. Four optional fields rather than
+/// a union is a deliberate trade: this is an existing wire type, and a union
+/// would buy compile-time safety over one runtime check at the cost of
+/// reshaping every call site.
+struct PluginInstallInput {
+    source_url: Option<String>,
+    source_ref: Option<String>,
+    marketplace: Option<String>,
+    plugin_name: Option<String>,
+}
+
+/// What a pasted URL turned out to be.
+#[type_tag = "outcome"]
+union InstallOutcome {
+    // A plain bundle repo, or a marketplace declaring exactly one plugin.
+    Installed(PluginView),
+    // Several plugins on offer: the source is recorded and its index cached,
+    // and the caller picks from `MarketplaceView.plugins`.
+    Marketplace(MarketplaceView),
 }
 
 /// Toggle whether a bundle is pre-selected for new sessions.

@@ -14,12 +14,40 @@ See [Runtime vendors](runtime-vendors.md).
 
 Open **Settings → Skills**:
 
-1. Enter a **Git URL** for the bundle repository, and an optional **ref**
-   (branch/tag/commit).
-2. Install it. The server clones the repo and adds it to your bundle library.
+1. Enter a **Git URL**, and an optional **ref** (branch/tag/commit).
+2. Install it. The server clones the repo and works out what it found.
+
+One box handles both shapes, because you should not have to know which you have
+before pasting it:
+
+- **A bundle repo** — or a marketplace publishing exactly one plugin — installs
+  straight into your library.
+- **A marketplace of several plugins** — the source is added to a
+  **Marketplaces** section on the same page, opened, listing what it offers.
+  Install any of them with one click; the picker marks the ones you already
+  have.
 
 Each installed bundle lists its name, version, skill count, a **hooks** badge if
-it ships hooks, and a description.
+it ships hooks, the marketplace it came from if it came from one, and a
+description.
+
+## Manage marketplaces
+
+Registered sources appear on the Skills page, each with a filter box (the public
+catalogue lists ~276 plugins) and two buttons:
+
+- **Refresh** — re-clone the source and re-read its index, picking up plugins
+  published since you added it. There is no automatic refresh; the cached index
+  is a snapshot until you ask for a new one.
+- **Remove** — drop the source. **Bundles installed from it stay installed** —
+  dropping a source is not dropping the software. Delete them individually if
+  that is what you want.
+
+Entries an index declares but horsie could not parse are named on the row rather
+than dropped, so a catalogue that has quietly lost a plugin is visible.
+
+To add a marketplace, paste its URL into the install box. There is deliberately
+no separate "add marketplace" form: one box, one place to paste.
 
 ## Manage bundles
 
@@ -56,9 +84,14 @@ from a plugin library on that machine instead of server bundles:
 2. Start `horsie connect` as usual — it passes the library to the runtime
    automatically. The confirmation line shows `plugins: N installed from …`.
 
-Every session on that runtime then sees the library's skills, and plugin
-`SessionStart` hooks run on your machine when a session starts. Installs and
-updates are picked up on the next session scan — no reconnect needed.
+Every session on that runtime then sees the library's skills, and the plugin
+hooks horsie supports run on your machine. Installs and updates are picked up on
+the next session scan — no reconnect needed.
+
+horsie runs four hook events today: `SessionStart` and `Stop` around a turn, and
+`PreToolUse`/`PostToolUse` around every tool call. A bundle declaring an event
+horsie cannot fire still installs — its skills work — and the events it cannot
+run are named rather than silently ignored.
 
 ### Where horsie looks for skills
 
@@ -71,9 +104,10 @@ horsie reads the repository's own plugin packaging rather than guessing:
   from a subdirectory, this says which one.
 
 A repository whose marketplace lists *several* plugins cannot be installed by
-URL alone, because there is no way to tell which one you meant — add it as a
-marketplace and install by name instead (see below). The error lists the
-available names.
+URL alone, because there is no way to tell which one you meant. On the server,
+pasting its URL registers it as a marketplace and shows you the list; from the
+CLI, add it as a marketplace and install by name (see below) — the error lists
+the available names.
 
 ### Marketplaces
 
@@ -88,6 +122,10 @@ horsie plugin install agent-sdk-dev@claude-plugins-public
 
 `horsie marketplace list` shows what you have added and how many plugins each
 offers; `update` pulls a fresh index; `remove` drops it.
+
+The CLI's marketplaces and the server's are separate registries: one is
+per-user on a machine, the other is shared server state. They share the same
+resolution rules and the same semantics, not the same rows.
 
 Removing a marketplace does **not** uninstall plugins you installed from it —
 dropping a source is not dropping the software. Use `horsie plugin remove` for
@@ -116,8 +154,11 @@ does not apply to it.** Selecting nothing leaves the host library in place. So
 the library is the default for sessions that express no preference, and an
 explicit selection replaces it rather than adding to it.
 
-> Hooks execute with the runtime's privileges on your machine — only install
-> plugins you trust.
+> Hooks execute with the runtime's privileges on your machine, and they are not
+> only observers: a `PreToolUse` hook can deny a tool call or rewrite its input
+> before it runs, a `PostToolUse` hook can rewrite its output before the agent
+> reads it, and a `Stop` hook can refuse to let a turn end and send the agent
+> back for another round. Only install plugins you trust.
 
 ## Notes
 

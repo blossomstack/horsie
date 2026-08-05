@@ -11,6 +11,7 @@ pub mod error;
 mod github;
 mod groups;
 mod handlers;
+mod marketplaces;
 mod mcp;
 mod memory;
 mod model_cards;
@@ -183,6 +184,15 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/mcp/servers/{name}/oauth/callback",
             get(mcp::oauth_callback),
+        )
+        .route("/api/marketplaces", get(marketplaces::list))
+        .route(
+            "/api/marketplaces/{name}",
+            axum::routing::delete(marketplaces::remove),
+        )
+        .route(
+            "/api/marketplaces/{name}/refresh",
+            post(marketplaces::refresh),
         )
         .route("/api/plugins", get(plugins::list).post(plugins::install))
         .route(
@@ -358,6 +368,7 @@ mod tests {
         ));
         let plugins = Arc::new(crate::plugins::PluginService::new(
             crate::plugins::PluginStore::new(opened.db.clone()),
+            crate::plugins::MarketplaceStore::new(opened.db.clone()),
             crate::plugins::ArtifactStore::new(tmp.path().join("plugins")),
             b"test-secret".to_vec(),
         ));
@@ -1058,7 +1069,7 @@ mod tests {
     #[tokio::test]
     async fn plugins_install_list_artifact_delete_over_http() {
         use crate::plugins::PluginProvisioner;
-        use horsie_models::plugins::PluginView;
+        use horsie_models::plugins::{InstallOutcome, PluginView};
         let tmp = tempfile::tempdir().unwrap();
         // A git plugin fixture (one skill).
         let repo = tmp.path().join("fixture");
@@ -1113,7 +1124,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
-        let view: PluginView = read_json(res).await;
+        let InstallOutcome::Installed(view) = read_json::<InstallOutcome>(res).await else {
+            panic!("a plain bundle repo installs rather than registering a source");
+        };
         assert_eq!(view.name, "demo");
         assert_eq!(view.skill_count, 1);
 
@@ -1143,6 +1156,127 @@ mod tests {
         // Delete.
         let res = app.oneshot(delete("/api/plugins/demo")).await.unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// A two-entry catalogue as a `file://` repo, plus the app under test.
+    async fn app_with_catalogue(tmp: &tempfile::TempDir) -> (axum::Router, String) {
+        let repo = tmp.path().join("market");
+        std::fs::create_dir_all(repo.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            repo.join(".claude-plugin").join("marketplace.json"),
+            r#"{"name":"catalogue","plugins":[
+                 {"name":"alpha","source":"./plugins/alpha"},
+                 {"name":"beta","source":"./plugins/beta"}]}"#,
+        )
+        .unwrap();
+        for entry in ["alpha", "beta"] {
+            let d = repo.join("plugins").join(entry).join("skills").join(entry);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), format!("---\nname: {entry}\n---\nx")).unwrap();
+        }
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "i"]);
+        let url = format!("file://{}", repo.display());
+        (app(test_state(tmp).await), url)
+    }
+
+    /// The one box: the same endpoint answers "installed it" and "here is a
+    /// catalogue", so the client never has to classify a URL before sending it.
+    #[tokio::test]
+    async fn posting_a_catalogue_url_returns_a_marketplace_outcome() {
+        use horsie_models::plugins::{InstallOutcome, MarketplaceView, PluginView};
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, url) = app_with_catalogue(&tmp).await;
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/plugins",
+                &serde_json::json!({ "sourceUrl": url }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let InstallOutcome::Marketplace(view) = read_json::<InstallOutcome>(res).await else {
+            panic!("a two-entry catalogue must not install anything");
+        };
+        assert_eq!(view.name, "catalogue");
+        assert_eq!(view.plugin_count, 2);
+
+        let res = app.clone().oneshot(get("/api/marketplaces")).await.unwrap();
+        let list: Vec<MarketplaceView> = read_json(res).await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].plugins.len(), 2);
+
+        // Nothing was installed by registering the source.
+        let res = app.oneshot(get("/api/plugins")).await.unwrap();
+        let bundles: Vec<PluginView> = read_json(res).await;
+        assert!(bundles.is_empty());
+    }
+
+    /// Neither input form is a 422 with a message, not a 500.
+    #[tokio::test]
+    async fn posting_an_empty_install_input_is_unprocessable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, _url) = app_with_catalogue(&tmp).await;
+        let res = app
+            .oneshot(post_json("/api/plugins", &serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Removing a source is a 204 and leaves the bundle library alone.
+    #[tokio::test]
+    async fn deleting_a_marketplace_keeps_its_installed_bundles() {
+        use horsie_models::plugins::PluginView;
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, url) = app_with_catalogue(&tmp).await;
+
+        app.clone()
+            .oneshot(post_json(
+                "/api/plugins",
+                &serde_json::json!({ "sourceUrl": url }),
+            ))
+            .await
+            .unwrap();
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/plugins",
+                &serde_json::json!({ "marketplace": "catalogue", "pluginName": "alpha" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+
+        let res = app
+            .clone()
+            .oneshot(delete("/api/marketplaces/catalogue"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let res = app.oneshot(get("/api/plugins")).await.unwrap();
+        let bundles: Vec<PluginView> = read_json(res).await;
+        assert_eq!(bundles.len(), 1, "dropping a source keeps its software");
+        assert_eq!(bundles[0].marketplace.as_deref(), Some("catalogue"));
     }
 
     #[tokio::test]

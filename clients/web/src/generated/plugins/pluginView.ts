@@ -4,7 +4,7 @@
  */
 export interface PluginView {
   /**
-   * Canonical bundle name (from plugin.json, else repo basename).
+   * Canonical bundle name (from plugin.json, else the marketplace entry&#x27;s
    */
   name: string;
   description?: string;
@@ -19,7 +19,7 @@ export interface PluginView {
    */
   skillCount: number;
   /**
-   * Whether the bundle ships a SessionStart hook.
+   * Whether the bundle ships hooks horsie will run.
    */
   hasHooks: boolean;
   /**
@@ -27,4 +27,8 @@ export interface PluginView {
    */
   enabledDefault: boolean;
   artifactSize: number;
+  /**
+   * The marketplace this bundle came from, when it came from one. A bundle
+   */
+  marketplace?: string;
 }

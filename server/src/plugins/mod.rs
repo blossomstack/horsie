@@ -7,11 +7,13 @@
 
 mod artifact;
 mod ingest;
+mod marketplace_store;
 mod service;
 mod store;
 mod token;
 
 pub use artifact::ArtifactStore;
+pub use marketplace_store::{MarketplaceRow, MarketplaceStore};
 pub use service::PluginService;
 pub use store::{PluginRow, PluginStore};
 

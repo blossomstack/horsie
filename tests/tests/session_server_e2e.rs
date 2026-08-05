@@ -160,6 +160,7 @@ async fn start_server_with(
     ));
     let plugins = Arc::new(horsie_server::plugins::PluginService::new(
         horsie_server::plugins::PluginStore::new(opened.db.clone()),
+        horsie_server::plugins::MarketplaceStore::new(opened.db.clone()),
         horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
         b"e2e-secret".to_vec(),
     ));
@@ -337,6 +338,7 @@ async fn start_server_with_live_vendors(
     ));
     let plugins = Arc::new(horsie_server::plugins::PluginService::new(
         horsie_server::plugins::PluginStore::new(opened.db.clone()),
+        horsie_server::plugins::MarketplaceStore::new(opened.db.clone()),
         horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
         b"e2e-secret".to_vec(),
     ));

@@ -119,6 +119,44 @@ export default async function globalSetup(): Promise<void> {
     }),
   );
 
+  // A local git marketplace so group U can exercise the real ingest path —
+  // clone, parse the index, resolve an entry, pack — without the network.
+  const marketDir = path.join(tmpDir, "market");
+  for (const [entry, skill] of [
+    ["e2e-alpha", "e2e-alpha-skill"],
+    ["e2e-beta", "e2e-beta-skill"],
+  ]) {
+    const d = path.join(marketDir, "plugins", entry, "skills", skill);
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(
+      path.join(d, "SKILL.md"),
+      `---\nname: ${skill}\ndescription: E2E marketplace fixture skill\n---\nbody\n`,
+    );
+  }
+  fs.mkdirSync(path.join(marketDir, ".claude-plugin"), { recursive: true });
+  fs.writeFileSync(
+    path.join(marketDir, ".claude-plugin", "marketplace.json"),
+    JSON.stringify({
+      name: "e2e-market",
+      plugins: [
+        {
+          name: "e2e-alpha",
+          description: "the first fixture plugin",
+          source: "./plugins/e2e-alpha",
+        },
+        { name: "e2e-beta", description: "the second", source: "./plugins/e2e-beta" },
+      ],
+    }),
+  );
+  const gitIn = (args: string[]) =>
+    execFileSync("git", ["-C", marketDir, ...args], { stdio: "ignore" });
+  gitIn(["init", "-q"]);
+  gitIn(["config", "user.email", "e2e@example.com"]);
+  gitIn(["config", "user.name", "e2e"]);
+  gitIn(["add", "-A"]);
+  gitIn(["commit", "-qm", "init"]);
+  const marketplaceUrl = `file://${marketDir}`;
+
   const configPath = path.join(tmpDir, "config.json");
   fs.writeFileSync(
     configPath,
@@ -240,6 +278,7 @@ export default async function globalSetup(): Promise<void> {
       baseURL,
       mockUrl,
       tmpDir,
+      marketplaceUrl,
       pids: children.map((c) => c.pid).filter((p): p is number => typeof p === "number"),
     };
     fs.writeFileSync(RUNTIME_FILE, JSON.stringify(info, null, 2));
