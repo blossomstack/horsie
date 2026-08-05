@@ -93,12 +93,22 @@ impl HookEvent {
             // design), no context compaction, no worktrees, no file watcher, no
             // slash commands, no agent teams, no MCP elicitation, no display
             // layer. Each would need a subsystem, not a call site.
-            "UserPromptExpansion" | "PermissionRequest" | "PermissionDenied" | "PreCompact"
-            | "PostCompact" | "FileChanged" | "ConfigChange" | "DirectoryAdded" | "Setup"
-            | "MessageDisplay" | "TeammateIdle" | "WorktreeCreate" | "WorktreeRemove"
-            | "Elicitation" | "ElicitationResult" | "InstructionsLoaded" => {
-                Err(Unsupported::NoConcept)
-            }
+            "UserPromptExpansion"
+            | "PermissionRequest"
+            | "PermissionDenied"
+            | "PreCompact"
+            | "PostCompact"
+            | "FileChanged"
+            | "ConfigChange"
+            | "DirectoryAdded"
+            | "Setup"
+            | "MessageDisplay"
+            | "TeammateIdle"
+            | "WorktreeCreate"
+            | "WorktreeRemove"
+            | "Elicitation"
+            | "ElicitationResult"
+            | "InstructionsLoaded" => Err(Unsupported::NoConcept),
 
             _ => Err(Unsupported::Unknown),
         }
@@ -157,9 +167,12 @@ impl HookEvent {
     pub fn permitted(self) -> &'static [OutputField] {
         match self {
             HookEvent::PreToolUse => &[SystemMessage, Decision, PermissionDecision, UpdatedInput],
-            HookEvent::PostToolUse => {
-                &[SystemMessage, Decision, AdditionalContext, UpdatedToolOutput]
-            }
+            HookEvent::PostToolUse => &[
+                SystemMessage,
+                Decision,
+                AdditionalContext,
+                UpdatedToolOutput,
+            ],
             HookEvent::PostToolUseFailure
             | HookEvent::PostToolBatch
             | HookEvent::UserPromptSubmit
