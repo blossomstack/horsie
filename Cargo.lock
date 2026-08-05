@@ -1544,7 +1544,7 @@ dependencies = [
  "horsie-models",
  "horsie-runtime-vendor",
  "horsie-support",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "reqwest-eventsource",
  "serde",
  "serde_json",
@@ -1598,7 +1598,7 @@ dependencies = [
  "horsie-agentcore",
  "horsie-mock-llm",
  "horsie-models",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -1611,7 +1611,7 @@ version = "0.1.6"
 dependencies = [
  "async-trait",
  "axum",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1625,7 +1625,7 @@ dependencies = [
  "axum",
  "futures",
  "parking_lot",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -1654,7 +1654,7 @@ dependencies = [
  "horsie-agentcore",
  "horsie-mock-llm",
  "horsie-models",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "reqwest-eventsource",
  "serde",
  "serde_json",
@@ -1673,7 +1673,7 @@ dependencies = [
  "horsie-agentcore",
  "horsie-mock-llm",
  "horsie-models",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "reqwest-eventsource",
  "serde",
  "serde_json",
@@ -1696,7 +1696,7 @@ dependencies = [
  "libc",
  "nono",
  "regex",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1769,7 +1769,7 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "rand 0.8.6",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1810,7 +1810,7 @@ dependencies = [
  "horsie-agentcore",
  "horsie-models",
  "horsie-runtime-vendor",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -1941,22 +1941,6 @@ dependencies = [
  "tokio-rustls",
  "tower-service",
  "webpki-roots",
-]
-
-[[package]]
-name = "hyper-tls"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-util",
- "native-tls",
- "tokio",
- "tokio-native-tls",
- "tower-service",
 ]
 
 [[package]]
@@ -2154,7 +2138,7 @@ dependencies = [
  "horsie-runtime-vendor",
  "horsie-server",
  "horsie-workflow",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde_json",
  "tempfile",
  "tokio",
@@ -3271,23 +3255,16 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "cookie",
- "cookie_store",
- "encoding_rs",
  "futures-core",
  "futures-util",
- "h2",
  "http",
  "http-body",
  "http-body-util",
  "hyper",
  "hyper-rustls",
- "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
- "mime",
- "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -3299,7 +3276,6 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
- "tokio-native-tls",
  "tokio-rustls",
  "tokio-util",
  "tower",
@@ -3308,7 +3284,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
+ "wasm-streams 0.4.2",
  "web-sys",
  "webpki-roots",
 ]
@@ -3321,6 +3297,9 @@ checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "cookie",
+ "cookie_store",
+ "encoding_rs",
  "futures-channel",
  "futures-core",
  "futures-util",
@@ -3333,6 +3312,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -3345,12 +3325,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams 0.5.0",
  "web-sys",
 ]
 
@@ -5068,6 +5050,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "wasmparser"
 version = "0.244.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5133,7 +5128,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
