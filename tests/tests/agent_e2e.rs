@@ -129,9 +129,13 @@ async fn test_simple_text_completion() {
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
-        .build()
-        .unwrap();
+    let mut agent = Agent::builder(
+        provider,
+        Arc::new(horsie_agentcore::EmptyToolbox),
+        "test-conversation",
+    )
+    .build()
+    .unwrap();
     let sink = CollectSink::new();
 
     let output = agent
@@ -150,9 +154,13 @@ async fn test_simple_text_completion() {
 async fn test_text_turn_event_sequence() {
     let mock = MockLlmServer::builder().response("done").build().await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
-        .build()
-        .unwrap();
+    let mut agent = Agent::builder(
+        provider,
+        Arc::new(horsie_agentcore::EmptyToolbox),
+        "test-conversation",
+    )
+    .build()
+    .unwrap();
     let sink = CollectSink::new();
 
     agent
@@ -187,9 +195,13 @@ async fn test_text_chunks_message_id_and_content() {
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
-        .build()
-        .unwrap();
+    let mut agent = Agent::builder(
+        provider,
+        Arc::new(horsie_agentcore::EmptyToolbox),
+        "test-conversation",
+    )
+    .build()
+    .unwrap();
     let sink = CollectSink::new();
 
     agent
@@ -236,7 +248,9 @@ async fn test_tool_call_cycle() {
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
     let toolbox = FixedToolbox::new("search", serde_json::json!("search result"));
-    let mut agent = Agent::builder(provider, toolbox.clone()).build().unwrap();
+    let mut agent = Agent::builder(provider, toolbox.clone(), "test-conversation")
+        .build()
+        .unwrap();
     let sink = CollectSink::new();
 
     let output = agent
@@ -274,7 +288,9 @@ async fn test_tool_turn_event_sequence() {
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
     let toolbox = FixedToolbox::new("lookup", serde_json::json!("data"));
-    let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+    let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+        .build()
+        .unwrap();
     let sink = CollectSink::new();
 
     agent
@@ -326,7 +342,9 @@ async fn test_tool_call_id_consistency() {
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
     let toolbox = FixedToolbox::new("calc", serde_json::json!(7));
-    let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+    let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+        .build()
+        .unwrap();
     let sink = CollectSink::new();
 
     agent
@@ -383,9 +401,13 @@ async fn test_message_complete_contains_full_message() {
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
-        .build()
-        .unwrap();
+    let mut agent = Agent::builder(
+        provider,
+        Arc::new(horsie_agentcore::EmptyToolbox),
+        "test-conversation",
+    )
+    .build()
+    .unwrap();
     let sink = CollectSink::new();
 
     agent
@@ -432,7 +454,9 @@ async fn test_run_complete_usage_and_iterations() {
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
     let toolbox = FixedToolbox::new("noop", serde_json::json!(null));
-    let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+    let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+        .build()
+        .unwrap();
     let sink = CollectSink::new();
 
     agent
@@ -467,7 +491,7 @@ async fn test_agent_handoff() {
     let provider = Arc::new(provider_at(&mock.url()));
     // The handoff tool must be advertised in the toolbox.
     let toolbox = FixedToolbox::new("delegate", serde_json::json!(null));
-    let mut agent = Agent::builder(provider, toolbox)
+    let mut agent = Agent::builder(provider, toolbox, "test-conversation")
         .with_handoff_tool("delegate")
         .build()
         .unwrap();
@@ -505,9 +529,13 @@ async fn test_agent_handoff() {
 async fn test_exactly_one_run_complete() {
     let mock = MockLlmServer::builder().response("ok").build().await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
-        .build()
-        .unwrap();
+    let mut agent = Agent::builder(
+        provider,
+        Arc::new(horsie_agentcore::EmptyToolbox),
+        "test-conversation",
+    )
+    .build()
+    .unwrap();
     let sink = CollectSink::new();
 
     agent
@@ -532,9 +560,13 @@ async fn test_agent_transparent_retry_on_overload() {
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(provider, Arc::new(horsie_agentcore::EmptyToolbox))
-        .build()
-        .unwrap();
+    let mut agent = Agent::builder(
+        provider,
+        Arc::new(horsie_agentcore::EmptyToolbox),
+        "test-conversation",
+    )
+    .build()
+    .unwrap();
     let sink = CollectSink::new();
 
     let output = agent
@@ -553,7 +585,9 @@ async fn test_cancellation() {
     let mock = MockLlmServer::builder().response("never").build().await;
     let provider = Arc::new(provider_at(&mock.url()));
     let toolbox = FixedToolbox::new("t", serde_json::json!(null));
-    let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+    let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+        .build()
+        .unwrap();
     let sink = CollectSink::new();
     let token = CancellationToken::new();
     token.cancel();

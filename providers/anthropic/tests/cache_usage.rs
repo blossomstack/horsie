@@ -113,6 +113,7 @@ async fn usage_for(
         tool_choice: ToolChoice::Auto,
         max_tokens: None,
         thinking_effort: None,
+        conversation_id: "test-conversation",
     };
     provider
         .complete(request, "msg-1", &NullSink)

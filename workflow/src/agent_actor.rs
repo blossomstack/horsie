@@ -812,6 +812,10 @@ impl AgentActor {
                 contexts.provider,
                 toolbox,
                 sink,
+                // This agent's own identity: the session id for a main agent, a
+                // subagent's own uuid for a subagent. Each has its own history
+                // and so its own cacheable prefix.
+                session_id.to_string(),
                 system_prompt,
                 handoff_tool,
                 force_handoff_choice,
@@ -1922,6 +1926,7 @@ async fn run_with_retries(
     provider: Arc<dyn LlmProvider>,
     toolbox: Arc<dyn Toolbox>,
     sink: Arc<dyn EventSink>,
+    conversation_id: String,
     system_prompt: String,
     handoff_tool: Option<String>,
     force_handoff_choice: bool,
@@ -1942,7 +1947,7 @@ async fn run_with_retries(
             thinking_effort,
             ..AgentConfig::default()
         };
-        let mut builder = Agent::builder(provider.clone(), toolbox.clone())
+        let mut builder = Agent::builder(provider.clone(), toolbox.clone(), &conversation_id)
             .with_system_prompt(system_prompt.clone())
             .with_config(config)
             .with_history(history.clone());
@@ -3336,6 +3341,7 @@ mod retry_tests {
             provider.clone(),
             toolbox,
             sink,
+            "test-conversation".to_string(),
             "sys".into(),
             None,
             false,
@@ -3395,6 +3401,7 @@ mod retry_tests {
             provider.clone(),
             Arc::new(EmptyToolbox),
             sink,
+            "test-conversation".to_string(),
             "sys".into(),
             None,
             false,
