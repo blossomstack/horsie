@@ -25,7 +25,7 @@ use horsie_models::settings::ServerInfo;
 use horsie_server::config::{DbConfigStore, StoreDeps, model_cards};
 use horsie_server::db::journal::SqlJournal;
 use horsie_server::http::{AppState, app};
-use horsie_server::plugins::{ArtifactStore, PluginService, PluginStore};
+use horsie_server::plugins::{ArtifactStore, MarketplaceStore, PluginService, PluginStore};
 use horsie_server::sessions::spec::ServerDeps;
 use horsie_server::sessions::supervisor::SessionSupervisor;
 use std::path::{Path, PathBuf};
@@ -158,6 +158,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     ));
     let plugins = Arc::new(PluginService::new(
         PluginStore::new(opened.db.clone()),
+        MarketplaceStore::new(opened.db.clone()),
         ArtifactStore::new(data_dir.join("plugins")),
         artifact_secret(),
     ));

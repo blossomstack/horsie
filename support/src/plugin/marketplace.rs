@@ -11,7 +11,10 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Where a marketplace entry's plugin tree comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` so a parsed index can be cached — the server keeps
+/// one per registered marketplace rather than re-cloning to browse.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PluginSource {
     /// A path inside the marketplace repo itself.
     Path(String),
@@ -23,7 +26,7 @@ pub enum PluginSource {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MarketplaceEntry {
     pub name: String,
     pub description: Option<String>,

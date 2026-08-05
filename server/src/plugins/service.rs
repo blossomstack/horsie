@@ -4,27 +4,46 @@
 //! `PluginProvisioner`, for `ensure_runtime`).
 
 use super::artifact::ArtifactStore;
-use super::ingest::{self, PluginBundle};
+use super::ingest::{self, IngestTarget, Ingested, ParsedMarketplace, PluginBundle};
+use super::marketplace_store::{MarketplaceRow, MarketplaceStore};
 use super::store::{PluginRow, PluginStore};
 use super::token;
 use super::{PluginArtifactRef, PluginProvisioner};
-use horsie_models::plugins::{PluginDefaultInput, PluginInstallInput, PluginView};
+use horsie_models::plugins::{
+    InstallOutcome, MarketplacePluginView, MarketplaceView, PluginDefaultInput, PluginInstallInput,
+    PluginView,
+};
+use horsie_support::plugin::source_location;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Capability-token lifetime; covers provisioning (incl. re-attach) with margin.
 const TOKEN_TTL_SECS: u64 = 3600;
 
+/// Where a bundle came from, for the `plugins` row. Both halves or neither: a
+/// bundle either came through a catalogue or did not.
+enum Provenance {
+    Direct,
+    FromMarketplace { name: String, entry: String },
+}
+
 pub struct PluginService {
     store: PluginStore,
+    marketplaces: MarketplaceStore,
     artifacts: ArtifactStore,
     token_secret: Vec<u8>,
 }
 
 impl PluginService {
-    pub fn new(store: PluginStore, artifacts: ArtifactStore, token_secret: Vec<u8>) -> Self {
+    pub fn new(
+        store: PluginStore,
+        marketplaces: MarketplaceStore,
+        artifacts: ArtifactStore,
+        token_secret: Vec<u8>,
+    ) -> Self {
         Self {
             store,
+            marketplaces,
             artifacts,
             token_secret,
         }
@@ -40,25 +59,226 @@ impl PluginService {
             .collect())
     }
 
-    /// Install a bundle from a git repo.
-    pub async fn install(&self, input: PluginInstallInput) -> Result<PluginView, String> {
-        let ing = clone_and_pack(input.source_url.clone(), input.source_ref.clone()).await?;
-        self.persist(&input, ing, None).await
+    /// Install a bundle, or register the catalogue a URL turned out to be.
+    ///
+    /// One box: the caller does not classify the URL first, because the server
+    /// has to clone the repo to find out either way.
+    pub async fn install(&self, input: PluginInstallInput) -> Result<InstallOutcome, String> {
+        let url = input
+            .source_url
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let pair = match (input.marketplace.as_ref(), input.plugin_name.as_ref()) {
+            (Some(m), Some(p)) => Some((m.clone(), p.clone())),
+            (None, None) => None,
+            _ => return Err("marketplace and plugin_name must be given together".to_string()),
+        };
+        match (url, pair) {
+            (Some(_), Some(_)) => {
+                Err("give either source_url or (marketplace, plugin_name), not both".to_string())
+            }
+            (None, None) => {
+                Err("source_url, or a (marketplace, plugin_name) pair, is required".to_string())
+            }
+            (Some(url), None) => self.install_url(url, input.source_ref).await,
+            (None, Some((market, plugin))) => self.install_entry(&market, &plugin).await,
+        }
     }
 
-    /// Re-clone a bundle from its remembered source and re-pack.
+    /// A pasted URL: clone once, and let what is there decide the outcome.
+    async fn install_url(
+        &self,
+        url: String,
+        git_ref: Option<String>,
+    ) -> Result<InstallOutcome, String> {
+        let target = IngestTarget::Url { url, git_ref };
+        match blocking_ingest(target).await? {
+            Ingested::Plugin(bundle) => Ok(InstallOutcome::Installed(
+                self.persist(bundle, Provenance::Direct).await?,
+            )),
+            Ingested::Marketplace(parsed) => {
+                Ok(InstallOutcome::Marketplace(self.record(parsed).await?))
+            }
+        }
+    }
+
+    /// A pick from a registered catalogue, resolved against the *cached* index —
+    /// browsing and installing must not each pay for a clone of the marketplace.
+    async fn install_entry(&self, market: &str, plugin: &str) -> Result<InstallOutcome, String> {
+        let row = self
+            .marketplaces
+            .get(market)
+            .await?
+            .ok_or_else(|| format!("no such marketplace '{market}'"))?;
+        let entry = row
+            .entries
+            .iter()
+            .find(|e| e.name == plugin)
+            .ok_or_else(|| {
+                let names: Vec<&str> = row.entries.iter().map(|e| e.name.as_str()).collect();
+                format!(
+                    "marketplace '{market}' has no plugin '{plugin}'. Available: {}",
+                    names.join(", ")
+                )
+            })?;
+        let (url, git_ref, subpath) =
+            source_location(&entry.source, &row.source_url, row.source_ref.as_deref());
+        let entry_name = entry.name.clone();
+        let bundle = match blocking_ingest(IngestTarget::Resolved {
+            url,
+            git_ref,
+            subpath,
+            name_hint: Some(entry_name.clone()),
+        })
+        .await?
+        {
+            Ingested::Plugin(b) => b,
+            // Unreachable by construction: `Resolved` never classifies.
+            Ingested::Marketplace(m) => {
+                return Err(format!("'{}' resolved to a marketplace", m.url));
+            }
+        };
+        let view = self
+            .persist(
+                bundle,
+                Provenance::FromMarketplace {
+                    name: market.to_string(),
+                    entry: entry_name,
+                },
+            )
+            .await?;
+        Ok(InstallOutcome::Installed(view))
+    }
+
+    /// Re-clone a bundle. One installed through a marketplace re-resolves
+    /// through the cached index first, so a catalogue that has since moved or
+    /// re-pinned an entry is followed.
     pub async fn update(&self, name: &str) -> Result<PluginView, String> {
         let existing = self
             .store
             .get(name)
             .await?
             .ok_or_else(|| format!("no such bundle '{name}'"))?;
-        let ing = clone_and_pack(existing.source_url.clone(), existing.source_ref.clone()).await?;
-        let input = PluginInstallInput {
-            source_url: existing.source_url.clone(),
-            source_ref: existing.source_ref.clone(),
+        let outcome = match (&existing.marketplace, &existing.marketplace_entry) {
+            (Some(market), Some(entry)) => self.install_entry(market, entry).await?,
+            _ => {
+                let target = IngestTarget::Resolved {
+                    url: existing.source_url.clone(),
+                    git_ref: existing.source_ref.clone(),
+                    subpath: existing.source_subpath.clone(),
+                    name_hint: Some(existing.name.clone()),
+                };
+                match blocking_ingest(target).await? {
+                    Ingested::Plugin(b) => {
+                        InstallOutcome::Installed(self.persist(b, Provenance::Direct).await?)
+                    }
+                    Ingested::Marketplace(m) => {
+                        return Err(format!("'{}' resolved to a marketplace", m.url));
+                    }
+                }
+            }
         };
-        self.persist(&input, ing, Some(existing)).await
+        match outcome {
+            InstallOutcome::Installed(v) => Ok(v),
+            InstallOutcome::Marketplace(m) => {
+                Err(format!("'{}' resolved to a marketplace", m.source_url))
+            }
+        }
+    }
+
+    pub async fn list_marketplaces(&self) -> Result<Vec<MarketplaceView>, String> {
+        let mut out = Vec::new();
+        for row in self.marketplaces.list().await? {
+            out.push(self.marketplace_view(row).await?);
+        }
+        Ok(out)
+    }
+
+    /// Re-clone and re-parse. Deliberately `read_marketplace` rather than
+    /// `ingest_git`: a catalogue that has dropped to one entry is still a
+    /// catalogue, and a refresh must not turn into an install.
+    pub async fn refresh_marketplace(&self, name: &str) -> Result<MarketplaceView, String> {
+        let row = self
+            .marketplaces
+            .get(name)
+            .await?
+            .ok_or_else(|| format!("no such marketplace '{name}'"))?;
+        let url = row.source_url.clone();
+        let git_ref = row.source_ref.clone();
+        let parsed =
+            tokio::task::spawn_blocking(move || ingest::read_marketplace(&url, git_ref.as_deref()))
+                .await
+                .map_err(|e| e.to_string())??;
+        // The row keeps the name it was registered under: it is the primary key,
+        // and installed bundles already record it as their provenance.
+        let updated = MarketplaceRow {
+            name: row.name,
+            source_url: row.source_url,
+            source_ref: row.source_ref,
+            sha: parsed.sha,
+            entries: parsed.entries,
+            skipped: parsed.skipped,
+            created_at: row.created_at,
+            updated_at: now_string(),
+        };
+        self.marketplaces.upsert(&updated).await?;
+        self.marketplace_view(updated).await
+    }
+
+    /// Drop the source. Bundles installed from it stay: dropping a source is not
+    /// dropping the software, which is what `horsie marketplace remove` does too.
+    pub async fn remove_marketplace(&self, name: &str) -> Result<(), String> {
+        self.marketplaces.delete(name).await
+    }
+
+    /// Register a freshly-parsed catalogue, or refresh the row already holding
+    /// its name.
+    async fn record(&self, parsed: ParsedMarketplace) -> Result<MarketplaceView, String> {
+        let existing = self.marketplaces.get(&parsed.name).await?;
+        if let Some(prev) = &existing {
+            if prev.source_url != parsed.url {
+                return Err(format!(
+                    "a marketplace named '{}' is already registered from {}",
+                    parsed.name, prev.source_url
+                ));
+            }
+        }
+        let now = now_string();
+        let row = MarketplaceRow {
+            name: parsed.name,
+            source_url: parsed.url,
+            source_ref: parsed.git_ref,
+            sha: parsed.sha,
+            entries: parsed.entries,
+            skipped: parsed.skipped,
+            created_at: existing.map_or_else(|| now.clone(), |p| p.created_at),
+            updated_at: now,
+        };
+        self.marketplaces.upsert(&row).await?;
+        self.marketplace_view(row).await
+    }
+
+    async fn marketplace_view(&self, row: MarketplaceRow) -> Result<MarketplaceView, String> {
+        let installed = self.store.installed_entries(&row.name).await?;
+        Ok(MarketplaceView {
+            plugin_count: u32::try_from(row.entries.len()).unwrap_or(u32::MAX),
+            plugins: row
+                .entries
+                .iter()
+                .map(|e| MarketplacePluginView {
+                    name: e.name.clone(),
+                    description: e.description.clone(),
+                    version: e.version.clone(),
+                    installed: installed.contains(&e.name),
+                })
+                .collect(),
+            name: row.name,
+            source_url: row.source_url,
+            source_ref: row.source_ref,
+            updated_at: row.updated_at,
+            skipped: row.skipped,
+        })
     }
 
     pub async fn set_default(
@@ -94,32 +314,38 @@ impl PluginService {
         token::verify(&self.token_secret, tok, hash)
     }
 
+    /// Write the artifact and the row. The source recorded is what ingest
+    /// actually cloned, not what the caller asked for — a marketplace entry may
+    /// name another repo, and `update` has to re-clone the same tree.
     async fn persist(
         &self,
-        input: &PluginInstallInput,
-        ing: PluginBundle,
-        existing: Option<PluginRow>,
+        bundle: PluginBundle,
+        provenance: Provenance,
     ) -> Result<PluginView, String> {
+        let existing = self.store.get(&bundle.name).await?;
         self.artifacts
-            .write(&ing.hash, &ing.zip_bytes)
+            .write(&bundle.hash, &bundle.zip_bytes)
             .map_err(|e| e.to_string())?;
+        let (marketplace, marketplace_entry) = match provenance {
+            Provenance::Direct => (None, None),
+            Provenance::FromMarketplace { name, entry } => (Some(name), Some(entry)),
+        };
         let now = now_string();
         let row = PluginRow {
-            name: ing.name,
+            name: bundle.name,
             source_kind: "git".to_string(),
-            source_url: input.source_url.trim().to_string(),
-            source_ref: input
-                .source_ref
-                .as_ref()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-            version: ing.version,
-            description: ing.description,
-            skill_count: ing.skill_count,
-            has_hooks: ing.has_hooks,
-            artifact_hash: ing.hash,
-            artifact_size: ing.zip_bytes.len() as u64,
+            source_url: bundle.url,
+            source_ref: bundle.git_ref,
+            source_subpath: bundle.subpath,
+            version: bundle.version,
+            description: bundle.description,
+            skill_count: bundle.skill_count,
+            has_hooks: bundle.has_hooks,
+            artifact_hash: bundle.hash,
+            artifact_size: bundle.zip_bytes.len() as u64,
             enabled_default: existing.as_ref().is_some_and(|e| e.enabled_default),
+            marketplace,
+            marketplace_entry,
             created_at: existing
                 .as_ref()
                 .map(|e| e.created_at.clone())
@@ -173,33 +399,24 @@ impl PluginProvisioner for PluginService {
     }
 }
 
-/// Run the blocking git clone + pack off the async runtime.
-async fn clone_and_pack(url: String, git_ref: Option<String>) -> Result<PluginBundle, String> {
-    let target = ingest::IngestTarget::Url { url, git_ref };
+/// Run the blocking clone + pack off the async runtime, warning about hooks
+/// horsie cannot fire — a bundle whose skills are fine installs anyway, and
+/// saying nothing would leave a guard that silently never runs, which is what
+/// classifying events rather than ignoring them is for.
+async fn blocking_ingest(target: IngestTarget) -> Result<Ingested, String> {
     let ingested = tokio::task::spawn_blocking(move || ingest::ingest_git(&target))
         .await
         .map_err(|e| e.to_string())??;
-    match ingested {
-        // A bundle whose skills are fine but whose hooks horsie cannot fire
-        // installs anyway; saying nothing would leave a guard that silently
-        // never runs, which is what classifying events rather than ignoring
-        // them is for.
-        ingest::Ingested::Plugin(b) => {
-            for reason in &b.unsupported_hooks {
-                tracing::warn!(
-                    plugin = b.name,
-                    reason,
-                    "plugin declares a hook horsie cannot run"
-                );
-            }
-            Ok(b)
+    if let Ingested::Plugin(b) = &ingested {
+        for reason in &b.unsupported_hooks {
+            tracing::warn!(
+                plugin = b.name,
+                reason,
+                "plugin declares a hook horsie cannot run"
+            );
         }
-        ingest::Ingested::Marketplace(m) => Err(format!(
-            "'{}' is a marketplace listing {} plugins",
-            m.url,
-            m.entries.len()
-        )),
     }
+    Ok(ingested)
 }
 
 fn row_to_view(row: PluginRow) -> PluginView {
@@ -213,6 +430,7 @@ fn row_to_view(row: PluginRow) -> PluginView {
         has_hooks: row.has_hooks,
         enabled_default: row.enabled_default,
         artifact_size: row.artifact_size,
+        marketplace: row.marketplace,
     }
 }
 
@@ -231,10 +449,83 @@ mod tests {
 
     async fn service() -> (PluginService, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let pool = crate::db::testing::db().await;
+        let db = crate::db::testing::db().await;
         let artifacts = ArtifactStore::new(tmp.path().join("artifacts"));
-        let svc = PluginService::new(PluginStore::new(pool), artifacts, b"secret".to_vec());
+        let svc = PluginService::new(
+            PluginStore::new(db.clone()),
+            MarketplaceStore::new(db),
+            artifacts,
+            b"secret".to_vec(),
+        );
         (svc, tmp)
+    }
+
+    fn url_input(url: &str) -> PluginInstallInput {
+        PluginInstallInput {
+            source_url: Some(url.to_string()),
+            source_ref: None,
+            marketplace: None,
+            plugin_name: None,
+        }
+    }
+
+    fn pick(marketplace: &str, plugin: &str) -> PluginInstallInput {
+        PluginInstallInput {
+            source_url: None,
+            source_ref: None,
+            marketplace: Some(marketplace.to_string()),
+            plugin_name: Some(plugin.to_string()),
+        }
+    }
+
+    fn write_marketplace(root: &Path, json: &str) {
+        let dir = root.join(".claude-plugin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marketplace.json"), json).unwrap();
+    }
+
+    fn write_skill(dir: &Path, name: &str) {
+        let s = dir.join("skills").join(name);
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("SKILL.md"), format!("---\nname: {name}\n---\nbody")).unwrap();
+    }
+
+    fn commit_repo(root: &Path) -> String {
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "t@t"]);
+        git(root, &["config", "user.name", "t"]);
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+        format!("file://{}", root.display())
+    }
+
+    /// A two-entry catalogue at `dir`, returned as a `file://` URL.
+    fn catalogue(tmp: &Path, dir: &str) -> String {
+        let repo = tmp.join(dir);
+        std::fs::create_dir_all(&repo).unwrap();
+        write_marketplace(
+            &repo,
+            r#"{"name":"catalogue","plugins":[
+                 {"name":"alpha","source":"./plugins/alpha"},
+                 {"name":"beta","source":"./plugins/beta"}]}"#,
+        );
+        write_skill(&repo.join("plugins/alpha"), "a");
+        write_skill(&repo.join("plugins/beta"), "b");
+        commit_repo(&repo)
+    }
+
+    fn expect_installed(out: InstallOutcome) -> PluginView {
+        match out {
+            InstallOutcome::Installed(v) => v,
+            InstallOutcome::Marketplace(m) => panic!("expected an install, got source {}", m.name),
+        }
+    }
+
+    fn expect_source(out: InstallOutcome) -> MarketplaceView {
+        match out {
+            InstallOutcome::Marketplace(m) => m,
+            InstallOutcome::Installed(v) => panic!("expected a source, got install {}", v.name),
+        }
     }
 
     fn git(dir: &Path, args: &[&str]) {
@@ -277,13 +568,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let url = fixture_repo(&repo);
 
-        let view = svc
-            .install(PluginInstallInput {
-                source_url: url.clone(),
-                source_ref: None,
-            })
-            .await
-            .unwrap();
+        let view = expect_installed(svc.install(url_input(&url)).await.unwrap());
         assert_eq!(view.name, "demo");
         assert_eq!(view.skill_count, 1);
 
@@ -310,12 +595,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let url = fixture_repo(&repo);
-        svc.install(PluginInstallInput {
-            source_url: url,
-            source_ref: None,
-        })
-        .await
-        .unwrap();
+        svc.install(url_input(&url)).await.unwrap();
         assert!(svc.default_names().await.is_empty());
         svc.set_default(
             "demo",
@@ -326,5 +606,183 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(svc.default_names().await, vec!["demo".to_string()]);
+    }
+
+    /// The one box: a URL that is a catalogue records a source and returns it,
+    /// rather than erroring or installing something arbitrary.
+    #[tokio::test]
+    async fn a_catalogue_url_registers_a_marketplace() {
+        let (svc, tmp) = service().await;
+        let url = catalogue(tmp.path(), "market");
+
+        let m = expect_source(svc.install(url_input(&url)).await.unwrap());
+        assert_eq!(m.name, "catalogue");
+        assert_eq!(m.plugin_count, 2);
+        assert!(m.plugins.iter().all(|p| !p.installed));
+        assert_eq!(svc.list_marketplaces().await.unwrap().len(), 1);
+        assert!(
+            svc.list().await.unwrap().is_empty(),
+            "nothing was installed"
+        );
+    }
+
+    /// The second half of the one box: picking an entry installs it through the
+    /// CACHED index — no second clone of the marketplace.
+    #[tokio::test]
+    async fn installing_from_a_marketplace_uses_the_cached_index() {
+        let (svc, tmp) = service().await;
+        let url = catalogue(tmp.path(), "market");
+        svc.install(url_input(&url)).await.unwrap();
+
+        let v = expect_installed(svc.install(pick("catalogue", "beta")).await.unwrap());
+        assert_eq!(v.name, "beta");
+        assert_eq!(v.skill_count, 1);
+        assert_eq!(v.marketplace.as_deref(), Some("catalogue"));
+
+        // The picker now knows not to offer it again.
+        let listed = svc.list_marketplaces().await.unwrap();
+        let beta = listed[0].plugins.iter().find(|p| p.name == "beta").unwrap();
+        assert!(beta.installed);
+        let alpha = listed[0]
+            .plugins
+            .iter()
+            .find(|p| p.name == "alpha")
+            .unwrap();
+        assert!(!alpha.installed);
+    }
+
+    /// An unknown entry names what is on offer, as the CLI does.
+    #[tokio::test]
+    async fn an_unknown_entry_names_the_alternatives() {
+        let (svc, tmp) = service().await;
+        let url = catalogue(tmp.path(), "market");
+        svc.install(url_input(&url)).await.unwrap();
+
+        let err = svc.install(pick("catalogue", "gamma")).await.unwrap_err();
+        assert!(err.contains("alpha") && err.contains("beta"), "err: {err}");
+    }
+
+    /// Neither form given is a rejection, not a panic and not a clone of "".
+    #[tokio::test]
+    async fn an_empty_install_input_is_rejected() {
+        let (svc, _tmp) = service().await;
+        let err = svc
+            .install(PluginInstallInput {
+                source_url: None,
+                source_ref: None,
+                marketplace: None,
+                plugin_name: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.contains("source_url"), "err: {err}");
+    }
+
+    /// Removing a source is not removing the software.
+    #[tokio::test]
+    async fn removing_a_marketplace_leaves_its_bundles_installed() {
+        let (svc, tmp) = service().await;
+        let url = catalogue(tmp.path(), "market");
+        svc.install(url_input(&url)).await.unwrap();
+        svc.install(pick("catalogue", "alpha")).await.unwrap();
+
+        svc.remove_marketplace("catalogue").await.unwrap();
+        assert!(svc.list_marketplaces().await.unwrap().is_empty());
+        assert_eq!(svc.list().await.unwrap().len(), 1, "the bundle stays");
+    }
+
+    /// Re-pasting a registered marketplace refreshes it rather than erroring:
+    /// "add it again" and "refresh" are the same intent from the user's side.
+    #[tokio::test]
+    async fn re_pasting_a_registered_marketplace_refreshes_it() {
+        let (svc, tmp) = service().await;
+        let repo = tmp.path().join("market");
+        let url = catalogue(tmp.path(), "market");
+        svc.install(url_input(&url)).await.unwrap();
+
+        write_marketplace(
+            &repo,
+            r#"{"name":"catalogue","plugins":[
+                 {"name":"alpha","source":"./plugins/alpha"},
+                 {"name":"beta","source":"./plugins/beta"},
+                 {"name":"gamma","source":"./plugins/gamma"}]}"#,
+        );
+        write_skill(&repo.join("plugins/gamma"), "g");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "add gamma"]);
+
+        let m = expect_source(svc.install(url_input(&url)).await.unwrap());
+        assert_eq!(m.plugin_count, 3);
+        assert_eq!(
+            svc.list_marketplaces().await.unwrap().len(),
+            1,
+            "not a second row"
+        );
+    }
+
+    /// The refresh button does the same, and must not turn into an install when
+    /// a catalogue drops to a single entry.
+    #[tokio::test]
+    async fn refresh_re_reads_the_index_without_installing() {
+        let (svc, tmp) = service().await;
+        let repo = tmp.path().join("market");
+        let url = catalogue(tmp.path(), "market");
+        svc.install(url_input(&url)).await.unwrap();
+
+        write_marketplace(
+            &repo,
+            r#"{"name":"catalogue","plugins":[
+                 {"name":"alpha","source":"./plugins/alpha"}]}"#,
+        );
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "drop beta"]);
+
+        let m = svc.refresh_marketplace("catalogue").await.unwrap();
+        assert_eq!(m.plugin_count, 1);
+        assert!(svc.list().await.unwrap().is_empty(), "still not an install");
+    }
+
+    /// Two different sources claiming one name is rejected, naming the
+    /// incumbent — silently renaming one would break the provenance already
+    /// recorded on installed bundles.
+    #[tokio::test]
+    async fn a_name_collision_between_two_sources_is_rejected() {
+        let (svc, tmp) = service().await;
+        let first = catalogue(tmp.path(), "one");
+        svc.install(url_input(&first)).await.unwrap();
+
+        let second = catalogue(tmp.path(), "two");
+        let err = svc.install(url_input(&second)).await.unwrap_err();
+        assert!(
+            err.contains(&first),
+            "must name the incumbent source: {err}"
+        );
+    }
+
+    /// A bundle installed through a catalogue re-resolves through the index on
+    /// update, so an entry the catalogue has moved is followed.
+    #[tokio::test]
+    async fn update_re_resolves_a_marketplace_bundle_through_the_index() {
+        let (svc, tmp) = service().await;
+        let repo = tmp.path().join("market");
+        let url = catalogue(tmp.path(), "market");
+        svc.install(url_input(&url)).await.unwrap();
+        svc.install(pick("catalogue", "beta")).await.unwrap();
+
+        // The catalogue moves `beta` to a different directory.
+        write_skill(&repo.join("moved/beta"), "b2");
+        write_marketplace(
+            &repo,
+            r#"{"name":"catalogue","plugins":[
+                 {"name":"alpha","source":"./plugins/alpha"},
+                 {"name":"beta","source":"./moved/beta"}]}"#,
+        );
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "move beta"]);
+        svc.refresh_marketplace("catalogue").await.unwrap();
+
+        let v = svc.update("beta").await.unwrap();
+        assert_eq!(v.marketplace.as_deref(), Some("catalogue"));
+        assert_eq!(v.skill_count, 1);
     }
 }

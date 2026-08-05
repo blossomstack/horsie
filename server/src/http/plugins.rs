@@ -7,18 +7,20 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use horsie_models::plugins::{PluginDefaultInput, PluginInstallInput, PluginView};
+use horsie_models::plugins::{InstallOutcome, PluginDefaultInput, PluginInstallInput, PluginView};
 
 /// GET /api/plugins — the installed bundle library (metadata only).
 pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<PluginView>>, Api> {
     state.plugins.list().await.map(Json).map_err(Api::internal)
 }
 
-/// POST /api/plugins — install a bundle from a git repo.
+/// POST /api/plugins — install a bundle, or register the catalogue a URL turned
+/// out to be. One box: the caller does not have to know which it pasted, and
+/// both outcomes create a row, so both are 201.
 pub async fn install(
     State(state): State<AppState>,
     Json(input): Json<PluginInstallInput>,
-) -> Result<(StatusCode, Json<PluginView>), Api> {
+) -> Result<(StatusCode, Json<InstallOutcome>), Api> {
     state
         .plugins
         .install(input)

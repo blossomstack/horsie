@@ -7,8 +7,9 @@ use sqlx::Row;
 use sqlx::any::AnyRow;
 use std::collections::HashSet;
 
-const COLS: &str = "name, source_kind, source_url, source_ref, version, description, \
-     skill_count, has_hooks, artifact_hash, artifact_size, enabled_default, created_at, updated_at";
+const COLS: &str = "name, source_kind, source_url, source_ref, source_subpath, version, \
+     description, skill_count, has_hooks, artifact_hash, artifact_size, enabled_default, \
+     marketplace, marketplace_entry, created_at, updated_at";
 
 /// One row of the `plugins` table.
 #[derive(Clone, Debug, PartialEq)]
@@ -17,6 +18,9 @@ pub struct PluginRow {
     pub source_kind: String,
     pub source_url: String,
     pub source_ref: Option<String>,
+    /// Where inside the checkout the plugin root sat. `None` means the repo
+    /// root, which is what a plain bundle repo means.
+    pub source_subpath: Option<String>,
     pub version: Option<String>,
     pub description: Option<String>,
     pub skill_count: u32,
@@ -24,6 +28,10 @@ pub struct PluginRow {
     pub artifact_hash: String,
     pub artifact_size: u64,
     pub enabled_default: bool,
+    /// The marketplace this bundle came through, and that marketplace's name
+    /// for it. Both or neither.
+    pub marketplace: Option<String>,
+    pub marketplace_entry: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -61,21 +69,25 @@ impl PluginStore {
     /// Insert or replace a bundle by name.
     pub async fn upsert(&self, row: &PluginRow) -> Result<(), String> {
         let sql = self.db.q(
-            "INSERT INTO plugins (name, source_kind, source_url, source_ref, version, description, \
-             skill_count, has_hooks, artifact_hash, artifact_size, enabled_default, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO plugins (name, source_kind, source_url, source_ref, source_subpath, \
+             version, description, skill_count, has_hooks, artifact_hash, artifact_size, \
+             enabled_default, marketplace, marketplace_entry, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(name) DO UPDATE SET source_kind = excluded.source_kind, \
              source_url = excluded.source_url, source_ref = excluded.source_ref, \
+             source_subpath = excluded.source_subpath, \
              version = excluded.version, description = excluded.description, \
              skill_count = excluded.skill_count, has_hooks = excluded.has_hooks, \
              artifact_hash = excluded.artifact_hash, artifact_size = excluded.artifact_size, \
-             enabled_default = excluded.enabled_default, updated_at = excluded.updated_at",
+             enabled_default = excluded.enabled_default, marketplace = excluded.marketplace, \
+             marketplace_entry = excluded.marketplace_entry, updated_at = excluded.updated_at",
         );
         sqlx::query(&sql)
             .bind(&row.name)
             .bind(&row.source_kind)
             .bind(&row.source_url)
             .bind(&row.source_ref)
+            .bind(&row.source_subpath)
             .bind(&row.version)
             .bind(&row.description)
             .bind(i64::from(row.skill_count))
@@ -83,6 +95,8 @@ impl PluginStore {
             .bind(&row.artifact_hash)
             .bind(i64::try_from(row.artifact_size).unwrap_or(i64::MAX))
             .bind(i64::from(row.enabled_default))
+            .bind(&row.marketplace)
+            .bind(&row.marketplace_entry)
             .bind(&row.created_at)
             .bind(&row.updated_at)
             .execute(self.db.pool())
@@ -114,6 +128,26 @@ impl PluginStore {
         Ok(())
     }
 
+    /// Entry names of bundles installed from `marketplace`, so the picker can
+    /// mark them rather than offering them again.
+    pub async fn installed_entries(&self, marketplace: &str) -> Result<HashSet<String>, String> {
+        let sql = self.db.q("SELECT marketplace_entry FROM plugins \
+             WHERE marketplace = ? AND marketplace_entry IS NOT NULL");
+        let rows = sqlx::query(&sql)
+            .bind(marketplace)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                r.try_get::<Option<String>, _>("marketplace_entry")
+                    .ok()
+                    .flatten()
+            })
+            .collect())
+    }
+
     /// All artifact hashes still referenced by a row (for artifact GC).
     pub async fn referenced_hashes(&self) -> Result<HashSet<String>, String> {
         let sql = self.db.q("SELECT artifact_hash FROM plugins");
@@ -142,6 +176,7 @@ fn row_to_plugin(row: &AnyRow) -> Result<PluginRow, String> {
         source_kind: get_s("source_kind")?,
         source_url: get_s("source_url")?,
         source_ref: get_os("source_ref")?,
+        source_subpath: get_os("source_subpath")?,
         version: get_os("version")?,
         description: get_os("description")?,
         skill_count: u32::try_from(get_i("skill_count")?).unwrap_or(0),
@@ -149,6 +184,8 @@ fn row_to_plugin(row: &AnyRow) -> Result<PluginRow, String> {
         artifact_hash: get_s("artifact_hash")?,
         artifact_size: u64::try_from(get_i("artifact_size")?).unwrap_or(0),
         enabled_default: get_i("enabled_default")? != 0,
+        marketplace: get_os("marketplace")?,
+        marketplace_entry: get_os("marketplace_entry")?,
         created_at: get_s("created_at")?,
         updated_at: get_s("updated_at")?,
     })
@@ -166,6 +203,7 @@ mod tests {
             source_kind: "git".into(),
             source_url: "https://example.com/x".into(),
             source_ref: None,
+            source_subpath: None,
             version: Some("1.0.0".into()),
             description: Some("d".into()),
             skill_count: 2,
@@ -173,6 +211,8 @@ mod tests {
             artifact_hash: hash.into(),
             artifact_size: 123,
             enabled_default: false,
+            marketplace: None,
+            marketplace_entry: None,
             created_at: "1".into(),
             updated_at: "1".into(),
         }
@@ -200,5 +240,28 @@ mod tests {
             assert!(s.get("demo").await.unwrap().is_none());
             assert_eq!(s.list().await.unwrap().len(), 1);
         }
+    }
+
+    /// Provenance survives a round trip, and only marketplace-installed bundles
+    /// show up as installed entries — a plain install must not mark a catalogue
+    /// entry it never came from.
+    #[tokio::test]
+    async fn provenance_survives_and_lists_installed_entries() {
+        let s = PluginStore::new(testing::db().await);
+        let mut r = row("api-security-testing", "h1");
+        r.marketplace = Some("official".into());
+        // The index's name for an entry is not always the name it installs as.
+        r.marketplace_entry = Some("42crunch-api-security-testing".into());
+        r.source_subpath = Some("./plugins/api".into());
+        s.upsert(&r).await.unwrap();
+        s.upsert(&row("plain", "h2")).await.unwrap();
+
+        let got = s.get("api-security-testing").await.unwrap().unwrap();
+        assert_eq!(got.marketplace.as_deref(), Some("official"));
+        assert_eq!(got.source_subpath.as_deref(), Some("./plugins/api"));
+
+        let entries = s.installed_entries("official").await.unwrap();
+        assert!(entries.contains("42crunch-api-security-testing"));
+        assert_eq!(entries.len(), 1, "a plain install must not appear");
     }
 }

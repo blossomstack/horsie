@@ -358,6 +358,7 @@ mod tests {
         ));
         let plugins = Arc::new(crate::plugins::PluginService::new(
             crate::plugins::PluginStore::new(opened.db.clone()),
+            crate::plugins::MarketplaceStore::new(opened.db.clone()),
             crate::plugins::ArtifactStore::new(tmp.path().join("plugins")),
             b"test-secret".to_vec(),
         ));
