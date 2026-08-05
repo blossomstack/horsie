@@ -141,17 +141,6 @@ fn is_retryable(e: &LlmError) -> bool {
     }
 }
 
-/// A key that is the same for every turn of one conversation and different
-/// across conversations.
-///
-/// The first message's id is exactly that: assigned once when the conversation
-/// starts and replayed in every later request, while the provider is handed no
-/// session id of its own. `None` for an empty history, where there is no prefix
-/// worth caching anyway.
-fn conversation_cache_key(messages: &[horsie_agentcore::Message]) -> Option<String> {
-    messages.first().map(|m| format!("horsie-{}", m.id))
-}
-
 /// How a request authenticates, and therefore where it goes.
 pub enum Credential {
     /// A platform API key. Targets `{base_url}/responses`.
@@ -325,7 +314,11 @@ impl ResponsesProvider {
             store: false,
             stream: true,
             include: vec!["reasoning.encrypted_content"],
-            prompt_cache_key: conversation_cache_key(request.messages),
+            // Prefixed so it cannot collide with another client's keys in the
+            // same account, and taken verbatim from the caller — deriving one
+            // from the history would move the moment history is copied or
+            // trimmed.
+            prompt_cache_key: Some(format!("horsie-{}", request.conversation_id)),
         }
     }
 }
@@ -824,6 +817,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             max_tokens: Some(64),
             thinking_effort: None,
+            conversation_id: "test-conversation",
         }
     }
 
@@ -1095,20 +1089,34 @@ mod tests {
         assert!(is_retryable(&err));
     }
 
+    /// The property the old inferred key only approximated: the cache key is
+    /// whatever the caller named, so it survives history growing, being trimmed
+    /// (compaction), or being copied wholesale (a fork).
     #[test]
-    fn every_turn_of_a_conversation_shares_one_cache_key() {
+    fn the_cache_key_is_the_caller_s_conversation_id_whatever_the_history() {
         let p = ResponsesProvider::with_api_key("k").unwrap();
-        let first = vec![user("hi")];
-        let later = vec![user("hi"), user("and again")];
+        let empty: Vec<Message> = vec![];
+        let one = vec![user("hi")];
+        let grown = vec![user("hi"), user("and again")];
+        // A fork: same history, different conversation.
+        let forked = grown.clone();
 
-        let a = p.build_body(&request(&first)).prompt_cache_key;
-        let b = p.build_body(&request(&later)).prompt_cache_key;
+        let key = |messages: &[Message]| {
+            let mut r = request(messages);
+            r.conversation_id = "sess-1";
+            p.build_body(&r).prompt_cache_key
+        };
 
-        assert!(a.is_some());
-        assert_eq!(a, b, "the key must not move as history grows");
-        assert!(
-            p.build_body(&request(&[])).prompt_cache_key.is_none(),
-            "an empty history has no prefix worth caching"
+        assert_eq!(key(&empty).as_deref(), Some("horsie-sess-1"));
+        assert_eq!(key(&one), key(&grown), "growing history must not move it");
+        assert_eq!(key(&empty), key(&grown), "trimming must not move it either");
+
+        let mut forked_req = request(&forked);
+        forked_req.conversation_id = "sess-2";
+        assert_ne!(
+            p.build_body(&forked_req).prompt_cache_key,
+            key(&grown),
+            "a fork copies the history but is its own conversation"
         );
     }
 

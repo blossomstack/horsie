@@ -99,7 +99,7 @@ async fn conformance_plain_text_turn() {
         server.queue_response("Hello from the mock");
         let provider = build_provider(kind, &base_url_for(kind, &server));
 
-        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox), "test-conversation")
             .build()
             .unwrap();
         let sink = CollectingEventSink::new();
@@ -136,7 +136,7 @@ async fn conformance_tool_call_then_text() {
         server.queue_response("tool said 42");
         let provider = build_provider(kind, &base_url_for(kind, &server));
 
-        let mut agent = Agent::builder(provider, MockToolbox::echo("echo"))
+        let mut agent = Agent::builder(provider, MockToolbox::echo("echo"), "test-conversation")
             .build()
             .unwrap();
         let sink = CollectingEventSink::new();
@@ -178,7 +178,7 @@ async fn conformance_multi_turn_history_is_replayed() {
         server.queue_response("second");
         let provider = build_provider(kind, &base_url_for(kind, &server));
 
-        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox), "test-conversation")
             .build()
             .unwrap();
         let sink = CollectingEventSink::new();
@@ -220,7 +220,7 @@ async fn conformance_max_tokens_truncation_surfaces() {
         server.queue_truncated("cut off here");
         let provider = build_provider(kind, &base_url_for(kind, &server));
 
-        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox), "test-conversation")
             .build()
             .unwrap();
         let sink = CollectingEventSink::new();
@@ -254,7 +254,7 @@ async fn conformance_rate_limit_is_classified() {
         }
         let provider = build_provider(kind, &base_url_for(kind, &server));
 
-        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox), "test-conversation")
             .with_config(AgentConfig {
                 max_iterations: 1,
                 ..Default::default()
@@ -297,7 +297,7 @@ async fn a_cut_stream_is_an_error_not_an_empty_success() {
             server.queue_cut_stream(["par", "tial"], 3);
             let provider = build_provider(kind, &base_url_for(kind, &server));
 
-            let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+            let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox), "test-conversation")
                 .build()
                 .unwrap();
             let sink = CollectingEventSink::new();
@@ -349,7 +349,9 @@ async fn a_tool_call_with_unparseable_input_is_never_dispatched() {
                 }),
             );
 
-            let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+            let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+                .build()
+                .unwrap();
             let sink = CollectingEventSink::new();
             let _ = agent
                 .run(
@@ -387,7 +389,7 @@ async fn a_slow_provider_gives_up_rather_than_waiting_forever() {
             server.queue_delayed("eventually", std::time::Duration::from_secs(30));
             let provider = build_provider(kind, &base_url_for(kind, &server));
 
-            let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+            let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox), "test-conversation")
                 .build()
                 .unwrap();
             let sink = CollectingEventSink::new();
@@ -434,6 +436,7 @@ fn request_for(messages: &[horsie_agentcore::Message]) -> horsie_agentcore::Comp
         tool_choice: horsie_agentcore::ToolChoice::Auto,
         max_tokens: None,
         thinking_effort: None,
+        conversation_id: "test-conversation",
     }
 }
 

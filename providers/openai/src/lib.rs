@@ -651,6 +651,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             max_tokens: Some(64),
             thinking_effort: None,
+            conversation_id: "test-conversation",
         }
     }
 
@@ -808,6 +809,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             max_tokens: None,
             thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+            conversation_id: "test-conversation",
         };
         assert_eq!(p.build_body(&req).reasoning_effort.as_deref(), Some("high"));
     }
@@ -823,6 +825,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             max_tokens: None,
             thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+            conversation_id: "test-conversation",
         };
         assert_eq!(p.build_body(&req).reasoning_effort, None);
     }
@@ -853,6 +856,7 @@ mod tests {
                 tool_choice: choice.clone(),
                 max_tokens: None,
                 thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+                conversation_id: "test-conversation",
             };
             assert_eq!(
                 p.build_body(&req).reasoning_effort.as_deref(),
@@ -877,6 +881,7 @@ mod tests {
             tool_choice: ToolChoice::Any,
             max_tokens: None,
             thinking_effort: None,
+            conversation_id: "test-conversation",
         };
         assert_eq!(p.build_body(&req).reasoning_effort.as_deref(), Some("none"));
     }
@@ -895,6 +900,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             max_tokens: None,
             thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+            conversation_id: "test-conversation",
         };
         assert_eq!(p.build_body(&req).reasoning_effort.as_deref(), Some("high"));
     }
@@ -914,6 +920,7 @@ mod tests {
             tool_choice: ToolChoice::Any,
             max_tokens: None,
             thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+            conversation_id: "test-conversation",
         };
         let body = p.build_body(&req);
         assert!(body.tool_choice.is_none());
@@ -933,6 +940,7 @@ mod tests {
             tool_choice: ToolChoice::Any,
             max_tokens: None,
             thinking_effort: horsie_agentcore::ThinkingEffort::parse("high"),
+            conversation_id: "test-conversation",
         };
         assert_eq!(p.build_body(&req).reasoning_effort.as_deref(), Some("high"));
     }

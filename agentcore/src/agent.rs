@@ -48,6 +48,13 @@ impl Default for AgentConfig {
 
 pub struct Agent {
     pub(crate) provider: Arc<dyn LlmProvider>,
+    /// Which conversation these turns belong to, supplied by the caller rather
+    /// than inferred from the history. Providers that can group requests — the
+    /// Responses wire uses it as a prompt-cache key — need an id that is the
+    /// same across a conversation's turns and different across conversations;
+    /// deriving one from message contents breaks the moment history is copied
+    /// (a fork) or trimmed (compaction).
+    pub(crate) conversation_id: String,
     pub(crate) system_prompt: String,
     pub(crate) toolbox: Arc<dyn Toolbox>,
     /// The tool whose invocation ends the run and returns control to the caller as
@@ -71,6 +78,8 @@ pub struct Agent {
 
 pub struct AgentBuilder {
     provider: Arc<dyn LlmProvider>,
+    /// Identifies the conversation these turns belong to; see [`Agent`].
+    conversation_id: String,
     system_prompt: String,
     toolbox: Arc<dyn Toolbox>,
     handoff_tool: Option<String>,
@@ -80,9 +89,14 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
-    pub fn new(provider: Arc<dyn LlmProvider>, toolbox: Arc<dyn Toolbox>) -> Self {
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        toolbox: Arc<dyn Toolbox>,
+        conversation_id: impl Into<String>,
+    ) -> Self {
         Self {
             provider,
+            conversation_id: conversation_id.into(),
             system_prompt: String::new(),
             toolbox,
             handoff_tool: None,
@@ -164,6 +178,7 @@ impl AgentBuilder {
 
         Ok(Agent {
             provider: self.provider,
+            conversation_id: self.conversation_id,
             system_prompt: self.system_prompt,
             toolbox: self.toolbox,
             handoff_tool: self.handoff_tool,
@@ -221,8 +236,17 @@ fn sum_optional(a: Option<u32>, b: Option<u32>) -> Option<u32> {
 }
 
 impl Agent {
-    pub fn builder(provider: Arc<dyn LlmProvider>, toolbox: Arc<dyn Toolbox>) -> AgentBuilder {
-        AgentBuilder::new(provider, toolbox)
+    /// `conversation_id` names the conversation these turns belong to. It is a
+    /// constructor argument rather than an optional setter on purpose: an
+    /// `Agent` is rebuilt for every run, so any default would hand a *different*
+    /// id to each turn of one conversation and silently defeat the prompt
+    /// caching it exists to enable. Callers pass the agent's own identity.
+    pub fn builder(
+        provider: Arc<dyn LlmProvider>,
+        toolbox: Arc<dyn Toolbox>,
+        conversation_id: impl Into<String>,
+    ) -> AgentBuilder {
+        AgentBuilder::new(provider, toolbox, conversation_id)
     }
 
     /// Returns `Some(reason)` when a handoff turn must be rejected: a *forced*
@@ -330,6 +354,7 @@ impl Agent {
                 tool_choice: tool_choice.clone(),
                 max_tokens: self.config.max_tokens,
                 thinking_effort: self.config.thinking_effort,
+                conversation_id: &self.conversation_id,
             };
 
             let msg_id = Uuid::new_v4().to_string();
@@ -709,11 +734,53 @@ mod tests {
 
     // --- tests ---
 
+    /// The conversation id the caller named must reach the provider unchanged,
+    /// on every turn. Providers that group requests by it — the Responses wire
+    /// uses it as a prompt-cache key — get no error if it is wrong, only a
+    /// colder cache, so the plumbing is pinned here rather than left to review.
     #[tokio::test]
-    async fn test_simple_text_completion() {
-        let mut agent = Agent::builder(MockProvider::text("Hello, world!"), Arc::new(EmptyToolbox))
+    async fn the_conversation_id_reaches_the_provider_on_every_turn() {
+        let text = |t: &str| CompletionResponse {
+            parts: vec![ContentPart::Text(TextPart {
+                text: t.to_string(),
+            })],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::without_cache(1, 1),
+        };
+        let provider = MockProvider::new(vec![text("one"), text("two")]);
+        let mut agent = Agent::builder(provider.clone(), Arc::new(EmptyToolbox), "sess-42")
             .build()
             .unwrap();
+        let sink = CollectingEventSink::new();
+
+        for msg in ["msg-1", "msg-2"] {
+            agent
+                .run(
+                    AgentInput::user_message(msg, "hi"),
+                    &sink,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let ids: Vec<String> = provider
+            .requests()
+            .into_iter()
+            .map(|r| r.conversation_id)
+            .collect();
+        assert_eq!(ids, vec!["sess-42".to_string(), "sess-42".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_simple_text_completion() {
+        let mut agent = Agent::builder(
+            MockProvider::text("Hello, world!"),
+            Arc::new(EmptyToolbox),
+            "test-conversation",
+        )
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
         let output = agent
             .run(
@@ -736,9 +803,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_completion_emits_message_complete_events() {
-        let mut agent = Agent::builder(MockProvider::text("done"), Arc::new(EmptyToolbox))
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            MockProvider::text("done"),
+            Arc::new(EmptyToolbox),
+            "test-conversation",
+        )
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -757,9 +828,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_input_message_event_emitted() {
-        let mut agent = Agent::builder(MockProvider::text("ok"), Arc::new(EmptyToolbox))
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            MockProvider::text("ok"),
+            Arc::new(EmptyToolbox),
+            "test-conversation",
+        )
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -784,9 +859,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_complete_event_emitted() {
-        let mut agent = Agent::builder(MockProvider::text("ok"), Arc::new(EmptyToolbox))
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            MockProvider::text("ok"),
+            Arc::new(EmptyToolbox),
+            "test-conversation",
+        )
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -810,7 +889,9 @@ mod tests {
         let provider =
             MockProvider::tool_then_text("tc1", "search", json!({"q": "rust"}), "found it");
         let toolbox = MockToolbox::echo("search");
-        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .build()
+            .unwrap();
         let sink = CollectingEventSink::new();
 
         let output = agent
@@ -847,7 +928,7 @@ mod tests {
         let before = now_ms();
         let provider =
             MockProvider::tool_then_text("tc1", "search", json!({"q": "rust"}), "found it");
-        let mut agent = Agent::builder(provider, MockToolbox::echo("search"))
+        let mut agent = Agent::builder(provider, MockToolbox::echo("search"), "test-conversation")
             .build()
             .unwrap();
         let sink = CollectingEventSink::new();
@@ -877,9 +958,13 @@ mod tests {
 
     #[tokio::test]
     async fn an_assistant_message_reports_when_its_provider_call_began() {
-        let mut agent = Agent::builder(MockProvider::text("hi"), Arc::new(EmptyToolbox))
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            MockProvider::text("hi"),
+            Arc::new(EmptyToolbox),
+            "test-conversation",
+        )
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -910,7 +995,7 @@ mod tests {
         // live one about when a tool finished.
         let provider =
             MockProvider::tool_then_text("tc1", "search", json!({"q": "rust"}), "found it");
-        let mut agent = Agent::builder(provider, MockToolbox::echo("search"))
+        let mut agent = Agent::builder(provider, MockToolbox::echo("search"), "test-conversation")
             .build()
             .unwrap();
         let sink = CollectingEventSink::new();
@@ -971,7 +1056,9 @@ mod tests {
             },
         ]);
         let toolbox = MockToolbox::echo("search");
-        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .build()
+            .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -1000,7 +1087,9 @@ mod tests {
     async fn test_tool_result_message_id_is_derived_from_tool_call_id() {
         let provider = MockProvider::tool_then_text("tc1", "calc", json!({"x": 1}), "result: 1");
         let toolbox = MockToolbox::echo("calc");
-        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .build()
+            .unwrap();
         let sink = CollectingEventSink::new();
 
         agent
@@ -1035,7 +1124,7 @@ mod tests {
             usage: Usage::without_cache(10, 5),
         }]);
         // The handoff tool must be advertised in the toolbox.
-        let mut agent = Agent::builder(provider, MockToolbox::echo("handoff"))
+        let mut agent = Agent::builder(provider, MockToolbox::echo("handoff"), "test-conversation")
             .with_handoff_tool("handoff")
             .build()
             .unwrap();
@@ -1062,9 +1151,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_fails_when_handoff_tool_missing() {
-        let agent = Agent::builder(MockProvider::text("x"), Arc::new(EmptyToolbox))
-            .with_handoff_tool("nope")
-            .build();
+        let agent = Agent::builder(
+            MockProvider::text("x"),
+            Arc::new(EmptyToolbox),
+            "test-conversation",
+        )
+        .with_handoff_tool("nope")
+        .build();
         assert!(matches!(
             agent,
             Err(AgentBuildError::HandoffToolNotRegistered { .. })
@@ -1106,7 +1199,7 @@ mod tests {
                 usage: Usage::without_cache(1, 1),
             },
         ]);
-        let mut agent = Agent::builder(provider, toolbox)
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
             .with_handoff_tool("finish")
             .build()
             .unwrap();
@@ -1155,7 +1248,7 @@ mod tests {
             handoff_max_retries: 1,
             ..AgentConfig::default()
         };
-        let mut agent = Agent::builder(provider, toolbox)
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
             .with_handoff_tool("finish")
             .with_config(config)
             .build()
@@ -1230,10 +1323,14 @@ mod tests {
             ("t1", "notes", json!({"text": "todo"})),
             ("h1", "ask", json!({"question": "which shape?"})),
         ])]);
-        let mut agent = Agent::builder(provider.clone(), toolbox_where(&["notes", "ask"], "ask"))
-            .with_handoff_tool_optional("ask")
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            provider.clone(),
+            toolbox_where(&["notes", "ask"], "ask"),
+            "test-conversation",
+        )
+        .with_handoff_tool_optional("ask")
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
 
         let output = agent
@@ -1278,10 +1375,14 @@ mod tests {
             ]),
             calls_response(vec![("h2", "finish", json!({"answer": 2}))]),
         ]);
-        let mut agent = Agent::builder(provider, toolbox_where(&["notes", "finish"], "finish"))
-            .with_handoff_tool("finish")
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            provider,
+            toolbox_where(&["notes", "finish"], "finish"),
+            "test-conversation",
+        )
+        .with_handoff_tool("finish")
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
 
         let output = agent
@@ -1318,10 +1419,14 @@ mod tests {
             ("t1", "notes", json!({})),
             ("h2", "ask", json!({"question": "second?"})),
         ])]);
-        let mut agent = Agent::builder(provider, toolbox_where(&["notes", "ask"], "ask"))
-            .with_handoff_tool_optional("ask")
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            provider,
+            toolbox_where(&["notes", "ask"], "ask"),
+            "test-conversation",
+        )
+        .with_handoff_tool_optional("ask")
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
 
         let output = agent
@@ -1361,10 +1466,14 @@ mod tests {
             ]),
             calls_response(vec![("h3", "finish", json!({"answer": "just one"}))]),
         ]);
-        let mut agent = Agent::builder(provider, toolbox_where(&["finish"], "finish"))
-            .with_handoff_tool("finish")
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            provider,
+            toolbox_where(&["finish"], "finish"),
+            "test-conversation",
+        )
+        .with_handoff_tool("finish")
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
 
         let output = agent
@@ -1415,7 +1524,7 @@ mod tests {
             },
         ];
         let provider = MockProvider::text("thanks for the answer");
-        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox), "test-conversation")
             .with_history(history)
             .build()
             .unwrap();
@@ -1463,7 +1572,7 @@ mod tests {
             max_tokens: None,
             ..AgentConfig::default()
         };
-        let mut agent = Agent::builder(provider, toolbox)
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
             .with_config(config)
             .build()
             .unwrap();
@@ -1499,7 +1608,7 @@ mod tests {
             max_tokens: None,
             ..AgentConfig::default()
         };
-        let mut agent = Agent::builder(provider, toolbox)
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
             .with_config(config)
             .build()
             .unwrap();
@@ -1528,7 +1637,9 @@ mod tests {
             usage: Usage::without_cache(5, 2),
         }]);
         let toolbox = MockToolbox::echo("some_tool");
-        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .build()
+            .unwrap();
         let sink = CollectingEventSink::new();
         let token = CancellationToken::new();
         token.cancel();
@@ -1596,6 +1707,7 @@ mod tests {
         let mut agent = Agent::builder(
             Arc::new(HangingProvider { entered: tx }),
             Arc::new(EmptyToolbox),
+            "test-conversation",
         )
         .build()
         .unwrap();
@@ -1648,9 +1760,13 @@ mod tests {
             usage: Usage::without_cache(5, 2),
         }]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut agent = Agent::builder(provider, Arc::new(HangingToolbox { entered: tx }))
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            provider,
+            Arc::new(HangingToolbox { entered: tx }),
+            "test-conversation",
+        )
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
         let token = CancellationToken::new();
 
@@ -1734,10 +1850,14 @@ mod tests {
                 usage: Usage::without_cache(1, 1),
             },
         });
-        let mut agent = Agent::builder(provider.clone(), MockToolbox::echo("finish"))
-            .with_handoff_tool("finish")
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            provider.clone(),
+            MockToolbox::echo("finish"),
+            "test-conversation",
+        )
+        .with_handoff_tool("finish")
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -1762,7 +1882,7 @@ mod tests {
             handoff_max_retries: 1,
             ..AgentConfig::default()
         };
-        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"))
+        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"), "test-conversation")
             .with_handoff_tool("finish")
             .with_config(config)
             .build()
@@ -1791,9 +1911,13 @@ mod tests {
                 usage: Usage::without_cache(1, 1),
             },
         });
-        let mut agent = Agent::builder(provider.clone(), Arc::new(EmptyToolbox))
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            provider.clone(),
+            Arc::new(EmptyToolbox),
+            "test-conversation",
+        )
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -1823,10 +1947,14 @@ mod tests {
                 usage: Usage::without_cache(1, 1),
             },
         });
-        let mut agent = Agent::builder(provider.clone(), MockToolbox::echo("finish"))
-            .with_handoff_tool_optional("finish")
-            .build()
-            .unwrap();
+        let mut agent = Agent::builder(
+            provider.clone(),
+            MockToolbox::echo("finish"),
+            "test-conversation",
+        )
+        .with_handoff_tool_optional("finish")
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -1847,7 +1975,7 @@ mod tests {
         // Unlike a forced handoff tool, an optional one never nudges/rejects a
         // text-only turn — it's accepted immediately as `Completed`.
         let provider = MockProvider::text("just chatting, no tool");
-        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"))
+        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"), "test-conversation")
             .with_handoff_tool_optional("finish")
             .build()
             .unwrap();
@@ -1879,7 +2007,7 @@ mod tests {
             stop_reason: StopReason::ToolUse,
             usage: Usage::without_cache(1, 1),
         }]);
-        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"))
+        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"), "test-conversation")
             .with_handoff_tool_optional("finish")
             .build()
             .unwrap();
@@ -1915,7 +2043,9 @@ mod tests {
             }],
             Arc::new(|_, _| Ok(Value::String("line1\nline2".to_string()))),
         );
-        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .build()
+            .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -2011,7 +2141,9 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             },
         });
-        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .build()
+            .unwrap();
         let sink = CollectingEventSink::new();
         agent
             .run(
@@ -2039,7 +2171,7 @@ mod tests {
             stop_reason: StopReason::MaxTokens,
             usage: Usage::without_cache(10, 5),
         }]);
-        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox), "test-conversation")
             .build()
             .unwrap();
         let sink = CollectingEventSink::new();

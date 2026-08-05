@@ -26,6 +26,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// place (#61 item 21).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestSummary {
+    /// What the caller named this conversation. Recorded so a test can pin the
+    /// plumbing from `Agent::builder` through to the wire.
+    pub conversation_id: String,
     pub message_count: usize,
     pub roles: Vec<Role>,
     pub tool_call_ids: Vec<String>,
@@ -33,7 +36,7 @@ pub struct RequestSummary {
 }
 
 impl RequestSummary {
-    fn of(messages: &[Message]) -> Self {
+    fn of(conversation_id: &str, messages: &[Message]) -> Self {
         let mut tool_call_ids = Vec::new();
         let mut tool_result_ids = Vec::new();
         for message in messages {
@@ -48,6 +51,7 @@ impl RequestSummary {
             }
         }
         Self {
+            conversation_id: conversation_id.to_string(),
             message_count: messages.len(),
             roles: messages.iter().map(|m| m.role.clone()).collect(),
             tool_call_ids,
@@ -173,7 +177,10 @@ impl LlmProvider for MockProvider {
         self.requests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(RequestSummary::of(request.messages));
+            .push(RequestSummary::of(
+                request.conversation_id,
+                request.messages,
+            ));
         match self.script.next_step() {
             Ok(outcome) => outcome,
             Err(exhausted) => Err(LlmError::ApiError {
@@ -358,6 +365,7 @@ mod tests {
                     tool_choice: ToolChoice::Auto,
                     max_tokens: None,
                     thinking_effort: None,
+                    conversation_id: "test-conversation",
                 },
                 "msg-1",
                 &sink as &dyn EventSink,

@@ -75,6 +75,7 @@ async fn pinned_tool_choice_succeeds_with_the_flag() {
         tool_choice: ToolChoice::Any,
         max_tokens: Some(512),
         thinking_effort: ThinkingEffort::parse("high"),
+        conversation_id: "test-conversation",
     };
 
     let resp = provider(true)
@@ -103,6 +104,7 @@ async fn pinned_tool_choice_is_rejected_without_the_flag() {
         tool_choice: ToolChoice::Any,
         max_tokens: Some(512),
         thinking_effort: ThinkingEffort::parse("high"),
+        conversation_id: "test-conversation",
     };
 
     let err = provider(false)

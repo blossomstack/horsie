@@ -10,6 +10,15 @@ pub struct CompletionRequest<'a> {
     pub max_tokens: Option<u32>,
     /// Canonical thinking effort for this session; `None` sends no control.
     pub thinking_effort: Option<crate::thinking::ThinkingEffort>,
+    /// Which conversation this turn belongs to: the same value for every turn of
+    /// one conversation, and different across conversations.
+    ///
+    /// Required rather than optional so it cannot be quietly omitted. A provider
+    /// that groups requests by it (the Responses wire sends it as
+    /// `prompt_cache_key`) gets no second chance if it is missing — the effect
+    /// of a wrong value is a silently colder cache, never an error. Providers
+    /// with no use for it ignore it.
+    pub conversation_id: &'a str,
 }
 
 #[derive(Debug, Clone)]
