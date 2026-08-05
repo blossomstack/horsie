@@ -562,7 +562,13 @@ function reducer(state: State, action: Action): State {
             livePendingAsks: ev.value.pendingAsks,
             statusSeq: state.statusSeq + 1,
             statusReason: ev.value.reason ?? null,
-            errorLive: true,
+            // Latched by a turn *starting*, not by any status frame at all. A
+            // turn that begins is what makes a server-held error stale; an
+            // `Idle` frame says nothing about whether the turn before it
+            // failed, and latching on it threw away the seeded banner for the
+            // failure that had just happened.
+            errorLive:
+              state.errorLive || ev.value.status === SessionStatusKind.Running,
             // A turn that has started supersedes the previous turn's error.
             // The optimistic echo already clears it for a message sent from
             // this view; this also covers turns with no echo of their own —
@@ -575,7 +581,7 @@ function reducer(state: State, action: Action): State {
                 : state.streamError,
           };
         case "Error":
-          return { ...state, streamError: ev.value.message };
+          return { ...state, streamError: ev.value.message, errorLive: true };
         case "Delta":
           return {
             ...state,
@@ -713,16 +719,24 @@ export function useSessionStream(
     // agent's transcript and its live run frames. The browser resumes the
     // agent stream on its own via `Last-Event-ID` (the last appended message
     // id), which the server serves from the agent's state.
-    // Seeding waits for the agent stream to be *connected*, not merely
-    // constructed. A session's first turn now starts with the session itself —
-    // the create carries the first message — so it can be well under way
-    // before this view exists. Fetching the window before the subscription is
-    // live leaves a hole exactly the width of the connect: anything appended in
-    // it is in neither the page nor the stream.
-    let seedStarted = false;
-    const seed = () => {
-      if (seedStarted || cancelled) return;
-      seedStarted = true;
+    // Each stream catches up on the state *it* carries, and each waits to be
+    // connected before doing it — not merely constructed. A session's first
+    // turn now starts with the session itself, since the create carries the
+    // first message, so a whole turn can begin and end while the browser is
+    // still navigating. Reading before the subscription is live leaves a hole
+    // exactly the width of the connect: whatever happens inside it is in
+    // neither the read nor the stream.
+    //
+    // Which is why the two catch-ups are wired to different streams. The
+    // transcript rides the agent stream; status, asks and the queue ride the
+    // session stream. Hanging both off one of them left the other's gap open —
+    // a turn whose completion frame was broadcast before the session stream
+    // connected left the badge reading `Running` with nothing left to correct
+    // it.
+    let historyStarted = false;
+    const seedHistory = () => {
+      if (historyStarted || cancelled) return;
+      historyStarted = true;
       const flush = () => {
         if (cancelled) return;
         seeded = true;
@@ -732,9 +746,6 @@ export function useSessionStream(
         }
         buffer.length = 0;
       };
-      // Whatever the stream missed by not existing yet is durable state the
-      // server still holds: the transcript here, and the documents that carry
-      // status, pending asks and the last error below.
       api.sessions
         .history(sessionId, agentId, { limit: HISTORY_LIMIT })
         .then((page) => {
@@ -744,14 +755,31 @@ export function useSessionStream(
         })
         // Let live events flow even if the initial fetch failed.
         .catch(flush);
-      void queryClient.invalidateQueries({ queryKey: qk.session(sessionId) });
-      void queryClient.invalidateQueries({
+    };
+
+    let documentsStarted = false;
+    const seedDocuments = () => {
+      if (documentsStarted || cancelled) return;
+      documentsStarted = true;
+      // `refetch`, not `invalidate`: this has to read the server even when the
+      // view's own fetch is still in flight or has already settled, because
+      // what it corrects is a frame nobody was listening for.
+      void queryClient.refetchQueries({ queryKey: qk.session(sessionId) });
+      void queryClient.refetchQueries({
         queryKey: qk.agent(sessionId, agentId),
       });
     };
 
-    const sessionEs = open(api.sessionEventsUrl(sessionId), "session");
-    const agentEs = open(api.agentEventsUrl(sessionId, agentId), "agent", seed);
+    const sessionEs = open(
+      api.sessionEventsUrl(sessionId),
+      "session",
+      seedDocuments,
+    );
+    const agentEs = open(
+      api.agentEventsUrl(sessionId, agentId),
+      "agent",
+      seedHistory,
+    );
     esRef.current = agentEs;
 
     return () => {
@@ -832,6 +860,16 @@ export function useSessionStream(
     dispatch({ kind: "ack-optimistic", id, serverId });
   };
 
+  // A call in the transcript with no result yet, in a session that is running,
+  // *is* running. Derived rather than taken from the `ToolStart` frame alone:
+  // that frame is broadcast once, so a client that subscribed after it — a
+  // reload mid-turn, or the first turn of a session, which now starts with the
+  // session itself — never heard it and drew a finished-looking row over a call
+  // still in flight. The transcript and the status both survive; between them
+  // they say the same thing the frame said.
+  const sessionRunning =
+    (state.liveStatus ?? detail?.status) === SessionStatusKind.Running;
+
   const stream = useMemo<SessionStream>(() => {
     const resolveTool = (tc: {
       id: string;
@@ -845,7 +883,7 @@ export function useSessionStream(
         output: result?.output,
         isError: result?.isError,
         endedAtMs: result?.atMs,
-        running: result === undefined && (live?.running ?? false),
+        running: result === undefined && (live?.running ?? sessionRunning),
         hooks: state.hooks[tc.id] ?? [],
       };
     };
@@ -927,7 +965,7 @@ export function useSessionStream(
       loadingMore: state.loadingMore,
       progression: state.progression,
     };
-  }, [state]);
+  }, [state, sessionRunning]);
 
   return {
     stream,

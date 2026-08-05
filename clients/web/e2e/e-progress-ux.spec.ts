@@ -77,17 +77,10 @@ test("E3: a running tool shows a live status on a multi-item work-group row", as
   appBase,
   mock,
 }) => {
-  // A session's first turn starts with the session itself — the create carries
-  // the first message — so it can be over before this view is subscribed, and
-  // a *live* row is by definition only visible to a subscriber. Spend a turn
-  // opening the session, then watch the next one.
-  await mock.queueText("ready when you are");
-  await createSession(page, appBase);
-  await sendMessage(page, "hello");
-  await expectStatus(page, "Idle");
-
   await mock.queueToolCall("bash", { command: "echo quick" });
   await mock.queueToolCall("bash", { command: "sleep 5" });
+  await createSession(page, appBase);
+
   await sendMessage(page, "run two things, one slow");
 
   await expectStatus(page, "Running");
