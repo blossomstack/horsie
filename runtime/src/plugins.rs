@@ -153,6 +153,30 @@ pub(crate) async fn run_hook_raw(
     }
 }
 
+/// The client every HTTP hook shares.
+///
+/// One per process rather than one per invocation: a `PreToolUse` webhook runs
+/// on every tool call, and building a client each time rebuilds the TLS config
+/// and throws away the connection pool that would have made the second call
+/// cheap. The per-hook budget rides the request instead of the client.
+///
+/// Redirects are refused. reqwest would otherwise follow up to ten, and a 302
+/// turns the POST into a GET — the endpoint would receive no payload at all and
+/// horsie would read whatever came back as the hook's reply. Refusing also keeps
+/// a hook pointed where its declaration says it is pointed.
+static HTTP_HOOK_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn http_hook_client() -> Option<&'static reqwest::Client> {
+    if let Some(client) = HTTP_HOOK_CLIENT.get() {
+        return Some(client);
+    }
+    let built = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+    Some(HTTP_HOOK_CLIENT.get_or_init(|| built))
+}
+
 /// POST `payload` to `url` and read the response as a hook's reply.
 ///
 /// Mapped onto the same [`HookRun`] a command hook produces, so everything
@@ -160,6 +184,12 @@ pub(crate) async fn run_hook_raw(
 /// mapping loses exactly one thing: there is no exit-code channel over HTTP, so
 /// an HTTP hook can only block through `decision` in its body. It is never
 /// reported as exit 2.
+///
+/// A transport failure is an *outage* in horsie's vocabulary, which is not the
+/// same as harmless: `PreToolUse` fails closed, so an unreachable endpoint denies
+/// the calls its hook guards. That is deliberate and it is what a command hook
+/// that cannot be spawned already does — but the spec has HTTP failures continue,
+/// so the guide says which one horsie is.
 pub(crate) async fn run_http_hook(
     url: &str,
     headers: &[(String, String)],
@@ -175,12 +205,12 @@ pub(crate) async fn run_http_hook(
         }
     };
 
-    let client = match reqwest::Client::builder().timeout(timeout).build() {
-        Ok(c) => c,
-        Err(e) => return failed(format!("http client: {e}")),
+    let Some(client) = http_hook_client() else {
+        return failed("http client could not be built".to_string());
     };
     let mut request = client
         .post(url)
+        .timeout(timeout)
         .header("content-type", "application/json")
         .body(payload.to_string());
     for (name, value) in headers {
@@ -191,8 +221,7 @@ pub(crate) async fn run_http_hook(
         Err(e) => return failed(format!("request failed: {e}")),
     };
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    let body: String = body.chars().take(HOOK_OUTPUT_CLAMP).collect();
+    let body = read_capped(response).await;
     if status.is_success() {
         return HookRun {
             code: Some(0),
@@ -208,6 +237,27 @@ pub(crate) async fn run_http_hook(
         stdout: String::new(),
         stderr: format!("the hook answered {status}"),
     }
+}
+
+/// The response body, stopping at the clamp instead of buffering the whole of
+/// it and truncating after.
+///
+/// A command hook's output is bounded by a process horsie started; an HTTP
+/// hook's is chosen by whatever is at the other end of the URL, so the cap has
+/// to hold before the bytes are in memory rather than after.
+async fn read_capped(mut response: reqwest::Response) -> String {
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() >= HOOK_OUTPUT_CLAMP {
+            tracing::warn!("a plugin http hook's response hit the output clamp");
+            break;
+        }
+    }
+    String::from_utf8_lossy(&bytes)
+        .chars()
+        .take(HOOK_OUTPUT_CLAMP)
+        .collect()
 }
 
 #[cfg(test)]

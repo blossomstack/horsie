@@ -43,7 +43,31 @@ true for subagents.
 Phase 2 lands that is the constant `"subagent"` for every subagent; a matcher on it selects
 all or none, which is honest rather than a lie about a type horsie does not yet have.
 
+**`agent_id` rides both subagent events too**, which the spec lists as a common field and
+horsie did not send. It is not a matcher subject — selecting one run is not something the
+spec offers — but while every subagent reports the same `agent_type` it is the only thing
+telling two concurrent ones apart, or joining a subagent's start to its own stop.
+
 `is_wired()` goes from six events to seven.
+
+## 1a. `SessionStart`'s `source` is an enum
+
+`source` is a matcher domain with a vocabulary the spec fixes — `startup`, `resume`, `clear`,
+`compact`, `fork` — so it is a `SessionStartSource` union rather than a `String`. horsie
+constructs two of the five: `Startup` for a fresh agent load, `Resume` for one folded from a
+journal. The other three are arms nothing constructs, which is the same honesty `is_wired()`
+gives an event horsie cannot fire, rather than three values that silently never appear.
+
+The enum is horsie's vocabulary and `"startup"` is the spec's, so `as_wire()` maps between
+them at the two places the foreign spelling is owed: the payload a hook reads, and the
+subject its matcher selects on. `SessionStartRecord.source` stays a `String` — it holds the
+spelling the hook was given, which is what the transcript shows.
+
+Worth naming, because it is a real divergence: horsie reports `resume` on every *agent load*,
+including the rehydration after an idle offload, which no user asked for. A `startup`-matched
+hook is unaffected. One matching `resume` fires more often than the spec's wording suggests
+— and legitimately so, since the context it exists to refresh really was lost. The guide says
+this.
 
 ## 2. `continue: false` and `stopReason`
 
@@ -89,22 +113,30 @@ Each seam reads the same field; the consequence differs because what is in fligh
   record already travels to the session over the existing `HookSink` → `HooksRan { key,
   records }`. The session halts the agent named by `key` — a new
   `SessionCommand::HaltAgent { key, reason }`, sibling to `ContinueAfterStop`, which the same
-  sink already reaches. Per key:
-  - `Main` — cancel the run and record `TurnStopped`. That is byte-for-byte what the user's
-    own Stop does, so the inbox drains on the turn boundary exactly as it would have.
-  - `Sub(id)` — cancel and persist `SubAgentFailed { id, error: reason }`. A cancel produces
-    no outcome of its own, so without this the node would stay `Running` forever and its
-    parent would never be owed anything.
-  - `Step(id)` — cancel and persist `StepFailed { index, error: reason }`. A halted step is
-    a failed step; the orchestrator already knows what to do with one.
+  sink already reaches. It cancels the agent and then routes an `AgentOutcome::Failed`
+  through the ordinary outcome path rather than branching per key itself — a halt *is* a
+  failure with a reason, and what a failure means for a main agent (a failed turn), a
+  subagent (`SubAgentFailed`, so the node does not sit `Running` forever) and a step
+  (`StepFailed`) is already decided in one place.
+
+  Only while that agent is still running. A halt races the turn it is halting — the records
+  reach the session on the sink while the tool call that produced them is still returning —
+  so a halt that arrives late finds a concluded turn and does nothing, exactly as
+  `ContinueAfterStop` does.
+
+  **Tool records only.** `RuntimeClient::run_hooks` puts a server-initiated event's records
+  on this same sink *as well as* returning them, and every one of those seams reads the halt
+  off its own return value. Acting on both routes halted the agent twice: a halting `Stop`
+  hook journaled `TurnFailed` and then `TurnEnded` for one turn.
 - **Start hooks** (`SessionStart` / `SubagentStart` / `UserPromptSubmit`, fired on the
   pre-run seam). The run has not begun, so halting is abandoning it: `AbandonedStart::Blocked
   (reason)`, the arm a `UserPromptSubmit` block already produces. `prompt_blocked` becomes
   `start_blocked` and reads a halt on *any* record as well as that block.
-- **`Stop` / `SubagentStop`.** The turn is already ending, so a halt cannot end it harder.
-  What it does do is **override a sibling hook's block**: with a halt present the turn ends
-  rather than continuing, which is the one place `continue`'s documented precedence over
-  `decision` is observable. `stop_verdict` returns `None` when any record in the batch halts.
+- **`Stop` / `SubagentStop`.** The turn is already ending, so a halt cannot end it harder —
+  and must not be allowed to, which is what the tool-records-only rule above buys. What it
+  does do is **override a sibling hook's block**: with a halt present the turn ends rather
+  than continuing, which is the one place `continue`'s documented precedence over `decision`
+  is observable. The records need no second `HooksRan`; the sink has already sent them.
 
 Because the reason reaches the user and never the model, it rides the record — which the web
 client already renders — rather than being injected as context.
@@ -129,14 +161,29 @@ the workspace's network needs the sandbox's network position rather than the ser
 
 - POST the same stdin payload as the JSON body, under the same per-hook timeout.
 - `${CLAUDE_PLUGIN_ROOT}` is substituted in the URL and in header values, as it is in a
-  command string.
+  command string. Header values additionally interpolate `$NAME` / `${NAME}` for the
+  variables `allowedEnvVars` lists — an allowlist, because a header is where a plugin puts
+  a credential and a hook free to name any variable could read every one the runtime holds.
+  An unlisted or unset variable is left as written rather than blanked: an empty credential
+  is indistinguishable from a wrong one at the far end.
 - The response body becomes the reply's `stdout`, so the whole of `process()` applies
-  unchanged.
+  unchanged. Read up to the clamp rather than buffered whole and truncated after, because
+  the length is chosen by the far end rather than by a process horsie started.
 - A non-2xx status is `Failed`, naming the status. A transport error is `code: None` — the
   existing outage shape, already distinguished from a decision.
 - **There is no exit-2 analogue over HTTP.** An HTTP hook blocks only through `decision` /
   `permissionDecision` in its body. Stated in the guide, because the difference is invisible
   otherwise.
+- **A failure to answer still fails closed**, which is a deliberate divergence: the spec has
+  a non-2xx continue, `denies()` treats `Verdict::Failed` as denying, and a `PreToolUse`
+  webhook that 500s therefore blocks the calls it guards. Consistent with a command hook
+  that cannot be spawned, and the safer half of the choice, but invisible unless stated —
+  so the guide states it.
+- Redirects are refused. reqwest follows ten by default and a 302 downgrades the POST to a
+  GET, so the endpoint would be sent no payload at all and its answer read as a reply.
+- One process-wide client, not one per invocation: a `PreToolUse` webhook runs on every
+  tool call, and rebuilding the client each time discards the connection pool and redoes
+  the TLS setup. The per-hook budget rides the request.
 
 `reqwest` is already a runtime dependency.
 
@@ -149,7 +196,11 @@ the workspace's network needs the sandbox's network position rather than the ser
   would; a 500 is `Failed`; a connection refusal is an outage.
 - Server: a subagent's conclusion fires `SubagentStop` and not `Stop`; a blocking
   `SubagentStop` continues that subagent under the cap; a halting tool hook stops the main
-  turn, fails the subagent node, fails the step; a halt beats a sibling `Stop` block.
+  turn, fails the subagent node, fails the step; a halt beats a sibling `Stop` block, and
+  ends that turn without also failing it — read off the journal, since the `TurnEnded` that
+  follows hides the spurious `TurnFailed` in the status.
+- Runtime: an allowed env var interpolates in a header in either spelling; an unlisted or
+  unset one is left as written; a redirect is refused.
 - Web: a halted record renders its reason.
 
 ## Not in scope

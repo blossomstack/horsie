@@ -79,6 +79,25 @@ pub mod executor {
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod runtime {
     include!(concat!(env!("OUT_DIR"), "/runtime/mod.rs"));
+
+    impl SessionStartSource {
+        /// The spelling a hook is given, which is the spec's and not Rust's.
+        ///
+        /// The enum is horsie's own vocabulary; `"startup"` is the foreign one a
+        /// plugin's `matcher` is written against and its script compares to. One
+        /// mapping, here, rather than a `String` threaded through every seam on
+        /// the chance that someone spells it right.
+        #[must_use]
+        pub fn as_wire(&self) -> &'static str {
+            match self {
+                Self::Startup => "startup",
+                Self::Resume => "resume",
+                Self::Clear => "clear",
+                Self::Compact => "compact",
+                Self::Fork => "fork",
+            }
+        }
+    }
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]

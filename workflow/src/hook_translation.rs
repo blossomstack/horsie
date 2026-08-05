@@ -249,6 +249,7 @@ mod tests {
     fn subagent_start_and_stop_context_translate() {
         assert!(
             translate(&entry(HookAction::SubagentStart(SubagentStartRecord {
+                agent_id: "sub-1".into(),
                 agent_type: "reviewer".into(),
                 system_message: None,
                 outcome: SubagentStartOutcome::Ran(ctx("house rules")),
@@ -257,6 +258,7 @@ mod tests {
         );
         assert!(
             translate(&entry(HookAction::SubagentStop(SubagentStopRecord {
+                agent_id: "sub-1".into(),
                 agent_type: "reviewer".into(),
                 system_message: None,
                 outcome: SubagentStopOutcome::Ran(ctx("summarise findings")),

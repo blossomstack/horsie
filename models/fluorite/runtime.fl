@@ -98,17 +98,37 @@ struct ScanResponse {
 
 // --- Server-initiated hooks ---
 
-struct SessionStartInput { source: String }
-/// `agent_type` is the matcher domain, the way `source` is for `SessionStart`.
-struct SubagentStartInput { agent_type: String }
+/// How the session that is starting came to start.
+///
+/// The spec's whole vocabulary, not the subset horsie produces. `Clear`,
+/// `Compact` and `Fork` have no call site — horsie has no context compaction,
+/// no fork and no clear — and are arms nothing constructs rather than values
+/// that silently never appear, which is the same honesty `is_wired()` gives an
+/// event horsie cannot fire. A matcher on one of them selects nothing.
+#[type_tag = "source"]
+union SessionStartSource {
+    Startup,
+    Resume,
+    Clear,
+    Compact,
+    Fork,
+}
+
+struct SessionStartInput { source: SessionStartSource }
+/// A subagent starting. `agent_id` names *which* subagent; `agent_type` is the
+/// matcher domain, the way `source` is for `SessionStart`. Both, because until
+/// #105's Phase 2 gives horsie an agent-type concept every subagent reports the
+/// same type, and the id is then the only thing telling two apart.
+struct SubagentStartInput { agent_id: String, agent_type: String }
 struct UserPromptSubmitInput { prompt: String }
 /// `stop_hook_active` is true when horsie is only still running because a
 /// previous `Stop` hook blocked. A cooperative hook returns early rather than
 /// looping; the server's hard cap exists for the hooks that do not.
 struct StopInput { last_assistant_message: Option<String>, stop_hook_active: bool }
-/// A subagent's turn ending. Carries `agent_type` as well, because that is what
-/// its matcher selects on — the same domain `SubagentStart` offers.
+/// A subagent's turn ending. Carries the same pair `SubagentStart` does, so a
+/// hook can join its own start to its own stop.
 struct SubagentStopInput {
+    agent_id: String,
     agent_type: String,
     last_assistant_message: Option<String>,
     stop_hook_active: bool,

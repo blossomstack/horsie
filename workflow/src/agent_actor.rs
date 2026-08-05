@@ -1391,15 +1391,13 @@ impl EventSourcedActor for AgentActor {
                     return CommandEffect::none();
                 }
                 let turn = crate::StartTurn {
-                    start_source: (!self.start_hook_fired).then(|| {
-                        // A fresh agent has nothing in its transcript; anything
-                        // else was folded from a journal. No framework flag
-                        // needed to tell a cold start from a rehydration.
-                        if state.history.is_empty() {
-                            "startup".to_string()
-                        } else {
-                            "resume".to_string()
-                        }
+                    // A fresh agent has nothing in its transcript; anything else
+                    // was folded from a journal. No framework flag needed to
+                    // tell a cold start from a rehydration.
+                    start_source: (!self.start_hook_fired).then_some(if state.history.is_empty() {
+                        horsie_models::runtime::SessionStartSource::Startup
+                    } else {
+                        horsie_models::runtime::SessionStartSource::Resume
                     }),
                     prompt: message.clone(),
                 };
@@ -2543,7 +2541,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|t| t.start_source.clone())
+                    .map(|t| t.start_source.as_ref().map(|s| s.as_wire().to_string()))
                     .collect()
             }
         }

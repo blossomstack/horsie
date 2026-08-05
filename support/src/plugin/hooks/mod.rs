@@ -34,8 +34,15 @@ pub enum HookTransport {
     /// only block through `decision` / `permissionDecision` in that body.
     Http {
         url: String,
-        /// Extra request headers, in declaration order.
+        /// Extra request headers, sorted by name — `serde_json`'s object is a
+        /// `BTreeMap` without the `preserve_order` feature, so declaration
+        /// order is not recoverable and nothing may depend on it.
         headers: Vec<(String, String)>,
+        /// `allowedEnvVars` — the environment variables a header value may
+        /// interpolate. An allowlist rather than free substitution: a header is
+        /// where a plugin puts a credential, and a hook that could name any
+        /// variable could exfiltrate every one the runtime holds.
+        allowed_env_vars: Vec<String>,
     },
 }
 
@@ -135,6 +142,15 @@ fn transport_of(hook: &serde_json::Value) -> Option<HookTransport> {
                 .map(|h| {
                     h.iter()
                         .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            allowed_env_vars: hook
+                .get("allowedEnvVars")
+                .and_then(serde_json::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| Some(v.as_str()?.to_string()))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -274,9 +290,33 @@ mod tests {
             HookTransport::Http {
                 url: "https://x".into(),
                 headers: vec![("X-Key".into(), "s".into())],
+                allowed_env_vars: Vec::new(),
             }
         );
         assert_eq!(h.decls[1].transport, HookTransport::Command("real".into()));
+    }
+
+    /// `allowedEnvVars` is read, because a header is where a plugin puts its
+    /// credential. Dropped, the `$TOKEN` in the value went out literally and
+    /// the endpoint answered 401 — which `PreToolUse` then failed closed on.
+    #[test]
+    fn an_http_hook_declares_the_env_vars_its_headers_may_read() {
+        let dir = TempDir::new().unwrap();
+        write_hooks(
+            dir.path(),
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"http","url":"https://x",
+                 "headers":{"Authorization":"Bearer $MY_TOKEN"},
+                 "allowedEnvVars":["MY_TOKEN"]}]}]}}"#,
+        );
+        let h = read(dir.path()).unwrap();
+        assert_eq!(
+            h.decls[0].transport,
+            HookTransport::Http {
+                url: "https://x".into(),
+                headers: vec![("Authorization".into(), "Bearer $MY_TOKEN".into())],
+                allowed_env_vars: vec!["MY_TOKEN".into()],
+            }
+        );
     }
 
     /// A transport horsie does not know, and a declaration missing the field

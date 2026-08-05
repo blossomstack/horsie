@@ -1,4 +1,5 @@
 
+import { SessionStartSource } from './sessionStartSource';
 export interface SessionStartInput {
-  source: string;
+  source: SessionStartSource;
 }

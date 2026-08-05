@@ -1727,9 +1727,16 @@ impl horsie_runtime_client::HookSink for SessionHookSink {
     async fn record(&self, hooks: Vec<HookRecord>) {
         // A halt is read here rather than in the session's `HooksRan` handler
         // so that handler stays what it says it is: pure routing into an
-        // agent's transcript. This is the only sink a tool hook's records
-        // travel on, so it is also the only place the halt could be seen.
-        let halt = halt_reason(&hooks);
+        // agent's transcript.
+        //
+        // Tool records only. Every *server*-initiated event's records travel
+        // this sink as well as being returned to the seam that fired them —
+        // `RuntimeClient::run_hooks` does both — and each of those seams reads
+        // the halt off its own return value: `start_blocked` at the pre-run
+        // seam, `StopHookParent` at the stop seam. Acting on them here too
+        // would halt the same agent twice, and on `Stop` it would fail a turn
+        // the stop seam is deliberately ending cleanly.
+        let halt = tool_halt_reason(&hooks);
         let _ = self
             .target
             .tell(SessionCommand::HooksRan {
@@ -1819,7 +1826,8 @@ impl AgentOutcomeSink for StopHookParent {
         // decorates every agent a session hosts, and until it was gated on the
         // kind a session with four subagents fired `Stop` five times.
         let event = match self.provider.kind {
-            SessionAgentKind::Sub(_) => ServerHookEvent::SubagentStop(SubagentStopInput {
+            SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStop(SubagentStopInput {
+                agent_id: id.to_string(),
                 agent_type: self.provider.agent_type(),
                 last_assistant_message,
                 stop_hook_active,
@@ -1838,15 +1846,12 @@ impl AgentOutcomeSink for StopHookParent {
 
         // A halt outranks a block, which is the spec's own precedence: a hook
         // that says both is asking to stop, and the turn is already stopping.
+        // So this ends the turn the way an unblocked one ends — the records are
+        // already on their way to the transcript, `run_hooks` having put them on
+        // the sink, and there is nothing to add to them the way `CapReached`
+        // adds to a block.
         if let Some(reason) = halt_reason(&records) {
             self.continuations.store(0, Ordering::Relaxed);
-            let _ = self
-                .session
-                .tell(SessionCommand::HooksRan {
-                    key: self.key,
-                    records,
-                })
-                .await;
             tracing::info!(reason, "a stop hook set continue: false; the turn ends");
             return self.inner.deliver(outcome).await;
         }
@@ -1891,13 +1896,50 @@ impl AgentOutcomeSink for StopHookParent {
 /// Reads the envelope rather than any outcome: `continue` is a common field, so
 /// every seam that can act on a halt reads it the same way.
 fn halt_reason(records: &[HookRecord]) -> Option<String> {
-    records.iter().find_map(|r| {
-        r.halt.as_ref().map(|h| {
-            h.reason
-                .clone()
-                .unwrap_or_else(|| "a hook set continue: false".to_string())
-        })
+    records.iter().find_map(halt_of)
+}
+
+/// The same, restricted to the records the sink is the only route for.
+fn tool_halt_reason(records: &[HookRecord]) -> Option<String> {
+    records
+        .iter()
+        .filter(|r| is_tool_seam(&r.action))
+        .find_map(halt_of)
+}
+
+/// One record's halt, with the fallback every seam shows when the hook set
+/// `continue: false` without a `stopReason`.
+fn halt_of(record: &HookRecord) -> Option<String> {
+    record.halt.as_ref().map(|h| {
+        h.reason
+            .clone()
+            .unwrap_or_else(|| "a hook set continue: false".to_string())
     })
+}
+
+/// Whether this record was made by a hook the runtime ran inline with a tool
+/// call, rather than by one the server initiated.
+///
+/// Listed rather than `_`: a newly wired event must be classified here
+/// deliberately, because a server event misfiled as a tool one is halted twice.
+fn is_tool_seam(action: &HookAction) -> bool {
+    match action {
+        HookAction::PreToolUse(_)
+        | HookAction::PostToolUse(_)
+        | HookAction::PostToolUseFailure(_)
+        | HookAction::PostToolBatch(_) => true,
+        HookAction::SessionStart(_)
+        | HookAction::SessionEnd(_)
+        | HookAction::UserPromptSubmit(_)
+        | HookAction::Stop(_)
+        | HookAction::StopFailure(_)
+        | HookAction::SubagentStart(_)
+        | HookAction::SubagentStop(_)
+        | HookAction::TaskCreated(_)
+        | HookAction::TaskCompleted(_)
+        | HookAction::Notification(_)
+        | HookAction::CwdChanged(_) => false,
+    }
 }
 
 /// Why a stop hook is holding this turn open, if one is.
@@ -2194,7 +2236,8 @@ impl ContextProvider for SessionContextProvider {
             // all — a subagent is not a session, and the two events carry
             // different matcher domains.
             let event = match self.kind {
-                SessionAgentKind::Sub(_) => ServerHookEvent::SubagentStart(SubagentStartInput {
+                SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStart(SubagentStartInput {
+                    agent_id: id.to_string(),
                     agent_type: self.agent_type(),
                 }),
                 SessionAgentKind::Main | SessionAgentKind::Step(_) => {
@@ -2689,14 +2732,30 @@ impl EventSourcedActor for SessionActor {
                 CommandEffect::none()
             }
             SessionCommand::HaltAgent { key, reason } => {
+                // A halt races the turn it is halting: the records reach the
+                // session on the sink while the tool call that produced them is
+                // still returning, so the turn can finish first. Failing it then
+                // would rewrite a turn that already ended — which is why
+                // `ContinueAfterStop` below no-ops on the same condition.
+                let live = self
+                    .agents
+                    .as_ref()
+                    .and_then(|a| a.get(key))
+                    .filter(|_| state.status == SessionStatus::Running)
+                    .cloned();
+                let Some(agent) = live else {
+                    tracing::warn!(
+                        session = %self.id,
+                        "a hook halted an agent whose turn had already ended; ignored"
+                    );
+                    return CommandEffect::none();
+                };
                 // Cancel first, so the agent is not still appending to its own
                 // journal when the outcome below is folded.
-                if let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)) {
-                    let (tx, rx) = oneshot::channel();
-                    let _ = agent.tell(AgentCommand::Cancel { ack: Some(tx) }).await;
-                    if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
-                        tracing::warn!(session = %self.id, "halted agent did not finish in time");
-                    }
+                let (tx, rx) = oneshot::channel();
+                let _ = agent.tell(AgentCommand::Cancel { ack: Some(tx) }).await;
+                if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
+                    tracing::warn!(session = %self.id, "halted agent did not finish in time");
                 }
                 // Routed through the ordinary outcome path rather than given its
                 // own per-key branching: a halt is a failure with a reason, and
@@ -4846,7 +4905,7 @@ mod tests {
     async fn stop_harness(
         records: Vec<Vec<HookRecord>>,
     ) -> (ActorFixture, ActorRef<SessionCommand>) {
-        let (f, session, _) = stop_harness_with_prompts(records).await;
+        let (f, session, _, _, _) = stop_harness_full(records).await;
         (f, session)
     }
 
@@ -4857,6 +4916,34 @@ mod tests {
         ActorFixture,
         ActorRef<SessionCommand>,
         Arc<Mutex<Vec<String>>>,
+    ) {
+        let (f, session, prompts, _, _) = stop_harness_full(records).await;
+        (f, session, prompts)
+    }
+
+    /// The same harness, also handing back the journal, for a test that has to
+    /// read what was *persisted*. A spurious failure is overwritten in the
+    /// status by whatever lands next; the journal keeps it.
+    async fn stop_harness_with_journal(
+        records: Vec<Vec<HookRecord>>,
+    ) -> (
+        ActorFixture,
+        ActorRef<SessionCommand>,
+        Uuid,
+        Arc<dyn horsie_actor::Journal>,
+    ) {
+        let (f, session, _, id, journal) = stop_harness_full(records).await;
+        (f, session, id, journal)
+    }
+
+    async fn stop_harness_full(
+        records: Vec<Vec<HookRecord>>,
+    ) -> (
+        ActorFixture,
+        ActorRef<SessionCommand>,
+        Arc<Mutex<Vec<String>>>,
+        Uuid,
+        Arc<dyn horsie_actor::Journal>,
     ) {
         let tmp = tempfile::tempdir().unwrap();
         let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
@@ -4893,6 +4980,8 @@ mod tests {
             "mock".to_string(),
             Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>,
         );
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
         let session = horsie_actor::spawn_root(
             SessionActor::new(
                 id,
@@ -4901,9 +4990,9 @@ mod tests {
                 spawn_deaf_supervisor(),
                 test_frames(),
             ),
-            Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
+            journal.clone(),
         );
-        (f, session, prompts)
+        (f, session, prompts, id, journal)
     }
 
     /// Every user-role message in the main agent's transcript, in order — which
@@ -5053,7 +5142,7 @@ mod tests {
         blocking[0].halt = Some(horsie_models::hooks::HookHalt {
             reason: Some("out of budget".into()),
         });
-        let (_f, session) = stop_harness(vec![blocking]).await;
+        let (_f, session, id, journal) = stop_harness_with_journal(vec![blocking]).await;
         send(&session, "go").await;
         let inputs = settled_inputs(&session).await;
         assert_eq!(
@@ -5061,32 +5150,39 @@ mod tests {
             1,
             "the halt must stop the block continuing the turn: {inputs:?}"
         );
+        // And ends it *cleanly*. `run_hooks` puts its records on the same sink
+        // tool records take, so before `tool_halt_reason` narrowed what the sink
+        // acts on, this halt also arrived as a `HaltAgent` and failed the turn
+        // the stop seam had already concluded. Read off the journal rather than
+        // the status: `TurnEnded` lands after the spurious failure and hides it.
+        let events = journaled_events(&journal, id).await;
+        assert!(
+            !events.iter().any(|e| e.contains("TurnFailed")),
+            "a halted stop ends the turn, it does not fail it: {events:?}"
+        );
     }
 
-    /// A subagent's turn ending is a `SubagentStop`. It fired `Stop` before
-    /// this, because the sink that fires it decorates every agent a session
-    /// hosts and was not gated on the kind — so a `Stop` hook meaning "the
-    /// session is done" fired once per subagent.
-    #[tokio::test]
-    async fn a_subagent_fires_subagent_stop_never_stop() {
-        let (f, session) = stop_harness(vec![]).await;
-        spawn_sub(&session, "research", "dig into it").await;
-        for _ in 0..200 {
-            if f.agent.hook_events().contains(&"SubagentStop") {
-                break;
+    /// Every session event that reached the journal, as its serialized payload.
+    /// Matched on as text, because the variant name is what a test cares about
+    /// and decoding buys nothing over reading it.
+    async fn journaled_events(
+        journal: &Arc<dyn horsie_actor::Journal>,
+        session_id: Uuid,
+    ) -> Vec<String> {
+        use futures_util::StreamExt;
+        let pid = SessionActor::persistence_id_for(session_id);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only inspection: names what was journaled, which no actor reports"
+        )]
+        let mut stream = journal.replay(&pid, 0).await;
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            if let Ok((_, bytes)) = item {
+                out.push(String::from_utf8_lossy(&bytes).into_owned());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let events = f.agent.hook_events();
-        assert_eq!(
-            events.iter().filter(|e| **e == "SubagentStop").count(),
-            1,
-            "the subagent stops as a subagent, got {events:?}"
-        );
-        assert!(
-            events.iter().filter(|e| **e == "Stop").count() <= 1,
-            "only the session's own agent may claim a stop, got {events:?}"
-        );
+        out
     }
 
     /// A halt from a tool hook reaches the session as its own command, because
