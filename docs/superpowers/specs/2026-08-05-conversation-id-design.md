@@ -88,6 +88,11 @@ copied history.
 - The "every turn of a conversation shares one cache key" test is replaced by one
   asserting the key is whatever the caller said **regardless of history** — the
   same property, now guaranteed rather than inferred.
+- An actor test driving a real run through a `MockProvider` and asserting the
+  request carries `ctx.session_id`. Everything below `start_run` is typed — the
+  field is required, so a request cannot exist without an id — but *which* id
+  is read there is a plain assignment whose failure mode is a colder cache and
+  no error, which is exactly the shape that survives review.
 - The conformance suite and the 53 test builders pass a literal id; this is
   mechanical.
 - `make check` and `make ts-types`.

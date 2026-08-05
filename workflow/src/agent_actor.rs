@@ -732,6 +732,12 @@ impl AgentActor {
         let max_retries = self.params.max_retries;
         let parent = self.ctx.parent.clone();
         let session_id = self.ctx.session_id;
+        // The same value, named for the other job it does. `session_id` is this
+        // agent's own identity, and only a *main* agent's identity is a session
+        // id — a subagent or a workflow step carries its own uuid. Each has its
+        // own history, and so its own cacheable prefix, which is exactly the
+        // granularity a provider grouping requests by conversation wants.
+        let conversation_id = session_id.to_string();
 
         tokio::spawn(async move {
             // Provide this run's contexts on the spawned task (never the mailbox):
@@ -812,10 +818,7 @@ impl AgentActor {
                 contexts.provider,
                 toolbox,
                 sink,
-                // This agent's own identity: the session id for a main agent, a
-                // subagent's own uuid for a subagent. Each has its own history
-                // and so its own cacheable prefix.
-                session_id.to_string(),
+                conversation_id,
                 system_prompt,
                 handoff_tool,
                 force_handoff_choice,
@@ -2232,6 +2235,87 @@ mod tests {
                 (format!("complete:{}", two.id), 2),
             ],
             "both events publish once, and state is already folded when they do"
+        );
+    }
+
+    /// The one seam the conversation id can regress at silently. Everything
+    /// downstream is typed — the field is required, so a provider cannot be
+    /// handed a request without one — but *which* id `start_run` reads is a
+    /// plain assignment, and getting it wrong (a fresh uuid, the run id) costs
+    /// only a colder prompt cache. Nothing fails, so nothing would catch it.
+    #[tokio::test]
+    async fn a_run_tells_the_provider_the_agent_s_own_id() {
+        use horsie_actor::{InMemoryJournal, Journal, spawn_root};
+        use horsie_agentcore::EmptyToolbox;
+        use horsie_agentcore::testkit::MockProvider;
+
+        struct MockContext(Arc<MockProvider>);
+        #[async_trait]
+        impl crate::ContextProvider for MockContext {
+            async fn provide(&self) -> Result<crate::Contexts, crate::ContextError> {
+                Ok(crate::Contexts {
+                    provider: self.0.clone(),
+                    toolbox: Arc::new(EmptyToolbox),
+                    system_prompt: None,
+                })
+            }
+        }
+        /// Forwards outcomes so the test awaits the run's end rather than
+        /// sleeping on it.
+        struct ReportingParent(tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
+        #[async_trait]
+        impl AgentOutcomeSink for ReportingParent {
+            async fn deliver(&self, outcome: AgentOutcome) {
+                let _ = self.0.send(outcome);
+            }
+        }
+
+        let provider = MockProvider::text("done");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // The agent's own identity: a session id for a main agent, its own uuid
+        // for a subagent or a workflow step. Distinct from every other id in
+        // scope, so a test that passes cannot be reading the wrong one.
+        let session_id = uuid::Uuid::new_v4();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(MockContext(provider.clone())),
+            event_sink: Arc::new(StubSink),
+            parent: Arc::new(ReportingParent(tx)),
+            session_id,
+        };
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let agent = spawn_root(
+            AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+            journal,
+        );
+
+        agent
+            .tell(AgentCommand::Resume {
+                results: vec![],
+                message: Some("hi".into()),
+                subagent_results: vec![],
+            })
+            .await
+            .unwrap();
+
+        // `UsageRecorded` rides alongside the terminal outcome, so read until
+        // the run itself reports.
+        loop {
+            match rx.recv().await.expect("the run must report an outcome") {
+                AgentOutcome::UsageRecorded { .. } => continue,
+                AgentOutcome::Concluded { .. } => break,
+                other => panic!("expected the turn to conclude, got {other:?}"),
+            }
+        }
+
+        let ids: Vec<String> = provider
+            .requests()
+            .into_iter()
+            .map(|r| r.conversation_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![session_id.to_string()],
+            "the provider must be told this agent's own id, not any other"
         );
     }
 
