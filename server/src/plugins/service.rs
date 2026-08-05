@@ -14,7 +14,7 @@ use horsie_models::plugins::{
     PluginView,
 };
 use horsie_support::plugin::source_location;
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Capability-token lifetime; covers provisioning (incl. re-attach) with margin.
@@ -30,16 +30,19 @@ enum Provenance {
 pub struct PluginService {
     store: PluginStore,
     marketplaces: MarketplaceStore,
-    artifacts: ArtifactStore,
-    token_secret: Vec<u8>,
+    /// Shared with every other account's service: artifacts are addressed by
+    /// the hash of their own bytes, so there is one file per bundle version on
+    /// the whole deployment.
+    artifacts: Arc<ArtifactStore>,
+    token_secret: Arc<Vec<u8>>,
 }
 
 impl PluginService {
     pub fn new(
         store: PluginStore,
         marketplaces: MarketplaceStore,
-        artifacts: ArtifactStore,
-        token_secret: Vec<u8>,
+        artifacts: Arc<ArtifactStore>,
+        token_secret: Arc<Vec<u8>>,
     ) -> Self {
         Self {
             store,
@@ -302,16 +305,6 @@ impl PluginService {
         self.gc().await
     }
 
-    /// Path to a hash's artifact (for the streaming route).
-    pub fn artifact_path(&self, hash: &str) -> PathBuf {
-        self.artifacts.path(hash)
-    }
-
-    /// Verify a fetch token authorizes `hash` (for the streaming route).
-    pub fn verify_token(&self, tok: &str, hash: &str) -> Result<(), String> {
-        token::verify(&self.token_secret, tok, hash)
-    }
-
     /// Write the artifact and the row. The source recorded is what ingest
     /// actually cloned, not what the caller asked for — a marketplace entry may
     /// name another repo, and `update` has to re-clone the same tree.
@@ -445,17 +438,17 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    async fn service() -> (PluginService, tempfile::TempDir) {
+    async fn service() -> (PluginService, Arc<ArtifactStore>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::db::testing::db().await;
-        let artifacts = ArtifactStore::new(tmp.path().join("artifacts"));
+        let artifacts = Arc::new(ArtifactStore::new(tmp.path().join("artifacts")));
         let svc = PluginService::new(
             PluginStore::new(db.clone(), crate::auth::UserId::new("1")),
             MarketplaceStore::new(db, crate::auth::UserId::new("1")),
-            artifacts,
-            b"secret".to_vec(),
+            artifacts.clone(),
+            Arc::new(b"secret".to_vec()),
         );
-        (svc, tmp)
+        (svc, artifacts, tmp)
     }
 
     fn url_input(url: &str) -> PluginInstallInput {
@@ -561,7 +554,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_then_resolve_and_token() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let url = fixture_repo(&repo);
@@ -578,10 +571,14 @@ mod tests {
             64,
             "the ref carries the content hash; the agent builds the URL from it"
         );
-        assert!(svc.artifact_path(&refs[0].hash).is_file());
+        assert!(artifacts.path(&refs[0].hash).is_file());
         let tok = svc.mint_token("s", &[refs[0].hash.clone()]);
-        assert!(svc.verify_token(&tok, &refs[0].hash).is_ok());
-        assert!(svc.verify_token(&tok, "deadbeef").is_err());
+        assert!(
+            artifacts
+                .verify_token(b"secret", &tok, &refs[0].hash)
+                .is_ok()
+        );
+        assert!(artifacts.verify_token(b"secret", &tok, "deadbeef").is_err());
 
         // Unknown name errors.
         assert!(svc.resolve(&["nope".into()]).await.is_err());
@@ -589,7 +586,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_names_reflect_flag() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let url = fixture_repo(&repo);
@@ -610,7 +607,7 @@ mod tests {
     /// rather than erroring or installing something arbitrary.
     #[tokio::test]
     async fn a_catalogue_url_registers_a_marketplace() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let url = catalogue(tmp.path(), "market");
 
         let m = expect_source(svc.install(url_input(&url)).await.unwrap());
@@ -628,7 +625,7 @@ mod tests {
     /// CACHED index — no second clone of the marketplace.
     #[tokio::test]
     async fn installing_from_a_marketplace_uses_the_cached_index() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
 
@@ -652,7 +649,7 @@ mod tests {
     /// An unknown entry names what is on offer, as the CLI does.
     #[tokio::test]
     async fn an_unknown_entry_names_the_alternatives() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
 
@@ -663,7 +660,7 @@ mod tests {
     /// Neither form given is a rejection, not a panic and not a clone of "".
     #[tokio::test]
     async fn an_empty_install_input_is_rejected() {
-        let (svc, _tmp) = service().await;
+        let (svc, _artifacts, _tmp) = service().await;
         let err = svc
             .install(PluginInstallInput {
                 source_url: None,
@@ -679,7 +676,7 @@ mod tests {
     /// Removing a source is not removing the software.
     #[tokio::test]
     async fn removing_a_marketplace_leaves_its_bundles_installed() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
         svc.install(pick("catalogue", "alpha")).await.unwrap();
@@ -693,7 +690,7 @@ mod tests {
     /// "add it again" and "refresh" are the same intent from the user's side.
     #[tokio::test]
     async fn re_pasting_a_registered_marketplace_refreshes_it() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let repo = tmp.path().join("market");
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
@@ -722,7 +719,7 @@ mod tests {
     /// a catalogue drops to a single entry.
     #[tokio::test]
     async fn refresh_re_reads_the_index_without_installing() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let repo = tmp.path().join("market");
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
@@ -745,7 +742,7 @@ mod tests {
     /// recorded on installed bundles.
     #[tokio::test]
     async fn a_name_collision_between_two_sources_is_rejected() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let first = catalogue(tmp.path(), "one");
         svc.install(url_input(&first)).await.unwrap();
 
@@ -761,7 +758,7 @@ mod tests {
     /// update, so an entry the catalogue has moved is followed.
     #[tokio::test]
     async fn update_re_resolves_a_marketplace_bundle_through_the_index() {
-        let (svc, tmp) = service().await;
+        let (svc, artifacts, tmp) = service().await;
         let repo = tmp.path().join("market");
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();

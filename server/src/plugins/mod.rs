@@ -10,7 +10,7 @@ mod ingest;
 mod marketplace_store;
 mod service;
 mod store;
-mod token;
+pub(crate) mod token;
 
 pub use artifact::ArtifactStore;
 pub use marketplace_store::{MarketplaceRow, MarketplaceStore};

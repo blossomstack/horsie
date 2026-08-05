@@ -21,16 +21,12 @@ mod sse;
 pub mod vendor_connect;
 mod workflows;
 
-use crate::auth::AuthService;
-use crate::config::ConfigStore;
-use crate::sessions::supervisor::SessionSupervisorCommand;
+use crate::auth::{AuthService, Principal};
+use crate::users::{Shared, UserRegistry, UserServices};
 use axum::Router;
 use axum::routing::{get, post, put};
-use horsie_actor::ActorRef;
-use horsie_models::session::GlobalSessionEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 
 /// "http://host" from the request headers (horsie serves same-origin; a
@@ -44,58 +40,76 @@ pub(crate) fn request_base(headers: &axum::http::HeaderMap) -> String {
     format!("http://{host}")
 }
 
+/// What the deployment owns, and how a request reaches what its account owns.
+///
+/// Everything scoped lives behind [`Scope`] instead. The split is what keeps
+/// the routes that run *ahead* of the auth layer working: `/api/health`,
+/// `/api/auth/*`, and `/api/plugin-artifacts/*` have no account to resolve.
 #[derive(Clone)]
 pub struct AppState {
-    pub supervisor: ActorRef<SessionSupervisorCommand>,
-    pub global_events: broadcast::Sender<GlobalSessionEvent>,
-    /// Reads and mutates the runtime-editable configuration (models, providers,
-    /// default vendor). Also the source of the default vendor a create request
-    /// falls back to when it omits one.
-    pub config_store: Arc<dyn ConfigStore>,
-    /// The model-card catalog (reference data, not runtime config): public
-    /// prefix search + admin CRUD. Shares the settings-DB pool.
-    pub model_cards: Arc<crate::config::model_cards::ModelCardStore>,
-    /// ChatGPT-plan sign-in for `kind = "chatgpt"` providers: device-code
-    /// login, polling, and sign-out.
-    pub chatgpt: Arc<crate::config::chatgpt_login::ChatGptLoginService>,
-    /// Deployment-global GitHub connection: App config, OAuth credentials, repo
-    /// listing, and the scoped-token minter used at session provisioning.
-    pub github: Arc<crate::github::GithubService>,
-    /// Configured remote MCP servers: CRUD + connect/test, and the source of the
-    /// per-session toolboxes built at agent spawn.
-    pub mcp: Arc<crate::mcp::McpService>,
-    /// DB-managed plugin-bundle library: install/list/update/delete and the
-    /// token-guarded artifact endpoint runtimes fetch bundles from.
-    pub plugins: Arc<crate::plugins::PluginService>,
-    /// Agent-managed long-term memories: CRUD for the web UI. The agent reaches
-    /// the same data through its `MemoryToolbox`, not over HTTP.
-    pub memory: Arc<crate::memory::MemoryService>,
-    /// Named agent presets: CRUD plus invoke-with-message.
-    pub agents: Arc<crate::agents::AgentService>,
-    /// Named routines: CRUD over the definitions. Triggering one goes through
-    /// `routine_runner`, which the scheduler's timer shares.
-    pub routines: Arc<crate::routines::RoutineService>,
-    /// Turns a routine into a running session. Held here so the run endpoint
-    /// and the background timer are the same code path.
-    pub routine_runner: Arc<crate::routines::RoutineRunner>,
-    /// Named environments (experimental): CRUD over the definitions. Nothing
-    /// consumes an environment yet.
-    pub environments: Arc<crate::environments::EnvironmentService>,
-    /// Workflow definitions: CRUD over the graphs. A *run* of one is a session,
-    /// reached through the session API like any other.
-    pub workflows: Arc<crate::workflows::WorkflowService>,
-    /// Every connected vendor agent, published into the same vendor map
-    /// sessions select from. Held here so the connect route can register a
-    /// freshly handshaken link.
-    pub vendor_agents: Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
-    /// The single admin account, the tokens it issues, and the policy the
-    /// `/api` middleware applies. Disabled deployments get a service whose
-    /// `enabled()` is false and which passes every request through.
+    /// The accounts, the tokens they issue, and the policy the `/api`
+    /// middleware applies. Disabled deployments get a service whose `enabled()`
+    /// is false and which passes every request through.
     pub auth: Arc<AuthService>,
+    /// The deployment tier: the pool, the artifact store, and what boot
+    /// resolved once.
+    pub shared: Arc<Shared>,
+    /// Every account's services, built on first touch.
+    pub users: Arc<UserRegistry>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
     pub web_dir: Option<PathBuf>,
+}
+
+/// The services belonging to whoever made this request.
+///
+/// Resolved per request from the [`Principal`] the auth middleware already put
+/// in the extensions, because the credential is what carries the scope and one
+/// process may hold several. A handler that takes this cannot reach another
+/// account's anything: it holds that account's objects, not a filtered view of
+/// everyone's.
+pub struct Scope(pub Arc<UserServices>);
+
+impl std::ops::Deref for Scope {
+    type Target = UserServices;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl axum::extract::FromRequestParts<AppState> for Scope {
+    type Rejection = error::Api;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        // Absent only if this route escaped `require_auth`, which would be a
+        // routing bug rather than a caller's mistake — so it is a 500, and a
+        // loud one, not a 401 that would read as "sign in again".
+        let Some(principal) = parts.extensions.get::<Principal>() else {
+            tracing::error!(
+                path = %parts.uri.path(),
+                "a scoped route ran without an authenticated principal"
+            );
+            return Err(error::Api::internal("could not resolve the account"));
+        };
+        let user = match principal {
+            // Every request on a deployment with authentication disabled. The
+            // account still exists — it is where the rows go.
+            Principal::Anonymous => state.shared.anonymous.clone(),
+            Principal::User(id) => id.clone(),
+        };
+        match state.users.get(&user).await {
+            Ok(services) => Ok(Self(services)),
+            Err(e) => {
+                tracing::error!(user = %user, error = %e, "building an account's services failed");
+                Err(error::Api::internal("could not resolve the account"))
+            }
+        }
+    }
 }
 
 pub fn app(state: AppState) -> Router {
@@ -345,119 +359,66 @@ mod tests {
         }
     }
 
+    /// The real composition root, on a throwaway database, with one fake
+    /// vendor agent published under `mock` in the bootstrap account.
+    ///
+    /// Deliberately built through `UserRegistry` rather than by assembling a
+    /// bundle by hand: what these tests exercise is what a request actually
+    /// resolves, including the lazy build.
     async fn test_state(tmp: &tempfile::TempDir) -> AppState {
-        let mut vendors: HashMap<String, Arc<RuntimeVendorLink>> = HashMap::new();
-        let mock_agent = FakeRuntimeVendor::builder("mock")
-            .serve_in_process()
-            .await
-            .expect("fake agent");
-        vendors.insert("mock".into(), mock_agent.link());
-        // A real DB store on a temp SQLite; the registry it opens is empty and
-        // shared with the supervisor. `mock` is the runtime vendor under test.
-        let db = tmp.path().join("config.db");
-        let opened = crate::config::DbConfigStore::open(
-            &format!("sqlite://{}", db.display()),
-            crate::config::StoreDeps { info: test_info() },
-            crate::auth::UserId::new("1"),
-        )
-        .await
-        .unwrap();
-        let github = Arc::new(crate::github::GithubService::new(
-            crate::github::GithubStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
-            crate::github::GithubApi::new(),
-        ));
-        let plugins = Arc::new(crate::plugins::PluginService::new(
-            crate::plugins::PluginStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
-            crate::plugins::MarketplaceStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
-            crate::plugins::ArtifactStore::new(tmp.path().join("plugins")),
-            b"test-secret".to_vec(),
-        ));
-        let mcp = Arc::new(crate::mcp::McpService::new(
-            crate::mcp::McpStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
-            github.clone(),
-        ));
-        let memory = Arc::new(crate::memory::MemoryService::new(
-            crate::memory::MemoryStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
-        ));
-        let model_cards = Arc::new(crate::config::model_cards::ModelCardStore::new(
-            opened.db.clone(),
-            crate::auth::UserId::new("1"),
-        ));
-        let agents = Arc::new(crate::agents::AgentService::new(
-            crate::agents::AgentStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
-            opened.store.clone(),
-        ));
-        let routines = Arc::new(crate::routines::RoutineService::new(
-            crate::routines::RoutineStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
-            agents.clone(),
-        ));
-        let environments = Arc::new(crate::environments::EnvironmentService::new(
-            crate::environments::EnvironmentStore::new(
-                opened.db.clone(),
-                crate::auth::UserId::new("1"),
-            ),
-        ));
-        let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
-        let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
-            shared_vendors.clone(),
-        ));
-        let deps = ServerDeps {
-            provider_registry: opened.registry,
-            runtimes: crate::runtime_manager::test_runtime_manager(&shared_vendors),
-            vendors: shared_vendors,
-            github_tokens: None,
-            mcp: Some(mcp.clone()),
-            plugins: None,
-            memory: Some(memory.clone()),
-        };
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let (gtx, _) = broadcast::channel(64);
-        let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
+        let db = crate::db::testing::db().await;
         // Auth off: every pre-existing test builds unauthenticated requests,
         // and a disabled deployment is a real supported configuration, not a
         // test-only escape. `auth_state` turns it on.
         let auth = Arc::new(crate::auth::AuthService::new(
-            crate::auth::AuthStore::new(opened.db.clone()),
+            crate::auth::AuthStore::new(db.clone()),
             crate::auth::AuthDeps {
                 enabled: false,
                 state_dir: tmp.path().to_path_buf(),
             },
         ));
-        let workflows = Arc::new(crate::workflows::WorkflowService::new(
-            crate::workflows::WorkflowStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
-            agents.clone(),
-        ));
-        let routine_runner = Arc::new(crate::routines::RoutineRunner::new(
-            routines.clone(),
-            agents.clone(),
-            opened.store.clone(),
-            vendor_agents.clone(),
-            supervisor.clone(),
-        ));
-        let chatgpt = Arc::new(crate::config::chatgpt_login::ChatGptLoginService::new(
-            opened.db.clone(),
-            crate::auth::UserId::new("1"),
-            opened.store.clone(),
-        ));
-        AppState {
-            supervisor,
-            global_events: gtx,
+        let shared = Arc::new(Shared {
+            db,
+            artifacts: Arc::new(crate::plugins::ArtifactStore::new(
+                tmp.path().join("plugins"),
+            )),
+            artifact_secret: Arc::new(b"test-secret".to_vec()),
+            info: test_info(),
+            model_card_seed: Arc::new(Vec::new()),
+            model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
+            anonymous: crate::auth::UserId::bootstrap(),
+        });
+        let state = AppState {
             auth,
-            config_store: opened.store,
-            model_cards,
-            chatgpt,
-            github,
-            mcp,
-            plugins,
-            memory,
-            agents,
-            routines,
-            workflows,
-            routine_runner,
-            environments,
-            vendor_agents,
+            users: Arc::new(UserRegistry::new(shared.clone())),
+            shared,
             web_dir: None,
-        }
+        };
+        publish_mock_vendor(&state).await;
+        state
+    }
+
+    /// Publish a fake vendor agent as `mock` in the state's anonymous account,
+    /// which is who every unauthenticated request resolves to.
+    async fn publish_mock_vendor(state: &AppState) {
+        let agent = FakeRuntimeVendor::builder("mock")
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        services(state)
+            .await
+            .vendor_agents
+            .publish(agent.link())
+            .expect("mock is unclaimed in a fresh account");
+    }
+
+    /// The bundle an unauthenticated request resolves to.
+    async fn services(state: &AppState) -> Arc<crate::users::UserServices> {
+        state
+            .users
+            .get(&state.shared.anonymous)
+            .await
+            .expect("the anonymous account builds")
     }
 
     /// `test_state` with authentication enabled and the admin account
@@ -686,15 +647,19 @@ mod tests {
         use horsie_models::settings::SettingsView;
         let tmp = tempfile::tempdir().unwrap();
         let app = app(test_state(&tmp).await);
-        // GET: fresh DB — no models, no configured vendors, and "local"
-        // falls back to being the (unloaded) default since no daemon has
-        // registered it and no other vendor is configured either.
+        // GET: fresh DB — no models, and "local" falls back to being the
+        // (unloaded) default since nothing has set a preference. The one vendor
+        // listed is the fake agent `test_state` published into this account's
+        // map, which is the same map the settings view reads.
         let res = app.clone().oneshot(get("/api/config")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
         assert_eq!(view.default_vendor, "local");
         assert!(view.models.is_empty());
-        assert!(view.vendors.is_empty());
+        assert_eq!(
+            view.vendors.iter().map(|v| &v.name).collect::<Vec<_>>(),
+            ["mock"]
+        );
         // PUT a provider + model persists and redacts the key.
         let body = serde_json::json!({
             "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
@@ -1110,7 +1075,7 @@ mod tests {
         let url = format!("file://{}", repo.display());
 
         let state = test_state(&tmp).await;
-        let plugins = state.plugins.clone();
+        let plugins = services(&state).await.plugins.clone();
         let app = app(state);
 
         // Empty to start.
@@ -1380,7 +1345,7 @@ mod tests {
         use horsie_models::model_cards::{ModelCard, ModelCardInput};
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&tmp).await;
-        let store = state.model_cards.clone();
+        let store = services(&state).await.model_cards.clone();
         let app = app(state);
 
         let input = |id: &str| ModelCardInput {
@@ -1501,7 +1466,7 @@ mod tests {
     async fn a_connected_agent_becomes_a_selectable_vendor() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&tmp).await;
-        let agents = state.vendor_agents.clone();
+        let agents = services(&state).await.vendor_agents.clone();
         let router = app(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2619,7 +2584,7 @@ mod tests {
     async fn a_vendor_dial_without_a_credential_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, _pw) = auth_state(&tmp).await;
-        let agents = state.vendor_agents.clone();
+        let agents = services(&state).await.vendor_agents.clone();
         let url = serve(app(state)).await;
 
         // The dial fails at the HTTP layer — a 401, not a completed upgrade
@@ -2645,7 +2610,7 @@ mod tests {
         // A valid credential of the wrong kind: right principal, but a cookie
         // has no business being a machine.
         let web = state.auth.login(&pw).await.unwrap();
-        let agents = state.vendor_agents.clone();
+        let agents = services(&state).await.vendor_agents.clone();
         let url = serve(app(state)).await;
 
         let outcome = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
@@ -2667,7 +2632,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let agents = state.vendor_agents.clone();
+        let agents = services(&state).await.vendor_agents.clone();
         let url = serve(app(state)).await;
 
         let _agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")

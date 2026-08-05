@@ -2,7 +2,7 @@
 //! `POST /api/agents/:name/invoke` — create a session from the preset and
 //! queue the first message in one call, returning the session immediately.
 
-use super::AppState;
+use super::Scope;
 use super::error::Api;
 use super::handlers;
 use crate::agents::AgentError;
@@ -11,7 +11,7 @@ use crate::sessions::builder::build_session_spec;
 use crate::sessions::spec::{SessionOrigin, SessionStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentPresetInput, AgentView};
 use horsie_models::now_ms;
@@ -29,13 +29,13 @@ fn api_err(e: AgentError) -> Api {
 }
 
 /// GET /api/agents
-pub async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<AgentView>>, Api> {
+pub async fn list_agents(Scope(state): Scope) -> Result<Json<Vec<AgentView>>, Api> {
     state.agents.list().await.map(Json).map_err(api_err)
 }
 
 /// POST /api/agents
 pub async fn create_agent(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(input): Json<AgentPresetInput>,
 ) -> Result<(StatusCode, Json<AgentView>), Api> {
     state
@@ -48,7 +48,7 @@ pub async fn create_agent(
 
 /// GET /api/agents/:name
 pub async fn get_agent(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<AgentView>, Api> {
     state.agents.get(&name).await.map(Json).map_err(api_err)
@@ -56,7 +56,7 @@ pub async fn get_agent(
 
 /// PUT /api/agents/:name — full replace; the path is the id of record.
 pub async fn replace_agent(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(input): Json<AgentPresetInput>,
 ) -> Result<Json<AgentView>, Api> {
@@ -74,7 +74,7 @@ pub async fn replace_agent(
 /// is the agent it points at, so deleting one out from under it turns a
 /// scheduled job into a timer that fails every firing.
 pub async fn delete_agent(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<StatusCode, Api> {
     let used_by = state
@@ -100,7 +100,7 @@ pub async fn delete_agent(
 /// the message; returns as soon as both are accepted (the turn runs in the
 /// background).
 pub async fn invoke_agent(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(req): Json<AgentInvokeRequest>,
 ) -> Result<(StatusCode, Json<AgentInvokeResponse>), Api> {

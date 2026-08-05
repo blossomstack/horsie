@@ -1,8 +1,8 @@
 //! The model-card catalog: reference records of well-known models (official
 //! model id + token limits). Reference data, NOT runtime config — lives
 //! outside `DbConfigStore`/`SettingsView`, and no registry rebuild is needed
-//! when cards change. Seeded at startup (insert-if-missing), managed via
-//! /api/admin/model-cards, searched via /api/model-cards.
+//! when cards change. Seeded on an account's first touch (insert-if-missing),
+//! managed via /api/admin/model-cards, searched via /api/model-cards.
 
 use crate::auth::UserId;
 use crate::db::Db;
@@ -273,6 +273,69 @@ impl ModelCardStore {
         }
         Ok(inserted)
     }
+
+    /// Seed this account's catalogue unless `marker` says it already has been.
+    ///
+    /// Called on the account's first touch rather than at boot, because looping
+    /// the bundled catalogue over every account at every startup is O(accounts
+    /// × cards) of writes before the port opens.
+    ///
+    /// The marker is a hash of the resolved seed set rather than the server
+    /// version: an operator's `--model-cards-seed` file can change without a
+    /// version bump, and a marker that misses that is a marker that lies. It
+    /// lives in this account's own `settings` row, so an account that has never
+    /// been touched carries no marker and gets seeded.
+    pub async fn seed_once(
+        &self,
+        cards: &[ModelCardInput],
+        marker: &str,
+    ) -> Result<usize, ModelCardError> {
+        let seen: Option<String> = sqlx::query_scalar(
+            &self
+                .db
+                .q("SELECT value FROM settings WHERE user_id = ? AND key = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(SEED_MARKER_KEY)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(|e| ModelCardError::Db(e.to_string()))?;
+        if seen.as_deref() == Some(marker) {
+            return Ok(0);
+        }
+        let inserted = self.seed_if_missing(cards).await?;
+        sqlx::query(&self.db.q(
+            "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) \
+             ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+        ))
+        .bind(self.user.as_str())
+        .bind(SEED_MARKER_KEY)
+        .bind(marker)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| ModelCardError::Db(e.to_string()))?;
+        Ok(inserted)
+    }
+}
+
+/// The `settings` key holding the hash of the seed set this account last got.
+const SEED_MARKER_KEY: &str = "model_cards_seed";
+
+/// A stable, short digest of a seed set, for [`ModelCardStore::seed_once`].
+///
+/// Computed once at boot and handed to every account's build. FNV-1a over the
+/// serialized inputs: this is a change detector, not a security boundary, and
+/// pulling in a cryptographic hash to compare a marker to itself would be
+/// weight for nothing.
+#[must_use]
+pub fn seed_marker(cards: &[ModelCardInput]) -> String {
+    let bytes = serde_json::to_vec(cards).unwrap_or_default();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 /// The compiled-in default catalog, seeded at every startup (insert-if-missing).

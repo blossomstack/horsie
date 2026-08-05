@@ -3,10 +3,10 @@
 //! over [`crate::github::GithubService`]; `auth`/`callback` return redirects.
 
 use crate::github::urlencode;
-use crate::http::AppState;
+use crate::http::Scope;
 use crate::http::error::Api;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::Query;
 use axum::http::HeaderMap;
 use axum::response::Redirect;
 use horsie_models::github::{
@@ -14,11 +14,11 @@ use horsie_models::github::{
 };
 use serde::Deserialize;
 
-pub async fn status(State(state): State<AppState>) -> Result<Json<GitHubStatus>, Api> {
+pub async fn status(Scope(state): Scope) -> Result<Json<GitHubStatus>, Api> {
     state.github.status().await.map(Json).map_err(Api::internal)
 }
 
-pub async fn auth(State(state): State<AppState>, headers: HeaderMap) -> Result<Redirect, Api> {
+pub async fn auth(Scope(state): Scope, headers: HeaderMap) -> Result<Redirect, Api> {
     let base = crate::http::request_base(&headers);
     let url = state
         .github
@@ -29,7 +29,7 @@ pub async fn auth(State(state): State<AppState>, headers: HeaderMap) -> Result<R
 }
 
 pub async fn callback(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Query(q): Query<CallbackQuery>,
     headers: HeaderMap,
 ) -> Redirect {
@@ -53,9 +53,7 @@ pub async fn callback(
 
 /// `GET /api/github/app-config` — the redacted App config, or empty defaults
 /// when nothing is stored yet (simpler for the UI than a 404).
-pub async fn get_app_config(
-    State(state): State<AppState>,
-) -> Result<Json<GitHubAppConfigView>, Api> {
+pub async fn get_app_config(Scope(state): Scope) -> Result<Json<GitHubAppConfigView>, Api> {
     let view = state
         .github
         .app_config_view()
@@ -73,7 +71,7 @@ pub async fn get_app_config(
 }
 
 pub async fn put_app_config(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(input): Json<GitHubAppConfigInput>,
 ) -> Result<Json<GitHubAppConfigView>, Api> {
     state
@@ -84,12 +82,12 @@ pub async fn put_app_config(
         .map_err(Api::unprocessable)
 }
 
-pub async fn disconnect(State(state): State<AppState>) -> Result<(), Api> {
+pub async fn disconnect(Scope(state): Scope) -> Result<(), Api> {
     state.github.disconnect().await.map_err(Api::internal)
 }
 
 pub async fn repos(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Query(q): Query<ReposQuery>,
 ) -> Result<Json<GitHubRepoList>, Api> {
     let refresh = q.refresh.as_deref() == Some("1");
@@ -102,7 +100,7 @@ pub async fn repos(
 }
 
 pub async fn branches(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Query(q): Query<BranchesQuery>,
 ) -> Result<Json<GitHubBranchList>, Api> {
     let branches = state

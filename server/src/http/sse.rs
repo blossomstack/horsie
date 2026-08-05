@@ -11,13 +11,13 @@
 //! or ephemeral run noise (deltas, tool starts). Neither is a log, so neither
 //! gets a cursor: a client that missed one re-reads the document.
 
-use crate::http::AppState;
+use crate::http::Scope;
 use crate::http::error::Api;
 use crate::http::handlers::{wire_queued_message, wire_status_kind};
 use crate::sessions::events::{resync_frame, wire_agent_frame};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::{AgentFrame, SessionFrame};
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
@@ -71,7 +71,7 @@ fn encode<T: serde::Serialize>(id: Option<&str>, payload: &T) -> Option<Event> {
 /// noise. Reconnect resumes from `Last-Event-ID` — served from the agent's own
 /// state, never its journal.
 pub async fn agent_events(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path((id, agent_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Api> {
@@ -170,7 +170,7 @@ pub async fn agent_events(
 /// belongs to an agent), no ids, no cursor — a client that misses a frame
 /// re-reads the session document.
 pub async fn session_events(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Api> {
     // Parsed only to reject a malformed id before it reaches the supervisor.
@@ -238,7 +238,7 @@ pub async fn session_events(
 }
 
 pub async fn global_events(
-    State(state): State<AppState>,
+    Scope(state): Scope,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut sub = state.global_events.subscribe();
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);

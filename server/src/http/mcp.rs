@@ -3,10 +3,10 @@
 //! fluorite wire types and views never carry secrets.
 
 use crate::github::urlencode;
-use crate::http::AppState;
+use crate::http::Scope;
 use crate::http::error::Api;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::HeaderMap;
 use axum::response::Redirect;
 use horsie_models::mcp::{
@@ -14,7 +14,7 @@ use horsie_models::mcp::{
 };
 use serde::Deserialize;
 
-pub async fn list(State(state): State<AppState>) -> Result<Json<McpServerList>, Api> {
+pub async fn list(Scope(state): Scope) -> Result<Json<McpServerList>, Api> {
     let servers = state.mcp.list().await.map_err(Api::internal)?;
     Ok(Json(McpServerList { servers }))
 }
@@ -22,7 +22,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<McpServerList>, 
 /// `PUT /api/mcp/servers/:name` — upsert; the path is the id of record, so it
 /// overrides any `name` in the body.
 pub async fn upsert(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(mut input): Json<McpServerInput>,
 ) -> Result<Json<McpServerView>, Api> {
@@ -35,7 +35,7 @@ pub async fn upsert(
         .map_err(Api::unprocessable)
 }
 
-pub async fn delete(State(state): State<AppState>, Path(name): Path<String>) -> Result<(), Api> {
+pub async fn delete(Scope(state): Scope, Path(name): Path<String>) -> Result<(), Api> {
     state.mcp.delete(&name).await.map_err(Api::internal)
 }
 
@@ -43,7 +43,7 @@ pub async fn delete(State(state): State<AppState>, Path(name): Path<String>) -> 
 /// persist the outcome, and return it. Always `200` with the result envelope;
 /// a failed connect is `ok: false` with `error`, not an HTTP error.
 pub async fn test(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<McpConnectResult>, Api> {
     state.mcp.test(&name).await.map(Json).map_err(Api::internal)
@@ -53,7 +53,7 @@ pub async fn test(
 /// discover + (if needed) register a client, then return the authorize URL for
 /// the browser to navigate to. Non-oauth servers use `/test` instead.
 pub async fn connect(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<McpAuthorizeUrl>, Api> {
@@ -69,7 +69,7 @@ pub async fn connect(
 /// `GET /api/mcp/servers/:name/oauth/callback` — exchange the code and redirect
 /// back into the Settings UI with the outcome (mirrors the github callback).
 pub async fn oauth_callback(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Query(q): Query<OAuthCallbackQuery>,
     headers: HeaderMap,

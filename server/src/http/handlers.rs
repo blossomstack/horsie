@@ -1,7 +1,7 @@
 //! REST handlers over the `SessionSupervisor`. Bodies are fluorite wire types;
 //! errors are the uniform `ApiError` envelope.
 
-use crate::http::AppState;
+use crate::http::Scope;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
 use crate::sessions::builder::build_session_spec;
@@ -10,7 +10,7 @@ use crate::sessions::spec::{PendingAsk, SessionOrigin, SessionStatus, status_kin
 use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::now_ms;
@@ -61,7 +61,7 @@ pub async fn health() -> impl IntoResponse {
 }
 
 /// Ask the supervisor a question, mapping a closed mailbox to a 500.
-pub(crate) async fn ask<T, F>(state: &AppState, make: F) -> Result<T, Api>
+pub(crate) async fn ask<T, F>(state: &crate::users::UserServices, make: F) -> Result<T, Api>
 where
     F: FnOnce(tokio::sync::oneshot::Sender<T>) -> SessionSupervisorCommand,
     T: Send + 'static,
@@ -90,7 +90,7 @@ pub(crate) fn summary(
 }
 
 pub async fn create_session(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, Api> {
     let spec = build_session_spec(
@@ -128,7 +128,7 @@ pub async fn create_session(
 /// Every session a person started. A routine's runs are deliberately absent:
 /// they are listed on the routine's own page, and a routine on a timer would
 /// otherwise bury the sessions somebody is actually having.
-pub async fn list_sessions(State(state): State<AppState>) -> Result<impl IntoResponse, Api> {
+pub async fn list_sessions(Scope(state): Scope) -> Result<impl IntoResponse, Api> {
     let sessions = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
     let sessions = sessions
         .iter()
@@ -139,7 +139,7 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<impl IntoRes
 }
 
 pub async fn get_session(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, Api> {
     let (rec, snapshot) = ask(&state, |reply| SessionSupervisorCommand::Get {
@@ -210,7 +210,7 @@ pub async fn get_session(
 /// and changes nothing. A partially answered park could not resume anyway, and
 /// would leave a `tool_use` on the wire with no result.
 pub async fn answer_asks(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<String>,
     Json(req): Json<AnswerAsksRequest>,
 ) -> Result<impl IntoResponse, Api> {
@@ -290,7 +290,7 @@ fn to_wire_usage(u: horsie_workflow::UsageTotal) -> UsageView {
 /// replay anywhere in the server. Messages only: current values live on the
 /// agent document, so a page means the same thing whichever cursor produced it.
 pub async fn get_history(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path((id, agent_id)): Path<(String, String)>,
     Query(params): Query<HistoryParams>,
 ) -> Result<impl IntoResponse, Api> {
@@ -318,7 +318,7 @@ pub async fn get_history(
 /// its spawn metadata and terminal result. Everything here is a value the
 /// client re-reads rather than a log it accumulates; the log is `/history`.
 pub async fn get_agent(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path((id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, Api> {
     let view = ask(&state, |reply| SessionSupervisorCommand::AgentState {
@@ -396,7 +396,7 @@ pub async fn get_agent(
 }
 
 pub async fn send_message(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<impl IntoResponse, Api> {
@@ -417,7 +417,7 @@ pub async fn send_message(
 }
 
 pub async fn stop_session(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, Api> {
     let result = ask(&state, |reply| SessionSupervisorCommand::Stop { id, reply }).await?;
@@ -428,7 +428,7 @@ pub async fn stop_session(
 }
 
 pub async fn delete_session(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, Api> {
     let result = ask(&state, |reply| SessionSupervisorCommand::Delete {
