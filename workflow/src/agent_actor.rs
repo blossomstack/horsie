@@ -471,19 +471,20 @@ impl AgentState {
             .count()
     }
 
-    /// What the model is allowed to see: the transcript with every non-LLM entry
-    /// dropped.
+    /// What the model sees: the transcript, with every hook entry translated
+    /// into the message it injects — most translate to nothing.
     ///
     /// The only way to obtain a `Vec<Message>` from state. `self.history` cannot
-    /// be handed to a provider because the element types differ, so a hook record
-    /// leaking into a prompt is a compile error rather than a review rule — and
-    /// any future non-model entry inherits that for free.
+    /// be handed to a provider because the element types differ, so every kind of
+    /// entry must state what, if anything, it shows the model;
+    /// [`crate::hook_translation::translate`] is where that is decided, in one
+    /// exhaustive match, and any future non-model entry inherits the obligation.
     pub fn prompt_messages(&self) -> Vec<Message> {
         self.history
             .iter()
             .filter_map(|e| match e {
                 HistoryEntry::Llm(m) => Some(m.clone()),
-                HistoryEntry::Hook(_) => None,
+                HistoryEntry::Hook(h) => crate::hook_translation::translate(h),
             })
             .collect()
     }
@@ -2417,12 +2418,12 @@ mod tests {
         )
     }
 
-    /// The whole point of the union: a hook record is in the transcript the user
-    /// reads and absent from the one the model is sent. If this ever passes a
-    /// hook to a provider it costs tokens on every call and ships a shape no
-    /// provider has an arm for.
+    /// A tool hook edits the tool's own output, so the tool result already
+    /// represents whatever it did and there is nothing left to translate. If
+    /// this ever reaches a provider it costs tokens on every call and repeats
+    /// text the tool result already carries.
     #[test]
-    fn a_hook_entry_is_never_offered_to_the_model() {
+    fn a_tool_scoped_hook_entry_is_never_offered_to_the_model() {
         let mut state = AgentActor::initial_state();
         state = AgentActor::apply_event(
             state,
@@ -2436,6 +2437,54 @@ mod tests {
         let prompt = state.prompt_messages();
         assert_eq!(prompt.len(), 1, "only the user message reaches the model");
         assert_eq!(prompt[0].role, Role::User);
+    }
+
+    /// The transcript is not the conversation: a translated entry keeps its
+    /// place among the messages around it, so injected context lands where the
+    /// hook ran rather than at the end of the prompt.
+    #[test]
+    fn a_translated_hook_entry_keeps_its_place_between_the_messages_around_it() {
+        use horsie_models::hooks::{
+            ContextInjected, HookAction, HookRecord, StopOutcome, StopRecord,
+        };
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("hello"),
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::HookRan {
+                record: HookRecord {
+                    plugin: "nagger".into(),
+                    duration_ms: 1,
+                    action: HookAction::Stop(StopRecord {
+                        system_message: None,
+                        outcome: StopOutcome::Ran(ContextInjected {
+                            additional_context: Some("check the tests".into()),
+                        }),
+                    }),
+                },
+                seq: 0,
+                at_ms: 2,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("carry on"),
+            },
+        );
+
+        let prompt = state.prompt_messages();
+        assert_eq!(prompt.len(), 3, "the hook contributes one message");
+        assert_eq!(prompt[1].id, "hook-context:hook:0");
+        assert!(
+            matches!(&prompt[1].parts[0], ContentPart::Text(t) if t.text.contains("check the tests")),
+            "the injected context reaches the model between the two messages"
+        );
     }
 
     /// The id counts hook entries in the transcript, not records against a
@@ -2496,10 +2545,14 @@ mod tests {
         );
         assert_eq!(state.history.len(), 1);
         assert_eq!(state.history[0].id(), "hook:0");
-        assert!(
-            state.prompt_messages().is_empty(),
-            "never shown to the model"
+        let prompt = state.prompt_messages();
+        assert_eq!(
+            prompt.len(),
+            1,
+            "a session-start hook's context has nowhere else to live, so it \
+             becomes a message"
         );
+        assert_eq!(prompt[0].id, "hook-context:hook:0");
     }
 
     /// A page is a window over the transcript, hook entries included, and the

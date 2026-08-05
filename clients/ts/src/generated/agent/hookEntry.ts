@@ -5,7 +5,7 @@ import { HookRecord } from '../hooks';
  */
 export interface HookEntry {
   /**
-   * Cursor id, in the same space as `Message.id`. Derived from the record
+   * Cursor id, in the same space as `Message.id`. Derived from the transcript
    */
   id: string;
   createdAtMs: number;
