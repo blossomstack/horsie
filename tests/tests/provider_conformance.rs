@@ -24,6 +24,7 @@ use horsie_agentcore::{
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
 use horsie_openai::OpenAiProvider;
+use horsie_openai_responses::ResponsesProvider;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -31,11 +32,19 @@ use tokio_util::sync::CancellationToken;
 enum ProviderKind {
     Anthropic,
     Openai,
+    /// The Responses wire, exercised with an API key. The ChatGPT-plan
+    /// credential reaches the identical code path with a different token and
+    /// host, so the suite covers it too — everything but the handshake.
+    OpenaiResponses,
 }
 
 /// Every kind the suite runs against. Adding a variant here is the only change
 /// needed to subject a new backend to the full suite.
-const KINDS: &[ProviderKind] = &[ProviderKind::Anthropic, ProviderKind::Openai];
+const KINDS: &[ProviderKind] = &[
+    ProviderKind::Anthropic,
+    ProviderKind::Openai,
+    ProviderKind::OpenaiResponses,
+];
 
 fn build_provider(kind: ProviderKind, base_url: &str) -> Arc<dyn LlmProvider> {
     // `with_retry_delay_secs(0)` on both: without it a queued 429 costs the
@@ -54,6 +63,15 @@ fn build_provider(kind: ProviderKind, base_url: &str) -> Arc<dyn LlmProvider> {
         ),
         ProviderKind::Openai => Arc::new(
             OpenAiProvider::with_api_key("test-key")
+                .unwrap()
+                .with_model("mock-model")
+                .with_base_url(base_url)
+                .with_max_tokens(Some(1024))
+                .with_retry_delay_secs(0)
+                .with_read_timeout_secs(2),
+        ),
+        ProviderKind::OpenaiResponses => Arc::new(
+            ResponsesProvider::with_api_key("test-key")
                 .unwrap()
                 .with_model("mock-model")
                 .with_base_url(base_url)
@@ -436,6 +454,36 @@ async fn anthropic_reports_a_400_as_an_api_error_with_its_status() {
         let provider = build_provider(
             ProviderKind::Anthropic,
             &base_url_for(ProviderKind::Anthropic, &server),
+        );
+        let sink = CollectingEventSink::new();
+        let messages = user_history();
+
+        let result = provider
+            .complete(request_for(&messages), "msg-1", &sink)
+            .await;
+
+        assert!(
+            matches!(result, Err(LlmError::ApiError { status: 400, .. })),
+            "a 400 must keep its status, got {:?}",
+            result.map(|_| ())
+        );
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// The Responses wire signals with real HTTP statuses too, so the same
+/// assertion holds — and must, because a ChatGPT-plan 400 (a model the
+/// subscription cannot reach, say) has to arrive as itself rather than as a
+/// network fault.
+#[tokio::test]
+async fn responses_reports_a_400_as_an_api_error_with_its_status() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let server = spawn_mock().await;
+        server.queue_error(400, "unsupported model for this plan");
+        let provider = build_provider(
+            ProviderKind::OpenaiResponses,
+            &base_url_for(ProviderKind::OpenaiResponses, &server),
         );
         let sink = CollectingEventSink::new();
         let messages = user_history();

@@ -6,6 +6,7 @@
 )]
 
 mod openai;
+mod responses;
 mod server;
 pub use server::{
     BlockHandle, MockLlmServer, MockLlmServerBuilder, MockResponse, Scenario, ScenarioConfig,

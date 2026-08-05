@@ -10,6 +10,7 @@ horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
 horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
 horsie-anthropic = { path = "../providers/anthropic" }
 horsie-openai = { path = "../providers/openai" }
+horsie-openai-responses = { path = "../providers/openai-responses" }
 horsie-mock-llm = { path = "../providers/mock-llm" }
 horsie-server = { path = "../server", features = ["test-util"] }
 horsie-runtime-vendor = { path = "../runtime-vendor" }
