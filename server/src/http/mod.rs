@@ -106,11 +106,11 @@ pub fn app(state: AppState) -> Router {
             post(handlers::create_session).get(handlers::list_sessions),
         )
         .route(
-            "/api/sessions/:id",
+            "/api/sessions/{id}",
             get(handlers::get_session).delete(handlers::delete_session),
         )
         .route(
-            "/api/sessions/:id/annotations",
+            "/api/sessions/{id}/annotations",
             put(groups::set_annotations),
         )
         .route(
@@ -118,37 +118,37 @@ pub fn app(state: AppState) -> Router {
             get(groups::list_groups).post(groups::create_group),
         )
         .route(
-            "/api/session-groups/:name",
+            "/api/session-groups/{name}",
             put(groups::rename_group).delete(groups::delete_group),
         )
-        .route("/api/sessions/:id/messages", post(handlers::send_message))
-        .route("/api/sessions/:id/answers", post(handlers::answer_asks))
+        .route("/api/sessions/{id}/messages", post(handlers::send_message))
+        .route("/api/sessions/{id}/answers", post(handlers::answer_asks))
         .route(
-            "/api/sessions/:id/agents/:agent_id",
+            "/api/sessions/{id}/agents/{agent_id}",
             get(handlers::get_agent),
         )
         .route(
-            "/api/sessions/:id/agents/:agent_id/history",
+            "/api/sessions/{id}/agents/{agent_id}/history",
             get(handlers::get_history),
         )
         .route(
-            "/api/sessions/:id/agents/:agent_id/events",
+            "/api/sessions/{id}/agents/{agent_id}/events",
             get(sse::agent_events),
         )
-        .route("/api/sessions/:id/stop", post(handlers::stop_session))
-        .route("/api/sessions/:id/events", get(sse::session_events))
+        .route("/api/sessions/{id}/stop", post(handlers::stop_session))
+        .route("/api/sessions/{id}/events", get(sse::session_events))
         .route("/api/events", get(sse::global_events))
         .route(
             "/api/config",
             get(config::get_config).put(config::update_config),
         )
-        .route("/api/admin/providers/:name/chatgpt", get(chatgpt::status))
+        .route("/api/admin/providers/{name}/chatgpt", get(chatgpt::status))
         .route(
-            "/api/admin/providers/:name/chatgpt/login",
+            "/api/admin/providers/{name}/chatgpt/login",
             post(chatgpt::start).delete(chatgpt::sign_out),
         )
         .route(
-            "/api/admin/providers/:name/chatgpt/poll",
+            "/api/admin/providers/{name}/chatgpt/poll",
             post(chatgpt::poll),
         )
         .route("/api/model-cards", get(model_cards::list))
@@ -157,7 +157,7 @@ pub fn app(state: AppState) -> Router {
             get(admin::list_cards).post(admin::create_card),
         )
         .route(
-            "/api/admin/model-cards/:model_id",
+            "/api/admin/model-cards/{model_id}",
             put(admin::update_card).delete(admin::delete_card),
         )
         .route("/api/github/status", get(github::status))
@@ -175,28 +175,28 @@ pub fn app(state: AppState) -> Router {
         .route("/api/github/repos/branches", get(github::branches))
         .route("/api/mcp/servers", get(mcp::list))
         .route(
-            "/api/mcp/servers/:name",
+            "/api/mcp/servers/{name}",
             axum::routing::put(mcp::upsert).delete(mcp::delete),
         )
-        .route("/api/mcp/servers/:name/test", post(mcp::test))
-        .route("/api/mcp/servers/:name/connect", post(mcp::connect))
+        .route("/api/mcp/servers/{name}/test", post(mcp::test))
+        .route("/api/mcp/servers/{name}/connect", post(mcp::connect))
         .route(
-            "/api/mcp/servers/:name/oauth/callback",
+            "/api/mcp/servers/{name}/oauth/callback",
             get(mcp::oauth_callback),
         )
         .route("/api/plugins", get(plugins::list).post(plugins::install))
         .route(
-            "/api/plugins/:name",
+            "/api/plugins/{name}",
             put(plugins::set_default).delete(plugins::remove),
         )
-        .route("/api/plugins/:name/update", post(plugins::update))
-        .route("/api/plugin-artifacts/:file", get(plugins::get_artifact))
+        .route("/api/plugins/{name}/update", post(plugins::update))
+        .route("/api/plugin-artifacts/{file}", get(plugins::get_artifact))
         .route(
             "/api/memory-spaces",
             get(memory::list_spaces).post(memory::create_space),
         )
         .route(
-            "/api/memory-spaces/:name",
+            "/api/memory-spaces/{name}",
             put(memory::update_space).delete(memory::delete_space),
         )
         .route(
@@ -204,7 +204,7 @@ pub fn app(state: AppState) -> Router {
             get(memory::list_memories).post(memory::create_memory),
         )
         .route(
-            "/api/memories/:id",
+            "/api/memories/{id}",
             get(memory::get_memory)
                 .put(memory::update_memory)
                 .delete(memory::delete_memory),
@@ -214,18 +214,18 @@ pub fn app(state: AppState) -> Router {
             get(agents::list_agents).post(agents::create_agent),
         )
         .route(
-            "/api/agents/:name",
+            "/api/agents/{name}",
             get(agents::get_agent)
                 .put(agents::replace_agent)
                 .delete(agents::delete_agent),
         )
-        .route("/api/agents/:name/invoke", post(agents::invoke_agent))
+        .route("/api/agents/{name}/invoke", post(agents::invoke_agent))
         .route(
             "/api/environments",
             get(environments::list_environments).post(environments::create_environment),
         )
         .route(
-            "/api/environments/:name",
+            "/api/environments/{name}",
             get(environments::get_environment)
                 .put(environments::replace_environment)
                 .delete(environments::delete_environment),
@@ -235,14 +235,14 @@ pub fn app(state: AppState) -> Router {
             get(routines::list_routines).post(routines::create_routine),
         )
         .route(
-            "/api/routines/:name",
+            "/api/routines/{name}",
             get(routines::get_routine)
                 .put(routines::replace_routine)
                 .delete(routines::delete_routine),
         )
-        .route("/api/routines/:name/run", post(routines::run_routine))
+        .route("/api/routines/{name}/run", post(routines::run_routine))
         .route(
-            "/api/routines/:name/sessions",
+            "/api/routines/{name}/sessions",
             get(routines::get_routine_sessions),
         )
         .route(
@@ -250,18 +250,18 @@ pub fn app(state: AppState) -> Router {
             get(workflows::list_workflows).post(workflows::create_workflow),
         )
         .route(
-            "/api/workflows/:name",
+            "/api/workflows/{name}",
             get(workflows::get_workflow)
                 .put(workflows::replace_workflow)
                 .delete(workflows::delete_workflow),
         )
         .route(
-            "/api/workflows/:name/runs",
+            "/api/workflows/{name}/runs",
             get(workflows::list_runs).post(workflows::start_run),
         )
-        .route("/api/sessions/:id/workflow", get(workflows::get_run_graph))
+        .route("/api/sessions/{id}/workflow", get(workflows::get_run_graph))
         .route(
-            "/api/sessions/:id/workflow/retry",
+            "/api/sessions/{id}/workflow/retry",
             post(workflows::retry_step),
         )
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
@@ -279,7 +279,7 @@ pub fn app(state: AppState) -> Router {
             get(auth::list_agent_tokens).post(auth::create_agent_token),
         )
         .route(
-            "/api/auth/tokens/:id",
+            "/api/auth/tokens/{id}",
             axum::routing::delete(auth::delete_agent_token),
         )
         // Guards every route above. The SPA shell and its assets, added below,
