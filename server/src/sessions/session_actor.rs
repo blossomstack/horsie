@@ -2583,7 +2583,37 @@ impl ContextProvider for SessionContextProvider {
             },
             None => self.llm_provider()?,
         };
-        let mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
+        // Plugin-declared MCP servers, hosted by the runtime. Discovered on the
+        // same pass as the workspace scan and only when this agent loads the
+        // library at all — a session with no plugins asks for nothing.
+        let mut mcp: Vec<Arc<dyn Toolbox>> = Vec::new();
+        if use_plugins {
+            match runtime_client.mcp_discover().await {
+                Ok(discovery) => {
+                    for failure in &discovery.failures {
+                        tracing::warn!(
+                            session = %self.session_id,
+                            failure,
+                            "a plugin MCP server is unavailable; its tools are absent"
+                        );
+                    }
+                    if !discovery.tools.is_empty() {
+                        mcp.push(Arc::new(horsie_workflow::PluginMcpToolbox::new(
+                            runtime_client.clone(),
+                            discovery.tools,
+                        )));
+                    }
+                }
+                // Never fatal: a plugin bringing a broken server must not stop a
+                // session that merely happens to load it.
+                Err(e) => tracing::warn!(
+                    session = %self.session_id,
+                    error = %e,
+                    "plugin MCP discovery failed; continuing without those tools"
+                ),
+            }
+        }
+        let admin_mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
             Vec::new()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
             if broadcast {
@@ -2600,6 +2630,7 @@ impl ContextProvider for SessionContextProvider {
             );
             Vec::new()
         };
+        mcp.extend(admin_mcp);
         let base: Arc<dyn Toolbox> = DefaultToolboxFactory.for_agent(
             &def,
             runtime_client.clone(),

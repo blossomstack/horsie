@@ -165,6 +165,19 @@ than a convenience.
 A `/name` horsie does not recognise is sent as you wrote it — a message may
 legitimately start with a slash, and `/etc/hosts` has to survive being typed.
 
+A bundle's `.mcp.json` brings **MCP servers** with it, and their tools appear
+alongside horsie's own as `mcp__<server>__<tool>`. Both shapes work: a local one
+(`"command": "npx", …`) and a remote one (`"type": "http", "url": …`).
+
+These run **in the sandbox**, not on the server — a plugin's local server belongs
+next to the workspace, and running it on the server host would be both wrong and
+a way for a plugin to execute commands there. That is the difference from the MCP
+servers you add in **Settings → MCP**, which run in the server process and can do
+OAuth. A plugin server authenticates with whatever its declaration carries in
+`env` or `headers`; if it needs an interactive login, add it as a Settings server
+instead. A plugin server that will not start contributes no tools and is logged —
+it never stops the session.
+
 Any hook, on any event, may answer `{"continue": false, "stopReason": "…"}`.
 horsie stops the agent that ran it and shows the reason: a tool hook's halt
 fails the turn, fails a subagent for its parent, or fails a workflow step. On

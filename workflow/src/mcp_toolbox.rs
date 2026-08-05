@@ -46,6 +46,67 @@ impl Toolbox for CompositeToolbox {
     }
 }
 
+/// Plugin-declared MCP tools, called through the runtime.
+///
+/// The counterpart to [`McpToolbox`], and the difference is *where the client
+/// lives*: an admin-configured server is reached from the server process, while
+/// a plugin's is reached from the sandbox — because a plugin's `npx …` server is
+/// a process that belongs next to the workspace. The tool names are namespaced
+/// identically, so an agent, an `allowed_tools` allowlist and a hook matcher all
+/// see one vocabulary whichever path a tool came from.
+pub struct PluginMcpToolbox {
+    client: horsie_runtime_client::RuntimeClient,
+    tools: Vec<horsie_models::runtime::PluginMcpTool>,
+}
+
+impl PluginMcpToolbox {
+    /// Build from an already-discovered tool list. Discovery happens once per
+    /// `provide()`, alongside the workspace scan.
+    #[must_use]
+    pub fn new(
+        client: horsie_runtime_client::RuntimeClient,
+        tools: Vec<horsie_models::runtime::PluginMcpTool>,
+    ) -> Self {
+        Self { client, tools }
+    }
+}
+
+#[async_trait]
+impl Toolbox for PluginMcpToolbox {
+    fn specs(&self) -> Vec<ToolSpec> {
+        self.tools
+            .iter()
+            .map(|t| ToolSpec {
+                name: t.name.clone(),
+                description: t.description.clone().unwrap_or_default(),
+                // The schema arrives as the JSON text the server published. A
+                // server that publishes something unparseable gets an empty
+                // object rather than sinking the whole tool list.
+                input_schema: serde_json::from_str(&t.input_schema)
+                    .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
+            })
+            .collect()
+    }
+
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
+        if !self.tools.iter().any(|t| t.name == name) {
+            return Err(ToolCallError::InvalidInput(format!(
+                "no plugin MCP tool named '{name}'"
+            )));
+        }
+        self.client
+            .mcp_invoke(tool_call_id, name, input.to_string())
+            .await
+            .map(Value::String)
+            .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
+    }
+}
+
 /// A toolbox backed by a remote MCP server. Tools are namespaced
 /// `mcp__<server>__<tool>` so they never collide with runtime tools and can be
 /// selected through the agent's `allowed_tools` allowlist.
@@ -124,6 +185,55 @@ mod tests {
     use horsie_mcp_client::McpTransport;
     use serde_json::json;
     use std::collections::HashMap;
+
+    /// A discovered tool list becomes specs the agent can call, with the
+    /// server's own JSON Schema carried through.
+    #[test]
+    fn plugin_mcp_tools_become_specs() {
+        let client = horsie_runtime_client::RuntimeClient::new(
+            horsie_runtime_client::testkit::MockTransport::ok(""),
+            "agent",
+        );
+        let tb = PluginMcpToolbox::new(
+            client,
+            vec![
+                horsie_models::runtime::PluginMcpTool {
+                    name: "mcp__docs__search".into(),
+                    description: Some("finds things".into()),
+                    input_schema: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#
+                        .into(),
+                },
+                // A server that publishes an unparseable schema still gets a
+                // usable tool rather than sinking the whole list.
+                horsie_models::runtime::PluginMcpTool {
+                    name: "mcp__docs__broken".into(),
+                    description: None,
+                    input_schema: "not json".into(),
+                },
+            ],
+        );
+        let specs = tb.specs();
+        assert_eq!(specs[0].name, "mcp__docs__search");
+        assert_eq!(specs[0].description, "finds things");
+        assert_eq!(specs[0].input_schema["properties"]["q"]["type"], "string");
+        assert_eq!(specs[1].input_schema, json!({"type": "object"}));
+    }
+
+    /// A name the discovery never advertised is refused here rather than sent
+    /// to a runtime that would have to refuse it anyway.
+    #[tokio::test]
+    async fn an_unknown_plugin_mcp_tool_is_refused_locally() {
+        let client = horsie_runtime_client::RuntimeClient::new(
+            horsie_runtime_client::testkit::MockTransport::ok(""),
+            "agent",
+        );
+        let tb = PluginMcpToolbox::new(client, Vec::new());
+        let err = tb
+            .execute("mcp__docs__search", json!({}), "tc1")
+            .await
+            .expect_err("no such tool");
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
 
     /// A one-tool toolbox for exercising `CompositeToolbox` routing.
     struct OneTool {

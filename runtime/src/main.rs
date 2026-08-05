@@ -11,8 +11,9 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    RunHooksResponse, RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeProvisionFailed,
-    RuntimeProvisioning, RuntimeReady, ScanResponse, ToolCallResponse, ToolError, ToolResult,
+    McpDiscoverResponse, McpInvokeResponse, RunHooksResponse, RuntimeInboundMessage,
+    RuntimeOutboundMessage, RuntimeProvisionFailed, RuntimeProvisioning, RuntimeReady,
+    ScanResponse, ToolCallResponse, ToolError, ToolOutput, ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -370,6 +371,9 @@ async fn run_loop<S>(
     }
 
     // in-flight task map: call_id → AbortHandle
+    // Plugin-declared MCP servers, live for as long as this connection: a stdio
+    // child respawned per tool call would cost more than the call.
+    let mcp = Arc::new(horsie_runtime::mcp::McpRegistry::default());
     let in_flight: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
@@ -502,6 +506,91 @@ async fn run_loop<S>(
                                 &RuntimeOutboundMessage::HookRecords(RunHooksResponse {
                                     call_id: call_id.clone(),
                                     records,
+                                }),
+                            );
+                            if let Ok(json) = response {
+                                let _ = sink_clone
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(json.into()))
+                                    .await;
+                            }
+                            in_flight_clone.lock().await.remove(&call_id);
+                        });
+
+                        in_flight.lock().await.insert(map_id, handle.abort_handle());
+                    }
+                    RuntimeInboundMessage::McpDiscover(req) => {
+                        let call_id = req.call_id.clone();
+                        let map_id = req.call_id.clone();
+                        let registry = registry.clone();
+                        let mcp = mcp.clone();
+                        let sink_clone = sink.clone();
+                        let in_flight_clone = in_flight.clone();
+
+                        // Cancellable like a hook run: starting a fleet of MCP
+                        // servers can take seconds, and a user hitting Stop must
+                        // not wait them all out.
+                        let handle = tokio::spawn(async move {
+                            let discovery = match registry.plugins_dir() {
+                                Some(dir) => mcp.discover(dir, registry.default_cwd()).await,
+                                None => horsie_runtime::mcp::Discovery {
+                                    tools: Vec::new(),
+                                    failures: Vec::new(),
+                                },
+                            };
+                            let response = serde_json::to_string(
+                                &RuntimeOutboundMessage::McpTools(McpDiscoverResponse {
+                                    call_id: call_id.clone(),
+                                    tools: discovery.tools,
+                                    failures: discovery.failures,
+                                }),
+                            );
+                            if let Ok(json) = response {
+                                let _ = sink_clone
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(json.into()))
+                                    .await;
+                            }
+                            in_flight_clone.lock().await.remove(&call_id);
+                        });
+
+                        in_flight.lock().await.insert(map_id, handle.abort_handle());
+                    }
+                    RuntimeInboundMessage::McpInvoke(req) => {
+                        let call_id = req.call_id.clone();
+                        let map_id = req.call_id.clone();
+                        let tool = req.tool.clone();
+                        let arguments = req.arguments.clone();
+                        let registry = registry.clone();
+                        let mcp = mcp.clone();
+                        let sink_clone = sink.clone();
+                        let in_flight_clone = in_flight.clone();
+
+                        let handle = tokio::spawn(async move {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null);
+                            let result = match registry.plugins_dir() {
+                                Some(dir) => mcp
+                                    .invoke(dir, registry.default_cwd(), &tool, args)
+                                    .await
+                                    .map(|stdout| {
+                                        ToolResult::Ok(ToolOutput {
+                                            stdout,
+                                            stderr: String::new(),
+                                            exit_code: 0,
+                                        })
+                                    })
+                                    .unwrap_or_else(|reason| ToolResult::Err(ToolError { reason })),
+                                None => ToolResult::Err(ToolError {
+                                    reason: "this runtime has no plugin library".to_string(),
+                                }),
+                            };
+                            let response = serde_json::to_string(
+                                &RuntimeOutboundMessage::McpResult(McpInvokeResponse {
+                                    call_id: call_id.clone(),
+                                    result,
                                 }),
                             );
                             if let Ok(json) = response {

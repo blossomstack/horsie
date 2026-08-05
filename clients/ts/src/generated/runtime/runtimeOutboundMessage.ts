@@ -1,4 +1,6 @@
 
+import { McpDiscoverResponse } from './mcpDiscoverResponse';
+import { McpInvokeResponse } from './mcpInvokeResponse';
 import { RunHooksResponse } from './runHooksResponse';
 import { RuntimeProvisionFailed } from './runtimeProvisionFailed';
 import { RuntimeProvisioning } from './runtimeProvisioning';
@@ -14,4 +16,6 @@ export type RuntimeOutboundMessage =
   | { type: "ProvisionFailed"; value: RuntimeProvisionFailed }
   | { type: "ToolCallResponse"; value: ToolCallResponse }
   | { type: "ScanResult"; value: ScanResponse }
-  | { type: "HookRecords"; value: RunHooksResponse };
+  | { type: "HookRecords"; value: RunHooksResponse }
+  | { type: "McpTools"; value: McpDiscoverResponse }
+  | { type: "McpResult"; value: McpInvokeResponse };

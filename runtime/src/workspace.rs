@@ -39,6 +39,13 @@ impl WorkspaceRegistry {
         self.plugins_dir.as_deref()
     }
 
+    /// The first workspace's path, which is where a process with no cwd of its
+    /// own should run — an MCP server that reads files should read the ones the
+    /// agent is working on.
+    pub fn default_cwd(&self) -> Option<&Path> {
+        self.workspaces.first().map(|w| w.path.as_path())
+    }
+
     /// Directories prepended to PATH when running plugin hooks.
     pub fn hook_path(&self) -> &[PathBuf] {
         &self.hook_path

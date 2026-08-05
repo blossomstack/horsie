@@ -8,8 +8,9 @@ use crate::transport::{RuntimeTransport, TransportError};
 use async_trait::async_trait;
 use horsie_agentcore::testkit::Script;
 use horsie_models::runtime::{
-    PluginSkill, RunHooksResponse, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse,
-    ToolCall, ToolCallResponse, ToolError, ToolOutput, ToolResult, WorkspaceScan,
+    McpDiscoverResponse, McpInvokeResponse, PluginSkill, RunHooksResponse, RuntimeInboundMessage,
+    RuntimeOutboundMessage, ScanResponse, ToolCall, ToolCallResponse, ToolError, ToolOutput,
+    ToolResult, WorkspaceScan,
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Notify;
@@ -368,6 +369,24 @@ impl RuntimeTransport for MockTransport {
                 Ok(RuntimeOutboundMessage::HookRecords(RunHooksResponse {
                     call_id: req.call_id,
                     records: self.server_hook_records.clone(),
+                }))
+            }
+            // No plugin library in a mock, so there is nothing to discover
+            // and nothing to call. A test needing plugin MCP drives the real
+            // runtime, where the servers actually are.
+            RuntimeInboundMessage::McpDiscover(req) => {
+                Ok(RuntimeOutboundMessage::McpTools(McpDiscoverResponse {
+                    call_id: req.call_id,
+                    tools: Vec::new(),
+                    failures: Vec::new(),
+                }))
+            }
+            RuntimeInboundMessage::McpInvoke(req) => {
+                Ok(RuntimeOutboundMessage::McpResult(McpInvokeResponse {
+                    call_id: req.call_id,
+                    result: ToolResult::Err(ToolError {
+                        reason: "no plugin MCP servers in a mock transport".to_string(),
+                    }),
                 }))
             }
             // A cancel draws no reply, so relaying one would hang a real

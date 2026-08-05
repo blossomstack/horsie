@@ -1,4 +1,5 @@
 pub mod hooks;
+pub mod mcp;
 pub mod plugins;
 pub mod plugins_fetch;
 pub mod provision;
