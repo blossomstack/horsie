@@ -425,7 +425,7 @@ mod tests {
         let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
         let app = Router::new()
             .route(
-                "/app/installations/:id/access_tokens",
+                "/app/installations/{id}/access_tokens",
                 post(
                     |State(cap): State<Arc<Mutex<Option<serde_json::Value>>>>,
                      Json(body): Json<serde_json::Value>| async move {

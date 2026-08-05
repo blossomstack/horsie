@@ -319,7 +319,7 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/containers", post(mock_create))
             .route(
-                "/api/v1/containers/:name",
+                "/api/v1/containers/{name}",
                 get(mock_get).delete(mock_delete),
             )
             .route("/auth/v1/me", get(mock_whoami))

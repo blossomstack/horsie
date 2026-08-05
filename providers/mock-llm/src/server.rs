@@ -261,7 +261,7 @@ impl MockLlmServerBuilder {
             .route("/scenarios/load", post(handle_load_scenarios))
             .route("/scenarios", get(handle_list_scenarios))
             .route(
-                "/scenarios/:name/register/:session_id",
+                "/scenarios/{name}/register/{session_id}",
                 post(handle_register_session),
             )
             .with_state(state.clone());
