@@ -310,7 +310,7 @@ union ServerHookEvent {
     SessionStart(SessionStartInput),       // { source }
     SessionEnd(SessionEndInput),           // { reason }
     UserPromptSubmit(UserPromptSubmitInput), // { prompt }
-    Stop(StopInput),                       // { last_assistant_message }
+    Stop(StopInput),                       // { last_assistant_message, stop_hook_active }
     SubagentStart(SubagentStartInput),
     SubagentStop(SubagentStopInput),
     // …one arm per server-initiated event, carrying that event's input
