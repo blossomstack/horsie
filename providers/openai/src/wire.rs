@@ -77,6 +77,19 @@ pub struct ChatRequest {
     /// Reasoning depth, for models whose dialect is `openai_effort`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Asks a streaming response to end with a usage frame.
+    ///
+    /// OpenAI sends none without it, so token counts and the prompt-cache split
+    /// were simply absent on that backend — nothing to report, not a backend
+    /// that reports nothing. Compatible backends differ: DeepSeek volunteers
+    /// usage either way (verified live), and one that does not know the field
+    /// ignores it, so it is sent unconditionally.
+    pub stream_options: StreamOptions,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct StreamOptions {
+    pub include_usage: bool,
 }
 
 // ── response (streaming chunks) ──────────────────────────────────────────────

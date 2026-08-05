@@ -89,6 +89,17 @@ async fn start_server_with(
     mock_url: &str,
     clock: Option<Arc<TestClock>>,
 ) -> Server {
+    start_server_on(journal_dir, vendor, provider_at(mock_url), clock).await
+}
+
+/// As [`start_server_with`], but with the LLM provider chosen by the caller —
+/// the seam a test needs to drive a wire other than Anthropic's.
+async fn start_server_on(
+    journal_dir: &Path,
+    vendor: Option<Arc<RuntimeVendorLink>>,
+    provider: Arc<dyn LlmProvider>,
+    clock: Option<Arc<TestClock>>,
+) -> Server {
     // The e2e suite runs on the production default backend, so every test here
     // — including the restart ones — exercises real snapshots and compaction.
     let db = Db::open(&format!("sqlite://{}/config.db", journal_dir.display()), 5)
@@ -144,7 +155,7 @@ async fn start_server_with(
         .provider_registry
         .write()
         .unwrap()
-        .insert("mock".into(), provider_at(mock_url));
+        .insert("mock".into(), provider);
     if let Some(vendor) = vendor {
         services
             .vendors
@@ -1950,4 +1961,282 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         "session b must be unaffected by a's stop"
     );
     wait_status(&client, &server.addr, &b, "Idle").await;
+}
+
+// ── prompt-cache prefix stability ────────────────────────────────────────────
+
+/// Every request the mock saw, oldest first.
+async fn received(client: &reqwest::Client, mock: &MockLlmServer) -> Vec<serde_json::Value> {
+    let mut v: Vec<serde_json::Value> = client
+        .get(format!("{}/received", mock.url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    v.reverse(); // the endpoint hands them back most-recent-first
+    v
+}
+
+/// Strip the moving cache breakpoint, which is *supposed* to move.
+fn without_cache_control(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(m) => serde_json::Value::Object(
+            m.iter()
+                .filter(|(k, _)| k.as_str() != "cache_control")
+                .map(|(k, v)| (k.clone(), without_cache_control(v)))
+                .collect(),
+        ),
+        serde_json::Value::Array(a) => {
+            serde_json::Value::Array(a.iter().map(without_cache_control).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// A backend serves a prompt from cache only when the new request repeats the
+/// previous one exactly and appends to it. Measured against the live ChatGPT
+/// backend, a 114k-token prefix in this shape is served at 99% on every repeat
+/// call — so a production cache miss is horsie's own prefix moving.
+#[tokio::test]
+async fn the_request_prefix_only_ever_grows() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("first");
+    mock.queue_response("second");
+    mock.queue_response("third");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr, &agent).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    for text in ["one", "two", "three"] {
+        assert_eq!(
+            send_message(&client, &server.addr, &id, text)
+                .await
+                .as_u16(),
+            202
+        );
+        wait_status(&client, &server.addr, &id, "Idle").await;
+    }
+
+    let bodies = received(&client, &mock).await;
+    assert!(bodies.len() >= 3, "expected 3 calls, got {}", bodies.len());
+
+    for (n, pair) in bodies.windows(2).enumerate() {
+        let (prev, next) = (&pair[0], &pair[1]);
+        assert_eq!(
+            prev["system"],
+            next["system"],
+            "call {n} -> {}: the system prompt changed, invalidating the whole prefix",
+            n + 1
+        );
+        assert_eq!(
+            without_cache_control(&prev["tools"]),
+            without_cache_control(&next["tools"]),
+            "call {n} -> {}: the tool list changed, invalidating the whole prefix",
+            n + 1
+        );
+        let a = without_cache_control(&prev["messages"]);
+        let b = without_cache_control(&next["messages"]);
+        let (a, b) = (a.as_array().unwrap(), b.as_array().unwrap());
+        for (i, old) in a.iter().enumerate() {
+            assert_eq!(
+                b.get(i),
+                Some(old),
+                "call {n} -> {}: message {i} of {} was rewritten instead of appended to",
+                n + 1,
+                a.len()
+            );
+        }
+    }
+}
+
+/// The same, across a restart. A production session is offloaded and rehydrated
+/// between turns, so the history the next request replays is one that came back
+/// out of the journal — not the one still in memory. Anything the round trip
+/// changes moves the prefix and costs the whole cached window.
+#[tokio::test]
+async fn the_request_prefix_survives_a_restart() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("first");
+    mock.queue_response("second");
+    mock.queue_response("third");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr, &agent).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    for text in ["one", "two"] {
+        send_message(&client, &server.addr, &id, text).await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+    }
+
+    server.shutdown().await;
+    let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    send_message(&client, &server2.addr, &id, "three").await;
+    wait_status(&client, &server2.addr, &id, "Idle").await;
+
+    let bodies = received(&client, &mock).await;
+    let (before, after) = (&bodies[bodies.len() - 2], &bodies[bodies.len() - 1]);
+    assert_eq!(
+        before["system"], after["system"],
+        "the system prompt changed across a restart, invalidating the whole prefix"
+    );
+    let a = without_cache_control(&before["messages"]);
+    let b = without_cache_control(&after["messages"]);
+    let (a, b) = (a.as_array().unwrap(), b.as_array().unwrap());
+    for (i, old) in a.iter().enumerate() {
+        assert_eq!(
+            b.get(i),
+            Some(old),
+            "message {i} of {} was rewritten across the restart",
+            a.len()
+        );
+    }
+
+    server2.shutdown().await;
+}
+
+/// The shape production actually runs: turns with tool calls, so one turn makes
+/// several provider calls, each re-sending everything before it.
+#[tokio::test]
+async fn the_request_prefix_only_grows_across_tool_calls() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+    let id = create_session(&client, &server.addr, &agent).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    // Two turns, each of them three provider calls: tool, tool, answer.
+    for text in ["first", "second"] {
+        mock.queue_tool_call("bash", serde_json::json!({ "command": "echo one" }));
+        mock.queue_tool_call("bash", serde_json::json!({ "command": "echo two" }));
+        mock.queue_response("done");
+        send_message(&client, &server.addr, &id, text).await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+    }
+
+    let bodies = received(&client, &mock).await;
+    assert!(bodies.len() >= 6, "expected 6 calls, got {}", bodies.len());
+
+    for (n, pair) in bodies.windows(2).enumerate() {
+        let (prev, next) = (&pair[0], &pair[1]);
+        assert_eq!(
+            prev["system"],
+            next["system"],
+            "call {n} -> {}: the system prompt changed, invalidating the whole prefix",
+            n + 1
+        );
+        assert_eq!(
+            without_cache_control(&prev["tools"]),
+            without_cache_control(&next["tools"]),
+            "call {n} -> {}: the tool list changed, invalidating the whole prefix",
+            n + 1
+        );
+        let a = without_cache_control(&prev["messages"]);
+        let b = without_cache_control(&next["messages"]);
+        let (a, b) = (a.as_array().unwrap(), b.as_array().unwrap());
+        for (i, old) in a.iter().enumerate() {
+            assert_eq!(
+                b.get(i),
+                Some(old),
+                "call {n} -> {}: message {i} of {} was rewritten instead of appended to",
+                n + 1,
+                a.len()
+            );
+        }
+    }
+
+    server.shutdown().await;
+}
+
+/// The Responses wire, which is where the ChatGPT plan runs. Reasoning replay is
+/// the part unique to it: the model only sees its own prior chain of thought if
+/// horsie hands the encrypted item back, and an item that fails to come back
+/// identical moves the prefix for every turn after it.
+#[tokio::test]
+async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let provider: Arc<dyn LlmProvider> = Arc::new(
+        horsie_openai_responses::ResponsesProvider::with_api_key("test-key")
+            .unwrap()
+            .with_model("mock")
+            .with_base_url(mock.url()),
+    );
+    let server = start_server_on(tmp.path(), Some(agent.link()), provider, None).await;
+    let client = reqwest::Client::new();
+    let id = create_session(&client, &server.addr, &agent).await;
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    for text in ["first", "second", "third"] {
+        mock.queue_reasoning("weighing it up", "done");
+        send_message(&client, &server.addr, &id, text).await;
+        wait_status(&client, &server.addr, &id, "Idle").await;
+    }
+
+    let bodies = received(&client, &mock).await;
+    assert!(bodies.len() >= 3, "expected 3 calls, got {}", bodies.len());
+    // The point of the test: reasoning came back, so it can move the prefix.
+    let last = bodies.last().unwrap();
+    let kinds: Vec<&str> = last["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["type"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"reasoning"),
+        "no reasoning item was replayed, so this proves nothing: {kinds:?}"
+    );
+
+    for (n, pair) in bodies.windows(2).enumerate() {
+        let (prev, next) = (&pair[0], &pair[1]);
+        assert_eq!(
+            prev["instructions"],
+            next["instructions"],
+            "call {n} -> {}: the instructions changed, invalidating the whole prefix",
+            n + 1
+        );
+        assert_eq!(
+            prev["tools"],
+            next["tools"],
+            "call {n} -> {}: the tool list changed, invalidating the whole prefix",
+            n + 1
+        );
+        let a = prev["input"].as_array().unwrap();
+        let b = next["input"].as_array().unwrap();
+        for (i, old) in a.iter().enumerate() {
+            assert_eq!(
+                b.get(i),
+                Some(old),
+                "call {n} -> {}: input item {i} of {} was rewritten instead of appended to",
+                n + 1,
+                a.len()
+            );
+        }
+    }
+
+    server.shutdown().await;
 }
