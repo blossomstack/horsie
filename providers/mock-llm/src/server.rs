@@ -147,12 +147,32 @@ pub(crate) struct MockState {
     /// Every inbound request body (both wires), for tests that assert on what
     /// reached the agent (e.g. the composed system prompt). Cleared by `/reset`.
     captured: Mutex<Vec<serde_json::Value>>,
+    /// A one-shot hold applied to the next answer out of the queue, however it
+    /// was queued. Set by `/reset` so it covers a test's *first* answer without
+    /// the test having to know which queued entry that turns out to be.
+    ///
+    /// It exists because an instant provider is the unrealistic case: a real
+    /// one takes hundreds of milliseconds to a first token, and a session's
+    /// first turn starts with the session, before any browser has finished
+    /// navigating to it. Answering with zero latency lets a whole turn happen
+    /// in a window no client could have been watching.
+    hold_next: Mutex<Option<std::time::Duration>>,
 }
 
 impl MockState {
     pub(crate) fn dequeue_entry(&self) -> Option<QueueEntry> {
-        let mut q = self.queue.lock();
-        (!q.is_empty()).then(|| q.remove(0))
+        let mut entry = {
+            let mut q = self.queue.lock();
+            (!q.is_empty()).then(|| q.remove(0))
+        }?;
+        // The hold is spent on whichever answer comes first, and only once —
+        // later turns in the same test run at full speed.
+        if let Some(hold) = self.hold_next.lock().take()
+            && entry.delay.is_none()
+        {
+            entry.delay = Some(hold);
+        }
+        Some(entry)
     }
     /// Record an inbound request body so `GET /received` can return it.
     pub(crate) fn capture(&self, body: serde_json::Value) {
@@ -243,6 +263,7 @@ impl MockLlmServerBuilder {
             session_bindings: Mutex::new(HashMap::new()),
             session_states: Mutex::new(HashMap::new()),
             captured: Mutex::new(Vec::new()),
+            hold_next: Mutex::new(None),
         });
         let app = Router::new()
             .route("/v1/messages", post(handle_messages))
@@ -614,11 +635,35 @@ async fn handle_messages(
 /// `{"type":"text","content":…}`, `{"type":"text_stream","chunks":[…]}`,
 /// `{"type":"tool_call","name":…,"input":…}`, `{"type":"error","status":…,
 /// "message":…}`, `{"type":"thinking","text":…,"signature":…}`.
+///
+/// An optional `"delayMs"` alongside those fields holds the answer back before
+/// sending it — the HTTP face of the `delay` every queue entry already has, and
+/// the only way an out-of-process test can make a turn *observably* in flight.
+/// A browser test that means to watch a turn happen needs the turn to still be
+/// happening when it looks.
 async fn handle_queue(
     State(state): State<Arc<MockState>>,
-    Json(response): Json<MockResponse>,
+    Json(body): Json<serde_json::Value>,
 ) -> Json<StatusResponse> {
-    state.queue.lock().push(QueueEntry::immediate(response));
+    let delay = body
+        .get("delayMs")
+        .and_then(serde_json::Value::as_u64)
+        .map(std::time::Duration::from_millis);
+    let response: MockResponse = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return Json(StatusResponse {
+                status: "error".into(),
+                message: Some(e.to_string()),
+            });
+        }
+    };
+    state.queue.lock().push(QueueEntry {
+        response,
+        reached: None,
+        gate: None,
+        delay,
+    });
     Json(StatusResponse {
         status: "queued".into(),
         message: None,
@@ -628,11 +673,20 @@ async fn handle_queue(
 /// Clear all per-test state: the FIFO queue and any per-session scenario
 /// cursors/bindings. Loaded scenario definitions are left intact. Tests call
 /// this before each case so nothing leaks across the serially-run suite.
-async fn handle_reset(State(state): State<Arc<MockState>>) -> Json<StatusResponse> {
+async fn handle_reset(
+    State(state): State<Arc<MockState>>,
+    body: Option<Json<serde_json::Value>>,
+) -> Json<StatusResponse> {
     state.queue.lock().clear();
     state.session_states.lock().clear();
     state.session_bindings.lock().clear();
     state.captured.lock().clear();
+    // `holdFirstMs` arms a one-shot delay on this test's first answer. See
+    // `MockState::hold_next` for why a zero-latency provider is the case worth
+    // avoiding rather than the case worth defaulting to.
+    *state.hold_next.lock() = body
+        .and_then(|Json(b)| b.get("holdFirstMs").and_then(serde_json::Value::as_u64))
+        .map(std::time::Duration::from_millis);
     Json(StatusResponse {
         status: "reset".into(),
         message: None,
