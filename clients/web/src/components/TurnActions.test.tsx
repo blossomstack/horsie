@@ -47,7 +47,7 @@ describe("Transcript user turn", () => {
     };
     render(
       <Transcript
-        messages={[userMsg]}
+        items={[{ kind: "message", value: userMsg }]}
         streaming=""
         orphanTools={[]}
         showLive={false}

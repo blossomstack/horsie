@@ -1,5 +1,5 @@
 
-import { HookRecord } from '../runtime';
+import { HookRecord } from '../hooks';
 /**
  * A plugin hook&#x27;s intervention, as it appears in an agent&#x27;s transcript.
  */

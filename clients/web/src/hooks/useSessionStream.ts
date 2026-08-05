@@ -15,6 +15,7 @@ import {
   type SessionEvent,
   type TaskItem,
 } from "../api/types";
+import { toolScope } from "../lib/hookSummary";
 import { qk, useAgent, useSession } from "./useSessions";
 
 /** Messages per history page (initial tail and each scroll-back load). */
@@ -72,8 +73,24 @@ export interface RenderedMessage {
   queued?: boolean;
 }
 
+/** A hook record with no tool call of its own, as the transcript renders it. */
+export interface RenderedHookNotice {
+  id: string;
+  record: HookRecord;
+  atMs: number;
+}
+
+/** One item in the rendered transcript.
+ *
+ * A union above `RenderedMessage` for the same reason `HistoryEntry` is one
+ * above `Message`: not everything in a transcript is something the model saw,
+ * and a notice must not have to pretend to be a message to be rendered. */
+export type TranscriptItem =
+  | { kind: "message"; value: RenderedMessage }
+  | { kind: "notice"; value: RenderedHookNotice };
+
 export interface SessionStream {
-  messages: RenderedMessage[];
+  items: TranscriptItem[];
   /** Live, not-yet-finalized assistant text (from Delta events). */
   streaming: string;
   /** Tools started but not yet attached to a finalized assistant message. */
@@ -132,6 +149,14 @@ interface State {
    * journaled before its tool result, but a client that reconnects mid-turn
    * may still see them in either order. */
   hooks: Record<string, HookRecord[]>;
+  /** Hook records with no tool call — a `SessionStart` bootstrap, a `Stop` that
+   * kept the turn going. These have nowhere to attach, so they are transcript
+   * items of their own, keyed by the entry id that also orders them. */
+  notices: Record<string, RenderedHookNotice>;
+  /** Entry ids already folded, for both halves above. A hook entry can arrive
+   * twice — once live, once on a backfill that overlaps the same window — and
+   * the server's derived id is what makes the two recognizable as one. */
+  hookEntryIds: Record<string, true>;
   /** Local echoes of messages this tab sent, shown until the server's own
    * account of them arrives — either in the queue or in the transcript.
    * `serverId` is the id the send was acknowledged with, once it resolves. */
@@ -167,6 +192,8 @@ const INITIAL: State = {
   toolResults: {},
   liveTools: {},
   hooks: {},
+  notices: {},
+  hookEntryIds: {},
   optimistic: [],
   queued: null,
   streaming: "",
@@ -295,28 +322,49 @@ function llmMessages(entries: HistoryEntry[]): Message[] {
   return entries.flatMap((e) => (e.type === "Llm" ? [e.value] : []));
 }
 
-/** Index hook entries by the call they guarded, de-duplicated by entry id so a
- * backfill that overlaps what the live stream already delivered cannot double a
- * row. */
-function withHooks(
-  current: Record<string, HookRecord[]>,
+/** Route hook entries by whether they name a tool call.
+ *
+ * A record with a `ToolScope` attaches to that call's card; one without — a
+ * `SessionStart` bootstrap, a `Stop` that kept the turn going — becomes a
+ * transcript row of its own.
+ *
+ * Both halves dedupe against one ledger of entry ids, because a backfill can
+ * overlap what the live stream already delivered. The id is the server's
+ * (`hook:{n}`), derived from the journal, so the two sources agree on it.
+ */
+function withHookEntries(
+  state: Pick<State, "hooks" | "notices" | "order" | "hookEntryIds">,
   entries: HistoryEntry[],
-): Record<string, HookRecord[]> {
-  const hooks = { ...current };
-  const seen = new Set(
-    Object.values(current).flatMap((rs) =>
-      rs.map((r) => `${r.toolCallId}:${r.plugin}:${r.event}`),
-    ),
-  );
+  prepend: boolean,
+): Pick<State, "hooks" | "notices" | "order" | "hookEntryIds"> {
+  const hooks = { ...state.hooks };
+  const notices = { ...state.notices };
+  const hookEntryIds = { ...state.hookEntryIds };
+  const fresh: string[] = [];
   for (const e of entries) {
     if (e.type !== "Hook") continue;
-    const r = e.value.record;
-    const key = `${r.toolCallId}:${r.plugin}:${r.event}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    hooks[r.toolCallId] = [...(hooks[r.toolCallId] ?? []), r];
+    const entry = e.value;
+    if (hookEntryIds[entry.id]) continue;
+    hookEntryIds[entry.id] = true;
+    const scope = toolScope(entry.record);
+    if (scope) {
+      hooks[scope.toolCallId] = [
+        ...(hooks[scope.toolCallId] ?? []),
+        entry.record,
+      ];
+    } else {
+      notices[entry.id] = {
+        id: entry.id,
+        record: entry.record,
+        atMs: entry.createdAtMs,
+      };
+      fresh.push(entry.id);
+    }
   }
-  return hooks;
+  const order = prepend
+    ? [...fresh, ...state.order]
+    : [...state.order, ...fresh];
+  return { hooks, notices, order, hookEntryIds };
 }
 
 function applyHistory(state: State, messages: Message[], prepend: boolean): State {
@@ -414,7 +462,7 @@ function reducer(state: State, action: Action): State {
       const next = applyHistory(state, llmMessages(page.entries), prepend);
       return {
         ...next,
-        hooks: withHooks(next.hooks, page.entries),
+        ...withHookEntries(next, page.entries, prepend),
         // A forward (backfill) page says nothing about what precedes the
         // window already loaded, so it must not overwrite that.
         hasMoreBefore: prepend || !action.forward ? page.hasMoreBefore : state.hasMoreBefore,
@@ -432,7 +480,7 @@ function reducer(state: State, action: Action): State {
             ? { ...ingestMessage(state, ev.value.entry.value), progression: null }
             : {
                 ...state,
-                hooks: withHooks(state.hooks, [ev.value.entry]),
+                ...withHookEntries(state, [ev.value.entry], false),
                 progression: null,
               };
         case "Resync":
@@ -751,41 +799,55 @@ export function useSessionStream(
       };
     };
 
-    const messages: RenderedMessage[] = state.order.map((id) => {
+    // One pass over `order`, which holds message ids and notice ids alike, so
+    // a notice sits exactly where the journal put it rather than being appended
+    // to the end of the conversation.
+    const items: TranscriptItem[] = state.order.map((id) => {
+      const notice = state.notices[id];
+      if (notice) return { kind: "notice", value: notice };
       const m = state.byId[id];
-      return { ...m, toolCalls: m.toolCalls.map(resolveTool) };
+      return {
+        kind: "message",
+        value: { ...m, toolCalls: m.toolCalls.map(resolveTool) },
+      };
     });
 
     // Queued first, then this tab's un-acknowledged echoes: everything the
     // server already holds is older than anything still in flight to it.
     for (const q of state.queued ?? []) {
-      messages.push({
-        id: q.id,
-        role: "User",
-        text: q.text,
-        thinking: [],
-        toolCalls: [],
-        subagentResults: [],
-        queued: true,
+      items.push({
+        kind: "message",
+        value: {
+          id: q.id,
+          role: "User",
+          text: q.text,
+          thinking: [],
+          toolCalls: [],
+          subagentResults: [],
+          queued: true,
+        },
       });
     }
 
     for (const opt of state.optimistic) {
-      messages.push({
-        id: opt.id,
-        role: "User",
-        text: opt.text,
-        thinking: [],
-        toolCalls: [],
-        subagentResults: [],
-        optimistic: true,
+      items.push({
+        kind: "message",
+        value: {
+          id: opt.id,
+          role: "User",
+          text: opt.text,
+          thinking: [],
+          toolCalls: [],
+          subagentResults: [],
+          optimistic: true,
+        },
       });
     }
 
     // Tools that started before their assistant message finalized.
     const known = new Set<string>();
-    for (const m of state.order)
-      for (const tc of state.byId[m].toolCalls) known.add(tc.id);
+    for (const id of state.order)
+      for (const tc of state.byId[id]?.toolCalls ?? []) known.add(tc.id);
     const orphanTools: RenderedToolCall[] = Object.entries(state.liveTools)
       .filter(([id]) => !known.has(id))
       .map(([id, t]) => ({
@@ -800,7 +862,7 @@ export function useSessionStream(
       }));
 
     return {
-      messages,
+      items,
       streaming: state.streaming,
       orphanTools,
       liveStatus: state.liveStatus,

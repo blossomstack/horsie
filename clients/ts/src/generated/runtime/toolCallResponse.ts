@@ -1,5 +1,5 @@
 
-import { HookRecord } from './hookRecord';
+import { HookRecord } from '../hooks';
 import { ToolResult } from './toolResult';
 export interface ToolCallResponse {
   callId: string;
