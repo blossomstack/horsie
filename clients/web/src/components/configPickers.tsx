@@ -1,4 +1,13 @@
-import { Boxes, Brain, Cpu, FolderGit2, Lightbulb, Plug, Server } from "lucide-react";
+import {
+  Boxes,
+  Brain,
+  Cpu,
+  FolderGit2,
+  Lightbulb,
+  Plug,
+  Server,
+  Workflow,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useGithubRepos } from "../hooks/useGithub";
@@ -8,7 +17,11 @@ import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
 import type { SessionDetail } from "../api/types";
 import { basename } from "../lib/format";
-import type { ConfigDraft, RuntimeChannel } from "../hooks/useSessionDraft";
+import type {
+  ConfigDraft,
+  RuntimeChannel,
+  WorkflowChannel,
+} from "../hooks/useSessionDraft";
 
 /**
  * One configurable channel of a session or agent preset.
@@ -87,6 +100,11 @@ function hasRuntime(draft: ConfigDraft): draft is ConfigDraft & RuntimeChannel {
   return "setVendor" in draft;
 }
 
+/** Likewise for the workflow channel: only the new-session draft starts one. */
+function hasWorkflow(draft: ConfigDraft): draft is ConfigDraft & WorkflowChannel {
+  return "setWorkflow" in draft;
+}
+
 /**
  * Every picker for a draft, in the order both surfaces render them.
  *
@@ -106,6 +124,57 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   const enabledMcp = (mcpServers ?? []).filter((s) => s.enabled);
 
   const pickers: PickerSpec[] = [];
+
+  // Leftmost, and first read: it decides which of the others mean anything.
+  const running = hasWorkflow(draft) ? draft.workflow : "";
+  if (hasWorkflow(draft)) {
+    const d = draft;
+    pickers.push({
+      key: "workflow",
+      legend: "Workflow",
+      icon: <Workflow size={15} />,
+      label: d.workflow || "None",
+      marked: !!d.workflow,
+      width: "w-64",
+      testId: "config-workflow",
+      body: (close) => (
+        <>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm hover:bg-raised"
+            data-testid="workflow-option"
+            data-value=""
+            onClick={() => {
+              d.setWorkflow("");
+              close();
+            }}
+          >
+            None
+            <span className="ml-auto text-[0.6875rem] text-faint">one agent</span>
+          </button>
+          {d.workflows.length === 0 ? (
+            <EmptyLink to="/workflows">Define a workflow to run one</EmptyLink>
+          ) : (
+            d.workflows.map((w) => (
+              <button
+                key={w}
+                type="button"
+                className="flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm hover:bg-raised"
+                data-testid="workflow-option"
+                data-value={w}
+                onClick={() => {
+                  d.setWorkflow(w);
+                  close();
+                }}
+              >
+                <span className="font-mono">{w}</span>
+              </button>
+            ))
+          )}
+        </>
+      ),
+    });
+  }
 
   if (hasRuntime(draft)) {
     const d = draft;
@@ -187,6 +256,11 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
         ),
     });
   }
+
+  // A run's model, thinking effort, skills, MCP and memory come from each
+  // step's own agent preset, and `WorkflowRunRequest` carries none of them —
+  // so while a workflow is selected these controls would configure nothing.
+  if (running) return pickers;
 
   // Skills and MCP are not workspace channels, so they are offered on every
   // vendor. A runtime fetches its selected bundles over its own outbound

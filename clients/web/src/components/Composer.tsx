@@ -21,12 +21,17 @@ export function Composer({
   status,
   busy,
   blockedReason = null,
+  idlePlaceholder = "Message the agent…",
   onSend,
   onStop,
 }: {
   status: SessionStatusKind | null | undefined;
   busy: boolean;
   blockedReason?: string | null;
+  /** What an idle, unblocked field invites. A workflow run is handed an input
+   * rather than sent a message, so the two surfaces do not ask for the same
+   * thing. */
+  idlePlaceholder?: string;
   onSend: (text: string) => void;
   onStop: () => void;
 }) {
@@ -89,7 +94,7 @@ export function Composer({
                 ? "Answer the agent…"
                 : running
                   ? "Queue a message for the next turn…"
-                  : "Message the agent…"
+                  : idlePlaceholder
           }
           disabled={!meta.canSend}
           // `pr-14` reserves the button's lane so a long line never runs

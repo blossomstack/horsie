@@ -17,8 +17,8 @@ describe("layoutGraph", () => {
     expect(rankOf(l, "triage")).toBe(0);
     expect(rankOf(l, "fix")).toBe(1);
     expect(rankOf(l, "review")).toBe(2);
-    expect(l.height).toBe(3);
-    expect(l.width).toBe(1);
+    expect(l.depth).toBe(3);
+    expect(l.breadth).toBe(1);
   });
 
   it("places a branch's two targets side by side in one rank", () => {
@@ -29,7 +29,7 @@ describe("layoutGraph", () => {
     );
     expect(rankOf(l, "fix")).toBe(1);
     expect(rankOf(l, "file")).toBe(1);
-    expect(l.width).toBe(2);
+    expect(l.breadth).toBe(2);
     // Order within the rank follows the definition's step order, so the graph
     // reads in the same sequence as the list beside it.
     const inRank = l.nodes.filter((n) => n.rank === 1).sort((a, b) => a.order - b.order);
@@ -101,6 +101,6 @@ describe("layoutGraph", () => {
 
   it("lays out an empty definition without dividing by zero", () => {
     const l = layoutGraph([], [], "start");
-    expect(l).toEqual({ nodes: [], edges: [], width: 0, height: 0 });
+    expect(l).toEqual({ nodes: [], edges: [], breadth: 0, depth: 0 });
   });
 });

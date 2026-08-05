@@ -11,7 +11,9 @@ whole job and let it spawn subagents instead.
 
 ## Defining one
 
-Open **Workflows** in the sidebar and press **New workflow**. Each step needs:
+Open **Workflows** in the sidebar and press **New workflow**. The editor lists
+what the definition holds down the left — the definition itself, then one row
+per step — and shows whichever you select on the right. Each step needs:
 
 - **Agent** — one of your agent presets. It supplies the model, MCP servers,
   memory spaces and thinking effort.
@@ -22,7 +24,10 @@ Open **Workflows** in the sidebar and press **New workflow**. Each step needs:
   fields you declare here.
 - **Goes to** — where to hand off, and on what condition.
 
-The graph beside the list redraws as you type.
+Press **Visualize** to swap the panel for the graph, which redraws as you
+type; choosing a node there opens that step. Steps can be dragged into another
+order, which changes how the list reads and nothing about how the run
+executes — the start step and the transitions decide that.
 
 ### Conditions
 
@@ -50,7 +55,16 @@ fails rather than spinning forever.
 
 ## Running one
 
-Press **Start run** on the workflow's page, or:
+Press **Run** on the workflow's page. That opens the new-session page with the
+workflow selected, where you choose the runtime and the repos and type the
+input the first step is handed. The same page starts an ordinary session when
+no workflow is selected — the **Workflow** key is the leftmost control on the
+row.
+
+A run takes its model, skills, MCP servers and memory from each step's own
+agent preset, so those controls are not offered while a workflow is selected.
+
+From the CLI:
 
 ```console
 $ horsie workflow run fix-bug --input "the build is red on main"
