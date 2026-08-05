@@ -1391,15 +1391,13 @@ impl EventSourcedActor for AgentActor {
                     return CommandEffect::none();
                 }
                 let turn = crate::StartTurn {
-                    start_source: (!self.start_hook_fired).then(|| {
-                        // A fresh agent has nothing in its transcript; anything
-                        // else was folded from a journal. No framework flag
-                        // needed to tell a cold start from a rehydration.
-                        if state.history.is_empty() {
-                            "startup".to_string()
-                        } else {
-                            "resume".to_string()
-                        }
+                    // A fresh agent has nothing in its transcript; anything else
+                    // was folded from a journal. No framework flag needed to
+                    // tell a cold start from a rehydration.
+                    start_source: (!self.start_hook_fired).then_some(if state.history.is_empty() {
+                        horsie_models::runtime::SessionStartSource::Startup
+                    } else {
+                        horsie_models::runtime::SessionStartSource::Resume
                     }),
                     prompt: message.clone(),
                 };
@@ -1429,7 +1427,7 @@ impl EventSourcedActor for AgentActor {
                 tokio::spawn(async move {
                     let prepared = match provider.start_hooks(turn).await {
                         Ok(records) => PreparedStart {
-                            abandon: crate::prompt_blocked(&records).map(AbandonedStart::Blocked),
+                            abandon: crate::start_blocked(&records).map(AbandonedStart::Blocked),
                             records,
                             results,
                             message,
@@ -2543,7 +2541,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|t| t.start_source.clone())
+                    .map(|t| t.start_source.as_ref().map(|s| s.as_wire().to_string()))
                     .collect()
             }
         }
@@ -2617,6 +2615,7 @@ mod tests {
             HookRecord {
                 plugin: "boot".into(),
                 duration_ms: 1,
+                halt: None,
                 action: HookAction::SessionStart(SessionStartRecord {
                     source: "startup".into(),
                     system_message: None,
@@ -2713,6 +2712,7 @@ mod tests {
                 vec![HookRecord {
                     plugin: "guard".into(),
                     duration_ms: 1,
+                    halt: None,
                     action: HookAction::UserPromptSubmit(UserPromptSubmitRecord {
                         system_message: None,
                         outcome: UserPromptSubmitOutcome::Blocked(HookBlocked {
@@ -2886,6 +2886,7 @@ mod tests {
         horsie_models::hooks::HookRecord {
             plugin: plugin.to_string(),
             duration_ms: 3,
+            halt: None,
             action: horsie_models::hooks::HookAction::PreToolUse(
                 horsie_models::hooks::PreToolUseRecord {
                     call: horsie_models::hooks::ToolScope {
@@ -2956,6 +2957,7 @@ mod tests {
                 record: HookRecord {
                     plugin: "nagger".into(),
                     duration_ms: 1,
+                    halt: None,
                     action: HookAction::Stop(StopRecord {
                         system_message: None,
                         outcome: StopOutcome::Ran(ContextInjected {
@@ -3023,6 +3025,7 @@ mod tests {
         let record = HookRecord {
             plugin: "boot".into(),
             duration_ms: 1,
+            halt: None,
             action: HookAction::SessionStart(SessionStartRecord {
                 source: "startup".into(),
                 system_message: None,

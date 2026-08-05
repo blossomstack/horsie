@@ -44,6 +44,15 @@ struct ContextInjected {
     additional_context: Option<String>,
 }
 
+/// The hook set `continue: false`, asking horsie to stop after it.
+///
+/// A common field in the spec — any hook on any event may set it, and it takes
+/// precedence over `decision`. `reason` is `stopReason`, which reaches the user
+/// and never the model.
+struct HookHalt {
+    reason: Option<String>,
+}
+
 // --- Tool events ---
 
 /// `PreToolUse` allowed the call, having possibly rewritten its input. Only an
@@ -129,7 +138,8 @@ union SessionStartOutcome {
     Failed(HookFailed),
 }
 
-/// `source` is the matcher domain: startup | resume | clear | compact | fork.
+/// `source` is the matcher domain, and the record keeps the wire spelling the
+/// hook was given rather than the enum: this is what the transcript shows.
 struct SessionStartRecord {
     source: String,
     system_message: Option<String>,
@@ -177,6 +187,7 @@ union SubagentStartOutcome {
 }
 
 struct SubagentStartRecord {
+    agent_id: String,
     agent_type: String,
     system_message: Option<String>,
     outcome: SubagentStartOutcome,
@@ -185,11 +196,16 @@ struct SubagentStartRecord {
 #[type_tag = "outcome"]
 union SubagentStopOutcome {
     Ran(ContextInjected),
+    // *Blocked from stopping*, exactly as `Stop` is: the subagent's turn
+    // continues with `reason` as its input.
     Blocked(HookBlocked),
     Failed(HookFailed),
+    // The continuation cap ended the subagent's turn despite a block.
+    CapReached(HookBlocked),
 }
 
 struct SubagentStopRecord {
+    agent_id: String,
     agent_type: String,
     system_message: Option<String>,
     outcome: SubagentStopOutcome,
@@ -281,5 +297,10 @@ struct HookRecord {
     plugin: String,
     /// Wall-clock, so a hook slowing every tool call is visible.
     duration_ms: u64,
+    /// Set when the hook asked horsie to stop. A common field rather than an
+    /// arm of every outcome union: halting is orthogonal to what the event
+    /// decided, and a hook that allows a call *and* halts the turn is a legal
+    /// reply the union shape could not express.
+    halt: Option<HookHalt>,
     action: HookAction,
 }

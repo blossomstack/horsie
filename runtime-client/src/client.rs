@@ -390,6 +390,7 @@ mod tests {
         let record = HookRecord {
             plugin: "guard".into(),
             duration_ms: 1,
+            halt: None,
             action: horsie_models::hooks::HookAction::PreToolUse(
                 horsie_models::hooks::PreToolUseRecord {
                     call: horsie_models::hooks::ToolScope {

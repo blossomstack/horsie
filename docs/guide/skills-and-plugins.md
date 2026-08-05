@@ -88,11 +88,44 @@ Every session on that runtime then sees the library's skills, and the plugin
 hooks horsie supports run on your machine. Installs and updates are picked up on
 the next session scan — no reconnect needed.
 
-horsie runs six hook events today: `SessionStart` once per session (and
-`SubagentStart` once per subagent), `UserPromptSubmit` on every prompt, `Stop`
-when a turn ends, and `PreToolUse`/`PostToolUse` around every tool call. A bundle
-declaring an event horsie cannot fire still installs — its skills work — and the
-events it cannot run are named rather than silently ignored.
+horsie runs seven hook events today: `SessionStart` once per agent load and
+`SubagentStart` once per subagent, `UserPromptSubmit` on every prompt, `Stop`
+when a turn ends and `SubagentStop` when a subagent's does, and
+`PreToolUse`/`PostToolUse` around every tool call. A bundle declaring an event
+horsie cannot fire still installs — its skills work — and the events it cannot
+run are named rather than silently ignored.
+
+`SessionStart` fires with `source: "startup"` the first time a session runs and
+`source: "resume"` whenever horsie reloads it — which it does on its own, after
+a session has been idle long enough to be offloaded, not only when you resume
+one yourself. Match on `startup` for a hook that must run once; leave the
+matcher off, or match `startup|resume`, for one that refreshes context whenever
+the session comes back. horsie never reports `clear`, `compact` or `fork`: it
+has none of the three.
+
+Both hook transports work: `type: "command"` runs a shell command with the
+plugin root as its working directory, and `type: "http"` POSTs the same payload
+to a URL and reads the response body as the reply. HTTP headers may interpolate
+`$NAME` or `${NAME}` for any variable the declaration lists in `allowedEnvVars`,
+which is how a webhook gets its credential; a variable not on that list is left
+in the header as written rather than read out of the runtime's environment.
+
+Two things differ over HTTP. There is no exit code, so an HTTP hook can only
+refuse through `decision` / `permissionDecision` in its JSON body — exit 2 has
+no equivalent. And a hook that does not answer at all — a non-2xx, an
+unreachable endpoint, a timeout — is recorded as having failed, which for
+`PreToolUse` **denies the call it was guarding**. horsie fails a guard closed
+whichever transport it runs over, on the grounds that a guard which could not
+run has not permitted anything; upstream Claude Code lets an HTTP failure
+through. Point a `PreToolUse` webhook only at an endpoint you are willing to
+have gate your tool calls.
+
+Any hook, on any event, may answer `{"continue": false, "stopReason": "…"}`.
+horsie stops the agent that ran it and shows the reason: a tool hook's halt
+fails the turn, fails a subagent for its parent, or fails a workflow step. On
+`Stop` and `SubagentStop` the turn is already ending, so a halt there simply
+lets it end — overriding a sibling hook's `decision: "block"`, which is where
+`continue`'s precedence over `decision` is visible.
 
 ### Where horsie looks for skills
 
@@ -159,9 +192,11 @@ explicit selection replaces it rather than adding to it.
 > only observers: a `PreToolUse` hook can deny a tool call or rewrite its input
 > before it runs, a `PostToolUse` hook can rewrite its output before the agent
 > reads it, a `UserPromptSubmit` hook can refuse a prompt outright, and a `Stop`
-> hook can refuse to let a turn end and send the agent back for another round.
-> `SessionStart`, `SubagentStart`, `UserPromptSubmit` and `Stop` can also inject
-> text straight into the model's context. Only install plugins you trust.
+> or `SubagentStop` hook can refuse to let a turn end and send the agent back for
+> another round. Any hook at all can stop horsie mid-task with
+> `continue: false`. `SessionStart`, `SubagentStart`, `UserPromptSubmit`, `Stop`
+> and `SubagentStop` can also inject text straight into the model's context.
+> Only install plugins you trust.
 
 ## Notes
 

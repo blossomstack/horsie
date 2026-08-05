@@ -1,7 +1,7 @@
 
 import { SessionStartOutcome } from './sessionStartOutcome';
 /**
- * `source` is the matcher domain: startup | resume | clear | compact | fork.
+ * `source` is the matcher domain, and the record keeps the wire spelling the
  */
 export interface SessionStartRecord {
   source: string;

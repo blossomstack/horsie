@@ -59,10 +59,14 @@ pub enum OutputField {
     UpdatedInput,
     /// `hookSpecificOutput.updatedToolOutput` — `PostToolUse` only.
     UpdatedToolOutput,
+    /// Top-level `continue: false` with `stopReason`. A common field: any event
+    /// with JSON output at all may set it, and it outranks `Decision`.
+    Halt,
 }
 
 use OutputField::{
-    AdditionalContext, Decision, PermissionDecision, SystemMessage, UpdatedInput, UpdatedToolOutput,
+    AdditionalContext, Decision, Halt, PermissionDecision, SystemMessage, UpdatedInput,
+    UpdatedToolOutput,
 };
 
 impl HookEvent {
@@ -151,12 +155,15 @@ impl HookEvent {
             | HookEvent::SessionStart
             | HookEvent::SubagentStart
             | HookEvent::UserPromptSubmit
-            | HookEvent::Stop => true,
+            | HookEvent::Stop
+            // A subagent's turn end used to fire `Stop`, because the sink that
+            // fires it was not gated on the agent's kind — the same conflation
+            // the start seam had before `SubagentStart` split off.
+            | HookEvent::SubagentStop => true,
             HookEvent::PostToolUseFailure
             | HookEvent::PostToolBatch
             | HookEvent::SessionEnd
             | HookEvent::StopFailure
-            | HookEvent::SubagentStop
             | HookEvent::TaskCreated
             | HookEvent::TaskCompleted
             | HookEvent::Notification
@@ -171,24 +178,33 @@ impl HookEvent {
     /// use it. Refusing it would break them for no gain.
     pub fn permitted(self) -> &'static [OutputField] {
         match self {
-            HookEvent::PreToolUse => &[SystemMessage, Decision, PermissionDecision, UpdatedInput],
+            HookEvent::PreToolUse => &[
+                SystemMessage,
+                Decision,
+                PermissionDecision,
+                UpdatedInput,
+                Halt,
+            ],
             HookEvent::PostToolUse => &[
                 SystemMessage,
                 Decision,
                 AdditionalContext,
                 UpdatedToolOutput,
+                Halt,
             ],
             HookEvent::PostToolUseFailure
             | HookEvent::PostToolBatch
             | HookEvent::UserPromptSubmit
             | HookEvent::Stop
-            | HookEvent::SubagentStop => &[SystemMessage, Decision, AdditionalContext],
+            | HookEvent::SubagentStop => &[SystemMessage, Decision, AdditionalContext, Halt],
             // No `decision`: neither can refuse anything, because by the time
-            // they run there is nothing left to refuse.
+            // they run there is nothing left to refuse. They can still halt —
+            // `continue` is not a refusal of the thing that just happened, it
+            // is a request to go no further.
             HookEvent::SessionStart | HookEvent::SubagentStart => {
-                &[SystemMessage, AdditionalContext]
+                &[SystemMessage, AdditionalContext, Halt]
             }
-            HookEvent::TaskCreated | HookEvent::TaskCompleted => &[SystemMessage],
+            HookEvent::TaskCreated | HookEvent::TaskCompleted => &[SystemMessage, Halt],
             // Side-effect only: the docs give these no JSON output at all, not
             // even `systemMessage`, and exit 2 has no special meaning for them.
             HookEvent::SessionEnd
@@ -350,7 +366,7 @@ mod tests {
 
     /// Wiring an event is a deliberate act. This is the list this change moves.
     #[test]
-    fn exactly_six_events_are_wired() {
+    fn exactly_seven_events_are_wired() {
         let wired: Vec<&str> = ALL_31
             .iter()
             .filter_map(|n| HookEvent::parse(n).ok())
@@ -365,6 +381,7 @@ mod tests {
                 "PreToolUse",
                 "PostToolUse",
                 "SubagentStart",
+                "SubagentStop",
                 "Stop",
             ],
             "wired set changed"

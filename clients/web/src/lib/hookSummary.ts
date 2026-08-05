@@ -81,10 +81,23 @@ export function deniesCall(r: HookRecord): boolean {
   return o === "Denied" || o === "Failed";
 }
 
+/** What a hook did, including whether it stopped horsie afterwards.
+ *
+ * A halt is read off the envelope rather than the outcome, because `continue`
+ * is a common field: any hook on any event may set it, and one that both
+ * allowed its call and halted the turn has done two separate things. It is
+ * reported first, since it is the larger of the two. */
+export function hookSummary(r: HookRecord): HookSummary {
+  const outcome = outcomeSummary(r);
+  if (!r.halt) return outcome;
+  const why = r.halt.reason ?? "no reason given";
+  return { text: `stopped horsie — ${why} (${outcome.text})`, intervened: true };
+}
+
 /** No `default` clause in the switch below, deliberately: adding a `HookAction`
  * arm must fail `tsc` rather than fall through to a generic sentence. That is
  * the TypeScript half of the guarantee the Rust union gives. */
-export function hookSummary(r: HookRecord): HookSummary {
+function outcomeSummary(r: HookRecord): HookSummary {
   const a = r.action;
   switch (a.event) {
     case "PreToolUse":
@@ -124,7 +137,6 @@ export function hookSummary(r: HookRecord): HookSummary {
       }
     case "PostToolUseFailure":
     case "PostToolBatch":
-    case "SubagentStop":
       switch (a.value.outcome.outcome) {
         case "Ran":
           return a.value.outcome.value.additionalContext
@@ -162,13 +174,17 @@ export function hookSummary(r: HookRecord): HookSummary {
         case "Failed":
           return failed(a.value.outcome.value.reason);
       }
+    // Both stop events read the same way: a block is a block *from stopping*,
+    // which is the opposite of a refusal. Separate arms because their outcome
+    // unions are separate types, and folding `SubagentStop` in with the
+    // objection-shaped events silently dropped its `CapReached` on the floor.
     case "Stop":
+    case "SubagentStop":
       switch (a.value.outcome.outcome) {
         case "Ran":
           return a.value.outcome.value.additionalContext
             ? { text: "left a note for the next turn", intervened: true }
             : RAN;
-        // Blocked means blocked *from stopping*: the opposite of a refusal.
         case "Blocked":
           return {
             text: `kept the turn going — ${a.value.outcome.value.reason ?? "no reason given"}`,

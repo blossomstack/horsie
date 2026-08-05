@@ -42,6 +42,9 @@ pub enum HookInvocation<'a> {
     /// subagent is not a session, and the two events carry different matcher
     /// domains — `source` for one, the agent's type for the other.
     SubagentStart {
+        /// Which subagent. Every one reports the same `agent_type` until #105's
+        /// Phase 2, so this is what tells two concurrent subagents apart.
+        agent_id: &'a str,
         agent_type: &'a str,
     },
     UserPromptSubmit {
@@ -51,6 +54,14 @@ pub enum HookInvocation<'a> {
         last_assistant_message: Option<&'a str>,
         /// True when horsie is only still running because a previous `Stop`
         /// hook blocked. A cooperative hook returns early rather than looping.
+        stop_hook_active: bool,
+    },
+    /// A subagent's turn ending. Not a `Stop`: a subagent is not a session, and
+    /// its matcher selects on the agent's type rather than on nothing at all.
+    SubagentStop {
+        agent_id: &'a str,
+        agent_type: &'a str,
+        last_assistant_message: Option<&'a str>,
         stop_hook_active: bool,
     },
 }
@@ -64,6 +75,7 @@ impl HookInvocation<'_> {
             HookInvocation::SubagentStart { .. } => HookEvent::SubagentStart,
             HookInvocation::UserPromptSubmit { .. } => HookEvent::UserPromptSubmit,
             HookInvocation::Stop { .. } => HookEvent::Stop,
+            HookInvocation::SubagentStop { .. } => HookEvent::SubagentStop,
         }
     }
 
@@ -80,7 +92,10 @@ impl HookInvocation<'_> {
                 v
             }
             HookInvocation::SessionStart { source } => vec![*source],
-            HookInvocation::SubagentStart { agent_type } => vec![*agent_type],
+            // `agent_type` alone: the id names one subagent, and a matcher
+            // selecting a single run is not a thing the spec offers.
+            HookInvocation::SubagentStart { agent_type, .. }
+            | HookInvocation::SubagentStop { agent_type, .. } => vec![*agent_type],
             HookInvocation::UserPromptSubmit { .. } | HookInvocation::Stop { .. } => Vec::new(),
         }
     }
@@ -122,8 +137,12 @@ impl HookInvocation<'_> {
                 "hook_event_name": "SessionStart",
                 "source": source,
             }),
-            HookInvocation::SubagentStart { agent_type } => json!({
+            HookInvocation::SubagentStart {
+                agent_id,
+                agent_type,
+            } => json!({
                 "hook_event_name": "SubagentStart",
+                "agent_id": agent_id,
                 "agent_type": agent_type,
             }),
             HookInvocation::UserPromptSubmit { prompt } => json!({
@@ -135,6 +154,18 @@ impl HookInvocation<'_> {
                 stop_hook_active,
             } => json!({
                 "hook_event_name": "Stop",
+                "last_assistant_message": last_assistant_message,
+                "stop_hook_active": stop_hook_active,
+            }),
+            HookInvocation::SubagentStop {
+                agent_id,
+                agent_type,
+                last_assistant_message,
+                stop_hook_active,
+            } => json!({
+                "hook_event_name": "SubagentStop",
+                "agent_id": agent_id,
+                "agent_type": agent_type,
                 "last_assistant_message": last_assistant_message,
                 "stop_hook_active": stop_hook_active,
             }),
@@ -152,6 +183,11 @@ impl HookInvocation<'_> {
         rec::HookRecord {
             plugin: plugin.to_string(),
             duration_ms,
+            // Straight through, on every event: `continue` is a common field,
+            // so unlike the outcome it needs no per-event mapping at all.
+            halt: out.halt.as_ref().map(|h| rec::HookHalt {
+                reason: h.reason.clone(),
+            }),
             action: self.action(out),
         }
     }
@@ -258,7 +294,10 @@ impl HookInvocation<'_> {
                     outcome,
                 })
             }
-            HookInvocation::SubagentStart { agent_type } => {
+            HookInvocation::SubagentStart {
+                agent_id,
+                agent_type,
+            } => {
                 // Cannot block, exactly like `SessionStart`: by the time it runs
                 // the subagent exists, so there is nothing left to refuse.
                 let outcome = match &out.verdict {
@@ -271,6 +310,7 @@ impl HookInvocation<'_> {
                     Verdict::Failed { reason } => rec::SubagentStartOutcome::Failed(failed(reason)),
                 };
                 rec::HookAction::SubagentStart(rec::SubagentStartRecord {
+                    agent_id: (*agent_id).to_string(),
                     agent_type: (*agent_type).to_string(),
                     system_message: sys,
                     outcome,
@@ -304,6 +344,30 @@ impl HookInvocation<'_> {
                     Verdict::Failed { reason } => rec::StopOutcome::Failed(failed(reason)),
                 };
                 rec::HookAction::Stop(rec::StopRecord {
+                    system_message: sys,
+                    outcome,
+                })
+            }
+            HookInvocation::SubagentStop {
+                agent_id,
+                agent_type,
+                ..
+            } => {
+                // Same three arms as `Stop`, and `CapReached` narrowed at the
+                // same call site: a subagent is held in its loop by the same
+                // budget the main agent is.
+                let outcome = match &out.verdict {
+                    Verdict::Proceed => rec::SubagentStopOutcome::Ran(ctx()),
+                    Verdict::Block { reason } => {
+                        rec::SubagentStopOutcome::Blocked(rec::HookBlocked {
+                            reason: reason.clone(),
+                        })
+                    }
+                    Verdict::Failed { reason } => rec::SubagentStopOutcome::Failed(failed(reason)),
+                };
+                rec::HookAction::SubagentStop(rec::SubagentStopRecord {
+                    agent_id: (*agent_id).to_string(),
+                    agent_type: (*agent_type).to_string(),
                     system_message: sys,
                     outcome,
                 })
@@ -376,6 +440,85 @@ mod tests {
         let p: Value = serde_json::from_str(&i.payload()).unwrap();
         assert_eq!(p["stop_hook_active"], true);
         assert_eq!(p["last_assistant_message"], "done");
+    }
+
+    /// A subagent's stop is its own event, naming *which* subagent and of what
+    /// type. Fired as `Stop` — which is what happened before this arm existed —
+    /// it would carry neither. Only the type is a matcher subject: an id
+    /// selects one run, which is not a thing the spec offers.
+    #[test]
+    fn subagent_stop_names_the_agent_on_the_payload_and_its_type_on_the_matcher() {
+        let i = HookInvocation::SubagentStop {
+            agent_id: "sub-1",
+            agent_type: "reviewer",
+            last_assistant_message: Some("looks fine"),
+            stop_hook_active: false,
+        };
+        let p: Value = serde_json::from_str(&i.payload()).unwrap();
+        assert_eq!(p["hook_event_name"], "SubagentStop");
+        assert_eq!(p["agent_id"], "sub-1");
+        assert_eq!(p["agent_type"], "reviewer");
+        assert_eq!(p["last_assistant_message"], "looks fine");
+        assert_eq!(i.matcher_subjects(), vec!["reviewer"]);
+    }
+
+    /// A blocking `SubagentStop` records a block, exactly as `Stop` does: it is
+    /// blocked *from stopping*, and the call site continues the subagent.
+    #[test]
+    fn a_blocking_subagent_stop_records_a_block() {
+        let out = HookOutput {
+            verdict: Verdict::Block {
+                reason: Some("no tests were run".into()),
+            },
+            ..Default::default()
+        };
+        let i = HookInvocation::SubagentStop {
+            agent_id: "sub-1",
+            agent_type: "reviewer",
+            last_assistant_message: None,
+            stop_hook_active: false,
+        };
+        match i.record("p", 1, &out).action {
+            HookAction::SubagentStop(r) => {
+                assert_eq!(r.agent_id, "sub-1");
+                assert_eq!(r.agent_type, "reviewer");
+                match r.outcome {
+                    horsie_models::hooks::SubagentStopOutcome::Blocked(b) => {
+                        assert_eq!(b.reason.as_deref(), Some("no tests were run"));
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The halt rides the envelope, on every event, unmapped. A record that
+    /// both allowed its call and halted the turn is the case this shape exists
+    /// for.
+    #[test]
+    fn a_halt_is_recorded_beside_the_outcome_not_inside_it() {
+        let out = HookOutput {
+            halt: Some(crate::plugin::hooks::Halt {
+                reason: Some("budget spent".into()),
+            }),
+            ..Default::default()
+        };
+        let input = json!({});
+        let rec = HookInvocation::PreToolUse {
+            tool: "bash",
+            tool_call_id: "t",
+            input: &input,
+        }
+        .record("p", 1, &out);
+        assert_eq!(
+            rec.halt.and_then(|h| h.reason).as_deref(),
+            Some("budget spent")
+        );
+        assert!(matches!(
+            rec.action,
+            HookAction::PreToolUse(r) if matches!(r.outcome, PreToolUseOutcome::Allowed(_))
+        ));
     }
 
     #[test]
