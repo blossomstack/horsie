@@ -8,7 +8,7 @@
 //! entropy, use argon2id (see `password.rs`).
 
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 /// What a token authorizes. `Web` is a browser cookie session, `Access` and
@@ -100,7 +100,11 @@ pub struct GeneratedToken {
 
 pub fn generate(kind: TokenKind) -> GeneratedToken {
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    // rand 0.10 removed `rngs::OsRng`; its replacement (`SysRng`) is fallible,
+    // which would make minting a token a `Result` all the way up. `rand::rng()`
+    // is a `CryptoRng` seeded from the OS and periodically reseeded — the
+    // crate's own recommendation for secrets — and stays infallible.
+    rand::rng().fill_bytes(&mut bytes);
     let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let secret = format!("hsk_{}_{body}", kind.tag());
     let hash = hash_secret(&secret);

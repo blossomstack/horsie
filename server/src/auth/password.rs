@@ -6,7 +6,7 @@
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use rand::Rng;
+use rand::RngExt;
 
 /// Alphanumeric only: the generated password is read off a terminal and typed
 /// into a browser, so ambiguity and shell quoting are the real risks, not the
@@ -35,9 +35,9 @@ pub fn verify(plain: &str, phc: &str) -> bool {
 
 pub fn generate_initial() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..INITIAL_PASSWORD_LEN)
-        .map(|_| char::from(ALPHABET[rng.gen_range(0..ALPHABET.len())]))
+        .map(|_| char::from(ALPHABET[rng.random_range(0..ALPHABET.len())]))
         .collect()
 }
 
