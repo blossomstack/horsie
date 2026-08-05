@@ -2388,7 +2388,7 @@ async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
         horsie_openai_responses::ResponsesProvider::with_api_key("test-key")
             .unwrap()
             .with_model("mock")
-            .with_base_url(&mock.url()),
+            .with_base_url(mock.url()),
     );
     let server = start_server_on(tmp.path(), agent.link(), provider, None).await;
     let client = reqwest::Client::new();
