@@ -94,7 +94,27 @@ pub async fn vendor_connect(
         return (StatusCode::BAD_REQUEST, "connection is not upgradable").into_response();
     };
     let accept = derive_accept_key(key.as_bytes());
-    let agents = state.vendor_agents.clone();
+
+    // The agent publishes into *its owner's* vendor map, resolved here because
+    // this is the moment the owner is known and the upgrade has not completed.
+    // Two accounts can therefore each run `horsie connect --runtime-id main`,
+    // and neither one's sessions can select the other's runtime — the link is
+    // not in the map they read.
+    let owner_id = match &owner {
+        Principal::Anonymous => state.shared.anonymous.clone(),
+        Principal::User(id) => id.clone(),
+    };
+    let agents = match state.users.get(&owner_id).await {
+        Ok(services) => services.vendor_agents.clone(),
+        Err(e) => {
+            tracing::error!(user = %owner_id, error = %e, "resolving a vendor's account failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not resolve the account",
+            )
+                .into_response();
+        }
+    };
 
     tokio::spawn(async move {
         match on_upgrade.await {

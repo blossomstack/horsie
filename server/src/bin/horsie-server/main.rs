@@ -19,15 +19,13 @@
 mod config;
 
 use clap::Parser;
-use config::{BootConfig, BootError, JournalBackend};
-use horsie_actor::{FileJournal, Journal, spawn_root};
+use config::{BootConfig, BootError};
 use horsie_models::settings::ServerInfo;
-use horsie_server::config::{DbConfigStore, StoreDeps, model_cards};
-use horsie_server::db::journal::SqlJournal;
+use horsie_server::config::model_cards;
 use horsie_server::http::{AppState, app};
-use horsie_server::plugins::{ArtifactStore, MarketplaceStore, PluginService, PluginStore};
-use horsie_server::sessions::spec::ServerDeps;
-use horsie_server::sessions::supervisor::SessionSupervisor;
+use horsie_server::plugins::ArtifactStore;
+use horsie_server::routines::RoutineScheduler;
+use horsie_server::users::{Shared, UserRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -68,14 +66,39 @@ async fn main() {
 async fn run(cli: Cli) -> Result<(), BootError> {
     let cfg = BootConfig::resolve(cli.config.as_deref())?;
     let config_path = BootConfig::resolve_path(cli.config.as_deref());
+    let db_url_env = std::env::var("HORSIE_DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let state = boot(&cfg, &cli, config_path, db_url_env).await?;
 
+    let listener = tokio::net::TcpListener::bind(&cli.addr)
+        .await
+        .map_err(|e| BootError::Io(format!("bind {}: {e}", cli.addr)))?;
+    println!("horsie server listening on http://{}", cli.addr);
+    if let Some(dir) = state.web_dir.as_ref() {
+        println!("serving web UI from {}", dir.display());
+    }
+    serve(listener, state).await
+}
+
+/// Assemble everything the server serves from, and nothing about serving it.
+///
+/// Split out of [`run`] so a test can bring up the real composition root: the
+/// only two inputs `run` reads from the process itself — the config file and
+/// `$HORSIE_DATABASE_URL` — are parameters here, so a test cannot accidentally
+/// boot against a developer's own deployment.
+async fn boot(
+    cfg: &BootConfig,
+    cli: &Cli,
+    config_path: Option<PathBuf>,
+    db_url_env: Option<String>,
+) -> Result<AppState, BootError> {
     let state_dir = cfg.storage.state_dir.join("server");
     let data_dir = cfg.storage.data_dir.join("server");
     std::fs::create_dir_all(&state_dir).map_err(|e| BootError::Io(e.to_string()))?;
     std::fs::create_dir_all(&data_dir).map_err(|e| BootError::Io(e.to_string()))?;
 
-    let db_url = resolve_db_url(&cfg, &data_dir);
-    let journal_backend = config::journal_backend(&cfg);
+    let db_url = resolve_db_url(db_url_env, cfg, &data_dir);
     let info = ServerInfo {
         config_path: config_path
             .as_ref()
@@ -86,7 +109,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         data_dir: cfg.storage.data_dir.display().to_string(),
         plugins_dir: data_dir.join("plugins").display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        journal_backend: journal_backend.as_str().to_string(),
     };
     // The pool comes up on its own first. Every store below binds a user, and
     // the user comes from the account `bootstrap` creates — which needs the
@@ -103,7 +125,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     let auth = Arc::new(horsie_server::auth::AuthService::new(
         horsie_server::auth::AuthStore::new(db.clone()),
         horsie_server::auth::AuthDeps {
-            enabled: config::auth_enabled(&cfg),
+            enabled: config::auth_enabled(cfg),
             state_dir: state_dir.clone(),
         },
     ));
@@ -137,187 +159,65 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         );
     }
 
-    // The scope every store below is built for. One account today; resolving it
-    // per request is the next change, not this one.
-    let user = auth
+    // The account `Principal::Anonymous` resolves to — every request on a
+    // deployment with authentication disabled. Resolved here, once, because
+    // `bootstrap` above is what guarantees there is one.
+    let anonymous = auth
         .sole_user()
         .await
         .map_err(BootError::Config)?
         .ok_or_else(|| BootError::Config("no account exists after bootstrap".into()))?;
 
-    let opened = DbConfigStore::open_on(db, StoreDeps { info }, user.clone())
-        .await
-        .map_err(BootError::Config)?;
-
-    // Built after the store, because the database backend shares its handle —
-    // one database, one migrator, one set of connections.
-    //
-    // Which journal a deployment gets is load-bearing and partly defaulted, so
-    // say it out loud: switching an existing deployment from `file` to
-    // `database` starts from an empty log and leaves the old sessions on disk.
-    let journal: Arc<dyn Journal> = match journal_backend {
-        JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
-        JournalBackend::Database => Arc::new(SqlJournal::new(opened.db.clone(), user.clone())),
-    };
-    eprintln!(
-        "journal backend: {} ({})",
-        journal_backend.as_str(),
-        match journal_backend {
-            JournalBackend::File => data_dir.join("actors").display().to_string(),
-            JournalBackend::Database => redact_db_url(&db_url),
-        }
-    );
-
-    // Seed the model-card catalog: bundled defaults plus an optional operator
-    // file. Seed-file parse/read errors are fatal (operator input should fail
-    // loud); DB errors only warn — the admin API stays usable to fix state.
-    // Insert-if-missing semantics mean admin edits survive every restart.
-    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(
-        opened.db.clone(),
-        user.clone(),
-    ));
+    // Resolve the model-card catalogue once. Parse/read errors are fatal here
+    // (operator input should fail loud); each account is then seeded from it on
+    // first touch rather than every account at every boot.
     let seed_path = cli
         .model_cards_seed
         .clone()
         .or_else(|| std::env::var_os("HORSIE_MODEL_CARDS_SEED").map(PathBuf::from));
-    let seeding = (|| -> Result<Vec<horsie_models::model_cards::ModelCardInput>, BootError> {
-        let mut seeds = model_cards::bundled_seed().map_err(BootError::Config)?;
-        if let Some(path) = seed_path {
-            seeds.extend(model_cards::load_seed_file(&path).map_err(BootError::Config)?);
-        }
-        Ok(seeds)
-    })();
-    match seeding {
-        Ok(seeds) => {
-            if let Err(e) = model_cards.seed_if_missing(&seeds).await {
-                eprintln!("warning: seeding model cards failed: {e:?}");
-            }
-        }
-        Err(e) => return Err(e),
+    let mut model_card_seed = model_cards::bundled_seed().map_err(BootError::Config)?;
+    if let Some(path) = seed_path {
+        model_card_seed.extend(model_cards::load_seed_file(&path).map_err(BootError::Config)?);
     }
 
-    // Vendor agents publish themselves into the same map sessions select from,
-    // exactly as the local-daemon registry does for dial-in runtimes.
-    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
-        opened.vendors.clone(),
-    ));
+    let shared = Arc::new(Shared {
+        db,
+        artifacts: Arc::new(ArtifactStore::new(data_dir.join("plugins"))),
+        artifact_secret: Arc::new(artifact_secret()),
+        info,
+        model_card_seed_marker: model_cards::seed_marker(&model_card_seed),
+        model_card_seed: Arc::new(model_card_seed),
+        anonymous,
+        supervisor: horsie_server::sessions::supervisor::SupervisorConfig::default(),
+    });
+    let users = Arc::new(UserRegistry::new(shared.clone()));
 
-    let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(opened.db.clone(), user.clone()),
-        horsie_server::github::GithubApi::new(),
-    ));
-    let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.db.clone(), user.clone()),
-        github.clone(),
-    ));
-    let plugins = Arc::new(PluginService::new(
-        PluginStore::new(opened.db.clone(), user.clone()),
-        MarketplaceStore::new(opened.db.clone(), user.clone()),
-        ArtifactStore::new(data_dir.join("plugins")),
-        artifact_secret(),
-    ));
-    let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(opened.db.clone(), user.clone()),
-    ));
-    let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(opened.db.clone(), user.clone()),
-        opened.store.clone(),
-    ));
-    let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(opened.db.clone(), user.clone()),
-        agents.clone(),
-    ));
-    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
-        horsie_server::environments::EnvironmentStore::new(opened.db.clone(), user.clone()),
-    ));
+    // One timer for the deployment, over every account's routines. It resolves
+    // an owner's services when one of their routines comes due, which is also
+    // the only thing that builds a bundle nobody has made a request for.
+    Arc::new(RoutineScheduler::new(shared.db.clone(), users.clone())).spawn();
 
-    let runtimes = Arc::new(horsie_server::runtime_manager::RuntimeManager::new(
-        horsie_server::runtime_manager::RuntimeDeps {
-            vendors: opened.vendors.clone(),
-            state_dir: state_dir.clone(),
-            github_tokens: Some(github.clone()),
-            plugins: Some(plugins.clone() as Arc<dyn horsie_server::plugins::PluginProvisioner>),
-        },
-    ));
-    let deps = ServerDeps {
-        runtimes,
-        provider_registry: opened.registry,
-        vendors: opened.vendors,
-        state_dir,
-        github_tokens: Some(github.clone()),
-        mcp: Some(mcp.clone()),
-        plugins: Some(plugins.clone() as Arc<dyn horsie_server::plugins::PluginProvisioner>),
-        memory: Some(memory.clone()),
-    };
-    let (global_tx, _) = tokio::sync::broadcast::channel(256);
-    let supervisor = spawn_root(
-        SessionSupervisor::new(deps, global_tx.clone()),
-        journal.clone(),
-    );
-
-    // Triggering a routine is one code path; the timer is a clock on top of it.
-    let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
-        horsie_server::workflows::WorkflowStore::new(opened.db.clone(), user.clone()),
-        agents.clone(),
-    ));
-    let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
-        routines.clone(),
-        agents.clone(),
-        opened.store.clone(),
-        vendor_agents.clone(),
-        supervisor.clone(),
-    ));
-    Arc::new(horsie_server::routines::RoutineScheduler::new(
-        routine_runner.clone(),
-        routines.clone(),
-    ))
-    .spawn();
-
-    let chatgpt = std::sync::Arc::new(
-        horsie_server::config::chatgpt_login::ChatGptLoginService::new(
-            opened.db.clone(),
-            user.clone(),
-            opened.store.clone(),
-        ),
-    );
-
-    let state = AppState {
-        supervisor,
-        global_events: global_tx,
+    Ok(AppState {
         auth,
-        config_store: opened.store,
-        model_cards,
-        chatgpt,
-        github,
-        mcp,
-        plugins,
-        memory,
-        agents,
-        routines,
-        workflows,
-        routine_runner,
-        environments,
-        vendor_agents,
-        web_dir: cli.web,
-    };
-    let listener = tokio::net::TcpListener::bind(&cli.addr)
-        .await
-        .map_err(|e| BootError::Io(format!("bind {}: {e}", cli.addr)))?;
-    println!("horsie server listening on http://{}", cli.addr);
-    if let Some(dir) = state.web_dir.as_ref() {
-        println!("serving web UI from {}", dir.display());
-    }
+        shared,
+        users,
+        web_dir: cli.web.clone(),
+    })
+}
+
+/// Serve until the process ends. Split from [`run`] so a test can hold the
+/// bound listener — and its address — and still exercise the real state that
+/// `run` assembled.
+async fn serve(listener: tokio::net::TcpListener, state: AppState) -> Result<(), BootError> {
     axum::serve(listener, app(state))
         .await
         .map_err(|e| BootError::Io(e.to_string()))
 }
 
-/// `$HORSIE_DATABASE_URL`, else `database.url` from config, else a SQLite
-/// file under the server data dir.
-fn resolve_db_url(cfg: &BootConfig, data_dir: &Path) -> String {
-    if let Ok(v) = std::env::var("HORSIE_DATABASE_URL")
-        && !v.is_empty()
-    {
+/// `$HORSIE_DATABASE_URL` (passed in), else `database.url` from config, else a
+/// SQLite file under the server data dir.
+fn resolve_db_url(env: Option<String>, cfg: &BootConfig, data_dir: &Path) -> String {
+    if let Some(v) = env.filter(|s| !s.is_empty()) {
         return v;
     }
     if let Some(u) = cfg.database.url.as_ref().filter(|s| !s.is_empty()) {
@@ -349,4 +249,133 @@ fn redact_db_url(url: &str) -> String {
         return format!("{scheme}://***@{tail}");
     }
     url.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::util::ServiceExt;
+
+    /// A boot against a throwaway directory, with no config file and no
+    /// `$HORSIE_DATABASE_URL` — so it cannot reach a developer's own database.
+    async fn boot_in(dir: &tempfile::TempDir) -> AppState {
+        let cfg = BootConfig {
+            storage: config::StorageConfig {
+                state_dir: dir.path().join("state"),
+                data_dir: dir.path().join("data"),
+            },
+            database: config::DatabaseConfig::default(),
+            auth: config::AuthConfig { enabled: false },
+        };
+        let cli = Cli {
+            config: None,
+            addr: "127.0.0.1:0".into(),
+            web: None,
+            model_cards_seed: None,
+        };
+        boot(&cfg, &cli, None, None)
+            .await
+            .expect("the server boots")
+    }
+
+    async fn read_json<T: serde::de::DeserializeOwned>(res: axum::response::Response) -> T {
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// The gap that let two boot bugs through #217 with the Rust suite green:
+    /// nothing in the tree ran this function. It asserts the parts that were
+    /// broken then — the server comes up, and the account it bootstrapped can
+    /// see the rows the migrations left for it.
+    #[tokio::test]
+    async fn a_fresh_deployment_boots_and_its_account_owns_its_data() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = boot_in(&dir).await;
+        let app = app(state.clone());
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("health responds");
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // The near-miss in #217: `bootstrap` minted an id the migration's
+        // backfill had not used, so the account came up healthy and empty. The
+        // seeded memory space is the cheapest thing that proves otherwise.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memory-spaces")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("memory spaces respond");
+        assert_eq!(res.status(), StatusCode::OK);
+        let spaces: Vec<horsie_models::memory::MemorySpaceView> = read_json(res).await;
+        assert_eq!(
+            spaces.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["default"],
+            "the bootstrapped account must own what the migrations backfilled"
+        );
+
+        // Seeding moved off the boot path and onto the account's first touch,
+        // so this is also the assertion that the lazy seed actually runs.
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model-cards")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("model cards respond");
+        let cards: Vec<horsie_models::model_cards::ModelCard> = read_json(res).await;
+        assert!(
+            !cards.is_empty(),
+            "the bundled catalogue is seeded on an account's first request"
+        );
+    }
+
+    /// Booting twice over the same directory is what every restart does.
+    #[tokio::test]
+    async fn a_second_boot_over_the_same_data_reuses_the_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = boot_in(&dir).await;
+        let second = boot_in(&dir).await;
+        assert_eq!(
+            first.shared.anonymous, second.shared.anonymous,
+            "a restart must resolve the same account, or it comes up empty"
+        );
+    }
+
+    #[test]
+    fn the_database_url_prefers_the_environment_then_the_file() {
+        let cfg = BootConfig::default();
+        let dir = Path::new("/tmp/horsie-test");
+        assert_eq!(
+            resolve_db_url(Some("postgres://env/db".into()), &cfg, dir),
+            "postgres://env/db"
+        );
+        assert_eq!(
+            resolve_db_url(None, &cfg, dir),
+            "sqlite:///tmp/horsie-test/config.db"
+        );
+        // An empty environment value is absent, not an override.
+        assert_eq!(
+            resolve_db_url(Some(String::new()), &cfg, dir),
+            "sqlite:///tmp/horsie-test/config.db"
+        );
+    }
 }

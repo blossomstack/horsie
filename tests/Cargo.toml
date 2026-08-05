@@ -14,7 +14,7 @@ horsie-openai-responses = { path = "../providers/openai-responses" }
 horsie-mock-llm = { path = "../providers/mock-llm" }
 horsie-server = { path = "../server", features = ["test-util"] }
 horsie-runtime-vendor = { path = "../runtime-vendor" }
-horsie-actor = { path = "../actor", features = ["file-journal"] }
+horsie-actor = { path = "../actor" }
 horsie-workflow = { path = "../workflow" }
 horsie-models = { path = "../models" }
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros"] }

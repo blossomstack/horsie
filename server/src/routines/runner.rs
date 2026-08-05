@@ -185,7 +185,6 @@ impl RoutineRunner {
 )]
 pub(crate) mod tests {
     use super::*;
-    use crate::routines::scheduler::RoutineScheduler;
     use crate::routines::service::tests::{Fixture, fixture, input};
     use crate::routines::store::Schedule;
     use crate::runtime_vendor::RuntimeVendorLink;
@@ -193,7 +192,7 @@ pub(crate) mod tests {
     use crate::sessions::spec::{ServerDeps, SessionSpec};
     use crate::sessions::supervisor::SessionSupervisor;
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
-    use horsie_models::routines::{EverySchedule, OnceSchedule, RoutineSchedule};
+    use horsie_models::routines::{EverySchedule, RoutineSchedule};
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -222,10 +221,9 @@ pub(crate) mod tests {
         let vendors = Arc::new(std::sync::RwLock::new(map));
         let registry = Arc::new(RuntimeVendorRegistry::new(vendors.clone()));
         let deps = ServerDeps {
-            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, f.tmp.path()),
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
             provider_registry: f.provider_registry.clone(),
             vendors,
-            state_dir: f.tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: None,
             plugins: None,
@@ -233,7 +231,10 @@ pub(crate) mod tests {
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = tokio::sync::broadcast::channel(64);
-        let supervisor = spawn_root(SessionSupervisor::new(deps, gtx), journal.clone());
+        let supervisor = spawn_root(
+            SessionSupervisor::new(crate::auth::UserId::bootstrap(), deps, gtx),
+            journal.clone(),
+        );
         let runner = Arc::new(RoutineRunner::new(
             f.routines.clone(),
             f.agents.clone(),
@@ -251,7 +252,9 @@ pub(crate) mod tests {
     }
 
     /// Every session the supervisor knows, with its spec.
-    async fn sessions(sup: &ActorRef<SessionSupervisorCommand>) -> Vec<(String, SessionSpec)> {
+    pub(crate) async fn sessions(
+        sup: &ActorRef<SessionSupervisorCommand>,
+    ) -> Vec<(String, SessionSpec)> {
         sup.ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap()
@@ -371,99 +374,6 @@ pub(crate) mod tests {
         let after = f.routines.get("hourly").await.unwrap();
         assert_eq!(after.next_run_at_ms, armed);
         assert_eq!(after.last_run_at_ms, Some(2_000));
-    }
-
-    #[tokio::test]
-    async fn the_scheduler_fires_only_once_due_and_re_arms_the_interval() {
-        let f = runner_fixture(true).await;
-        let scheduler = RoutineScheduler::new(f.runner.clone(), f.routines.clone());
-        f.routines
-            .create(
-                input(
-                    "hourly",
-                    Some(RoutineSchedule::Every(EverySchedule {
-                        interval_secs: 3_600,
-                    })),
-                ),
-                1_000,
-            )
-            .await
-            .unwrap();
-        // Armed for now + 1h.
-        assert_eq!(
-            f.routines.get("hourly").await.unwrap().next_run_at_ms,
-            Some(3_601_000)
-        );
-
-        scheduler.tick(3_600_999).await;
-        assert!(sessions(&f.supervisor).await.is_empty(), "not due yet");
-
-        scheduler.tick(3_601_000).await;
-        assert_eq!(sessions(&f.supervisor).await.len(), 1);
-        let view = f.routines.get("hourly").await.unwrap();
-        assert_eq!(
-            view.next_run_at_ms,
-            Some(3_601_000 + 3_600_000),
-            "the next firing is measured from this one, not from the last due time"
-        );
-
-        // A second tick at the same instant must not fire it again.
-        scheduler.tick(3_601_000).await;
-        assert_eq!(sessions(&f.supervisor).await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_once_routine_never_re_arms() {
-        let f = runner_fixture(true).await;
-        let scheduler = RoutineScheduler::new(f.runner.clone(), f.routines.clone());
-        f.routines
-            .create(
-                input(
-                    "launch",
-                    Some(RoutineSchedule::Once(OnceSchedule { at_ms: 5_000 })),
-                ),
-                1_000,
-            )
-            .await
-            .unwrap();
-
-        scheduler.tick(5_000).await;
-        assert_eq!(sessions(&f.supervisor).await.len(), 1);
-        let view = f.routines.get("launch").await.unwrap();
-        assert_eq!(view.next_run_at_ms, None);
-        assert_eq!(
-            view.schedule,
-            RoutineSchedule::Once(OnceSchedule { at_ms: 5_000 })
-        );
-
-        scheduler.tick(9_999).await;
-        assert_eq!(sessions(&f.supervisor).await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_failed_run_still_advances_the_schedule() {
-        // Otherwise a routine whose vendor is offline is retried on every
-        // 15-second tick, which is a hot loop rather than a schedule.
-        let f = runner_fixture(false).await;
-        let scheduler = RoutineScheduler::new(f.runner.clone(), f.routines.clone());
-        f.routines
-            .create(
-                input(
-                    "hourly",
-                    Some(RoutineSchedule::Every(EverySchedule {
-                        interval_secs: 3_600,
-                    })),
-                ),
-                0,
-            )
-            .await
-            .unwrap();
-
-        scheduler.tick(3_600_000).await;
-        let view = f.routines.get("hourly").await.unwrap();
-        assert!(view.last_error.is_some());
-        assert_eq!(view.next_run_at_ms, Some(7_200_000));
-        assert!(f.routines.due(3_600_001).await.unwrap().is_empty());
     }
 
     #[test]

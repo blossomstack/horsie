@@ -25,9 +25,6 @@ pub struct BootConfig {
     /// Where the session server persists its runtime-editable settings.
     #[serde(default)]
     pub database: DatabaseConfig,
-    /// Where actor journals live.
-    #[serde(default)]
-    pub journal: JournalConfig,
     /// Authentication. Enabled unless explicitly turned off — a deployment
     /// reachable from anywhere but localhost should not be open by accident.
     #[serde(default)]
@@ -71,8 +68,9 @@ pub struct StorageConfig {
     /// `$HOME/.local/state/horsie`.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
-    /// Durable session journal, when `journal.backend` is `file`. Defaults to
-    /// `$XDG_DATA_HOME/horsie`, else `$HOME/.local/share/horsie`.
+    /// Durable data the deployment owns — the default SQLite database and the
+    /// plugin artifact store. Defaults to `$XDG_DATA_HOME/horsie`, else
+    /// `$HOME/.local/share/horsie`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 }
@@ -95,47 +93,6 @@ pub struct DatabaseConfig {
     /// Pool size. Settings reads and journal writes share this pool.
     #[serde(default)]
     pub max_connections: Option<u32>,
-}
-
-/// Which journal backend to use, and how an absent setting resolves.
-#[derive(Debug, Default, Deserialize)]
-pub struct JournalConfig {
-    #[serde(default)]
-    pub backend: Option<JournalBackend>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JournalBackend {
-    /// Base64 JSONL under `storage.data_dir`. Needs a durable volume.
-    File,
-    /// The `journal_events` / `journal_snapshots` tables in `database.url`.
-    Database,
-}
-
-impl JournalBackend {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            JournalBackend::File => "file",
-            JournalBackend::Database => "database",
-        }
-    }
-}
-
-/// The journal backend to use: the configured one, else `database`.
-///
-/// The default does not depend on the dialect. It is tempting to make it
-/// asymmetric — keep `file` on SQLite so an upgrade cannot abandon journals
-/// already on disk — but that ship has sailed: the database journal has been
-/// the default since it landed for SQLite, so defaulting to `file` here would
-/// abandon the journals of every deployment that has upgraded since, which is
-/// the same one-way door pointing the other way. `file` stays available
-/// explicitly, and remains what the CLI uses.
-///
-/// The resolved value is logged at boot and reported in `/api/config`, so it is
-/// never a guess.
-pub fn journal_backend(cfg: &BootConfig) -> JournalBackend {
-    cfg.journal.backend.unwrap_or(JournalBackend::Database)
 }
 
 impl BootConfig {

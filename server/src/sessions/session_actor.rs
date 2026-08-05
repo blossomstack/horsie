@@ -3338,10 +3338,9 @@ mod tests {
         vendors.insert("mock".to_string(), agent.link());
         let vendors = Arc::new(std::sync::RwLock::new(vendors));
         let deps = ServerDeps {
-            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors,
-            state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: None,
             plugins: None,
@@ -4955,10 +4954,9 @@ mod tests {
         vendors.insert("mock".to_string(), agent.link());
         let vendors = Arc::new(std::sync::RwLock::new(vendors));
         let deps = ServerDeps {
-            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors,
-            state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: None,
             plugins: None,

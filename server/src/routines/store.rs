@@ -133,25 +133,6 @@ impl RoutineStore {
         row.as_ref().map(row_to_routine).transpose()
     }
 
-    /// Enabled routines of *this* account whose next run has come due.
-    ///
-    /// What the scheduler reads today, because a deployment has one account.
-    /// [`due_across_all_users`](Self::due_across_all_users) is the read that
-    /// replaces it once services are built per account rather than per process.
-    pub async fn due(&self, now_ms: u64) -> Result<Vec<RoutineRow>, String> {
-        let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM routines \
-             WHERE user_id = ? AND enabled = 1 AND next_run_at_ms IS NOT NULL \
-             AND next_run_at_ms <= ? ORDER BY next_run_at_ms"
-        )))
-        .bind(self.user.as_str())
-        .bind(now_ms as i64)
-        .fetch_all(self.db.pool())
-        .await
-        .map_err(|e| e.to_string())?;
-        rows.iter().map(row_to_routine).collect()
-    }
-
     /// Enabled routines whose next run has come due, across every account,
     /// each paired with the account that owns it.
     ///
@@ -159,6 +140,11 @@ impl RoutineStore {
     /// method because it belongs to no one account: the scheduler is one timer
     /// for the deployment. Each routine is then armed and run *as its owner*.
     /// On the scope audit's allowlist for exactly this reason.
+    ///
+    /// The only "what is due" read there is. A scoped twin used to exist beside
+    /// it, and a second answer to that question is a second thing to keep
+    /// correct — the scoped one silently under-reports the moment a deployment
+    /// has two accounts.
     pub async fn due_across_all_users(
         db: &Db,
         now_ms: u64,
@@ -427,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn due_respects_the_timestamp_and_the_enabled_flag() {
-        let (s, _db) = store().await;
+        let (s, db) = store().await;
         let mut soon = row("soon", Schedule::Every { interval_secs: 60 });
         soon.next_run_at_ms = Some(1_000);
         let mut later = row("later", Schedule::Every { interval_secs: 60 });
@@ -441,10 +427,13 @@ mod tests {
             s.insert(r).await.unwrap();
         }
 
-        let names = |rows: Vec<RoutineRow>| rows.into_iter().map(|r| r.name).collect::<Vec<_>>();
-        assert!(names(s.due(999).await.unwrap()).is_empty());
-        assert_eq!(names(s.due(1_000).await.unwrap()), vec!["soon"]);
-        assert_eq!(names(s.due(9_999).await.unwrap()), vec!["soon", "later"]);
+        let names = |rows: Vec<(crate::auth::UserId, RoutineRow)>| {
+            rows.into_iter().map(|(_, r)| r.name).collect::<Vec<_>>()
+        };
+        let due = async |at| RoutineStore::due_across_all_users(&db, at).await.unwrap();
+        assert!(names(due(999).await).is_empty());
+        assert_eq!(names(due(1_000).await), vec!["soon"]);
+        assert_eq!(names(due(9_999).await), vec!["soon", "later"]);
     }
 
     #[tokio::test]
@@ -478,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn arm_moves_the_timer_and_disarming_takes_it_out_of_due() {
-        let (s, _db) = store().await;
+        let (s, db) = store().await;
         s.insert(&row("a", Schedule::Every { interval_secs: 60 }))
             .await
             .unwrap();
@@ -487,11 +476,21 @@ mod tests {
             s.get("a").await.unwrap().unwrap().next_run_at_ms,
             Some(61_000)
         );
-        assert!(s.due(60_999).await.unwrap().is_empty());
+        assert!(
+            RoutineStore::due_across_all_users(&db, 60_999)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         s.arm("a", None).await.unwrap();
         assert_eq!(s.get("a").await.unwrap().unwrap().next_run_at_ms, None);
-        assert!(s.due(u64::MAX).await.unwrap().is_empty());
+        assert!(
+            RoutineStore::due_across_all_users(&db, u64::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

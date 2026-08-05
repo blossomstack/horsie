@@ -82,10 +82,6 @@ struct ServerInfo {
     data_dir: String,
     plugins_dir: String,
     version: String,
-    /// Where actor journals are stored: "file" (JSONL under data_dir) or
-    /// "database" (the `database` above). Resolved at boot, so this reports
-    /// what the server actually did rather than what was configured.
-    journal_backend: String,
 }
 
 /// Full settings snapshot — returned by `GET /api/config` and after an update.

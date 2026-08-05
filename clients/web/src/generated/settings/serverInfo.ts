@@ -9,8 +9,4 @@ export interface ServerInfo {
   dataDir: string;
   pluginsDir: string;
   version: string;
-  /**
-   * Where actor journals are stored: &#34;file&#34; (JSONL under data_dir) or
-   */
-  journalBackend: string;
 }

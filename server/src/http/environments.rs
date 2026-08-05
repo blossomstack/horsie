@@ -1,11 +1,11 @@
 //! HTTP surface for environments: CRUD for the web UI. There is no invoke or
 //! run endpoint — nothing consumes an environment yet.
 
-use super::AppState;
+use super::Scope;
 use super::error::Api;
 use crate::environments::EnvironmentError;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::environments::{EnvironmentInput, EnvironmentView};
 
@@ -20,15 +20,13 @@ fn api_err(e: EnvironmentError) -> Api {
 }
 
 /// GET /api/environments
-pub async fn list_environments(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<EnvironmentView>>, Api> {
+pub async fn list_environments(Scope(state): Scope) -> Result<Json<Vec<EnvironmentView>>, Api> {
     state.environments.list().await.map(Json).map_err(api_err)
 }
 
 /// POST /api/environments
 pub async fn create_environment(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(input): Json<EnvironmentInput>,
 ) -> Result<(StatusCode, Json<EnvironmentView>), Api> {
     state
@@ -41,7 +39,7 @@ pub async fn create_environment(
 
 /// GET /api/environments/:name
 pub async fn get_environment(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<EnvironmentView>, Api> {
     state
@@ -54,7 +52,7 @@ pub async fn get_environment(
 
 /// PUT /api/environments/:name — full replace; the path is the id of record.
 pub async fn replace_environment(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(input): Json<EnvironmentInput>,
 ) -> Result<Json<EnvironmentView>, Api> {
@@ -71,7 +69,7 @@ pub async fn replace_environment(
 /// Unconditional: nothing references an environment yet, so there is no
 /// in-use guard like the agents one. When wiring arrives, revisit this.
 pub async fn delete_environment(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<StatusCode, Api> {
     state

@@ -7,8 +7,7 @@ version = "0.1.6"
 edition = "2024"
 
 [features]
-file-journal = ["dep:base64"]
-# Exposes `testkit` (FaultyJournal, corrupt-journal fixture) to other crates.
+# Exposes `testkit` (FaultyJournal) to other crates.
 # actor's own unit tests get it via `cfg(test)` without the feature.
 test-util = []
 
@@ -21,14 +20,13 @@ serde_json   = { workspace = true }
 futures-util = { workspace = true }
 parking_lot  = { workspace = true }
 tracing      = { workspace = true }
-base64       = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 # Self-dependency so this crate's own integration tests (actor/tests/) see the
 # optional features. Unit tests get `testkit` via cfg(test); a test *binary* is a
 # separate crate and does not.
-horsie-actor = { path = ".", features = ["file-journal", "test-util"] }
+horsie-actor = { path = ".", features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -7,7 +7,6 @@ use horsie_agentcore::LlmProvider;
 use horsie_models::session::SessionStatusKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 /// LLM providers keyed by model alias, behind a shared lock so the settings API
@@ -217,8 +216,6 @@ pub struct ServerDeps {
     pub provider_registry: SharedProviderRegistry,
     /// Runtime vendors keyed by the session spec's `vendor` name.
     pub vendors: SharedVendors,
-    /// Per-session server state (capability files) under `<state_dir>/sessions/<id>/`.
-    pub state_dir: PathBuf,
     /// Mints short-lived GitHub tokens for repo provisioning; `None` when the
     /// deployment has no GitHub integration wired.
     pub github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,
