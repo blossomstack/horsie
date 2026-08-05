@@ -116,8 +116,15 @@ impl AuthService {
     /// `<state_dir>/initial-admin-password` (0600): an operator whose
     /// container logs have rotated would otherwise be locked out of their own
     /// deployment with no recovery short of editing SQLite.
+    ///
+    /// The account is created **even when authentication is disabled**, because
+    /// it is not only a credential — it is the scope every stored row belongs
+    /// to, so a deployment without one has nowhere to put its data. What being
+    /// disabled changes is only whether a password is *announced*: printing one
+    /// nobody can use is noise. The file is still written either way, so
+    /// turning authentication on later is a login rather than a lockout.
     pub async fn bootstrap(&self) -> Result<Option<String>, String> {
-        if !self.enabled || self.store.user_count().await? > 0 {
+        if self.store.user_count().await? > 0 {
             return Ok(None);
         }
         let plain = password::generate_initial();
@@ -126,7 +133,7 @@ impl AuthService {
             .create_user(ADMIN_USERNAME, &hash, true, now_secs())
             .await?;
         write_secret_file(&self.state_dir.join(INITIAL_PASSWORD_FILE), &plain)?;
-        Ok(Some(plain))
+        Ok(self.enabled.then_some(plain))
     }
 
     pub async fn must_change_password(&self) -> Result<bool, String> {
@@ -584,12 +591,30 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), generated);
     }
 
+    /// With authentication off there is still an account, because the account
+    /// is the scope every stored row belongs to — a server without one has
+    /// nowhere to put its data and refuses to boot. What is suppressed is only
+    /// the announcement: a password nobody can use is noise in the log.
     #[tokio::test]
-    async fn bootstrap_does_nothing_when_auth_is_disabled() {
+    async fn disabling_auth_still_creates_the_account_but_announces_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let svc = service(&tmp, false).await;
-        assert!(svc.bootstrap().await.unwrap().is_none());
-        assert!(!tmp.path().join("initial-admin-password").exists());
+
+        assert!(
+            svc.bootstrap().await.unwrap().is_none(),
+            "nothing to print when nobody can log in"
+        );
+        assert!(
+            svc.sole_user().await.unwrap().is_some(),
+            "but the scope has to exist"
+        );
+        // Written anyway, so turning authentication on later is a login rather
+        // than a lockout: by then the account exists, so `bootstrap` is a
+        // no-op and would never mint a second password.
+        assert!(
+            tmp.path().join("initial-admin-password").exists(),
+            "the recovery file is the only way back in after enabling auth"
+        );
     }
 
     #[tokio::test]
