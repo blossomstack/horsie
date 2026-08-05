@@ -34,7 +34,7 @@ pub mod journal;
 pub mod testing;
 
 use sqlx::any::{AnyPoolOptions, AnyRow};
-use sqlx::{AnyPool, Executor, Row};
+use sqlx::{AnyPool, AssertSqlSafe, Executor, Row, SqlSafeStr};
 use std::borrow::Cow;
 
 /// Which SQL dialect [`Db`] is talking. Selected from the URL scheme, never
@@ -72,6 +72,31 @@ impl Dialect {
 /// connection holds the database surfaces as an immediate `database is locked`
 /// instead of a short wait.
 const SQLITE_BUSY_TIMEOUT_MS: u32 = 5_000;
+
+/// A dialect-translated query string, ready to hand to `sqlx::query`.
+///
+/// sqlx 0.9 refuses non-`'static` SQL strings unless they are wrapped in
+/// `AssertSqlSafe`, to force an injection audit. That audit passes trivially
+/// here, and is worth stating once rather than at 120 call sites: [`Db::q`] is
+/// the only producer, its input is always a literal written in this repo, and
+/// all it does is rewrite `?` placeholders into `$1..$n` for PostgreSQL. No
+/// caller-supplied value ever reaches it — values are bound, never interpolated.
+///
+/// `SqlSafeStr` is implemented for `&Sql` rather than for `Sql` so the existing
+/// `sqlx::query(&db.q("…"))` call sites keep working unchanged.
+pub struct Sql(String);
+
+impl SqlSafeStr for &Sql {
+    fn into_sql_str(self) -> sqlx::SqlStr {
+        AssertSqlSafe(self.0.clone()).into_sql_str()
+    }
+}
+
+impl std::fmt::Display for Sql {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// The server's database handle: a pool plus the dialect it speaks.
 ///
@@ -119,9 +144,11 @@ impl Db {
                         // some builds. `CommandEffect::PersistAndAck` promises
                         // the ack means the event reached the disk.
                         conn.execute("PRAGMA synchronous = FULL").await?;
-                        conn.execute(
-                            format!("PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}").as_str(),
-                        )
+                        // `AssertSqlSafe` because sqlx 0.9 wants `'static` SQL:
+                        // the only interpolation is our own constant.
+                        conn.execute(AssertSqlSafe(format!(
+                            "PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}"
+                        )))
                         .await?;
                     }
                     Ok(())
@@ -166,11 +193,11 @@ impl Db {
     /// on the way out. `?` inside a string literal is left alone — `model_cards`
     /// really does issue `LIKE ? ESCAPE '\'` — so this walks the string
     /// tracking quoting rather than doing a blind replace.
-    pub fn q<'a>(&self, sql: &'a str) -> Cow<'a, str> {
-        match self.dialect {
-            Dialect::Sqlite => Cow::Borrowed(sql),
-            Dialect::Postgres => Cow::Owned(to_dollar_placeholders(sql)),
-        }
+    pub fn q(&self, sql: &str) -> Sql {
+        Sql(match self.dialect {
+            Dialect::Sqlite => sql.to_string(),
+            Dialect::Postgres => to_dollar_placeholders(sql),
+        })
     }
 
     /// SQL for "now", as TEXT in the shape the `*_at` TEXT columns use

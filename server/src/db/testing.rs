@@ -17,6 +17,7 @@
 //! fails in whichever test already covers that code path.
 
 use crate::db::Db;
+use sqlx::AssertSqlSafe;
 use sqlx::any::AnyPoolOptions;
 use uuid::Uuid;
 
@@ -92,7 +93,7 @@ pub async fn postgres() -> Option<Db> {
         .unwrap_or_else(|e| panic!("connect to HORSIE_TEST_POSTGRES_URL: {e}"));
     // The database name is generated here, never user input, so interpolating
     // it is safe — and `CREATE DATABASE` takes no bind parameters anyway.
-    sqlx::query(&format!("CREATE DATABASE {name}"))
+    sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {name}")))
         .execute(&admin)
         .await
         .unwrap_or_else(|e| panic!("create test database {name}: {e}"));
