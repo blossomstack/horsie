@@ -52,7 +52,15 @@ reqwest           = { version = "0.12", features = ["json"] }
 reqwest-eventsource = "0.6.0"
 tempfile          = "3"
 jsonschema        = "0.49"
-jsonwebtoken      = "11"
+# 11 made the crypto backend opt-in: with neither feature on, every sign/verify
+# panics at runtime asking for a provider, and with both the selection is
+# ambiguous. `aws_lc_rs` rather than `rust_crypto` because the pure-Rust backend
+# pulls in `rsa`, which carries RUSTSEC-2023-0071 (Marvin Attack — key recovery
+# through timing sidechannels, still unpatched). aws-lc-rs is already linked
+# into these binaries by rustls, so this adds no new build dependency.
+# `use_pem` is in the crate's default set and is what provides
+# `EncodingKey::from_rsa_pem`, which the GitHub App JWT needs.
+jsonwebtoken      = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 base64            = "0.23"
 sha2              = "0.10"
 zip               = { version = "8", default-features = false, features = ["deflate"] }
