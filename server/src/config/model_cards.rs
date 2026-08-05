@@ -4,6 +4,7 @@
 //! when cards change. Seeded at startup (insert-if-missing), managed via
 //! /api/admin/model-cards, searched via /api/model-cards.
 
+use crate::auth::UserId;
 use crate::db::Db;
 use horsie_models::model_cards::{ModelCard, ModelCardInput, ModelCardUpdate};
 use sqlx::Row;
@@ -26,6 +27,9 @@ pub enum ModelCardError {
 
 pub struct ModelCardStore {
     db: Db,
+    /// Bound once, here, rather than passed per call: there is then no call
+    /// site that *can* hand a method the wrong account.
+    user: UserId,
 }
 
 fn validate(
@@ -79,15 +83,16 @@ fn row_to_card(r: &AnyRow) -> Result<ModelCard, sqlx::Error> {
 }
 
 impl ModelCardStore {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, user: UserId) -> Self {
+        Self { db, user }
     }
 
     /// Every card, ordered by `model_id`.
     pub async fn list(&self) -> Result<Vec<ModelCard>, ModelCardError> {
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLUMNS} FROM model_cards ORDER BY model_id"
+            "SELECT {COLUMNS} FROM model_cards WHERE user_id = ? ORDER BY model_id"
         )))
+        .bind(self.user.as_str())
         .fetch_all(self.db.pool())
         .await
         .map_err(|e| ModelCardError::Db(e.to_string()))?;
@@ -106,9 +111,10 @@ impl ModelCardStore {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLUMNS} FROM model_cards WHERE model_id LIKE ? ESCAPE '\\' \
+            "SELECT {COLUMNS} FROM model_cards WHERE user_id = ? AND model_id LIKE ? ESCAPE '\\' \
              ORDER BY model_id LIMIT ?"
         )))
+        .bind(self.user.as_str())
         .bind(format!("{escaped}%"))
         .bind(SEARCH_LIMIT)
         .fetch_all(self.db.pool())
@@ -122,8 +128,9 @@ impl ModelCardStore {
 
     pub async fn get(&self, model_id: &str) -> Result<Option<ModelCard>, ModelCardError> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLUMNS} FROM model_cards WHERE model_id = ?"
+            "SELECT {COLUMNS} FROM model_cards WHERE user_id = ? AND model_id = ?"
         )))
+        .bind(self.user.as_str())
         .bind(model_id)
         .fetch_optional(self.db.pool())
         .await
@@ -148,9 +155,10 @@ impl ModelCardStore {
             )));
         }
         sqlx::query(&self.db.q(
-            "INSERT INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO model_cards (user_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ))
+        .bind(self.user.as_str())
         .bind(&input.model_id)
         .bind(&input.name)
         .bind(input.context_window.map(i64::from))
@@ -184,7 +192,7 @@ impl ModelCardStore {
             "UPDATE model_cards SET name = ?, context_window = ?, max_tokens = ?, \
              thinking_efforts = ?, default_thinking_effort = ?, thinking_dialect = ?, \
              base_url = ?, forced_tools_disable_thinking = ?, \
-             updated_at = {} WHERE model_id = ?",
+             updated_at = {} WHERE user_id = ? AND model_id = ?",
             self.db.now_text()
         );
         let res = sqlx::query(&self.db.q(&statement))
@@ -200,6 +208,7 @@ impl ModelCardStore {
             .bind(i64::from(
                 update.forced_tools_disable_thinking.unwrap_or(false),
             ))
+            .bind(self.user.as_str())
             .bind(model_id)
             .execute(self.db.pool())
             .await
@@ -215,11 +224,16 @@ impl ModelCardStore {
     }
 
     pub async fn delete(&self, model_id: &str) -> Result<(), ModelCardError> {
-        let res = sqlx::query(&self.db.q("DELETE FROM model_cards WHERE model_id = ?"))
-            .bind(model_id)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| ModelCardError::Db(e.to_string()))?;
+        let res = sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM model_cards WHERE user_id = ? AND model_id = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(model_id)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| ModelCardError::Db(e.to_string()))?;
         if res.rows_affected() == 0 {
             return Err(ModelCardError::NotFound(format!(
                 "no model card '{model_id}'"
@@ -238,10 +252,11 @@ impl ModelCardStore {
             // `ON CONFLICT DO NOTHING` rather than SQLite's `INSERT OR IGNORE`:
             // same semantics, and the standard spelling works on both backends.
             let res = sqlx::query(&self.db.q(
-                "INSERT INTO model_cards (model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-                 ON CONFLICT (model_id) DO NOTHING",
+                "INSERT INTO model_cards (user_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (user_id, model_id) DO NOTHING",
             ))
+            .bind(self.user.as_str())
             .bind(&c.model_id)
             .bind(&c.name)
             .bind(c.context_window.map(i64::from))
@@ -302,7 +317,7 @@ mod tests {
     use super::*;
 
     async fn test_store() -> ModelCardStore {
-        ModelCardStore::new(crate::db::testing::db().await)
+        ModelCardStore::new(crate::db::testing::db().await, UserId::new("1"))
     }
 
     fn input(model_id: &str, name: &str, cw: Option<u32>, mt: Option<u32>) -> ModelCardInput {
@@ -660,12 +675,17 @@ mod tests {
         assert_eq!(cards, 0, "migrations must not seed the catalog");
 
         // The new columns exist and default correctly on both tables.
-        sqlx::query(&db.q("INSERT INTO model_cards (model_id, name) VALUES ('probe', 'Probe')"))
-            .execute(pool)
-            .await
-            .expect("insert without the new columns still works");
+        sqlx::query(
+            &db.q(
+                "INSERT INTO model_cards (user_id, model_id, name) VALUES ('1', 'probe', 'Probe')",
+            ),
+        )
+        .execute(pool)
+        .await
+        .expect("insert without the new columns still works");
         let row = sqlx::query(&db.q(
-            "SELECT base_url, forced_tools_disable_thinking FROM model_cards WHERE model_id = 'probe'",
+            "SELECT base_url, forced_tools_disable_thinking FROM model_cards \
+             WHERE user_id = '1' AND model_id = 'probe'",
         ))
         .fetch_one(pool)
         .await

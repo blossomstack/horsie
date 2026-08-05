@@ -272,6 +272,7 @@ mod tests {
                     journal_backend: "file".into(),
                 },
             },
+            crate::auth::UserId::new("1"),
         )
         .await
         .unwrap();

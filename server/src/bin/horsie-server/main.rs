@@ -88,15 +88,66 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         journal_backend: journal_backend.as_str().to_string(),
     };
-    let opened = DbConfigStore::open_with(
+    // The pool comes up on its own first. Every store below binds a user, and
+    // the user comes from the account `bootstrap` creates — which needs the
+    // database. So the order is: open, bootstrap, then build everything scoped.
+    let db = horsie_server::db::Db::open(
         &db_url,
         cfg.database
             .max_connections
             .unwrap_or(horsie_server::config::DEFAULT_MAX_CONNECTIONS),
-        StoreDeps { info },
     )
     .await
     .map_err(BootError::Config)?;
+
+    let auth = Arc::new(horsie_server::auth::AuthService::new(
+        horsie_server::auth::AuthStore::new(db.clone()),
+        horsie_server::auth::AuthDeps {
+            enabled: config::auth_enabled(&cfg),
+            state_dir: state_dir.clone(),
+        },
+    ));
+    match auth.bootstrap().await {
+        Ok(Some(password)) => {
+            let file = state_dir
+                .join(horsie_server::auth::INITIAL_PASSWORD_FILE)
+                .display()
+                .to_string();
+            println!(
+                "\n\
+                 ┌──────────────────────────────────────────────────────────────┐\n\
+                 │  horsie created its admin account                            │\n\
+                 └──────────────────────────────────────────────────────────────┘\n\
+                 \n  username: admin\n  password: {password}\n\n\
+                 Also written to {file} (deleted when you change the password).\n\
+                 Change it from Settings → Account.\n"
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(BootError::Config(format!(
+                "bootstrapping the admin account: {e}"
+            )));
+        }
+    }
+    if !auth.enabled() {
+        println!(
+            "warning: authentication is disabled — every caller that can reach \
+             this port has full access"
+        );
+    }
+
+    // The scope every store below is built for. One account today; resolving it
+    // per request is the next change, not this one.
+    let user = auth
+        .sole_user()
+        .await
+        .map_err(BootError::Config)?
+        .ok_or_else(|| BootError::Config("no account exists after bootstrap".into()))?;
+
+    let opened = DbConfigStore::open_on(db, StoreDeps { info }, user.clone())
+        .await
+        .map_err(BootError::Config)?;
 
     // Built after the store, because the database backend shares its handle —
     // one database, one migrator, one set of connections.
@@ -121,7 +172,10 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     // file. Seed-file parse/read errors are fatal (operator input should fail
     // loud); DB errors only warn — the admin API stays usable to fix state.
     // Insert-if-missing semantics mean admin edits survive every restart.
-    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(opened.db.clone()));
+    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(
+        opened.db.clone(),
+        user.clone(),
+    ));
     let seed_path = cli
         .model_cards_seed
         .clone()
@@ -177,43 +231,6 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         horsie_server::environments::EnvironmentStore::new(opened.db.clone()),
     ));
 
-    let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.db.clone()),
-        horsie_server::auth::AuthDeps {
-            enabled: config::auth_enabled(&cfg),
-            state_dir: state_dir.clone(),
-        },
-    ));
-    match auth.bootstrap().await {
-        Ok(Some(password)) => {
-            let file = state_dir
-                .join(horsie_server::auth::INITIAL_PASSWORD_FILE)
-                .display()
-                .to_string();
-            println!(
-                "\n\
-                 ┌──────────────────────────────────────────────────────────────┐\n\
-                 │  horsie created its admin account                            │\n\
-                 └──────────────────────────────────────────────────────────────┘\n\
-                 \n  username: admin\n  password: {password}\n\n\
-                 Also written to {file} (deleted when you change the password).\n\
-                 Change it from Settings → Account.\n"
-            );
-        }
-        Ok(None) => {}
-        Err(e) => {
-            return Err(BootError::Config(format!(
-                "bootstrapping the admin account: {e}"
-            )));
-        }
-    }
-    if !auth.enabled() {
-        println!(
-            "warning: authentication is disabled — every caller that can reach \
-             this port has full access"
-        );
-    }
-
     let runtimes = Arc::new(horsie_server::runtime_manager::RuntimeManager::new(
         horsie_server::runtime_manager::RuntimeDeps {
             vendors: opened.vendors.clone(),
@@ -259,6 +276,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     let chatgpt = std::sync::Arc::new(
         horsie_server::config::chatgpt_login::ChatGptLoginService::new(
             opened.db.clone(),
+            user.clone(),
             opened.store.clone(),
         ),
     );

@@ -555,19 +555,18 @@ mod tests {
             .await
             .unwrap();
         }
-        let n: i64 =
-            sqlx::query_scalar(&db.q("SELECT COUNT(*) FROM memory_spaces WHERE name = ?"))
-                .bind("notes")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
+        let n: i64 = sqlx::query_scalar(&db.q("SELECT COUNT(*) FROM memory_spaces WHERE name = ?"))
+            .bind("notes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
         assert_eq!(n, 2);
 
         // 0009_memory.sql seeds a space; the rebuild must have carried it over
         // and given it the bootstrap account. This is the backfill working.
-        let seeded: i64 = sqlx::query_scalar(&db.q(
-            "SELECT COUNT(*) FROM memory_spaces WHERE user_id = ? AND name <> ?",
-        ))
+        let seeded: i64 = sqlx::query_scalar(
+            &db.q("SELECT COUNT(*) FROM memory_spaces WHERE user_id = ? AND name <> ?"),
+        )
         .bind("1")
         .bind("notes")
         .fetch_one(db.pool())
@@ -582,9 +581,9 @@ mod tests {
     #[tokio::test]
     async fn rebuilding_the_journal_log_table_keeps_its_events() {
         let db = testing::db().await;
-        sqlx::query(&db.q(
-            "INSERT INTO journal_logs (user_id, kind, id, last_seq) VALUES (?, ?, ?, ?)",
-        ))
+        sqlx::query(
+            &db.q("INSERT INTO journal_logs (user_id, kind, id, last_seq) VALUES (?, ?, ?, ?)"),
+        )
         .bind("1")
         .bind("session")
         .bind("abc")
@@ -592,9 +591,9 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
-        let log_id: i64 = sqlx::query_scalar(&db.q(
-            "SELECT log_id FROM journal_logs WHERE user_id = ? AND kind = ? AND id = ?",
-        ))
+        let log_id: i64 = sqlx::query_scalar(
+            &db.q("SELECT log_id FROM journal_logs WHERE user_id = ? AND kind = ? AND id = ?"),
+        )
         .bind("1")
         .bind("session")
         .bind("abc")
@@ -610,9 +609,9 @@ mod tests {
             .unwrap();
 
         // Two accounts, one persistence id: the widened UNIQUE is what allows it.
-        sqlx::query(&db.q(
-            "INSERT INTO journal_logs (user_id, kind, id, last_seq) VALUES (?, ?, ?, ?)",
-        ))
+        sqlx::query(
+            &db.q("INSERT INTO journal_logs (user_id, kind, id, last_seq) VALUES (?, ?, ?, ?)"),
+        )
         .bind("k3m9x0abc7qr")
         .bind("session")
         .bind("abc")
@@ -627,7 +626,6 @@ mod tests {
         let db = testing::db().await;
         assert!(db.execute("SELECT 1 FROM vendors").await.is_err());
     }
-
 
     #[test]
     fn redaction_hides_the_password_only() {

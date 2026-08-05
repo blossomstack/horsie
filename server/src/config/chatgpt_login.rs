@@ -8,6 +8,7 @@
 //! eight-character user code — so nothing needs a callback URL, an inbound
 //! route, or a proxy change.
 
+use crate::auth::UserId;
 use crate::config::ConfigStore;
 use crate::db::Db;
 use horsie_models::settings::SettingsUpdate;
@@ -46,6 +47,8 @@ pub enum LoginError {
 
 pub struct ChatGptLoginService {
     db: Db,
+    /// Bound once, here, rather than passed per call.
+    user: UserId,
     config: Arc<dyn ConfigStore>,
     http: reqwest::Client,
     issuer: String,
@@ -57,9 +60,10 @@ pub struct ChatGptLoginService {
 
 impl ChatGptLoginService {
     #[must_use]
-    pub fn new(db: Db, config: Arc<dyn ConfigStore>) -> Self {
+    pub fn new(db: Db, user: UserId, config: Arc<dyn ConfigStore>) -> Self {
         Self {
             db,
+            user,
             config,
             http: reqwest::Client::new(),
             issuer: DEFAULT_ISSUER.to_string(),
@@ -76,11 +80,16 @@ impl ChatGptLoginService {
     }
 
     async fn require_chatgpt_provider(&self, provider: &str) -> Result<(), LoginError> {
-        let row = sqlx::query(&self.db.q("SELECT kind FROM providers WHERE name = ?"))
-            .bind(provider)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(|e| LoginError::Upstream(e.to_string()))?;
+        let row = sqlx::query(
+            &self
+                .db
+                .q("SELECT kind FROM providers WHERE user_id = ? AND name = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(provider)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(|e| LoginError::Upstream(e.to_string()))?;
 
         match row {
             None => Err(LoginError::UnknownProvider),
@@ -155,7 +164,7 @@ impl ChatGptLoginService {
         provider: &str,
         tokens: &StoredTokens,
     ) -> Result<(), LoginError> {
-        crate::config::store::write_provider_oauth(&self.db, provider, tokens)
+        crate::config::store::write_provider_oauth(&self.db, &self.user, provider, tokens)
             .await
             .map_err(|e| LoginError::Upstream(e.to_string()))?;
 
@@ -178,11 +187,16 @@ impl ChatGptLoginService {
     pub async fn sign_out(&self, provider: &str) -> Result<(), LoginError> {
         self.require_chatgpt_provider(provider).await?;
 
-        sqlx::query(&self.db.q("DELETE FROM provider_oauth WHERE provider = ?"))
-            .bind(provider)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| LoginError::Upstream(e.to_string()))?;
+        sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM provider_oauth WHERE user_id = ? AND provider = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(provider)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| LoginError::Upstream(e.to_string()))?;
         self.pending
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -195,8 +209,9 @@ impl ChatGptLoginService {
         let row = sqlx::query(
             &self
                 .db
-                .q("SELECT account_id FROM provider_oauth WHERE provider = ?"),
+                .q("SELECT account_id FROM provider_oauth WHERE user_id = ? AND provider = ?"),
         )
+        .bind(self.user.as_str())
         .bind(provider)
         .fetch_optional(self.db.pool())
         .await
@@ -318,13 +333,15 @@ mod tests {
                     journal_backend: "file".into(),
                 },
             },
+            UserId::new("1"),
         )
         .await
         .unwrap();
 
         let issuer = mock_issuer(approve_after_first_poll).await;
         let service =
-            ChatGptLoginService::new(opened.db.clone(), opened.store.clone()).with_issuer(issuer);
+            ChatGptLoginService::new(opened.db.clone(), UserId::new("1"), opened.store.clone())
+                .with_issuer(issuer);
 
         Fixture {
             service,

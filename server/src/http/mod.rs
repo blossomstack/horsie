@@ -359,6 +359,7 @@ mod tests {
         let opened = crate::config::DbConfigStore::open(
             &format!("sqlite://{}", db.display()),
             crate::config::StoreDeps { info: test_info() },
+            crate::auth::UserId::new("1"),
         )
         .await
         .unwrap();
@@ -381,6 +382,7 @@ mod tests {
         ));
         let model_cards = Arc::new(crate::config::model_cards::ModelCardStore::new(
             opened.db.clone(),
+            crate::auth::UserId::new("1"),
         ));
         let agents = Arc::new(crate::agents::AgentService::new(
             crate::agents::AgentStore::new(opened.db.clone()),
@@ -433,6 +435,7 @@ mod tests {
         ));
         let chatgpt = Arc::new(crate::config::chatgpt_login::ChatGptLoginService::new(
             opened.db.clone(),
+            crate::auth::UserId::new("1"),
             opened.store.clone(),
         ));
         AppState {
