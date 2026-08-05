@@ -5,7 +5,7 @@ export interface CreateSessionRequest {
   name?: string;
   agent: AgentSettings;
   /**
-   * Runtime vendor name; defaults to &quot;local&quot;.
+   * Runtime vendor name; defaults to &#34;local&#34;.
    */
   vendor?: string;
   /**

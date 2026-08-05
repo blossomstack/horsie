@@ -1,7 +1,7 @@
 
 import { SessionSummary } from '../session';
 /**
- * A workflow&#x27;s runs, newest first.
+ * A workflow&#39;s runs, newest first.
  */
 export interface WorkflowRunsResponse {
   sessions: SessionSummary[];

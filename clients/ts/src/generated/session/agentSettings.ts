@@ -17,7 +17,7 @@ export interface AgentSettings {
    */
   memorySpaces?: string[];
   /**
-   * Canonical thinking effort for this session, chosen from the model&#x27;s
+   * Canonical thinking effort for this session, chosen from the model&#39;s
    */
   thinkingEffort?: string;
   /**

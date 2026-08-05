@@ -5,12 +5,12 @@
 export interface ProviderInput {
   name: string;
   /**
-   * Provider kind: &quot;anthropic&quot; or &quot;openai&quot;.
+   * Provider kind: &#34;anthropic&#34; or &#34;openai&#34;.
    */
   kind: string;
   baseUrl?: string;
   /**
-   * New inline key. Omit to keep the existing stored key; &quot;&quot; to clear.
+   * New inline key. Omit to keep the existing stored key; &#34;&#34; to clear.
    */
   apiKey?: string;
   /**

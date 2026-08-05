@@ -12,15 +12,15 @@ export interface ModelCardInput {
    */
   thinkingEfforts?: string[];
   /**
-   * The provider&#x27;s default effort, when documented.
+   * The provider&#39;s default effort, when documented.
    */
   defaultThinkingEffort?: string;
   /**
-   * Wire encoding for this model&#x27;s thinking control.
+   * Wire encoding for this model&#39;s thinking control.
    */
   thinkingDialect?: string;
   /**
-   * Where this model is officially served (e.g. &quot;https://api.deepseek.com&quot;).
+   * Where this model is officially served (e.g. &#34;https://api.deepseek.com&#34;).
    */
   baseUrl?: string;
   /**

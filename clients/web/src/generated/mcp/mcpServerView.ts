@@ -5,7 +5,7 @@ import { McpAuthView } from './mcpAuthView';
  */
 export interface McpServerView {
   /**
-   * Stable id and namespace prefix for its tools (`mcp__&lt;name&gt;__&lt;tool&gt;`).
+   * Stable id and namespace prefix for its tools (`mcp__&#60;name&#62;__&#60;tool&#62;`).
    */
   name: string;
   /**

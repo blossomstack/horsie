@@ -1,7 +1,7 @@
 
 import { HookRecord } from '../hooks';
 /**
- * A plugin hook&#x27;s intervention, as it appears in an agent&#x27;s transcript.
+ * A plugin hook&#39;s intervention, as it appears in an agent&#39;s transcript.
  */
 export interface HookEntry {
   /**

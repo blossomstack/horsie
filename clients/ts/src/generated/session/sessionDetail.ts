@@ -13,7 +13,7 @@ export interface SessionDetail {
   createdAt: number;
   lastError?: string;
   /**
-   * User-set key-value metadata (e.g. `group=&lt;name&gt;`). Empty when none.
+   * User-set key-value metadata (e.g. `group=&#60;name&#62;`). Empty when none.
    */
   annotations: AnnotationEntry[];
   /**
@@ -23,7 +23,7 @@ export interface SessionDetail {
   model: string;
   vendor: string;
   /**
-   * Clone URLs of the session&#x27;s provisioned repos (empty when none).
+   * Clone URLs of the session&#39;s provisioned repos (empty when none).
    */
   repos: string[];
   /**
@@ -39,11 +39,11 @@ export interface SessionDetail {
    */
   memorySpaces: string[];
   /**
-   * Whether the runtime&#x27;s plugin/skill machinery is enabled for this session.
+   * Whether the runtime&#39;s plugin/skill machinery is enabled for this session.
    */
   usePlugins: boolean;
   /**
-   * The session&#x27;s frozen thinking effort, chosen at creation or inherited
+   * The session&#39;s frozen thinking effort, chosen at creation or inherited
    */
   thinkingEffort?: string;
   /**

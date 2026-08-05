@@ -4,7 +4,7 @@ A modern web UI for the horsie server — create sessions, drive agents in
 sandboxed runtimes, and watch turns stream live over SSE.
 
 Built with **Bun + Vite + React 19 + Tailwind v4**, talking to the server over
-the [fluorite](https://github.com/zhxiaogg/fluorite)-generated protocol types.
+the [fluorite](https://github.com/blossomstack/fluorite)-generated protocol types.
 
 ## Stack
 
@@ -22,8 +22,9 @@ the [fluorite](https://github.com/zhxiaogg/fluorite)-generated protocol types.
 ## Prerequisites
 
 - [Bun](https://bun.sh)
-- The [`fluorite`](https://github.com/zhxiaogg/fluorite) CLI on `PATH`
-  (`cargo install fluorite`) — only needed to regenerate protocol types.
+- The [`fluorite`](https://github.com/blossomstack/fluorite) CLI on `PATH`
+  (`cargo install fluorite_codegen`, or `npm i -g @blossomstack/fluorite-cli`)
+  — only needed to regenerate protocol types.
 - A running horsie server:
 
   ```bash

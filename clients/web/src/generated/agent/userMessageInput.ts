@@ -10,7 +10,7 @@ export interface UserMessageInput {
    */
   text: string;
   /**
-   * Finished subagents&#x27; results delivered with this turn.
+   * Finished subagents&#39; results delivered with this turn.
    */
   subagentResults: SubAgentResultPart[];
 }

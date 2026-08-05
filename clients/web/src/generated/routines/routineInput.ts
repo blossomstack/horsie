@@ -1,7 +1,7 @@
 
 import { RoutineSchedule } from './routineSchedule';
 /**
- * Create or fully replace a routine. `description` defaults to &quot;&quot;, `schedule`
+ * Create or fully replace a routine. `description` defaults to &#34;&#34;, `schedule`
  */
 export interface RoutineInput {
   name: string;

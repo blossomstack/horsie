@@ -142,7 +142,7 @@ cargo test --workspace
 ```
 
 Wire/protocol types are generated with
-[fluorite](https://github.com/zhxiaogg/fluorite) from the schemas under
+[fluorite](https://github.com/blossomstack/fluorite) from the schemas under
 `models/fluorite/`. Production code denies `unwrap`, `expect`, `panic`, and
 wildcard match arms; tests opt out per-file. See `CLAUDE.md` for the full design
 philosophy and contribution conventions.

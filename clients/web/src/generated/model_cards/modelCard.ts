@@ -4,11 +4,11 @@
  */
 export interface ModelCard {
   /**
-   * Official provider model id — the card&#x27;s identity (e.g. &quot;claude-sonnet-4-6&quot;).
+   * Official provider model id — the card&#39;s identity (e.g. &#34;claude-sonnet-4-6&#34;).
    */
   modelId: string;
   /**
-   * Display label (e.g. &quot;Claude Sonnet 4.6&quot;).
+   * Display label (e.g. &#34;Claude Sonnet 4.6&#34;).
    */
   name: string;
   /**
@@ -24,15 +24,15 @@ export interface ModelCard {
    */
   thinkingEfforts?: string[];
   /**
-   * The provider&#x27;s default effort, when documented.
+   * The provider&#39;s default effort, when documented.
    */
   defaultThinkingEffort?: string;
   /**
-   * Wire encoding for this model&#x27;s thinking control.
+   * Wire encoding for this model&#39;s thinking control.
    */
   thinkingDialect?: string;
   /**
-   * Where this model is officially served (e.g. &quot;https://api.deepseek.com&quot;).
+   * Where this model is officially served (e.g. &#34;https://api.deepseek.com&#34;).
    */
   baseUrl?: string;
   /**

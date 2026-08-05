@@ -7,7 +7,7 @@ export interface WorkspaceScan {
   instructions?: ScannedFile;
   skills: ScannedFile[];
   /**
-   * Runtime OS/arch (`&lt;os&gt;-&lt;arch&gt;`, e.g. &quot;macos-aarch64&quot;); optional so an
+   * Runtime OS/arch (`&#60;os&#62;-&#60;arch&#62;`, e.g. &#34;macos-aarch64&#34;); optional so an
    */
   platform?: string;
 }

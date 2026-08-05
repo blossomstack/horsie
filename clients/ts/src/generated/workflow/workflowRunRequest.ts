@@ -6,11 +6,11 @@ import { RepoConfig } from '../session_api';
 export interface WorkflowRunRequest {
   input: string;
   /**
-   * Runtime vendor for the run&#x27;s single shared runtime; absent → the
+   * Runtime vendor for the run&#39;s single shared runtime; absent → the
    */
   vendor?: string;
   /**
-   * Repositories cloned into the run&#x27;s shared workspace.
+   * Repositories cloned into the run&#39;s shared workspace.
    */
   repos?: RepoConfig[];
   /**

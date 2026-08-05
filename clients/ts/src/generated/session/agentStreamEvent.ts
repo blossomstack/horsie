@@ -6,7 +6,7 @@ import { TaskListEvent } from './taskListEvent';
 import { ToolStartEvent } from './toolStartEvent';
 import { TurnCompletedEvent } from './turnCompletedEvent';
 /**
- * A frame on one agent&#x27;s stream (`/sessions/:id/agents/:agent_id/events`).
+ * A frame on one agent&#39;s stream (`/sessions/:id/agents/:agent_id/events`).
  */
 export type AgentStreamEvent =
   | { type: "Appended"; value: AppendedEvent }

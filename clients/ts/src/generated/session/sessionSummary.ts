@@ -15,7 +15,7 @@ export interface SessionSummary {
    */
   workflow?: string;
   /**
-   * User-set key-value metadata (e.g. `group=&lt;name&gt;`). Empty when none.
+   * User-set key-value metadata (e.g. `group=&#60;name&#62;`). Empty when none.
    */
   annotations: AnnotationEntry[];
 }

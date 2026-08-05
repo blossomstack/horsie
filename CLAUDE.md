@@ -29,7 +29,7 @@ my-crate/
 
 ## Protocol models (fluorite)
 
-Use [fluorite](https://github.com/zhxiaogg/fluorite) to generate all protocol message types — any data transported between modules, or between server and clients (API request/response types, inter-crate message envelopes, wire formats).
+Use [fluorite](https://github.com/blossomstack/fluorite) to generate all protocol message types — any data transported between modules, or between server and clients (API request/response types, inter-crate message envelopes, wire formats).
 
 - Define schemas as `.fl` files under `models/fluorite/` (inside the models crate, so published packages are self-contained).
 - The `horsie-models` crate runs `fluorite_codegen` in `build.rs` and exposes generated types via `horsie_models::models::*`.
