@@ -129,8 +129,16 @@ impl AuthService {
         }
         let plain = password::generate_initial();
         let hash = password::hash(&plain)?;
+        // `UserId::bootstrap`, not a random id: this is the first account, and
+        // the migration already backfilled every pre-existing row to it.
         self.store
-            .create_user(ADMIN_USERNAME, &hash, true, now_secs())
+            .create_user(
+                &crate::auth::UserId::bootstrap(),
+                ADMIN_USERNAME,
+                &hash,
+                true,
+                now_secs(),
+            )
             .await?;
         write_secret_file(&self.state_dir.join(INITIAL_PASSWORD_FILE), &plain)?;
         Ok(self.enabled.then_some(plain))
@@ -589,6 +597,41 @@ mod tests {
         // Second boot: no new password, file untouched.
         assert!(svc.bootstrap().await.unwrap().is_none());
         assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), generated);
+    }
+
+    /// The first account must own what the migration backfilled, or the server
+    /// comes up unable to see its own data.
+    ///
+    /// This is not hypothetical: `0024_user_scoping.sql` backfills every
+    /// pre-existing row to `UserId::bootstrap`, and a random first id orphaned
+    /// all of it — the seeded memory space on a fresh install, and *everything*
+    /// on a deployment that had been running with authentication disabled and
+    /// so had no account row for 0023 to carry across.
+    #[tokio::test]
+    async fn the_first_account_owns_what_the_migration_backfilled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::testing::db().await;
+        let svc = AuthService::new(
+            AuthStore::new(db.clone()),
+            AuthDeps {
+                enabled: true,
+                state_dir: tmp.path().to_path_buf(),
+            },
+        );
+        svc.bootstrap().await.unwrap();
+
+        let account = svc.sole_user().await.unwrap().expect("an account exists");
+        let backfilled: String =
+            sqlx::query_scalar(&db.q("SELECT user_id FROM memory_spaces LIMIT 1"))
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(
+            account.as_str(),
+            backfilled,
+            "the account and the backfilled rows must be the same owner"
+        );
     }
 
     /// With authentication off there is still an account, because the account

@@ -27,6 +27,22 @@ const LEN: usize = 12;
 pub struct UserId(String);
 
 impl UserId {
+    /// The account every pre-existing row was backfilled to.
+    ///
+    /// `0024_user_scoping.sql` writes this id onto every row that existed
+    /// before scoping, so the *first* account a deployment has must be this id
+    /// rather than a random one — otherwise the server comes up unable to see
+    /// its own data. It is a legitimate id, not a sentinel; every account after
+    /// it gets [`generate`](Self::generate).
+    ///
+    /// It is also the one predictable id in the system, and that is fine: ids
+    /// are random to stop the *set* being enumerable and to stop a count
+    /// leaking. Knowing a deployment has a first account leaks neither.
+    #[must_use]
+    pub fn bootstrap() -> UserId {
+        UserId("1".to_string())
+    }
+
     /// A fresh random id.
     #[must_use]
     pub fn generate() -> UserId {

@@ -113,10 +113,12 @@ impl AuthStore {
     /// `username` plus this crate's single-account rule mean a second call
     /// errs, which is the point.
     ///
-    /// The id is minted here rather than by the database: it is random, not
-    /// sequential, so there is no sequence to draw from and nothing to return.
+    /// The id is the caller's to choose, because the first account is not free
+    /// to be random: it has to match what `0024_user_scoping.sql` backfilled
+    /// every pre-existing row to. See [`UserId::bootstrap`].
     pub async fn create_user(
         &self,
+        id: &UserId,
         username: &str,
         password_hash: &str,
         generated: bool,
@@ -125,7 +127,7 @@ impl AuthStore {
         if self.user_count().await? > 0 {
             return Err("an account already exists".to_string());
         }
-        let id = UserId::generate();
+        let id = id.clone();
         sqlx::query(&self.db.q("INSERT INTO auth_users \
              (id, username, password_hash, password_is_generated, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?)"))
@@ -524,7 +526,7 @@ mod tests {
         assert!(s.get_user("admin").await.unwrap().is_none());
 
         let id = s
-            .create_user("admin", "phc-hash", true, 1000)
+            .create_user(&UserId::bootstrap(), "admin", "phc-hash", true, 1000)
             .await
             .unwrap();
         assert_eq!(s.user_count().await.unwrap(), 1);
@@ -538,14 +540,22 @@ mod tests {
     #[tokio::test]
     async fn a_second_user_is_refused() {
         let (s, _tmp) = store().await;
-        s.create_user("admin", "h", true, 1000).await.unwrap();
-        assert!(s.create_user("other", "h", false, 1000).await.is_err());
+        s.create_user(&UserId::bootstrap(), "admin", "h", true, 1000)
+            .await
+            .unwrap();
+        assert!(
+            s.create_user(&UserId::bootstrap(), "other", "h", false, 1000)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn set_password_clears_the_generated_flag() {
         let (s, _tmp) = store().await;
-        s.create_user("admin", "old", true, 1000).await.unwrap();
+        s.create_user(&UserId::bootstrap(), "admin", "old", true, 1000)
+            .await
+            .unwrap();
         s.set_password("admin", "new", 2000).await.unwrap();
         let u = s.get_user("admin").await.unwrap().unwrap();
         assert_eq!(u.password_hash, "new");
