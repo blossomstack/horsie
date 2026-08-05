@@ -1,6 +1,6 @@
 import { CircleAlert, ListTodo, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError, MAIN_AGENT } from "../api/client";
 import { SessionStatusKind, TaskStatus } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
@@ -49,16 +49,9 @@ function showsProgression(stage: string | undefined): boolean {
   return stage !== undefined && stage !== "ready";
 }
 
-/** Router state carrying the first message through the navigation from a new
- * chat draft — see `NewSessionView`. */
-export interface PendingFirstMessageState {
-  pendingFirstMessage: string;
-}
-
 export function SessionView() {
   const { id, agentId } = useParams<{ id: string; agentId?: string }>();
   const navigate = useNavigate();
-  const location = useLocation();
   const { data: detail, isLoading } = useSession(id);
   const {
     stream,
@@ -80,7 +73,6 @@ export function SessionView() {
   // When a scroll-back page is loading, holds the scroll height captured just
   // before the prepend so we can restore the viewport position after it lands.
   const loadAnchor = useRef<number | null>(null);
-  const sentPendingRef = useRef(false);
 
   const handleSend = async (sessionId: string, text: string) => {
     setSendError(null);
@@ -126,25 +118,6 @@ export function SessionView() {
       );
     }
   };
-
-  // A new chat's first message is sent here, once this view's own session
-  // fetch has resolved — not from NewSessionView immediately after create.
-  // Two reasons: it gives the server's async provisioning the same
-  // wall-clock slack a full page mount gives it under any load, local or CI;
-  // and it guarantees `qk.session(id)`'s query cache already exists before
-  // `useSendMessage`'s optimistic title update runs, since that update is a
-  // no-op against a not-yet-populated cache entry (same guard pattern as
-  // `applyGlobalEvent`).
-  useEffect(() => {
-    if (!id || isLoading || sentPendingRef.current) return;
-    const pending = (location.state as PendingFirstMessageState | null)
-      ?.pendingFirstMessage;
-    if (!pending) return;
-    sentPendingRef.current = true;
-    handleSend(id, pending);
-    navigate(location.pathname, { replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, isLoading]);
 
   // `null` is a real answer, not a missing one: a session the server has not
   // loaded since it started has no status to report, and guessing `Idle` would

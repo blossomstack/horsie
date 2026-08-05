@@ -172,6 +172,10 @@ interface State {
   statusReason: string | null;
   streamError: string | null;
   connected: boolean;
+  /** A live status frame has arrived, so the session document must no longer
+   * seed `streamError` over what the stream itself has said. Cleared on
+   * `reset`. */
+  errorLive: boolean;
   tasks: TaskItem[];
   /** A live `TaskListChanged` has arrived for this session, so the agent
    * document must no longer seed over it. Cleared on `reset`. */
@@ -203,6 +207,7 @@ const INITIAL: State = {
   statusReason: null,
   streamError: null,
   connected: false,
+  errorLive: false,
   tasks: [],
   tasksLive: false,
   hasMoreBefore: false,
@@ -223,6 +228,10 @@ type Action =
   // has arrived, which is always fresher.
   | { kind: "seed-queue"; queued: QueuedMessage[] }
   | { kind: "seed-tasks"; tasks: TaskItem[] }
+  // The failed turn's reason as the *detail* endpoint reported it. A session's
+  // first turn starts with the session, so its `Error` frame can be broadcast
+  // before this view is subscribed and never be heard.
+  | { kind: "seed-error"; error: string | null }
   | { kind: "loading-more"; value: boolean }
   | {
       kind: "history";
@@ -453,6 +462,12 @@ function reducer(state: State, action: Action): State {
     // events that had already been broadcast and would never replay.
     case "seed-tasks":
       return state.tasksLive ? state : { ...state, tasks: action.tasks };
+    // Same guard shape again, and the same reason #100 gave for not showing a
+    // server-held error forever: once the stream has said anything about this
+    // session's status, the stream owns the banner and a stale `lastError`
+    // must not reappear underneath it.
+    case "seed-error":
+      return state.errorLive ? state : { ...state, streamError: action.error };
     case "history": {
       const { page, prepend } = action;
       // A page carries messages and nothing else. Task list and usage are
@@ -497,6 +512,9 @@ function reducer(state: State, action: Action): State {
             ...state,
             needsResync: state.needsResync + 1,
             tasksLive: false,
+            // Released for the same reason: a lost `Error` frame is exactly
+            // what the session document can still answer for.
+            errorLive: false,
           };
         case "Progressed":
           return {
@@ -544,6 +562,7 @@ function reducer(state: State, action: Action): State {
             livePendingAsks: ev.value.pendingAsks,
             statusSeq: state.statusSeq + 1,
             statusReason: ev.value.reason ?? null,
+            errorLive: true,
             // A turn that has started supersedes the previous turn's error.
             // The optimistic echo already clears it for a message sent from
             // this view; this also covers turns with no echo of their own —
@@ -663,9 +682,16 @@ export function useSessionStream(
       } else buffer.push(event);
     };
 
-    const open = (url: string, label: string): EventSource => {
+    const open = (
+      url: string,
+      label: string,
+      settled?: () => void,
+    ): EventSource => {
       const es = new EventSource(url);
-      es.onopen = () => dispatch({ kind: "connected", value: true });
+      es.onopen = () => {
+        dispatch({ kind: "connected", value: true });
+        settled?.();
+      };
       es.onmessage = (e: MessageEvent<string>) => {
         try {
           ingest(JSON.parse(e.data) as SessionEvent | AgentStreamEvent);
@@ -673,7 +699,12 @@ export function useSessionStream(
           console.error(`failed to parse ${label} event`, err, e.data);
         }
       };
-      es.onerror = () => dispatch({ kind: "connected", value: false });
+      es.onerror = () => {
+        dispatch({ kind: "connected", value: false });
+        // A stream that will not open must not strand the seed below: the
+        // transcript is worth showing even when nothing live can reach it.
+        settled?.();
+      };
       return es;
     };
 
@@ -682,36 +713,46 @@ export function useSessionStream(
     // agent's transcript and its live run frames. The browser resumes the
     // agent stream on its own via `Last-Event-ID` (the last appended message
     // id), which the server serves from the agent's state.
-    const sessionEs = open(api.sessionEventsUrl(sessionId), "session");
-    const agentEs = open(
-      api.agentEventsUrl(sessionId, agentId),
-      "agent",
-    );
-    esRef.current = agentEs;
-
-    // Seed the latest window, then flush anything buffered during the fetch.
-    api.sessions
-      .history(sessionId, agentId, { limit: HISTORY_LIMIT })
-      .then((page) => {
+    // Seeding waits for the agent stream to be *connected*, not merely
+    // constructed. A session's first turn now starts with the session itself —
+    // the create carries the first message — so it can be well under way
+    // before this view exists. Fetching the window before the subscription is
+    // live leaves a hole exactly the width of the connect: anything appended in
+    // it is in neither the page nor the stream.
+    let seedStarted = false;
+    const seed = () => {
+      if (seedStarted || cancelled) return;
+      seedStarted = true;
+      const flush = () => {
         if (cancelled) return;
-        dispatch({ kind: "history", page, prepend: false });
         seeded = true;
         for (const event of buffer) {
           dispatch({ kind: "event", event });
           refreshDocuments(event);
         }
         buffer.length = 0;
-      })
-      .catch(() => {
-        if (cancelled) return;
+      };
+      // Whatever the stream missed by not existing yet is durable state the
+      // server still holds: the transcript here, and the documents that carry
+      // status, pending asks and the last error below.
+      api.sessions
+        .history(sessionId, agentId, { limit: HISTORY_LIMIT })
+        .then((page) => {
+          if (cancelled) return;
+          dispatch({ kind: "history", page, prepend: false });
+          flush();
+        })
         // Let live events flow even if the initial fetch failed.
-        seeded = true;
-        for (const event of buffer) {
-          dispatch({ kind: "event", event });
-          refreshDocuments(event);
-        }
-        buffer.length = 0;
+        .catch(flush);
+      void queryClient.invalidateQueries({ queryKey: qk.session(sessionId) });
+      void queryClient.invalidateQueries({
+        queryKey: qk.agent(sessionId, agentId),
       });
+    };
+
+    const sessionEs = open(api.sessionEventsUrl(sessionId), "session");
+    const agentEs = open(api.agentEventsUrl(sessionId, agentId), "agent", seed);
+    esRef.current = agentEs;
 
     return () => {
       cancelled = true;
@@ -747,6 +788,16 @@ export function useSessionStream(
   useEffect(() => {
     if (seedQueue) dispatch({ kind: "seed-queue", queued: seedQueue });
   }, [seedQueue]);
+
+  // The last turn's failure, from the session document. A turn that failed
+  // before this view subscribed — which a session's first turn now can, since
+  // the create starts it — broadcast its `Error` frame to nobody, and the
+  // banner is the only thing that says the turn did not simply end.
+  const seedError = detail?.lastError ?? null;
+  const sessionKey = detail?.id;
+  useEffect(() => {
+    if (sessionKey) dispatch({ kind: "seed-error", error: seedError });
+  }, [sessionKey, seedError]);
 
   // The main agent's durable `task_list` state. `useAgent` shares its cache
   // entry with the view, so this costs no extra request, and `StatusChanged`

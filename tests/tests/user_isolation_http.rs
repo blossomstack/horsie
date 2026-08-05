@@ -194,7 +194,8 @@ async fn create_session(f: &Fixture, account: &Account) -> String {
             "/api/sessions",
             &serde_json::json!({
                 "agent": { "model": "mock", "use_plugins": false },
-                "vendor": "main"
+                "vendor": "main",
+                "message": "hi"
             }),
         )
         .await;
