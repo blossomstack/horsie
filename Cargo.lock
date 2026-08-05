@@ -1690,6 +1690,7 @@ dependencies = [
  "futures-util",
  "glob",
  "hackamore-agent",
+ "hex",
  "horsie-models",
  "horsie-runtime-vendor",
  "horsie-support",
@@ -1753,6 +1754,7 @@ dependencies = [
  "clap",
  "eval",
  "futures-util",
+ "hex",
  "horsie-actor",
  "horsie-agentcore",
  "horsie-anthropic",
@@ -1791,6 +1793,7 @@ dependencies = [
 name = "horsie-support"
 version = "0.1.6"
 dependencies = [
+ "hex",
  "horsie-models",
  "regex",
  "serde",

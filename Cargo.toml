@@ -55,6 +55,11 @@ jsonschema        = "0.49"
 jsonwebtoken      = "9"
 base64            = "0.23"
 sha2              = "0.11"
+# sha2 0.11 returns `hybrid_array::Array` from `finalize()`, which has no
+# `LowerHex` impl — `format!("{:x}", …)` no longer compiles. These digests are
+# persisted (plugin artifact ids, source keys), so the encoding must stay
+# byte-identical lowercase hex; `hex::encode` is exactly that.
+hex               = "0.4"
 zip               = { version = "8", default-features = false, features = ["deflate"] }
 eval              = "0.4"
 # SQLite-backed settings store for the session server (Postgres-ready: add the

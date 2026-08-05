@@ -48,5 +48,5 @@ pub fn source_key(url: &str, git_ref: Option<&str>) -> String {
     hasher.update(url.trim().as_bytes());
     hasher.update(b"\n");
     hasher.update(git_ref.unwrap_or("").as_bytes());
-    format!("{:x}", hasher.finalize())[..16].to_string()
+    hex::encode(hasher.finalize())[..16].to_string()
 }

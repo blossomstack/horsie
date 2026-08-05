@@ -34,6 +34,7 @@ libc          = "0.2"
 base64        = { workspace = true }
 reqwest       = { workspace = true }
 sha2          = { workspace = true }
+hex               = { workspace = true }
 zip           = { workspace = true }
 # Upstream nono. The macOS SecurityServer TLS allow is injected as a capability rule
 # (see server/src/default_capabilities.json), not a fork. default-features=false drops system-keyring.
