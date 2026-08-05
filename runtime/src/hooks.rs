@@ -52,7 +52,7 @@ fn clamp(s: &str) -> String {
 fn record(plugin: &str, event: HookEvent, tool: &str, call_id: &str) -> HookRecord {
     HookRecord {
         plugin: plugin.to_string(),
-        event: event.as_str().to_string(),
+        event: event.name().to_string(),
         tool: tool.to_string(),
         tool_call_id: call_id.to_string(),
         duration_ms: 0,
