@@ -16,6 +16,7 @@ pub mod wire;
 
 use async_trait::async_trait;
 use chatgpt::{CHATGPT_RESPONSES_URL, ChatGptTokens, ORIGINATOR};
+use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use horsie_agentcore::{
     AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
@@ -23,7 +24,6 @@ use horsie_agentcore::{
     TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingDialect, ThinkingPart,
     ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
 };
-use reqwest_eventsource::{Event, EventSource};
 use std::{collections::BTreeMap, env, sync::Arc, time::Duration};
 use wire::{FunctionTool, ReasoningControl, ReasoningRef, ResponsesRequest, to_input_items};
 
@@ -666,12 +666,63 @@ impl LlmProvider for ResponsesProvider {
             // A stream that just stops — the connection dropped mid-response —
             // must not be mistaken for a completed turn.
             let mut saw_terminal = false;
-            let mut es = EventSource::new(req).map_err(io_err)?;
 
-            while let Some(ev) = es.next().await {
+            let response = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = LlmError::Network(Box::new(e));
+                    if is_retryable(&err) {
+                        last_error = Some(err);
+                        continue 'retry;
+                    }
+                    return Err(err);
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let code = status.as_u16();
+                // Read before the body: `text()` consumes the response.
+                advised = advised_wait(response.headers());
+                let body_text = response.text().await.unwrap_or_default();
+                let err = classify_status(code, &body_text, advised);
+                // A token can be revoked long before it expires, so an
+                // unexpired-looking credential can still be refused. Refresh
+                // once and try again immediately — waiting out a backoff would
+                // not make a stale token any fresher.
+                if code == 401
+                    && !refreshed_after_401
+                    && !state.emitted_anything
+                    && let Credential::ChatGpt(tokens) = &self.credential
+                {
+                    refreshed_after_401 = true;
+                    skip_backoff = true;
+                    tokens.refresh(now_secs()).await?;
+                    continue 'retry;
+                }
+                // Only retry when nothing has been emitted — re-running a
+                // partially streamed turn would duplicate content the caller
+                // has already seen.
+                if is_retryable(&err) && !state.emitted_anything {
+                    last_error = Some(err);
+                    continue 'retry;
+                }
+                return Err(err);
+            }
+
+            // Parsed straight off the body rather than through
+            // `reqwest_eventsource::EventSource`, which rejects any response
+            // whose `Content-Type` is not `text/event-stream` — and the ChatGPT
+            // Codex backend sends **no `Content-Type` at all** on a perfectly
+            // good 200 SSE stream. That check turned every plan turn into
+            // `network error: Invalid header value: ""` before a single frame
+            // was read. The status is classified above, which is the only other
+            // thing that wrapper was doing for us.
+            let mut stream = response.bytes_stream().eventsource();
+
+            while let Some(ev) = stream.next().await {
                 match ev {
-                    Ok(Event::Open) => {}
-                    Ok(Event::Message(m)) => {
+                    Ok(m) => {
                         if m.data.trim() == "[DONE]" {
                             saw_terminal = true;
                             break;
@@ -694,51 +745,18 @@ impl LlmProvider for ResponsesProvider {
                                 break;
                             }
                             Ok(None) => {}
-                            Err(e) => {
-                                es.close();
-                                return Err(e);
-                            }
+                            Err(e) => return Err(e),
                         }
                     }
-                    Err(reqwest_eventsource::Error::StreamEnded) => break,
-                    Err(reqwest_eventsource::Error::InvalidStatusCode(status, resp)) => {
-                        let code = status.as_u16();
-                        // Read before the body: `text()` consumes the response.
-                        advised = advised_wait(resp.headers());
-                        let body_text = resp.text().await.unwrap_or_default();
-                        let err = classify_status(code, &body_text, advised);
-                        es.close();
-                        // A token can be revoked long before it expires, so an
-                        // unexpired-looking credential can still be refused.
-                        // Refresh once and try again immediately — waiting out a
-                        // backoff would not make a stale token any fresher.
-                        if code == 401
-                            && !refreshed_after_401
-                            && !state.emitted_anything
-                            && let Credential::ChatGpt(tokens) = &self.credential
-                        {
-                            refreshed_after_401 = true;
-                            skip_backoff = true;
-                            tokens.refresh(now_secs()).await?;
-                            continue 'retry;
-                        }
-                        // Only retry when nothing has been emitted — re-running a
-                        // partially streamed turn would duplicate content the
-                        // caller has already seen.
-                        if is_retryable(&err) && !state.emitted_anything {
-                            last_error = Some(err);
-                            continue 'retry;
-                        }
-                        return Err(err);
-                    }
+                    // A malformed or truncated stream. Falls through to the
+                    // no-terminal-frame branch below, which decides whether the
+                    // turn can be retried.
                     Err(e) => {
-                        es.close();
-                        return Err(io_err(e));
+                        last_error = Some(io_err(e));
+                        break;
                     }
                 }
             }
-
-            es.close();
 
             // A stream that ended without its terminal frame is a dropped
             // connection, not an answer. Returning what arrived would journal a
@@ -1138,6 +1156,61 @@ mod tests {
         assert!(!body.store, "store must be false: horsie owns the history");
         assert!(body.stream);
         assert_eq!(body.include, vec!["reasoning.encrypted_content"]);
+    }
+
+    /// The ChatGPT Codex backend answers a streaming request with `200` and
+    /// **no `Content-Type` header at all** (verified against a live plan:
+    /// `server: cloudflare`, `x-codex-*` limit headers, no content type).
+    /// `reqwest_eventsource::EventSource` rejects that before reading a frame,
+    /// which turned every plan turn into `network error: Invalid header value:
+    /// ""`. So the stream is parsed off the body directly.
+    ///
+    /// Served from a raw socket rather than the mock server, because the point
+    /// is a header the mock's `Sse` response cannot be made to omit.
+    #[tokio::test]
+    async fn a_stream_with_no_content_type_is_read_rather_than_rejected() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let body = concat!(
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,",
+                "\"item\":{\"type\":\"message\"}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,",
+                "\"delta\":\"OK\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,",
+                "\"item\":{\"type\":\"message\",\"content\":[{\"text\":\"OK\"}]}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":",
+                "{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            );
+            // Deliberately no `Content-Type`. Body framed by the close, as the
+            // real backend frames it.
+            let head = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+            sock.write_all(head.as_bytes()).await.unwrap();
+            sock.write_all(body.as_bytes()).await.unwrap();
+            sock.shutdown().await.unwrap();
+        });
+
+        let p = ResponsesProvider::with_api_key("k")
+            .unwrap()
+            .with_base_url(format!("http://{addr}"))
+            .with_retry_delay_secs(0);
+        let history = vec![user("hi")];
+
+        let res = p
+            .complete(request(&history), "msg-1", &NullSink::new())
+            .await
+            .expect("a content-type-less SSE stream is still a stream");
+
+        assert!(
+            matches!(&res.parts[0], ContentPart::Text(t) if t.text == "OK"),
+            "got {:?}",
+            res.parts
+        );
     }
 
     /// Verified against the live Codex backend: the same body is a `400
