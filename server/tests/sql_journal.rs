@@ -28,7 +28,7 @@ use horsie_server::db::journal::SqlJournal;
 use horsie_server::db::testing;
 
 async fn journal() -> SqlJournal {
-    SqlJournal::new(testing::db().await)
+    SqlJournal::new(testing::db().await, horsie_server::auth::UserId::new("1"))
 }
 
 fn pid(id: &str) -> PersistenceId {
@@ -113,7 +113,7 @@ async fn compaction_never_renumbers_the_survivors() {
 #[tokio::test]
 async fn numbering_survives_a_restart_after_full_compaction() {
     let db = testing::db().await;
-    let first = SqlJournal::new(db.clone());
+    let first = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
     first
         .persist(&pid("compacted"), &[vec![1], vec![2]])
         .await
@@ -128,7 +128,7 @@ async fn numbering_survives_a_restart_after_full_compaction() {
         .unwrap();
 
     // A new instance over the same database stands in for a restart.
-    let second = SqlJournal::new(db);
+    let second = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
     second.persist(&pid("compacted"), &[vec![3]]).await.unwrap();
     assert_eq!(
         drain(&second, "compacted", 2).await,
@@ -211,7 +211,7 @@ async fn a_fork_continues_numbering_from_the_copied_snapshot() {
 #[tokio::test]
 async fn reading_an_unknown_log_creates_nothing() {
     let db = testing::db().await;
-    let j = SqlJournal::new(db.clone());
+    let j = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
     assert!(drain(&j, "ghost", 0).await.is_empty());
     assert_eq!(j.latest_snapshot(&pid("ghost")).await.unwrap(), None);
     // A read must not have inserted a log row as a side effect.
@@ -235,7 +235,7 @@ async fn payloads_survive_arbitrary_bytes() {
 #[tokio::test]
 async fn clear_removes_events_and_snapshot_together() {
     let db = testing::db().await;
-    let j = SqlJournal::new(db.clone());
+    let j = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
     j.persist(&pid("c"), &[vec![1]]).await.unwrap();
     j.save_snapshot(&pid("c"), vec![7], 1).await.unwrap();
     j.clear(&pid("c")).await.unwrap();
@@ -354,4 +354,33 @@ async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
         15,
         "snapshot (10) plus the one replayed event (5)"
     );
+}
+
+/// Two accounts may run actors with identical persistence ids without seeing
+/// each other's events.
+///
+/// The `(kind, id)` lookup is what binds the scope: with no `log_id` there is
+/// no way to reach the events at all, which is why `journal_events` carries no
+/// `user_id` of its own.
+#[tokio::test]
+async fn identical_persistence_ids_do_not_collide_across_accounts() {
+    let db = testing::db().await;
+    let mine = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
+    let theirs = SqlJournal::new(db, horsie_server::auth::UserId::new("k3m9x0abc7qr"));
+    let pid = PersistenceId::new("session", "same-id");
+
+    mine.persist(&pid, &[b"mine".to_vec()]).await.unwrap();
+    theirs.persist(&pid, &[b"theirs".to_vec()]).await.unwrap();
+
+    async fn read(j: &SqlJournal, pid: &PersistenceId) -> Vec<Vec<u8>> {
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        let mut s = j.replay(pid, 0).await;
+        while let Some(item) = s.next().await {
+            out.push(item.unwrap().1);
+        }
+        out
+    }
+
+    assert_eq!(read(&mine, &pid).await, vec![b"mine".to_vec()]);
+    assert_eq!(read(&theirs, &pid).await, vec![b"theirs".to_vec()]);
 }

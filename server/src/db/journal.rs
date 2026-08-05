@@ -17,6 +17,7 @@
 //! full-replays, wrong for a server that offloads idle actors and re-recovers
 //! them on demand.
 
+use crate::auth::UserId;
 use crate::db::Db;
 use async_trait::async_trait;
 use futures_util::stream::{self, BoxStream, StreamExt};
@@ -59,11 +60,22 @@ pub(crate) fn insert_statement(rows: usize) -> String {
 /// A [`Journal`] over the server's database, on either dialect.
 pub struct SqlJournal {
     db: Db,
+    /// Whose actors this journals.
+    ///
+    /// Only the `journal_logs` statements bind it. `journal_events` and
+    /// `journal_snapshots` are reached exclusively by `log_id`, which comes
+    /// from a scoped lookup here — so there is no way to obtain another
+    /// account's `log_id`, and without one their rows are unreachable. Widening
+    /// `PRIMARY KEY (log_id, seq)` to carry `user_id` would damage the WITHOUT
+    /// ROWID key that makes replay a contiguous range scan, to duplicate a fact
+    /// the parent row already enforces. Both are on the scope audit's
+    /// allowlist for this reason.
+    user: UserId,
 }
 
 impl SqlJournal {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, user: UserId) -> Self {
+        Self { db, user }
     }
 
     /// The `log_id` for `pid`, or `None` when this actor has never persisted.
@@ -71,8 +83,9 @@ impl SqlJournal {
     async fn log_id(&self, pid: &PersistenceId) -> JournalResult<Option<i64>> {
         let sql = self
             .db
-            .q("SELECT log_id FROM journal_logs WHERE kind = ? AND id = ?");
+            .q("SELECT log_id FROM journal_logs WHERE user_id = ? AND kind = ? AND id = ?");
         sqlx::query_scalar(&sql)
+            .bind(self.user.as_str())
             .bind(&pid.kind)
             .bind(&pid.id)
             .fetch_optional(self.db.pool())
@@ -83,21 +96,26 @@ impl SqlJournal {
     /// The `log_id` for `pid`, creating the row if absent. Only writes call this.
     async fn log_id_for_write(
         db: &Db,
+        user: &UserId,
         tx: &mut Transaction<'_, Any>,
         pid: &PersistenceId,
     ) -> JournalResult<i64> {
         // `DO NOTHING` then `SELECT` rather than `RETURNING`: on the conflict
         // path there is no returned row, and the select is an index hit anyway.
-        let insert =
-            db.q("INSERT INTO journal_logs (kind, id) VALUES (?, ?) ON CONFLICT DO NOTHING");
+        let insert = db.q(
+            "INSERT INTO journal_logs (user_id, kind, id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+        );
         sqlx::query(&insert)
+            .bind(user.as_str())
             .bind(&pid.kind)
             .bind(&pid.id)
             .execute(&mut **tx)
             .await
             .map_err(backend)?;
-        let select = db.q("SELECT log_id FROM journal_logs WHERE kind = ? AND id = ?");
+        let select =
+            db.q("SELECT log_id FROM journal_logs WHERE user_id = ? AND kind = ? AND id = ?");
         sqlx::query_scalar(&select)
+            .bind(user.as_str())
             .bind(&pid.kind)
             .bind(&pid.id)
             .fetch_one(&mut **tx)
@@ -128,7 +146,7 @@ impl Journal for SqlJournal {
             return Ok(());
         }
         let mut tx = self.db.begin_write().await.map_err(backend)?;
-        let log_id = Self::log_id_for_write(&self.db, &mut tx, pid).await?;
+        let log_id = Self::log_id_for_write(&self.db, &self.user, &mut tx, pid).await?;
 
         // Allocate the whole batch's numbers in one update, then read the base.
         // The batch is one transaction, so a crash mid-write leaves neither the
@@ -207,7 +225,7 @@ impl Journal for SqlJournal {
         seq_nr: u64,
     ) -> JournalResult<()> {
         let mut tx = self.db.begin_write().await.map_err(backend)?;
-        let log_id = Self::log_id_for_write(&self.db, &mut tx, pid).await?;
+        let log_id = Self::log_id_for_write(&self.db, &self.user, &mut tx, pid).await?;
         // A snapshot may be taken at a sequence this log has not reached when
         // the state came from elsewhere; keep `last_seq` monotonic so later
         // events never reuse a number the snapshot already covers.
@@ -276,8 +294,9 @@ impl Journal for SqlJournal {
         let mut tx = self.db.begin_write().await.map_err(backend)?;
         let select = self.db.q("SELECT s.state, s.seq FROM journal_snapshots s \
              JOIN journal_logs l ON l.log_id = s.log_id \
-             WHERE l.kind = ? AND l.id = ?");
+             WHERE l.user_id = ? AND l.kind = ? AND l.id = ?");
         let src = sqlx::query(&select)
+            .bind(self.user.as_str())
             .bind(&from.kind)
             .bind(&from.id)
             .fetch_optional(&mut *tx)
@@ -289,7 +308,7 @@ impl Journal for SqlJournal {
 
         let state: Vec<u8> = src.try_get("state").map_err(backend)?;
         let seq: i64 = src.try_get("seq").map_err(backend)?;
-        let dst = Self::log_id_for_write(&self.db, &mut tx, to).await?;
+        let dst = Self::log_id_for_write(&self.db, &self.user, &mut tx, to).await?;
         // The destination starts with an empty event log at the source's
         // snapshot sequence, so a fresh actor recovers the copied state and
         // numbers its own first event from there.
@@ -347,6 +366,7 @@ impl Journal for SqlJournal {
                 .await
                 .map_err(backend)?;
         }
+        // By `log_id`, which only a scoped lookup can produce.
         let sql = self.db.q("DELETE FROM journal_logs WHERE log_id = ?");
         sqlx::query(&sql)
             .bind(log_id)

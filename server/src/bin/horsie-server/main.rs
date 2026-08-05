@@ -157,7 +157,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     // `database` starts from an empty log and leaves the old sessions on disk.
     let journal: Arc<dyn Journal> = match journal_backend {
         JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
-        JournalBackend::Database => Arc::new(SqlJournal::new(opened.db.clone())),
+        JournalBackend::Database => Arc::new(SqlJournal::new(opened.db.clone(), user.clone())),
     };
     eprintln!(
         "journal backend: {} ({})",
