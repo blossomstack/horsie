@@ -8,11 +8,13 @@
 //! consequences, and the consequences belong to the call sites.
 
 mod events;
+mod invoke;
 mod process;
 
 pub use events::{
     HookEvent, OutputField, Unsupported, claude_aliases, matcher_applies, matcher_selects,
 };
+pub use invoke::HookInvocation;
 pub use process::{HookOutput, HookReply, Permission, Verdict, process};
 
 use std::path::Path;

@@ -1,0 +1,285 @@
+/// What a plugin hook did, modelled per event.
+///
+/// One struct per event rather than one flat record with optional everything.
+/// The duplication between arms is deliberate: each event's handling is checked
+/// against its own type, and one event gaining a capability cannot silently
+/// widen another. The flat shape this replaces recorded `additionalContext` on
+/// an event that never offered it, and set `blocked` when a hook had merely
+/// failed to run.
+package hooks;
+
+// --- Shared payloads ---
+
+/// What a tool hook guarded. The join key attaching a record to its call.
+struct ToolScope {
+    tool: String,
+    tool_call_id: String,
+}
+
+/// A value a hook replaced. Both halves or neither — never a dangling "before".
+struct HookRewrite {
+    before: String,
+    after: String,
+}
+
+/// The hook never ran to completion: spawn failure, timeout, or a non-zero exit
+/// that is not a refusal. An outage, never a decision.
+struct HookFailed {
+    reason: String,
+}
+
+/// A `PreToolUse` refusal, via `permissionDecision: "deny"` or exit 2.
+struct HookDenied {
+    reason: Option<String>,
+}
+
+/// Every other event's refusal, via top-level `decision: "block"` or exit 2.
+/// For `Stop` this means *blocked from stopping*, which continues the turn.
+struct HookBlocked {
+    reason: Option<String>,
+}
+
+/// The hook ran and may have injected context into the model.
+struct ContextInjected {
+    additional_context: Option<String>,
+}
+
+// --- Tool events ---
+
+/// `PreToolUse` allowed the call, having possibly rewritten its input. Only an
+/// allowed call can be rewritten, which is why the rewrite lives here.
+struct PreToolUseAllowed {
+    input: Option<HookRewrite>,
+}
+
+/// The only event that can refuse a call before it runs, and the only one that
+/// can rewrite its input. No `additionalContext`: the spec does not offer it
+/// here, and there is no result yet to attach it to.
+#[type_tag = "outcome"]
+union PreToolUseOutcome {
+    Allowed(PreToolUseAllowed),
+    Denied(HookDenied),
+    // horsie has no permission prompt and runs unattended sessions, so there
+    // is nobody to ask. Recorded, and treated as allowed.
+    Ask,
+    Defer,
+    // Denies the call: `PreToolUse` fails closed, alone among the events.
+    Failed(HookFailed),
+}
+
+struct PreToolUseRecord {
+    call: ToolScope,
+    system_message: Option<String>,
+    outcome: PreToolUseOutcome,
+}
+
+struct PostToolUseRan {
+    output: Option<HookRewrite>,
+    additional_context: Option<String>,
+}
+
+#[type_tag = "outcome"]
+union PostToolUseOutcome {
+    Ran(PostToolUseRan),
+    // Recorded; the call already ran, so nothing is undone.
+    Blocked(HookBlocked),
+    Failed(HookFailed),
+}
+
+struct PostToolUseRecord {
+    call: ToolScope,
+    system_message: Option<String>,
+    outcome: PostToolUseOutcome,
+}
+
+#[type_tag = "outcome"]
+union PostToolUseFailureOutcome {
+    Ran(ContextInjected),
+    Blocked(HookBlocked),
+    Failed(HookFailed),
+}
+
+struct PostToolUseFailureRecord {
+    call: ToolScope,
+    system_message: Option<String>,
+    outcome: PostToolUseFailureOutcome,
+}
+
+#[type_tag = "outcome"]
+union PostToolBatchOutcome {
+    Ran(ContextInjected),
+    Blocked(HookBlocked),
+    Failed(HookFailed),
+}
+
+/// A whole batch of parallel calls, so it names every call rather than one.
+struct PostToolBatchRecord {
+    calls: Vec<ToolScope>,
+    system_message: Option<String>,
+    outcome: PostToolBatchOutcome,
+}
+
+// --- Turn and session events ---
+
+/// Cannot block: `SessionStart` has no decision field, because by the time it
+/// runs there is nothing to refuse.
+#[type_tag = "outcome"]
+union SessionStartOutcome {
+    Ran(ContextInjected),
+    Failed(HookFailed),
+}
+
+/// `source` is the matcher domain: startup | resume | clear | compact | fork.
+struct SessionStartRecord {
+    source: String,
+    system_message: Option<String>,
+    outcome: SessionStartOutcome,
+}
+
+#[type_tag = "outcome"]
+union UserPromptSubmitOutcome {
+    Ran(ContextInjected),
+    // The prompt is rejected and never reaches the model.
+    Blocked(HookBlocked),
+    Failed(HookFailed),
+}
+
+/// Injects context via raw stdout as well as `additionalContext`.
+struct UserPromptSubmitRecord {
+    system_message: Option<String>,
+    outcome: UserPromptSubmitOutcome,
+}
+
+#[type_tag = "outcome"]
+union StopOutcome {
+    Ran(ContextInjected),
+    // *Blocked from stopping* — the turn continues with `reason` as its input.
+    // This is not a refusal like `PreToolUse`'s; it is the opposite.
+    Blocked(HookBlocked),
+    // Recorded, never fatal: `Stop` runs after the fact, so a guard that could
+    // not run cannot deny anything.
+    Failed(HookFailed),
+    // The continuation cap ended the turn despite a block. Recorded distinctly
+    // so an unattended session that hit the guard says so, rather than looking
+    // like a turn that ended on its own.
+    CapReached(HookBlocked),
+}
+
+struct StopRecord {
+    system_message: Option<String>,
+    outcome: StopOutcome,
+}
+
+#[type_tag = "outcome"]
+union SubagentStartOutcome {
+    Ran(ContextInjected),
+    Failed(HookFailed),
+}
+
+struct SubagentStartRecord {
+    agent_type: String,
+    system_message: Option<String>,
+    outcome: SubagentStartOutcome,
+}
+
+#[type_tag = "outcome"]
+union SubagentStopOutcome {
+    Ran(ContextInjected),
+    Blocked(HookBlocked),
+    Failed(HookFailed),
+}
+
+struct SubagentStopRecord {
+    agent_type: String,
+    system_message: Option<String>,
+    outcome: SubagentStopOutcome,
+}
+
+#[type_tag = "outcome"]
+union TaskOutcome {
+    Ran,
+    Failed(HookFailed),
+}
+
+struct TaskCreatedRecord {
+    task_id: String,
+    system_message: Option<String>,
+    outcome: TaskOutcome,
+}
+
+struct TaskCompletedRecord {
+    task_id: String,
+    system_message: Option<String>,
+    outcome: TaskOutcome,
+}
+
+// --- Side-effect-only events ---
+
+/// These support no JSON output at all — not even `systemMessage` — and cannot
+/// block: exit 2 has no special meaning for them. They can still fail, and
+/// their stderr is still user-facing, which is the whole of what to record.
+#[type_tag = "outcome"]
+union SideEffectOutcome {
+    Ran,
+    Failed(HookFailed),
+}
+
+/// `reason` is the matcher domain: clear | resume | logout | prompt_input_exit | …
+struct SessionEndRecord {
+    reason: String,
+    outcome: SideEffectOutcome,
+}
+
+/// `error` is the matcher domain: rate_limit | overloaded | … | unknown
+struct StopFailureRecord {
+    error: String,
+    outcome: SideEffectOutcome,
+}
+
+struct NotificationRecord {
+    message: String,
+    outcome: SideEffectOutcome,
+}
+
+struct CwdChangedRecord {
+    cwd: String,
+    outcome: SideEffectOutcome,
+}
+
+// --- The envelope ---
+
+/// What one hook did, tagged by the event it ran for.
+///
+/// Named `HookAction` rather than `HookEvent` because
+/// `horsie_support::plugin::hooks::HookEvent` already exists as the name
+/// classifier that powers install-time refusal. Two jobs, two names.
+#[type_tag = "event"]
+union HookAction {
+    PreToolUse(PreToolUseRecord),
+    PostToolUse(PostToolUseRecord),
+    PostToolUseFailure(PostToolUseFailureRecord),
+    PostToolBatch(PostToolBatchRecord),
+    SessionStart(SessionStartRecord),
+    SessionEnd(SessionEndRecord),
+    UserPromptSubmit(UserPromptSubmitRecord),
+    Stop(StopRecord),
+    StopFailure(StopFailureRecord),
+    SubagentStart(SubagentStartRecord),
+    SubagentStop(SubagentStopRecord),
+    TaskCreated(TaskCreatedRecord),
+    TaskCompleted(TaskCompletedRecord),
+    Notification(NotificationRecord),
+    CwdChanged(CwdChangedRecord),
+}
+
+/// One hook's run, as the transcript records it.
+///
+/// `plugin` and `duration_ms` are the only universally true facts: every hook
+/// that ran was declared by a plugin and took time. Everything else is
+/// per-event and lives on the action.
+struct HookRecord {
+    plugin: String,
+    /// Wall-clock, so a hook slowing every tool call is visible.
+    duration_ms: u64,
+    action: HookAction,
+}
