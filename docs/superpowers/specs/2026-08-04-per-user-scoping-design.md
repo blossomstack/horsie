@@ -90,16 +90,19 @@ KEY` today, which must become composite:
 | Change | Tables |
 | --- | --- |
 | Composite PK `(user_id, name)` — 13 | `providers`, `models`, `settings`, `mcp_servers`, `plugins`, `memory_spaces`, `agents`, `routines`, `environments`, `workflows`, `provider_oauth`, `marketplaces`, `model_cards` |
-| Plain `user_id` column — 3 | `memories`, `github_credentials`, `journal_logs` |
+| Rebuilt for a widened `UNIQUE`/`CHECK` — 3 | `memories` (`UNIQUE (space, name)`), `journal_logs` (`UNIQUE (kind, id)`), `github_credentials` (was one row, pinned by `CHECK (id = 1)`) |
 | Already scoped | `auth_tokens`, `auth_device_codes` — both carry `principal` |
 | Scoped through a parent | `journal_events`, `journal_snapshots` — via `journal_logs.log_id` |
 | Identity root, PK retyped | `auth_users` — `id` becomes `TEXT PRIMARY KEY` |
 | Deployment config | `github_app` |
 | Dropped | `vendors` |
 
-**SQLite cannot alter a primary key.** Those thirteen, plus `auth_users`, are
-fourteen create-new / copy / drop / rename rebuilds on the SQLite side, and
-plain `ALTER` on PostgreSQL. The two migration directories must declare
+**SQLite cannot alter a primary key, a UNIQUE constraint, or a CHECK.** Those
+thirteen, the three above, and `auth_users` are **seventeen** create-new / copy
+/ drop / rename rebuilds on the SQLite side, and plain `ALTER` on PostgreSQL.
+The last three were found by dumping a migrated database rather than reading
+the migration files, which is the only way to see a constraint added by a later
+`ALTER`. The two migration directories must declare
 identical versions and descriptions or `migrations_are_in_parity` fails CI
 (`server/src/db/mod.rs`).
 
@@ -301,8 +304,12 @@ the client already knows whose token it is holding.
 
 ## Risks
 
-- **The fourteen table rebuilds** are the most error-prone piece of the work.
+- **The seventeen table rebuilds** are the most error-prone piece of the work.
   Each needs its data preservation asserted by a test, in both dialects.
+- **A rebuild drops that table's indexes with it**, and SQLite gives no warning.
+  PostgreSQL keeps them, because it alters in place — so the two dialects
+  diverge silently. Every index on a rebuilt table has to be recreated, and the
+  fact that it was is worth pinning in a test.
 - **Retyping `auth_users.id`** touches `Principal`, every `to_db`/`from_db`
   round trip, and both principal-bearing auth tables. It is a small change in a
   place where a mistake logs everyone out.
