@@ -24,6 +24,8 @@ import type {
   ListGroupsResponse,
   ListSessionsResponse,
   LoginRequest,
+  InstallOutcome,
+  MarketplaceView,
   McpAuthorizeUrl,
   McpConnectResult,
   McpServerInput,
@@ -492,8 +494,11 @@ export const api = {
     /** All installed skill bundles (metadata only). */
     list: (): Promise<PluginView[]> => request("/plugins"),
 
-    /** Install a bundle from a git repo; may take a few seconds. */
-    install: (body: PluginInstallInput): Promise<PluginView> =>
+    /**
+     * Install a bundle, or register the catalogue the URL turned out to be.
+     * One box: the server classifies what it cloned. May take a few seconds.
+     */
+    install: (body: PluginInstallInput): Promise<InstallOutcome> =>
       request("/plugins", { method: "POST", body: JSON.stringify(body) }),
 
     /** Re-clone a bundle at its ref to pick up upstream changes. */
@@ -511,6 +516,21 @@ export const api = {
 
     remove: (name: string): Promise<void> =>
       request(`/plugins/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  },
+
+  marketplaces: {
+    /** Registered sources, each carrying its cached catalogue. */
+    list: (): Promise<MarketplaceView[]> => request("/marketplaces"),
+
+    /** Re-clone and re-parse a source's index; may take a few seconds. */
+    refresh: (name: string): Promise<MarketplaceView> =>
+      request(`/marketplaces/${encodeURIComponent(name)}/refresh`, {
+        method: "POST",
+      }),
+
+    /** Drop a source. Bundles installed from it stay installed. */
+    remove: (name: string): Promise<void> =>
+      request(`/marketplaces/${encodeURIComponent(name)}`, { method: "DELETE" }),
   },
 
   memory: {

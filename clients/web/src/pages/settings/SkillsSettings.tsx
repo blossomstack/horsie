@@ -1,42 +1,40 @@
-import {
-  Boxes,
-  Download,
-  Loader2,
-  RotateCcw,
-  Trash2,
-  Webhook,
-} from "lucide-react";
+import { Boxes, Download, Loader2, Store } from "lucide-react";
 import { useState } from "react";
 import { ApiRequestError } from "../../api/client";
-import type { PluginView } from "../../api/types";
-import { cn } from "../../lib/cn";
 import {
   useInstallPlugin,
+  useMarketplaces,
   usePlugins,
-  useRemovePlugin,
-  useSetPluginDefault,
-  useUpdatePlugin,
 } from "../../hooks/usePlugins";
 import { TextField, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
+import { BundleRow } from "./skills/BundleRow";
+import { MarketplaceRow } from "./skills/MarketplaceRow";
 
 export function SkillsSettings() {
   const { data: bundles, isLoading, isError } = usePlugins();
+  const { data: marketplaces } = useMarketplaces();
   const install = useInstallPlugin();
 
   const [sourceUrl, setSourceUrl] = useState("");
   const [sourceRef, setSourceRef] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   const submitInstall = async () => {
     const url = sourceUrl.trim();
     if (!url) return;
     try {
-      await install.mutateAsync({
+      const outcome = await install.mutateAsync({
         sourceUrl: url,
         sourceRef: sourceRef.trim() || undefined,
       });
       setSourceUrl("");
       setSourceRef("");
+      // A catalogue is not an error and not a dead end: its row appears below,
+      // already open, so the next click is the one the person came to make.
+      setExpanded(
+        outcome.outcome === "Marketplace" ? outcome.value.name : null,
+      );
     } catch {
       /* surfaced from install.error below */
     }
@@ -57,198 +55,116 @@ export function SkillsSettings() {
       />
 
       <SettingsPane>
+        <section className="panel p-4">
+          <div className="mb-3 flex items-start gap-2">
+            <Download size={15} className="mt-0.5 text-faint" />
+            <div>
+              <h2 className="section-title">Install a skill bundle</h2>
+              <p className="mt-0.5 text-xs text-faint">
+                A bundle, or a marketplace of them — horsie works out which.
+                This can take a few seconds.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-[1fr_auto] gap-3">
+            <TextField
+              label="Git URL"
+              value={sourceUrl}
+              onChange={setSourceUrl}
+              placeholder="https://github.com/owner/skills-bundle"
+            />
+            <TextField
+              label="Ref (optional)"
+              value={sourceRef}
+              onChange={setSourceRef}
+              placeholder="main"
+            />
+          </div>
+
+          {installError && (
+            <div className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+              {installError}
+            </div>
+          )}
+
+          <div className="mt-3 flex justify-end">
+            <button
+              className="key key-go"
+              onClick={submitInstall}
+              disabled={!sourceUrl.trim() || install.isPending}
+            >
+              {install.isPending ? (
+                <Loader2 size={15} className="animate-spin" />
+              ) : (
+                <Download size={15} />
+              )}
+              Install
+            </button>
+          </div>
+        </section>
+
+        {/* Hidden entirely until there is a catalogue to show, so a server with
+            none looks exactly as it did before marketplaces existed. */}
+        {marketplaces && marketplaces.length > 0 && (
           <section className="panel p-4">
             <div className="mb-3 flex items-start gap-2">
-              <Download size={15} className="mt-0.5 text-faint" />
+              <Store size={15} className="mt-0.5 text-faint" />
               <div>
-                <h2 className="section-title">
-                  Install a skill bundle
-                </h2>
+                <h2 className="section-title">Marketplaces</h2>
                 <p className="mt-0.5 text-xs text-faint">
-                  Clone a public git repo of skills. This can take a few seconds.
-                </p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-[1fr_auto] gap-3">
-              <TextField
-                label="Git URL"
-                value={sourceUrl}
-                onChange={setSourceUrl}
-                placeholder="https://github.com/owner/skills-bundle"
-              />
-              <TextField
-                label="Ref (optional)"
-                value={sourceRef}
-                onChange={setSourceRef}
-                placeholder="main"
-              />
-            </div>
-
-            {installError && (
-              <div className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-                {installError}
-              </div>
-            )}
-
-            <div className="mt-3 flex justify-end">
-              <button
-                className="key key-go"
-                onClick={submitInstall}
-                disabled={!sourceUrl.trim() || install.isPending}
-              >
-                {install.isPending ? (
-                  <Loader2 size={15} className="animate-spin" />
-                ) : (
-                  <Download size={15} />
-                )}
-                Install
-              </button>
-            </div>
-          </section>
-
-          <section className="panel p-4">
-            <div className="mb-3 flex items-start gap-2">
-              <Boxes size={15} className="mt-0.5 text-faint" />
-              <div>
-                <h2 className="section-title">
-                  Installed bundles
-                </h2>
-                <p className="mt-0.5 text-xs text-faint">
-                  Toggle a bundle on to pre-select it for new sessions.
+                  Catalogues you have added. Removing one leaves its installed
+                  bundles in place.
                 </p>
               </div>
             </div>
 
             <div className="space-y-2.5">
-              {isLoading && (
-                <p className="py-8 text-center text-sm text-faint">Loading…</p>
-              )}
-              {isError && (
-                <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-                  Couldn’t load bundles. Is <code>horsie serve</code> running?
-                </div>
-              )}
-              {bundles && bundles.length === 0 && (
-                <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
-                  No skill bundles installed yet.
-                </p>
-              )}
-              {bundles?.map((b) => (
-                <BundleRow key={b.name} bundle={b} />
+              {marketplaces.map((m) => (
+                <MarketplaceRow
+                  key={m.name}
+                  marketplace={m}
+                  expanded={expanded === m.name}
+                  onToggle={() =>
+                    setExpanded(expanded === m.name ? null : m.name)
+                  }
+                />
               ))}
             </div>
           </section>
+        )}
+
+        <section className="panel p-4">
+          <div className="mb-3 flex items-start gap-2">
+            <Boxes size={15} className="mt-0.5 text-faint" />
+            <div>
+              <h2 className="section-title">Installed bundles</h2>
+              <p className="mt-0.5 text-xs text-faint">
+                Toggle a bundle on to pre-select it for new sessions.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-2.5">
+            {isLoading && (
+              <p className="py-8 text-center text-sm text-faint">Loading…</p>
+            )}
+            {isError && (
+              <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+                Couldn’t load bundles. Is <code>horsie serve</code> running?
+              </div>
+            )}
+            {bundles && bundles.length === 0 && (
+              <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+                No skill bundles installed yet.
+              </p>
+            )}
+            {bundles?.map((b) => (
+              <BundleRow key={b.name} bundle={b} />
+            ))}
+          </div>
+        </section>
       </SettingsPane>
     </div>
-  );
-}
-
-function BundleRow({ bundle }: { bundle: PluginView }) {
-  const setDefault = useSetPluginDefault();
-  const update = useUpdatePlugin();
-  const remove = useRemovePlugin();
-
-  return (
-    <div
-      className="rounded-[var(--radius-control)] border p-3"
-      style={{ background: "var(--panel-raised)" }}
-    >
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="item-title truncate">
-              {bundle.name}
-            </span>
-            {bundle.version && (
-              <span className="chip !py-0 text-[0.625rem]">{bundle.version}</span>
-            )}
-            {bundle.hasHooks && (
-              <span className="chip !py-0 flex items-center gap-1 text-[0.625rem]">
-                <Webhook size={11} /> hooks
-              </span>
-            )}
-          </div>
-          {bundle.description && (
-            <p className="mt-0.5 text-xs text-dim">{bundle.description}</p>
-          )}
-          <p className="mt-0.5 text-[0.6875rem] text-faint">
-            {bundle.skillCount} skill{bundle.skillCount === 1 ? "" : "s"}
-          </p>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-2">
-          <Toggle
-            label="Default for new sessions"
-            checked={bundle.enabledDefault}
-            disabled={setDefault.isPending}
-            onChange={() =>
-              setDefault.mutate({
-                name: bundle.name,
-                enabledDefault: !bundle.enabledDefault,
-              })
-            }
-          />
-          <button
-            className="key shrink-0 !px-2.5 !py-1.5 text-xs"
-            onClick={() => update.mutate(bundle.name)}
-            disabled={update.isPending}
-          >
-            {update.isPending ? (
-              <Loader2 size={13} className="animate-spin" />
-            ) : (
-              <RotateCcw size={13} />
-            )}
-            Update
-          </button>
-          <button
-            className="key-icon shrink-0 text-faint hover:text-red-ink"
-            onClick={() => {
-              if (confirm(`Delete skill bundle "${bundle.name}"?`))
-                remove.mutate(bundle.name);
-            }}
-            disabled={remove.isPending}
-            aria-label="Delete bundle"
-          >
-            <Trash2 size={15} />
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Toggle({
-  label,
-  checked,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  disabled?: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className={cn(
-        "relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50",
-        checked ? "bg-orange" : "bg-raised",
-      )}
-    >
-      <span
-        className={cn(
-          "absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform",
-          checked ? "translate-x-4" : "translate-x-0.5",
-        )}
-      />
-    </button>
   );
 }
