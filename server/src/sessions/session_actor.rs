@@ -2013,6 +2013,9 @@ fn is_tool_seam(action: &HookAction) -> bool {
         HookAction::SessionStart(_)
         | HookAction::SessionEnd(_)
         | HookAction::UserPromptSubmit(_)
+        // Fired from the pre-run seam like the other server events, so its
+        // records reach this sink and the expansion path both.
+        | HookAction::UserPromptExpansion(_)
         | HookAction::Stop(_)
         | HookAction::StopFailure(_)
         | HookAction::SubagentStart(_)
