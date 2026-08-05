@@ -45,10 +45,20 @@ test("S1: group CRUD and session membership", async ({
       .locator(`[data-session-id="${id}"]`),
   ).toBeVisible();
 
-  // Delete (two-step); the session lands back in Ungrouped.
+  // Collapse and expand from the header row itself, not just the chevron.
+  await page.getByTestId("group-toggle-frontend").click();
+  await expect(
+    page
+      .getByTestId("group-section-frontend")
+      .locator(`[data-session-id="${id}"]`),
+  ).toBeHidden();
+  await page.getByTestId("group-toggle-frontend").click();
+
+  // Delete: the menu arms it, the rail itself confirms it, and the session
+  // lands back in Ungrouped.
   await page.getByTestId("group-menu-button-frontend").click();
   await page.getByTestId("delete-group-item").click();
-  await page.getByTestId("group-menu-button-frontend").click();
+  await expect(page.getByTestId("group-delete-confirm-frontend")).toBeVisible();
   await page.getByTestId("confirm-delete-group-item").click();
   await expect(
     page

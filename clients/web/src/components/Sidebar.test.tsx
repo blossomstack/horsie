@@ -107,6 +107,74 @@ describe("Sidebar groups", () => {
     );
   });
 
+  it("creates a group from the tick, and dismisses the box from the cross", async () => {
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    vi.mocked(api.sessionGroups.create).mockResolvedValue({
+      group: { name: "web" },
+    });
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [] });
+    renderSidebar();
+
+    // Cancel: the box goes away and nothing is created.
+    fireEvent.click(await screen.findByTestId("new-group-button"));
+    fireEvent.click(screen.getByTestId("create-group-cancel"));
+    expect(screen.queryByTestId("group-name-input")).toBeNull();
+    expect(api.sessionGroups.create).not.toHaveBeenCalled();
+
+    // The tick is inert until the name is non-empty.
+    fireEvent.click(screen.getByTestId("new-group-button"));
+    expect(
+      screen.getByTestId<HTMLButtonElement>("create-group-confirm").disabled,
+    ).toBe(true);
+    fireEvent.change(screen.getByTestId("group-name-input"), {
+      target: { value: "web" },
+    });
+    fireEvent.click(screen.getByTestId("create-group-confirm"));
+    await waitFor(() =>
+      expect(api.sessionGroups.create).toHaveBeenCalledWith("web"),
+    );
+    expect(screen.queryByTestId("group-name-input")).toBeNull();
+  });
+
+  it("collapses and expands a group by clicking its header row", async () => {
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({
+      groups: [{ name: "web" }],
+    });
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1", "web")],
+    });
+    renderSidebar();
+    const toggle = await screen.findByTestId("group-toggle-web");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByTestId("group-section-web").textContent).toContain(
+      "session 1",
+    );
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByTestId("group-section-web").textContent).not.toContain(
+      "session 1",
+    );
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("opens the menu without collapsing the group", async () => {
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({
+      groups: [{ name: "web" }],
+    });
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1", "web")],
+    });
+    renderSidebar();
+    fireEvent.click(await screen.findByTestId("group-menu-button-web"));
+    expect(screen.getByTestId("rename-group-item")).toBeDefined();
+    expect(
+      screen.getByTestId("group-toggle-web").getAttribute("aria-expanded"),
+    ).toBe("true");
+  });
+
   it("moves a session to a group from the row menu", async () => {
     vi.mocked(api.sessionGroups.list).mockResolvedValue({
       groups: [{ name: "web" }],
@@ -126,7 +194,7 @@ describe("Sidebar groups", () => {
     );
   });
 
-  it("deletes a group after the two-step confirm", async () => {
+  it("confirms a delete in the header, not behind the menu", async () => {
     vi.mocked(api.sessionGroups.list).mockResolvedValue({
       groups: [{ name: "web" }],
     });
@@ -135,10 +203,28 @@ describe("Sidebar groups", () => {
     renderSidebar();
     fireEvent.click(await screen.findByTestId("group-menu-button-web"));
     fireEvent.click(screen.getByTestId("delete-group-item"));
-    fireEvent.click(await screen.findByTestId("group-menu-button-web"));
+
+    // The prompt is on the rail itself, so the confirm is one click away —
+    // the menu it came from has already closed.
+    const confirm = await screen.findByTestId("group-delete-confirm-web");
+    expect(confirm.textContent).toContain("Its sessions move to Ungrouped");
     fireEvent.click(screen.getByTestId("confirm-delete-group-item"));
     await waitFor(() =>
       expect(api.sessionGroups.remove).toHaveBeenCalledWith("web"),
     );
+  });
+
+  it("backs out of a delete without removing the group", async () => {
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({
+      groups: [{ name: "web" }],
+    });
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [] });
+    renderSidebar();
+    fireEvent.click(await screen.findByTestId("group-menu-button-web"));
+    fireEvent.click(screen.getByTestId("delete-group-item"));
+    fireEvent.click(await screen.findByTestId("cancel-delete-group-item"));
+    expect(screen.queryByTestId("group-delete-confirm-web")).toBeNull();
+    expect(screen.getByTestId("group-toggle-web")).toBeDefined();
+    expect(api.sessionGroups.remove).not.toHaveBeenCalled();
   });
 });
