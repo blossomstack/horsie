@@ -9,6 +9,7 @@ mod service;
 mod store;
 mod throttle;
 mod token;
+mod user;
 
 pub use service::{
     ACCESS_TOKEN_TTL_SECS, ADMIN_USERNAME, AuthDeps, AuthService, DEVICE_CODE_TTL_SECS,
@@ -18,3 +19,4 @@ pub use service::{
 pub use store::{AuthStore, DeviceCodeRow, RawTokenRow, TokenRow, TokenSummary, UserRow};
 pub use throttle::Throttle;
 pub use token::{GeneratedToken, Principal, TokenKind, generate, hash_secret, parse};
+pub use user::UserId;
