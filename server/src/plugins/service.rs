@@ -586,7 +586,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_names_reflect_flag() {
-        let (svc, artifacts, tmp) = service().await;
+        let (svc, _artifacts, tmp) = service().await;
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let url = fixture_repo(&repo);
@@ -607,7 +607,7 @@ mod tests {
     /// rather than erroring or installing something arbitrary.
     #[tokio::test]
     async fn a_catalogue_url_registers_a_marketplace() {
-        let (svc, artifacts, tmp) = service().await;
+        let (svc, _artifacts, tmp) = service().await;
         let url = catalogue(tmp.path(), "market");
 
         let m = expect_source(svc.install(url_input(&url)).await.unwrap());
@@ -625,7 +625,7 @@ mod tests {
     /// CACHED index — no second clone of the marketplace.
     #[tokio::test]
     async fn installing_from_a_marketplace_uses_the_cached_index() {
-        let (svc, artifacts, tmp) = service().await;
+        let (svc, _artifacts, tmp) = service().await;
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
 
@@ -649,7 +649,7 @@ mod tests {
     /// An unknown entry names what is on offer, as the CLI does.
     #[tokio::test]
     async fn an_unknown_entry_names_the_alternatives() {
-        let (svc, artifacts, tmp) = service().await;
+        let (svc, _artifacts, tmp) = service().await;
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
 
@@ -676,7 +676,7 @@ mod tests {
     /// Removing a source is not removing the software.
     #[tokio::test]
     async fn removing_a_marketplace_leaves_its_bundles_installed() {
-        let (svc, artifacts, tmp) = service().await;
+        let (svc, _artifacts, tmp) = service().await;
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
         svc.install(pick("catalogue", "alpha")).await.unwrap();
@@ -690,7 +690,7 @@ mod tests {
     /// "add it again" and "refresh" are the same intent from the user's side.
     #[tokio::test]
     async fn re_pasting_a_registered_marketplace_refreshes_it() {
-        let (svc, artifacts, tmp) = service().await;
+        let (svc, _artifacts, tmp) = service().await;
         let repo = tmp.path().join("market");
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
@@ -719,7 +719,7 @@ mod tests {
     /// a catalogue drops to a single entry.
     #[tokio::test]
     async fn refresh_re_reads_the_index_without_installing() {
-        let (svc, artifacts, tmp) = service().await;
+        let (svc, _artifacts, tmp) = service().await;
         let repo = tmp.path().join("market");
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();
@@ -742,7 +742,7 @@ mod tests {
     /// recorded on installed bundles.
     #[tokio::test]
     async fn a_name_collision_between_two_sources_is_rejected() {
-        let (svc, artifacts, tmp) = service().await;
+        let (svc, _artifacts, tmp) = service().await;
         let first = catalogue(tmp.path(), "one");
         svc.install(url_input(&first)).await.unwrap();
 
@@ -758,7 +758,7 @@ mod tests {
     /// update, so an entry the catalogue has moved is followed.
     #[tokio::test]
     async fn update_re_resolves_a_marketplace_bundle_through_the_index() {
-        let (svc, artifacts, tmp) = service().await;
+        let (svc, _artifacts, tmp) = service().await;
         let repo = tmp.path().join("market");
         let url = catalogue(tmp.path(), "market");
         svc.install(url_input(&url)).await.unwrap();

@@ -337,15 +337,10 @@ pub fn app(state: AppState) -> Router {
 )]
 mod tests {
     use super::*;
-    use crate::runtime_vendor::RuntimeVendorLink;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
-    use crate::sessions::spec::ServerDeps;
-    use crate::sessions::supervisor::SessionSupervisor;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use horsie_models::session_api::{CreateSessionResponse, ListSessionsResponse};
-    use std::collections::HashMap;
     use tower::util::ServiceExt;
 
     fn test_info() -> horsie_models::settings::ServerInfo {

@@ -383,6 +383,66 @@ mod tests {
         ModelCardStore::new(crate::db::testing::db().await, UserId::new("1"))
     }
 
+    /// The marker is what stops a boot-time loop becoming a per-request one:
+    /// seed on first touch, then never again until the seed set itself changes.
+    #[tokio::test]
+    async fn seed_once_seeds_on_first_touch_and_not_again() {
+        let store = test_store().await;
+        let seeds = [input("m1", "One", Some(1000), None)];
+        let marker = seed_marker(&seeds);
+
+        assert_eq!(store.seed_once(&seeds, &marker).await.unwrap(), 1);
+        assert_eq!(store.seed_once(&seeds, &marker).await.unwrap(), 0);
+
+        // An operator deleting a bundled card gets it back only when the seed
+        // set changes — which is the price of not having a shared catalogue.
+        store.delete("m1").await.unwrap();
+        assert_eq!(store.seed_once(&seeds, &marker).await.unwrap(), 0);
+
+        let grown = [
+            input("m1", "One", Some(1000), None),
+            input("m2", "Two", Some(2000), None),
+        ];
+        assert_eq!(
+            store.seed_once(&grown, &seed_marker(&grown)).await.unwrap(),
+            2,
+            "a changed seed set reseeds, and restores what was deleted"
+        );
+    }
+
+    /// A marker derived from the server version would miss an operator editing
+    /// their `--model-cards-seed` file, so it is derived from the set itself.
+    #[test]
+    fn the_marker_follows_the_seed_set_not_the_release() {
+        let one = [input("m1", "One", Some(1000), None)];
+        let renamed = [input("m1", "One Renamed", Some(1000), None)];
+        assert_eq!(seed_marker(&one), seed_marker(&one));
+        assert_ne!(seed_marker(&one), seed_marker(&renamed));
+        assert_ne!(seed_marker(&one), seed_marker(&[]));
+    }
+
+    /// Each account gets its own copy: the catalogue is per-account precisely
+    /// so a member can add a card the operator has not blessed.
+    #[tokio::test]
+    async fn each_account_is_seeded_separately() {
+        let db = crate::db::testing::db().await;
+        let (one, two) = (
+            ModelCardStore::new(db.clone(), UserId::generate()),
+            ModelCardStore::new(db, UserId::generate()),
+        );
+        let seeds = [input("m1", "One", Some(1000), None)];
+        let marker = seed_marker(&seeds);
+
+        assert_eq!(one.seed_once(&seeds, &marker).await.unwrap(), 1);
+        assert_eq!(
+            two.seed_once(&seeds, &marker).await.unwrap(),
+            1,
+            "the second account's marker is its own, and so is its catalogue"
+        );
+        one.delete("m1").await.unwrap();
+        assert_eq!(two.list().await.unwrap().len(), 1);
+    }
+
     fn input(model_id: &str, name: &str, cw: Option<u32>, mt: Option<u32>) -> ModelCardInput {
         ModelCardInput {
             model_id: model_id.into(),

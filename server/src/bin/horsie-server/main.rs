@@ -66,13 +66,39 @@ async fn main() {
 async fn run(cli: Cli) -> Result<(), BootError> {
     let cfg = BootConfig::resolve(cli.config.as_deref())?;
     let config_path = BootConfig::resolve_path(cli.config.as_deref());
+    let db_url_env = std::env::var("HORSIE_DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let state = boot(&cfg, &cli, config_path, db_url_env).await?;
 
+    let listener = tokio::net::TcpListener::bind(&cli.addr)
+        .await
+        .map_err(|e| BootError::Io(format!("bind {}: {e}", cli.addr)))?;
+    println!("horsie server listening on http://{}", cli.addr);
+    if let Some(dir) = state.web_dir.as_ref() {
+        println!("serving web UI from {}", dir.display());
+    }
+    serve(listener, state).await
+}
+
+/// Assemble everything the server serves from, and nothing about serving it.
+///
+/// Split out of [`run`] so a test can bring up the real composition root: the
+/// only two inputs `run` reads from the process itself — the config file and
+/// `$HORSIE_DATABASE_URL` — are parameters here, so a test cannot accidentally
+/// boot against a developer's own deployment.
+async fn boot(
+    cfg: &BootConfig,
+    cli: &Cli,
+    config_path: Option<PathBuf>,
+    db_url_env: Option<String>,
+) -> Result<AppState, BootError> {
     let state_dir = cfg.storage.state_dir.join("server");
     let data_dir = cfg.storage.data_dir.join("server");
     std::fs::create_dir_all(&state_dir).map_err(|e| BootError::Io(e.to_string()))?;
     std::fs::create_dir_all(&data_dir).map_err(|e| BootError::Io(e.to_string()))?;
 
-    let db_url = resolve_db_url(&cfg, &data_dir);
+    let db_url = resolve_db_url(db_url_env, cfg, &data_dir);
     let info = ServerInfo {
         config_path: config_path
             .as_ref()
@@ -99,7 +125,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     let auth = Arc::new(horsie_server::auth::AuthService::new(
         horsie_server::auth::AuthStore::new(db.clone()),
         horsie_server::auth::AuthDeps {
-            enabled: config::auth_enabled(&cfg),
+            enabled: config::auth_enabled(cfg),
             state_dir: state_dir.clone(),
         },
     ));
@@ -170,20 +196,12 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     // the only thing that builds a bundle nobody has made a request for.
     Arc::new(RoutineScheduler::new(shared.db.clone(), users.clone())).spawn();
 
-    let state = AppState {
+    Ok(AppState {
         auth,
         shared,
         users,
-        web_dir: cli.web,
-    };
-    let listener = tokio::net::TcpListener::bind(&cli.addr)
-        .await
-        .map_err(|e| BootError::Io(format!("bind {}: {e}", cli.addr)))?;
-    println!("horsie server listening on http://{}", cli.addr);
-    if let Some(dir) = state.web_dir.as_ref() {
-        println!("serving web UI from {}", dir.display());
-    }
-    serve(listener, state).await
+        web_dir: cli.web.clone(),
+    })
 }
 
 /// Serve until the process ends. Split from [`run`] so a test can hold the
@@ -195,12 +213,10 @@ async fn serve(listener: tokio::net::TcpListener, state: AppState) -> Result<(),
         .map_err(|e| BootError::Io(e.to_string()))
 }
 
-/// `$HORSIE_DATABASE_URL`, else `database.url` from config, else a SQLite
-/// file under the server data dir.
-fn resolve_db_url(cfg: &BootConfig, data_dir: &Path) -> String {
-    if let Ok(v) = std::env::var("HORSIE_DATABASE_URL")
-        && !v.is_empty()
-    {
+/// `$HORSIE_DATABASE_URL` (passed in), else `database.url` from config, else a
+/// SQLite file under the server data dir.
+fn resolve_db_url(env: Option<String>, cfg: &BootConfig, data_dir: &Path) -> String {
+    if let Some(v) = env.filter(|s| !s.is_empty()) {
         return v;
     }
     if let Some(u) = cfg.database.url.as_ref().filter(|s| !s.is_empty()) {
@@ -232,4 +248,133 @@ fn redact_db_url(url: &str) -> String {
         return format!("{scheme}://***@{tail}");
     }
     url.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::util::ServiceExt;
+
+    /// A boot against a throwaway directory, with no config file and no
+    /// `$HORSIE_DATABASE_URL` — so it cannot reach a developer's own database.
+    async fn boot_in(dir: &tempfile::TempDir) -> AppState {
+        let cfg = BootConfig {
+            storage: config::StorageConfig {
+                state_dir: dir.path().join("state"),
+                data_dir: dir.path().join("data"),
+            },
+            database: config::DatabaseConfig::default(),
+            auth: config::AuthConfig { enabled: false },
+        };
+        let cli = Cli {
+            config: None,
+            addr: "127.0.0.1:0".into(),
+            web: None,
+            model_cards_seed: None,
+        };
+        boot(&cfg, &cli, None, None)
+            .await
+            .expect("the server boots")
+    }
+
+    async fn read_json<T: serde::de::DeserializeOwned>(res: axum::response::Response) -> T {
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// The gap that let two boot bugs through #217 with the Rust suite green:
+    /// nothing in the tree ran this function. It asserts the parts that were
+    /// broken then — the server comes up, and the account it bootstrapped can
+    /// see the rows the migrations left for it.
+    #[tokio::test]
+    async fn a_fresh_deployment_boots_and_its_account_owns_its_data() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = boot_in(&dir).await;
+        let app = app(state.clone());
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("health responds");
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // The near-miss in #217: `bootstrap` minted an id the migration's
+        // backfill had not used, so the account came up healthy and empty. The
+        // seeded memory space is the cheapest thing that proves otherwise.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memory-spaces")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("memory spaces respond");
+        assert_eq!(res.status(), StatusCode::OK);
+        let spaces: Vec<horsie_models::memory::MemorySpaceView> = read_json(res).await;
+        assert_eq!(
+            spaces.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["default"],
+            "the bootstrapped account must own what the migrations backfilled"
+        );
+
+        // Seeding moved off the boot path and onto the account's first touch,
+        // so this is also the assertion that the lazy seed actually runs.
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model-cards")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("model cards respond");
+        let cards: Vec<horsie_models::model_cards::ModelCard> = read_json(res).await;
+        assert!(
+            !cards.is_empty(),
+            "the bundled catalogue is seeded on an account's first request"
+        );
+    }
+
+    /// Booting twice over the same directory is what every restart does.
+    #[tokio::test]
+    async fn a_second_boot_over_the_same_data_reuses_the_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = boot_in(&dir).await;
+        let second = boot_in(&dir).await;
+        assert_eq!(
+            first.shared.anonymous, second.shared.anonymous,
+            "a restart must resolve the same account, or it comes up empty"
+        );
+    }
+
+    #[test]
+    fn the_database_url_prefers_the_environment_then_the_file() {
+        let cfg = BootConfig::default();
+        let dir = Path::new("/tmp/horsie-test");
+        assert_eq!(
+            resolve_db_url(Some("postgres://env/db".into()), &cfg, dir),
+            "postgres://env/db"
+        );
+        assert_eq!(
+            resolve_db_url(None, &cfg, dir),
+            "sqlite:///tmp/horsie-test/config.db"
+        );
+        // An empty environment value is absent, not an override.
+        assert_eq!(
+            resolve_db_url(Some(String::new()), &cfg, dir),
+            "sqlite:///tmp/horsie-test/config.db"
+        );
+    }
 }
