@@ -44,6 +44,15 @@ struct ContextInjected {
     additional_context: Option<String>,
 }
 
+/// The hook set `continue: false`, asking horsie to stop after it.
+///
+/// A common field in the spec — any hook on any event may set it, and it takes
+/// precedence over `decision`. `reason` is `stopReason`, which reaches the user
+/// and never the model.
+struct HookHalt {
+    reason: Option<String>,
+}
+
 // --- Tool events ---
 
 /// `PreToolUse` allowed the call, having possibly rewritten its input. Only an
@@ -185,8 +194,12 @@ struct SubagentStartRecord {
 #[type_tag = "outcome"]
 union SubagentStopOutcome {
     Ran(ContextInjected),
+    // *Blocked from stopping*, exactly as `Stop` is: the subagent's turn
+    // continues with `reason` as its input.
     Blocked(HookBlocked),
     Failed(HookFailed),
+    // The continuation cap ended the subagent's turn despite a block.
+    CapReached(HookBlocked),
 }
 
 struct SubagentStopRecord {
@@ -281,5 +294,10 @@ struct HookRecord {
     plugin: String,
     /// Wall-clock, so a hook slowing every tool call is visible.
     duration_ms: u64,
+    /// Set when the hook asked horsie to stop. A common field rather than an
+    /// arm of every outcome union: halting is orthogonal to what the event
+    /// decided, and a hook that allows a call *and* halts the turn is a legal
+    /// reply the union shape could not express.
+    halt: Option<HookHalt>,
     action: HookAction,
 }

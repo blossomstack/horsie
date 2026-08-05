@@ -19,6 +19,7 @@ export * from './sessionStartInput';
 export * from './subagentStartInput';
 export * from './userPromptSubmitInput';
 export * from './stopInput';
+export * from './subagentStopInput';
 export * from './serverHookEvent';
 export * from './runHooksRequest';
 export * from './runHooksResponse';

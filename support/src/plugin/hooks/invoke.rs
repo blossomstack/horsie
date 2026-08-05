@@ -53,6 +53,13 @@ pub enum HookInvocation<'a> {
         /// hook blocked. A cooperative hook returns early rather than looping.
         stop_hook_active: bool,
     },
+    /// A subagent's turn ending. Not a `Stop`: a subagent is not a session, and
+    /// its matcher selects on the agent's type rather than on nothing at all.
+    SubagentStop {
+        agent_type: &'a str,
+        last_assistant_message: Option<&'a str>,
+        stop_hook_active: bool,
+    },
 }
 
 impl HookInvocation<'_> {
@@ -64,6 +71,7 @@ impl HookInvocation<'_> {
             HookInvocation::SubagentStart { .. } => HookEvent::SubagentStart,
             HookInvocation::UserPromptSubmit { .. } => HookEvent::UserPromptSubmit,
             HookInvocation::Stop { .. } => HookEvent::Stop,
+            HookInvocation::SubagentStop { .. } => HookEvent::SubagentStop,
         }
     }
 
@@ -80,7 +88,8 @@ impl HookInvocation<'_> {
                 v
             }
             HookInvocation::SessionStart { source } => vec![*source],
-            HookInvocation::SubagentStart { agent_type } => vec![*agent_type],
+            HookInvocation::SubagentStart { agent_type }
+            | HookInvocation::SubagentStop { agent_type, .. } => vec![*agent_type],
             HookInvocation::UserPromptSubmit { .. } | HookInvocation::Stop { .. } => Vec::new(),
         }
     }
@@ -138,6 +147,16 @@ impl HookInvocation<'_> {
                 "last_assistant_message": last_assistant_message,
                 "stop_hook_active": stop_hook_active,
             }),
+            HookInvocation::SubagentStop {
+                agent_type,
+                last_assistant_message,
+                stop_hook_active,
+            } => json!({
+                "hook_event_name": "SubagentStop",
+                "agent_type": agent_type,
+                "last_assistant_message": last_assistant_message,
+                "stop_hook_active": stop_hook_active,
+            }),
         };
         v.to_string()
     }
@@ -152,6 +171,11 @@ impl HookInvocation<'_> {
         rec::HookRecord {
             plugin: plugin.to_string(),
             duration_ms,
+            // Straight through, on every event: `continue` is a common field,
+            // so unlike the outcome it needs no per-event mapping at all.
+            halt: out.halt.as_ref().map(|h| rec::HookHalt {
+                reason: h.reason.clone(),
+            }),
             action: self.action(out),
         }
     }
@@ -308,6 +332,25 @@ impl HookInvocation<'_> {
                     outcome,
                 })
             }
+            HookInvocation::SubagentStop { agent_type, .. } => {
+                // Same three arms as `Stop`, and `CapReached` narrowed at the
+                // same call site: a subagent is held in its loop by the same
+                // budget the main agent is.
+                let outcome = match &out.verdict {
+                    Verdict::Proceed => rec::SubagentStopOutcome::Ran(ctx()),
+                    Verdict::Block { reason } => {
+                        rec::SubagentStopOutcome::Blocked(rec::HookBlocked {
+                            reason: reason.clone(),
+                        })
+                    }
+                    Verdict::Failed { reason } => rec::SubagentStopOutcome::Failed(failed(reason)),
+                };
+                rec::HookAction::SubagentStop(rec::SubagentStopRecord {
+                    agent_type: (*agent_type).to_string(),
+                    system_message: sys,
+                    outcome,
+                })
+            }
         }
     }
 }
@@ -376,6 +419,80 @@ mod tests {
         let p: Value = serde_json::from_str(&i.payload()).unwrap();
         assert_eq!(p["stop_hook_active"], true);
         assert_eq!(p["last_assistant_message"], "done");
+    }
+
+    /// A subagent's stop is its own event, with the agent's type on the payload
+    /// and as its matcher domain. Fired as `Stop` — which is what happened
+    /// before this arm existed — it would carry neither.
+    #[test]
+    fn subagent_stop_names_the_agent_type_on_the_payload_and_the_matcher() {
+        let i = HookInvocation::SubagentStop {
+            agent_type: "reviewer",
+            last_assistant_message: Some("looks fine"),
+            stop_hook_active: false,
+        };
+        let p: Value = serde_json::from_str(&i.payload()).unwrap();
+        assert_eq!(p["hook_event_name"], "SubagentStop");
+        assert_eq!(p["agent_type"], "reviewer");
+        assert_eq!(p["last_assistant_message"], "looks fine");
+        assert_eq!(i.matcher_subjects(), vec!["reviewer"]);
+    }
+
+    /// A blocking `SubagentStop` records a block, exactly as `Stop` does: it is
+    /// blocked *from stopping*, and the call site continues the subagent.
+    #[test]
+    fn a_blocking_subagent_stop_records_a_block() {
+        let out = HookOutput {
+            verdict: Verdict::Block {
+                reason: Some("no tests were run".into()),
+            },
+            ..Default::default()
+        };
+        let i = HookInvocation::SubagentStop {
+            agent_type: "reviewer",
+            last_assistant_message: None,
+            stop_hook_active: false,
+        };
+        match i.record("p", 1, &out).action {
+            HookAction::SubagentStop(r) => {
+                assert_eq!(r.agent_type, "reviewer");
+                match r.outcome {
+                    horsie_models::hooks::SubagentStopOutcome::Blocked(b) => {
+                        assert_eq!(b.reason.as_deref(), Some("no tests were run"));
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The halt rides the envelope, on every event, unmapped. A record that
+    /// both allowed its call and halted the turn is the case this shape exists
+    /// for.
+    #[test]
+    fn a_halt_is_recorded_beside_the_outcome_not_inside_it() {
+        let out = HookOutput {
+            halt: Some(crate::plugin::hooks::Halt {
+                reason: Some("budget spent".into()),
+            }),
+            ..Default::default()
+        };
+        let input = json!({});
+        let rec = HookInvocation::PreToolUse {
+            tool: "bash",
+            tool_call_id: "t",
+            input: &input,
+        }
+        .record("p", 1, &out);
+        assert_eq!(
+            rec.halt.and_then(|h| h.reason).as_deref(),
+            Some("budget spent")
+        );
+        assert!(matches!(
+            rec.action,
+            HookAction::PreToolUse(r) if matches!(r.outcome, PreToolUseOutcome::Allowed(_))
+        ));
     }
 
     #[test]

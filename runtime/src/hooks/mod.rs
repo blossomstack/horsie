@@ -17,7 +17,8 @@ pub use tool::dispatch_with_hooks;
 
 use horsie_models::hooks::HookRecord;
 use horsie_support::plugin::hooks::{
-    HookDecl, HookEvent, HookInvocation, HookOutput, HookReply, matcher_selects, process,
+    HookDecl, HookEvent, HookInvocation, HookOutput, HookReply, HookTransport, matcher_selects,
+    process,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -62,20 +63,34 @@ pub(crate) async fn run_one(
     hook_path: &[PathBuf],
     invocation: HookInvocation<'_>,
 ) -> (HookOutput, HookRecord) {
-    let command = decl
-        .command
-        .replace("${CLAUDE_PLUGIN_ROOT}", &plugin_root.to_string_lossy());
+    let root = plugin_root.to_string_lossy();
+    let expand = |s: &str| s.replace("${CLAUDE_PLUGIN_ROOT}", &root);
     let timeout = decl.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_secs);
+    let payload = invocation.payload();
 
     let started = Instant::now();
-    let run = crate::plugins::run_hook_raw(
-        plugin_root,
-        &command,
-        hook_path,
-        &invocation.payload(),
-        timeout,
-    )
-    .await;
+    // Both transports produce the same `HookRun`, so everything below — the
+    // reply processor, the record, the clamp — is shared. A hook's transport is
+    // its plumbing, never part of what it decided.
+    let run = match &decl.transport {
+        HookTransport::Command(command) => {
+            crate::plugins::run_hook_raw(
+                plugin_root,
+                &expand(command),
+                hook_path,
+                &payload,
+                timeout,
+            )
+            .await
+        }
+        HookTransport::Http { url, headers } => {
+            let headers: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), expand(v)))
+                .collect();
+            crate::plugins::run_http_hook(&expand(url), &headers, &payload, timeout).await
+        }
+    };
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let out = process(

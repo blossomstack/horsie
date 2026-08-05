@@ -153,6 +153,63 @@ pub(crate) async fn run_hook_raw(
     }
 }
 
+/// POST `payload` to `url` and read the response as a hook's reply.
+///
+/// Mapped onto the same [`HookRun`] a command hook produces, so everything
+/// downstream — the reply processor, the record, the clamp — is shared. The
+/// mapping loses exactly one thing: there is no exit-code channel over HTTP, so
+/// an HTTP hook can only block through `decision` in its body. It is never
+/// reported as exit 2.
+pub(crate) async fn run_http_hook(
+    url: &str,
+    headers: &[(String, String)],
+    payload: &str,
+    timeout: Duration,
+) -> HookRun {
+    let failed = |why: String| {
+        tracing::warn!(url, why, "plugin http hook did not run");
+        HookRun {
+            code: None,
+            stdout: String::new(),
+            stderr: why,
+        }
+    };
+
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
+        Ok(c) => c,
+        Err(e) => return failed(format!("http client: {e}")),
+    };
+    let mut request = client
+        .post(url)
+        .header("content-type", "application/json")
+        .body(payload.to_string());
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let response = match request.send().await {
+        Ok(r) => r,
+        Err(e) => return failed(format!("request failed: {e}")),
+    };
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let body: String = body.chars().take(HOOK_OUTPUT_CLAMP).collect();
+    if status.is_success() {
+        return HookRun {
+            code: Some(0),
+            stdout: body,
+            stderr: String::new(),
+        };
+    }
+    // A non-2xx is an outage, not a refusal: the hook had its chance to refuse
+    // in the body, and a 500 means it never got that far. Exit 1 rather than
+    // exit 2 for exactly that reason.
+    HookRun {
+        code: Some(1),
+        stdout: String::new(),
+        stderr: format!("the hook answered {status}"),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

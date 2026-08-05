@@ -34,6 +34,11 @@ pub async fn run_hooks(registry: &WorkspaceRegistry, event: &ServerHookEvent) ->
             last_assistant_message: i.last_assistant_message.as_deref(),
             stop_hook_active: i.stop_hook_active,
         },
+        ServerHookEvent::SubagentStop(i) => HookInvocation::SubagentStop {
+            agent_type: &i.agent_type,
+            last_assistant_message: i.last_assistant_message.as_deref(),
+            stop_hook_active: i.stop_hook_active,
+        },
     };
     let hook_path = registry.hook_path();
     let subjects = invocation.matcher_subjects();
@@ -176,5 +181,168 @@ mod tests {
             path: work.path().to_path_buf(),
         }]);
         assert!(run_hooks(&registry, &start("startup")).await.is_empty());
+    }
+
+    /// A subagent's stop is its own event on the wire, carrying the agent type
+    /// its matcher selects on.
+    #[tokio::test]
+    async fn a_subagent_stop_hook_matches_on_the_agent_type() {
+        let plugins = TempDir::new().unwrap();
+        plugin(
+            plugins.path(),
+            "reviewer-guard",
+            "SubagentStop",
+            "reviewer",
+            "echo CHECKED",
+        );
+        let e = env(plugins);
+        let event = |agent_type: &str| {
+            ServerHookEvent::SubagentStop(horsie_models::runtime::SubagentStopInput {
+                agent_type: agent_type.to_string(),
+                last_assistant_message: None,
+                stop_hook_active: false,
+            })
+        };
+        assert!(
+            run_hooks(&e.registry, &event("researcher"))
+                .await
+                .is_empty()
+        );
+        let records = run_hooks(&e.registry, &event("reviewer")).await;
+        assert_eq!(records.len(), 1);
+        match &records[0].action {
+            HookAction::SubagentStop(r) => assert_eq!(r.agent_type, "reviewer"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // --- HTTP hooks ---
+    //
+    // Same records, same processing, a different way of getting there. The one
+    // thing the transport changes is that there is no exit code, so an HTTP
+    // hook can block only through its body.
+
+    /// A one-request HTTP server answering `status` with `body`. Hand-rolled
+    /// rather than pulling in a server crate for four tests — the runtime is
+    /// already a `reqwest` client and needs nothing else.
+    async fn one_shot_server(status: &'static str, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+        format!("http://{addr}/hook")
+    }
+
+    fn http_plugin(plugins: &std::path::Path, name: &str, event: &str, url: &str) {
+        let dir = plugins.join(name);
+        std::fs::create_dir_all(dir.join("hooks")).unwrap();
+        std::fs::write(
+            dir.join("hooks/hooks.json"),
+            format!(
+                r#"{{"hooks":{{"{event}":[{{"hooks":[
+                     {{"type":"http","url":"{url}","timeout":5}}]}}]}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_http_hook_records_what_its_body_said() {
+        let url = one_shot_server(
+            "200 OK",
+            r#"{"hookSpecificOutput":{"additionalContext":"FROM THE WEB"}}"#,
+        )
+        .await;
+        let plugins = TempDir::new().unwrap();
+        http_plugin(plugins.path(), "webhook", "SessionStart", &url);
+        let e = env(plugins);
+        let records = run_hooks(&e.registry, &start("startup")).await;
+        assert_eq!(records.len(), 1);
+        match &records[0].action {
+            HookAction::SessionStart(r) => match &r.outcome {
+                SessionStartOutcome::Ran(c) => {
+                    assert_eq!(c.additional_context.as_deref(), Some("FROM THE WEB"));
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An HTTP hook blocks through its body, because there is no exit code to
+    /// carry a 2. A `Stop` that blocks still continues the turn.
+    #[tokio::test]
+    async fn an_http_hook_blocks_through_its_body() {
+        let url = one_shot_server("200 OK", r#"{"decision":"block","reason":"not yet"}"#).await;
+        let plugins = TempDir::new().unwrap();
+        http_plugin(plugins.path(), "webhook", "Stop", &url);
+        let e = env(plugins);
+        let records = run_hooks(
+            &e.registry,
+            &ServerHookEvent::Stop(StopInput {
+                last_assistant_message: None,
+                stop_hook_active: false,
+            }),
+        )
+        .await;
+        match &records[0].action {
+            HookAction::Stop(r) => match &r.outcome {
+                StopOutcome::Blocked(b) => assert_eq!(b.reason.as_deref(), Some("not yet")),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A non-2xx is an outage, never a refusal: the hook had its chance to
+    /// refuse in the body, and a 500 means it never got that far.
+    #[tokio::test]
+    async fn a_failing_status_is_an_outage_not_a_decision() {
+        let url = one_shot_server("500 Internal Server Error", "boom").await;
+        let plugins = TempDir::new().unwrap();
+        http_plugin(plugins.path(), "webhook", "SessionStart", &url);
+        let e = env(plugins);
+        let records = run_hooks(&e.registry, &start("startup")).await;
+        match &records[0].action {
+            HookAction::SessionStart(r) => match &r.outcome {
+                SessionStartOutcome::Failed(f) => assert!(f.reason.contains("500"), "{f:?}"),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Nothing listening is the same outage shape a hook that could not be
+    /// spawned produces.
+    #[tokio::test]
+    async fn an_unreachable_endpoint_is_recorded_as_failed() {
+        let plugins = TempDir::new().unwrap();
+        // Port 1 on loopback: reserved, and nothing binds it.
+        http_plugin(
+            plugins.path(),
+            "webhook",
+            "SessionStart",
+            "http://127.0.0.1:1/hook",
+        );
+        let e = env(plugins);
+        let records = run_hooks(&e.registry, &start("startup")).await;
+        match &records[0].action {
+            HookAction::SessionStart(r) => {
+                assert!(matches!(r.outcome, SessionStartOutcome::Failed(_)));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

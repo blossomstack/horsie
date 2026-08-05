@@ -4,7 +4,7 @@
  */
 export interface PluginView {
   /**
-   * Canonical bundle name (from plugin.json, else the marketplace entry&#x27;s
+   * Canonical bundle name (from plugin.json, else the marketplace entry&#39;s
    */
   name: string;
   description?: string;

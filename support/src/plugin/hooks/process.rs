@@ -43,11 +43,24 @@ pub enum Permission {
     Defer,
 }
 
+/// The hook asked horsie to stop after it — `continue: false`, with
+/// `stopReason` as `reason`.
+///
+/// Carried beside the verdict rather than inside it: halting is not a verdict
+/// about the thing the event guards, it is a request about everything after.
+/// A `PreToolUse` hook may allow its call and still halt the turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Halt {
+    pub reason: Option<String>,
+}
+
 /// Everything one hook said, filtered to what its event may say.
 #[derive(Debug, Clone, Default)]
 pub struct HookOutput {
     pub verdict: Verdict,
     pub permission: Option<Permission>,
+    /// `Some` when the hook set `continue: false`.
+    pub halt: Option<Halt>,
     pub system_message: Option<String>,
     pub additional_context: Option<String>,
     pub updated_input: Option<Value>,
@@ -133,6 +146,19 @@ pub fn process(event: HookEvent, reply: &HookReply) -> HookOutput {
         out.system_message = str_at(json.get("systemMessage"));
     }
 
+    // Read before `decision`, because the spec gives it precedence: a hook that
+    // says both is asking to stop, not merely to block one thing.
+    if take(
+        json.get("continue").and_then(Value::as_bool) == Some(false),
+        OutputField::Halt,
+        "continue",
+        &mut out,
+    ) {
+        out.halt = Some(Halt {
+            reason: str_at(json.get("stopReason")),
+        });
+    }
+
     if take(
         json.get("decision").and_then(Value::as_str) == Some("block"),
         OutputField::Decision,
@@ -212,6 +238,67 @@ mod tests {
             stdout: stdout.to_string(),
             stderr: String::new(),
         }
+    }
+
+    /// `continue: false` is a common field — every event that has JSON output
+    /// at all may set it, including the two that cannot block.
+    #[test]
+    fn continue_false_halts_and_carries_its_reason() {
+        let out = process(
+            HookEvent::SessionStart,
+            &ok(r#"{"continue":false,"stopReason":"the repo is locked"}"#),
+        );
+        assert_eq!(
+            out.halt,
+            Some(Halt {
+                reason: Some("the repo is locked".to_string())
+            })
+        );
+        // Halting is not blocking: `SessionStart` still cannot refuse anything.
+        assert_eq!(out.verdict, Verdict::Proceed);
+        assert!(out.ignored.is_empty());
+    }
+
+    /// A halt with no reason is still a halt. Nothing downstream may treat a
+    /// missing `stopReason` as "it did not really mean it".
+    #[test]
+    fn continue_false_without_a_reason_still_halts() {
+        let out = process(HookEvent::PreToolUse, &ok(r#"{"continue":false}"#));
+        assert_eq!(out.halt, Some(Halt { reason: None }));
+    }
+
+    /// `continue: true` is the default and says nothing.
+    #[test]
+    fn continue_true_is_not_a_halt() {
+        assert!(
+            process(HookEvent::Stop, &ok(r#"{"continue":true}"#))
+                .halt
+                .is_none()
+        );
+    }
+
+    /// A hook may allow its call and still ask horsie to go no further. This is
+    /// the reply shape that made `halt` a field beside the verdict rather than
+    /// an arm inside it.
+    #[test]
+    fn a_pre_tool_use_hook_can_allow_and_halt_at_once() {
+        let out = process(
+            HookEvent::PreToolUse,
+            &ok(r#"{"continue":false,"stopReason":"budget spent",
+                   "hookSpecificOutput":{"permissionDecision":"allow"}}"#),
+        );
+        assert_eq!(out.verdict, Verdict::Proceed);
+        assert!(out.halt.is_some());
+    }
+
+    /// The four side-effect-only events are documented as producing no JSON
+    /// output at all, so a `continue` on one is named as ignored rather than
+    /// quietly obeyed.
+    #[test]
+    fn a_side_effect_event_cannot_halt() {
+        let out = process(HookEvent::Notification, &ok(r#"{"continue":false}"#));
+        assert!(out.halt.is_none());
+        assert_eq!(out.ignored, vec!["continue"]);
     }
 
     #[test]

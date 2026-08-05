@@ -5,6 +5,7 @@ export * from './hookFailed';
 export * from './hookDenied';
 export * from './hookBlocked';
 export * from './contextInjected';
+export * from './hookHalt';
 export * from './preToolUseAllowed';
 export * from './preToolUseOutcome';
 export * from './preToolUseRecord';

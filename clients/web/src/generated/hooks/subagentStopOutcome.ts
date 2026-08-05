@@ -5,4 +5,5 @@ import { HookFailed } from './hookFailed';
 export type SubagentStopOutcome =
   | { outcome: "Ran"; value: ContextInjected }
   | { outcome: "Blocked"; value: HookBlocked }
-  | { outcome: "Failed"; value: HookFailed };
+  | { outcome: "Failed"; value: HookFailed }
+  | { outcome: "CapReached"; value: HookBlocked };

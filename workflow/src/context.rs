@@ -155,7 +155,7 @@ pub trait ContextProvider: Send + Sync {
     ///
     /// Returns the records to journal. Their consequences are read off them by
     /// the caller — the agent translates the context and
-    /// [`crate::prompt_blocked`] reads a refusal — so this never decides
+    /// [`crate::start_blocked`] reads a refusal — so this never decides
     /// anything itself.
     async fn start_hooks(
         &self,

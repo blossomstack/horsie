@@ -1429,7 +1429,7 @@ impl EventSourcedActor for AgentActor {
                 tokio::spawn(async move {
                     let prepared = match provider.start_hooks(turn).await {
                         Ok(records) => PreparedStart {
-                            abandon: crate::prompt_blocked(&records).map(AbandonedStart::Blocked),
+                            abandon: crate::start_blocked(&records).map(AbandonedStart::Blocked),
                             records,
                             results,
                             message,
@@ -2617,6 +2617,7 @@ mod tests {
             HookRecord {
                 plugin: "boot".into(),
                 duration_ms: 1,
+                halt: None,
                 action: HookAction::SessionStart(SessionStartRecord {
                     source: "startup".into(),
                     system_message: None,
@@ -2713,6 +2714,7 @@ mod tests {
                 vec![HookRecord {
                     plugin: "guard".into(),
                     duration_ms: 1,
+                    halt: None,
                     action: HookAction::UserPromptSubmit(UserPromptSubmitRecord {
                         system_message: None,
                         outcome: UserPromptSubmitOutcome::Blocked(HookBlocked {
@@ -2886,6 +2888,7 @@ mod tests {
         horsie_models::hooks::HookRecord {
             plugin: plugin.to_string(),
             duration_ms: 3,
+            halt: None,
             action: horsie_models::hooks::HookAction::PreToolUse(
                 horsie_models::hooks::PreToolUseRecord {
                     call: horsie_models::hooks::ToolScope {
@@ -2956,6 +2959,7 @@ mod tests {
                 record: HookRecord {
                     plugin: "nagger".into(),
                     duration_ms: 1,
+                    halt: None,
                     action: HookAction::Stop(StopRecord {
                         system_message: None,
                         outcome: StopOutcome::Ran(ContextInjected {
@@ -3023,6 +3027,7 @@ mod tests {
         let record = HookRecord {
             plugin: "boot".into(),
             duration_ms: 1,
+            halt: None,
             action: HookAction::SessionStart(SessionStartRecord {
                 source: "startup".into(),
                 system_message: None,

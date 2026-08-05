@@ -153,6 +153,64 @@ describe("hookSummary", () => {
   });
 });
 
+describe("a halted hook", () => {
+  // `continue: false` is a common field, so it is reported alongside whatever
+  // the event itself decided rather than instead of it.
+  it("reports the halt and keeps the outcome", () => {
+    const r: HookRecord = {
+      ...rec({
+        event: "PreToolUse",
+        value: {
+          call: CALL,
+          systemMessage: undefined,
+          outcome: { outcome: "Allowed", value: { input: undefined } },
+        },
+      }),
+      halt: { reason: "out of budget" },
+    };
+    expect(hookSummary(r)).toEqual({
+      text: "stopped horsie — out of budget (allowed)",
+      intervened: true,
+    });
+  });
+
+  it("says so even with no stopReason", () => {
+    const r: HookRecord = {
+      ...rec({
+        event: "Stop",
+        value: {
+          systemMessage: undefined,
+          outcome: { outcome: "Ran", value: { additionalContext: undefined } },
+        },
+      }),
+      halt: { reason: undefined },
+    };
+    expect(hookSummary(r).text).toContain("no reason given");
+    expect(hookSummary(r).intervened).toBe(true);
+  });
+});
+
+// A subagent's stop reads exactly like the session's: blocked *from stopping*.
+// It used to share an arm with the objection-shaped events, so its
+// `CapReached` fell through to the arm below it.
+describe("SubagentStop", () => {
+  it("reads a block as keeping the turn going, and a cap as the limit", () => {
+    const outcome = (o: string) =>
+      rec({
+        event: "SubagentStop",
+        value: {
+          agentType: "reviewer",
+          systemMessage: undefined,
+          outcome: { outcome: o, value: { reason: "no tests were run" } },
+        },
+      } as HookRecord["action"]);
+    expect(hookSummary(outcome("Blocked")).text).toContain("kept the turn going");
+    expect(hookSummary(outcome("CapReached")).text).toContain(
+      "continuation limit",
+    );
+  });
+});
+
 describe("systemMessage", () => {
   // The field that has been parsed, stored, put on the wire and read by nobody
   // since #140.
