@@ -11,8 +11,12 @@ const SKILLS_GLOB: &str = ".claude/skills/*/SKILL.md";
 /// Reserved workspace name addressing the shared plugin library.
 pub const SHARED_WORKSPACE: &str = "horsie_shared";
 
-/// The shared plugin library surfaced to an opted-in agent: its skills plus the
-/// `SessionStart` bootstrap context, as of the spawn-time scan.
+/// The shared plugin library surfaced to an opted-in agent: its skills, as of
+/// the spawn-time scan.
+///
+/// `SessionStart` context used to ride along here on its way into the system
+/// prompt. It is a hook record now, translated into a message at its place in
+/// the transcript, so the library carries only what it actually holds.
 #[derive(Clone, Default)]
 pub struct SharedContext {
     pub skills: Arc<SkillSet>,
@@ -21,7 +25,6 @@ pub struct SharedContext {
     /// with the ordinary filesystem tools — the library is not a workspace, so an
     /// absolute path is its only handle.
     pub root: Option<String>,
-    pub bootstrap: Option<String>,
 }
 
 /// The shared plugin library as scanned: its skills and its absolute root. The
@@ -34,7 +37,7 @@ pub struct SharedScan {
 
 impl SharedContext {
     pub fn is_empty(&self) -> bool {
-        self.skills.is_empty() && self.bootstrap.is_none()
+        self.skills.is_empty()
     }
 }
 
@@ -282,22 +285,16 @@ fn unquote(s: &str) -> &str {
     }
 }
 
-/// Compose the agent's effective system prompt: the `SessionStart` bootstrap (if any)
-/// first, then its own prompt (role), the workspace instructions/skills, and finally
-/// the shared-skills listing. Sections are omitted when empty; returns `None` if
-/// nothing at all would be emitted.
+/// Compose the agent's effective system prompt: the agent's own prompt (role),
+/// the workspace instructions/skills, and finally the shared-skills listing.
+/// Sections are omitted when empty; returns `None` if nothing at all would be
+/// emitted.
 pub fn compose_system_prompt(
     agent_prompt: Option<&str>,
     ws: &WorkspaceContext,
     shared: Option<&SharedContext>,
 ) -> Option<String> {
     let mut sections: Vec<String> = Vec::new();
-    if let Some(s) = shared
-        && let Some(boot) = &s.bootstrap
-        && !boot.trim().is_empty()
-    {
-        sections.push(format!("# Session bootstrap\n{}", boot.trim()));
-    }
     if let Some(p) = agent_prompt
         && !p.trim().is_empty()
     {
@@ -766,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_prepends_bootstrap_and_appends_shared_skills() {
+    fn compose_orders_the_role_before_the_shared_skills() {
         let ctx = WorkspaceContext::default();
         let scan = interpret_shared(
             vec![plugin_skill("tdd", "sp/skills/tdd", "write tests first")],
@@ -775,14 +772,15 @@ mod tests {
         let shared = SharedContext {
             skills: Arc::new(scan.skills),
             root: scan.root,
-            bootstrap: Some("USE SKILLS".into()),
         };
         let prompt = compose_system_prompt(Some("You are a coder."), &ctx, Some(&shared)).unwrap();
-        let boot = prompt.find("# Session bootstrap").unwrap();
         let role = prompt.find("You are a coder.").unwrap();
         let shared_hdr = prompt.find("# Shared skills").unwrap();
-        assert!(boot < role && role < shared_hdr);
-        assert!(prompt.contains("USE SKILLS"));
+        assert!(role < shared_hdr);
+        // `SessionStart` context used to be prepended here as a "# Session
+        // bootstrap" section. It is a translated hook record now, so the system
+        // prompt has nothing to say about it.
+        assert!(!prompt.contains("# Session bootstrap"));
         assert!(prompt.contains("workspace=\"horsie_shared\""));
         // The header names the library root, so the per-skill path can be relative.
         assert!(

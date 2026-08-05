@@ -92,6 +92,21 @@ impl RuntimeClient {
         self
     }
 
+    /// The same handle with its hook sink detached, for a caller that journals
+    /// the records itself.
+    ///
+    /// The one caller is the agent's pre-run seam: its records must be folded
+    /// into state *before* the turn reads its prompt, so they travel back on the
+    /// return value and go through the agent's own mailbox. Left on the sink,
+    /// they would take the longer agent → session → agent route and could land
+    /// after the turn they are supposed to precede — as well as being journaled
+    /// twice.
+    #[must_use]
+    pub fn without_hook_sink(mut self) -> Self {
+        self.hook_sink = None;
+        self
+    }
+
     /// A handle onto the same runtime acting for a different agent.
     ///
     /// The seam subagents use: a subagent sharing its parent's runtime derives
@@ -242,54 +257,6 @@ impl RuntimeClient {
         }
         Ok(records)
     }
-}
-
-/// The context these records inject, concatenated in the order the hooks ran.
-///
-/// Derived rather than carried: a record already says what its hook injected, so
-/// a separate `context: String` beside them could only ever disagree with it.
-#[must_use]
-pub fn injected_context(records: &[HookRecord]) -> Option<String> {
-    use horsie_models::hooks::{
-        HookAction, SessionStartOutcome, StopOutcome, UserPromptSubmitOutcome,
-    };
-    let sections: Vec<&str> = records
-        .iter()
-        .filter_map(|r| match &r.action {
-            HookAction::SessionStart(s) => match &s.outcome {
-                SessionStartOutcome::Ran(c) => c.additional_context.as_deref(),
-                SessionStartOutcome::Failed(_) => None,
-            },
-            HookAction::UserPromptSubmit(u) => match &u.outcome {
-                UserPromptSubmitOutcome::Ran(c) => c.additional_context.as_deref(),
-                UserPromptSubmitOutcome::Blocked(_) | UserPromptSubmitOutcome::Failed(_) => None,
-            },
-            HookAction::Stop(s) => match &s.outcome {
-                StopOutcome::Ran(c) => c.additional_context.as_deref(),
-                StopOutcome::Blocked(_) | StopOutcome::Failed(_) | StopOutcome::CapReached(_) => {
-                    None
-                }
-            },
-            // Listed rather than `_`, so promoting an event that injects context
-            // cannot silently drop it here — the same silent-widening bug the
-            // record reshape exists to close.
-            HookAction::PreToolUse(_)
-            | HookAction::PostToolUse(_)
-            | HookAction::PostToolUseFailure(_)
-            | HookAction::PostToolBatch(_)
-            | HookAction::SessionEnd(_)
-            | HookAction::StopFailure(_)
-            | HookAction::SubagentStart(_)
-            | HookAction::SubagentStop(_)
-            | HookAction::TaskCreated(_)
-            | HookAction::TaskCompleted(_)
-            | HookAction::Notification(_)
-            | HookAction::CwdChanged(_) => None,
-        })
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 #[cfg(test)]

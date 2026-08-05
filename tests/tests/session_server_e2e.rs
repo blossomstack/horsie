@@ -656,8 +656,16 @@ async fn create_message_sse_roundtrip() {
     wait_status(&client, &server.addr, &id, "Idle").await;
     assert_eq!(
         agent.signals(),
-        vec![format!("create:{id}"), format!("get:{id}")],
-        "one create at session creation, then a get for the turn that ran"
+        vec![
+            format!("create:{id}"),
+            format!("get:{id}"),
+            format!("get:{id}")
+        ],
+        "one create at session creation, then two gets for the first turn: the \
+         pre-run hook seam needs a runtime before the turn snapshots its \
+         history, and `provide` still resolves one of its own so a hibernated \
+         runtime is resumed on every run. Later turns reuse the cached handle \
+         and cost one apiece. `get` never provisions."
     );
 
     server.shutdown().await;
@@ -1688,8 +1696,13 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     let after_turn = agent.signals();
     assert_eq!(
         after_turn,
-        vec![format!("create:{id}"), format!("get:{id}")],
-        "one create at session creation, one get for the turn that ran"
+        vec![
+            format!("create:{id}"),
+            format!("get:{id}"),
+            format!("get:{id}")
+        ],
+        "one create at session creation, two gets for the first turn — the hook \
+         seam resolves one before the snapshot, `provide` one for the run"
     );
 
     // Read it every way a client can, repeatedly.

@@ -29,12 +29,14 @@ use horsie_models::agent::ToolResultInput;
 use horsie_models::hooks::HookRecord;
 use horsie_models::hooks::{HookAction, StopOutcome};
 use horsie_models::now_ms;
-use horsie_models::runtime::{ServerHookEvent, SessionStartInput, StopInput};
+use horsie_models::runtime::{
+    ServerHookEvent, SessionStartInput, StopInput, SubagentStartInput, UserPromptSubmitInput,
+};
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
     AgentRunDef, AgentRuntimeContext, AgentUsageSnapshot, ContextError, ContextProvider, Contexts,
-    DefaultToolboxFactory, HistoryQuery, SharedContext, ToolboxFactory, UsageTotal,
+    DefaultToolboxFactory, HistoryQuery, SharedContext, StartTurn, ToolboxFactory, UsageTotal,
     compose_system_prompt, scan_workspace,
 };
 use serde::{Deserialize, Serialize};
@@ -2037,10 +2039,86 @@ impl SessionContextProvider {
     fn use_plugins(&self) -> bool {
         self.settings.use_plugins.unwrap_or(true)
     }
+
+    /// Acquire this agent's runtime handle, scoped to it. Sink-less: `provide`
+    /// attaches one for the tool hooks that report themselves mid-call, while
+    /// `start_hooks` returns its records to the agent, which journals them
+    /// itself. A sink there would both duplicate them and race the turn they
+    /// must precede.
+    async fn runtime_client(&self) -> Result<RuntimeClient, ContextError> {
+        let client = self.runtimes.get().await.map_err(|e| match e {
+            // The one failure the session can never retry: the vendor is alive
+            // and says the runtime is gone. A vendor that is merely offline
+            // (`Unavailable`) says nothing about the runtime's existence.
+            RuntimeError::Gone(m) => ContextError::terminal(m),
+            other @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_)) => {
+                ContextError::retryable(other.to_string())
+            }
+        })?;
+        Ok(scoped_client(&self.kind, client))
+    }
+
+    /// The `agent_type` a `SubagentStart` hook matches on.
+    ///
+    /// One value for every subagent, because horsie has no agent-*type* concept
+    /// yet — plugin-declared agents are #105's Phase 2. Reporting the model name
+    /// here instead would be worse than reporting nothing useful: a hook
+    /// matching on it would be matching on a lie.
+    fn agent_type(&self) -> String {
+        "subagent".to_string()
+    }
 }
 
 #[async_trait]
 impl ContextProvider for SessionContextProvider {
+    fn has_start_hooks(&self) -> bool {
+        self.use_plugins()
+    }
+
+    /// Fire this turn's start hooks, before the run snapshots its history.
+    ///
+    /// A hook that cannot run is not a turn that cannot start: `run_hooks`
+    /// failures fall back to no records, exactly as the `SessionStart` bootstrap
+    /// did. Acquiring the runtime is the only step that can fail the turn, and
+    /// it fails it the same way `provide` would have, one step later.
+    async fn start_hooks(&self, turn: StartTurn) -> Result<Vec<HookRecord>, ContextError> {
+        // Reuse the handle the last run resolved when there is one, so a warm
+        // agent pays one vendor round-trip per turn rather than two. Only the
+        // first turn of a load has nothing cached — and that is the turn whose
+        // hooks could not have run any earlier anyway.
+        let client = match self.cached_client() {
+            Some(cached) => cached.without_hook_sink(),
+            None => self.runtime_client().await?,
+        };
+        let mut records = Vec::new();
+        if let Some(source) = turn.start_source {
+            // A subagent's start is a `SubagentStart`. It used to be a
+            // `SessionStart`, because this call was not gated on the kind at
+            // all — a subagent is not a session, and the two events carry
+            // different matcher domains.
+            let event = match self.kind {
+                SessionAgentKind::Sub(_) => ServerHookEvent::SubagentStart(SubagentStartInput {
+                    agent_type: self.agent_type(),
+                }),
+                SessionAgentKind::Main | SessionAgentKind::Step(_) => {
+                    ServerHookEvent::SessionStart(SessionStartInput { source })
+                }
+            };
+            records.extend(client.run_hooks(event).await.unwrap_or_default());
+        }
+        if let Some(prompt) = turn.prompt {
+            records.extend(
+                client
+                    .run_hooks(ServerHookEvent::UserPromptSubmit(UserPromptSubmitInput {
+                        prompt,
+                    }))
+                    .await
+                    .unwrap_or_default(),
+            );
+        }
+        Ok(records)
+    }
+
     async fn provide(&self) -> Result<Contexts, ContextError> {
         let settings = &self.settings;
         let provider = self.llm_provider()?;
@@ -2055,16 +2133,7 @@ impl ContextProvider for SessionContextProvider {
         if broadcast {
             emit_progress(&self.frames, "acquiring_runtime", None);
         }
-        let runtime_client = self.runtimes.get().await.map_err(|e| match e {
-            // The one failure the session can never retry: the vendor is alive
-            // and says the runtime is gone. A vendor that is merely offline
-            // (`Unavailable`) says nothing about the runtime's existence.
-            RuntimeError::Gone(m) => ContextError::terminal(m),
-            other @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_)) => {
-                ContextError::retryable(other.to_string())
-            }
-        })?;
-        let runtime_client = scoped_client(&self.kind, runtime_client);
+        let runtime_client = self.runtime_client().await?;
         // Hooks run runtime-side and report what they did on the tool response.
         // Routing those records here is what makes a plugin's interventions
         // visible to the user rather than silent.
@@ -2085,26 +2154,15 @@ impl ContextProvider for SessionContextProvider {
             emit_progress(&self.frames, "scanning_workspace", None);
         }
         let (ws, shared_scan) = scan_workspace(&runtime_client, None, use_plugins).await;
-        let shared = if use_plugins {
-            // The records reach the transcript through the client's own hook
-            // sink, exactly as a tool hook's do. All that is derived here is the
-            // context, which the system prompt needs.
-            let bootstrap = runtime_client
-                .run_hooks(ServerHookEvent::SessionStart(SessionStartInput {
-                    source: "startup".to_string(),
-                }))
-                .await
-                .ok()
-                .as_deref()
-                .and_then(horsie_runtime_client::injected_context);
-            Some(SharedContext {
-                skills: Arc::new(shared_scan.skills),
-                root: shared_scan.root,
-                bootstrap,
-            })
-        } else {
-            None
-        };
+        // No `SessionStart` here any more. It used to fire on this line, once
+        // per *run* — `provide` is per-run — so every turn re-ran every start
+        // hook, always reporting `source: "startup"`. It now fires once per
+        // agent load at `start_hooks`, early enough for its context to reach the
+        // turn that triggered it.
+        let shared = use_plugins.then(|| SharedContext {
+            skills: Arc::new(shared_scan.skills),
+            root: shared_scan.root,
+        });
         let mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
             Vec::new()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
@@ -4614,11 +4672,61 @@ mod tests {
         ))]
     }
 
+    /// An `EchoProvider` that also keeps every text part it was prompted with,
+    /// so a test can assert on what the model was actually told rather than on
+    /// what the transcript would translate to.
+    #[derive(Default)]
+    struct PromptRecorder(Arc<Mutex<Vec<String>>>);
+
+    #[async_trait]
+    impl LlmProvider for PromptRecorder {
+        fn model_id(&self) -> &str {
+            "mock"
+        }
+        async fn complete(
+            &self,
+            request: horsie_agentcore::CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn horsie_agentcore::EventSink,
+        ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+            let mut seen = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            for m in request.messages {
+                for p in &m.parts {
+                    if let horsie_agentcore::ContentPart::Text(t) = p {
+                        seen.push(t.text.clone());
+                    }
+                }
+            }
+            drop(seen);
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::Text(
+                    horsie_agentcore::TextPart {
+                        text: "done".to_string(),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::EndTurn,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        }
+    }
+
     /// A session whose runtime answers every `RunHooks` from `records`, with an
     /// LLM that concludes on the first call.
     async fn stop_harness(
         records: Vec<Vec<HookRecord>>,
     ) -> (ActorFixture, ActorRef<SessionCommand>) {
+        let (f, session, _) = stop_harness_with_prompts(records).await;
+        (f, session)
+    }
+
+    /// The same harness, also handing back every prompt the model was sent.
+    async fn stop_harness_with_prompts(
+        records: Vec<Vec<HookRecord>>,
+    ) -> (
+        ActorFixture,
+        ActorRef<SessionCommand>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
         let tmp = tempfile::tempdir().unwrap();
         let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
             .hook_records(records)
@@ -4649,9 +4757,10 @@ mod tests {
             .create(&id.to_string(), "mock", &actor_spec_fixture())
             .await
             .expect("create");
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
         f.deps.provider_registry.write().unwrap().insert(
             "mock".to_string(),
-            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+            Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>,
         );
         let session = horsie_actor::spawn_root(
             SessionActor::new(
@@ -4663,7 +4772,7 @@ mod tests {
             ),
             Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
         );
-        (f, session)
+        (f, session, prompts)
     }
 
     /// Every user-role message in the main agent's transcript, in order — which
@@ -4831,6 +4940,103 @@ mod tests {
         send(&session, "go").await;
         settled_inputs(&session).await;
         assert_eq!(stop_outcomes(&session).await.len(), 1);
+    }
+
+    /// The bug this change exists to close, end to end.
+    ///
+    /// `injected_context` knew how to pull `additionalContext` off a `Stop`
+    /// record and had exactly one caller — the `SessionStart` bootstrap — so a
+    /// `Stop` hook's context was recorded, rendered in the web UI, and never
+    /// shown to the model. It reaches the next turn's prompt now because
+    /// `prompt_messages` translates the record where it sits.
+    #[tokio::test]
+    async fn a_stop_hooks_context_reaches_the_next_prompt() {
+        let (_f, session, prompts) = stop_harness_with_prompts(vec![vec![stop_record(
+            StopOutcome::Ran(horsie_models::hooks::ContextInjected {
+                additional_context: Some("run the linter before you finish".into()),
+            }),
+        )]])
+        .await;
+        send(&session, "first").await;
+        settled_inputs(&session).await;
+        assert_eq!(stop_outcomes(&session).await.len(), 1);
+
+        // The hook ran when the first turn ended, so the second turn is the
+        // first prompt that can carry it.
+        send(&session, "second").await;
+        settled_inputs(&session).await;
+
+        let seen = prompts.lock().unwrap().clone();
+        assert!(
+            seen.iter()
+                .any(|t| t.contains("run the linter before you finish")),
+            "the Stop hook's context must reach the model, got {seen:?}"
+        );
+    }
+
+    // --- Start hooks, and which event a turn actually fires ---
+    //
+    // Deciding *which* event fires, and how often, is this layer's job: the
+    // agent only says "a start is due, on this source" and "here is the prompt".
+    // The prompt those records reach is `hook_translation`'s job, tested there.
+
+    /// `SessionStart` used to fire from `provide()`, which is per-run — so every
+    /// turn re-ran every start hook, always reporting `source: "startup"`. It
+    /// fires once per agent load now; `UserPromptSubmit` is the one that belongs
+    /// to every turn.
+    #[tokio::test]
+    async fn a_session_starts_once_but_every_prompt_is_hooked() {
+        let (f, session) = stop_harness(vec![]).await;
+        send(&session, "first").await;
+        settled_inputs(&session).await;
+        send(&session, "second").await;
+        settled_inputs(&session).await;
+
+        let starts = f
+            .agent
+            .hook_events()
+            .into_iter()
+            .filter(|e| *e == "SessionStart")
+            .count();
+        let prompts = f
+            .agent
+            .hook_events()
+            .into_iter()
+            .filter(|e| *e == "UserPromptSubmit")
+            .count();
+        assert_eq!(starts, 1, "the start hook is due once per agent load");
+        assert_eq!(prompts, 2, "the prompt hook is due every turn");
+    }
+
+    /// A subagent is not a session. The call fired `SessionStart` for one before
+    /// this, because it was not gated on the agent's kind at all — so a hook
+    /// matching `startup` fired again for every subagent spawned.
+    #[tokio::test]
+    async fn a_subagent_fires_subagent_start_never_session_start() {
+        let (f, session) = stop_harness(vec![]).await;
+        spawn_sub(&session, "research", "dig into it").await;
+        for _ in 0..200 {
+            if f.agent.hook_events().contains(&"SubagentStart") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The main agent runs a turn of its own once the subagent reports back,
+        // so one `SessionStart` is correct here. What must never happen is the
+        // subagent contributing a second one — which is what it did before,
+        // because the call was not gated on the agent's kind.
+        let events = f.agent.hook_events();
+        assert_eq!(
+            events.iter().filter(|e| **e == "SubagentStart").count(),
+            1,
+            "the subagent starts as a subagent, got {events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|e| **e == "SessionStart").count(),
+            1,
+            "only the session's own agent may claim a session start, got {events:?}"
+        );
     }
 
     /// A hook guards one agent's call, so its record belongs in that agent's

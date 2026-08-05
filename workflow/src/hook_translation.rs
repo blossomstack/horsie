@@ -129,13 +129,32 @@ pub fn prompt_blocked(records: &[HookRecord]) -> Option<String> {
             ),
             UserPromptSubmitOutcome::Ran(_) | UserPromptSubmitOutcome::Failed(_) => None,
         },
-        // A single-event question, unlike `translate`: every other action is
-        // simply not a `UserPromptSubmit` verdict.
-        _ => None,
+        // Listed rather than `_`, so an event that gains the power to refuse a
+        // turn cannot be silently ignored here.
+        HookAction::PreToolUse(_)
+        | HookAction::PostToolUse(_)
+        | HookAction::PostToolUseFailure(_)
+        | HookAction::PostToolBatch(_)
+        | HookAction::SessionStart(_)
+        | HookAction::SessionEnd(_)
+        | HookAction::Stop(_)
+        | HookAction::StopFailure(_)
+        | HookAction::SubagentStart(_)
+        | HookAction::SubagentStop(_)
+        | HookAction::TaskCreated(_)
+        | HookAction::TaskCompleted(_)
+        | HookAction::Notification(_)
+        | HookAction::CwdChanged(_) => None,
     })
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::*;
     use horsie_models::hooks::{

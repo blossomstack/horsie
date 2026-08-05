@@ -38,6 +38,12 @@ pub enum HookInvocation<'a> {
     SessionStart {
         source: &'a str,
     },
+    /// A subagent's start. Not a `SessionStart` with a different subject: a
+    /// subagent is not a session, and the two events carry different matcher
+    /// domains — `source` for one, the agent's type for the other.
+    SubagentStart {
+        agent_type: &'a str,
+    },
     UserPromptSubmit {
         prompt: &'a str,
     },
@@ -55,6 +61,7 @@ impl HookInvocation<'_> {
             HookInvocation::PreToolUse { .. } => HookEvent::PreToolUse,
             HookInvocation::PostToolUse { .. } => HookEvent::PostToolUse,
             HookInvocation::SessionStart { .. } => HookEvent::SessionStart,
+            HookInvocation::SubagentStart { .. } => HookEvent::SubagentStart,
             HookInvocation::UserPromptSubmit { .. } => HookEvent::UserPromptSubmit,
             HookInvocation::Stop { .. } => HookEvent::Stop,
         }
@@ -73,6 +80,7 @@ impl HookInvocation<'_> {
                 v
             }
             HookInvocation::SessionStart { source } => vec![*source],
+            HookInvocation::SubagentStart { agent_type } => vec![*agent_type],
             HookInvocation::UserPromptSubmit { .. } | HookInvocation::Stop { .. } => Vec::new(),
         }
     }
@@ -113,6 +121,10 @@ impl HookInvocation<'_> {
             HookInvocation::SessionStart { source } => json!({
                 "hook_event_name": "SessionStart",
                 "source": source,
+            }),
+            HookInvocation::SubagentStart { agent_type } => json!({
+                "hook_event_name": "SubagentStart",
+                "agent_type": agent_type,
             }),
             HookInvocation::UserPromptSubmit { prompt } => json!({
                 "hook_event_name": "UserPromptSubmit",
@@ -242,6 +254,24 @@ impl HookInvocation<'_> {
                 };
                 rec::HookAction::SessionStart(rec::SessionStartRecord {
                     source: (*source).to_string(),
+                    system_message: sys,
+                    outcome,
+                })
+            }
+            HookInvocation::SubagentStart { agent_type } => {
+                // Cannot block, exactly like `SessionStart`: by the time it runs
+                // the subagent exists, so there is nothing left to refuse.
+                let outcome = match &out.verdict {
+                    Verdict::Proceed => rec::SubagentStartOutcome::Ran(ctx()),
+                    Verdict::Block { reason } => rec::SubagentStartOutcome::Failed(failed(
+                        reason
+                            .as_deref()
+                            .unwrap_or("the hook tried to block, which SubagentStart cannot do"),
+                    )),
+                    Verdict::Failed { reason } => rec::SubagentStartOutcome::Failed(failed(reason)),
+                };
+                rec::HookAction::SubagentStart(rec::SubagentStartRecord {
+                    agent_type: (*agent_type).to_string(),
                     system_message: sys,
                     outcome,
                 })

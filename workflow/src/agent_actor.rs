@@ -775,20 +775,23 @@ impl AgentActor {
         } = prepared;
 
         let at_ms = now_ms();
-        let mut seq = state.hook_entry_count();
         let mut events = Vec::new();
         let mut folded = state.clone();
-        for record in records {
+        for (seq, record) in (state.hook_entry_count()..).zip(records) {
             let event = AgentDomainEvent::HookRan { record, seq, at_ms };
             folded = Self::apply_event(folded, event.clone());
             events.push(event);
-            seq += 1;
         }
 
         if let Some(abandon) = abandon {
-            let (error, recoverable) = match abandon {
-                AbandonedStart::Blocked(reason) => (reason, false),
-                AbandonedStart::Failed(e) => (e.message, true),
+            // A preparation failure is reported exactly as the same failure
+            // coming out of `provide` would be — `terminal` above all, which is
+            // what tells the session its sandbox is gone for good rather than
+            // merely unreachable. A refusal is neither: the prompt was read and
+            // rejected, so retrying it unchanged would be rejected again.
+            let (error, recoverable, terminal) = match abandon {
+                AbandonedStart::Blocked(reason) => (reason, false, false),
+                AbandonedStart::Failed(e) => (e.message, true, e.terminal),
             };
             self.ctx
                 .parent
@@ -796,7 +799,7 @@ impl AgentActor {
                     session_id: self.ctx.session_id,
                     error,
                     recoverable,
-                    terminal: false,
+                    terminal,
                 })
                 .await;
             // The records are still journaled: a user whose prompt was refused
@@ -2603,12 +2606,11 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            loop {
-                match rx.recv().await.expect("the turn must report an outcome") {
-                    AgentOutcome::UsageRecorded { .. } => continue,
-                    _ => break,
-                }
-            }
+            // `UsageRecorded` rides alongside the terminal outcome, so read
+            // past it until the turn itself reports.
+            while let AgentOutcome::UsageRecorded { .. } =
+                rx.recv().await.expect("the turn must report an outcome")
+            {}
         }
 
         fn session_start(context: &str) -> HookRecord {
@@ -2751,6 +2753,59 @@ mod tests {
                 .unwrap();
             assert_eq!(page.entries.len(), 1, "the record, and nothing else");
             assert!(matches!(page.entries[0], HistoryEntry::Hook(_)));
+        }
+
+        /// A preparation failure must classify itself exactly as the same
+        /// failure out of `provide` would. Flattening `terminal` here leaves a
+        /// session whose sandbox is gone for good reporting a retryable error,
+        /// so it never reaches `Unrecoverable` and invites the user to try
+        /// again forever.
+        #[tokio::test]
+        async fn a_terminal_preparation_failure_stays_terminal() {
+            struct GoneContext;
+            #[async_trait]
+            impl crate::ContextProvider for GoneContext {
+                async fn provide(&self) -> Result<crate::Contexts, crate::ContextError> {
+                    Err(crate::ContextError::terminal("runtime is gone"))
+                }
+                fn has_start_hooks(&self) -> bool {
+                    true
+                }
+                async fn start_hooks(
+                    &self,
+                    _: crate::StartTurn,
+                ) -> Result<Vec<HookRecord>, crate::ContextError> {
+                    Err(crate::ContextError::terminal("runtime is gone"))
+                }
+            }
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let ctx = AgentRuntimeContext {
+                context_provider: Arc::new(GoneContext),
+                event_sink: Arc::new(StubSink),
+                parent: Arc::new(ReportingParent(tx)),
+                session_id: uuid::Uuid::new_v4(),
+            };
+            let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+            let agent = spawn_root(
+                AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+                journal,
+            );
+            agent
+                .tell(AgentCommand::Resume {
+                    results: vec![],
+                    message: Some("hi".into()),
+                    subagent_results: vec![],
+                })
+                .await
+                .unwrap();
+
+            match rx.recv().await.expect("the turn must report an outcome") {
+                AgentOutcome::Failed { terminal, .. } => {
+                    assert!(terminal, "a gone sandbox is terminal wherever it surfaces");
+                }
+                other => panic!("expected the turn to fail, got {other:?}"),
+            }
         }
 
         /// A session with no plugins pays nothing for a seam it cannot use.

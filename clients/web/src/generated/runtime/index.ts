@@ -16,6 +16,7 @@ export * from './workspaceScan';
 export * from './pluginSkill';
 export * from './scanResponse';
 export * from './sessionStartInput';
+export * from './subagentStartInput';
 export * from './userPromptSubmitInput';
 export * from './stopInput';
 export * from './serverHookEvent';
