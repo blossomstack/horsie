@@ -30,6 +30,8 @@
 //!    `?mode=rwc` on the URL.
 
 pub mod journal;
+#[cfg(test)]
+mod scope_audit;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
 

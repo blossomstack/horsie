@@ -152,11 +152,11 @@ impl Journal for SqlJournal {
         // The batch is one transaction, so a crash mid-write leaves neither the
         // numbers nor the rows — the actor advances `seq_nr` only after `persist`
         // returns `Ok`, so a half-written batch must not be half-applied.
-        let sql = self.db.q(
-            "UPDATE journal_logs SET last_seq = last_seq + ? WHERE log_id = ? RETURNING last_seq",
-        );
+        let sql = self.db.q("UPDATE journal_logs SET last_seq = last_seq + ? \
+             WHERE user_id = ? AND log_id = ? RETURNING last_seq");
         let last_seq: i64 = sqlx::query_scalar(&sql)
             .bind(to_i64(events.len() as u64))
+            .bind(self.user.as_str())
             .bind(log_id)
             .fetch_one(&mut *tx)
             .await
@@ -230,12 +230,13 @@ impl Journal for SqlJournal {
         // the state came from elsewhere; keep `last_seq` monotonic so later
         // events never reuse a number the snapshot already covers.
         let statement = format!(
-            "UPDATE journal_logs SET last_seq = {} WHERE log_id = ?",
+            "UPDATE journal_logs SET last_seq = {} WHERE user_id = ? AND log_id = ?",
             self.db.greatest("last_seq", "?")
         );
         let bump = self.db.q(&statement);
         sqlx::query(&bump)
             .bind(to_i64(seq_nr))
+            .bind(self.user.as_str())
             .bind(log_id)
             .execute(&mut *tx)
             .await
@@ -314,9 +315,10 @@ impl Journal for SqlJournal {
         // numbers its own first event from there.
         let set_seq = self
             .db
-            .q("UPDATE journal_logs SET last_seq = ? WHERE log_id = ?");
+            .q("UPDATE journal_logs SET last_seq = ? WHERE user_id = ? AND log_id = ?");
         sqlx::query(&set_seq)
             .bind(seq)
+            .bind(self.user.as_str())
             .bind(dst)
             .execute(&mut *tx)
             .await
@@ -366,9 +368,13 @@ impl Journal for SqlJournal {
                 .await
                 .map_err(backend)?;
         }
-        // By `log_id`, which only a scoped lookup can produce.
-        let sql = self.db.q("DELETE FROM journal_logs WHERE log_id = ?");
+        // `log_id` already came from a scoped lookup; binding the account
+        // again costs nothing and keeps this statement readable on its own.
+        let sql = self
+            .db
+            .q("DELETE FROM journal_logs WHERE user_id = ? AND log_id = ?");
         sqlx::query(&sql)
+            .bind(self.user.as_str())
             .bind(log_id)
             .execute(&mut *tx)
             .await
