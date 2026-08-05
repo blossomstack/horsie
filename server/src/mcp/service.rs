@@ -435,10 +435,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
         let github = Arc::new(GithubService::new(
-            GithubStore::new(pool.clone()),
+            GithubStore::new(pool.clone(), crate::auth::UserId::new("1")),
             GithubApi::new(),
         ));
-        (McpService::new(McpStore::new(pool), github), tmp)
+        (
+            McpService::new(McpStore::new(pool, crate::auth::UserId::new("1")), github),
+            tmp,
+        )
     }
 
     /// A minimal Streamable-HTTP MCP server: JSON-RPC in, JSON out. Returns its

@@ -4,6 +4,7 @@
 //! in [`Secret`] in memory; write-only inputs follow the settings store's
 //! keep/clear/set convention (`None` keeps, `""` clears, a value sets).
 
+use crate::auth::UserId;
 use crate::db::Db;
 use horsie_agentcore::Secret;
 use horsie_models::github::GitHubAppConfigInput;
@@ -31,13 +32,23 @@ pub struct CredentialsRow {
 
 pub struct GithubStore {
     db: Db,
+    /// Whose credentials this reads and writes. The App registration below is
+    /// deliberately outside this scope.
+    user: UserId,
 }
 
 impl GithubStore {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, user: UserId) -> Self {
+        Self { db, user }
     }
 
+    /// The deployment's GitHub App registration.
+    ///
+    /// Deliberately NOT scoped: an App is registered against this server — one
+    /// callback URL, one client id, one private key, all bound to its public
+    /// address. Accounts *install* that App, and what an installation produces
+    /// is `github_credentials`, which is scoped. On the scope audit's
+    /// allowlist for this reason.
     pub async fn app_config(&self) -> Result<Option<AppConfigRow>, String> {
         let row = sqlx::query(&self.db.q(
             "SELECT client_id, client_secret, app_id, private_key, app_slug, callback_base \
@@ -101,8 +112,9 @@ impl GithubStore {
     pub async fn credentials(&self) -> Result<Option<CredentialsRow>, String> {
         let row = sqlx::query(&self.db.q(
             "SELECT login, access_token, refresh_token, expires_at, installation_id \
-             FROM github_credentials WHERE id = 1",
+             FROM github_credentials WHERE user_id = ?",
         ))
+        .bind(self.user.as_str())
         .fetch_optional(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
@@ -125,12 +137,13 @@ impl GithubStore {
 
     pub async fn save_credentials(&self, row: &CredentialsRow) -> Result<(), String> {
         sqlx::query(&self.db.q(
-            "INSERT INTO github_credentials (id, login, access_token, refresh_token, expires_at, installation_id) \
-             VALUES (1, ?, ?, ?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET login = excluded.login, \
+            "INSERT INTO github_credentials (user_id, login, access_token, refresh_token, expires_at, installation_id) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(user_id) DO UPDATE SET login = excluded.login, \
              access_token = excluded.access_token, refresh_token = excluded.refresh_token, \
              expires_at = excluded.expires_at, installation_id = excluded.installation_id",
         ))
+        .bind(self.user.as_str())
         .bind(row.login.trim())
         .bind(row.access_token.expose().to_string())
         .bind(row.refresh_token.as_ref().map(|s| s.expose().to_string()))
@@ -143,10 +156,15 @@ impl GithubStore {
     }
 
     pub async fn clear_credentials(&self) -> Result<(), String> {
-        sqlx::query(&self.db.q("DELETE FROM github_credentials"))
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM github_credentials WHERE user_id = ?"),
+        )
+        .bind(self.user.as_str())
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 }
@@ -203,7 +221,7 @@ mod tests {
     async fn store() -> (GithubStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
-        (GithubStore::new(pool), tmp)
+        (GithubStore::new(pool, crate::auth::UserId::new("1")), tmp)
     }
 
     fn input(secret: Option<&str>, key: Option<&str>) -> GitHubAppConfigInput {

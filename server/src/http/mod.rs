@@ -364,7 +364,7 @@ mod tests {
         .await
         .unwrap();
         let github = Arc::new(crate::github::GithubService::new(
-            crate::github::GithubStore::new(opened.db.clone()),
+            crate::github::GithubStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             crate::github::GithubApi::new(),
         ));
         let plugins = Arc::new(crate::plugins::PluginService::new(
@@ -374,7 +374,7 @@ mod tests {
             b"test-secret".to_vec(),
         ));
         let mcp = Arc::new(crate::mcp::McpService::new(
-            crate::mcp::McpStore::new(opened.db.clone()),
+            crate::mcp::McpStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             github.clone(),
         ));
         let memory = Arc::new(crate::memory::MemoryService::new(

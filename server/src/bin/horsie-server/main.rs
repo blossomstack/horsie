@@ -203,11 +203,11 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     ));
 
     let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(opened.db.clone()),
+        horsie_server::github::GithubStore::new(opened.db.clone(), user.clone()),
         horsie_server::github::GithubApi::new(),
     ));
     let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.db.clone()),
+        horsie_server::mcp::McpStore::new(opened.db.clone(), user.clone()),
         github.clone(),
     ));
     let plugins = Arc::new(PluginService::new(
