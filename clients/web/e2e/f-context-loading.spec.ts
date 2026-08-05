@@ -70,12 +70,20 @@ test("F2: shared plugin-library skill loads into the system prompt", async ({
   ).toBe(true);
 });
 
-test("F3: SessionStart hook output loads as the session bootstrap", async ({
+// A `SessionStart` hook's context used to be prepended to the system prompt as a
+// "# Session bootstrap" section. It is a hook record now, translated into a
+// framed message at its place in the transcript — so this asserts on the frame
+// as well as the marker, because the frame is what tells the model the text came
+// from a third-party plugin rather than from horsie.
+test("F3: SessionStart hook output reaches the model as framed context", async ({
   page,
   appBase,
   mock,
 }) => {
   await runTurnAndCapture(page, appBase, mock);
-  expect(await mock.capturedContains("# Session bootstrap")).toBe(true);
   expect(await mock.capturedContains("E2E_BOOTSTRAP_MARKER")).toBe(true);
+  // No quotes in the needle: `capturedContains` matches against
+  // `JSON.stringify(body)`, where the frame's own quotes are backslash-escaped.
+  expect(await mock.capturedContains("<hook-context plugin=")).toBe(true);
+  expect(await mock.capturedContains("# Session bootstrap")).toBe(false);
 });
