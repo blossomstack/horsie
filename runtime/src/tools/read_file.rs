@@ -6,6 +6,14 @@ pub async fn exec(working_dir: &Path, input: ReadFileInput) -> ToolResult {
     match tokio::task::spawn_blocking(move || {
         let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let result = match (input.start_line, input.end_line) {
+            // Both ends are clamped to the file length independently, so an
+            // inverted request would slice `start..end` backwards and panic.
+            // Reject it here: an empty read would look like an empty file.
+            (Some(s), Some(e)) if e < s => {
+                return Err(format!(
+                    "start_line {s} is after end_line {e}; the range must be ascending"
+                ));
+            }
             (Some(s), Some(e)) => {
                 let lines: Vec<&str> = content.lines().collect();
                 let start = (s as usize).saturating_sub(1).min(lines.len());
@@ -62,6 +70,25 @@ mod tests {
         match result {
             ToolResult::Ok(o) => assert_eq!(o.stdout, "line1\nline2\nline3"),
             ToolResult::Err(e) => panic!("{}", e.reason),
+        }
+    }
+
+    #[tokio::test]
+    async fn inverted_range_is_an_error_not_a_panic() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\nd").unwrap();
+        let result = exec(
+            dir.path(),
+            ReadFileInput {
+                path: "f.txt".into(),
+                start_line: Some(4),
+                end_line: Some(2),
+            },
+        )
+        .await;
+        match result {
+            ToolResult::Err(e) => assert!(e.reason.contains("start_line"), "{}", e.reason),
+            ToolResult::Ok(o) => panic!("expected an error, got {:?}", o.stdout),
         }
     }
 
