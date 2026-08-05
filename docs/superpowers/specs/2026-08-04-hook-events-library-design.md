@@ -125,10 +125,12 @@ One code path turns a hook's reply into an outcome, driven by the table above:
   recorded as though it had an effect. This is what stops the next
   `additional_context`-on-`PreToolUse`.
 
-The library never decides *consequences* — whether a denial actually stops
-anything is horsie's call, made at the call site, because it depends on horsie's
-own semantics (`PreToolUse` fails closed; `Stop` is advisory because horsie does
-not resume a concluded turn).
+The library never decides *consequences* — what a verdict actually does is
+horsie's call, made at the call site, because it depends on horsie's own
+semantics. `PreToolUse` fails closed, so a hook that could not run denies the
+call; `Stop` blocking means the opposite of a refusal and continues the turn (see
+below); `Notification` cannot block at all, so the same exit code is merely
+recorded. One parser, three consequences.
 
 ## What a hook can change, and where it lands
 
