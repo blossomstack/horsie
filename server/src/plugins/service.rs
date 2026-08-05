@@ -236,13 +236,11 @@ impl PluginService {
     /// its name.
     async fn record(&self, parsed: ParsedMarketplace) -> Result<MarketplaceView, String> {
         let existing = self.marketplaces.get(&parsed.name).await?;
-        if let Some(prev) = &existing {
-            if prev.source_url != parsed.url {
-                return Err(format!(
-                    "a marketplace named '{}' is already registered from {}",
-                    parsed.name, prev.source_url
-                ));
-            }
+        if let Some(prev) = existing.as_ref().filter(|p| p.source_url != parsed.url) {
+            return Err(format!(
+                "a marketplace named '{}' is already registered from {}",
+                parsed.name, prev.source_url
+            ));
         }
         let now = now_string();
         let row = MarketplaceRow {
