@@ -188,6 +188,7 @@ async fn boot(
         model_card_seed_marker: model_cards::seed_marker(&model_card_seed),
         model_card_seed: Arc::new(model_card_seed),
         anonymous,
+        supervisor: horsie_server::sessions::supervisor::SupervisorConfig::default(),
     });
     let users = Arc::new(UserRegistry::new(shared.clone()));
 

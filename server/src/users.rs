@@ -16,7 +16,8 @@ use crate::db::Db;
 use crate::db::journal::SqlJournal;
 use crate::plugins::ArtifactStore;
 use crate::sessions::spec::ServerDeps;
-use crate::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand};
+use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
+use crate::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand, SupervisorConfig};
 use horsie_actor::{ActorRef, Journal, spawn_root};
 use horsie_models::model_cards::ModelCardInput;
 use horsie_models::session::GlobalSessionEvent;
@@ -46,6 +47,10 @@ pub struct Shared {
     /// The account `Principal::Anonymous` resolves to — which is every request
     /// on a deployment with authentication disabled.
     pub anonymous: UserId,
+    /// The idle policy every account's supervisor is built with. Deployment
+    /// policy, not account preference — and the seam a test drives time
+    /// through.
+    pub supervisor: SupervisorConfig,
 }
 
 /// Everything one account owns.
@@ -59,6 +64,13 @@ pub struct UserServices {
     /// every session title on the server.
     pub global_events: broadcast::Sender<GlobalSessionEvent>,
     pub config_store: Arc<dyn crate::config::ConfigStore>,
+    /// This account's live LLM clients, keyed by model alias, and the vendor
+    /// map its sessions select a runtime from. Both are handles the config
+    /// store, the supervisor and the runtime manager already share; held here
+    /// so a caller that needs to look at one does not have to reach through a
+    /// service that happens to own it.
+    pub provider_registry: SharedProviderRegistry,
+    pub vendors: SharedVendors,
     pub model_cards: Arc<model_cards::ModelCardStore>,
     pub chatgpt: Arc<crate::config::chatgpt_login::ChatGptLoginService>,
     pub github: Arc<crate::github::GithubService>,
@@ -157,8 +169,8 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     ));
     let deps = ServerDeps {
         runtimes,
-        provider_registry: opened.registry,
-        vendors: opened.vendors,
+        provider_registry: opened.registry.clone(),
+        vendors: opened.vendors.clone(),
         github_tokens: Some(github.clone()),
         mcp: Some(mcp.clone()),
         plugins: Some(plugins.clone() as Arc<dyn crate::plugins::PluginProvisioner>),
@@ -168,7 +180,12 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(shared.db.clone(), user.clone()));
     let (global_events, _) = broadcast::channel(GLOBAL_EVENT_CAPACITY);
     let supervisor = spawn_root(
-        SessionSupervisor::new(user.clone(), deps, global_events.clone()),
+        SessionSupervisor::with_config(
+            user.clone(),
+            deps,
+            global_events.clone(),
+            shared.supervisor.clone(),
+        ),
         journal,
     );
 
@@ -185,6 +202,8 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         supervisor,
         global_events,
         config_store: opened.store,
+        provider_registry: opened.registry,
+        vendors: opened.vendors,
         model_cards,
         chatgpt,
         github,
@@ -278,6 +297,7 @@ mod tests {
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: model_cards::seed_marker(&[]),
             anonymous: UserId::bootstrap(),
+            supervisor: SupervisorConfig::default(),
         }))
     }
 

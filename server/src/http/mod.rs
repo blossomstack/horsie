@@ -382,6 +382,7 @@ mod tests {
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
             anonymous: crate::auth::UserId::bootstrap(),
+            supervisor: crate::sessions::supervisor::SupervisorConfig::default(),
         });
         let state = AppState {
             auth,

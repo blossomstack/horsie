@@ -10,23 +10,17 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use horsie_actor::{ActorRef, Journal, spawn_root};
+use horsie_actor::ActorRef;
 use horsie_agentcore::LlmProvider;
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
-use horsie_runtime_vendor::ConnectedRuntimeRegistry;
-use horsie_server::config::{DbConfigStore, StoreDeps};
-use horsie_server::db::journal::SqlJournal;
+use horsie_server::db::Db;
 use horsie_server::http::{AppState, app};
-use horsie_server::runtime_manager::{RuntimeDeps, RuntimeManager};
 use horsie_server::runtime_vendor::RuntimeVendorLink;
 use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
 use horsie_server::sessions::clock::TestClock;
-use horsie_server::sessions::spec::ServerDeps;
-use horsie_server::sessions::supervisor::{
-    SessionSupervisor, SessionSupervisorCommand, SupervisorConfig,
-};
-use std::collections::HashMap;
+use horsie_server::sessions::supervisor::{SessionSupervisorCommand, SupervisorConfig};
+use horsie_server::users::{Shared, UserRegistry};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -83,7 +77,7 @@ async fn start_server(
     vendor: Arc<RuntimeVendorLink>,
     mock_url: &str,
 ) -> Server {
-    start_server_with(journal_dir, vendor, mock_url, None).await
+    start_server_with(journal_dir, Some(vendor), mock_url, None).await
 }
 
 /// As [`start_server`], but with the supervisor's idle policy under the test's
@@ -91,172 +85,79 @@ async fn start_server(
 /// offload happens exactly when the test sends `Tick` and never by surprise.
 async fn start_server_with(
     journal_dir: &Path,
-    vendor: Arc<RuntimeVendorLink>,
+    vendor: Option<Arc<RuntimeVendorLink>>,
     mock_url: &str,
     clock: Option<Arc<TestClock>>,
 ) -> Server {
-    let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
-    providers.insert("mock".into(), provider_at(mock_url));
-    let mut vendors: HashMap<String, Arc<RuntimeVendorLink>> = HashMap::new();
-    vendors.insert("mock".into(), vendor);
-    let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
-    let deps = ServerDeps {
-        runtimes: Arc::new(RuntimeManager::new(RuntimeDeps {
-            vendors: shared_vendors.clone(),
-            github_tokens: None,
-            plugins: None,
-        })),
-        provider_registry: Arc::new(std::sync::RwLock::new(providers)),
-        vendors: shared_vendors.clone(),
-        github_tokens: None,
-        mcp: None,
-        plugins: None,
-        memory: None,
-    };
     // The e2e suite runs on the production default backend, so every test here
     // — including the restart ones — exercises real snapshots and compaction.
-    let db = journal_dir.join("config.db");
-    let opened = DbConfigStore::open(
-        &format!("sqlite://{}", db.display()),
-        StoreDeps {
-            info: horsie_models::settings::ServerInfo {
-                config_path: String::new(),
-                database: String::new(),
-                state_dir: String::new(),
-                data_dir: String::new(),
-                plugins_dir: String::new(),
-                version: "test".into(),
-            },
-        },
-        horsie_server::auth::UserId::new("1"),
-    )
-    .await
-    .unwrap();
-    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(
-        opened.db.clone(),
-        horsie_server::auth::UserId::new("1"),
-    ));
-    let (gtx, _) = tokio::sync::broadcast::channel(256);
-    let supervisor = match clock {
-        Some(clock) => spawn_root(
-            SessionSupervisor::with_config(
-                deps,
-                gtx.clone(),
-                SupervisorConfig {
-                    clock,
-                    idle_timeout: Duration::from_secs(180),
-                    tick_interval: None,
-                },
-            ),
-            journal.clone(),
-        ),
-        None => spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone()),
-    };
-    // A real (empty) settings store backs `/api/config`; the session flow uses
-    // the custom `mock` registry/vendor above, so the store's own registry is
-    // unused. It is the same store the journal above runs on.
-    let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::github::GithubApi::new(),
-    ));
-    let plugins = Arc::new(horsie_server::plugins::PluginService::new(
-        horsie_server::plugins::PluginStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::plugins::MarketplaceStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
-        b"e2e-secret".to_vec(),
-    ));
-    let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.db.clone(), horsie_server::auth::UserId::new("1")),
-        github.clone(),
-    ));
-    let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-    ));
-    let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        opened.store.clone(),
-    ));
-    let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        agents.clone(),
-    ));
-    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
-        horsie_server::environments::EnvironmentStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-    ));
+    let db = Db::open(&format!("sqlite://{}/config.db", journal_dir.display()), 5)
+        .await
+        .unwrap();
     // Auth off: this suite drives the HTTP API without a credential, and a
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
     let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.db.clone()),
+        horsie_server::auth::AuthStore::new(db.clone()),
         horsie_server::auth::AuthDeps {
             enabled: false,
             state_dir: journal_dir.to_path_buf(),
         },
     ));
-    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
-        shared_vendors,
-    ));
-    let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
-        horsie_server::workflows::WorkflowStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        agents.clone(),
-    ));
-    let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
-        routines.clone(),
-        agents.clone(),
-        opened.store.clone(),
-        vendor_agents.clone(),
-        supervisor.clone(),
-    ));
-    let state = AppState {
-        supervisor: supervisor.clone(),
-        global_events: gtx,
-        auth,
-        config_store: opened.store.clone(),
-        model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
+    auth.bootstrap().await.unwrap();
+    let account = auth.sole_user().await.unwrap().expect("bootstrapped");
+
+    let shared = Arc::new(Shared {
+        db,
+        artifacts: Arc::new(horsie_server::plugins::ArtifactStore::new(
+            journal_dir.join("plugin-artifacts"),
         )),
-        chatgpt: Arc::new(
-            horsie_server::config::chatgpt_login::ChatGptLoginService::new(
-                opened.db.clone(),
-                horsie_server::auth::UserId::new("1"),
-                opened.store.clone(),
-            ),
-        ),
-        github,
-        mcp,
-        plugins,
-        memory,
-        agents,
-        routines,
-        workflows,
-        routine_runner,
-        environments,
-        vendor_agents,
+        artifact_secret: Arc::new(b"e2e-secret".to_vec()),
+        info: horsie_models::settings::ServerInfo {
+            config_path: String::new(),
+            database: String::new(),
+            state_dir: String::new(),
+            data_dir: String::new(),
+            plugins_dir: String::new(),
+            version: "test".into(),
+        },
+        model_card_seed: Arc::new(Vec::new()),
+        model_card_seed_marker: horsie_server::config::model_cards::seed_marker(&[]),
+        anonymous: account.clone(),
+        // With a clock the test drives the idle policy itself: no background
+        // ticker, so an offload happens exactly when it sends `Tick`.
+        supervisor: match clock {
+            Some(clock) => SupervisorConfig {
+                clock,
+                idle_timeout: Duration::from_secs(180),
+                tick_interval: None,
+            },
+            None => SupervisorConfig::default(),
+        },
+    });
+    let users = Arc::new(UserRegistry::new(shared.clone()));
+    let services = users.get(&account).await.unwrap();
+
+    // The doubles go into the account's own registry and vendor map — the same
+    // handles its supervisor and runtime manager read.
+    services
+        .provider_registry
+        .write()
+        .unwrap()
+        .insert("mock".into(), provider_at(mock_url));
+    if let Some(vendor) = vendor {
+        services
+            .vendors
+            .write()
+            .unwrap()
+            .insert("mock".into(), vendor);
+    }
+
+    let supervisor = services.supervisor.clone();
+    let state = AppState {
+        auth,
+        shared,
+        users,
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -311,173 +212,20 @@ async fn create_session_for_vendor(
     v["session"]["id"].as_str().unwrap().to_string()
 }
 
-/// Start a server whose `ServerDeps.vendors` is the SAME `SharedVendors` map
-/// `DbConfigStore::open()` returns — unlike `start_server`, which builds its own.
-/// That is the seam a vendor agent needs: an agent dialing
-/// `/api/vendor/connect` publishes itself into that map and becomes resolvable
-/// by session creation exactly as in production. Returns the server handle plus
-/// the HTTP address agents dial.
+/// Start a server with no vendor pre-published, for the tests where an agent
+/// dials `/api/vendor/connect` and has to become resolvable by session creation
+/// exactly as in production.
+///
+/// That used to need its own harness, because the old one built a vendor map
+/// separate from the one the config store handed out. An account's map is now
+/// the only one there is, so this is `start_server_with` with nothing in it.
 async fn start_server_with_live_vendors(
     journal_dir: &Path,
     mock_url: &str,
 ) -> (Server, SocketAddr) {
-    let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
-    providers.insert("mock".into(), provider_at(mock_url));
-    let db = journal_dir.join("config.db");
-    let _runtime_registry = Arc::new(ConnectedRuntimeRegistry::new());
-    let opened = DbConfigStore::open(
-        &format!("sqlite://{}", db.display()),
-        StoreDeps {
-            info: horsie_models::settings::ServerInfo {
-                config_path: String::new(),
-                database: String::new(),
-                state_dir: String::new(),
-                data_dir: String::new(),
-                plugins_dir: String::new(),
-                version: "test".into(),
-            },
-        },
-        horsie_server::auth::UserId::new("1"),
-    )
-    .await
-    .unwrap();
-    let deps = ServerDeps {
-        runtimes: Arc::new(RuntimeManager::new(RuntimeDeps {
-            vendors: opened.vendors.clone(),
-            github_tokens: None,
-            plugins: None,
-        })),
-        provider_registry: Arc::new(std::sync::RwLock::new(providers)),
-        vendors: opened.vendors.clone(),
-        github_tokens: None,
-        mcp: None,
-        plugins: None,
-        memory: None,
-    };
-    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(
-        opened.db.clone(),
-        horsie_server::auth::UserId::new("1"),
-    ));
-    let (gtx, _) = tokio::sync::broadcast::channel(256);
-    let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
-    let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::github::GithubApi::new(),
-    ));
-    let plugins = Arc::new(horsie_server::plugins::PluginService::new(
-        horsie_server::plugins::PluginStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::plugins::MarketplaceStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
-        b"e2e-secret".to_vec(),
-    ));
-    let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.db.clone(), horsie_server::auth::UserId::new("1")),
-        github.clone(),
-    ));
-    let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-    ));
-    let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        opened.store.clone(),
-    ));
-    let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        agents.clone(),
-    ));
-    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
-        horsie_server::environments::EnvironmentStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-    ));
-    // Auth off: this suite drives the HTTP API without a credential, and a
-    // disabled deployment is a supported configuration. Authenticated coverage
-    // lives in the server crate's own HTTP tests.
-    let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.db.clone()),
-        horsie_server::auth::AuthDeps {
-            enabled: false,
-            state_dir: journal_dir.to_path_buf(),
-        },
-    ));
-    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
-        opened.vendors.clone(),
-    ));
-    let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
-        horsie_server::workflows::WorkflowStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        agents.clone(),
-    ));
-    let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
-        routines.clone(),
-        agents.clone(),
-        opened.store.clone(),
-        vendor_agents.clone(),
-        supervisor.clone(),
-    ));
-    let state = AppState {
-        supervisor: supervisor.clone(),
-        global_events: gtx,
-        auth,
-        config_store: opened.store.clone(),
-        model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        )),
-        chatgpt: Arc::new(
-            horsie_server::config::chatgpt_login::ChatGptLoginService::new(
-                opened.db.clone(),
-                horsie_server::auth::UserId::new("1"),
-                opened.store.clone(),
-            ),
-        ),
-        github,
-        mcp,
-        plugins,
-        memory,
-        agents,
-        routines,
-        workflows,
-        routine_runner,
-        environments,
-        vendor_agents,
-        web_dir: None,
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app(state)).await;
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    (
-        Server {
-            addr,
-            supervisor,
-            task,
-        },
-        addr,
-    )
+    let server = start_server_with(journal_dir, None, mock_url, None).await;
+    let addr = server.addr;
+    (server, addr)
 }
 
 async fn send_message(
@@ -2029,8 +1777,13 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
         .await
         .expect("fake agent");
     let clock = Arc::new(TestClock::new());
-    let server =
-        start_server_with(tmp.path(), agent.link(), &mock.url(), Some(clock.clone())).await;
+    let server = start_server_with(
+        tmp.path(),
+        Some(agent.link()),
+        &mock.url(),
+        Some(clock.clone()),
+    )
+    .await;
     let client = reqwest::Client::new();
 
     let id = create_session(&client, &server.addr).await;

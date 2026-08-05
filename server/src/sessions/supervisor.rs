@@ -40,6 +40,10 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Knobs the idle policy reads. Separated so tests drive time explicitly.
+///
+/// One per deployment, cloned into every account's supervisor: how long a
+/// session may sit idle is an operator's policy, not an account's.
+#[derive(Clone)]
 pub struct SupervisorConfig {
     pub clock: Arc<dyn Clock>,
     pub idle_timeout: Duration,
