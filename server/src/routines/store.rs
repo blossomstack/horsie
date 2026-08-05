@@ -4,6 +4,7 @@
 //! is the only place that knows both shapes. A row that cannot be read back as
 //! a legal schedule is an error, never a silently-defaulted value.
 
+use crate::auth::UserId;
 use crate::db::Db;
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -100,19 +101,20 @@ pub struct RoutineRow {
 
 pub struct RoutineStore {
     db: Db,
+    /// Bound once, here, rather than passed per call.
+    user: UserId,
 }
 
 impl RoutineStore {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, user: UserId) -> Self {
+        Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<RoutineRow>, String> {
-        let rows = sqlx::query(
-            &self
-                .db
-                .q(&format!("SELECT {COLS} FROM routines ORDER BY name")),
-        )
+        let rows = sqlx::query(&self.db.q(&format!(
+            "SELECT {COLS} FROM routines WHERE user_id = ? ORDER BY name"
+        )))
+        .bind(self.user.as_str())
         .fetch_all(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
@@ -120,11 +122,10 @@ impl RoutineStore {
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<RoutineRow>, String> {
-        let row = sqlx::query(
-            &self
-                .db
-                .q(&format!("SELECT {COLS} FROM routines WHERE name = ?")),
-        )
+        let row = sqlx::query(&self.db.q(&format!(
+            "SELECT {COLS} FROM routines WHERE user_id = ? AND name = ?"
+        )))
+        .bind(self.user.as_str())
         .bind(name)
         .fetch_optional(self.db.pool())
         .await
@@ -132,13 +133,18 @@ impl RoutineStore {
         row.as_ref().map(row_to_routine).transpose()
     }
 
-    /// Enabled routines whose next run has come due. The scheduler's only read.
+    /// Enabled routines of *this* account whose next run has come due.
+    ///
+    /// What the scheduler reads today, because a deployment has one account.
+    /// [`due_across_all_users`](Self::due_across_all_users) is the read that
+    /// replaces it once services are built per account rather than per process.
     pub async fn due(&self, now_ms: u64) -> Result<Vec<RoutineRow>, String> {
         let rows = sqlx::query(&self.db.q(&format!(
             "SELECT {COLS} FROM routines \
-             WHERE enabled = 1 AND next_run_at_ms IS NOT NULL AND next_run_at_ms <= ? \
-             ORDER BY next_run_at_ms"
+             WHERE user_id = ? AND enabled = 1 AND next_run_at_ms IS NOT NULL \
+             AND next_run_at_ms <= ? ORDER BY next_run_at_ms"
         )))
+        .bind(self.user.as_str())
         .bind(now_ms as i64)
         .fetch_all(self.db.pool())
         .await
@@ -146,13 +152,44 @@ impl RoutineStore {
         rows.iter().map(row_to_routine).collect()
     }
 
+    /// Enabled routines whose next run has come due, across every account,
+    /// each paired with the account that owns it.
+    ///
+    /// Deliberately NOT scoped, and an associated function rather than a
+    /// method because it belongs to no one account: the scheduler is one timer
+    /// for the deployment. Each routine is then armed and run *as its owner*.
+    /// On the scope audit's allowlist for exactly this reason.
+    pub async fn due_across_all_users(
+        db: &Db,
+        now_ms: u64,
+    ) -> Result<Vec<(UserId, RoutineRow)>, String> {
+        let rows = sqlx::query(&db.q(&format!(
+            "SELECT user_id, {COLS} FROM routines \
+             WHERE enabled = 1 AND next_run_at_ms IS NOT NULL AND next_run_at_ms <= ? \
+             ORDER BY next_run_at_ms"
+        )))
+        .bind(now_ms as i64)
+        .fetch_all(db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
+        rows.iter()
+            .map(|r| {
+                let owner = r
+                    .try_get::<String, _>("user_id")
+                    .map_err(|e| e.to_string())?;
+                Ok((UserId::new(owner), row_to_routine(r)?))
+            })
+            .collect()
+    }
+
     /// Names of the routines configured to run a given agent preset.
     pub async fn using_agent(&self, agent: &str) -> Result<Vec<String>, String> {
         let rows = sqlx::query(
             &self
                 .db
-                .q("SELECT name FROM routines WHERE agent = ? ORDER BY name"),
+                .q("SELECT name FROM routines WHERE user_id = ? AND agent = ? ORDER BY name"),
         )
+        .bind(self.user.as_str())
         .bind(agent)
         .fetch_all(self.db.pool())
         .await
@@ -166,8 +203,9 @@ impl RoutineStore {
     /// would discard the existing routine).
     pub async fn insert(&self, row: &RoutineRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO routines ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO routines (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
+        .bind(self.user.as_str())
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.agent)
@@ -195,7 +233,7 @@ impl RoutineStore {
         let res = sqlx::query(&self.db.q(
             "UPDATE routines SET description = ?, agent = ?, prompt = ?, schedule_kind = ?, \
              interval_secs = ?, at_ms = ?, enabled = ?, next_run_at_ms = ?, updated_at = ? \
-             WHERE name = ?",
+             WHERE user_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.agent)
@@ -206,6 +244,7 @@ impl RoutineStore {
         .bind(i64::from(row.enabled))
         .bind(row.next_run_at_ms.map(|v| v as i64))
         .bind(&row.updated_at)
+        .bind(self.user.as_str())
         .bind(&row.name)
         .execute(self.db.pool())
         .await
@@ -214,11 +253,16 @@ impl RoutineStore {
     }
 
     pub async fn delete(&self, name: &str) -> Result<bool, String> {
-        let res = sqlx::query(&self.db.q("DELETE FROM routines WHERE name = ?"))
-            .bind(name)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        let res = sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM routines WHERE user_id = ? AND name = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(name)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 
@@ -229,9 +273,10 @@ impl RoutineStore {
         sqlx::query(
             &self
                 .db
-                .q("UPDATE routines SET next_run_at_ms = ? WHERE name = ?"),
+                .q("UPDATE routines SET next_run_at_ms = ? WHERE user_id = ? AND name = ?"),
         )
         .bind(next_run_at_ms.map(|v| v as i64))
+        .bind(self.user.as_str())
         .bind(name)
         .execute(self.db.pool())
         .await
@@ -254,11 +299,12 @@ impl RoutineStore {
         };
         sqlx::query(&self.db.q(
             "UPDATE routines SET last_run_at_ms = ?, last_session_id = ?, last_error = ? \
-             WHERE name = ?",
+             WHERE user_id = ? AND name = ?",
         ))
         .bind(at_ms as i64)
         .bind(session)
         .bind(error)
+        .bind(self.user.as_str())
         .bind(name)
         .execute(self.db.pool())
         .await
@@ -301,7 +347,10 @@ mod tests {
 
     async fn store() -> (RoutineStore, Db) {
         let db = crate::db::testing::db().await;
-        (RoutineStore::new(db.clone()), db)
+        (
+            RoutineStore::new(db.clone(), crate::auth::UserId::new("1")),
+            db,
+        )
     }
 
     fn row(name: &str, schedule: Schedule) -> RoutineRow {

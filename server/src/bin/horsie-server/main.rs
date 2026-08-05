@@ -220,15 +220,15 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         horsie_server::memory::MemoryStore::new(opened.db.clone(), user.clone()),
     ));
     let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(opened.db.clone()),
+        horsie_server::agents::AgentStore::new(opened.db.clone(), user.clone()),
         opened.store.clone(),
     ));
     let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(opened.db.clone()),
+        horsie_server::routines::RoutineStore::new(opened.db.clone(), user.clone()),
         agents.clone(),
     ));
     let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
-        horsie_server::environments::EnvironmentStore::new(opened.db.clone()),
+        horsie_server::environments::EnvironmentStore::new(opened.db.clone(), user.clone()),
     ));
 
     let runtimes = Arc::new(horsie_server::runtime_manager::RuntimeManager::new(
@@ -257,7 +257,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
 
     // Triggering a routine is one code path; the timer is a clock on top of it.
     let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
-        horsie_server::workflows::WorkflowStore::new(opened.db.clone()),
+        horsie_server::workflows::WorkflowStore::new(opened.db.clone(), user.clone()),
         agents.clone(),
     ));
     let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(

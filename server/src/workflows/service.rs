@@ -302,7 +302,7 @@ mod tests {
             .await
             .unwrap();
         let agents = Arc::new(AgentService::new(
-            crate::agents::AgentStore::new(db.clone()),
+            crate::agents::AgentStore::new(db.clone(), crate::auth::UserId::new("1")),
             opened.store.clone(),
         ));
         for name in ["bug-triager", "coder", "writer"] {
@@ -320,7 +320,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        WorkflowService::new(WorkflowStore::new(db), agents)
+        WorkflowService::new(
+            WorkflowStore::new(db, crate::auth::UserId::new("1")),
+            agents,
+        )
     }
 
     fn step(name: &str, agent: &str) -> WorkflowStepDef {

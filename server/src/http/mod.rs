@@ -385,15 +385,18 @@ mod tests {
             crate::auth::UserId::new("1"),
         ));
         let agents = Arc::new(crate::agents::AgentService::new(
-            crate::agents::AgentStore::new(opened.db.clone()),
+            crate::agents::AgentStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             opened.store.clone(),
         ));
         let routines = Arc::new(crate::routines::RoutineService::new(
-            crate::routines::RoutineStore::new(opened.db.clone()),
+            crate::routines::RoutineStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             agents.clone(),
         ));
         let environments = Arc::new(crate::environments::EnvironmentService::new(
-            crate::environments::EnvironmentStore::new(opened.db.clone()),
+            crate::environments::EnvironmentStore::new(
+                opened.db.clone(),
+                crate::auth::UserId::new("1"),
+            ),
         ));
         let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
         let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
@@ -423,7 +426,7 @@ mod tests {
             },
         ));
         let workflows = Arc::new(crate::workflows::WorkflowService::new(
-            crate::workflows::WorkflowStore::new(opened.db.clone()),
+            crate::workflows::WorkflowStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             agents.clone(),
         ));
         let routine_runner = Arc::new(crate::routines::RoutineRunner::new(
