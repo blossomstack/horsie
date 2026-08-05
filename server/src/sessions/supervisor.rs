@@ -40,6 +40,10 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Knobs the idle policy reads. Separated so tests drive time explicitly.
+///
+/// One per deployment, cloned into every account's supervisor: how long a
+/// session may sit idle is an operator's policy, not an account's.
+#[derive(Clone)]
 pub struct SupervisorConfig {
     pub clock: Arc<dyn Clock>,
     pub idle_timeout: Duration,
@@ -318,6 +322,9 @@ pub struct SessionSupervisorState {
 }
 
 pub struct SessionSupervisor {
+    /// The account this supervisor is the session list of. Its only job is to
+    /// key the persistence id — every scoped *store* binds its own copy.
+    user: crate::auth::UserId,
     deps: ServerDeps,
     global_tx: broadcast::Sender<GlobalSessionEvent>,
     config: SupervisorConfig,
@@ -333,16 +340,22 @@ pub struct SessionSupervisor {
 }
 
 impl SessionSupervisor {
-    pub fn new(deps: ServerDeps, global_tx: broadcast::Sender<GlobalSessionEvent>) -> Self {
-        Self::with_config(deps, global_tx, SupervisorConfig::default())
+    pub fn new(
+        user: crate::auth::UserId,
+        deps: ServerDeps,
+        global_tx: broadcast::Sender<GlobalSessionEvent>,
+    ) -> Self {
+        Self::with_config(user, deps, global_tx, SupervisorConfig::default())
     }
 
     pub fn with_config(
+        user: crate::auth::UserId,
         deps: ServerDeps,
         global_tx: broadcast::Sender<GlobalSessionEvent>,
         config: SupervisorConfig,
     ) -> Self {
         Self {
+            user,
             deps,
             global_tx,
             config,
@@ -482,8 +495,13 @@ impl EventSourcedActor for SessionSupervisor {
     type Event = SessionSupervisorEvent;
     type State = SessionSupervisorState;
 
+    /// One supervisor per account, and the account is the instance id.
+    ///
+    /// Its event-sourced state *is* that account's session list, so this is
+    /// what keeps two accounts' lists apart — there is no filter anywhere and
+    /// nothing to forget to apply.
     fn persistence_id(&self) -> PersistenceId {
-        PersistenceId::new("session-supervisor", "main")
+        PersistenceId::new("session-supervisor", self.user.as_str())
     }
 
     fn initial_state() -> SessionSupervisorState {
@@ -1024,10 +1042,9 @@ mod tests {
         vendors.insert("mock".to_string(), agent.link());
         let vendors = Arc::new(std::sync::RwLock::new(vendors));
         let deps = ServerDeps {
-            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
             provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vendors,
-            state_dir: tmp.path().to_path_buf(),
             github_tokens: None,
             mcp: None,
             plugins: None,
@@ -1065,7 +1082,12 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
         spawn_root(
-            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx,
+                manual_config(&clock),
+            ),
             journal,
         )
     }
@@ -1231,7 +1253,12 @@ mod tests {
         let (gtx, _) = broadcast::channel(16);
 
         let sup = spawn_root(
-            SessionSupervisor::with_config(f.deps.clone(), gtx.clone(), manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx.clone(),
+                manual_config(&clock),
+            ),
             journal.clone(),
         );
         let id = create(&sup).await;
@@ -1244,7 +1271,12 @@ mod tests {
         // Second incarnation on the same journal: the registry comes back, but
         // nothing is loaded and no vendor is touched.
         let sup2 = spawn_root(
-            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx,
+                manual_config(&clock),
+            ),
             journal,
         );
         let rows = sup2
@@ -1273,7 +1305,12 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
         let sup = spawn_root(
-            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx,
+                manual_config(&clock),
+            ),
             journal,
         );
         let id = create(&sup).await;
@@ -1306,7 +1343,12 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
         let sup = spawn_root(
-            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx,
+                manual_config(&clock),
+            ),
             journal.clone(),
         );
         let id = create(&sup).await;
@@ -1357,7 +1399,12 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
         let sup = spawn_root(
-            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx,
+                manual_config(&clock),
+            ),
             journal,
         );
         let id = create(&sup).await;
@@ -1415,7 +1462,12 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
         let sup = spawn_root(
-            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx,
+                manual_config(&clock),
+            ),
             journal,
         );
         let id = create(&sup).await;
@@ -1457,7 +1509,12 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
         let sup = spawn_root(
-            SessionSupervisor::with_config(f.deps.clone(), gtx, manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx,
+                manual_config(&clock),
+            ),
             journal,
         );
         let id = create(&sup).await;
@@ -1497,7 +1554,12 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
         let sup = spawn_root(
-            SessionSupervisor::with_config(f.deps, gtx, manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps,
+                gtx,
+                manual_config(&clock),
+            ),
             journal,
         );
         let res = sup
@@ -1518,7 +1580,12 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, mut grx) = broadcast::channel(16);
         let sup = spawn_root(
-            SessionSupervisor::with_config(f.deps, gtx, manual_config(&clock)),
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps,
+                gtx,
+                manual_config(&clock),
+            ),
             journal,
         );
         let id = sup

@@ -1,8 +1,8 @@
 //! HTTP surface for the plugin-bundle library: CRUD for the operator (web UI)
 //! plus a token-guarded artifact endpoint the session runtime fetches from.
 
-use super::AppState;
 use super::error::Api;
+use super::{AppState, Scope};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use horsie_models::plugins::{InstallOutcome, PluginDefaultInput, PluginInstallInput, PluginView};
 
 /// GET /api/plugins — the installed bundle library (metadata only).
-pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<PluginView>>, Api> {
+pub async fn list(Scope(state): Scope) -> Result<Json<Vec<PluginView>>, Api> {
     state.plugins.list().await.map(Json).map_err(Api::internal)
 }
 
@@ -18,7 +18,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<PluginView>>
 /// out to be. One box: the caller does not have to know which it pasted, and
 /// both outcomes create a row, so both are 201.
 pub async fn install(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(input): Json<PluginInstallInput>,
 ) -> Result<(StatusCode, Json<InstallOutcome>), Api> {
     state
@@ -31,7 +31,7 @@ pub async fn install(
 
 /// POST /api/plugins/:name/update — re-clone from the remembered source.
 pub async fn update(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<PluginView>, Api> {
     state
@@ -44,7 +44,7 @@ pub async fn update(
 
 /// PUT /api/plugins/:name — toggle whether the bundle is enabled by default.
 pub async fn set_default(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(input): Json<PluginDefaultInput>,
 ) -> Result<Json<PluginView>, Api> {
@@ -57,10 +57,7 @@ pub async fn set_default(
 }
 
 /// DELETE /api/plugins/:name — remove the bundle and GC its artifact.
-pub async fn remove(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Result<StatusCode, Api> {
+pub async fn remove(Scope(state): Scope, Path(name): Path<String>) -> Result<StatusCode, Api> {
     state
         .plugins
         .remove(&name)
@@ -73,6 +70,11 @@ pub async fn remove(
 /// `<hash>.zip`; requires `Authorization: Bearer <token>` scoping that hash.
 /// Served under a distinct prefix so a bundle named "artifacts" can't collide
 /// with the `/api/plugins/:name` routes.
+///
+/// The one plugin route with no account behind it. It runs ahead of the auth
+/// layer, for runtimes that hold a capability token and no credential — and it
+/// can, because an artifact is addressed by the hash of its own bytes, so
+/// there is nothing per-account to consult.
 pub async fn get_artifact(
     State(state): State<AppState>,
     Path(file): Path<String>,
@@ -83,10 +85,11 @@ pub async fn get_artifact(
         .ok_or_else(|| Api::not_found("not an artifact"))?;
     let token = bearer(&headers).ok_or_else(|| Api::forbidden("missing bearer token"))?;
     state
-        .plugins
-        .verify_token(&token, hash)
+        .shared
+        .artifacts
+        .verify_token(&state.shared.artifact_secret, &token, hash)
         .map_err(Api::forbidden)?;
-    let path = state.plugins.artifact_path(hash);
+    let path = state.shared.artifacts.path(hash);
     let bytes = std::fs::read(&path).map_err(|_| Api::not_found("artifact not found"))?;
     Ok(([(header::CONTENT_TYPE, "application/zip")], bytes).into_response())
 }

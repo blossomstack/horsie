@@ -3,13 +3,13 @@
 //! `GET /api/routines/:name/sessions` — the run list, which is the only place a
 //! routine's sessions appear.
 
-use super::AppState;
+use super::Scope;
 use super::error::Api;
 use super::handlers;
 use crate::routines::RoutineError;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::now_ms;
 use horsie_models::routines::{
@@ -28,13 +28,13 @@ fn api_err(e: RoutineError) -> Api {
 }
 
 /// GET /api/routines
-pub async fn list_routines(State(state): State<AppState>) -> Result<Json<Vec<RoutineView>>, Api> {
+pub async fn list_routines(Scope(state): Scope) -> Result<Json<Vec<RoutineView>>, Api> {
     state.routines.list().await.map(Json).map_err(api_err)
 }
 
 /// POST /api/routines
 pub async fn create_routine(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(input): Json<RoutineInput>,
 ) -> Result<(StatusCode, Json<RoutineView>), Api> {
     state
@@ -47,7 +47,7 @@ pub async fn create_routine(
 
 /// GET /api/routines/:name
 pub async fn get_routine(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<RoutineView>, Api> {
     state.routines.get(&name).await.map(Json).map_err(api_err)
@@ -55,7 +55,7 @@ pub async fn get_routine(
 
 /// PUT /api/routines/:name — full replace; the path is the id of record.
 pub async fn replace_routine(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(input): Json<RoutineInput>,
 ) -> Result<Json<RoutineView>, Api> {
@@ -73,7 +73,7 @@ pub async fn replace_routine(
 /// would leave sessions that no view reaches and whose runtimes nothing
 /// releases. The UI says how many will go before asking.
 pub async fn delete_routine(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<StatusCode, Api> {
     state.routines.get(&name).await.map_err(api_err)?;
@@ -102,7 +102,7 @@ pub async fn delete_routine(
 /// Deliberately independent of `enabled`, which pauses the timer only: pausing
 /// a routine should not take away the button that lets you try it.
 pub async fn run_routine(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<(StatusCode, Json<RoutineRunResponse>), Api> {
     state
@@ -115,7 +115,7 @@ pub async fn run_routine(
 
 /// GET /api/routines/:name/sessions — the routine's runs, newest first.
 pub async fn get_routine_sessions(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<RoutineSessionsResponse>, Api> {
     state.routines.get(&name).await.map_err(api_err)?;
@@ -130,7 +130,7 @@ pub async fn get_routine_sessions(
 
 /// Every session created by `name`, as (id, summary).
 async fn routine_sessions(
-    state: &AppState,
+    state: &crate::users::UserServices,
     name: &str,
 ) -> Result<Vec<(String, SessionSummary)>, Api> {
     let sessions = handlers::ask(state, |reply| SessionSupervisorCommand::List { reply }).await?;

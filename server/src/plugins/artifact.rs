@@ -1,6 +1,12 @@
 //! Content-addressed zip artifact store on the data dir: one `<hash>.zip` per
 //! bundle version. The DB holds metadata + hash; these are the bytes the
 //! runtime fetches. GC removes artifacts no `plugins` row references.
+//!
+//! Shared by every account, and unavoidably so: an artifact is addressed by the
+//! hash of its own bytes, so two accounts installing the same bundle name the
+//! same file. That is also why `PluginStore::referenced_hashes` is deliberately
+//! unscoped — a GC that only saw one account's rows would delete bytes another
+//! account is still using.
 
 use std::collections::HashSet;
 use std::fs;
@@ -48,6 +54,17 @@ impl ArtifactStore {
             }
         }
         Ok(())
+    }
+
+    /// Verify a fetch token authorizes `hash`.
+    ///
+    /// Lives here rather than on `PluginService` because the artifact route is
+    /// reached *before* the auth layer, by runtimes that hold a capability
+    /// token and no account credential. A token names hashes, and a hash is
+    /// already the content it addresses, so there is nothing per-account for
+    /// this check to consult.
+    pub fn verify_token(&self, secret: &[u8], token: &str, hash: &str) -> Result<(), String> {
+        crate::plugins::token::verify(secret, token, hash)
     }
 }
 

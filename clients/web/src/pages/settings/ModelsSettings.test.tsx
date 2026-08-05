@@ -31,7 +31,6 @@ const view = (providers: ProviderView[]): SettingsView => ({
     dataDir: "",
     pluginsDir: "",
     version: "test",
-    journalBackend: "file",
   },
 });
 

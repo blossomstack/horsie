@@ -12,10 +12,11 @@
 //! rather than in a per-process cache is also what lets the numbers stay correct
 //! without this type having to assume it is the only writer.
 //!
-//! The alternative backend is `FileJournal`, which the CLI still uses. That one
-//! no-ops every snapshot method — fine for a short single-shot run that always
+//! This is the only journal the server has. The `FileJournal` that preceded it
+//! no-oped every snapshot method — fine for a short single-shot run that always
 //! full-replays, wrong for a server that offloads idle actors and re-recovers
-//! them on demand.
+//! them on demand — and left with the `journal.backend` setting that selected
+//! it.
 
 use crate::auth::UserId;
 use crate::db::Db;

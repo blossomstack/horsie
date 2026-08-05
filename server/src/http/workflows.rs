@@ -4,7 +4,7 @@
 //! `POST /api/workflows/:name/runs` but read, watched, interrupted and deleted
 //! through the session API like any other.
 
-use super::AppState;
+use super::Scope;
 use super::error::Api;
 use super::handlers;
 use crate::sessions::builder::build_session_spec;
@@ -16,7 +16,7 @@ use crate::sessions::workflow::{
 };
 use crate::workflows::WorkflowError;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::now_ms;
 use horsie_models::session::AgentSettings as WireAgentSettings;
@@ -44,13 +44,13 @@ fn api_err(e: WorkflowError) -> Api {
 }
 
 /// GET /api/workflows
-pub async fn list_workflows(State(state): State<AppState>) -> Result<Json<Vec<WorkflowView>>, Api> {
+pub async fn list_workflows(Scope(state): Scope) -> Result<Json<Vec<WorkflowView>>, Api> {
     state.workflows.list().await.map(Json).map_err(api_err)
 }
 
 /// POST /api/workflows
 pub async fn create_workflow(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(input): Json<WorkflowInput>,
 ) -> Result<(StatusCode, Json<WorkflowView>), Api> {
     state
@@ -63,7 +63,7 @@ pub async fn create_workflow(
 
 /// GET /api/workflows/:name
 pub async fn get_workflow(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<WorkflowView>, Api> {
     state.workflows.get(&name).await.map(Json).map_err(api_err)
@@ -74,7 +74,7 @@ pub async fn get_workflow(
 /// A run snapshots the definition when it is created, so editing a workflow
 /// never changes a run already under way.
 pub async fn replace_workflow(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(input): Json<WorkflowInput>,
 ) -> Result<Json<WorkflowView>, Api> {
@@ -92,7 +92,7 @@ pub async fn replace_workflow(
 /// sessions in the ordinary session list, each carrying its own snapshot of the
 /// graph, and they stay readable afterwards.
 pub async fn delete_workflow(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<StatusCode, Api> {
     state
@@ -111,7 +111,7 @@ pub async fn delete_workflow(
 /// snapshotted here, so editing the definition or a preset afterwards leaves
 /// this run alone.
 pub async fn start_run(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(req): Json<WorkflowRunRequest>,
 ) -> Result<(StatusCode, Json<WorkflowRunResponse>), Api> {
@@ -251,7 +251,7 @@ pub async fn start_run(
 
 /// GET /api/workflows/:name/runs — this workflow's runs, newest first.
 pub async fn list_runs(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<WorkflowRunsResponse>, Api> {
     // Confirms the workflow exists, so an unknown name is a 404 rather than an
@@ -273,7 +273,7 @@ pub async fn list_runs(
 /// definition is present, including ones the run never reached, so the client
 /// draws the whole graph and lights up what happened.
 pub async fn get_run_graph(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<String>,
 ) -> Result<Json<WorkflowRunGraph>, Api> {
     let (rec, _) = handlers::ask(&state, |reply| SessionSupervisorCommand::Get {
@@ -305,7 +305,7 @@ pub async fn get_run_graph(
 
 /// POST /api/sessions/:id/workflow/retry — re-run one execution.
 pub async fn retry_step(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<String>,
     Json(req): Json<WorkflowRetryRequest>,
 ) -> Result<StatusCode, Api> {

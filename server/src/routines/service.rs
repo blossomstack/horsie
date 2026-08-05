@@ -161,11 +161,6 @@ impl RoutineService {
         }
     }
 
-    /// Enabled routines that have come due.
-    pub async fn due(&self, now_ms: u64) -> Result<Vec<RoutineRow>, RoutineError> {
-        self.store.due(now_ms).await.map_err(RoutineError::Internal)
-    }
-
     /// Names of the routines that would run a given agent preset.
     pub async fn using_agent(&self, agent: &str) -> Result<Vec<String>, RoutineError> {
         self.store
@@ -327,7 +322,6 @@ pub(crate) mod tests {
                     data_dir: String::new(),
                     plugins_dir: String::new(),
                     version: "test".into(),
-                    journal_backend: "file".into(),
                 },
             },
             crate::auth::UserId::new("1"),
@@ -546,7 +540,6 @@ pub(crate) mod tests {
         let v = s.create(paused, 1_000).await.unwrap();
         assert!(!v.enabled);
         assert_eq!(v.next_run_at_ms, None);
-        assert!(s.due(u64::MAX).await.unwrap().is_empty());
     }
 
     #[tokio::test]

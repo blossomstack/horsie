@@ -88,7 +88,7 @@ Open **Settings**. The left nav lists one page per group of settings:
 | **Memory** | — | Memory spaces and the notes the agent has saved in them. |
 | **Integrations** | GitHub | GitHub App config + connection; the GitHub-tools-(MCP) toggle. See [GitHub](github.md). |
 | | MCP servers | Remote MCP servers: name, URL, auth. See [MCP servers](mcp-servers.md). |
-| | Server *(read-only)* | Config file path, database, journal backend, state dir, data dir, plugins dir, version. |
+| | Server *(read-only)* | Config file path, database, state dir, data dir, plugins dir, version. |
 | **Appearance** | Theme / Light or dark / Text size / Transcript | How this browser draws horsie: one of four themes, light/dark/system, a three-step text size that scales the whole interface, and the transcript display switches. Stored in the browser, not the settings database, so each browser you use can differ. |
 | **Account** | — | Change the admin password and sign out. Shows a notice while the deployment is still using its generated first-boot password. Says so plainly when authentication is disabled. |
 
@@ -222,7 +222,6 @@ appends `/v1/chat/completions` itself) or a model id the backend has not loaded.
 
 - **`data_dir`** — plugin artifacts, plus (with the default SQLite database) the
   settings database and the journal under `<data_dir>/server/`. Back this up;
-  mount a volume here in containers. Set `journal.backend` to `file` and the
-  session journal lands here as JSONL instead; a PostgreSQL deployment on the
-  default `database` journal keeps only plugin artifacts here.
+  mount a volume here in containers. A PostgreSQL deployment keeps only plugin
+  artifacts here.
 - **`state_dir`** — ephemeral runtime state; safe to lose across restarts.

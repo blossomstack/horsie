@@ -1,8 +1,8 @@
 //! The model-card catalog: reference records of well-known models (official
 //! model id + token limits). Reference data, NOT runtime config — lives
 //! outside `DbConfigStore`/`SettingsView`, and no registry rebuild is needed
-//! when cards change. Seeded at startup (insert-if-missing), managed via
-//! /api/admin/model-cards, searched via /api/model-cards.
+//! when cards change. Seeded on an account's first touch (insert-if-missing),
+//! managed via /api/admin/model-cards, searched via /api/model-cards.
 
 use crate::auth::UserId;
 use crate::db::Db;
@@ -273,6 +273,69 @@ impl ModelCardStore {
         }
         Ok(inserted)
     }
+
+    /// Seed this account's catalogue unless `marker` says it already has been.
+    ///
+    /// Called on the account's first touch rather than at boot, because looping
+    /// the bundled catalogue over every account at every startup is O(accounts
+    /// × cards) of writes before the port opens.
+    ///
+    /// The marker is a hash of the resolved seed set rather than the server
+    /// version: an operator's `--model-cards-seed` file can change without a
+    /// version bump, and a marker that misses that is a marker that lies. It
+    /// lives in this account's own `settings` row, so an account that has never
+    /// been touched carries no marker and gets seeded.
+    pub async fn seed_once(
+        &self,
+        cards: &[ModelCardInput],
+        marker: &str,
+    ) -> Result<usize, ModelCardError> {
+        let seen: Option<String> = sqlx::query_scalar(
+            &self
+                .db
+                .q("SELECT value FROM settings WHERE user_id = ? AND key = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(SEED_MARKER_KEY)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(|e| ModelCardError::Db(e.to_string()))?;
+        if seen.as_deref() == Some(marker) {
+            return Ok(0);
+        }
+        let inserted = self.seed_if_missing(cards).await?;
+        sqlx::query(&self.db.q(
+            "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) \
+             ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+        ))
+        .bind(self.user.as_str())
+        .bind(SEED_MARKER_KEY)
+        .bind(marker)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| ModelCardError::Db(e.to_string()))?;
+        Ok(inserted)
+    }
+}
+
+/// The `settings` key holding the hash of the seed set this account last got.
+const SEED_MARKER_KEY: &str = "model_cards_seed";
+
+/// A stable, short digest of a seed set, for [`ModelCardStore::seed_once`].
+///
+/// Computed once at boot and handed to every account's build. FNV-1a over the
+/// serialized inputs: this is a change detector, not a security boundary, and
+/// pulling in a cryptographic hash to compare a marker to itself would be
+/// weight for nothing.
+#[must_use]
+pub fn seed_marker(cards: &[ModelCardInput]) -> String {
+    let bytes = serde_json::to_vec(cards).unwrap_or_default();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 /// The compiled-in default catalog, seeded at every startup (insert-if-missing).
@@ -318,6 +381,66 @@ mod tests {
 
     async fn test_store() -> ModelCardStore {
         ModelCardStore::new(crate::db::testing::db().await, UserId::new("1"))
+    }
+
+    /// The marker is what stops a boot-time loop becoming a per-request one:
+    /// seed on first touch, then never again until the seed set itself changes.
+    #[tokio::test]
+    async fn seed_once_seeds_on_first_touch_and_not_again() {
+        let store = test_store().await;
+        let seeds = [input("m1", "One", Some(1000), None)];
+        let marker = seed_marker(&seeds);
+
+        assert_eq!(store.seed_once(&seeds, &marker).await.unwrap(), 1);
+        assert_eq!(store.seed_once(&seeds, &marker).await.unwrap(), 0);
+
+        // An operator deleting a bundled card gets it back only when the seed
+        // set changes — which is the price of not having a shared catalogue.
+        store.delete("m1").await.unwrap();
+        assert_eq!(store.seed_once(&seeds, &marker).await.unwrap(), 0);
+
+        let grown = [
+            input("m1", "One", Some(1000), None),
+            input("m2", "Two", Some(2000), None),
+        ];
+        assert_eq!(
+            store.seed_once(&grown, &seed_marker(&grown)).await.unwrap(),
+            2,
+            "a changed seed set reseeds, and restores what was deleted"
+        );
+    }
+
+    /// A marker derived from the server version would miss an operator editing
+    /// their `--model-cards-seed` file, so it is derived from the set itself.
+    #[test]
+    fn the_marker_follows_the_seed_set_not_the_release() {
+        let one = [input("m1", "One", Some(1000), None)];
+        let renamed = [input("m1", "One Renamed", Some(1000), None)];
+        assert_eq!(seed_marker(&one), seed_marker(&one));
+        assert_ne!(seed_marker(&one), seed_marker(&renamed));
+        assert_ne!(seed_marker(&one), seed_marker(&[]));
+    }
+
+    /// Each account gets its own copy: the catalogue is per-account precisely
+    /// so a member can add a card the operator has not blessed.
+    #[tokio::test]
+    async fn each_account_is_seeded_separately() {
+        let db = crate::db::testing::db().await;
+        let (one, two) = (
+            ModelCardStore::new(db.clone(), UserId::generate()),
+            ModelCardStore::new(db, UserId::generate()),
+        );
+        let seeds = [input("m1", "One", Some(1000), None)];
+        let marker = seed_marker(&seeds);
+
+        assert_eq!(one.seed_once(&seeds, &marker).await.unwrap(), 1);
+        assert_eq!(
+            two.seed_once(&seeds, &marker).await.unwrap(),
+            1,
+            "the second account's marker is its own, and so is its catalogue"
+        );
+        one.delete("m1").await.unwrap();
+        assert_eq!(two.list().await.unwrap().len(), 1);
     }
 
     fn input(model_id: &str, name: &str, cw: Option<u32>, mt: Option<u32>) -> ModelCardInput {

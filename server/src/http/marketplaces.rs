@@ -9,10 +9,10 @@
 //! install already accepts arbitrary git URLs at this trust level, and adding a
 //! catalogue of URLs does not change it.
 
-use super::AppState;
+use super::Scope;
 use super::error::Api;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::plugins::MarketplaceView;
 
@@ -21,7 +21,7 @@ use horsie_models::plugins::MarketplaceView;
 /// The entries ride along, so the picker needs no second request: they are
 /// already on the row, and a `/:name/plugins` endpoint would be a second read
 /// of the same column.
-pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<MarketplaceView>>, Api> {
+pub async fn list(Scope(state): Scope) -> Result<Json<Vec<MarketplaceView>>, Api> {
     state
         .plugins
         .list_marketplaces()
@@ -32,7 +32,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<MarketplaceV
 
 /// POST /api/marketplaces/:name/refresh — re-clone and re-parse the index.
 pub async fn refresh(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<MarketplaceView>, Api> {
     state
@@ -45,10 +45,7 @@ pub async fn refresh(
 
 /// DELETE /api/marketplaces/:name — drop the source. Bundles installed from it
 /// stay installed.
-pub async fn remove(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Result<StatusCode, Api> {
+pub async fn remove(Scope(state): Scope, Path(name): Path<String>) -> Result<StatusCode, Api> {
     state
         .plugins
         .remove_marketplace(&name)

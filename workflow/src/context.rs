@@ -115,9 +115,9 @@ pub struct Contexts {
 #[derive(Debug, Clone)]
 pub struct StartTurn {
     /// `Some(source)` when this agent load has not yet fired its start hook.
-    /// `"startup"` for a fresh agent, `"resume"` for one recovered from a
-    /// journal — the only two lifecycle transitions horsie has.
-    pub start_source: Option<String>,
+    /// `Startup` for a fresh agent, `Resume` for one recovered from a journal —
+    /// the only two of the spec's five lifecycle transitions horsie has.
+    pub start_source: Option<horsie_models::runtime::SessionStartSource>,
     /// The user prompt this run starts on, when it has one.
     pub prompt: Option<String>,
 }
@@ -155,7 +155,7 @@ pub trait ContextProvider: Send + Sync {
     ///
     /// Returns the records to journal. Their consequences are read off them by
     /// the caller — the agent translates the context and
-    /// [`crate::prompt_blocked`] reads a refusal — so this never decides
+    /// [`crate::start_blocked`] reads a refusal — so this never decides
     /// anything itself.
     async fn start_hooks(
         &self,

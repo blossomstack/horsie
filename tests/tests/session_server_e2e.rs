@@ -1,5 +1,5 @@
 //! End-to-end tests for the session server: real axum HTTP + real event-sourced
-//! actors + real FileJournal, driven over HTTP with reqwest. Only the sandbox
+//! actors + a real `SqlJournal`, driven over HTTP with reqwest. Only the sandbox
 //! runtime (a FakeRuntimeVendor over a real WebSocket) and the LLM
 //! (MockLlmServer) are doubled.
 
@@ -10,23 +10,17 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use horsie_actor::{ActorRef, Journal, spawn_root};
+use horsie_actor::ActorRef;
 use horsie_agentcore::LlmProvider;
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
-use horsie_runtime_vendor::ConnectedRuntimeRegistry;
-use horsie_server::config::{DbConfigStore, StoreDeps};
-use horsie_server::db::journal::SqlJournal;
+use horsie_server::db::Db;
 use horsie_server::http::{AppState, app};
-use horsie_server::runtime_manager::{RuntimeDeps, RuntimeManager};
 use horsie_server::runtime_vendor::RuntimeVendorLink;
 use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
 use horsie_server::sessions::clock::TestClock;
-use horsie_server::sessions::spec::ServerDeps;
-use horsie_server::sessions::supervisor::{
-    SessionSupervisor, SessionSupervisorCommand, SupervisorConfig,
-};
-use std::collections::HashMap;
+use horsie_server::sessions::supervisor::{SessionSupervisorCommand, SupervisorConfig};
+use horsie_server::users::{Shared, UserRegistry};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -83,7 +77,7 @@ async fn start_server(
     vendor: Arc<RuntimeVendorLink>,
     mock_url: &str,
 ) -> Server {
-    start_server_with(journal_dir, vendor, mock_url, None).await
+    start_server_with(journal_dir, Some(vendor), mock_url, None).await
 }
 
 /// As [`start_server`], but with the supervisor's idle policy under the test's
@@ -91,7 +85,7 @@ async fn start_server(
 /// offload happens exactly when the test sends `Tick` and never by surprise.
 async fn start_server_with(
     journal_dir: &Path,
-    vendor: Arc<RuntimeVendorLink>,
+    vendor: Option<Arc<RuntimeVendorLink>>,
     mock_url: &str,
     clock: Option<Arc<TestClock>>,
 ) -> Server {
@@ -102,175 +96,79 @@ async fn start_server_with(
 /// the seam a test needs to drive a wire other than Anthropic's.
 async fn start_server_on(
     journal_dir: &Path,
-    vendor: Arc<RuntimeVendorLink>,
+    vendor: Option<Arc<RuntimeVendorLink>>,
     provider: Arc<dyn LlmProvider>,
     clock: Option<Arc<TestClock>>,
 ) -> Server {
-    let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
-    providers.insert("mock".into(), provider);
-    let mut vendors: HashMap<String, Arc<RuntimeVendorLink>> = HashMap::new();
-    vendors.insert("mock".into(), vendor);
-    let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
-    let deps = ServerDeps {
-        runtimes: Arc::new(RuntimeManager::new(RuntimeDeps {
-            vendors: shared_vendors.clone(),
-            state_dir: journal_dir.join("state"),
-            github_tokens: None,
-            plugins: None,
-        })),
-        provider_registry: Arc::new(std::sync::RwLock::new(providers)),
-        vendors: shared_vendors.clone(),
-        state_dir: journal_dir.join("state"),
-        github_tokens: None,
-        mcp: None,
-        plugins: None,
-        memory: None,
-    };
     // The e2e suite runs on the production default backend, so every test here
     // — including the restart ones — exercises real snapshots and compaction.
-    let db = journal_dir.join("config.db");
-    let opened = DbConfigStore::open(
-        &format!("sqlite://{}", db.display()),
-        StoreDeps {
-            info: horsie_models::settings::ServerInfo {
-                config_path: String::new(),
-                database: String::new(),
-                state_dir: String::new(),
-                data_dir: String::new(),
-                plugins_dir: String::new(),
-                version: "test".into(),
-                journal_backend: "file".into(),
-            },
-        },
-        horsie_server::auth::UserId::new("1"),
-    )
-    .await
-    .unwrap();
-    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(
-        opened.db.clone(),
-        horsie_server::auth::UserId::new("1"),
-    ));
-    let (gtx, _) = tokio::sync::broadcast::channel(256);
-    let supervisor = match clock {
-        Some(clock) => spawn_root(
-            SessionSupervisor::with_config(
-                deps,
-                gtx.clone(),
-                SupervisorConfig {
-                    clock,
-                    idle_timeout: Duration::from_secs(180),
-                    tick_interval: None,
-                },
-            ),
-            journal.clone(),
-        ),
-        None => spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone()),
-    };
-    // A real (empty) settings store backs `/api/config`; the session flow uses
-    // the custom `mock` registry/vendor above, so the store's own registry is
-    // unused. It is the same store the journal above runs on.
-    let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::github::GithubApi::new(),
-    ));
-    let plugins = Arc::new(horsie_server::plugins::PluginService::new(
-        horsie_server::plugins::PluginStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::plugins::MarketplaceStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
-        b"e2e-secret".to_vec(),
-    ));
-    let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.db.clone(), horsie_server::auth::UserId::new("1")),
-        github.clone(),
-    ));
-    let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-    ));
-    let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        opened.store.clone(),
-    ));
-    let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        agents.clone(),
-    ));
-    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
-        horsie_server::environments::EnvironmentStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-    ));
+    let db = Db::open(&format!("sqlite://{}/config.db", journal_dir.display()), 5)
+        .await
+        .unwrap();
     // Auth off: this suite drives the HTTP API without a credential, and a
     // disabled deployment is a supported configuration. Authenticated coverage
     // lives in the server crate's own HTTP tests.
     let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.db.clone()),
+        horsie_server::auth::AuthStore::new(db.clone()),
         horsie_server::auth::AuthDeps {
             enabled: false,
             state_dir: journal_dir.to_path_buf(),
         },
     ));
-    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
-        shared_vendors,
-    ));
-    let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
-        horsie_server::workflows::WorkflowStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        agents.clone(),
-    ));
-    let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
-        routines.clone(),
-        agents.clone(),
-        opened.store.clone(),
-        vendor_agents.clone(),
-        supervisor.clone(),
-    ));
-    let state = AppState {
-        supervisor: supervisor.clone(),
-        global_events: gtx,
-        auth,
-        config_store: opened.store.clone(),
-        model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
+    auth.bootstrap().await.unwrap();
+    let account = auth.sole_user().await.unwrap().expect("bootstrapped");
+
+    let shared = Arc::new(Shared {
+        db,
+        artifacts: Arc::new(horsie_server::plugins::ArtifactStore::new(
+            journal_dir.join("plugin-artifacts"),
         )),
-        chatgpt: Arc::new(
-            horsie_server::config::chatgpt_login::ChatGptLoginService::new(
-                opened.db.clone(),
-                horsie_server::auth::UserId::new("1"),
-                opened.store.clone(),
-            ),
-        ),
-        github,
-        mcp,
-        plugins,
-        memory,
-        agents,
-        routines,
-        workflows,
-        routine_runner,
-        environments,
-        vendor_agents,
+        artifact_secret: Arc::new(b"e2e-secret".to_vec()),
+        info: horsie_models::settings::ServerInfo {
+            config_path: String::new(),
+            database: String::new(),
+            state_dir: String::new(),
+            data_dir: String::new(),
+            plugins_dir: String::new(),
+            version: "test".into(),
+        },
+        model_card_seed: Arc::new(Vec::new()),
+        model_card_seed_marker: horsie_server::config::model_cards::seed_marker(&[]),
+        anonymous: account.clone(),
+        // With a clock the test drives the idle policy itself: no background
+        // ticker, so an offload happens exactly when it sends `Tick`.
+        supervisor: match clock {
+            Some(clock) => SupervisorConfig {
+                clock,
+                idle_timeout: Duration::from_secs(180),
+                tick_interval: None,
+            },
+            None => SupervisorConfig::default(),
+        },
+    });
+    let users = Arc::new(UserRegistry::new(shared.clone()));
+    let services = users.get(&account).await.unwrap();
+
+    // The doubles go into the account's own registry and vendor map — the same
+    // handles its supervisor and runtime manager read.
+    services
+        .provider_registry
+        .write()
+        .unwrap()
+        .insert("mock".into(), provider);
+    if let Some(vendor) = vendor {
+        services
+            .vendors
+            .write()
+            .unwrap()
+            .insert("mock".into(), vendor);
+    }
+
+    let supervisor = services.supervisor.clone();
+    let state = AppState {
+        auth,
+        shared,
+        users,
         web_dir: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -287,7 +185,18 @@ async fn start_server_on(
     }
 }
 
-async fn create_session(client: &reqwest::Client, addr: &SocketAddr) -> String {
+/// Create a session and wait until its runtime actually exists.
+///
+/// The wait is not politeness. Provisioning is detached — `Create` answers
+/// before the runtime is asked for — so a session reporting `Idle` says nothing
+/// about whether its runtime exists, and a turn that beats the create to the
+/// vendor gets a terminal `Gone` (horsie#232). Every test here means "a session
+/// that is up", so this is where that is established, once.
+async fn create_session(
+    client: &reqwest::Client,
+    addr: &SocketAddr,
+    agent: &FakeRuntimeVendor,
+) -> String {
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
         "vendor": "mock"
@@ -300,7 +209,9 @@ async fn create_session(client: &reqwest::Client, addr: &SocketAddr) -> String {
         .unwrap();
     assert_eq!(res.status().as_u16(), 201);
     let v: serde_json::Value = res.json().await.unwrap();
-    v["session"]["id"].as_str().unwrap().to_string()
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+    wait_for_signal(agent, &format!("create:{id}")).await;
+    id
 }
 
 /// Like `create_session`, but selects a named vendor with no `repos` — the
@@ -309,6 +220,7 @@ async fn create_session_for_vendor(
     client: &reqwest::Client,
     addr: &SocketAddr,
     vendor: &str,
+    agent: &FakeRuntimeVendor,
 ) -> String {
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
@@ -322,179 +234,26 @@ async fn create_session_for_vendor(
         .unwrap();
     assert_eq!(res.status().as_u16(), 201);
     let v: serde_json::Value = res.json().await.unwrap();
-    v["session"]["id"].as_str().unwrap().to_string()
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+    // As `create_session`: a session is not up until its runtime exists.
+    wait_for_signal(agent, &format!("create:{id}")).await;
+    id
 }
 
-/// Start a server whose `ServerDeps.vendors` is the SAME `SharedVendors` map
-/// `DbConfigStore::open()` returns — unlike `start_server`, which builds its own.
-/// That is the seam a vendor agent needs: an agent dialing
-/// `/api/vendor/connect` publishes itself into that map and becomes resolvable
-/// by session creation exactly as in production. Returns the server handle plus
-/// the HTTP address agents dial.
+/// Start a server with no vendor pre-published, for the tests where an agent
+/// dials `/api/vendor/connect` and has to become resolvable by session creation
+/// exactly as in production.
+///
+/// That used to need its own harness, because the old one built a vendor map
+/// separate from the one the config store handed out. An account's map is now
+/// the only one there is, so this is `start_server_with` with nothing in it.
 async fn start_server_with_live_vendors(
     journal_dir: &Path,
     mock_url: &str,
 ) -> (Server, SocketAddr) {
-    let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
-    providers.insert("mock".into(), provider_at(mock_url));
-    let db = journal_dir.join("config.db");
-    let _runtime_registry = Arc::new(ConnectedRuntimeRegistry::new());
-    let opened = DbConfigStore::open(
-        &format!("sqlite://{}", db.display()),
-        StoreDeps {
-            info: horsie_models::settings::ServerInfo {
-                config_path: String::new(),
-                database: String::new(),
-                state_dir: String::new(),
-                data_dir: String::new(),
-                plugins_dir: String::new(),
-                version: "test".into(),
-                journal_backend: "file".into(),
-            },
-        },
-        horsie_server::auth::UserId::new("1"),
-    )
-    .await
-    .unwrap();
-    let deps = ServerDeps {
-        runtimes: Arc::new(RuntimeManager::new(RuntimeDeps {
-            vendors: opened.vendors.clone(),
-            state_dir: journal_dir.join("state"),
-            github_tokens: None,
-            plugins: None,
-        })),
-        provider_registry: Arc::new(std::sync::RwLock::new(providers)),
-        vendors: opened.vendors.clone(),
-        state_dir: journal_dir.join("state"),
-        github_tokens: None,
-        mcp: None,
-        plugins: None,
-        memory: None,
-    };
-    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(
-        opened.db.clone(),
-        horsie_server::auth::UserId::new("1"),
-    ));
-    let (gtx, _) = tokio::sync::broadcast::channel(256);
-    let supervisor = spawn_root(SessionSupervisor::new(deps, gtx.clone()), journal.clone());
-    let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::github::GithubApi::new(),
-    ));
-    let plugins = Arc::new(horsie_server::plugins::PluginService::new(
-        horsie_server::plugins::PluginStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::plugins::MarketplaceStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        horsie_server::plugins::ArtifactStore::new(journal_dir.join("plugin-artifacts")),
-        b"e2e-secret".to_vec(),
-    ));
-    let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.db.clone(), horsie_server::auth::UserId::new("1")),
-        github.clone(),
-    ));
-    let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-    ));
-    let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        opened.store.clone(),
-    ));
-    let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        agents.clone(),
-    ));
-    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
-        horsie_server::environments::EnvironmentStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-    ));
-    // Auth off: this suite drives the HTTP API without a credential, and a
-    // disabled deployment is a supported configuration. Authenticated coverage
-    // lives in the server crate's own HTTP tests.
-    let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.db.clone()),
-        horsie_server::auth::AuthDeps {
-            enabled: false,
-            state_dir: journal_dir.to_path_buf(),
-        },
-    ));
-    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
-        opened.vendors.clone(),
-    ));
-    let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
-        horsie_server::workflows::WorkflowStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        ),
-        agents.clone(),
-    ));
-    let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
-        routines.clone(),
-        agents.clone(),
-        opened.store.clone(),
-        vendor_agents.clone(),
-        supervisor.clone(),
-    ));
-    let state = AppState {
-        supervisor: supervisor.clone(),
-        global_events: gtx,
-        auth,
-        config_store: opened.store.clone(),
-        model_cards: Arc::new(horsie_server::config::model_cards::ModelCardStore::new(
-            opened.db.clone(),
-            horsie_server::auth::UserId::new("1"),
-        )),
-        chatgpt: Arc::new(
-            horsie_server::config::chatgpt_login::ChatGptLoginService::new(
-                opened.db.clone(),
-                horsie_server::auth::UserId::new("1"),
-                opened.store.clone(),
-            ),
-        ),
-        github,
-        mcp,
-        plugins,
-        memory,
-        agents,
-        routines,
-        workflows,
-        routine_runner,
-        environments,
-        vendor_agents,
-        web_dir: None,
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app(state)).await;
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    (
-        Server {
-            addr,
-            supervisor,
-            task,
-        },
-        addr,
-    )
+    let server = start_server_with(journal_dir, None, mock_url, None).await;
+    let addr = server.addr;
+    (server, addr)
 }
 
 async fn send_message(
@@ -582,6 +341,37 @@ async fn wait_status(client: &reqwest::Client, addr: &SocketAddr, id: &str, want
             panic!("timed out waiting for status {want}; last = {got:?}");
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+}
+
+/// Poll a fake agent's signals until `signal` appears, or the deadline passes.
+///
+/// Provisioning is detached — `SessionSupervisorCommand::Create` spawns it and
+/// answers immediately, because a real create legitimately runs for minutes.
+/// So a session reporting `Idle` says nothing about whether its runtime exists
+/// yet, and a test that takes the vendor away, or restarts the server, has to
+/// wait for `create:<id>` first or it is racing the create it meant to happen
+/// before.
+///
+/// A `get` issued while a create is in flight *at the agent* waits for it. One
+/// issued before the server has finished assembling the spec — which does real
+/// I/O for plugin refs and GitHub tokens — does not: the agent has never heard
+/// of the runtime, so it answers `Gone`, which is terminal. That window is
+/// horsie#232, and it is why waiting on the signal rather than on `Idle` is the
+/// honest thing for a test to do.
+async fn wait_for_signal(agent: &FakeRuntimeVendor, signal: &str) {
+    let deadline = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        if agent.signals().iter().any(|s| s == signal) {
+            return;
+        }
+        assert!(
+            start.elapsed() <= deadline,
+            "timed out waiting for {signal}; saw {:?}",
+            agent.signals()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -674,7 +464,7 @@ async fn create_message_sse_roundtrip() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // Connect SSE (replay from 0 + live) BEFORE sending, so we see the whole turn.
@@ -753,7 +543,7 @@ async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // A turn that hangs inside the provider call, so the session is genuinely
@@ -823,7 +613,7 @@ async fn prep_progressions_stream_during_a_turn() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // Subscribe before sending so the live progression frames are seen. Prep
@@ -873,7 +663,7 @@ async fn history_endpoint_returns_windowed_messages() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // Two completed turns → user + assistant per turn = 4 messages. Poll the
@@ -1037,7 +827,7 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     let client = reqwest::Client::new();
 
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     let usage = |addr: SocketAddr, id: String| {
@@ -1126,7 +916,7 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "one").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -1205,7 +995,7 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "one").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -1250,7 +1040,7 @@ async fn restart_reconciles_the_interrupted_turn_and_never_resumes() {
     let client = reqwest::Client::new();
 
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // A blocking turn: the LLM request arrives, then hangs — the session is
@@ -1300,7 +1090,7 @@ async fn last_event_id_replay_is_gap_free() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "one").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -1560,7 +1350,7 @@ async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
             .expect("fake agent");
         let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
         let client = reqwest::Client::new();
-        let id = create_session(&client, &server.addr).await;
+        let id = create_session(&client, &server.addr, &agent).await;
         wait_status(&client, &server.addr, &id, "Idle").await;
 
         mock.queue_tool_call("bash", serde_json::json!({ "command": "echo hi" }));
@@ -1627,7 +1417,7 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
             .expect("fake agent");
         let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
         let client = reqwest::Client::new();
-        let id = create_session(&client, &server.addr).await;
+        let id = create_session(&client, &server.addr, &agent).await;
         wait_status(&client, &server.addr, &id, "Idle").await;
 
         mock.queue_tool_call("bash", serde_json::json!({ "command": "sleep 999" }));
@@ -1720,7 +1510,7 @@ async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
     // Let the handshake land before the session resolves the vendor name.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let id = create_session_for_vendor(&client, &server.addr, "agent-1").await;
+    let id = create_session_for_vendor(&client, &server.addr, "agent-1", &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     assert_eq!(
@@ -1759,7 +1549,7 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "hello").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -1833,7 +1623,7 @@ async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     let block = mock.blocking_response("first");
@@ -1897,7 +1687,7 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     let block = mock.blocking_response("never delivered");
@@ -1945,7 +1735,7 @@ async fn a_gone_runtime_is_terminal_while_an_unreachable_vendor_is_not() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     mock.queue_response("never reached");
@@ -1993,7 +1783,7 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
         .expect("agent connects");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let id = create_session_for_vendor(&client, &server.addr, "agent-3").await;
+    let id = create_session_for_vendor(&client, &server.addr, "agent-3", &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // The vendor goes away between turns. Its runtime is not gone — nobody can
@@ -2046,11 +1836,16 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
         .await
         .expect("fake agent");
     let clock = Arc::new(TestClock::new());
-    let server =
-        start_server_with(tmp.path(), agent.link(), &mock.url(), Some(clock.clone())).await;
+    let server = start_server_with(
+        tmp.path(),
+        Some(agent.link()),
+        &mock.url(),
+        Some(clock.clone()),
+    )
+    .await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "one").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -2132,8 +1927,8 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         .expect("agent connects");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let a = create_session_for_vendor(&client, &server.addr, "agent-2").await;
-    let b = create_session_for_vendor(&client, &server.addr, "agent-2").await;
+    let a = create_session_for_vendor(&client, &server.addr, "agent-2", &agent).await;
+    let b = create_session_for_vendor(&client, &server.addr, "agent-2", &agent).await;
     wait_status(&client, &server.addr, &a, "Idle").await;
     wait_status(&client, &server.addr, &b, "Idle").await;
 
@@ -2218,7 +2013,7 @@ async fn the_request_prefix_only_ever_grows() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     for text in ["one", "two", "three"] {
@@ -2281,7 +2076,7 @@ async fn the_request_prefix_survives_a_restart() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     for text in ["one", "two"] {
         send_message(&client, &server.addr, &id, text).await;
@@ -2326,7 +2121,7 @@ async fn the_request_prefix_only_grows_across_tool_calls() {
         .expect("fake agent");
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // Two turns, each of them three provider calls: tool, tool, answer.
@@ -2390,9 +2185,9 @@ async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
             .with_model("mock")
             .with_base_url(mock.url()),
     );
-    let server = start_server_on(tmp.path(), agent.link(), provider, None).await;
+    let server = start_server_on(tmp.path(), Some(agent.link()), provider, None).await;
     let client = reqwest::Client::new();
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     for text in ["first", "second", "third"] {

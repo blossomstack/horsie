@@ -1,10 +1,10 @@
 //! Public model-card read API: prefix search consumed by the Settings model
 //! form's model-id autocomplete. Mutations live under `/api/admin`.
 
-use crate::http::AppState;
+use crate::http::Scope;
 use crate::http::error::Api;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::Query;
 use horsie_models::model_cards::ModelCard;
 use serde::Deserialize;
 
@@ -16,7 +16,7 @@ pub struct ListQuery {
 /// `GET /api/model-cards?prefix=` — cards whose `model_id` starts with
 /// `prefix` (all cards when omitted), ordered by `model_id`, capped.
 pub async fn list(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<ModelCard>>, Api> {
     state

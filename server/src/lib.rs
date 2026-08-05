@@ -13,6 +13,7 @@ pub mod routines;
 pub mod runtime_manager;
 pub mod runtime_vendor;
 pub mod sessions;
+pub mod users;
 mod wire_redact;
 pub mod workflows;
 

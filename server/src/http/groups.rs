@@ -1,12 +1,12 @@
 //! Session groups and session annotations. Both are supervisor-journal state,
 //! so every handler is a thin ask-and-map over `SessionSupervisorCommand`.
 
-use crate::http::AppState;
+use crate::http::Scope;
 use crate::http::error::Api;
 use crate::http::handlers::ask;
 use crate::sessions::supervisor::{GroupError, SessionSupervisorCommand};
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::now_ms;
@@ -24,7 +24,7 @@ fn group_error(e: GroupError) -> Api {
     }
 }
 
-pub async fn list_groups(State(state): State<AppState>) -> Result<impl IntoResponse, Api> {
+pub async fn list_groups(Scope(state): Scope) -> Result<impl IntoResponse, Api> {
     let groups = ask(&state, |reply| SessionSupervisorCommand::ListGroups {
         reply,
     })
@@ -37,7 +37,7 @@ pub async fn list_groups(State(state): State<AppState>) -> Result<impl IntoRespo
 }
 
 pub async fn create_group(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(req): Json<CreateGroupRequest>,
 ) -> Result<impl IntoResponse, Api> {
     ask(&state, |reply| SessionSupervisorCommand::CreateGroup {
@@ -56,7 +56,7 @@ pub async fn create_group(
 }
 
 pub async fn rename_group(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(req): Json<RenameGroupRequest>,
 ) -> Result<impl IntoResponse, Api> {
@@ -71,7 +71,7 @@ pub async fn rename_group(
 }
 
 pub async fn delete_group(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, Api> {
     ask(&state, |reply| SessionSupervisorCommand::DeleteGroup {
@@ -93,7 +93,7 @@ fn valid_annotation_key(key: &str) -> bool {
 }
 
 pub async fn set_annotations(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<String>,
     Json(req): Json<SetAnnotationsRequest>,
 ) -> Result<impl IntoResponse, Api> {

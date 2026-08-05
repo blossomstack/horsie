@@ -1584,7 +1584,6 @@ name = "horsie-actor"
 version = "0.1.6"
 dependencies = [
  "async-trait",
- "base64 0.23.0",
  "futures-util",
  "horsie-actor",
  "parking_lot",

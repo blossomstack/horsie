@@ -38,7 +38,7 @@ pub fn translate(entry: &HookEntry) -> Option<Message> {
             match &r.outcome {
                 UserPromptSubmitOutcome::Ran(c) => c.additional_context.as_deref(),
                 // A blocked prompt never starts a run, so there is no turn to
-                // annotate; the seam abandons it. See [`prompt_blocked`].
+                // annotate; the seam abandons it. See [`start_blocked`].
                 UserPromptSubmitOutcome::Blocked(_) | UserPromptSubmitOutcome::Failed(_) => None,
             },
         ),
@@ -64,7 +64,9 @@ pub fn translate(entry: &HookEntry) -> Option<Message> {
             "SubagentStop",
             match &r.outcome {
                 SubagentStopOutcome::Ran(c) => c.additional_context.as_deref(),
-                SubagentStopOutcome::Blocked(_) | SubagentStopOutcome::Failed(_) => None,
+                SubagentStopOutcome::Blocked(_)
+                | SubagentStopOutcome::CapReached(_)
+                | SubagentStopOutcome::Failed(_) => None,
             },
         ),
         // The one tool-*named* event that translates: it spans N calls, so no
@@ -112,12 +114,22 @@ pub fn translate(entry: &HookEntry) -> Option<Message> {
     })
 }
 
-/// Why a `UserPromptSubmit` hook refused this prompt, if one did.
+/// Why this run must not start, if one of its start hooks said so.
 ///
-/// Not a translation: a blocked prompt is never journaled, so the run is
-/// abandoned at the seam rather than filtered out of the fold.
+/// Two ways to say it, and they are not the same statement. A
+/// `UserPromptSubmit` block refuses *this prompt*; `continue: false` on any
+/// start hook refuses *everything after it*, which at this seam is the same
+/// run. The halt is checked first because the spec gives it precedence.
+///
+/// Not a translation: a refused run is never journaled, so it is abandoned at
+/// the seam rather than filtered out of the fold.
 #[must_use]
-pub fn prompt_blocked(records: &[HookRecord]) -> Option<String> {
+pub fn start_blocked(records: &[HookRecord]) -> Option<String> {
+    if let Some(halt) = records.iter().find_map(|r| r.halt.as_ref()) {
+        return Some(halt.reason.clone().unwrap_or_else(|| {
+            "a start hook set continue: false, so this turn was not run".to_string()
+        }));
+    }
     records.iter().find_map(|r| match &r.action {
         HookAction::UserPromptSubmit(u) => match &u.outcome {
             UserPromptSubmitOutcome::Blocked(b) => Some(
@@ -173,6 +185,7 @@ mod tests {
             record: HookRecord {
                 plugin: "impeccable".into(),
                 duration_ms: 3,
+                halt: None,
                 action,
             },
         }
@@ -236,6 +249,7 @@ mod tests {
     fn subagent_start_and_stop_context_translate() {
         assert!(
             translate(&entry(HookAction::SubagentStart(SubagentStartRecord {
+                agent_id: "sub-1".into(),
                 agent_type: "reviewer".into(),
                 system_message: None,
                 outcome: SubagentStartOutcome::Ran(ctx("house rules")),
@@ -244,6 +258,7 @@ mod tests {
         );
         assert!(
             translate(&entry(HookAction::SubagentStop(SubagentStopRecord {
+                agent_id: "sub-1".into(),
                 agent_type: "reviewer".into(),
                 system_message: None,
                 outcome: SubagentStopOutcome::Ran(ctx("summarise findings")),
@@ -382,6 +397,7 @@ mod tests {
         let records = vec![HookRecord {
             plugin: "guard".into(),
             duration_ms: 1,
+            halt: None,
             action: HookAction::UserPromptSubmit(UserPromptSubmitRecord {
                 system_message: None,
                 outcome: UserPromptSubmitOutcome::Blocked(HookBlocked {
@@ -390,9 +406,38 @@ mod tests {
             }),
         }];
         assert_eq!(
-            prompt_blocked(&records).as_deref(),
+            start_blocked(&records).as_deref(),
             Some("secrets in the prompt")
         );
-        assert!(prompt_blocked(&[]).is_none());
+        assert!(start_blocked(&[]).is_none());
+    }
+
+    /// `continue: false` refuses the run from any start hook, including the two
+    /// that cannot block anything — a `SessionStart` has nothing to refuse, but
+    /// it can still say "go no further".
+    #[test]
+    fn a_halt_on_any_start_hook_refuses_the_run() {
+        let mut record = HookRecord {
+            plugin: "guard".into(),
+            duration_ms: 1,
+            halt: Some(horsie_models::hooks::HookHalt {
+                reason: Some("the workspace is read-only today".into()),
+            }),
+            action: HookAction::SessionStart(horsie_models::hooks::SessionStartRecord {
+                source: "startup".into(),
+                system_message: None,
+                outcome: SessionStartOutcome::Ran(horsie_models::hooks::ContextInjected {
+                    additional_context: None,
+                }),
+            }),
+        };
+        assert_eq!(
+            start_blocked(std::slice::from_ref(&record)).as_deref(),
+            Some("the workspace is read-only today")
+        );
+        // A halt with no reason still refuses; nothing may read a missing
+        // `stopReason` as "it did not mean it".
+        record.halt = Some(horsie_models::hooks::HookHalt { reason: None });
+        assert!(start_blocked(&[record]).is_some());
     }
 }

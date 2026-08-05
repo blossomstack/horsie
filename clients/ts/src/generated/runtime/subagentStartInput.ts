@@ -1,7 +1,8 @@
 
 /**
- * `agent_type` is the matcher domain, the way `source` is for `SessionStart`.
+ * A subagent starting. `agent_id` names *which* subagent; `agent_type` is the
  */
 export interface SubagentStartInput {
+  agentId: string;
   agentType: string;
 }

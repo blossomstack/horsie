@@ -2,10 +2,10 @@
 //! them, for the web UI. The agent reaches the same data through
 //! `MemoryToolbox`, not through these routes.
 
-use super::AppState;
+use super::Scope;
 use super::error::Api;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use horsie_models::memory::{
     MemoryCreateInput, MemorySpaceCreateInput, MemorySpaceUpdateInput, MemorySpaceView,
@@ -19,7 +19,7 @@ pub struct ListQuery {
 }
 
 /// GET /api/memory-spaces
-pub async fn list_spaces(State(state): State<AppState>) -> Result<Json<Vec<MemorySpaceView>>, Api> {
+pub async fn list_spaces(Scope(state): Scope) -> Result<Json<Vec<MemorySpaceView>>, Api> {
     state
         .memory
         .list_spaces()
@@ -30,7 +30,7 @@ pub async fn list_spaces(State(state): State<AppState>) -> Result<Json<Vec<Memor
 
 /// POST /api/memory-spaces
 pub async fn create_space(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(input): Json<MemorySpaceCreateInput>,
 ) -> Result<(StatusCode, Json<MemorySpaceView>), Api> {
     state
@@ -43,7 +43,7 @@ pub async fn create_space(
 
 /// PUT /api/memory-spaces/:name — rename and/or re-describe.
 pub async fn update_space(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
     Json(input): Json<MemorySpaceUpdateInput>,
 ) -> Result<Json<MemorySpaceView>, Api> {
@@ -57,7 +57,7 @@ pub async fn update_space(
 
 /// DELETE /api/memory-spaces/:name — removes the space and its memories.
 pub async fn delete_space(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<StatusCode, Api> {
     state
@@ -70,7 +70,7 @@ pub async fn delete_space(
 
 /// GET /api/memories?space=<name>
 pub async fn list_memories(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<MemoryView>>, Api> {
     state
@@ -82,10 +82,7 @@ pub async fn list_memories(
 }
 
 /// GET /api/memories/:id
-pub async fn get_memory(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> Result<Json<MemoryView>, Api> {
+pub async fn get_memory(Scope(state): Scope, Path(id): Path<i64>) -> Result<Json<MemoryView>, Api> {
     state
         .memory
         .get_memory(id)
@@ -96,7 +93,7 @@ pub async fn get_memory(
 
 /// POST /api/memories
 pub async fn create_memory(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(input): Json<MemoryCreateInput>,
 ) -> Result<(StatusCode, Json<MemoryView>), Api> {
     state
@@ -109,7 +106,7 @@ pub async fn create_memory(
 
 /// PUT /api/memories/:id
 pub async fn update_memory(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(id): Path<i64>,
     Json(input): Json<MemoryUpdateInput>,
 ) -> Result<Json<MemoryView>, Api> {
@@ -122,10 +119,7 @@ pub async fn update_memory(
 }
 
 /// DELETE /api/memories/:id
-pub async fn delete_memory(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, Api> {
+pub async fn delete_memory(Scope(state): Scope, Path(id): Path<i64>) -> Result<StatusCode, Api> {
     state
         .memory
         .delete_memory(id)

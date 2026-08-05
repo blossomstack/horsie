@@ -4,10 +4,10 @@
 //! localhost-bound deployment).
 
 use crate::config::model_cards::ModelCardError;
-use crate::http::AppState;
+use crate::http::Scope;
 use crate::http::error::Api;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::model_cards::{ModelCard, ModelCardInput, ModelCardUpdate};
 
@@ -25,7 +25,7 @@ pub(crate) fn map_card_err(e: ModelCardError) -> Api {
 /// `GET /api/admin/model-cards` — the full catalog (kept separate from the
 /// public search so admin-only fields can be added later without touching
 /// the public contract).
-pub async fn list_cards(State(state): State<AppState>) -> Result<Json<Vec<ModelCard>>, Api> {
+pub async fn list_cards(Scope(state): Scope) -> Result<Json<Vec<ModelCard>>, Api> {
     state
         .model_cards
         .list()
@@ -36,7 +36,7 @@ pub async fn list_cards(State(state): State<AppState>) -> Result<Json<Vec<ModelC
 
 /// `POST /api/admin/model-cards` — create a card; 409 on duplicate `model_id`.
 pub async fn create_card(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Json(input): Json<ModelCardInput>,
 ) -> Result<(StatusCode, Json<ModelCard>), Api> {
     state
@@ -50,7 +50,7 @@ pub async fn create_card(
 /// `PUT /api/admin/model-cards/:model_id` — update name/limits. `model_id`
 /// itself is immutable (rename = delete + create).
 pub async fn update_card(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(model_id): Path<String>,
     Json(update): Json<ModelCardUpdate>,
 ) -> Result<Json<ModelCard>, Api> {
@@ -64,7 +64,7 @@ pub async fn update_card(
 
 /// `DELETE /api/admin/model-cards/:model_id` — 204 on success, 404 when absent.
 pub async fn delete_card(
-    State(state): State<AppState>,
+    Scope(state): Scope,
     Path(model_id): Path<String>,
 ) -> Result<StatusCode, Api> {
     state

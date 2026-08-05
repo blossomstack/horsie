@@ -1,9 +1,9 @@
 //! `SqlJournal` against the same contract every other journal is held to, on
 //! whichever backend this run selected.
 //!
-//! All ten contract assertions are green here, including the five that are red
-//! on `FileJournal` (#61 item 9): this is the first journal in the tree where
-//! snapshots and compaction actually do something. The tests below the contract
+//! All ten contract assertions are green here, including the five that were red
+//! on the `FileJournal` this replaced (#61 item 9): snapshots and compaction
+//! actually do something. The tests below the contract
 //! are the ones that only mean something for a SQL backend — and because
 //! `db::testing::db()` picks its dialect from the environment, they are a
 //! PostgreSQL suite as well as a SQLite one without being written twice.

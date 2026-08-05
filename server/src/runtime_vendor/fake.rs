@@ -61,6 +61,7 @@ fn event_name(event: &horsie_models::runtime::ServerHookEvent) -> &'static str {
         E::SubagentStart(_) => "SubagentStart",
         E::UserPromptSubmit(_) => "UserPromptSubmit",
         E::Stop(_) => "Stop",
+        E::SubagentStop(_) => "SubagentStop",
     }
 }
 

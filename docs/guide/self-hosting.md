@@ -94,20 +94,8 @@ at startup on either backend, and `max_connections` (default 10) sizes the pool
 that settings reads and journal writes share.
 
 **Where sessions are stored.** Session and agent history lives in an *actor
-journal*, which is separate from the settings tables and has its own setting:
-
-| `journal.backend` | Where history goes |
-| --- | --- |
-| `file` | JSONL files under `storage.data_dir` — needs a durable volume |
-| `database` | the `journal_*` tables in `database.url` |
-
-Left unset, both backends get `database`. The resolved choice is printed at
-startup and shown under **Settings → Integrations → Server**.
-
-> **Switching an existing server from `file` to `database` starts from an empty
-> journal.** Sessions already in the UI disappear. Nothing is deleted — the
-> JSONL tree stays on the volume — but nothing is imported either, so treat it
-> as a one-way door and do it on a server whose history you can afford to lose.
+journal*, which is separate from the settings tables but shares the database:
+the `journal_*` tables in `database.url`. There is nothing to configure.
 
 ## Signing in
 
