@@ -1,12 +1,14 @@
 import {
   Bot,
   CalendarClock,
+  Check,
   Container,
   FolderPlus,
   Plus,
   Settings,
   ShieldCheck,
   Workflow,
+  X,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
@@ -119,6 +121,13 @@ export function Sidebar() {
   );
   const navigate = useNavigate();
 
+  const submitGroup = () => {
+    const name = newGroupName.trim();
+    if (!name) return;
+    createGroup.mutate(name);
+    setAddingGroup(false);
+  };
+
   return (
     <aside className="flex h-full w-[17.5rem] shrink-0 flex-col border-r bg-panel">
       {/* Nameplate. The lamp reports the rail's own link to the server, so a
@@ -228,24 +237,45 @@ export function Sidebar() {
             start one.
           </p>
         )}
+        {/* Enter and Escape still work, but they were the *only* way out: the
+            box had no visible commit and no visible way to back out of one you
+            opened by mistake. */}
         {addingGroup && (
-          <input
-            data-testid="group-name-input"
-            className="mx-1 mb-1 w-[calc(100%-0.5rem)] rounded-[var(--radius-control)] border bg-panel px-2 py-1 text-[0.8125rem] text-legend outline-none focus:border-[var(--rule-strong)]"
-            placeholder="Group name"
-            value={newGroupName}
-            autoFocus
-            onChange={(e) => setNewGroupName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                const name = newGroupName.trim();
-                if (name) createGroup.mutate(name);
-                setAddingGroup(false);
-              } else if (e.key === "Escape") {
-                setAddingGroup(false);
-              }
-            }}
-          />
+          <div className="mx-1 mb-1 flex items-center gap-1">
+            <input
+              data-testid="group-name-input"
+              className="min-w-0 flex-1 rounded-[var(--radius-control)] border bg-panel px-2 py-1 text-[0.8125rem] text-legend outline-none focus:border-[var(--rule-strong)]"
+              placeholder="Group name"
+              value={newGroupName}
+              autoFocus
+              onChange={(e) => setNewGroupName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitGroup();
+                else if (e.key === "Escape") setAddingGroup(false);
+              }}
+            />
+            <button
+              type="button"
+              className="key key-go !h-7 !w-7 !p-0"
+              disabled={newGroupName.trim() === ""}
+              onClick={submitGroup}
+              data-testid="create-group-confirm"
+              title="Create group"
+              aria-label="Create group"
+            >
+              <Check size={14} aria-hidden />
+            </button>
+            <button
+              type="button"
+              className="key-icon !h-7 !w-7"
+              onClick={() => setAddingGroup(false)}
+              data-testid="create-group-cancel"
+              title="Cancel"
+              aria-label="Cancel"
+            >
+              <X size={14} aria-hidden />
+            </button>
+          </div>
         )}
         {!isLoading &&
           !isError &&

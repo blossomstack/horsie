@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useId, useState } from "react";
 import type { SessionSummary } from "../api/types";
 import { cn } from "../lib/cn";
 import { moveBefore } from "../lib/sessionGroups";
@@ -36,29 +36,64 @@ export function SessionGroupSection({
   const [collapsed, setCollapsed] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(name);
-  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [dropHint, setDropHint] = useState(false);
   const renameGroup = useRenameGroup();
   const deleteGroup = useDeleteGroup();
   const setAnnotations = useSetSessionAnnotations();
-
-  // Two-step delete: the menu closes on select, so the armed state lives here
-  // and self-resets if the confirm never comes.
-  useEffect(() => {
-    if (!deleteArmed) return;
-    const t = setTimeout(() => setDeleteArmed(false), 3000);
-    return () => clearTimeout(t);
-  }, [deleteArmed]);
+  const bodyId = useId();
 
   const label = ungrouped ? "Ungrouped" : name;
 
   return (
     <div data-testid={`group-section-${name}`} data-group-name={name}>
-      {!bare && (
+      {/* The confirm takes the header's place rather than living in the menu.
+          A menu closes on select, so the second step of a two-step delete was
+          behind a click that first had to reopen the menu — a confirm nobody
+          could reach without knowing it was there. */}
+      {!bare && confirmingDelete && (
+        <div
+          className="mb-1 rounded-[var(--radius-control)] bg-raised px-2 py-1.5 shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+          data-testid={`group-delete-confirm-${name}`}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setConfirmingDelete(false);
+          }}
+        >
+          <p className="text-[0.8125rem] leading-relaxed text-legend">
+            Delete <span className="font-mono">{name}</span>? Its sessions move
+            to Ungrouped.
+          </p>
+          <div className="mt-1.5 flex items-center gap-1.5">
+            <button
+              type="button"
+              className="key key-stop !px-2 !py-1"
+              data-testid="confirm-delete-group-item"
+              onClick={() => {
+                setConfirmingDelete(false);
+                deleteGroup.mutate(name);
+              }}
+            >
+              Delete
+            </button>
+            <button
+              type="button"
+              className="key key-blank !px-2 !py-1"
+              data-testid="cancel-delete-group-item"
+              autoFocus
+              onClick={() => setConfirmingDelete(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {!bare && !confirmingDelete && (
         <div
           className={cn(
             "group/header flex items-center gap-1 rounded-[var(--radius-control)] px-1.5 py-1",
-            dropHint && "bg-raised shadow-[inset_0_0_0_1px_var(--rule-strong)]",
+            dropHint
+              ? "bg-raised shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+              : "hover:bg-raised",
           )}
           draggable={!renaming}
           onDragStart={(e) => {
@@ -96,18 +131,6 @@ export function SessionGroupSection({
             }
           }}
         >
-          <button
-            type="button"
-            className="key-icon !h-5 !w-5 shrink-0"
-            onClick={() => setCollapsed((v) => !v)}
-            aria-label={collapsed ? `Expand ${label}` : `Collapse ${label}`}
-          >
-            {collapsed ? (
-              <ChevronRight size={12} aria-hidden />
-            ) : (
-              <ChevronDown size={12} aria-hidden />
-            )}
-          </button>
           {renaming ? (
             <input
               data-testid="group-rename-input"
@@ -129,10 +152,27 @@ export function SessionGroupSection({
               onBlur={() => setRenaming(false)}
             />
           ) : (
-            <span className="legend min-w-0 flex-1 truncate">{label}</span>
+            // The toggle *is* the row: it spans the free width so the empty
+            // space beside a short name collapses the group too. The menu is
+            // its sibling, not its child, so `...` still opens the menu.
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 text-left"
+              onClick={() => setCollapsed((v) => !v)}
+              aria-expanded={!collapsed}
+              aria-controls={bodyId}
+              data-testid={`group-toggle-${name}`}
+            >
+              <span className="legend min-w-0 truncate">{label}</span>
+              {collapsed ? (
+                <ChevronRight size={12} className="shrink-0 text-faint" aria-hidden />
+              ) : (
+                <ChevronDown size={12} className="shrink-0 text-faint" aria-hidden />
+              )}
+            </button>
           )}
           {!ungrouped && !renaming && (
-            <span className="opacity-0 transition-opacity focus-within:opacity-100 group-hover/header:opacity-100">
+            <span className="ml-auto shrink-0 opacity-0 transition-opacity focus-within:opacity-100 group-hover/header:opacity-100">
               <Menu
                 label={`${label} actions`}
                 testId={`group-menu-button-${name}`}
@@ -146,33 +186,22 @@ export function SessionGroupSection({
                 >
                   Rename
                 </MenuItem>
-                {deleteArmed ? (
-                  <MenuItem
-                    danger
-                    testId="confirm-delete-group-item"
-                    onSelect={() => {
-                      setDeleteArmed(false);
-                      deleteGroup.mutate(name);
-                    }}
-                  >
-                    Confirm delete?
-                  </MenuItem>
-                ) : (
-                  <MenuItem
-                    danger
-                    testId="delete-group-item"
-                    onSelect={() => setDeleteArmed(true)}
-                  >
-                    Delete
-                  </MenuItem>
-                )}
+                <MenuItem
+                  danger
+                  testId="delete-group-item"
+                  onSelect={() => setConfirmingDelete(true)}
+                >
+                  Delete
+                </MenuItem>
               </Menu>
             </span>
           )}
         </div>
       )}
-      {(bare || !collapsed) &&
-        sessions.map((s) => <SessionRow key={s.id} s={s} groups={groups} />)}
+      <div id={bodyId}>
+        {(bare || !collapsed) &&
+          sessions.map((s) => <SessionRow key={s.id} s={s} groups={groups} />)}
+      </div>
     </div>
   );
 }
