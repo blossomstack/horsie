@@ -57,6 +57,12 @@ pub struct ResponsesRequest {
     /// Asks for the encrypted chain of thought, which is the only form in which
     /// it can be replayed on the next turn.
     pub include: Vec<&'static str>,
+    /// Groups a conversation's turns for prompt caching. Every turn after the
+    /// first re-sends the whole history, so without a stable key the shared
+    /// prefix is re-read at full price each time — and on a ChatGPT plan that
+    /// price is the subscription's own window, not a bill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
 }
 
 // ── reasoning replay ─────────────────────────────────────────────────────────

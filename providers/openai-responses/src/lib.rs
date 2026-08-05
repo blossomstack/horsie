@@ -79,11 +79,24 @@ fn io_err(msg: impl std::fmt::Display) -> LlmError {
     LlmError::Network(Box::new(std::io::Error::other(msg.to_string())))
 }
 
+/// Longest advised wait this provider will actually sit through.
+///
+/// A ChatGPT plan's 429 is not the API's per-minute blip: it means the
+/// subscription's window is spent, and the reset is measured in hours. Sleeping
+/// through that would hold a turn open for the rest of the day, so anything
+/// longer than this is returned to the caller with its reset time attached
+/// instead of being retried.
+const MAX_ADVISED_WAIT_SECS: u64 = 60;
+
 /// Map an HTTP status onto a classified error. Getting this wrong is not
 /// cosmetic: a 429 misfiled as `Network` is never retried.
-fn classify_status(status: u16, body: &str) -> LlmError {
+///
+/// `advised` is the server's own `Retry-After`, when it sent one.
+fn classify_status(status: u16, body: &str, advised: Option<Duration>) -> LlmError {
     match status {
-        429 => LlmError::RateLimit { retry_after: None },
+        429 => LlmError::RateLimit {
+            retry_after: advised,
+        },
         500 | 502 | 503 | 504 | 529 => LlmError::Overloaded,
         _ => LlmError::ApiError {
             status,
@@ -92,8 +105,51 @@ fn classify_status(status: u16, body: &str) -> LlmError {
     }
 }
 
+/// The server's advised wait, from whichever header it used.
+///
+/// `Retry-After` is the standard one and may be either seconds or an HTTP
+/// date; the ChatGPT backend also sends `x-ratelimit-reset-requests` in
+/// seconds. Only the numeric forms are read — a date form is rare here and a
+/// missing hint is not an error, just a fall back to our own backoff.
+fn advised_wait(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    for name in ["retry-after", "x-ratelimit-reset-requests"] {
+        if let Some(secs) = headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().trim_end_matches('s').parse::<f64>().ok())
+            && secs >= 0.0
+        {
+            return Some(Duration::from_secs_f64(secs));
+        }
+    }
+    None
+}
+
+/// Whether waiting could plausibly help.
+///
+/// A rate limit whose own reset is further out than we are willing to wait is
+/// terminal for this turn: retrying it just burns attempts against a window
+/// that will not reopen in time, and on a subscription those attempts are the
+/// scarce resource.
 fn is_retryable(e: &LlmError) -> bool {
-    matches!(e, LlmError::RateLimit { .. } | LlmError::Overloaded)
+    match e {
+        LlmError::RateLimit { retry_after } => {
+            retry_after.is_none_or(|d| d.as_secs() <= MAX_ADVISED_WAIT_SECS)
+        }
+        LlmError::Overloaded => true,
+        LlmError::ApiError { .. } | LlmError::Network(_) | LlmError::EventSink(_) => false,
+    }
+}
+
+/// A key that is the same for every turn of one conversation and different
+/// across conversations.
+///
+/// The first message's id is exactly that: assigned once when the conversation
+/// starts and replayed in every later request, while the provider is handed no
+/// session id of its own. `None` for an empty history, where there is no prefix
+/// worth caching anyway.
+fn conversation_cache_key(messages: &[horsie_agentcore::Message]) -> Option<String> {
+    messages.first().map(|m| format!("horsie-{}", m.id))
 }
 
 /// How a request authenticates, and therefore where it goes.
@@ -269,6 +325,7 @@ impl ResponsesProvider {
             store: false,
             stream: true,
             include: vec!["reasoning.encrypted_content"],
+            prompt_cache_key: conversation_cache_key(request.messages),
         }
     }
 }
@@ -574,12 +631,17 @@ impl LlmProvider for ResponsesProvider {
         let mut refreshed_after_401 = false;
         // Set when the previous attempt failed for a reason a wait cannot fix.
         let mut skip_backoff = false;
+        // The server's own advised wait, when it sent one. Preferred over our
+        // backoff: it knows when the window reopens and we are guessing.
+        let mut advised: Option<Duration> = None;
 
         'retry: for attempt in 0..=MAX_STREAM_RETRIES {
             if attempt > 0 && !skip_backoff {
-                let delay = self.retry_base_secs * 2u64.pow(attempt - 1);
-                tracing::warn!(attempt, delay_secs = delay, "Responses retry");
-                tokio::time::sleep(Duration::from_secs(delay)).await;
+                let delay = advised.take().unwrap_or_else(|| {
+                    Duration::from_secs(self.retry_base_secs * 2u64.pow(attempt - 1))
+                });
+                tracing::warn!(attempt, delay_secs = delay.as_secs(), "Responses retry");
+                tokio::time::sleep(delay).await;
             }
             skip_backoff = false;
 
@@ -639,8 +701,10 @@ impl LlmProvider for ResponsesProvider {
                     Err(reqwest_eventsource::Error::StreamEnded) => break,
                     Err(reqwest_eventsource::Error::InvalidStatusCode(status, resp)) => {
                         let code = status.as_u16();
+                        // Read before the body: `text()` consumes the response.
+                        advised = advised_wait(resp.headers());
                         let body_text = resp.text().await.unwrap_or_default();
-                        let err = classify_status(code, &body_text);
+                        let err = classify_status(code, &body_text, advised);
                         es.close();
                         // A token can be revoked long before it expires, so an
                         // unexpired-looking credential can still be refused.
@@ -985,6 +1049,67 @@ mod tests {
             other => panic!("expected text, got {other:?}"),
         }
         assert_eq!(store.saved().len(), 1, "exactly one refresh");
+    }
+
+    /// A plan's window reopens in hours. Sitting through that would hold the
+    /// turn open for the rest of the day, so a far-off reset is handed back
+    /// with its duration rather than retried.
+    #[test]
+    fn a_far_off_rate_limit_reset_is_not_retryable_and_carries_its_wait() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "3600".parse().unwrap());
+
+        let advised = advised_wait(&headers);
+        assert_eq!(advised, Some(Duration::from_secs(3600)));
+
+        let err = classify_status(429, "rate limited", advised);
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+        assert!(
+            !is_retryable(&err),
+            "an hour-long reset must not be waited out"
+        );
+    }
+
+    #[test]
+    fn a_short_rate_limit_reset_is_still_retried() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset-requests", "12s".parse().unwrap());
+
+        let err = classify_status(429, "slow down", advised_wait(&headers));
+
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(12)));
+        assert!(is_retryable(&err));
+    }
+
+    /// No hint is not the same as a long wait: we fall back to our own backoff
+    /// rather than giving up on the turn.
+    #[test]
+    fn a_rate_limit_without_a_hint_keeps_the_old_behaviour() {
+        let err = classify_status(
+            429,
+            "slow down",
+            advised_wait(&reqwest::header::HeaderMap::new()),
+        );
+
+        assert_eq!(err.retry_after(), None);
+        assert!(is_retryable(&err));
+    }
+
+    #[test]
+    fn every_turn_of_a_conversation_shares_one_cache_key() {
+        let p = ResponsesProvider::with_api_key("k").unwrap();
+        let first = vec![user("hi")];
+        let later = vec![user("hi"), user("and again")];
+
+        let a = p.build_body(&request(&first)).prompt_cache_key;
+        let b = p.build_body(&request(&later)).prompt_cache_key;
+
+        assert!(a.is_some());
+        assert_eq!(a, b, "the key must not move as history grows");
+        assert!(
+            p.build_body(&request(&[])).prompt_cache_key.is_none(),
+            "an empty history has no prefix worth caching"
+        );
     }
 
     #[test]
