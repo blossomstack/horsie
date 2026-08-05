@@ -485,6 +485,12 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                     "installed plugin '{installed}' into {}",
                     paths.plugins.display()
                 );
+                // Its skills are installed and will work; a hook horsie cannot
+                // fire must not simply go quiet, which is the whole point of
+                // classifying events rather than ignoring unknown ones.
+                for reason in horsie::plugins::hook_report(&paths.plugins.join(&installed)) {
+                    eprintln!("warning: {reason}");
+                }
                 Ok(0)
             }
             PluginAction::List { config } => {

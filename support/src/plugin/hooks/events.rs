@@ -144,9 +144,16 @@ impl HookEvent {
             HookEvent::PreToolUse
             | HookEvent::PostToolUse
             | HookEvent::SessionStart
-            | HookEvent::UserPromptSubmit
             | HookEvent::Stop => true,
-            HookEvent::PostToolUseFailure
+            // `UserPromptSubmit` is modelled end-to-end — payload, processing,
+            // record, and the runtime side of `RunHooks` — but has no server
+            // call site. Firing it needs the prompt *and* a runtime, and on a
+            // session's first message no runtime has been acquired yet; wiring
+            // it where one exists would leave the first prompt of every session
+            // silently unhooked, which is the failure this classification is
+            // here to prevent. It needs a seam on the agent's run path.
+            HookEvent::UserPromptSubmit
+            | HookEvent::PostToolUseFailure
             | HookEvent::PostToolBatch
             | HookEvent::SessionEnd
             | HookEvent::StopFailure
@@ -345,7 +352,7 @@ mod tests {
 
     /// Wiring an event is a deliberate act. This is the list this change moves.
     #[test]
-    fn exactly_five_events_are_wired() {
+    fn exactly_four_events_are_wired() {
         let wired: Vec<&str> = ALL_31
             .iter()
             .filter_map(|n| HookEvent::parse(n).ok())
@@ -354,13 +361,7 @@ mod tests {
             .collect();
         assert_eq!(
             wired,
-            vec![
-                "SessionStart",
-                "UserPromptSubmit",
-                "PreToolUse",
-                "PostToolUse",
-                "Stop"
-            ],
+            vec!["SessionStart", "PreToolUse", "PostToolUse", "Stop"],
             "wired set changed"
         );
     }

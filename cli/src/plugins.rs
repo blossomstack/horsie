@@ -192,6 +192,46 @@ struct Resolved {
 /// `horsie plugin install <url|plugin@marketplace>`: resolve where the plugin
 /// lives, check it out under the shared sources dir, and symlink its root into
 /// the library.
+/// One sentence per hook event this plugin declares that horsie cannot fire.
+///
+/// Reported rather than refused, because a plugin's skills are worth installing
+/// even when one of its hooks is not yet supported — but installing to silence
+/// is exactly what the event classification exists to prevent, so the user is
+/// told. An unreadable `hooks.json` yields nothing here; `read` already fails
+/// the install for that.
+#[must_use]
+pub fn hook_report(plugin_root: &std::path::Path) -> Vec<String> {
+    horsie_support::plugin::hooks::read(plugin_root)
+        .map(|h| {
+            h.unsupported
+                .iter()
+                .map(|(name, why)| why.explain(name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every installed plugin's unrunnable hook events, keyed by plugin name.
+///
+/// The re-check a session start wants: a plugin installed against a build that
+/// supported its hooks, then carried onto one that does not, would otherwise go
+/// quiet with nothing said.
+#[must_use]
+pub fn unsupported_hooks(paths: &PluginPaths) -> Vec<(String, Vec<String>)> {
+    let Ok(entries) = std::fs::read_dir(&paths.plugins) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Vec<String>)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let reasons = hook_report(&e.path());
+            (!reasons.is_empty()).then(|| (e.file_name().to_string_lossy().into_owned(), reasons))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 pub fn install(
     paths: &PluginPaths,
     target: &InstallTarget,
@@ -226,9 +266,18 @@ pub fn install(
             .as_deref()
             .map(|p| format!(" in {p}"))
             .unwrap_or_default();
+        // A plugin whose only content is hooks horsie cannot fire deserves to
+        // be told *which* ones, rather than the generic "no skills" — that is
+        // the difference between "wrong plugin" and "wrong version of horsie".
+        let hooks = hook_report(&root_dir);
+        let because = if hooks.is_empty() {
+            String::new()
+        } else {
+            format!(" Its hooks cannot run either: {}.", hooks.join("; "))
+        };
         return Err(CliError::Config(format!(
             "'{}'{checked} provides no skills to install: {}. \
-             horsie loads plugin skills; plugin agents, commands and MCP servers are not supported yet.",
+             horsie loads plugin skills; plugin agents, commands and MCP servers are not supported yet.{because}",
             resolved.label,
             root.rejection()
         )));
@@ -929,6 +978,129 @@ mod tests {
             install(&p, &InstallTarget::parse("other@acme"), None, None, false).is_ok(),
             "a sibling plugin in the same marketplace must still install"
         );
+    }
+
+    /// A marketplace with one plugin, whose `hooks.json` is `hooks_json` and
+    /// which ships a skill so it is installable at all.
+    fn marketplace_with_hooks(name: &str, hooks_json: &str) -> (PluginPaths, TempDir, TempDir) {
+        let src = TempDir::new().unwrap();
+        let cp = src.path().join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("marketplace.json"),
+            format!(
+                r#"{{"name":"acme","plugins":[{{"name":"{name}","source":"./plugins/{name}"}}]}}"#
+            ),
+        )
+        .unwrap();
+        let root = src.path().join(format!("plugins/{name}"));
+        std::fs::create_dir_all(root.join("skills/s")).unwrap();
+        std::fs::write(root.join("skills/s/SKILL.md"), "---\nname: s\n---\nb").unwrap();
+        std::fs::create_dir_all(root.join("hooks")).unwrap();
+        std::fs::write(root.join("hooks/hooks.json"), hooks_json).unwrap();
+        commit_all(src.path());
+
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        crate::marketplace::add(&p, &file_url(src.path()), None, None, false).unwrap();
+        (p, home, src)
+    }
+
+    /// `Stop` is the most-declared event across the official marketplace and is
+    /// now wired, so it must stop being refused. This is what fails if the
+    /// continuation work regresses.
+    #[test]
+    fn stop_is_no_longer_reported_as_unrunnable() {
+        let (p, _home, _src) = marketplace_with_hooks(
+            "stopper",
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node hook.mjs"}]}]}}"#,
+        );
+        let installed =
+            install(&p, &InstallTarget::parse("stopper@acme"), None, None, false).unwrap();
+        assert!(
+            hook_report(&p.plugins.join(&installed)).is_empty(),
+            "Stop is wired: {:?}",
+            hook_report(&p.plugins.join(&installed))
+        );
+    }
+
+    /// A plugin's skills are worth installing even when one of its hooks cannot
+    /// fire — but the user is told, rather than left with a guard that silently
+    /// never runs.
+    #[test]
+    fn a_partly_supported_plugin_installs_and_names_the_hook_it_cannot_run() {
+        let (p, _home, _src) = marketplace_with_hooks(
+            "mixed",
+            r#"{"hooks":{
+                 "PostToolUse":[{"hooks":[{"type":"command","command":"node hook.mjs"}]}],
+                 "CwdChanged":[{"hooks":[{"type":"command","command":"node hook.mjs"}]}]}}"#,
+        );
+        let installed =
+            install(&p, &InstallTarget::parse("mixed@acme"), None, None, false).unwrap();
+        let reasons = hook_report(&p.plugins.join(&installed));
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(reasons[0].contains("CwdChanged"), "{reasons:?}");
+        // Described and seam-able, just unwired — distinct from an event horsie
+        // has no concept of, and the two read differently on purpose.
+        assert!(reasons[0].contains("not implemented"), "{reasons:?}");
+    }
+
+    /// The re-check: a plugin installed against a build that ran its hooks, then
+    /// carried onto one that does not, must not go quiet.
+    #[test]
+    fn unsupported_hooks_reports_every_installed_plugin() {
+        let (p, _home, _src) = marketplace_with_hooks(
+            "batcher",
+            r#"{"hooks":{"PostToolBatch":[{"hooks":[{"type":"command","command":"x"}]}]}}"#,
+        );
+        assert!(unsupported_hooks(&p).is_empty(), "nothing installed yet");
+        install(&p, &InstallTarget::parse("batcher@acme"), None, None, false).unwrap();
+        let found = unsupported_hooks(&p);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "batcher");
+        assert!(found[0].1[0].contains("PostToolBatch"), "{:?}", found[0].1);
+        assert!(
+            found[0].1[0].contains("not implemented"),
+            "{:?}",
+            found[0].1
+        );
+    }
+
+    /// A plugin with nothing but unrunnable hooks fails to install, and the
+    /// error says which hooks — the difference between "wrong plugin" and
+    /// "wrong version of horsie".
+    #[test]
+    fn a_hooks_only_plugin_is_refused_and_names_the_events() {
+        let src = TempDir::new().unwrap();
+        let cp = src.path().join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("marketplace.json"),
+            r#"{"name":"acme","plugins":[{"name":"hooksonly","source":"./plugins/hooksonly"}]}"#,
+        )
+        .unwrap();
+        let root = src.path().join("plugins/hooksonly");
+        std::fs::create_dir_all(root.join("hooks")).unwrap();
+        std::fs::write(
+            root.join("hooks/hooks.json"),
+            r#"{"hooks":{"WorktreeCreate":[{"hooks":[{"type":"command","command":"x"}]}]}}"#,
+        )
+        .unwrap();
+        commit_all(src.path());
+
+        let home = TempDir::new().unwrap();
+        let p = paths(home.path());
+        crate::marketplace::add(&p, &file_url(src.path()), None, None, false).unwrap();
+        let err = install(
+            &p,
+            &InstallTarget::parse("hooksonly@acme"),
+            None,
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("WorktreeCreate"), "must name the event: {err}");
     }
 
     /// A plugin's manifest name may differ from its catalogue name, so `update`

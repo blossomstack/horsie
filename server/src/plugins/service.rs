@@ -175,9 +175,21 @@ impl PluginProvisioner for PluginService {
 
 /// Run the blocking git clone + pack off the async runtime.
 async fn clone_and_pack(url: String, git_ref: Option<String>) -> Result<Ingested, String> {
-    tokio::task::spawn_blocking(move || ingest::ingest_git(&url, git_ref.as_deref()))
-        .await
-        .map_err(|e| e.to_string())?
+    let ingested =
+        tokio::task::spawn_blocking(move || ingest::ingest_git(&url, git_ref.as_deref()))
+            .await
+            .map_err(|e| e.to_string())??;
+    // A bundle whose skills are fine but whose hooks horsie cannot fire installs
+    // anyway; saying nothing would leave a guard that silently never runs, which
+    // is what classifying events rather than ignoring them is for.
+    for reason in &ingested.unsupported_hooks {
+        tracing::warn!(
+            plugin = ingested.name,
+            reason,
+            "plugin declares a hook horsie cannot run"
+        );
+    }
+    Ok(ingested)
 }
 
 fn row_to_view(row: PluginRow) -> PluginView {
