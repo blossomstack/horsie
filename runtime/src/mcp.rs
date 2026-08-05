@@ -303,8 +303,7 @@ impl horsie_mcp_client::BearerProvider for NoBearer {
 /// and the root is only knowable here — which is why the reader leaves the
 /// placeholder alone.
 fn expand_root(server: PluginMcpServer, plugin_root: &Path) -> PluginMcpServer {
-    let root = plugin_root.to_string_lossy();
-    let sub = |s: &str| s.replace("${CLAUDE_PLUGIN_ROOT}", &root);
+    let sub = |s: &str| horsie_support::plugin::expand_plugin_root(s, plugin_root);
     let transport = match server.transport {
         McpTransportSpec::Stdio { command, args, env } => McpTransportSpec::Stdio {
             command: sub(&command),

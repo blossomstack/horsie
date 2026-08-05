@@ -43,6 +43,20 @@ pub fn join_declared(root: &Path, declared: &str) -> PathBuf {
     root.join(rest)
 }
 
+/// The placeholder a plugin uses to name its own directory.
+///
+/// A plugin cannot know where it will be installed, so every path it ships —
+/// a hook command, an MCP server's script, a resource a skill or agent points at
+/// — is written against this. One constant, so the four places that resolve it
+/// cannot disagree about its spelling.
+pub const PLUGIN_ROOT_VAR: &str = "${CLAUDE_PLUGIN_ROOT}";
+
+/// Resolve [`PLUGIN_ROOT_VAR`] against the directory a plugin is installed at.
+#[must_use]
+pub fn expand_plugin_root(text: &str, plugin_root: &Path) -> String {
+    text.replace(PLUGIN_ROOT_VAR, &plugin_root.to_string_lossy())
+}
+
 /// Stable short key for a checkout of `(url, git_ref)`, used to name the shared
 /// clone under `<data_dir>/sources/`. Keyed by source rather than by plugin name
 /// so a marketplace declaring several plugins as paths into its own repo clones
