@@ -211,13 +211,13 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         github.clone(),
     ));
     let plugins = Arc::new(PluginService::new(
-        PluginStore::new(opened.db.clone()),
-        MarketplaceStore::new(opened.db.clone()),
+        PluginStore::new(opened.db.clone(), user.clone()),
+        MarketplaceStore::new(opened.db.clone(), user.clone()),
         ArtifactStore::new(data_dir.join("plugins")),
         artifact_secret(),
     ));
     let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(opened.db.clone()),
+        horsie_server::memory::MemoryStore::new(opened.db.clone(), user.clone()),
     ));
     let agents = Arc::new(horsie_server::agents::AgentService::new(
         horsie_server::agents::AgentStore::new(opened.db.clone()),

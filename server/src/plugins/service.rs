@@ -450,8 +450,8 @@ mod tests {
         let db = crate::db::testing::db().await;
         let artifacts = ArtifactStore::new(tmp.path().join("artifacts"));
         let svc = PluginService::new(
-            PluginStore::new(db.clone()),
-            MarketplaceStore::new(db),
+            PluginStore::new(db.clone(), crate::auth::UserId::new("1")),
+            MarketplaceStore::new(db, crate::auth::UserId::new("1")),
             artifacts,
             b"secret".to_vec(),
         );

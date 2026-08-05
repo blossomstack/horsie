@@ -368,8 +368,8 @@ mod tests {
             crate::github::GithubApi::new(),
         ));
         let plugins = Arc::new(crate::plugins::PluginService::new(
-            crate::plugins::PluginStore::new(opened.db.clone()),
-            crate::plugins::MarketplaceStore::new(opened.db.clone()),
+            crate::plugins::PluginStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
+            crate::plugins::MarketplaceStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             crate::plugins::ArtifactStore::new(tmp.path().join("plugins")),
             b"test-secret".to_vec(),
         ));
@@ -378,7 +378,7 @@ mod tests {
             github.clone(),
         ));
         let memory = Arc::new(crate::memory::MemoryService::new(
-            crate::memory::MemoryStore::new(opened.db.clone()),
+            crate::memory::MemoryStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
         ));
         let model_cards = Arc::new(crate::config::model_cards::ModelCardStore::new(
             opened.db.clone(),

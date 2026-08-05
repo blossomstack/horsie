@@ -2,6 +2,7 @@
 //! store's database. No secrets — bundles are public artifacts, so this is a
 //! plain metadata store (mirrors `github::store` without the `Secret` wrapping).
 
+use crate::auth::UserId;
 use crate::db::Db;
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -38,17 +39,20 @@ pub struct PluginRow {
 
 pub struct PluginStore {
     db: Db,
+    /// Bound once, here, rather than passed per call.
+    user: UserId,
 }
 
 impl PluginStore {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, user: UserId) -> Self {
+        Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<PluginRow>, String> {
-        let statement = format!("SELECT {COLS} FROM plugins ORDER BY name");
+        let statement = format!("SELECT {COLS} FROM plugins WHERE user_id = ? ORDER BY name");
         let sql = self.db.q(&statement);
         let rows = sqlx::query(&sql)
+            .bind(self.user.as_str())
             .fetch_all(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
@@ -56,9 +60,10 @@ impl PluginStore {
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<PluginRow>, String> {
-        let statement = format!("SELECT {COLS} FROM plugins WHERE name = ?");
+        let statement = format!("SELECT {COLS} FROM plugins WHERE user_id = ? AND name = ?");
         let sql = self.db.q(&statement);
         let row = sqlx::query(&sql)
+            .bind(self.user.as_str())
             .bind(name)
             .fetch_optional(self.db.pool())
             .await
@@ -69,11 +74,11 @@ impl PluginStore {
     /// Insert or replace a bundle by name.
     pub async fn upsert(&self, row: &PluginRow) -> Result<(), String> {
         let sql = self.db.q(
-            "INSERT INTO plugins (name, source_kind, source_url, source_ref, source_subpath, \
+            "INSERT INTO plugins (user_id, name, source_kind, source_url, source_ref, source_subpath, \
              version, description, skill_count, has_hooks, artifact_hash, artifact_size, \
              enabled_default, marketplace, marketplace_entry, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(name) DO UPDATE SET source_kind = excluded.source_kind, \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(user_id, name) DO UPDATE SET source_kind = excluded.source_kind, \
              source_url = excluded.source_url, source_ref = excluded.source_ref, \
              source_subpath = excluded.source_subpath, \
              version = excluded.version, description = excluded.description, \
@@ -83,6 +88,7 @@ impl PluginStore {
              marketplace_entry = excluded.marketplace_entry, updated_at = excluded.updated_at",
         );
         sqlx::query(&sql)
+            .bind(self.user.as_str())
             .bind(&row.name)
             .bind(&row.source_kind)
             .bind(&row.source_url)
@@ -108,9 +114,10 @@ impl PluginStore {
     pub async fn set_default(&self, name: &str, enabled: bool) -> Result<(), String> {
         let sql = self
             .db
-            .q("UPDATE plugins SET enabled_default = ? WHERE name = ?");
+            .q("UPDATE plugins SET enabled_default = ? WHERE user_id = ? AND name = ?");
         sqlx::query(&sql)
             .bind(i64::from(enabled))
+            .bind(self.user.as_str())
             .bind(name)
             .execute(self.db.pool())
             .await
@@ -119,8 +126,11 @@ impl PluginStore {
     }
 
     pub async fn delete(&self, name: &str) -> Result<(), String> {
-        let sql = self.db.q("DELETE FROM plugins WHERE name = ?");
+        let sql = self
+            .db
+            .q("DELETE FROM plugins WHERE user_id = ? AND name = ?");
         sqlx::query(&sql)
+            .bind(self.user.as_str())
             .bind(name)
             .execute(self.db.pool())
             .await
@@ -132,8 +142,9 @@ impl PluginStore {
     /// mark them rather than offering them again.
     pub async fn installed_entries(&self, marketplace: &str) -> Result<HashSet<String>, String> {
         let sql = self.db.q("SELECT marketplace_entry FROM plugins \
-             WHERE marketplace = ? AND marketplace_entry IS NOT NULL");
+             WHERE user_id = ? AND marketplace = ? AND marketplace_entry IS NOT NULL");
         let rows = sqlx::query(&sql)
+            .bind(self.user.as_str())
             .bind(marketplace)
             .fetch_all(self.db.pool())
             .await
@@ -148,7 +159,12 @@ impl PluginStore {
             .collect())
     }
 
-    /// All artifact hashes still referenced by a row (for artifact GC).
+    /// Every artifact hash any account still references.
+    ///
+    /// Deliberately NOT scoped, and it must stay that way. Artifacts are
+    /// content-addressed and therefore shared between accounts, so a scoped
+    /// keep-set would make GC delete bundle bytes another account is still
+    /// using. On the scope audit's allowlist for exactly this reason.
     pub async fn referenced_hashes(&self) -> Result<HashSet<String>, String> {
         let sql = self.db.q("SELECT artifact_hash FROM plugins");
         let rows = sqlx::query(&sql)
@@ -221,7 +237,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_get_list_default_delete_roundtrip() {
         {
-            let s = PluginStore::new(testing::db().await);
+            let s = PluginStore::new(testing::db().await, UserId::new("1"));
             assert!(s.list().await.unwrap().is_empty());
             s.upsert(&row("demo", "h1")).await.unwrap();
             let got = s.get("demo").await.unwrap().unwrap();
@@ -247,7 +263,7 @@ mod tests {
     /// entry it never came from.
     #[tokio::test]
     async fn provenance_survives_and_lists_installed_entries() {
-        let s = PluginStore::new(testing::db().await);
+        let s = PluginStore::new(testing::db().await, UserId::new("1"));
         let mut r = row("api-security-testing", "h1");
         r.marketplace = Some("official".into());
         // The index's name for an entry is not always the name it installs as.
