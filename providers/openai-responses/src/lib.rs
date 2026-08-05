@@ -327,7 +327,22 @@ impl ResponsesProvider {
             // same account, and taken verbatim from the caller — deriving one
             // from the history would move the moment history is copied or
             // trimmed.
-            prompt_cache_key: Some(format!("horsie-{}", request.conversation_id)),
+            //
+            // Omitted on a ChatGPT plan, where the field is not merely ignored
+            // but replaced: the backend answers with a key of its own, taken
+            // from the `session_id` request header when there is one and
+            // otherwise freshly minted per call. Measured against the live
+            // backend, that assigned key does not partition the cache either —
+            // a key never sent before reads a prefix another key warmed, at the
+            // same rate as the key that warmed it — so there is nothing left
+            // for this field to buy there. Keyed on the credential rather than
+            // the base URL, exactly as `max_output_tokens` above.
+            prompt_cache_key: match self.credential {
+                Credential::ChatGpt(_) => None,
+                Credential::ApiKey(_) | Credential::None => {
+                    Some(format!("horsie-{}", request.conversation_id))
+                }
+            },
         }
     }
 }
@@ -1238,6 +1253,31 @@ mod tests {
         let history = vec![user("hi")];
 
         assert_eq!(p.build_body(&request(&history)).max_output_tokens, None);
+    }
+
+    /// Measured against the live Codex backend: the key we send never comes
+    /// back. The response carries the `session_id` header's value when one is
+    /// sent and a fresh server UUID otherwise, and neither partitions the cache
+    /// — a key never used before reads a prefix a different key warmed. So the
+    /// field is left off rather than sent to be overwritten.
+    #[test]
+    fn a_chatgpt_credential_sends_no_prompt_cache_key() {
+        use crate::chatgpt::{ChatGptTokens, StoredTokens, tests::RecordingStore};
+
+        let tokens = Arc::new(ChatGptTokens::new(
+            StoredTokens {
+                access: "live".into(),
+                refresh: "r".into(),
+                expires_at: i64::MAX,
+                account_id: "acct_1".into(),
+            },
+            Arc::new(RecordingStore::default()),
+            "https://issuer.invalid",
+        ));
+        let p = ResponsesProvider::with_chatgpt(tokens).unwrap();
+        let history = vec![user("hi")];
+
+        assert_eq!(p.build_body(&request(&history)).prompt_cache_key, None);
     }
 
     #[test]

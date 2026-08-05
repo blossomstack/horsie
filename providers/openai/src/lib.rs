@@ -20,7 +20,9 @@ use horsie_agentcore::{
 };
 use reqwest_eventsource::{Event, EventSource};
 use std::{collections::BTreeMap, env, time::Duration};
-use wire::{ChatChunk, ChatMessage, ChatRequest, FunctionDef, ToolDef, to_wire_messages};
+use wire::{
+    ChatChunk, ChatMessage, ChatRequest, FunctionDef, StreamOptions, ToolDef, to_wire_messages,
+};
 
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
 pub const DEFAULT_MAX_TOKENS: u32 = 16_384;
@@ -249,6 +251,9 @@ impl OpenAiProvider {
             tools,
             tool_choice,
             reasoning_effort,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
         }
     }
 
@@ -943,5 +948,28 @@ mod tests {
             conversation_id: "test-conversation",
         };
         assert_eq!(p.build_body(&req).reasoning_effort.as_deref(), Some("high"));
+    }
+
+    /// Without this OpenAI streams no usage frame at all, so every turn on that
+    /// backend reported no tokens and no prompt-cache split — the absence read
+    /// as "this backend does not report caching" when nothing had asked it to.
+    #[test]
+    fn a_streamed_request_asks_for_the_usage_frame() {
+        let p = OpenAiProvider::new().expect("builds");
+        let msgs: Vec<horsie_models::agent::Message> = vec![];
+        let req = CompletionRequest {
+            messages: &msgs,
+            system: None,
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            thinking_effort: None,
+            conversation_id: "test-conversation",
+        };
+        let body = p.build_body(&req);
+        assert!(body.stream, "the guard only matters on a streamed request");
+        assert!(body.stream_options.include_usage);
+        let json = serde_json::to_value(&body).expect("serializes");
+        assert_eq!(json["stream_options"]["include_usage"], true);
     }
 }
