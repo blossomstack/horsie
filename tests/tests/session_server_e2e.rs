@@ -174,7 +174,18 @@ async fn start_server_with(
     }
 }
 
-async fn create_session(client: &reqwest::Client, addr: &SocketAddr) -> String {
+/// Create a session and wait until its runtime actually exists.
+///
+/// The wait is not politeness. Provisioning is detached — `Create` answers
+/// before the runtime is asked for — so a session reporting `Idle` says nothing
+/// about whether its runtime exists, and a turn that beats the create to the
+/// vendor gets a terminal `Gone` (horsie#232). Every test here means "a session
+/// that is up", so this is where that is established, once.
+async fn create_session(
+    client: &reqwest::Client,
+    addr: &SocketAddr,
+    agent: &FakeRuntimeVendor,
+) -> String {
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
         "vendor": "mock"
@@ -187,7 +198,9 @@ async fn create_session(client: &reqwest::Client, addr: &SocketAddr) -> String {
         .unwrap();
     assert_eq!(res.status().as_u16(), 201);
     let v: serde_json::Value = res.json().await.unwrap();
-    v["session"]["id"].as_str().unwrap().to_string()
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+    wait_for_signal(agent, &format!("create:{id}")).await;
+    id
 }
 
 /// Like `create_session`, but selects a named vendor with no `repos` — the
@@ -196,6 +209,7 @@ async fn create_session_for_vendor(
     client: &reqwest::Client,
     addr: &SocketAddr,
     vendor: &str,
+    agent: &FakeRuntimeVendor,
 ) -> String {
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
@@ -209,7 +223,10 @@ async fn create_session_for_vendor(
         .unwrap();
     assert_eq!(res.status().as_u16(), 201);
     let v: serde_json::Value = res.json().await.unwrap();
-    v["session"]["id"].as_str().unwrap().to_string()
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+    // As `create_session`: a session is not up until its runtime exists.
+    wait_for_signal(agent, &format!("create:{id}")).await;
+    id
 }
 
 /// Start a server with no vendor pre-published, for the tests where an agent
@@ -316,6 +333,37 @@ async fn wait_status(client: &reqwest::Client, addr: &SocketAddr, id: &str, want
     }
 }
 
+/// Poll a fake agent's signals until `signal` appears, or the deadline passes.
+///
+/// Provisioning is detached — `SessionSupervisorCommand::Create` spawns it and
+/// answers immediately, because a real create legitimately runs for minutes.
+/// So a session reporting `Idle` says nothing about whether its runtime exists
+/// yet, and a test that takes the vendor away, or restarts the server, has to
+/// wait for `create:<id>` first or it is racing the create it meant to happen
+/// before.
+///
+/// A `get` issued while a create is in flight *at the agent* waits for it. One
+/// issued before the server has finished assembling the spec — which does real
+/// I/O for plugin refs and GitHub tokens — does not: the agent has never heard
+/// of the runtime, so it answers `Gone`, which is terminal. That window is
+/// horsie#232, and it is why waiting on the signal rather than on `Idle` is the
+/// honest thing for a test to do.
+async fn wait_for_signal(agent: &FakeRuntimeVendor, signal: &str) {
+    let deadline = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        if agent.signals().iter().any(|s| s == signal) {
+            return;
+        }
+        assert!(
+            start.elapsed() <= deadline,
+            "timed out waiting for {signal}; saw {:?}",
+            agent.signals()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 // ── SSE reader ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -405,7 +453,7 @@ async fn create_message_sse_roundtrip() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // Connect SSE (replay from 0 + live) BEFORE sending, so we see the whole turn.
@@ -484,7 +532,7 @@ async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // A turn that hangs inside the provider call, so the session is genuinely
@@ -554,7 +602,7 @@ async fn prep_progressions_stream_during_a_turn() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // Subscribe before sending so the live progression frames are seen. Prep
@@ -604,7 +652,7 @@ async fn history_endpoint_returns_windowed_messages() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // Two completed turns → user + assistant per turn = 4 messages. Poll the
@@ -768,7 +816,7 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     let client = reqwest::Client::new();
 
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     let usage = |addr: SocketAddr, id: String| {
@@ -857,7 +905,7 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "one").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -936,7 +984,7 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "one").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -981,7 +1029,7 @@ async fn restart_reconciles_the_interrupted_turn_and_never_resumes() {
     let client = reqwest::Client::new();
 
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // A blocking turn: the LLM request arrives, then hangs — the session is
@@ -1031,7 +1079,7 @@ async fn last_event_id_replay_is_gap_free() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "one").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -1291,7 +1339,7 @@ async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
             .expect("fake agent");
         let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
         let client = reqwest::Client::new();
-        let id = create_session(&client, &server.addr).await;
+        let id = create_session(&client, &server.addr, &agent).await;
         wait_status(&client, &server.addr, &id, "Idle").await;
 
         mock.queue_tool_call("bash", serde_json::json!({ "command": "echo hi" }));
@@ -1358,7 +1406,7 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
             .expect("fake agent");
         let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
         let client = reqwest::Client::new();
-        let id = create_session(&client, &server.addr).await;
+        let id = create_session(&client, &server.addr, &agent).await;
         wait_status(&client, &server.addr, &id, "Idle").await;
 
         mock.queue_tool_call("bash", serde_json::json!({ "command": "sleep 999" }));
@@ -1451,7 +1499,7 @@ async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
     // Let the handshake land before the session resolves the vendor name.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let id = create_session_for_vendor(&client, &server.addr, "agent-1").await;
+    let id = create_session_for_vendor(&client, &server.addr, "agent-1", &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     assert_eq!(
@@ -1490,7 +1538,7 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "hello").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -1564,7 +1612,7 @@ async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     let block = mock.blocking_response("first");
@@ -1628,7 +1676,7 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     let block = mock.blocking_response("never delivered");
@@ -1676,7 +1724,7 @@ async fn a_gone_runtime_is_terminal_while_an_unreachable_vendor_is_not() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     mock.queue_response("never reached");
@@ -1724,7 +1772,7 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
         .expect("agent connects");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let id = create_session_for_vendor(&client, &server.addr, "agent-3").await;
+    let id = create_session_for_vendor(&client, &server.addr, "agent-3", &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     // The vendor goes away between turns. Its runtime is not gone — nobody can
@@ -1786,7 +1834,7 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
     .await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr).await;
+    let id = create_session(&client, &server.addr, &agent).await;
     wait_status(&client, &server.addr, &id, "Idle").await;
     send_message(&client, &server.addr, &id, "one").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
@@ -1868,8 +1916,8 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         .expect("agent connects");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let a = create_session_for_vendor(&client, &server.addr, "agent-2").await;
-    let b = create_session_for_vendor(&client, &server.addr, "agent-2").await;
+    let a = create_session_for_vendor(&client, &server.addr, "agent-2", &agent).await;
+    let b = create_session_for_vendor(&client, &server.addr, "agent-2", &agent).await;
     wait_status(&client, &server.addr, &a, "Idle").await;
     wait_status(&client, &server.addr, &b, "Idle").await;
 
