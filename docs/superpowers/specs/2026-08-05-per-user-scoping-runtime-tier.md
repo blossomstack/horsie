@@ -145,6 +145,12 @@ registry and stops there — no session actor spawned, no vendor called — so
 building a bundle lazily costs one journal replay, paid on that account's first
 request rather than at boot.
 
+**The idle policy stays deployment-wide.** `SupervisorConfig` — the clock, the
+idle timeout, whether a background ticker runs — is cloned into every account's
+supervisor from `Shared`. How long a session may sit idle is an operator's
+decision, not an account's preference, and putting it on the deployment tier is
+also what lets a test drive time for every account at once.
+
 **`global_events` is one channel per bundle.** Not one channel with a `user_id`
 on the frame and a filter in the SSE handler: a filter is one forgotten line
 away from leaking every session title and status transition on the server,
@@ -158,6 +164,10 @@ and is on the scope audit's allowlist with its reason — then resolves each due
 routine's owner bundle to arm and run it in that account's scope. Scoping this
 read instead would mean one timer per account, and a timer per dormant account
 is exactly what lazy bundles are for avoiding.
+
+Its scoped twin goes with it. `RoutineStore::due` had exactly one caller, and
+leaving a second answer to "what is due" in the tree is leaving something that
+silently under-reports the moment a deployment has two accounts.
 
 **Model-card seeding leaves boot.** Looping the bundled catalogue over every
 account at every startup is O(accounts × cards) of writes before the port opens.
@@ -176,8 +186,10 @@ already paid it.
 Two tests carry this, and both are load-bearing rather than belt-and-braces.
 
 **An HTTP isolation test**, the runtime-tier twin of `tests/user_isolation.rs`.
-Two accounts created through `AuthStore::create_user` with tokens from
-`insert_token`, because no route in this repo creates a second account. It
+Two accounts are two tokens from `AuthStore::insert_token` rather than two
+`auth_users` rows: `create_user` enforces the single-account rule this repo
+ships with, and a token *is* the scope — `auth_tokens.principal` is what every
+request resolves through. It
 asserts that B cannot see A's sessions, that B's `/api/events` receives none of
 A's frames, and that two agents both announcing `main` each resolve to their own
 owner's link. This is the test that fails when a handler keeps reaching for
