@@ -5,6 +5,7 @@
 //! root. A module that acquires its own heavy dependencies graduates into its
 //! own crate.
 
+pub mod frontmatter;
 #[cfg(feature = "git")]
 pub mod git;
 pub mod plugin;

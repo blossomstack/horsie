@@ -155,6 +155,12 @@ pub enum SessionCommand {
         caller: SubAgentParent,
         label: String,
         task: String,
+        /// A plugin-declared agent type, already checked against the catalogue
+        /// by the tool that advertised it. The session journals the name and
+        /// never resolves it: what an agent type *is* belongs to the plugin
+        /// library as of the moment the subagent runs, not the moment it was
+        /// asked for.
+        agent_type: Option<String>,
         reply: oneshot::Sender<Result<Uuid, String>>,
     },
     /// The `subagent_status` tool: one node, or the caller's whole subtree.
@@ -190,6 +196,7 @@ pub enum SessionCommand {
         id: Uuid,
         label: String,
         task: String,
+        agent_type: Option<String>,
         reply: oneshot::Sender<Result<Uuid, String>>,
         persisted: Result<(), horsie_actor::JournalError>,
     },
@@ -268,6 +275,11 @@ pub enum SessionDomainEvent {
         label: String,
         task: String,
         depth: u32,
+        /// The plugin-declared agent type this subagent runs as, if any.
+        /// Defaulted so journals written before typed agents existed replay as
+        /// the general-purpose subagent they were.
+        #[serde(default)]
+        agent_type: Option<String>,
     },
     /// A terminal node started another run, woken to consume child results.
     SubAgentRunning {
@@ -679,6 +691,7 @@ impl SessionActor {
             step_output_schema: None,
             session_id: self.id,
             kind: SessionAgentKind::Main,
+            agent_type: None,
             unattended: self.spec.is_unattended(),
             session: ctx.self_ref(),
             frames: self.frames.clone(),
@@ -757,6 +770,7 @@ impl SessionActor {
             step_output_schema: step.output_schema.clone(),
             session_id: self.id,
             kind: SessionAgentKind::Step(agent_id),
+            agent_type: None,
             unattended: self.spec.is_unattended(),
             session: ctx.self_ref(),
             frames: self.frames.clone(),
@@ -926,18 +940,29 @@ impl SessionActor {
                 if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
                     return Some((AgentKey::Sub(id), agent.clone()));
                 }
-                state.mode.subagents().get(&id)?;
-                Some((AgentKey::Sub(id), self.spawn_sub_agent_actor(ctx, id)))
+                // The type comes off the record, not from the caller: a cold
+                // node woken to answer a read must run as what it was spawned as.
+                let agent_type = state.mode.subagents().get(&id)?.agent_type.clone();
+                Some((
+                    AgentKey::Sub(id),
+                    self.spawn_sub_agent_actor(ctx, id, agent_type),
+                ))
             }
         }
     }
 
     /// Spawn a resident subagent actor — journal replay only; the caller
     /// decides whether a run starts (spawn) or not (recovery).
+    /// Spawn one subagent's actor. `agent_type` names a plugin-declared agent to
+    /// run as, and travels no further than the provider: the *definition* is
+    /// resolved from the library scan when the subagent runs, so an agent whose
+    /// plugin was removed in between fails loudly rather than running with a
+    /// prompt nobody can point at.
     fn spawn_sub_agent_actor(
         &mut self,
         ctx: &ActorContext<Self>,
         id: Uuid,
+        agent_type: Option<String>,
     ) -> ActorRef<AgentCommand> {
         let context_provider = Arc::new(SessionContextProvider {
             runtimes: self
@@ -951,6 +976,7 @@ impl SessionActor {
             step_output_schema: None,
             session_id: self.id,
             kind: SessionAgentKind::Sub(id),
+            agent_type,
             unattended: self.spec.is_unattended(),
             session: ctx.self_ref(),
             frames: self.frames.clone(),
@@ -1065,10 +1091,13 @@ impl SessionActor {
                     Some(agent) => agent.clone(),
                     // A cold node woken for the first time since load: spawn
                     // its resident actor on demand (see `on_recovery_complete`).
-                    None if state.mode.subagents().get(&id).is_some() => {
-                        self.spawn_sub_agent_actor(ctx, id)
-                    }
-                    None => return Vec::new(),
+                    None => match state.mode.subagents().get(&id) {
+                        Some(rec) => {
+                            let agent_type = rec.agent_type.clone();
+                            self.spawn_sub_agent_actor(ctx, id, agent_type)
+                        }
+                        None => return Vec::new(),
+                    },
                 };
                 if agent
                     .tell(AgentCommand::Resume {
@@ -2142,6 +2171,11 @@ struct SessionContextProvider {
     step_output_schema: Option<Value>,
     session_id: Uuid,
     kind: SessionAgentKind,
+    /// The plugin-declared agent type this agent runs as, for a subagent that
+    /// was spawned with one. The *name* only — the definition is resolved from
+    /// the library scan on every `provide()`, so a subagent that outlives its
+    /// plugin fails rather than running a prompt nobody can point at.
+    agent_type: Option<String>,
     /// Whether nobody is watching this session (a routine run). Decides one
     /// thing: the main agent gets no `ask_user`, and is told why.
     unattended: bool,
@@ -2155,6 +2189,15 @@ struct SessionContextProvider {
 }
 
 impl SessionContextProvider {
+    /// The provider for one named model, or `None` when horsie has none.
+    ///
+    /// Separate from [`Self::llm_provider`] because a missing model means two
+    /// different things: the session's own model is a failure, while a
+    /// plugin agent's is a declaration horsie cannot honour and inherits past.
+    fn provider_for(&self, model: &str) -> Option<Arc<dyn LlmProvider>> {
+        self.registry.read().ok()?.get(model).cloned()
+    }
+
     fn llm_provider(&self) -> Result<Arc<dyn LlmProvider>, String> {
         let reg = self
             .registry
@@ -2197,14 +2240,15 @@ impl SessionContextProvider {
         Ok(scoped_client(&self.kind, client))
     }
 
-    /// The `agent_type` a `SubagentStart` hook matches on.
+    /// The `agent_type` a `SubagentStart` / `SubagentStop` hook matches on.
     ///
-    /// One value for every subagent, because horsie has no agent-*type* concept
-    /// yet — plugin-declared agents are #105's Phase 2. Reporting the model name
-    /// here instead would be worse than reporting nothing useful: a hook
-    /// matching on it would be matching on a lie.
+    /// The plugin-declared type when the spawn named one, so a hook may select
+    /// `reviewer` and fire for reviewers only. An untyped spawn reports
+    /// `"subagent"` — the general-purpose case, which is a kind and not a lie.
     fn agent_type(&self) -> String {
-        "subagent".to_string()
+        self.agent_type
+            .clone()
+            .unwrap_or_else(|| "subagent".to_string())
     }
 }
 
@@ -2261,8 +2305,7 @@ impl ContextProvider for SessionContextProvider {
 
     async fn provide(&self) -> Result<Contexts, ContextError> {
         let settings = &self.settings;
-        let provider = self.llm_provider()?;
-        let def = session_run_def(settings);
+        let mut def = session_run_def(settings);
         let use_plugins = settings.use_plugins.unwrap_or(true);
         // Preparation progress is main-only: subagents are quiet by design.
         let broadcast = matches!(
@@ -2301,8 +2344,64 @@ impl ContextProvider for SessionContextProvider {
         // turn that triggered it.
         let shared = use_plugins.then(|| SharedContext {
             skills: Arc::new(shared_scan.skills),
+            agents: Arc::new(shared_scan.agents),
             root: shared_scan.root,
         });
+        // Resolved here rather than carried from the spawn: the definition is a
+        // property of the library as it is *now*, so an agent whose plugin was
+        // uninstalled between spawn and wake fails loudly.
+        let plugin_agent = match (&self.agent_type, shared.as_ref()) {
+            (None, _) => None,
+            (Some(name), Some(shared)) => Some(shared.agents.get(name).cloned().ok_or_else(|| {
+                ContextError::retryable(format!(
+                    "this subagent runs as agent type '{name}', which no installed plugin declares"
+                ))
+            })?),
+            (Some(name), None) => {
+                return Err(ContextError::retryable(format!(
+                    "this subagent runs as agent type '{name}', but the session loads no plugins"
+                )));
+            }
+        };
+        if let Some(agent) = &plugin_agent
+            && !agent.def.tools.is_empty()
+        {
+            // The declared allowlist is in Claude's vocabulary; horsie's filter
+            // is in horsie's. Same table the hook matchers use, read backwards.
+            let allowed: Vec<String> = agent
+                .def
+                .tools
+                .iter()
+                .flat_map(|t| horsie_support::plugin::hooks::horsie_tools_for(t))
+                .map(str::to_string)
+                .collect();
+            if allowed.is_empty() {
+                tracing::warn!(
+                    agent = %agent.def.name,
+                    declared = ?agent.def.tools,
+                    "agent's tool allowlist names no tool horsie has; it will run with none"
+                );
+            }
+            def.allowed_tools = Some(allowed);
+        }
+        // A declared `model` is honoured only when horsie actually has it.
+        // Every model declared in the wild is an alias (`inherit`, `sonnet`,
+        // `opus`), and mapping those onto whatever the catalogue holds would let
+        // a plugin author switch a kimi session to Anthropic by writing a word
+        // in a file.
+        let provider = match plugin_agent.as_ref().and_then(|a| a.def.model.as_deref()) {
+            Some(model) => match self.provider_for(model) {
+                Some(provider) => provider,
+                None => {
+                    tracing::info!(
+                        model,
+                        "agent declares a model horsie has no provider for; inheriting the session's"
+                    );
+                    self.llm_provider()?
+                }
+            },
+            None => self.llm_provider()?,
+        };
         let mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
             Vec::new()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
@@ -2343,6 +2442,10 @@ impl ContextProvider for SessionContextProvider {
                 with_memory,
                 self.session.clone(),
                 caller,
+                shared
+                    .as_ref()
+                    .map(|s| Arc::clone(&s.agents))
+                    .unwrap_or_default(),
             ))
         };
         let toolbox: Arc<dyn Toolbox> = match self.kind {
@@ -2368,11 +2471,19 @@ impl ContextProvider for SessionContextProvider {
             SessionAgentKind::Sub(_) => with_spawn,
         };
         let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
-        let suffix = match self.kind {
+        // A typed subagent's role section is its plugin's prompt. The workspace
+        // and skill sections around it are untouched: a named agent still works
+        // in the same workspace, with the same skills.
+        let subagent_role = plugin_agent
+            .as_ref()
+            .map(|a| format!("\n\n# Subagent role: {}\n\n{}\n", a.def.name, a.def.prompt));
+        let suffix: Option<&str> = match &self.kind {
             SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
             SessionAgentKind::Main => None,
             SessionAgentKind::Step(_) => Some(STEP_PROMPT_SUFFIX),
-            SessionAgentKind::Sub(_) => Some(SUBAGENT_PROMPT_SUFFIX),
+            SessionAgentKind::Sub(_) => {
+                Some(subagent_role.as_deref().unwrap_or(SUBAGENT_PROMPT_SUFFIX))
+            }
         };
         let system_prompt = match suffix {
             None => system_prompt,
@@ -2476,9 +2587,10 @@ impl EventSourcedActor for SessionActor {
                 task,
                 depth,
                 at_ms,
+                agent_type,
             } => {
                 if let Some(tree) = state.mode.tree_of_parent_mut(parent) {
-                    tree.apply_spawned(id, parent, label, task, depth, at_ms);
+                    tree.apply_spawned(id, parent, label, task, depth, at_ms, agent_type);
                 }
             }
             SessionDomainEvent::SubAgentRunning { id, at_ms } => {
@@ -2842,6 +2954,7 @@ impl EventSourcedActor for SessionActor {
                 caller,
                 label,
                 task,
+                agent_type,
                 reply,
             } => {
                 let Some(parent_depth) = state.mode.subagents().depth_of(caller) else {
@@ -2870,6 +2983,7 @@ impl EventSourcedActor for SessionActor {
                     label: label.clone(),
                     task: task.clone(),
                     depth: parent_depth + 1,
+                    agent_type: agent_type.clone(),
                 };
                 let (tx, rx) = oneshot::channel();
                 let self_ref = ctx.self_ref();
@@ -2884,6 +2998,7 @@ impl EventSourcedActor for SessionActor {
                             id,
                             label,
                             task,
+                            agent_type,
                             reply,
                             persisted,
                         })
@@ -2895,6 +3010,7 @@ impl EventSourcedActor for SessionActor {
                 id,
                 label,
                 task,
+                agent_type,
                 reply,
                 persisted,
             } => {
@@ -2902,7 +3018,7 @@ impl EventSourcedActor for SessionActor {
                     let _ = reply.send(Err(format!("persist subagent: {e}")));
                     return CommandEffect::none();
                 }
-                let agent = self.spawn_sub_agent_actor(ctx, id);
+                let agent = self.spawn_sub_agent_actor(ctx, id, agent_type);
                 let _ = agent
                     .tell(AgentCommand::Resume {
                         results: Vec::new(),
@@ -3228,6 +3344,7 @@ mod tests {
             label: "research".into(),
             task: "look into it".into(),
             depth: 1,
+            agent_type: None,
         }]);
         assert_eq!(s.mode.subagents().active_count(), 1);
 
@@ -3258,6 +3375,7 @@ mod tests {
             label: "w".into(),
             task: "t".into(),
             depth: 1,
+            agent_type: None,
         }]);
         assert_eq!(s.mode.subagents().interrupted(), vec![id]);
         let s = SessionActor::apply_event(
@@ -4516,6 +4634,7 @@ mod tests {
                 caller: crate::sessions::subagents::SubAgentParent::Main,
                 label: label.into(),
                 task: task.into(),
+                agent_type: None,
                 reply,
             })
             .await
@@ -4557,6 +4676,7 @@ mod tests {
                     caller: parent,
                     label: "w".into(),
                     task: "t".into(),
+                    agent_type: None,
                     reply,
                 })
                 .await
@@ -4570,6 +4690,7 @@ mod tests {
                 caller: parent,
                 label: "x".into(),
                 task: "y".into(),
+                agent_type: None,
                 reply,
             })
             .await
@@ -4590,6 +4711,7 @@ mod tests {
                 caller: crate::sessions::subagents::SubAgentParent::Main,
                 label: "x".into(),
                 task: "y".into(),
+                agent_type: None,
                 reply,
             })
             .await
@@ -4606,6 +4728,7 @@ mod tests {
                 caller: crate::sessions::subagents::SubAgentParent::SubAgent(Uuid::new_v4()),
                 label: "x".into(),
                 task: "y".into(),
+                agent_type: None,
                 reply,
             })
             .await
@@ -4618,6 +4741,7 @@ mod tests {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
 
         let build = |kind: SessionAgentKind| SessionContextProvider {
+            agent_type: None,
             runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
@@ -4675,6 +4799,7 @@ mod tests {
             step_output_schema: None,
             session_id: id,
             kind: SessionAgentKind::Main,
+            agent_type: None,
             unattended: false,
             session: session.clone(),
             frames: broadcast::channel(8).0,
@@ -4711,6 +4836,7 @@ mod tests {
             step_output_schema: None,
             session_id: id,
             kind: SessionAgentKind::Main,
+            agent_type: None,
             unattended,
             session: session.clone(),
             frames: broadcast::channel(8).0,
@@ -5185,6 +5311,210 @@ mod tests {
         out
     }
 
+    // --- Plugin agents ---
+
+    /// A session whose runtime library declares `code-reviewer`, with a
+    /// `PromptRecorder` so the test can assert what the model was actually
+    /// told rather than what the transcript would render.
+    async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, Uuid) {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
+            .shared_agents(vec![horsie_models::runtime::PluginAgent {
+                plugin: "feature-dev".into(),
+                rel_path: "feature-dev/agents/code-reviewer.md".into(),
+                content: "---\nname: code-reviewer\ndescription: reviews diffs\n\
+                          tools: Read, Grep\n---\nReport only high-confidence bugs."
+                    .into(),
+            }])
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        let mut vendors = HashMap::new();
+        vendors.insert("mock".to_string(), agent.link());
+        let vendors = Arc::new(std::sync::RwLock::new(vendors));
+        let deps = ServerDeps {
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors, tmp.path()),
+            provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            vendors,
+            state_dir: tmp.path().to_path_buf(),
+            github_tokens: None,
+            mcp: None,
+            plugins: None,
+            memory: None,
+        };
+        let f = ActorFixture {
+            deps,
+            agent,
+            _tmp: tmp,
+        };
+        let id = Uuid::new_v4();
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "mock", &actor_spec_fixture())
+            .await
+            .expect("create");
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>,
+        );
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                test_frames(),
+            ),
+            Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
+        );
+        drop(prompts);
+        (f, session, id)
+    }
+
+    async fn spawn_typed(
+        session: &ActorRef<SessionCommand>,
+        agent_type: Option<&str>,
+    ) -> Result<Uuid, String> {
+        session
+            .ask(|reply| SessionCommand::SpawnSubAgent {
+                caller: crate::sessions::subagents::SubAgentParent::Main,
+                label: "review".into(),
+                task: "look at the diff".into(),
+                agent_type: agent_type.map(str::to_string),
+                reply,
+            })
+            .await
+            .unwrap()
+    }
+
+    /// The agent's body replaces the generic subagent role, and its `tools`
+    /// allowlist reaches the toolbox through the same alias table hook matchers
+    /// use.
+    #[tokio::test]
+    async fn a_typed_subagent_runs_with_its_plugins_prompt() {
+        let (f, session, id) = agent_harness().await;
+        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
+
+        let provider = SessionContextProvider {
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings: actor_spec_fixture().agent,
+            step_output_schema: None,
+            session_id: id,
+            kind: SessionAgentKind::Sub(sub),
+            agent_type: Some("code-reviewer".to_string()),
+            unattended: false,
+            session: session.clone(),
+            frames: test_frames(),
+            last_client: Mutex::new(None),
+        };
+        let contexts = provider.provide().await.expect("contexts");
+        let prompt = contexts.system_prompt.unwrap_or_default();
+        assert!(
+            prompt.contains("# Subagent role: code-reviewer"),
+            "the plugin's agent names the role: {prompt}"
+        );
+        assert!(
+            prompt.contains("Report only high-confidence bugs."),
+            "the plugin's body is the role: {prompt}"
+        );
+        // `Read, Grep` in Claude's vocabulary is `read_file, grep` in horsie's.
+        let tools: Vec<String> = contexts
+            .toolbox
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(tools.contains(&"read_file".to_string()), "{tools:?}");
+        assert!(tools.contains(&"grep".to_string()), "{tools:?}");
+        assert!(
+            !tools.contains(&"bash".to_string()),
+            "the allowlist must exclude what it did not name: {tools:?}"
+        );
+    }
+
+    /// The definition is resolved when the subagent runs, not carried from the
+    /// spawn — so an agent whose plugin has gone fails loudly rather than
+    /// running a prompt nobody can point at.
+    #[tokio::test]
+    async fn a_subagent_whose_agent_type_is_gone_fails_rather_than_running_generic() {
+        let (f, session, id) = agent_harness().await;
+        let provider = SessionContextProvider {
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings: actor_spec_fixture().agent,
+            step_output_schema: None,
+            session_id: id,
+            kind: SessionAgentKind::Sub(Uuid::new_v4()),
+            agent_type: Some("uninstalled-agent".to_string()),
+            unattended: false,
+            session: session.clone(),
+            frames: test_frames(),
+            last_client: Mutex::new(None),
+        };
+        let Err(err) = provider.provide().await else {
+            panic!("a subagent whose agent type is gone must not run generic");
+        };
+        assert!(err.message.contains("uninstalled-agent"), "{}", err.message);
+        assert!(
+            !err.terminal,
+            "a missing plugin is not the end of a session"
+        );
+    }
+
+    /// The type is what `SubagentStart` / `SubagentStop` matchers select on. It
+    /// was the constant `"subagent"` for every subagent before agent types
+    /// existed, so a matcher could only select all or none.
+    #[tokio::test]
+    async fn the_agent_type_reaches_the_subagent_hook_matcher() {
+        let (f, session, _id) = agent_harness().await;
+        spawn_typed(&session, Some("code-reviewer")).await.unwrap();
+        for _ in 0..200 {
+            if f.agent.hook_events().contains(&"SubagentStart") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let types: Vec<String> = f
+            .agent
+            .server_hook_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                horsie_models::runtime::ServerHookEvent::SubagentStart(i) => Some(i.agent_type),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(types, vec!["code-reviewer".to_string()]);
+    }
+
+    /// An untyped spawn is the general-purpose subagent, unchanged.
+    #[tokio::test]
+    async fn an_untyped_spawn_still_reports_the_generic_type() {
+        let (f, session, _id) = agent_harness().await;
+        spawn_typed(&session, None).await.unwrap();
+        for _ in 0..200 {
+            if f.agent.hook_events().contains(&"SubagentStart") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let types: Vec<String> = f
+            .agent
+            .server_hook_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                horsie_models::runtime::ServerHookEvent::SubagentStart(i) => Some(i.agent_type),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(types, vec!["subagent".to_string()]);
+    }
+
     /// A halt from a tool hook reaches the session as its own command, because
     /// the runtime that ran the hook cannot end a turn and the agent is mid-call
     /// when it arrives. The reason is what the user is shown.
@@ -5635,6 +5965,7 @@ mod tests {
                 label: "parent".into(),
                 task: "parent task".into(),
                 depth: 1,
+                agent_type: None,
             },
             SessionDomainEvent::SubAgentCompleted {
                 at_ms: 0,
@@ -5649,6 +5980,7 @@ mod tests {
                 label: "child".into(),
                 task: "child task".into(),
                 depth: 2,
+                agent_type: None,
             },
             SessionDomainEvent::SubAgentFailed {
                 at_ms: 0,

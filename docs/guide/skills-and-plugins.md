@@ -120,6 +120,20 @@ run has not permitted anything; upstream Claude Code lets an HTTP failure
 through. Point a `PreToolUse` webhook only at an endpoint you are willing to
 have gate your tool calls.
 
+A bundle's `agents/*.md` become **agent types** the session's agent can delegate
+to. Each file's frontmatter names it (`name`), says when to pick it
+(`description`), and may narrow its tools (`tools`) or ask for a model
+(`model`); the body below the header is that agent's instructions. horsie offers
+the list on its `spawn_agent` tool, so the model chooses one by description the
+way it chooses a skill.
+
+Two things to know. A declared `tools` list is written in Claude Code's
+vocabulary (`Read`, `Grep`, `Edit`), and horsie maps it onto its own tools —
+names with no horsie equivalent (`WebFetch`, `TodoWrite`) simply grant nothing. A
+declared `model` is honoured only when it names a model your horsie actually has;
+in practice agents declare `inherit`, `sonnet` or `opus`, so they inherit the
+session's model rather than silently switching your provider.
+
 Any hook, on any event, may answer `{"continue": false, "stopReason": "…"}`.
 horsie stops the agent that ran it and shows the reason: a tool hook's halt
 fails the turn, fails a subagent for its parent, or fails a workflow step. On

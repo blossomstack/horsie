@@ -12,6 +12,7 @@ use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;
 use horsie_actor::ActorRef;
 use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
+use horsie_workflow::AgentCatalog;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -21,30 +22,60 @@ pub const SPAWN_AGENT_TOOL: &str = "spawn_agent";
 /// Name of the built-in subagent-inspection tool.
 pub const SUBAGENT_STATUS_TOOL: &str = "subagent_status";
 
-fn spawn_agent_spec() -> ToolSpec {
+fn spawn_agent_spec(catalog: &AgentCatalog) -> ToolSpec {
+    let mut description = "Spawn a subagent to work on a task independently and in parallel. \
+        Returns immediately with the subagent's id; when it finishes, its result is \
+        delivered back to you as a message. Use subagent_status to check progress. \
+        Spawning fails when the session's subagent limits (depth or concurrency) are \
+        reached."
+        .to_string();
+    let mut properties = json!({
+        "label": {
+            "type": "string",
+            "description": "A short human-readable label for the subagent (a few words)."
+        },
+        "task": {
+            "type": "string",
+            "description": "The complete, self-contained task for the subagent. It \
+                inherits your model and tools but not your conversation — include \
+                everything it needs to know."
+        }
+    });
+    // The catalogue goes in the description, not in a JSON `enum`: a bare list
+    // of names says nothing about when to pick one, and `description` is the
+    // whole point of the frontmatter field. With no agents installed the
+    // parameter is absent entirely, so a session with no plugins sees exactly
+    // the tool it saw before they existed.
+    if !catalog.is_empty() {
+        let listing = catalog
+            .iter()
+            .map(|a| format!("- {}: {}", a.def.name, a.def.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+        description.push_str(&format!(
+            "\n\nInstalled agent types, each with its own instructions, tools and \
+             expertise. Pass one as `agent_type` when its description fits the task \
+             better than a general-purpose subagent would:\n{listing}"
+        ));
+        if let Some(map) = properties.as_object_mut() {
+            map.insert(
+                "agent_type".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Name of an installed agent type, from the list above. \
+                        Omit for a general-purpose subagent that inherits your own \
+                        instructions and tools."
+                }),
+            );
+        }
+    }
     ToolSpec {
         name: SPAWN_AGENT_TOOL.to_string(),
-        description: "Spawn a subagent to work on a task independently and in parallel. \
-            Returns immediately with the subagent's id; when it finishes, its result is \
-            delivered back to you as a message. Use subagent_status to check progress. \
-            Spawning fails when the session's subagent limits (depth or concurrency) are \
-            reached."
-            .to_string(),
+        description,
         input_schema: json!({
             "type": "object",
             "required": ["label", "task"],
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "description": "A short human-readable label for the subagent (a few words)."
-                },
-                "task": {
-                    "type": "string",
-                    "description": "The complete, self-contained task for the subagent. It \
-                        inherits your model and tools but not your conversation — include \
-                        everything it needs to know."
-                }
-            }
+            "properties": properties,
         }),
     }
 }
@@ -74,6 +105,10 @@ pub struct SubAgentToolbox {
     session: ActorRef<SessionCommand>,
     /// Which agent this toolbox belongs to — the parent spawns attribute to.
     caller: SubAgentParent,
+    /// The plugin-declared agents this session can spawn. Held here because
+    /// this toolbox is built in `provide()`, where the library scan is; the
+    /// session actor never learns what an agent type is, it journals a string.
+    catalog: Arc<AgentCatalog>,
 }
 
 impl SubAgentToolbox {
@@ -81,12 +116,41 @@ impl SubAgentToolbox {
         inner: Arc<dyn Toolbox>,
         session: ActorRef<SessionCommand>,
         caller: SubAgentParent,
+        catalog: Arc<AgentCatalog>,
     ) -> Self {
         Self {
             inner,
             session,
             caller,
+            catalog,
         }
+    }
+
+    /// Validate a requested agent type against the catalogue.
+    ///
+    /// Rejected here rather than at the session, because this is the layer that
+    /// advertised the list — an error naming what exists is only possible where
+    /// the list is.
+    fn resolve_type(&self, input: &Value) -> Result<Option<String>, ToolCallError> {
+        let Some(requested) = input.get("agent_type").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let requested = requested.trim();
+        if requested.is_empty() {
+            return Ok(None);
+        }
+        if self.catalog.get(requested).is_some() {
+            return Ok(Some(requested.to_string()));
+        }
+        let known = self.catalog.names();
+        Err(ToolCallError::InvalidInput(if known.is_empty() {
+            format!("no agent type '{requested}': this session has no agent types installed")
+        } else {
+            format!(
+                "no agent type '{requested}'; installed types are {}",
+                known.join(", ")
+            )
+        }))
     }
 }
 
@@ -94,7 +158,7 @@ impl SubAgentToolbox {
 impl Toolbox for SubAgentToolbox {
     fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.inner.specs();
-        specs.push(spawn_agent_spec());
+        specs.push(spawn_agent_spec(&self.catalog));
         specs.push(subagent_status_spec());
         specs
     }
@@ -114,12 +178,14 @@ impl Toolbox for SubAgentToolbox {
                 .get("task")
                 .and_then(Value::as_str)
                 .ok_or_else(|| ToolCallError::InvalidInput("missing 'task'".to_string()))?;
+            let agent_type = self.resolve_type(&input)?;
             let id = self
                 .session
                 .ask(|reply| SessionCommand::SpawnSubAgent {
                     caller: self.caller,
                     label: label.to_string(),
                     task: task.to_string(),
+                    agent_type,
                     reply,
                 })
                 .await
@@ -215,11 +281,35 @@ mod tests {
     }
 
     fn toolbox(spawn_result: Result<Uuid, String>) -> SubAgentToolbox {
+        with_catalog(spawn_result, AgentCatalog::default())
+    }
+
+    fn with_catalog(spawn_result: Result<Uuid, String>, catalog: AgentCatalog) -> SubAgentToolbox {
         let session = spawn_root(
             StubSession { spawn_result },
             Arc::new(InMemoryJournal::new()),
         );
-        SubAgentToolbox::new(Arc::new(EmptyToolbox), session, SubAgentParent::Main)
+        SubAgentToolbox::new(
+            Arc::new(EmptyToolbox),
+            session,
+            SubAgentParent::Main,
+            Arc::new(catalog),
+        )
+    }
+
+    /// A catalogue of one, built the way a real scan builds it.
+    fn catalog_of(name: &str, description: &str) -> AgentCatalog {
+        std::iter::once(horsie_workflow::CatalogAgent {
+            plugin: "fd".into(),
+            def: horsie_support::plugin::agents::PluginAgentDef {
+                name: name.into(),
+                description: description.into(),
+                model: None,
+                tools: Vec::new(),
+                prompt: "be one".into(),
+            },
+        })
+        .collect()
     }
 
     #[tokio::test]
@@ -231,6 +321,70 @@ mod tests {
             .collect();
         assert!(names.contains(&SPAWN_AGENT_TOOL.to_string()));
         assert!(names.contains(&SUBAGENT_STATUS_TOOL.to_string()));
+    }
+
+    /// A session with no plugin agents sees exactly the tool it saw before
+    /// agent types existed — no vestigial parameter, no empty list to reason
+    /// about.
+    #[tokio::test]
+    async fn with_no_agents_installed_the_parameter_is_absent() {
+        let specs = toolbox(Ok(Uuid::new_v4())).specs();
+        let spawn = specs.iter().find(|s| s.name == SPAWN_AGENT_TOOL).unwrap();
+        assert!(spawn.input_schema["properties"]["agent_type"].is_null());
+        assert!(!spawn.description.contains("agent_type"));
+    }
+
+    /// The catalogue rides in the description, because a name alone does not
+    /// tell a model when to pick one.
+    #[tokio::test]
+    async fn an_installed_agent_is_offered_with_its_description() {
+        let tb = with_catalog(
+            Ok(Uuid::new_v4()),
+            catalog_of("code-reviewer", "reviews diffs for real bugs"),
+        );
+        let specs = tb.specs();
+        let spawn = specs.iter().find(|s| s.name == SPAWN_AGENT_TOOL).unwrap();
+        assert!(spawn.input_schema["properties"]["agent_type"].is_object());
+        assert!(
+            spawn
+                .description
+                .contains("- code-reviewer: reviews diffs for real bugs"),
+            "{}",
+            spawn.description
+        );
+    }
+
+    /// Rejected at the layer that advertised the list, so the error can name
+    /// what actually exists.
+    #[tokio::test]
+    async fn an_unknown_agent_type_is_refused_and_names_the_known_ones() {
+        let tb = with_catalog(Ok(Uuid::new_v4()), catalog_of("code-reviewer", "reviews"));
+        let err = tb
+            .execute(
+                SPAWN_AGENT_TOOL,
+                json!({"label": "x", "task": "y", "agent_type": "reviewer"}),
+                "tc1",
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolCallError::InvalidInput(msg) => {
+                assert!(msg.contains("code-reviewer"), "{msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// An omitted or blank type is the general-purpose subagent, not an error.
+    #[tokio::test]
+    async fn an_absent_agent_type_spawns_a_general_purpose_subagent() {
+        let tb = with_catalog(Ok(Uuid::new_v4()), catalog_of("code-reviewer", "reviews"));
+        for input in [
+            json!({"label": "x", "task": "y"}),
+            json!({"label": "x", "task": "y", "agent_type": "  "}),
+        ] {
+            assert!(tb.execute(SPAWN_AGENT_TOOL, input, "tc1").await.is_ok());
+        }
     }
 
     #[tokio::test]

@@ -357,6 +357,7 @@ impl RuntimeTransport for MockTransport {
                     call_id: req.call_id,
                     workspaces: self.scan.clone(),
                     shared_skills: shared,
+                    shared_agents: None,
                     shared_root,
                 }))
             }

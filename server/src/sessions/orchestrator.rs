@@ -292,7 +292,15 @@ mod tests {
             .mode
             .subagents_mut()
             .expect("an interactive session has a tree");
-        tree.apply_spawned(id, SubAgentParent::Main, label.into(), "t".into(), 1, 100);
+        tree.apply_spawned(
+            id,
+            SubAgentParent::Main,
+            label.into(),
+            "t".into(),
+            1,
+            100,
+            None,
+        );
         tree.apply_completed(id, output.into(), 400);
         s
     }
@@ -345,6 +353,7 @@ mod tests {
                 "t".into(),
                 1,
                 100,
+                None,
             );
             tree.apply_completed(parent, "waiting".into(), 200);
             tree.apply_notified(parent);
@@ -355,6 +364,7 @@ mod tests {
                 "t".into(),
                 2,
                 300,
+                None,
             );
             tree.apply_completed(child, "kid done".into(), 600);
         }

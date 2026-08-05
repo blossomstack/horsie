@@ -64,6 +64,11 @@ pub struct SubAgentRecord {
     pub task: String,
     pub depth: u32,
     pub status: SubAgentStatus,
+    /// The plugin-declared agent type this node runs as, if any. `None` is the
+    /// general-purpose subagent — and is what every node journaled before typed
+    /// agents existed reads as.
+    #[serde(default)]
+    pub agent_type: Option<String>,
     pub output: Option<String>,
     pub error: Option<String>,
     /// Whether the parent was sent this node's latest terminal result. Every
@@ -113,6 +118,7 @@ fn result_part(id: &Uuid, rec: &SubAgentRecord) -> SubAgentResultPart {
 }
 
 impl SubAgentTree {
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_spawned(
         &mut self,
         id: Uuid,
@@ -121,6 +127,7 @@ impl SubAgentTree {
         task: String,
         depth: u32,
         at_ms: u64,
+        agent_type: Option<String>,
     ) {
         self.nodes.insert(
             id,
@@ -130,6 +137,7 @@ impl SubAgentTree {
                 task,
                 depth,
                 status: SubAgentStatus::Running,
+                agent_type,
                 output: None,
                 error: None,
                 notified: false,
@@ -344,7 +352,7 @@ mod tests {
     use super::*;
 
     fn spawn(tree: &mut SubAgentTree, id: Uuid, parent: SubAgentParent, depth: u32) {
-        tree.apply_spawned(id, parent, "label".into(), "task".into(), depth, 100);
+        tree.apply_spawned(id, parent, "label".into(), "task".into(), depth, 100, None);
     }
 
     #[test]
@@ -463,6 +471,7 @@ mod tests {
             "t".into(),
             1,
             100,
+            None,
         );
         tree.apply_spawned(
             boom,
@@ -471,6 +480,7 @@ mod tests {
             "t".into(),
             1,
             100,
+            None,
         );
         tree.apply_completed(done, "answer".into(), 400);
         tree.apply_failed(boom, "boom".into(), 400);
@@ -557,7 +567,15 @@ mod tests {
         let mut tree = SubAgentTree::default();
         let id = Uuid::new_v4();
         let huge = "x".repeat(MAX_RESULT_BYTES + 10_000);
-        tree.apply_spawned(id, SubAgentParent::Main, "w".into(), "t".into(), 1, 100);
+        tree.apply_spawned(
+            id,
+            SubAgentParent::Main,
+            "w".into(),
+            "t".into(),
+            1,
+            100,
+            None,
+        );
         tree.apply_completed(id, huge.clone(), 400);
         let text = tree.owed_for(SubAgentParent::Main)[0].1.to_wire_text();
         assert!(text.contains("[truncated:"), "{text:.200}");

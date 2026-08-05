@@ -140,6 +140,10 @@ struct SubAgentView {
     parent: Option<String>,
     label: Option<String>,
     depth: u32,
+    /// The plugin-declared agent type this subagent runs as, when it was
+    /// spawned with one. Absent for the main agent and for a general-purpose
+    /// subagent.
+    agent_type: Option<String>,
     /// "running" | "completed" | "failed".
     status: String,
     error: Option<String>,

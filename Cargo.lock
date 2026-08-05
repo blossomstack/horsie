@@ -1861,6 +1861,7 @@ dependencies = [
  "horsie-mock-llm",
  "horsie-models",
  "horsie-runtime-client",
+ "horsie-support",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
