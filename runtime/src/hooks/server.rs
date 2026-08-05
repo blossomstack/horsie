@@ -24,6 +24,9 @@ pub async fn run_hooks(registry: &WorkspaceRegistry, event: &ServerHookEvent) ->
     };
     let invocation = match event {
         ServerHookEvent::SessionStart(i) => HookInvocation::SessionStart { source: &i.source },
+        ServerHookEvent::SubagentStart(i) => HookInvocation::SubagentStart {
+            agent_type: &i.agent_type,
+        },
         ServerHookEvent::UserPromptSubmit(i) => {
             HookInvocation::UserPromptSubmit { prompt: &i.prompt }
         }

@@ -99,6 +99,8 @@ struct ScanResponse {
 // --- Server-initiated hooks ---
 
 struct SessionStartInput { source: String }
+/// `agent_type` is the matcher domain, the way `source` is for `SessionStart`.
+struct SubagentStartInput { agent_type: String }
 struct UserPromptSubmitInput { prompt: String }
 /// `stop_hook_active` is true when horsie is only still running because a
 /// previous `Stop` hook blocked. A cooperative hook returns early rather than
@@ -114,6 +116,7 @@ struct StopInput { last_assistant_message: Option<String>, stop_hook_active: boo
 #[type_tag = "event"]
 union ServerHookEvent {
     SessionStart(SessionStartInput),
+    SubagentStart(SubagentStartInput),
     UserPromptSubmit(UserPromptSubmitInput),
     Stop(StopInput),
 }

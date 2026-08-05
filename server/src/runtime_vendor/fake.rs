@@ -58,6 +58,7 @@ fn event_name(event: &horsie_models::runtime::ServerHookEvent) -> &'static str {
     use horsie_models::runtime::ServerHookEvent as E;
     match event {
         E::SessionStart(_) => "SessionStart",
+        E::SubagentStart(_) => "SubagentStart",
         E::UserPromptSubmit(_) => "UserPromptSubmit",
         E::Stop(_) => "Stop",
     }
@@ -187,6 +188,21 @@ impl FakeRuntimeVendor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The server-initiated hook events this runtime was asked to run, named and
+    /// in order. Which event fired — and how often — is the server's decision,
+    /// so it is asserted here rather than inferred from the records that came
+    /// back.
+    #[must_use]
+    pub fn hook_events(&self) -> Vec<&'static str> {
+        self.recorder
+            .server_hook_events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(event_name)
+            .collect()
     }
 
     /// Wait for this agent to stop serving and report why the server refused

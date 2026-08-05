@@ -124,6 +124,9 @@ pub enum AgentCommand {
     HooksRan {
         records: Vec<horsie_models::hooks::HookRecord>,
     },
+    /// Internal: a turn's pre-start hooks finished. Journal their records, then
+    /// start the turn — or abandon it. Boxed to keep the command enum small.
+    StartPrepared(Box<PreparedStart>),
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
     /// Arm a timer; replies with the new timer id once recorded.
@@ -175,6 +178,31 @@ pub enum AgentCommand {
     GetState {
         reply: tokio::sync::oneshot::Sender<AgentStateView>,
     },
+}
+
+/// A turn whose pre-start hooks have run, on its way back to the actor.
+///
+/// Carries the original `Resume` payload untouched: the prepare step decides
+/// nothing about the turn itself, it only learns what the hooks said.
+pub struct PreparedStart {
+    pub results: Vec<horsie_models::agent::ToolResultInput>,
+    pub message: Option<String>,
+    pub subagent_results: Vec<horsie_models::agent::SubAgentResultPart>,
+    /// Records to journal before the turn snapshots its history — which is the
+    /// whole reason this round-trip exists. Empty when no hook fired.
+    pub records: Vec<horsie_models::hooks::HookRecord>,
+    /// `Some` abandons the turn.
+    pub abandon: Option<AbandonedStart>,
+}
+
+/// Why a prepared turn never ran.
+pub enum AbandonedStart {
+    /// A `UserPromptSubmit` hook refused the prompt. Deterministic for that
+    /// prompt, so retrying it unchanged would be refused again.
+    Blocked(String),
+    /// Preparation could not complete — no runtime, most likely. The same
+    /// failure `provide` would have reported one step later.
+    Failed(crate::ContextError),
 }
 
 /// A windowed history request over the agent's message log.
@@ -471,19 +499,20 @@ impl AgentState {
             .count()
     }
 
-    /// What the model is allowed to see: the transcript with every non-LLM entry
-    /// dropped.
+    /// What the model sees: the transcript, with every hook entry translated
+    /// into the message it injects — most translate to nothing.
     ///
     /// The only way to obtain a `Vec<Message>` from state. `self.history` cannot
-    /// be handed to a provider because the element types differ, so a hook record
-    /// leaking into a prompt is a compile error rather than a review rule — and
-    /// any future non-model entry inherits that for free.
+    /// be handed to a provider because the element types differ, so every kind of
+    /// entry must state what, if anything, it shows the model;
+    /// [`crate::hook_translation::translate`] is where that is decided, in one
+    /// exhaustive match, and any future non-model entry inherits the obligation.
     pub fn prompt_messages(&self) -> Vec<Message> {
         self.history
             .iter()
             .filter_map(|e| match e {
                 HistoryEntry::Llm(m) => Some(m.clone()),
-                HistoryEntry::Hook(_) => None,
+                HistoryEntry::Hook(h) => crate::hook_translation::translate(h),
             })
             .collect()
     }
@@ -636,6 +665,15 @@ pub struct AgentActor {
     next_run_id: u64,
     /// A timer fired while a run was in flight; consume it when the run parks.
     pending_wake: bool,
+    /// A prepare step is in flight. Gates a second `Resume` exactly as `running`
+    /// does: between `Resume` and `StartPrepared` no run exists yet, so
+    /// `running` alone would let two turns through and land two runs on one
+    /// journal.
+    preparing: bool,
+    /// Whether this agent load has fired its start hook. Deliberately **not**
+    /// journaled — a rehydrated agent fires again, which is precisely what
+    /// `source: "resume"` means.
+    start_hook_fired: bool,
     /// Callers waiting to hear that the in-flight run has terminated (see
     /// [`AgentCommand::Cancel`]). Drained the moment `RunFinished` is handled —
     /// the run task sends that as its very last act, so every journal write it
@@ -653,6 +691,8 @@ impl AgentActor {
             events_since_snapshot: 0,
             next_run_id: 0,
             pending_wake: false,
+            preparing: false,
+            start_hook_fired: false,
             cancel_acks: Vec::new(),
         }
     }
@@ -689,7 +729,8 @@ impl AgentActor {
         PersistenceId::new("agent", session_id.to_string())
     }
 
-    /// Refuse to begin a turn while one is already in flight.
+    /// Refuse to begin a turn while one is already in flight — running, or still
+    /// in its prepare step.
     ///
     /// `start_run` overwrites `self.running` with a fresh token, so a second start
     /// orphans the first run's cancel token and leaves two background loops
@@ -697,13 +738,111 @@ impl AgentActor {
     /// `tool_result`s for the same `tool_call_id`, which makes the provider 400 on
     /// every later turn (#61 item 3). Callers gate on session status, but that is a
     /// different actor's state; this is the invariant enforced where it lives.
-    fn reject_if_running(&self, command: &str) -> Option<CommandEffect<AgentDomainEvent>> {
-        self.running.as_ref()?;
+    ///
+    /// `preparing` is part of it because a turn between `Resume` and
+    /// `StartPrepared` has no run yet: gating on `running` alone would let a
+    /// second `Resume` straight through into the same collision.
+    fn reject_if_busy(&self, command: &str) -> Option<CommandEffect<AgentDomainEvent>> {
+        if self.running.is_none() && !self.preparing {
+            return None;
+        }
         tracing::warn!(
             command,
-            "refusing to start a turn while one is already running"
+            preparing = self.preparing,
+            "refusing to start a turn while one is already in flight"
         );
         Some(CommandEffect::none())
+    }
+
+    /// Journal a prepared turn's hook records, then start it — or abandon it.
+    ///
+    /// The records are folded into a local copy of state before the prompt is
+    /// read, which is the whole point of the prepare step: `state` here is the
+    /// pre-command snapshot, and a `SessionStart` record that is not folded in
+    /// first would first reach the model on the *next* turn.
+    async fn start_prepared(
+        &mut self,
+        prepared: PreparedStart,
+        state: &AgentState,
+        ctx: &ActorContext<Self>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let PreparedStart {
+            results,
+            message,
+            subagent_results,
+            records,
+            abandon,
+        } = prepared;
+
+        let at_ms = now_ms();
+        let mut events = Vec::new();
+        let mut folded = state.clone();
+        for (seq, record) in (state.hook_entry_count()..).zip(records) {
+            let event = AgentDomainEvent::HookRan { record, seq, at_ms };
+            folded = Self::apply_event(folded, event.clone());
+            events.push(event);
+        }
+
+        if let Some(abandon) = abandon {
+            // A preparation failure is reported exactly as the same failure
+            // coming out of `provide` would be — `terminal` above all, which is
+            // what tells the session its sandbox is gone for good rather than
+            // merely unreachable. A refusal is neither: the prompt was read and
+            // rejected, so retrying it unchanged would be rejected again.
+            let (error, recoverable, terminal) = match abandon {
+                AbandonedStart::Blocked(reason) => (reason, false, false),
+                AbandonedStart::Failed(e) => (e.message, true, e.terminal),
+            };
+            self.ctx
+                .parent
+                .deliver(AgentOutcome::Failed {
+                    session_id: self.ctx.session_id,
+                    error,
+                    recoverable,
+                    terminal,
+                })
+                .await;
+            // The records are still journaled: a user whose prompt was refused
+            // must be able to see which plugin refused it and why.
+            return CommandEffect::persist(events);
+        }
+
+        // The ids answered here are not dangling, whatever the recovered
+        // history says: their results are in this very input.
+        let answering: std::collections::HashSet<String> =
+            results.iter().map(|r| r.tool_call_id.clone()).collect();
+        // Sanitize on every turn start: a history recovered from a
+        // mid-turn crash may carry dangling tool calls (a no-op when
+        // well-formed).
+        let mut history = repair_unanswered_tool_calls_except(folded.prompt_messages(), &answering);
+
+        // Results that precede a user message belong to the history, not
+        // to the input: the turn is started by what the user said.
+        let starts_a_user_turn = message.is_some() || !subagent_results.is_empty();
+        let agent_input = if starts_a_user_turn {
+            if !results.is_empty() {
+                let recorded = AgentInput::tool_results(results).to_message(now_ms());
+                events.push(AgentDomainEvent::InputMessage {
+                    message: recorded.clone(),
+                });
+                history.push(recorded);
+            }
+            AgentInput::user_message_with_results(
+                new_message_id(),
+                message.unwrap_or_default(),
+                subagent_results,
+            )
+        } else {
+            AgentInput::tool_results(results)
+        };
+        // Persist the input message here (not via the streaming sink), so a
+        // turn-restarting provider retry that re-emits it can never
+        // double-persist it into two consecutive user messages.
+        events.push(AgentDomainEvent::InputMessage {
+            message: agent_input.to_message(now_ms()),
+        });
+        self.start_run(agent_input, ctx, history);
+        CommandEffect::persist(events)
     }
 
     fn start_run(&mut self, input: AgentInput, ctx: &ActorContext<Self>, history: Vec<Message>) {
@@ -1244,51 +1383,75 @@ impl EventSourcedActor for AgentActor {
                 message,
                 subagent_results,
             } => {
-                if let Some(reason) = self.reject_if_running("Resume") {
+                if let Some(reason) = self.reject_if_busy("Resume") {
                     return reason;
                 }
                 if results.is_empty() && message.is_none() && subagent_results.is_empty() {
                     tracing::warn!("Resume with nothing to resume on; ignoring");
                     return CommandEffect::none();
                 }
-                // The ids answered here are not dangling, whatever the recovered
-                // history says: their results are in this very input.
-                let answering: std::collections::HashSet<String> =
-                    results.iter().map(|r| r.tool_call_id.clone()).collect();
-                // Sanitize on every turn start: a history recovered from a
-                // mid-turn crash may carry dangling tool calls (a no-op when
-                // well-formed).
-                let mut history =
-                    repair_unanswered_tool_calls_except(state.prompt_messages(), &answering);
-
-                // Results that precede a user message belong to the history, not
-                // to the input: the turn is started by what the user said.
-                let mut events = Vec::new();
-                let starts_a_user_turn = message.is_some() || !subagent_results.is_empty();
-                let agent_input = if starts_a_user_turn {
-                    if !results.is_empty() {
-                        let recorded = AgentInput::tool_results(results).to_message(now_ms());
-                        events.push(AgentDomainEvent::InputMessage {
-                            message: recorded.clone(),
-                        });
-                        history.push(recorded);
-                    }
-                    AgentInput::user_message_with_results(
-                        new_message_id(),
-                        message.unwrap_or_default(),
-                        subagent_results,
-                    )
-                } else {
-                    AgentInput::tool_results(results)
+                let turn = crate::StartTurn {
+                    start_source: (!self.start_hook_fired).then(|| {
+                        // A fresh agent has nothing in its transcript; anything
+                        // else was folded from a journal. No framework flag
+                        // needed to tell a cold start from a rehydration.
+                        if state.history.is_empty() {
+                            "startup".to_string()
+                        } else {
+                            "resume".to_string()
+                        }
+                    }),
+                    prompt: message.clone(),
                 };
-                // Persist the input message here (not via the streaming sink), so a
-                // turn-restarting provider retry that re-emits it can never
-                // double-persist it into two consecutive user messages.
-                events.push(AgentDomainEvent::InputMessage {
-                    message: agent_input.to_message(now_ms()),
+                let nothing_due = turn.start_source.is_none() && turn.prompt.is_none();
+                if nothing_due || !self.ctx.context_provider.has_start_hooks() {
+                    return self
+                        .start_prepared(
+                            PreparedStart {
+                                results,
+                                message,
+                                subagent_results,
+                                records: Vec::new(),
+                                abandon: None,
+                            },
+                            state,
+                            ctx,
+                        )
+                        .await;
+                }
+                self.preparing = true;
+                // Set when the prepare task is *spawned*, not when it returns: a
+                // failed prepare must not re-fire the start hook on the next
+                // turn, which would inject its context a second time.
+                self.start_hook_fired = true;
+                let provider = self.ctx.context_provider.clone();
+                let self_ref = ctx.self_ref();
+                tokio::spawn(async move {
+                    let prepared = match provider.start_hooks(turn).await {
+                        Ok(records) => PreparedStart {
+                            abandon: crate::prompt_blocked(&records).map(AbandonedStart::Blocked),
+                            records,
+                            results,
+                            message,
+                            subagent_results,
+                        },
+                        Err(error) => PreparedStart {
+                            results,
+                            message,
+                            subagent_results,
+                            records: Vec::new(),
+                            abandon: Some(AbandonedStart::Failed(error)),
+                        },
+                    };
+                    let _ = self_ref
+                        .tell(AgentCommand::StartPrepared(Box::new(prepared)))
+                        .await;
                 });
-                self.start_run(agent_input, ctx, history);
-                CommandEffect::persist(events)
+                CommandEffect::none()
+            }
+            AgentCommand::StartPrepared(prepared) => {
+                self.preparing = false;
+                self.start_prepared(*prepared, state, ctx).await
             }
             AgentCommand::HooksRan { records } => {
                 let at_ms = now_ms();
@@ -2328,6 +2491,340 @@ mod tests {
         );
     }
 
+    // --- The pre-run hook seam ---
+    //
+    // `SessionStart` used to fire inside `provide()`, which runs on the run's
+    // own task *after* the history snapshot — so a record journaled there first
+    // reached the model on the following turn. These pin the seam that moved it
+    // ahead of the snapshot, and the once-per-load bookkeeping that came with
+    // it.
+
+    mod start_hooks {
+        use super::*;
+        use horsie_actor::{ActorRef, InMemoryJournal, Journal, spawn_root};
+        use horsie_agentcore::EmptyToolbox;
+        use horsie_agentcore::testkit::MockProvider;
+        use horsie_models::hooks::{
+            ContextInjected, HookAction, HookBlocked, HookRecord, SessionStartOutcome,
+            SessionStartRecord, UserPromptSubmitOutcome, UserPromptSubmitRecord,
+        };
+        use std::sync::Mutex;
+
+        /// A provider that answers `start_hooks` from a script and records every
+        /// `StartTurn` it was asked about.
+        struct HookingContext {
+            llm: Arc<MockProvider>,
+            records: Vec<HookRecord>,
+            enabled: bool,
+            seen: Mutex<Vec<crate::StartTurn>>,
+        }
+
+        impl HookingContext {
+            fn new(llm: Arc<MockProvider>, records: Vec<HookRecord>) -> Arc<Self> {
+                Arc::new(Self {
+                    llm,
+                    records,
+                    enabled: true,
+                    seen: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn disabled(llm: Arc<MockProvider>) -> Arc<Self> {
+                Arc::new(Self {
+                    llm,
+                    records: Vec::new(),
+                    enabled: false,
+                    seen: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn sources(&self) -> Vec<Option<String>> {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t.start_source.clone())
+                    .collect()
+            }
+        }
+
+        #[async_trait]
+        impl crate::ContextProvider for HookingContext {
+            async fn provide(&self) -> Result<crate::Contexts, crate::ContextError> {
+                Ok(crate::Contexts {
+                    provider: self.llm.clone(),
+                    toolbox: Arc::new(EmptyToolbox),
+                    system_prompt: None,
+                })
+            }
+
+            fn has_start_hooks(&self) -> bool {
+                self.enabled
+            }
+
+            async fn start_hooks(
+                &self,
+                turn: crate::StartTurn,
+            ) -> Result<Vec<HookRecord>, crate::ContextError> {
+                self.seen.lock().unwrap().push(turn);
+                Ok(self.records.clone())
+            }
+        }
+
+        struct ReportingParent(tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
+        #[async_trait]
+        impl AgentOutcomeSink for ReportingParent {
+            async fn deliver(&self, outcome: AgentOutcome) {
+                let _ = self.0.send(outcome);
+            }
+        }
+
+        type Outcomes = tokio::sync::mpsc::UnboundedReceiver<AgentOutcome>;
+
+        fn spawn(provider: Arc<HookingContext>) -> (ActorRef<AgentCommand>, Outcomes) {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let ctx = AgentRuntimeContext {
+                context_provider: provider,
+                event_sink: Arc::new(StubSink),
+                parent: Arc::new(ReportingParent(tx)),
+                session_id: uuid::Uuid::new_v4(),
+            };
+            let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+            let agent = spawn_root(
+                AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+                journal,
+            );
+            (agent, rx)
+        }
+
+        async fn prompt(agent: &ActorRef<AgentCommand>, text: &str, rx: &mut Outcomes) {
+            agent
+                .tell(AgentCommand::Resume {
+                    results: vec![],
+                    message: Some(text.into()),
+                    subagent_results: vec![],
+                })
+                .await
+                .unwrap();
+            // `UsageRecorded` rides alongside the terminal outcome, so read
+            // past it until the turn itself reports.
+            while let AgentOutcome::UsageRecorded { .. } =
+                rx.recv().await.expect("the turn must report an outcome")
+            {}
+        }
+
+        fn session_start(context: &str) -> HookRecord {
+            HookRecord {
+                plugin: "boot".into(),
+                duration_ms: 1,
+                action: HookAction::SessionStart(SessionStartRecord {
+                    source: "startup".into(),
+                    system_message: None,
+                    outcome: SessionStartOutcome::Ran(ContextInjected {
+                        additional_context: Some(context.into()),
+                    }),
+                }),
+            }
+        }
+
+        /// The regression the whole seam exists to prevent: `provide()` runs
+        /// after the run has already snapshotted its history, so a record
+        /// journaled there would first appear on turn two — leaving every
+        /// session's opening turn unhooked.
+        #[tokio::test]
+        async fn session_start_context_reaches_the_very_first_prompt() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::new(llm.clone(), vec![session_start("pins node 22")]);
+            let (agent, mut rx) = spawn(provider);
+
+            prompt(&agent, "hi", &mut rx).await;
+
+            let first = llm
+                .requests()
+                .into_iter()
+                .next()
+                .expect("one provider call");
+            assert!(
+                first.texts.iter().any(|t| t.contains("pins node 22")),
+                "the first prompt must carry the start hook's context, got {:?}",
+                first.texts
+            );
+        }
+
+        /// `SessionStart` fired on every turn before this: `provide()` is
+        /// per-run and its call had no guard, so every message re-ran every
+        /// start hook and always reported `source: "startup"`.
+        #[tokio::test]
+        async fn a_second_turn_does_not_fire_the_start_hook_again() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::new(llm.clone(), vec![session_start("pins node 22")]);
+            let (agent, mut rx) = spawn(provider.clone());
+
+            prompt(&agent, "hi", &mut rx).await;
+            prompt(&agent, "again", &mut rx).await;
+
+            assert_eq!(
+                provider.sources(),
+                vec![Some("startup".to_string()), None],
+                "the start hook is due once per load; the prompt hook every turn"
+            );
+        }
+
+        /// A rehydrated agent is a `resume`, and it is the only other lifecycle
+        /// transition horsie has. Detected from the transcript rather than a
+        /// framework flag: a fresh agent has nothing in it.
+        #[tokio::test]
+        async fn an_agent_with_recovered_history_reports_source_resume() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::new(llm.clone(), vec![]);
+            let (agent, mut rx) = spawn(provider.clone());
+            // Stand in for a recovered load: a transcript that predates this
+            // actor's first command, which is exactly what folding a journal
+            // leaves behind.
+            let (ack, done) = tokio::sync::oneshot::channel();
+            agent
+                .tell(AgentCommand::PersistProgress {
+                    events: vec![AgentDomainEvent::InputMessage {
+                        message: user_msg("from a previous load"),
+                    }],
+                    ack,
+                })
+                .await
+                .unwrap();
+            done.await.unwrap().unwrap();
+
+            prompt(&agent, "carry on", &mut rx).await;
+
+            assert_eq!(
+                provider.sources(),
+                vec![Some("resume".to_string())],
+                "a transcript that predates this load means the agent was recovered"
+            );
+        }
+
+        /// A blocked prompt never becomes a turn: nothing is journaled as input
+        /// and no run starts. The record still lands, so the user can see which
+        /// plugin refused it.
+        #[tokio::test]
+        async fn a_blocked_prompt_journals_no_input_and_starts_no_run() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::new(
+                llm.clone(),
+                vec![HookRecord {
+                    plugin: "guard".into(),
+                    duration_ms: 1,
+                    action: HookAction::UserPromptSubmit(UserPromptSubmitRecord {
+                        system_message: None,
+                        outcome: UserPromptSubmitOutcome::Blocked(HookBlocked {
+                            reason: Some("secrets in the prompt".into()),
+                        }),
+                    }),
+                }],
+            );
+            let (agent, mut rx) = spawn(provider);
+
+            agent
+                .tell(AgentCommand::Resume {
+                    results: vec![],
+                    message: Some("my password is hunter2".into()),
+                    subagent_results: vec![],
+                })
+                .await
+                .unwrap();
+
+            match rx.recv().await.expect("the turn must report an outcome") {
+                AgentOutcome::Failed { error, .. } => {
+                    assert_eq!(error, "secrets in the prompt");
+                }
+                other => panic!("expected the turn to be refused, got {other:?}"),
+            }
+            assert_eq!(llm.calls(), 0, "the model must never be reached");
+
+            let page = agent
+                .ask(|reply| AgentCommand::GetHistory {
+                    query: HistoryQuery {
+                        before: None,
+                        after: None,
+                        limit: 50,
+                    },
+                    reply,
+                })
+                .await
+                .unwrap();
+            assert_eq!(page.entries.len(), 1, "the record, and nothing else");
+            assert!(matches!(page.entries[0], HistoryEntry::Hook(_)));
+        }
+
+        /// A preparation failure must classify itself exactly as the same
+        /// failure out of `provide` would. Flattening `terminal` here leaves a
+        /// session whose sandbox is gone for good reporting a retryable error,
+        /// so it never reaches `Unrecoverable` and invites the user to try
+        /// again forever.
+        #[tokio::test]
+        async fn a_terminal_preparation_failure_stays_terminal() {
+            struct GoneContext;
+            #[async_trait]
+            impl crate::ContextProvider for GoneContext {
+                async fn provide(&self) -> Result<crate::Contexts, crate::ContextError> {
+                    Err(crate::ContextError::terminal("runtime is gone"))
+                }
+                fn has_start_hooks(&self) -> bool {
+                    true
+                }
+                async fn start_hooks(
+                    &self,
+                    _: crate::StartTurn,
+                ) -> Result<Vec<HookRecord>, crate::ContextError> {
+                    Err(crate::ContextError::terminal("runtime is gone"))
+                }
+            }
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let ctx = AgentRuntimeContext {
+                context_provider: Arc::new(GoneContext),
+                event_sink: Arc::new(StubSink),
+                parent: Arc::new(ReportingParent(tx)),
+                session_id: uuid::Uuid::new_v4(),
+            };
+            let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+            let agent = spawn_root(
+                AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+                journal,
+            );
+            agent
+                .tell(AgentCommand::Resume {
+                    results: vec![],
+                    message: Some("hi".into()),
+                    subagent_results: vec![],
+                })
+                .await
+                .unwrap();
+
+            match rx.recv().await.expect("the turn must report an outcome") {
+                AgentOutcome::Failed { terminal, .. } => {
+                    assert!(terminal, "a gone sandbox is terminal wherever it surfaces");
+                }
+                other => panic!("expected the turn to fail, got {other:?}"),
+            }
+        }
+
+        /// A session with no plugins pays nothing for a seam it cannot use.
+        #[tokio::test]
+        async fn a_provider_without_start_hooks_makes_no_prepare_round_trip() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::disabled(llm.clone());
+            let (agent, mut rx) = spawn(provider.clone());
+
+            prompt(&agent, "hi", &mut rx).await;
+
+            assert!(
+                provider.sources().is_empty(),
+                "`has_start_hooks() == false` must skip the round-trip entirely"
+            );
+            assert_eq!(llm.calls(), 1, "the turn still runs");
+        }
+    }
+
     #[test]
     fn a_replayed_tool_result_keeps_its_original_stamp() {
         // The stamp is journaled on the event rather than read from the clock
@@ -2417,12 +2914,12 @@ mod tests {
         )
     }
 
-    /// The whole point of the union: a hook record is in the transcript the user
-    /// reads and absent from the one the model is sent. If this ever passes a
-    /// hook to a provider it costs tokens on every call and ships a shape no
-    /// provider has an arm for.
+    /// A tool hook edits the tool's own output, so the tool result already
+    /// represents whatever it did and there is nothing left to translate. If
+    /// this ever reaches a provider it costs tokens on every call and repeats
+    /// text the tool result already carries.
     #[test]
-    fn a_hook_entry_is_never_offered_to_the_model() {
+    fn a_tool_scoped_hook_entry_is_never_offered_to_the_model() {
         let mut state = AgentActor::initial_state();
         state = AgentActor::apply_event(
             state,
@@ -2436,6 +2933,54 @@ mod tests {
         let prompt = state.prompt_messages();
         assert_eq!(prompt.len(), 1, "only the user message reaches the model");
         assert_eq!(prompt[0].role, Role::User);
+    }
+
+    /// The transcript is not the conversation: a translated entry keeps its
+    /// place among the messages around it, so injected context lands where the
+    /// hook ran rather than at the end of the prompt.
+    #[test]
+    fn a_translated_hook_entry_keeps_its_place_between_the_messages_around_it() {
+        use horsie_models::hooks::{
+            ContextInjected, HookAction, HookRecord, StopOutcome, StopRecord,
+        };
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("hello"),
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::HookRan {
+                record: HookRecord {
+                    plugin: "nagger".into(),
+                    duration_ms: 1,
+                    action: HookAction::Stop(StopRecord {
+                        system_message: None,
+                        outcome: StopOutcome::Ran(ContextInjected {
+                            additional_context: Some("check the tests".into()),
+                        }),
+                    }),
+                },
+                seq: 0,
+                at_ms: 2,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("carry on"),
+            },
+        );
+
+        let prompt = state.prompt_messages();
+        assert_eq!(prompt.len(), 3, "the hook contributes one message");
+        assert_eq!(prompt[1].id, "hook-context:hook:0");
+        assert!(
+            matches!(&prompt[1].parts[0], ContentPart::Text(t) if t.text.contains("check the tests")),
+            "the injected context reaches the model between the two messages"
+        );
     }
 
     /// The id counts hook entries in the transcript, not records against a
@@ -2496,10 +3041,14 @@ mod tests {
         );
         assert_eq!(state.history.len(), 1);
         assert_eq!(state.history[0].id(), "hook:0");
-        assert!(
-            state.prompt_messages().is_empty(),
-            "never shown to the model"
+        let prompt = state.prompt_messages();
+        assert_eq!(
+            prompt.len(),
+            1,
+            "a session-start hook's context has nowhere else to live, so it \
+             becomes a message"
         );
+        assert_eq!(prompt[0].id, "hook-context:hook:0");
     }
 
     /// A page is a window over the transcript, hook entries included, and the

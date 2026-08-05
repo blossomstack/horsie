@@ -106,6 +106,22 @@ pub struct Contexts {
     pub system_prompt: Option<String>,
 }
 
+/// What a run's pre-start hooks need to know about the turn about to begin.
+///
+/// Split across the two layers that each hold half the answer: the agent actor
+/// knows whether this load has already fired its start hook and whether the turn
+/// begins on a user message; the provider knows whether this agent is a session
+/// or a subagent, and so which event that start actually is.
+#[derive(Debug, Clone)]
+pub struct StartTurn {
+    /// `Some(source)` when this agent load has not yet fired its start hook.
+    /// `"startup"` for a fresh agent, `"resume"` for one recovered from a
+    /// journal — the only two lifecycle transitions horsie has.
+    pub start_source: Option<String>,
+    /// The user prompt this run starts on, when it has one.
+    pub prompt: Option<String>,
+}
+
 /// Provides the per-run [`Contexts`] an [`AgentActor`](crate::AgentActor) needs.
 ///
 /// `provide` is called on the run's *spawned task* — never an actor mailbox — at
@@ -118,6 +134,36 @@ pub struct Contexts {
 #[async_trait]
 pub trait ContextProvider: Send + Sync {
     async fn provide(&self) -> Result<Contexts, ContextError>;
+
+    /// Whether this provider has hooks to fire before a run starts.
+    ///
+    /// `false` skips the prepare round-trip entirely, which is what keeps a
+    /// session with no plugins exactly as fast as it was before the seam
+    /// existed. Answered without I/O, on the mailbox.
+    fn has_start_hooks(&self) -> bool {
+        false
+    }
+
+    /// Fire the hooks that must run *before* the turn snapshots its history —
+    /// `SessionStart` / `SubagentStart` and `UserPromptSubmit`.
+    ///
+    /// Called on a spawned task, never a mailbox, exactly like `provide`. It
+    /// runs before the snapshot because that is the only place a record can
+    /// land early enough to reach the very first turn's prompt: `provide` runs
+    /// after it, which is why the context these hooks inject used to bypass the
+    /// conversation entirely.
+    ///
+    /// Returns the records to journal. Their consequences are read off them by
+    /// the caller — the agent translates the context and
+    /// [`crate::prompt_blocked`] reads a refusal — so this never decides
+    /// anything itself.
+    async fn start_hooks(
+        &self,
+        turn: StartTurn,
+    ) -> Result<Vec<horsie_models::hooks::HookRecord>, ContextError> {
+        let _ = turn;
+        Ok(Vec::new())
+    }
 }
 
 /// Why a run's contexts could not be produced.
