@@ -276,21 +276,23 @@ mod tests {
     /// derives, or the stream and `/history` disagree on the cursor.
     #[test]
     fn a_hook_record_is_an_append_with_the_id_the_fold_derives() {
-        let record = horsie_models::runtime::HookRecord {
+        let record = horsie_models::hooks::HookRecord {
             plugin: "guard".into(),
-            event: "PreToolUse".into(),
-            tool: "bash".into(),
-            tool_call_id: "tc1".into(),
             duration_ms: 4,
-            blocked: true,
-            reason: Some("not allowed".into()),
-            failed: false,
-            input_before: None,
-            input_after: None,
-            output_before: None,
-            output_after: None,
-            additional_context: None,
-            system_message: None,
+            action: horsie_models::hooks::HookAction::PreToolUse(
+                horsie_models::hooks::PreToolUseRecord {
+                    call: horsie_models::hooks::ToolScope {
+                        tool: "bash".into(),
+                        tool_call_id: "tc1".into(),
+                    },
+                    system_message: None,
+                    outcome: horsie_models::hooks::PreToolUseOutcome::Denied(
+                        horsie_models::hooks::HookDenied {
+                            reason: Some("not allowed".into()),
+                        },
+                    ),
+                },
+            ),
         };
         match agent_frame(&AgentDomainEvent::HookRan {
             record: record.clone(),
@@ -300,10 +302,18 @@ mod tests {
             Some(AgentFrame::Appended {
                 entry: HistoryEntry::Hook(hook),
             }) => {
-                assert_eq!(hook.id, "hook:tc1:1");
+                assert_eq!(hook.id, "hook:1");
                 assert_eq!(hook.created_at_ms, 42);
                 assert_eq!(hook.record.plugin, "guard");
-                assert!(hook.record.blocked);
+                match &hook.record.action {
+                    horsie_models::hooks::HookAction::PreToolUse(r) => {
+                        assert!(matches!(
+                            r.outcome,
+                            horsie_models::hooks::PreToolUseOutcome::Denied(_)
+                        ));
+                    }
+                    other => panic!("expected a PreToolUse action, got {other:?}"),
+                }
             }
             other => panic!("expected a hook append, got {other:?}"),
         }

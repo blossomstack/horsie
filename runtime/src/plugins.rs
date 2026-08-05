@@ -7,15 +7,13 @@
 //! (string or array of paths). Hooks are declared in `hooks/hooks.json`.
 
 use horsie_models::runtime::PluginSkill;
-use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-/// Max bytes of a single hook's captured context (mirrors the bash tool clamp).
+/// Max bytes of a single hook's captured stdout/stderr (mirrors the bash tool
+/// clamp). The per-hook wall-clock budget lives with the runner, in `hooks`.
 const HOOK_OUTPUT_CLAMP: usize = 50_000;
-/// Per-hook wall-clock budget.
-const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Plugin directories under `plugins_dir`, sorted for stable ordering. Best-effort:
 /// an unreadable `plugins_dir` yields an empty list.
@@ -70,48 +68,6 @@ pub fn discover_skills(plugins_dir: &Path) -> Vec<PluginSkill> {
         }
     }
     out
-}
-
-/// Extract the `SessionStart` command strings from a plugin's `hooks/hooks.json`,
-/// substituting `${CLAUDE_PLUGIN_ROOT}`.
-fn session_start_commands(plugin_root: &Path) -> Vec<String> {
-    let hooks_file = plugin_root.join("hooks").join("hooks.json");
-    let Ok(text) = std::fs::read_to_string(hooks_file) else {
-        return Vec::new();
-    };
-    let Ok(json) = serde_json::from_str::<Value>(&text) else {
-        return Vec::new();
-    };
-    let root = plugin_root.to_string_lossy();
-    json.get("hooks")
-        .and_then(|h| h.get("SessionStart"))
-        .and_then(Value::as_array)
-        .map(|matchers| {
-            matchers
-                .iter()
-                .filter_map(|m| m.get("hooks").and_then(Value::as_array))
-                .flatten()
-                .filter(|h| h.get("type").and_then(Value::as_str) == Some("command"))
-                .filter_map(|h| h.get("command").and_then(Value::as_str))
-                .map(|cmd| cmd.replace("${CLAUDE_PLUGIN_ROOT}", &root))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Interpret a hook's stdout: the Claude-Code envelope
-/// `{"hookSpecificOutput":{"additionalContext":"…"}}` if present, else raw stdout.
-fn extract_context(stdout: &str) -> String {
-    let ctx = serde_json::from_str::<Value>(stdout)
-        .ok()
-        .and_then(|v| {
-            v.get("hookSpecificOutput")
-                .and_then(|h| h.get("additionalContext"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| stdout.to_string());
-    ctx.chars().take(HOOK_OUTPUT_CLAMP).collect()
 }
 
 /// What one hook process produced. `code` is `None` when it could not be run to
@@ -195,40 +151,6 @@ pub(crate) async fn run_hook_raw(
         stdout: clamp(String::from_utf8_lossy(&output.stdout)),
         stderr: clamp(String::from_utf8_lossy(&output.stderr)),
     }
-}
-
-/// Run one `SessionStart` hook and return its injected context, or `None` when
-/// it could not run or exited non-zero (logged, non-fatal).
-async fn run_hook(plugin_root: &Path, command: &str, hook_path: &[PathBuf]) -> Option<String> {
-    let run = run_hook_raw(
-        plugin_root,
-        command,
-        hook_path,
-        r#"{"hook_event_name":"SessionStart","source":"startup"}"#,
-        HOOK_TIMEOUT,
-    )
-    .await;
-    if run.code != Some(0) {
-        tracing::warn!(code = ?run.code, "plugin hook exited non-zero");
-        return None;
-    }
-    Some(extract_context(&run.stdout))
-}
-
-/// Run every installed plugin's `SessionStart` hooks (in stable plugin order) and
-/// return their concatenated injected context. Empty when there are no hooks.
-pub async fn run_session_start(plugins_dir: &Path, hook_path: &[PathBuf]) -> String {
-    let mut sections = Vec::new();
-    for plugin_root in plugin_dirs(plugins_dir) {
-        for command in session_start_commands(&plugin_root) {
-            if let Some(ctx) = run_hook(&plugin_root, &command, hook_path).await
-                && !ctx.trim().is_empty()
-            {
-                sections.push(ctx);
-            }
-        }
-    }
-    sections.join("\n\n")
 }
 
 #[cfg(test)]
@@ -335,49 +257,5 @@ mod tests {
         assert!(discover_skills(Path::new("/no/such/dir")).is_empty());
         let dir = TempDir::new().unwrap();
         assert!(discover_skills(dir.path()).is_empty());
-    }
-
-    #[test]
-    fn extract_context_prefers_envelope() {
-        let raw = r#"{"hookSpecificOutput":{"additionalContext":"hello"}}"#;
-        assert_eq!(extract_context(raw), "hello");
-        assert_eq!(extract_context("plain text"), "plain text");
-    }
-
-    #[test]
-    fn session_start_commands_substitutes_root() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().join("p");
-        write(
-            &root.join("hooks/hooks.json"),
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"cat ${CLAUDE_PLUGIN_ROOT}/x"}]}]}}"#,
-        );
-        let cmds = session_start_commands(&root);
-        assert_eq!(cmds.len(), 1);
-        assert!(cmds[0].ends_with("/p/x"));
-        assert!(!cmds[0].contains("CLAUDE_PLUGIN_ROOT"));
-    }
-
-    #[tokio::test]
-    async fn runs_session_start_hook() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        write(
-            &root.join("p/hooks/hooks.json"),
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo BOOTSTRAP"}]}]}}"#,
-        );
-        let ctx = run_session_start(root, &[]).await;
-        assert_eq!(ctx.trim(), "BOOTSTRAP");
-    }
-
-    #[tokio::test]
-    async fn failing_hook_is_skipped() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        write(
-            &root.join("p/hooks/hooks.json"),
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"exit 1"}]}]}}"#,
-        );
-        assert!(run_session_start(root, &[]).await.is_empty());
     }
 }

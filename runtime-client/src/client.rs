@@ -1,11 +1,12 @@
 use crate::transport::{RuntimeTransport, TransportError};
+use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
-    HookRecord, ScanResponse, ToolCall, ToolError, ToolOutput, ToolResult,
+    ScanResponse, ServerHookEvent, ToolCall, ToolError, ToolOutput, ToolResult,
 };
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 // Still minted for the calls that have no model tool_call_id to borrow —
-// `scan_workspace` and `run_session_start` are server-initiated, not tool calls.
+// `scan_workspace` and `run_hooks` are server-initiated, not tool calls.
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -215,15 +216,80 @@ impl RuntimeClient {
             .map_err(RuntimeCallError::Transport)
     }
 
-    /// Run the shared plugin library's `SessionStart` hooks and return the injected
-    /// context (empty when there are none).
-    pub async fn run_session_start(&self) -> Result<String, RuntimeCallError> {
+    /// Run every hook matching a server-initiated event.
+    ///
+    /// Mints its own `call_id`: unlike a tool hook this is not correlated to
+    /// anything the model said, so there is no id to borrow.
+    ///
+    /// Records go to the same [`HookSink`] tool records take, so a
+    /// server-initiated hook reaches the transcript by one route rather than a
+    /// second one. They are also returned, because the caller has to act on
+    /// them — inject the context, or honour a block.
+    pub async fn run_hooks(
+        &self,
+        event: ServerHookEvent,
+    ) -> Result<Vec<HookRecord>, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
-        self.inner
-            .run_session_start(&call_id)
+        let records = self
+            .inner
+            .run_hooks(&call_id, &event)
             .await
-            .map_err(RuntimeCallError::Transport)
+            .map_err(RuntimeCallError::Transport)?;
+        if let Some(sink) = &self.hook_sink
+            && !records.is_empty()
+        {
+            sink.record(records.clone()).await;
+        }
+        Ok(records)
     }
+}
+
+/// The context these records inject, concatenated in the order the hooks ran.
+///
+/// Derived rather than carried: a record already says what its hook injected, so
+/// a separate `context: String` beside them could only ever disagree with it.
+#[must_use]
+pub fn injected_context(records: &[HookRecord]) -> Option<String> {
+    use horsie_models::hooks::{
+        HookAction, SessionStartOutcome, StopOutcome, UserPromptSubmitOutcome,
+    };
+    let sections: Vec<&str> = records
+        .iter()
+        .filter_map(|r| match &r.action {
+            HookAction::SessionStart(s) => match &s.outcome {
+                SessionStartOutcome::Ran(c) => c.additional_context.as_deref(),
+                SessionStartOutcome::Failed(_) => None,
+            },
+            HookAction::UserPromptSubmit(u) => match &u.outcome {
+                UserPromptSubmitOutcome::Ran(c) => c.additional_context.as_deref(),
+                UserPromptSubmitOutcome::Blocked(_) | UserPromptSubmitOutcome::Failed(_) => None,
+            },
+            HookAction::Stop(s) => match &s.outcome {
+                StopOutcome::Ran(c) => c.additional_context.as_deref(),
+                StopOutcome::Blocked(_) | StopOutcome::Failed(_) | StopOutcome::CapReached(_) => {
+                    None
+                }
+            },
+            // Listed rather than `_`, so promoting an event that injects context
+            // cannot silently drop it here — the same silent-widening bug the
+            // record reshape exists to close.
+            HookAction::PreToolUse(_)
+            | HookAction::PostToolUse(_)
+            | HookAction::PostToolUseFailure(_)
+            | HookAction::PostToolBatch(_)
+            | HookAction::SessionEnd(_)
+            | HookAction::StopFailure(_)
+            | HookAction::SubagentStart(_)
+            | HookAction::SubagentStop(_)
+            | HookAction::TaskCreated(_)
+            | HookAction::TaskCompleted(_)
+            | HookAction::Notification(_)
+            | HookAction::CwdChanged(_) => None,
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 #[cfg(test)]
@@ -356,19 +422,19 @@ mod tests {
 
         let record = HookRecord {
             plugin: "guard".into(),
-            event: "PreToolUse".into(),
-            tool: "bash".into(),
-            tool_call_id: "tc1".into(),
             duration_ms: 1,
-            blocked: false,
-            reason: None,
-            failed: false,
-            input_before: None,
-            input_after: None,
-            output_before: None,
-            output_after: None,
-            additional_context: None,
-            system_message: None,
+            action: horsie_models::hooks::HookAction::PreToolUse(
+                horsie_models::hooks::PreToolUseRecord {
+                    call: horsie_models::hooks::ToolScope {
+                        tool: "bash".into(),
+                        tool_call_id: "tc1".into(),
+                    },
+                    system_message: None,
+                    outcome: horsie_models::hooks::PreToolUseOutcome::Denied(
+                        horsie_models::hooks::HookDenied { reason: None },
+                    ),
+                },
+            ),
         };
         let told = Arc::new(AtomicBool::new(false));
         let client = RuntimeClient::new(

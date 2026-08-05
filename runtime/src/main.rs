@@ -11,8 +11,8 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeProvisionFailed, RuntimeProvisioning,
-    RuntimeReady, ScanResponse, SessionStartResponse, ToolCallResponse, ToolError, ToolResult,
+    RunHooksResponse, RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeProvisionFailed,
+    RuntimeProvisioning, RuntimeReady, ScanResponse, ToolCallResponse, ToolError, ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -489,28 +489,23 @@ async fn run_loop<S>(
                             let _ = sink.lock().await.send(Message::Text(json.into())).await;
                         }
                     }
-                    RuntimeInboundMessage::SessionStart(req) => {
+                    RuntimeInboundMessage::RunHooks(req) => {
                         let call_id = req.call_id.clone();
                         let map_id = req.call_id.clone();
+                        let event = req.event;
                         let registry = registry.clone();
                         let sink_clone = sink.clone();
                         let in_flight_clone = in_flight.clone();
 
+                        // Spawned and registered in `in_flight` like a tool
+                        // call, so a slow hook stays cancellable: a user hitting
+                        // Stop must not have to wait out a 30-second guard.
                         let handle = tokio::spawn(async move {
-                            let context = match registry.plugins_dir() {
-                                Some(dir) => {
-                                    horsie_runtime::plugins::run_session_start(
-                                        dir,
-                                        registry.hook_path(),
-                                    )
-                                    .await
-                                }
-                                None => String::new(),
-                            };
+                            let records = horsie_runtime::hooks::run_hooks(&registry, &event).await;
                             let response = serde_json::to_string(
-                                &RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
+                                &RuntimeOutboundMessage::HookRecords(RunHooksResponse {
                                     call_id: call_id.clone(),
-                                    context,
+                                    records,
                                 }),
                             );
                             if let Ok(json) = response {

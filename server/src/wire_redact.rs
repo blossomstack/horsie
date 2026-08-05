@@ -108,24 +108,26 @@ mod tests {
     #[test]
     fn a_hook_entry_passes_through_untouched() {
         use horsie_models::agent::HookEntry;
-        let record = horsie_models::runtime::HookRecord {
+        let record = horsie_models::hooks::HookRecord {
             plugin: "guard".into(),
-            event: "PreToolUse".into(),
-            tool: "bash".into(),
-            tool_call_id: "tc1".into(),
             duration_ms: 3,
-            blocked: true,
-            reason: Some("denied".into()),
-            failed: false,
-            input_before: None,
-            input_after: None,
-            output_before: None,
-            output_after: None,
-            additional_context: None,
-            system_message: None,
+            action: horsie_models::hooks::HookAction::PreToolUse(
+                horsie_models::hooks::PreToolUseRecord {
+                    call: horsie_models::hooks::ToolScope {
+                        tool: "bash".into(),
+                        tool_call_id: "tc1".into(),
+                    },
+                    system_message: None,
+                    outcome: horsie_models::hooks::PreToolUseOutcome::Denied(
+                        horsie_models::hooks::HookDenied {
+                            reason: Some("denied".into()),
+                        },
+                    ),
+                },
+            ),
         };
         let hook = HistoryEntry::Hook(HookEntry {
-            id: "hook:tc1:0".into(),
+            id: "hook:0".into(),
             created_at_ms: 7,
             record,
         });

@@ -8,7 +8,7 @@ use crate::transport::{RuntimeTransport, TransportError};
 use async_trait::async_trait;
 use horsie_agentcore::testkit::Script;
 use horsie_models::runtime::{
-    PluginSkill, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
+    PluginSkill, RunHooksResponse, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse,
     ToolCall, ToolCallResponse, ToolError, ToolOutput, ToolResult, WorkspaceScan,
 };
 use std::sync::{Arc, Mutex, PoisonError};
@@ -116,10 +116,12 @@ pub struct MockTransport {
     scan: Vec<WorkspaceScan>,
     shared: Vec<PluginSkill>,
     shared_root: Option<String>,
-    session_context: String,
+    /// Records every `RunHooks` reply carries, as a runtime that ran the
+    /// server-initiated hooks would report them.
+    server_hook_records: Vec<horsie_models::hooks::HookRecord>,
     /// When set, `invoke` waits on this gate before answering.
     invoke_gate: Option<Arc<Notify>>,
-    /// When set, `scan_workspace` and `run_session_start` wait on this gate.
+    /// When set, `scan_workspace` and `run_hooks` wait on this gate.
     prep_gate: Option<Arc<Notify>>,
     cancels: Arc<Mutex<Vec<String>>>,
     invocations: Arc<Mutex<Vec<ToolCall>>>,
@@ -127,7 +129,7 @@ pub struct MockTransport {
     call_ids: Arc<Mutex<Vec<String>>>,
     /// Hook records every tool response carries back, as a runtime that ran
     /// plugin hooks would report them.
-    hooks: Vec<horsie_models::runtime::HookRecord>,
+    hooks: Vec<horsie_models::hooks::HookRecord>,
 }
 
 impl MockTransport {
@@ -139,7 +141,7 @@ impl MockTransport {
             scan: Vec::new(),
             shared: Vec::new(),
             shared_root: None,
-            session_context: String::new(),
+            server_hook_records: Vec::new(),
             invoke_gate: None,
             prep_gate: None,
             cancels: Arc::new(Mutex::new(Vec::new())),
@@ -152,7 +154,7 @@ impl MockTransport {
     /// Report `hooks` on every tool response, the way a runtime that ran plugin
     /// hooks does.
     #[must_use]
-    pub fn with_hooks(mut self, hooks: Vec<horsie_models::runtime::HookRecord>) -> Self {
+    pub fn with_hooks(mut self, hooks: Vec<horsie_models::hooks::HookRecord>) -> Self {
         self.hooks = hooks;
         self
     }
@@ -220,7 +222,7 @@ impl MockTransport {
         t
     }
 
-    /// A transport whose `scan_workspace` and `run_session_start` block until
+    /// A transport whose `scan_workspace` and `run_hooks` block until
     /// `handle` is released — the shape that wedges `provide()` (#61 item 5).
     #[must_use]
     pub fn gated_prep(handle: &BlockHandle) -> Self {
@@ -263,10 +265,17 @@ impl MockTransport {
         self
     }
 
-    /// Override the canned `SessionStart` context.
+    /// Answer every `RunHooks` with `records`.
+    ///
+    /// The general form of the old canned-`SessionStart`-context knob: injected
+    /// context is now derived from the records, so a test scripts the records
+    /// and gets the context for free.
     #[must_use]
-    pub fn with_session_context(mut self, context: impl Into<String>) -> Self {
-        self.session_context = context.into();
+    pub fn with_server_hook_records(
+        mut self,
+        records: Vec<horsie_models::hooks::HookRecord>,
+    ) -> Self {
+        self.server_hook_records = records;
         self
     }
 
@@ -351,16 +360,14 @@ impl RuntimeTransport for MockTransport {
                     shared_root,
                 }))
             }
-            RuntimeInboundMessage::SessionStart(req) => {
+            RuntimeInboundMessage::RunHooks(req) => {
                 if let Some(gate) = &self.prep_gate {
                     gate.notified().await;
                 }
-                Ok(RuntimeOutboundMessage::SessionStartResult(
-                    SessionStartResponse {
-                        call_id: req.call_id,
-                        context: self.session_context.clone(),
-                    },
-                ))
+                Ok(RuntimeOutboundMessage::HookRecords(RunHooksResponse {
+                    call_id: req.call_id,
+                    records: self.server_hook_records.clone(),
+                }))
             }
             // A cancel draws no reply, so relaying one would hang a real
             // transport; a test that does it has a bug worth surfacing.

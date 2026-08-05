@@ -1,7 +1,7 @@
 /// Protocol types for agent messages
 package agent;
 
-use runtime.HookRecord;
+use hooks.HookRecord;
 
 /// Role of the message sender
 enum Role {

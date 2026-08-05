@@ -122,7 +122,7 @@ pub enum AgentCommand {
     /// ack: nothing waits on an audit trail, and recording what a hook did must
     /// never be able to slow the call it describes.
     HooksRan {
-        records: Vec<horsie_models::runtime::HookRecord>,
+        records: Vec<horsie_models::hooks::HookRecord>,
     },
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
@@ -245,7 +245,7 @@ pub enum AgentDomainEvent {
     /// the call's own `ToolComplete` because a hook changes what the agent did,
     /// and that must be auditable rather than invisible.
     HookRan {
-        record: horsie_models::runtime::HookRecord,
+        record: horsie_models::hooks::HookRecord,
         /// How many records were already recorded against this same tool call.
         /// Journaled rather than recomputed at fold time so the id is a fact of
         /// the log: the live broadcast derives the entry from the event alone
@@ -430,42 +430,44 @@ pub struct AgentStateView {
 
 /// Build the transcript entry for one hook record.
 ///
-/// The id is derived, never generated: `hook:{tool_call_id}:{n}` where `n` counts
-/// the records already recorded against that same call. Journal replay therefore
-/// reproduces the ids it produced live, which a uuid could not — and a recovered
-/// transcript must page with the same cursors as the one it replaced.
+/// The id is derived, never generated: `hook:{n}` where `n` counts the hook
+/// entries already in this transcript. Journal replay therefore reproduces the
+/// ids it produced live, which a uuid could not — and a recovered transcript
+/// must page with the same cursors as the one it replaced.
 pub fn hook_entry(
-    record: horsie_models::runtime::HookRecord,
+    record: horsie_models::hooks::HookRecord,
     seq: usize,
     at_ms: u64,
 ) -> horsie_agentcore::HookEntry {
     horsie_agentcore::HookEntry {
-        id: hook_entry_id(&record.tool_call_id, seq),
+        id: hook_entry_id(seq),
         created_at_ms: at_ms,
         record,
     }
 }
 
-/// The cursor id of the `seq`-th hook record against `tool_call_id`.
+/// The cursor id of the `seq`-th hook entry in a transcript.
+///
+/// Counts entries rather than records-per-call, because not every record has a
+/// call: `hook:{tool_call_id}:{n}` cannot name a `SessionStart`. The tool join
+/// is unaffected — it goes through the record's own `ToolScope`, which is where
+/// it belongs.
 ///
 /// One function, two callers — the fold and the live broadcast — because the
 /// stream and `/history` must name the same entry the same way.
 #[must_use]
-pub fn hook_entry_id(tool_call_id: &str, seq: usize) -> String {
-    format!("hook:{tool_call_id}:{seq}")
+pub fn hook_entry_id(seq: usize) -> String {
+    format!("hook:{seq}")
 }
 
 impl AgentState {
-    /// How many hook records this transcript already holds for `tool_call_id`.
-    /// The next one's `seq`.
+    /// How many hook entries this transcript already holds. The next one's
+    /// `seq`.
     #[must_use]
-    pub fn hook_records_for(&self, tool_call_id: &str) -> usize {
+    pub fn hook_entry_count(&self) -> usize {
         self.history
             .iter()
-            .filter(|e| match e {
-                HistoryEntry::Hook(h) => h.record.tool_call_id == tool_call_id,
-                HistoryEntry::Llm(_) => false,
-            })
+            .filter(|e| matches!(e, HistoryEntry::Hook(_)))
             .count()
     }
 
@@ -1283,19 +1285,17 @@ impl EventSourcedActor for AgentActor {
             }
             AgentCommand::HooksRan { records } => {
                 let at_ms = now_ms();
-                // Counted here, against the state as it stands, and then carried
-                // on the event — a batch may hold several records for one call,
-                // so the running count has to advance within the batch too.
-                let mut seen = std::collections::HashMap::<String, usize>::new();
+                // Counted here, against the state as it stands, and carried on
+                // the event: `agent_frame` sees only the event, so deriving the
+                // id at fold time would give the live stream different cursors
+                // than `/history`.
+                let mut seq = state.hook_entry_count();
                 let events = records
                     .into_iter()
                     .map(|record| {
-                        let next = seen
-                            .entry(record.tool_call_id.clone())
-                            .or_insert_with(|| state.hook_records_for(&record.tool_call_id));
-                        let seq = *next;
-                        *next += 1;
-                        AgentDomainEvent::HookRan { record, seq, at_ms }
+                        let event = AgentDomainEvent::HookRan { record, seq, at_ms };
+                        seq += 1;
+                        event
                     })
                     .collect();
                 CommandEffect::persist(events)
@@ -2296,22 +2296,24 @@ mod tests {
         assert!(matches!(run, AgentDomainEvent::RunComplete { at_ms, .. } if at_ms == 99));
     }
 
-    fn hook_record(plugin: &str, call: &str) -> horsie_models::runtime::HookRecord {
-        horsie_models::runtime::HookRecord {
+    fn hook_record(plugin: &str, call: &str) -> horsie_models::hooks::HookRecord {
+        horsie_models::hooks::HookRecord {
             plugin: plugin.to_string(),
-            event: "PreToolUse".to_string(),
-            tool: "bash".to_string(),
-            tool_call_id: call.to_string(),
             duration_ms: 3,
-            blocked: true,
-            reason: Some("not allowed".to_string()),
-            failed: false,
-            input_before: None,
-            input_after: None,
-            output_before: None,
-            output_after: None,
-            additional_context: None,
-            system_message: None,
+            action: horsie_models::hooks::HookAction::PreToolUse(
+                horsie_models::hooks::PreToolUseRecord {
+                    call: horsie_models::hooks::ToolScope {
+                        tool: "bash".to_string(),
+                        tool_call_id: call.to_string(),
+                    },
+                    system_message: None,
+                    outcome: horsie_models::hooks::PreToolUseOutcome::Denied(
+                        horsie_models::hooks::HookDenied {
+                            reason: Some("not allowed".into()),
+                        },
+                    ),
+                },
+            ),
         }
     }
 
@@ -2347,33 +2349,68 @@ mod tests {
         assert_eq!(prompt[0].role, Role::User);
     }
 
-    /// The id is a function of the record and its index, never of the clock or a
-    /// uuid — so replaying the journal reproduces the cursors the live stream
-    /// already handed out.
+    /// The id counts hook entries in the transcript, not records against a
+    /// call: `hook:{tool_call_id}:{n}` cannot name a `SessionStart` record,
+    /// which has no tool call. The tool join goes through the record's own
+    /// `ToolScope` instead.
     #[test]
-    fn hook_entry_ids_are_derived_and_stable_per_call() {
+    fn hook_entry_ids_count_the_transcript_not_the_call() {
         let mut state = AgentActor::initial_state();
         state = with_hook(state, "guard", "tc1", 0);
         state = with_hook(state, "linter", "tc1", 1);
-        state = with_hook(state, "guard", "tc2", 0);
+        state = with_hook(state, "guard", "tc2", 2);
 
         let ids: Vec<&str> = state.history.iter().map(HistoryEntry::id).collect();
-        assert_eq!(ids, vec!["hook:tc1:0", "hook:tc1:1", "hook:tc2:0"]);
+        assert_eq!(ids, vec!["hook:0", "hook:1", "hook:2"]);
     }
 
     /// `seq` is what the fold and the live broadcast agree on. Counting it from
     /// state at fold time instead would give a replayed transcript different
     /// ids than the stream, and a client's cursor would stop resolving.
     #[test]
-    fn the_next_seq_counts_only_that_calls_records() {
+    fn the_next_seq_counts_every_hook_entry() {
         let mut state = AgentActor::initial_state();
+        assert_eq!(state.hook_entry_count(), 0);
         state = with_hook(state, "guard", "tc1", 0);
         state = with_hook(state, "linter", "tc1", 1);
-        state = with_hook(state, "guard", "tc2", 0);
+        state = with_hook(state, "guard", "tc2", 2);
 
-        assert_eq!(state.hook_records_for("tc1"), 2);
-        assert_eq!(state.hook_records_for("tc2"), 1);
-        assert_eq!(state.hook_records_for("tc-none"), 0);
+        assert_eq!(state.hook_entry_count(), 3);
+    }
+
+    /// A record with no tool call at all must reach the transcript: the locked
+    /// decision "every hook that runs is recorded" was already untrue for
+    /// `SessionStart`, which took a bespoke path returning a bare string.
+    #[test]
+    fn a_non_tool_record_is_a_transcript_entry_like_any_other() {
+        use horsie_models::hooks::{
+            ContextInjected, HookAction, HookRecord, SessionStartOutcome, SessionStartRecord,
+        };
+        let record = HookRecord {
+            plugin: "boot".into(),
+            duration_ms: 1,
+            action: HookAction::SessionStart(SessionStartRecord {
+                source: "startup".into(),
+                system_message: None,
+                outcome: SessionStartOutcome::Ran(ContextInjected {
+                    additional_context: Some("conventions".into()),
+                }),
+            }),
+        };
+        let state = AgentActor::apply_event(
+            AgentActor::initial_state(),
+            AgentDomainEvent::HookRan {
+                record,
+                seq: 0,
+                at_ms: 7,
+            },
+        );
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0].id(), "hook:0");
+        assert!(
+            state.prompt_messages().is_empty(),
+            "never shown to the model"
+        );
     }
 
     /// A page is a window over the transcript, hook entries included, and the
@@ -2404,19 +2441,19 @@ mod tests {
             after: None,
             limit: 2,
         });
-        assert_eq!(page_ids(&tail), vec!["hook:tc1:0", "result:tc1"]);
+        assert_eq!(page_ids(&tail), vec!["hook:0", "result:tc1"]);
         assert!(tail.has_more_before, "the user message is still owed");
 
         // The cursor resolves against a hook entry, not just a message.
         let forward = state.history_page(&HistoryQuery {
             before: None,
-            after: Some("hook:tc1:0".to_string()),
+            after: Some("hook:0".to_string()),
             limit: 10,
         });
         assert_eq!(page_ids(&forward), vec!["result:tc1"]);
 
         let back = state.history_page(&HistoryQuery {
-            before: Some("hook:tc1:0".to_string()),
+            before: Some("hook:0".to_string()),
             after: None,
             limit: 10,
         });
@@ -2453,8 +2490,21 @@ mod tests {
         match &back.history[1] {
             HistoryEntry::Hook(h) => {
                 assert_eq!(h.record.plugin, "guard");
-                assert!(h.record.blocked);
-                assert_eq!(h.record.reason.as_deref(), Some("not allowed"));
+                // The externally-tagged union has to survive the round trip,
+                // outcome and all — a snapshot is what a recovered transcript
+                // is rebuilt from.
+                match &h.record.action {
+                    horsie_models::hooks::HookAction::PreToolUse(r) => {
+                        assert_eq!(r.call.tool_call_id, "tc1");
+                        match &r.outcome {
+                            horsie_models::hooks::PreToolUseOutcome::Denied(d) => {
+                                assert_eq!(d.reason.as_deref(), Some("not allowed"));
+                            }
+                            other => panic!("expected a denial, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected a PreToolUse action, got {other:?}"),
+                }
             }
             other => panic!("expected a hook entry, got {other:?}"),
         }

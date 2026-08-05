@@ -26,8 +26,9 @@ use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_models::agent::ToolResultInput;
+use horsie_models::hooks::HookRecord;
 use horsie_models::now_ms;
-use horsie_models::runtime::HookRecord;
+use horsie_models::runtime::{ServerHookEvent, SessionStartInput};
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
@@ -1903,10 +1904,17 @@ impl ContextProvider for SessionContextProvider {
         }
         let (ws, shared_scan) = scan_workspace(&runtime_client, None, use_plugins).await;
         let shared = if use_plugins {
-            let bootstrap = match runtime_client.run_session_start().await {
-                Ok(context) if !context.trim().is_empty() => Some(context),
-                Ok(_) | Err(_) => None,
-            };
+            // The records reach the transcript through the client's own hook
+            // sink, exactly as a tool hook's do. All that is derived here is the
+            // context, which the system prompt needs.
+            let bootstrap = runtime_client
+                .run_hooks(ServerHookEvent::SessionStart(SessionStartInput {
+                    source: "startup".to_string(),
+                }))
+                .await
+                .ok()
+                .as_deref()
+                .and_then(horsie_runtime_client::injected_context);
             Some(SharedContext {
                 skills: Arc::new(shared_scan.skills),
                 root: shared_scan.root,
@@ -4331,19 +4339,21 @@ mod tests {
     fn hook_record(plugin: &str, call: &str) -> HookRecord {
         HookRecord {
             plugin: plugin.to_string(),
-            event: "PreToolUse".to_string(),
-            tool: "bash".to_string(),
-            tool_call_id: call.to_string(),
             duration_ms: 4,
-            blocked: true,
-            reason: Some("not allowed".to_string()),
-            failed: false,
-            input_before: None,
-            input_after: None,
-            output_before: None,
-            output_after: None,
-            additional_context: None,
-            system_message: None,
+            action: horsie_models::hooks::HookAction::PreToolUse(
+                horsie_models::hooks::PreToolUseRecord {
+                    call: horsie_models::hooks::ToolScope {
+                        tool: "bash".to_string(),
+                        tool_call_id: call.to_string(),
+                    },
+                    system_message: None,
+                    outcome: horsie_models::hooks::PreToolUseOutcome::Denied(
+                        horsie_models::hooks::HookDenied {
+                            reason: Some("not allowed".into()),
+                        },
+                    ),
+                },
+            ),
         }
     }
 
@@ -4404,7 +4414,7 @@ mod tests {
         loop {
             let page = agent_history(&session, Some(sub.to_string())).await;
             if !hook_ids(&page).is_empty() {
-                assert_eq!(hook_ids(&page), vec!["hook:tc1:0".to_string()]);
+                assert_eq!(hook_ids(&page), vec!["hook:0".to_string()]);
                 break;
             }
             assert!(waited < 100, "the subagent never recorded the hook");

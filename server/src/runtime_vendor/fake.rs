@@ -14,7 +14,7 @@
 use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, WorkspaceSpec};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, SessionStartResponse,
+    RunHooksResponse, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse,
     ToolCallResponse, ToolOutput, ToolResult, WorkspaceScan,
 };
 use horsie_models::runtime_vendor::{
@@ -47,6 +47,10 @@ struct Recorder {
     cancels: Mutex<Vec<String>>,
     /// Why the server refused to publish this agent, if it did.
     rejection: Mutex<Option<String>>,
+    /// Every `ServerHookEvent` this fake was asked to run, in order — how a test
+    /// proves what went on the wire, `stop_hook_active` above all.
+    server_hook_events: Mutex<Vec<horsie_models::runtime::ServerHookEvent>>,
+    hook_runs: Mutex<usize>,
 }
 
 impl Recorder {
@@ -133,6 +137,7 @@ impl FakeRuntimeVendor {
             instance_id: uuid::Uuid::new_v4().to_string(),
             supports_provisioning: true,
             bash_stdout: "ok".to_string(),
+            hook_records: Vec::new(),
             faults: Faults::default(),
             block: false,
             resume: None,
@@ -261,6 +266,10 @@ pub struct FakeRuntimeVendorBuilder {
     instance_id: String,
     supports_provisioning: bool,
     bash_stdout: String,
+    /// Records this fake answers each `RunHooks` with, in order; the last entry
+    /// repeats once exhausted. A `Stop` continuation loop asks many times, and a
+    /// script that ran dry would look like a hook that stopped blocking.
+    hook_records: Vec<Vec<horsie_models::hooks::HookRecord>>,
     faults: Faults,
     block: bool,
     /// Runtime state carried over from a previous agent process — see
@@ -312,6 +321,12 @@ impl FakeRuntimeVendorBuilder {
 
     /// Canned stdout every `ToolCall` answers with.
     #[must_use]
+    /// Answer each `RunHooks` with the next entry, repeating the last.
+    pub fn hook_records(mut self, records: Vec<Vec<horsie_models::hooks::HookRecord>>) -> Self {
+        self.hook_records = records;
+        self
+    }
+
     pub fn bash_stdout(mut self, value: &str) -> Self {
         self.bash_stdout = value.to_string();
         self
@@ -482,6 +497,7 @@ async fn run_agent<S>(
         instance_id,
         supports_provisioning,
         bash_stdout,
+        hook_records,
         faults,
         block: _,
         resume: _,
@@ -682,12 +698,30 @@ async fn run_agent<S>(
                             shared_root: None,
                         }))
                     }
-                    RuntimeInboundMessage::SessionStart(req) => Some(
-                        RuntimeOutboundMessage::SessionStartResult(SessionStartResponse {
+                    RuntimeInboundMessage::RunHooks(req) => {
+                        recorder
+                            .server_hook_events
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(req.event.clone());
+                        let n = {
+                            let mut g = recorder
+                                .hook_runs
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            *g += 1;
+                            *g - 1
+                        };
+                        let records = hook_records
+                            .get(n)
+                            .or_else(|| hook_records.last())
+                            .cloned()
+                            .unwrap_or_default();
+                        Some(RuntimeOutboundMessage::HookRecords(RunHooksResponse {
                             call_id: req.call_id,
-                            context: String::new(),
-                        }),
-                    ),
+                            records,
+                        }))
+                    }
                 };
                 answer.map(|message| {
                     RuntimeVendorEvent::Runtime(RuntimeRelayResponse {
