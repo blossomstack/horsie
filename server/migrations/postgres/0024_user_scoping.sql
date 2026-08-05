@@ -59,9 +59,8 @@ ALTER TABLE routines DROP CONSTRAINT routines_pkey;
 ALTER TABLE routines ADD PRIMARY KEY (user_id, name);
 ALTER TABLE routines ALTER COLUMN user_id DROP DEFAULT;
 
--- The scheduler is one timer for the deployment, so it scans across accounts;
--- this is the index that scan uses.
-CREATE INDEX idx_routines_due ON routines(next_run_at_ms);
+-- No index work for `routines`: ALTER preserves 0016's `routines_next_run`,
+-- which the SQLite side has to recreate because its rebuild drops it.
 
 -- `environments`
 ALTER TABLE environments ADD COLUMN user_id TEXT NOT NULL DEFAULT '1';
@@ -101,6 +100,10 @@ ALTER TABLE memories DROP CONSTRAINT memories_space_name_key;
 ALTER TABLE memories ADD UNIQUE (user_id, space, name);
 ALTER TABLE memories ALTER COLUMN user_id DROP DEFAULT;
 
+-- 0009's index survives the ALTER, so it is replaced rather than added: every
+-- lookup is now by account first. The SQLite side reaches the same shape by
+-- recreating it after the table rebuild.
+DROP INDEX idx_memories_space;
 CREATE INDEX idx_memories_space ON memories(user_id, space);
 
 -- `github_credentials`. Was a one-row table pinned by `CHECK (id = 1)`; it is

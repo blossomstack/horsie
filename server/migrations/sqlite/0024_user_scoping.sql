@@ -177,9 +177,10 @@ INSERT INTO routines_new SELECT '1', * FROM routines;
 DROP TABLE routines;
 ALTER TABLE routines_new RENAME TO routines;
 
--- The scheduler is one timer for the deployment, so it scans across accounts;
--- this is the index that scan uses.
-CREATE INDEX idx_routines_due ON routines(next_run_at_ms);
+-- Recreated, not new: dropping the table above took 0016's index with it. The
+-- scheduler scans across accounts, so this stays unscoped -- and it must match
+-- the PostgreSQL side, which keeps its original because ALTER preserves it.
+CREATE INDEX routines_next_run ON routines (next_run_at_ms) WHERE enabled = 1;
 
 -- `environments`
 CREATE TABLE environments_new (
@@ -287,6 +288,8 @@ FROM memories;
 DROP TABLE memories;
 ALTER TABLE memories_new RENAME TO memories;
 
+-- Recreated and widened: dropping the table took 0009's `memories(space)` with
+-- it, and every lookup is now by account first.
 CREATE INDEX idx_memories_space ON memories(user_id, space);
 
 -- `github_credentials`. Was a one-row table pinned by `CHECK (id = 1)`; it is

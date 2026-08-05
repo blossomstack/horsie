@@ -629,6 +629,38 @@ mod tests {
         assert!(db.execute("SELECT 1 FROM vendors").await.is_err());
     }
 
+    /// A table rebuild drops that table's indexes with it, and SQLite has no
+    /// way to notice. 0024 lost `idx_memories_space` and `routines_next_run`
+    /// exactly that way, and PostgreSQL kept both because it alters in place —
+    /// so the two backends silently diverged until this was pinned.
+    #[tokio::test]
+    async fn the_indexes_survive_every_table_rebuild() {
+        let db = testing::db().await;
+        let sql = match db.dialect() {
+            Dialect::Sqlite => "SELECT name FROM sqlite_master WHERE type = 'index'",
+            // Cast: `indexname` is PostgreSQL's `name` type, which the Any
+            // driver cannot decode.
+            Dialect::Postgres => "SELECT indexname::text AS name FROM pg_indexes",
+        };
+        let names: Vec<String> = sqlx::query_scalar(&db.q(sql))
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+        for expected in [
+            "idx_memories_space",
+            "routines_next_run",
+            "idx_auth_tokens_hash",
+            "idx_auth_tokens_chain",
+            "idx_auth_tokens_principal",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "{expected} is missing on {:?}; a rebuild dropped it: {names:?}",
+                db.dialect()
+            );
+        }
+    }
+
     #[test]
     fn redaction_hides_the_password_only() {
         assert_eq!(
