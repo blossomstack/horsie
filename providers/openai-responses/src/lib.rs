@@ -11,9 +11,11 @@
 //! not a dialect. History is a flat item list, tool definitions are flat, and
 //! thinking is replayed rather than dropped. See [`wire`].
 
+pub mod chatgpt;
 pub mod wire;
 
 use async_trait::async_trait;
+use chatgpt::{CHATGPT_RESPONSES_URL, ChatGptTokens, ORIGINATOR};
 use futures_util::StreamExt;
 use horsie_agentcore::{
     AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
@@ -22,7 +24,7 @@ use horsie_agentcore::{
     ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
 };
 use reqwest_eventsource::{Event, EventSource};
-use std::{collections::BTreeMap, env, time::Duration};
+use std::{collections::BTreeMap, env, sync::Arc, time::Duration};
 use wire::{FunctionTool, ReasoningControl, ReasoningRef, ResponsesRequest, to_input_items};
 
 pub const DEFAULT_MODEL: &str = "gpt-5";
@@ -98,8 +100,23 @@ fn is_retryable(e: &LlmError) -> bool {
 pub enum Credential {
     /// A platform API key. Targets `{base_url}/responses`.
     ApiKey(Secret),
+    /// A ChatGPT subscription. Targets the Codex backend, and carries an
+    /// account id alongside the bearer token.
+    ChatGpt(Arc<ChatGptTokens>),
     /// No credential at all — a local Responses-compatible server.
     None,
+}
+
+/// Seconds since the epoch. Token expiry is absolute, so the clock has to be
+/// read at the moment of use rather than captured at construction.
+fn now_secs() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 pub struct ResponsesProvider {
@@ -139,6 +156,19 @@ impl ResponsesProvider {
             .filter(|s| !s.is_empty())
             .map(Secret::from);
         Self::build(key.map_or(Credential::None, Credential::ApiKey))
+    }
+
+    /// A provider that spends a ChatGPT subscription.
+    ///
+    /// The base URL is the Codex backend rather than `api.openai.com`: a plan
+    /// is not reachable through the platform API. `with_base_url` still
+    /// overrides it, which is how the tests point this at a mock.
+    pub fn with_chatgpt(tokens: Arc<ChatGptTokens>) -> Result<Self, LlmError> {
+        let mut p = Self::build(Credential::ChatGpt(tokens))?;
+        p.base_url = CHATGPT_RESPONSES_URL
+            .trim_end_matches("/responses")
+            .to_string();
+        Ok(p)
     }
 
     pub fn with_api_key(key: impl Into<Secret>) -> Result<Self, LlmError> {
@@ -538,17 +568,32 @@ impl LlmProvider for ResponsesProvider {
     ) -> Result<CompletionResponse, LlmError> {
         let body = self.build_body(&request);
         let mut last_error: Option<LlmError> = None;
+        // A 401 buys exactly one forced refresh. More would spin against a
+        // revoked login, and the operator needs to be told to sign in again
+        // rather than have it retried at them.
+        let mut refreshed_after_401 = false;
+        // Set when the previous attempt failed for a reason a wait cannot fix.
+        let mut skip_backoff = false;
 
         'retry: for attempt in 0..=MAX_STREAM_RETRIES {
-            if attempt > 0 {
+            if attempt > 0 && !skip_backoff {
                 let delay = self.retry_base_secs * 2u64.pow(attempt - 1);
                 tracing::warn!(attempt, delay_secs = delay, "Responses retry");
                 tokio::time::sleep(Duration::from_secs(delay)).await;
             }
+            skip_backoff = false;
 
             let mut req = self.http.post(self.endpoint()).json(&body);
             match &self.credential {
                 Credential::ApiKey(k) => req = req.bearer_auth(k.expose()),
+                Credential::ChatGpt(tokens) => {
+                    req = req
+                        .bearer_auth(tokens.access_token(now_secs()).await?)
+                        .header("ChatGPT-Account-ID", tokens.account_id())
+                        // Who we are. Never `codex_cli_rs`, and never an
+                        // `x-oai-attestation` we are not entitled to mint.
+                        .header("originator", ORIGINATOR);
+                }
                 Credential::None => {}
             }
 
@@ -597,6 +642,20 @@ impl LlmProvider for ResponsesProvider {
                         let body_text = resp.text().await.unwrap_or_default();
                         let err = classify_status(code, &body_text);
                         es.close();
+                        // A token can be revoked long before it expires, so an
+                        // unexpired-looking credential can still be refused.
+                        // Refresh once and try again immediately — waiting out a
+                        // backoff would not make a stale token any fresher.
+                        if code == 401
+                            && !refreshed_after_401
+                            && !state.emitted_anything
+                            && let Credential::ChatGpt(tokens) = &self.credential
+                        {
+                            refreshed_after_401 = true;
+                            skip_backoff = true;
+                            tokens.refresh(now_secs()).await?;
+                            continue 'retry;
+                        }
                         // Only retry when nothing has been emitted — re-running a
                         // partially streamed turn would duplicate content the
                         // caller has already seen.
@@ -847,6 +906,85 @@ mod tests {
             .expect_err("429s must surface");
 
         assert!(matches!(err, LlmError::RateLimit { .. }), "got {err:?}");
+    }
+
+    /// A ChatGPT provider whose token is already spent must renew it and get on
+    /// with the turn — an operator never sees this happen.
+    #[tokio::test]
+    async fn an_expired_chatgpt_credential_refreshes_before_the_turn() {
+        use crate::chatgpt::{ChatGptTokens, StoredTokens, tests::RecordingStore};
+
+        let server = MockLlmServer::builder().build().await;
+        server.queue_response("hi there");
+        let issuer = crate::chatgpt::tests::mock_issuer(200, false).await;
+        let store = Arc::new(RecordingStore::default());
+        let tokens = Arc::new(ChatGptTokens::new(
+            StoredTokens {
+                access: "stale".into(),
+                refresh: "refresh-1".into(),
+                expires_at: 0,
+                account_id: "acct_1".into(),
+            },
+            store.clone(),
+            issuer,
+        ));
+
+        let p = ResponsesProvider::with_chatgpt(tokens)
+            .unwrap()
+            .with_base_url(server.url())
+            .with_model("mock-model")
+            .with_retry_delay_secs(0);
+
+        let history = vec![user("hi")];
+        let res = p
+            .complete(request(&history), "msg-1", &NullSink::new())
+            .await
+            .unwrap();
+
+        assert_eq!(res.parts.len(), 1);
+        assert_eq!(store.saved().len(), 1, "the refreshed token is persisted");
+        assert_eq!(store.saved()[0].access, "access-2");
+    }
+
+    /// A token can be revoked while it still looks valid. One forced refresh,
+    /// one retry, no backoff — waiting would not make a dead token live.
+    #[tokio::test]
+    async fn a_401_forces_one_refresh_and_retries() {
+        use crate::chatgpt::{ChatGptTokens, StoredTokens, tests::RecordingStore};
+
+        let server = MockLlmServer::builder().build().await;
+        server.queue_error(401, "token revoked");
+        server.queue_response("second time lucky");
+        let issuer = crate::chatgpt::tests::mock_issuer(200, false).await;
+        let store = Arc::new(RecordingStore::default());
+        let tokens = Arc::new(ChatGptTokens::new(
+            StoredTokens {
+                access: "looks-fine".into(),
+                refresh: "refresh-1".into(),
+                expires_at: now_secs() + 3600,
+                account_id: "acct_1".into(),
+            },
+            store.clone(),
+            issuer,
+        ));
+
+        let p = ResponsesProvider::with_chatgpt(tokens)
+            .unwrap()
+            .with_base_url(server.url())
+            .with_model("mock-model")
+            .with_retry_delay_secs(0);
+
+        let history = vec![user("hi")];
+        let res = p
+            .complete(request(&history), "msg-1", &NullSink::new())
+            .await
+            .unwrap();
+
+        match &res.parts[0] {
+            ContentPart::Text(t) => assert_eq!(t.text, "second time lucky"),
+            other => panic!("expected text, got {other:?}"),
+        }
+        assert_eq!(store.saved().len(), 1, "exactly one refresh");
     }
 
     #[test]

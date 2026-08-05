@@ -1759,6 +1759,7 @@ dependencies = [
  "horsie-mcp-client",
  "horsie-models",
  "horsie-openai",
+ "horsie-openai-responses",
  "horsie-runtime-client",
  "horsie-runtime-vendor",
  "horsie-server",

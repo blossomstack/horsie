@@ -4,6 +4,7 @@
 mod admin;
 mod agents;
 mod auth;
+mod chatgpt;
 mod config;
 mod environments;
 pub mod error;
@@ -53,6 +54,9 @@ pub struct AppState {
     /// The model-card catalog (reference data, not runtime config): public
     /// prefix search + admin CRUD. Shares the settings-DB pool.
     pub model_cards: Arc<crate::config::model_cards::ModelCardStore>,
+    /// ChatGPT-plan sign-in for `kind = "chatgpt"` providers: device-code
+    /// login, polling, and sign-out.
+    pub chatgpt: Arc<crate::config::chatgpt_login::ChatGptLoginService>,
     /// Deployment-global GitHub connection: App config, OAuth credentials, repo
     /// listing, and the scoped-token minter used at session provisioning.
     pub github: Arc<crate::github::GithubService>,
@@ -137,6 +141,15 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/config",
             get(config::get_config).put(config::update_config),
+        )
+        .route("/api/admin/providers/:name/chatgpt", get(chatgpt::status))
+        .route(
+            "/api/admin/providers/:name/chatgpt/login",
+            post(chatgpt::start).delete(chatgpt::sign_out),
+        )
+        .route(
+            "/api/admin/providers/:name/chatgpt/poll",
+            post(chatgpt::poll),
         )
         .route("/api/model-cards", get(model_cards::list))
         .route(
@@ -407,12 +420,17 @@ mod tests {
             vendor_agents.clone(),
             supervisor.clone(),
         ));
+        let chatgpt = Arc::new(crate::config::chatgpt_login::ChatGptLoginService::new(
+            opened.db.clone(),
+            opened.store.clone(),
+        ));
         AppState {
             supervisor,
             global_events: gtx,
             auth,
             config_store: opened.store,
             model_cards,
+            chatgpt,
             github,
             mcp,
             plugins,
@@ -584,6 +602,68 @@ mod tests {
         let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
         let list: ListSessionsResponse = read_json(res).await;
         assert!(list.sessions.is_empty());
+    }
+
+    /// The endpoints reject what they should before ever reaching OpenAI. The
+    /// approved-login path is covered in `config::chatgpt_login`, against a fake
+    /// issuer — there is nothing for an HTTP test to add to it.
+    #[tokio::test]
+    async fn chatgpt_login_rejects_unknown_and_non_chatgpt_providers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/admin/providers/ghost/chatgpt/login",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let body = serde_json::json!({
+            "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
+            "models": [],
+        });
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/config", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/admin/providers/p/chatgpt/login",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // And a ChatGPT provider that nobody has signed into reports as much
+        // rather than 404ing — the provider exists, the sign-in does not.
+        let body = serde_json::json!({
+            "providers": [{"name": "c", "kind": "chatgpt"}],
+            "models": [],
+        });
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/config", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .clone()
+            .oneshot(get("/api/admin/providers/c/chatgpt"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let status: serde_json::Value = read_json(res).await;
+        assert_eq!(status["signedIn"], serde_json::json!(false));
     }
 
     #[tokio::test]
