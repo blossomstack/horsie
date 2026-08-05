@@ -99,6 +99,14 @@ impl AuthService {
         }
     }
 
+    /// The id of the only account, or `None` when there is none yet.
+    ///
+    /// The scope every service is built for while this deployment has one
+    /// account. Replaced outright when a scope is resolved per request.
+    pub async fn sole_user(&self) -> Result<Option<crate::auth::UserId>, String> {
+        self.store.sole_user().await
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -544,6 +552,7 @@ fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<(), Strin
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::auth::UserId;
 
     /// File-backed, not `sqlite::memory:` — see the note in `store.rs`'s tests.
     /// The temp dir doubles as the service's state dir, so the generated
@@ -594,7 +603,10 @@ mod tests {
 
         let v = svc.verify(&secret).await.unwrap().expect("verifies");
         assert_eq!(v.kind, TokenKind::Web);
-        assert_eq!(v.principal, Principal::User(1));
+        // Against the account that bootstrap actually created, not a literal:
+        // the id is random now, so there is no id to write down here.
+        let bootstrapped = svc.sole_user().await.unwrap().expect("an account exists");
+        assert_eq!(v.principal, Principal::User(bootstrapped));
 
         // Logout revokes it.
         svc.logout(&secret).await.unwrap();
@@ -732,7 +744,7 @@ mod tests {
         ));
 
         assert!(
-            svc.approve_device(&d.user_code, &Principal::User(1))
+            svc.approve_device(&d.user_code, &Principal::User(UserId::new("1")))
                 .await
                 .unwrap()
         );
@@ -744,7 +756,7 @@ mod tests {
 
         // The access token authenticates as the approver.
         let v = svc.verify(&issued.access_token).await.unwrap().unwrap();
-        assert_eq!(v.principal, Principal::User(1));
+        assert_eq!(v.principal, Principal::User(UserId::new("1")));
         assert_eq!(v.kind, TokenKind::Access);
 
         // A consumed code cannot mint a second pair.
@@ -769,7 +781,7 @@ mod tests {
         // Answering twice is refused.
         assert!(!svc.deny_device(&d.user_code).await.unwrap());
         assert!(
-            !svc.approve_device(&d.user_code, &Principal::User(1))
+            !svc.approve_device(&d.user_code, &Principal::User(UserId::new("1")))
                 .await
                 .unwrap()
         );
@@ -805,7 +817,7 @@ mod tests {
         let svc = service(&tmp, true).await;
         svc.bootstrap().await.unwrap();
         let d = svc.start_device_authorization().await.unwrap();
-        svc.approve_device(&d.user_code, &Principal::User(1))
+        svc.approve_device(&d.user_code, &Principal::User(UserId::new("1")))
             .await
             .unwrap();
         let first = svc.poll_device_token(&d.device_code).await.unwrap();
@@ -852,7 +864,7 @@ mod tests {
         svc.bootstrap().await.unwrap();
 
         let (secret, view) = svc
-            .mint_agent_token("my-laptop", &Principal::User(1))
+            .mint_agent_token("my-laptop", &Principal::User(UserId::new("1")))
             .await
             .unwrap();
         assert!(secret.starts_with("hsk_agt_"), "{secret}");
@@ -860,7 +872,7 @@ mod tests {
 
         let v = svc.verify(&secret).await.unwrap().expect("verifies");
         assert_eq!(v.kind, TokenKind::Agent);
-        assert_eq!(v.principal, Principal::User(1));
+        assert_eq!(v.principal, Principal::User(UserId::new("1")));
 
         let listed = svc.list_agent_tokens().await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -879,7 +891,7 @@ mod tests {
         // A wall of unlabelled secrets is unrevokable in practice: nobody can
         // tell which machine a row belongs to.
         assert!(
-            svc.mint_agent_token("   ", &Principal::User(1))
+            svc.mint_agent_token("   ", &Principal::User(UserId::new("1")))
                 .await
                 .is_err()
         );

@@ -2657,7 +2657,10 @@ mod tests {
         let (state, _pw) = auth_state(&tmp).await;
         let (secret, _view) = state
             .auth
-            .mint_agent_token("my-laptop", &crate::auth::Principal::User(1))
+            .mint_agent_token(
+                "my-laptop",
+                &crate::auth::Principal::User(crate::auth::UserId::new("1")),
+            )
             .await
             .unwrap();
         let agents = state.vendor_agents.clone();

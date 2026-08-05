@@ -484,6 +484,36 @@ mod tests {
         assert_eq!(sync, 2, "the ack must mean the write reached the disk");
     }
 
+    /// The bootstrap account keeps a usable id across the retype — `'1'`, the
+    /// text of the integer it had. It is a legitimate id, not a sentinel:
+    /// accounts created after this migration get a random one.
+    #[tokio::test]
+    async fn retyping_the_user_id_preserves_the_bootstrap_row() {
+        let db = testing::db().await;
+        sqlx::query(&db.q(
+            "INSERT INTO auth_users (id, username, password_hash, password_is_generated, \
+             created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ))
+        .bind("1")
+        .bind("admin")
+        .bind("$argon2id$fake")
+        .bind(0_i64)
+        .bind(1_i64)
+        .bind(1_i64)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // Read as a String: the whole point of the migration is that this
+        // column is no longer an integer, and `Any` decodes by runtime type.
+        let id: String = sqlx::query_scalar(&db.q("SELECT id FROM auth_users WHERE username = ?"))
+            .bind("admin")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(id, "1");
+    }
+
     #[test]
     fn redaction_hides_the_password_only() {
         assert_eq!(

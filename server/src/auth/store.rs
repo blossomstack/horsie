@@ -2,7 +2,7 @@
 //! store's database. Policy lives in `service.rs`; this layer only reads and
 //! writes rows.
 
-use crate::auth::{Principal, TokenKind};
+use crate::auth::{Principal, TokenKind, UserId};
 use crate::db::Db;
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -10,7 +10,7 @@ use sqlx::any::AnyRow;
 /// One row of `auth_users`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UserRow {
-    pub id: i64,
+    pub id: UserId,
     pub username: String,
     pub password_hash: String,
     pub password_is_generated: bool,
@@ -95,32 +95,50 @@ impl AuthStore {
         row.as_ref().map(row_to_user).transpose()
     }
 
-    /// Insert the account. The UNIQUE index on `username` plus this crate's
-    /// single-account rule mean a second call errs, which is the point.
+    /// The id of the only account, or `None` when there is none yet.
+    ///
+    /// Deliberately not "the first account": while there is exactly one,
+    /// ordering is not a question, and this call is replaced outright when a
+    /// scope is resolved per request rather than per deployment.
+    pub async fn sole_user(&self) -> Result<Option<UserId>, String> {
+        let id: Option<String> =
+            sqlx::query_scalar(&self.db.q("SELECT id FROM auth_users LIMIT 1"))
+                .fetch_optional(self.db.pool())
+                .await
+                .map_err(|e| e.to_string())?;
+        Ok(id.map(UserId::new))
+    }
+
+    /// Insert the account, returning the id it was given. The UNIQUE index on
+    /// `username` plus this crate's single-account rule mean a second call
+    /// errs, which is the point.
+    ///
+    /// The id is minted here rather than by the database: it is random, not
+    /// sequential, so there is no sequence to draw from and nothing to return.
     pub async fn create_user(
         &self,
         username: &str,
         password_hash: &str,
         generated: bool,
         now: i64,
-    ) -> Result<i64, String> {
+    ) -> Result<UserId, String> {
         if self.user_count().await? > 0 {
             return Err("an account already exists".to_string());
         }
-        // `RETURNING id` rather than a follow-up `last_insert_id`: sqlx's Any
-        // driver reports that as NULL on SQLite regardless of the backend.
-        let row = sqlx::query(&self.db.q("INSERT INTO auth_users \
-             (username, password_hash, password_is_generated, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?) RETURNING id"))
+        let id = UserId::generate();
+        sqlx::query(&self.db.q("INSERT INTO auth_users \
+             (id, username, password_hash, password_is_generated, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?)"))
+        .bind(id.as_str())
         .bind(username)
         .bind(password_hash)
         .bind(i64::from(generated))
         .bind(now)
         .bind(now)
-        .fetch_one(self.db.pool())
+        .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
-        row.try_get::<i64, _>("id").map_err(|e| e.to_string())
+        Ok(id)
     }
 
     /// Replace the password. Always clears `password_is_generated`: the only
@@ -461,7 +479,7 @@ impl AuthStore {
 
 fn row_to_user(row: &AnyRow) -> Result<UserRow, String> {
     Ok(UserRow {
-        id: row.try_get("id").map_err(|e| e.to_string())?,
+        id: UserId::new(row.try_get::<String, _>("id").map_err(|e| e.to_string())?),
         username: row.try_get("username").map_err(|e| e.to_string())?,
         password_hash: row.try_get("password_hash").map_err(|e| e.to_string())?,
         password_is_generated: row
@@ -541,7 +559,7 @@ mod tests {
         s.insert_token(
             "id-live",
             TokenKind::Web,
-            &Principal::User(1),
+            &Principal::User(UserId::new("1")),
             &live.hash,
             None,
             None,
@@ -554,14 +572,14 @@ mod tests {
         let found = s.lookup_token(&live.hash, 1001).await.unwrap().unwrap();
         assert_eq!(found.id, "id-live");
         assert_eq!(found.kind, TokenKind::Web);
-        assert_eq!(found.principal, Principal::User(1));
+        assert_eq!(found.principal, Principal::User(UserId::new("1")));
 
         // Expired.
         let old = generate(TokenKind::Web);
         s.insert_token(
             "id-old",
             TokenKind::Web,
-            &Principal::User(1),
+            &Principal::User(UserId::new("1")),
             &old.hash,
             None,
             None,
@@ -587,7 +605,7 @@ mod tests {
         s.insert_token(
             "id-agent",
             TokenKind::Agent,
-            &Principal::User(1),
+            &Principal::User(UserId::new("1")),
             &t.hash,
             Some("laptop"),
             None,
@@ -620,7 +638,7 @@ mod tests {
             s.insert_token(
                 id,
                 kind,
-                &Principal::User(1),
+                &Principal::User(UserId::new("1")),
                 &tok.hash,
                 None,
                 None,
@@ -630,9 +648,14 @@ mod tests {
             .await
             .unwrap();
         }
-        s.revoke_kind_for_principal(&Principal::User(1), TokenKind::Web, Some("a"), 2000)
-            .await
-            .unwrap();
+        s.revoke_kind_for_principal(
+            &Principal::User(UserId::new("1")),
+            TokenKind::Web,
+            Some("a"),
+            2000,
+        )
+        .await
+        .unwrap();
         assert!(s.lookup_token(&a.hash, 2001).await.unwrap().is_some());
         assert!(s.lookup_token(&b.hash, 2001).await.unwrap().is_none());
         assert!(s.lookup_token(&c.hash, 2001).await.unwrap().is_some());
@@ -645,7 +668,7 @@ mod tests {
         s.insert_token(
             "id",
             TokenKind::Web,
-            &Principal::User(1),
+            &Principal::User(UserId::new("1")),
             &t.hash,
             None,
             None,
@@ -678,12 +701,12 @@ mod tests {
 
         // Approval by user code, which is what the browser sends.
         assert!(
-            s.approve_device_code("BCDF-GHJK", &Principal::User(1), 1100)
+            s.approve_device_code("BCDF-GHJK", &Principal::User(UserId::new("1")), 1100)
                 .await
                 .unwrap()
         );
         let row = s.get_device_code(b"dhash").await.unwrap().unwrap();
-        assert_eq!(row.principal, Some(Principal::User(1)));
+        assert_eq!(row.principal, Some(Principal::User(UserId::new("1"))));
         assert_eq!(row.approved_at, Some(1100));
 
         // Consuming marks it used, so a second poll cannot mint a second pair.
@@ -696,7 +719,7 @@ mod tests {
     async fn approving_or_denying_an_unknown_user_code_reports_it() {
         let (s, _tmp) = store().await;
         assert!(
-            !s.approve_device_code("NOPE-NOPE", &Principal::User(1), 1000)
+            !s.approve_device_code("NOPE-NOPE", &Principal::User(UserId::new("1")), 1000)
                 .await
                 .unwrap()
         );
@@ -746,7 +769,7 @@ mod tests {
         s.insert_token(
             "r1",
             TokenKind::Refresh,
-            &Principal::User(1),
+            &Principal::User(UserId::new("1")),
             &t.hash,
             None,
             Some("chain-a"),
@@ -792,7 +815,7 @@ mod tests {
             s.insert_token(
                 id,
                 kind,
-                &Principal::User(1),
+                &Principal::User(UserId::new("1")),
                 &tok.hash,
                 None,
                 Some(chain),
@@ -819,7 +842,7 @@ mod tests {
         s.insert_token(
             "t-a",
             TokenKind::Agent,
-            &Principal::User(1),
+            &Principal::User(UserId::new("1")),
             &a.hash,
             Some("laptop"),
             None,
@@ -831,7 +854,7 @@ mod tests {
         s.insert_token(
             "t-b",
             TokenKind::Agent,
-            &Principal::User(1),
+            &Principal::User(UserId::new("1")),
             &b.hash,
             Some("ci"),
             None,
@@ -844,7 +867,7 @@ mod tests {
         s.insert_token(
             "t-c",
             TokenKind::Access,
-            &Principal::User(1),
+            &Principal::User(UserId::new("1")),
             &other.hash,
             None,
             None,
