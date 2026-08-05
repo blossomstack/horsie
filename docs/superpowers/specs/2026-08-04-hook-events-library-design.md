@@ -87,8 +87,17 @@ Each event carries three facts the rest of the system keeps re-deriving:
 - **Its matcher domain** — matchers are *not* tool-only. `SessionStart` matches
   `startup`/`resume`/`clear`/`compact`/`fork`; `SessionEnd` matches
   `clear`/`resume`/`logout`/`prompt_input_exit`/…; `Notification` matches
-  `permission_prompt`/`idle_prompt`/…; `CwdChanged` supports no matcher at all.
-  Tool events match tool names, which is the only case horsie currently handles.
+  `permission_prompt`/`idle_prompt`/…; `StopFailure` matches its error class
+  (`rate_limit`/`overloaded`/…); `CwdChanged` supports no matcher at all. Tool
+  events match tool names, which is the only case horsie currently handles.
+
+  So `matcher_applies(matcher, horsie_tool)` becomes `matches(event, matcher)`:
+  the same regex semantics — absent or empty selects everything, a pattern that
+  fails to compile selects nothing so a broken matcher cannot widen to "all" —
+  but the *subject* comes from the event's description rather than being assumed
+  to be a tool name. Tool events keep testing against the horsie tool name and
+  each of its Claude aliases, which is what makes any published matcher fire at
+  all.
 - **Its permitted output fields** — which of `systemMessage`, `continue`,
   `stopReason`, `decision`/`reason`, `permissionDecision`, `additionalContext`,
   `updatedInput`, `updatedToolOutput` that event may set.
@@ -120,6 +129,26 @@ The library never decides *consequences* — whether a denial actually stops
 anything is horsie's call, made at the call site, because it depends on horsie's
 own semantics (`PreToolUse` fails closed; `Stop` is advisory because horsie does
 not resume a concluded turn).
+
+## What a hook can change, and where it lands
+
+Two outputs reach two different audiences, and they must never share a path.
+
+**`additionalContext` goes to the model.** Verified in the code, by two routes:
+
+- `SessionStart` context becomes `SharedContext.bootstrap`, which
+  `compose_system_prompt` prepends as a `# Session bootstrap` section of the
+  agent's **system prompt** (`workflow/src/workspace.rs:285-299`).
+- `PostToolUse` `additional_context` is appended to the tool's stdout
+  (`runtime/src/hooks.rs:179`), landing in the **tool result** the model reads.
+
+`UserPromptSubmit` and `SessionStart` can also inject context as *bare stdout*
+rather than JSON, which the generic processor handles for those events and
+discards for the rest.
+
+**`systemMessage` goes to the user.** The spec calls it "warning text shown to
+user". It is not injected into the model, which is why this design surfaces it in
+the transcript rather than in a prompt. Today it reaches neither.
 
 ## The record
 
@@ -228,6 +257,8 @@ union SessionStartOutcome { Ran(ContextInjected), Failed(HookFailed) }   // cann
 struct UserPromptSubmitRecord { system_message: Option<String>, outcome: UserPromptSubmitOutcome }
 union UserPromptSubmitOutcome { Ran(ContextInjected), Blocked(HookBlocked), Failed(HookFailed) }
 
+/// `Blocked` means *blocked from stopping* — the turn continues. See "Stop
+/// continues the turn" below; this is not a refusal like `PreToolUse`'s.
 struct StopRecord { system_message: Option<String>, outcome: StopOutcome }
 union StopOutcome { Ran(ContextInjected), Blocked(HookBlocked), Failed(HookFailed) }
 
@@ -297,6 +328,51 @@ everything else and the two-classes asymmetry disappears.
 records }` → `AgentCommand::HooksRan` → `AgentDomainEvent::HookRan`. No new
 plumbing — that is the payoff of generalising rather than adding a third RPC.
 
+## Stop continues the turn
+
+`Stop` is not a notification that a turn ended — its only two capabilities are
+ways of **not** ending it:
+
+> Stop hooks support blocking—exit code 2 or `decision: "block"`—which prevents
+> Claude from stopping and causes the agentic loop to continue. They also support
+> non-blocking feedback through `additionalContext`… Return blocking feedback if
+> you want to force another iteration.
+
+So recording a `Stop` hook and ignoring both outputs would fire the event and
+discard everything it said. That is the failure the phase's locked decision
+exists to prevent — *no plugin installs believing a hook works and finds it
+silently never fires* — one level down. It matters in practice: `Stop` is the
+most-declared event in the whole official marketplace.
+
+horsie therefore honours it, which makes `Stop` a **turn-lifecycle** change
+rather than a hook-dispatch one:
+
+- **`Blocked`** — the turn does not conclude. The reason is fed back as the input
+  to another run, reusing the same `start_run(AgentInput::user_message(…))` path
+  recovery already uses to continue an interrupted task.
+- **`Ran` with `additional_context`** — non-blocking feedback. The context is
+  recorded and carried into the *next* turn rather than forcing one now, which
+  is the honest mapping of "inform Claude but let it decide" onto a server that
+  has no idle agentic loop to re-enter.
+- **`Failed`** — recorded, never fatal. `Stop` runs after the fact, so a guard
+  that could not run cannot deny anything; only `PreToolUse` fails closed.
+
+**The loop guard is mandatory, not optional.** horsie runs unattended sessions,
+so a `Stop` hook that always blocks would spin forever with nobody watching.
+Two mechanisms, both required:
+
+- `stop_hook_active` is set on the input for every continuation-triggered run.
+  The spec defines it as "true when Claude would normally stop but is being held
+  in the loop by a blocking hook", so a cooperative hook returns early.
+- A hard per-turn cap on continuations, after which the turn concludes regardless
+  and the record says why. Cooperation cannot be relied on: a hook that ignores
+  `stop_hook_active` is exactly the case the cap exists for.
+
+Where it runs is unchanged from #141's one durable idea: a decorator on
+`AgentOutcomeSink::deliver`, which is called on the agent's own run task. A slow
+`Stop` hook delays that turn's completion without stalling the session's command
+loop against a cancel or a new message.
+
 ## The transcript
 
 The entry id becomes **`hook:{seq}`**, where `seq` counts hook entries already in
@@ -333,7 +409,9 @@ carries forward.
    records appearing.
 4. **`Stop` and `UserPromptSubmit`**, the two events with real demand, plus the
    unsupported-event gates from `ec4127e` (install refusal and session-start
-   re-check).
+   re-check). This is the largest and riskiest step: `Stop` continuation changes
+   the turn lifecycle, and the loop guard has to hold for unattended sessions.
+   Worth splitting again if it grows — the gates are independent of `Stop`.
 5. **The remaining ten**, sequenced afterwards, each one a call site against a
    library that already knows the event.
 
@@ -349,6 +427,11 @@ carries forward.
   same sink as tool records; `run_hooks` cannot be asked for a tool event.
 - **Server** — a subagent's hooks land on the subagent's transcript; a `Stop`
   hook cannot stall the session command loop.
+- **`Stop` continuation** — a blocking `Stop` starts another run with the reason
+  as input; `stop_hook_active` is set on every continuation run and absent on the
+  first; a hook that blocks unconditionally is stopped by the cap rather than
+  looping, and the record says the cap ended it; non-blocking
+  `additional_context` does *not* start a run.
 - **Web** — the tool-attached and standalone renderings; `system_message` shown.
 - **e2e** — the Playwright case #140 left undone: a hook row is present **after a
   reload**, which is the requirement journaling exists for. PR 4 provides the
@@ -364,9 +447,6 @@ carries forward.
   hook-dispatch one. Worth its own issue.
 - **HTTP hooks.** The spec allows a hook to be an HTTP endpoint receiving the
   payload as a POST body. horsie runs commands only.
-- **Honouring a `Stop` block.** horsie does not resume a concluded turn;
-  re-entering the agent is a turn-lifecycle change, so a block is recorded and
-  logged.
 
 ## Sources
 
