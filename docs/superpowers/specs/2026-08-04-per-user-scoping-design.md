@@ -32,7 +32,7 @@ smaller half of this.
 
 ## The scope
 
-The scope key is `user_id: i64`. Nothing else.
+The scope key is `user_id`, a short random string. Nothing else.
 
 Three reasons it is the user and not a group:
 
@@ -48,10 +48,34 @@ Three reasons it is the user and not a group:
 Naming: `user`, not `workspace` (taken — `WorkspaceSpec`, runtime workspaces)
 and not `space` (taken — memory spaces).
 
+**The id is a random string, not an autoincrementing integer.** `auth_users.id`
+is `INTEGER PRIMARY KEY AUTOINCREMENT` today, and a sequential key published as
+a scope would leak how many accounts a deployment has and make the set
+enumerable. So `auth_users.id` becomes `TEXT PRIMARY KEY` and
+`Principal::User(i64)` becomes `Principal::User(String)` —
+`auth_tokens.principal` already stores `user:<id>` as text and needs no
+reshaping.
+
+Format: **12 characters of lowercase Crockford base32** (`0-9a-z` less `i`, `l`,
+`o`, `u`), drawn from a `CryptoRng`. Three constraints pick that alphabet, and
+each rules something out:
+
+- The id becomes a directory name under `<state_dir>/server/users/<id>/`, and
+  macOS APFS is case-insensitive by default — so a case-*sensitive* alphabet
+  like base62 could collide two distinct ids on one filesystem.
+- It appears in URLs and logs, so it must need no escaping.
+- Crockford's excluded letters remove the transcription ambiguity that matters
+  the first time somebody reads an id out of a log.
+
+12 characters is 60 bits: a collision becomes likely somewhere past a billion
+accounts, which is several orders of magnitude of headroom over any plausible
+deployment. It is not a secret and not a credential — unguessability here is
+defence in depth, not a boundary.
+
 `Principal::Anonymous`, which is what every request carries when
-`auth.enabled = false`, resolves to user 1. Existing single-user deployments
-keep working unchanged, which PRODUCT.md's "auth is on by default, but" story
-depends on.
+`auth.enabled = false`, resolves to the bootstrap account. Existing single-user
+deployments keep working unchanged, which PRODUCT.md's "auth is on by default,
+but" story depends on.
 
 Grouping users — teams, shared ownership, delegated administration — is out of
 scope here and needs nothing from this schema. A deployment that wants it can
@@ -69,16 +93,22 @@ KEY` today, which must become composite:
 | Plain `user_id` column — 3 | `memories`, `github_credentials`, `journal_logs` |
 | Already scoped | `auth_tokens`, `auth_device_codes` — both carry `principal` |
 | Scoped through a parent | `journal_events`, `journal_snapshots` — via `journal_logs.log_id` |
-| Identity root | `auth_users` |
+| Identity root, PK retyped | `auth_users` — `id` becomes `TEXT PRIMARY KEY` |
 | Deployment config | `github_app` |
 | Dropped | `vendors` |
 
-**SQLite cannot alter a primary key.** Those thirteen are create-new / copy /
-drop / rename rebuilds on the SQLite side and plain `ALTER` on PostgreSQL. The
-two migration directories must declare identical versions and descriptions or
-`migrations_are_in_parity` fails CI (`server/src/db/mod.rs`). Backfill is
-`DEFAULT 1` throughout: every row that exists belongs to the only user there has
-ever been.
+**SQLite cannot alter a primary key.** Those thirteen, plus `auth_users`, are
+fourteen create-new / copy / drop / rename rebuilds on the SQLite side, and
+plain `ALTER` on PostgreSQL. The two migration directories must declare
+identical versions and descriptions or `migrations_are_in_parity` fails CI
+(`server/src/db/mod.rs`).
+
+Backfill: every row that exists belongs to the only account there has ever been,
+so `auth_users.id` becomes `CAST(id AS TEXT)` — `'1'` for the bootstrap row —
+and every scoped table backfills to that same literal. Deployments created after
+this migration get a random id from `create_user` like any other account; only
+an upgraded deployment carries `'1'`, and it is a legitimate id rather than a
+sentinel.
 
 Four of these entries are decisions rather than mechanics.
 
@@ -231,7 +261,8 @@ account-management surface of its own.
 provisions its own accounts inserts through the method that is already there.
 `role` and `disabled_at` are **not** added to `auth_users`; a deployment that
 needs a role model owns it, in its own tables, with `UserResolver` as the
-enforcement point on the auth path. `auth_users` is unchanged by this design.
+enforcement point on the auth path. `auth_users` gains no columns here — its
+`id` is retyped to `TEXT`, and nothing else about it changes.
 
 Three additions make that seam usable from outside the crate:
 
@@ -270,8 +301,11 @@ the client already knows whose token it is holding.
 
 ## Risks
 
-- **The thirteen table rebuilds** are the most error-prone piece of the work.
+- **The fourteen table rebuilds** are the most error-prone piece of the work.
   Each needs its data preservation asserted by a test, in both dialects.
+- **Retyping `auth_users.id`** touches `Principal`, every `to_db`/`from_db`
+  round trip, and both principal-bearing auth tables. It is a small change in a
+  place where a mistake logs everyone out.
 - **Per-user provider registries** mean each active user holds their own
   provider HTTP clients, where today the deployment holds one set. Fine at the
   intended scale; worth watching.
@@ -284,14 +318,19 @@ the client already knows whose token it is holding.
 
 ## Work breakdown
 
-Eight changes, in dependency order. The first and third are the large ones.
+Nine changes, in dependency order. Items 2, 3 and 4 are the large ones.
 
-1. Schema: 13 composite-key rebuilds, 3 column adds, drop `vendors`, backfill to
-   user 1 — both dialects, in parity.
-2. Scope the stores: constructor-bound `user_id` across 143 `sqlx::query` sites.
-3. `UserServices` + the lazy registry; refactor the composition root.
-4. Per-user `SessionSupervisor` and journal scoping.
-5. Per-user vendor map and event channel.
-6. Lazy per-user model-card seeding.
-7. The isolation harness and the CI static check.
-8. Extension-point traits, `routes()`, and documentation.
+1. `UserId` + random id generation; retype `auth_users.id` and `Principal`.
+2. Schema: 13 composite-key rebuilds, 3 column adds, drop `vendors`, backfill to
+   the bootstrap account's id — both dialects, in parity.
+3. Scope the stores: constructor-bound `user_id` across 143 `sqlx::query` sites.
+4. `UserServices` + the lazy registry; refactor the composition root.
+5. Per-user `SessionSupervisor` and journal scoping.
+6. Per-user vendor map and event channel.
+7. Lazy per-user model-card seeding.
+8. The isolation harness and the CI static check.
+9. Extension-point traits, `routes()`, and documentation.
+
+Items 1–3 plus 8 are the data tier and produce a working, shippable server on
+their own: every query scoped, behaviour unchanged, isolation proven. That is
+the first implementation plan; the runtime tier follows as a second.
