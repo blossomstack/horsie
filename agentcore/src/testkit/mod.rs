@@ -33,20 +33,25 @@ pub struct RequestSummary {
     pub roles: Vec<Role>,
     pub tool_call_ids: Vec<String>,
     pub tool_result_ids: Vec<String>,
+    /// Every text part in the prompt, in order. What the model was *told*, as
+    /// opposed to how the prompt was shaped — the only way to assert that
+    /// content assembled outside the transcript (a translated hook record, say)
+    /// actually arrived.
+    pub texts: Vec<String>,
 }
 
 impl RequestSummary {
     fn of(conversation_id: &str, messages: &[Message]) -> Self {
         let mut tool_call_ids = Vec::new();
         let mut tool_result_ids = Vec::new();
+        let mut texts = Vec::new();
         for message in messages {
             for part in &message.parts {
                 match part {
                     ContentPart::ToolCall(c) => tool_call_ids.push(c.id.clone()),
                     ContentPart::ToolResult(r) => tool_result_ids.push(r.tool_call_id.clone()),
-                    ContentPart::Text(_)
-                    | ContentPart::Thinking(_)
-                    | ContentPart::SubAgentResult(_) => {}
+                    ContentPart::Text(t) => texts.push(t.text.clone()),
+                    ContentPart::Thinking(_) | ContentPart::SubAgentResult(_) => {}
                 }
             }
         }
@@ -56,6 +61,7 @@ impl RequestSummary {
             roles: messages.iter().map(|m| m.role.clone()).collect(),
             tool_call_ids,
             tool_result_ids,
+            texts,
         }
     }
 }
