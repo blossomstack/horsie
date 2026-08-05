@@ -11,6 +11,7 @@
 //! schema change. The database itself is SQLite or PostgreSQL, selected by
 //! `database.url`; see `crate::db`.
 
+use crate::auth::UserId;
 use crate::config::ConfigStore;
 use crate::db::Db;
 use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
@@ -49,6 +50,9 @@ pub struct OpenedConfig {
 
 pub struct DbConfigStore {
     db: Db,
+    /// Bound once, here, rather than passed per call: there is then no call
+    /// site that *can* hand a method the wrong account.
+    user: UserId,
     registry: SharedProviderRegistry,
     /// The name new sessions prefer. A preference, not a validated reference:
     /// the agent that answers to it may connect long after boot.
@@ -62,8 +66,8 @@ pub struct DbConfigStore {
 impl DbConfigStore {
     /// Open (creating if absent) the database, run migrations, and build the
     /// live registry + vendors from it.
-    pub async fn open(db_url: &str, deps: StoreDeps) -> Result<OpenedConfig, String> {
-        Self::open_with(db_url, DEFAULT_MAX_CONNECTIONS, deps).await
+    pub async fn open(db_url: &str, deps: StoreDeps, user: UserId) -> Result<OpenedConfig, String> {
+        Self::open_with(db_url, DEFAULT_MAX_CONNECTIONS, deps, user).await
     }
 
     /// As [`open`](Self::open), with an explicit pool size.
@@ -71,24 +75,26 @@ impl DbConfigStore {
         db_url: &str,
         max_connections: u32,
         deps: StoreDeps,
+        user: UserId,
     ) -> Result<OpenedConfig, String> {
-        Self::open_on(Db::open(db_url, max_connections).await?, deps).await
+        Self::open_on(Db::open(db_url, max_connections).await?, deps, user).await
     }
 
     /// Build the store on an already-open database.
     ///
     /// The seam tests use, so they exercise whichever backend the run selected
     /// rather than a hardcoded SQLite URL.
-    pub async fn open_on(db: Db, deps: StoreDeps) -> Result<OpenedConfig, String> {
-        let provs = read_providers(&db, db.pool())
+    pub async fn open_on(db: Db, deps: StoreDeps, user: UserId) -> Result<OpenedConfig, String> {
+        let provs = read_providers(&db, db.pool(), &user)
             .await
             .map_err(|e| e.to_string())?;
-        let mods = read_models(&db, db.pool())
+        let mods = read_models(&db, db.pool(), &user)
             .await
             .map_err(|e| e.to_string())?;
         let chatgpt = live_chatgpt_tokens(
             &db,
-            read_provider_oauth(&db, db.pool())
+            &user,
+            read_provider_oauth(&db, db.pool(), &user)
                 .await
                 .map_err(|e| e.to_string())?,
         );
@@ -103,13 +109,14 @@ impl DbConfigStore {
         // Kept as a preference even when no agent has connected yet — an agent
         // announcing this name later makes it take effect, so validating it
         // against the (empty) live map at boot would be wrong.
-        let default_vendor = read_setting(&db, db.pool(), "default_vendor")
+        let default_vendor = read_setting(&db, db.pool(), &user, "default_vendor")
             .await
             .map_err(|e| e.to_string())?
             .unwrap_or_else(|| "local".into());
 
         let store = Arc::new(Self {
             db: db.clone(),
+            user,
             registry: registry.clone(),
             default_vendor: RwLock::new(default_vendor),
             vendors: vendors.clone(),
@@ -124,16 +131,16 @@ impl DbConfigStore {
     }
 
     async fn build_view(&self) -> Result<SettingsView, String> {
-        let provs = read_providers(&self.db, self.db.pool())
+        let provs = read_providers(&self.db, self.db.pool(), &self.user)
             .await
             .map_err(|e| e.to_string())?;
-        let mods = read_models(&self.db, self.db.pool())
+        let mods = read_models(&self.db, self.db.pool(), &self.user)
             .await
             .map_err(|e| e.to_string())?;
         // A ChatGPT plan's credential lives in `provider_oauth`, not in the
         // provider row, so the view cannot answer "is this usable" from
         // `providers` alone.
-        let signed_in = read_provider_oauth(&self.db, self.db.pool())
+        let signed_in = read_provider_oauth(&self.db, self.db.pool(), &self.user)
             .await
             .map_err(|e| e.to_string())?;
         let default_vendor = self.default_vendor();
@@ -179,7 +186,7 @@ impl ConfigStore for DbConfigStore {
         let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
 
         if let Some(providers) = &update.providers {
-            let existing = read_providers(&self.db, &mut *tx)
+            let existing = read_providers(&self.db, &mut *tx, &self.user)
                 .await
                 .map_err(|e| e.to_string())?;
             let keep: HashMap<&str, &str> = existing
@@ -188,7 +195,11 @@ impl ConfigStore for DbConfigStore {
                 .collect();
             let mut seen = HashSet::new();
             let mut chatgpt_now = HashSet::new();
-            sqlx::query(&self.db.q("DELETE FROM providers"))
+            // Scoped, and load-bearing: providers are rewritten wholesale, so
+            // an unscoped DELETE here would wipe every other account's
+            // providers on any settings save.
+            sqlx::query(&self.db.q("DELETE FROM providers WHERE user_id = ?"))
+                .bind(self.user.as_str())
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -222,8 +233,9 @@ impl ConfigStore for DbConfigStore {
                     resolve_secret(&p.api_key, keep.get(name).copied())
                 };
                 sqlx::query(&self.db.q(
-                    "INSERT INTO providers (name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO providers (user_id, name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?, ?)",
                 ))
+                .bind(self.user.as_str())
                 .bind(name)
                 .bind(&p.kind)
                 .bind(trimmed(&p.base_url))
@@ -240,24 +252,31 @@ impl ConfigStore for DbConfigStore {
             // rewritten wholesale), or it is still there under a kind that no
             // longer signs in. Keeping only the names that are ChatGPT plans
             // *now* covers both without asking which happened.
-            let orphans: Vec<String> = read_provider_oauth(&self.db, &mut *tx)
+            let orphans: Vec<String> = read_provider_oauth(&self.db, &mut *tx, &self.user)
                 .await
                 .map_err(|e| e.to_string())?
                 .into_keys()
                 .filter(|p| !chatgpt_now.contains(p))
                 .collect();
             for provider in orphans {
-                sqlx::query(&self.db.q("DELETE FROM provider_oauth WHERE provider = ?"))
-                    .bind(&provider)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                sqlx::query(
+                    &self
+                        .db
+                        .q("DELETE FROM provider_oauth WHERE user_id = ? AND provider = ?"),
+                )
+                .bind(self.user.as_str())
+                .bind(&provider)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
             }
         }
 
         if let Some(models) = &update.models {
             let mut seen = HashSet::new();
-            sqlx::query(&self.db.q("DELETE FROM models"))
+            // Scoped for the same reason as the provider rewrite above.
+            sqlx::query(&self.db.q("DELETE FROM models WHERE user_id = ?"))
+                .bind(self.user.as_str())
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -298,8 +317,9 @@ impl ConfigStore for DbConfigStore {
                     ));
                 }
                 sqlx::query(&self.db.q(
-                    "INSERT INTO models (alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO models (user_id, alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ))
+                .bind(self.user.as_str())
                 .bind(alias)
                 .bind(&m.provider)
                 .bind(m.model_id.trim())
@@ -324,9 +344,10 @@ impl ConfigStore for DbConfigStore {
             // set, and rejecting it here would make the setting unusable
             // before its agent is running.
             sqlx::query(&self.db.q(
-                "INSERT INTO settings (key, value) VALUES ('default_vendor', ?) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                "INSERT INTO settings (user_id, key, value) VALUES (?, 'default_vendor', ?) \
+                 ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
             ))
+            .bind(self.user.as_str())
             .bind(dv)
             .execute(&mut *tx)
             .await
@@ -335,15 +356,16 @@ impl ConfigStore for DbConfigStore {
 
         // Validate providers/models by building the registry from the new state
         // before committing — a bad edit rolls back untouched.
-        let provs = read_providers(&self.db, &mut *tx)
+        let provs = read_providers(&self.db, &mut *tx, &self.user)
             .await
             .map_err(|e| e.to_string())?;
-        let mods = read_models(&self.db, &mut *tx)
+        let mods = read_models(&self.db, &mut *tx, &self.user)
             .await
             .map_err(|e| e.to_string())?;
         let chatgpt = live_chatgpt_tokens(
             &self.db,
-            read_provider_oauth(&self.db, &mut *tx)
+            &self.user,
+            read_provider_oauth(&self.db, &mut *tx, &self.user)
                 .await
                 .map_err(|e| e.to_string())?,
         );
@@ -598,6 +620,9 @@ fn build_chatgpt(
 /// runs outside a settings edit.
 struct DbTokenStore {
     db: Db,
+    /// Whose credential this is. A refreshed token must land back in the
+    /// account it was refreshed for.
+    user: UserId,
     provider: String,
 }
 
@@ -615,7 +640,7 @@ impl std::fmt::Debug for DbTokenStore {
 #[async_trait]
 impl TokenStore for DbTokenStore {
     async fn save(&self, tokens: &StoredTokens) -> Result<(), String> {
-        write_provider_oauth(&self.db, &self.provider, tokens)
+        write_provider_oauth(&self.db, &self.user, &self.provider, tokens)
             .await
             .map_err(|e| e.to_string())
     }
@@ -624,6 +649,7 @@ impl TokenStore for DbTokenStore {
 /// Upsert one provider's credential.
 pub(crate) async fn write_provider_oauth(
     db: &Db,
+    user: &UserId,
     provider: &str,
     tokens: &StoredTokens,
 ) -> Result<(), sqlx::Error> {
@@ -635,12 +661,13 @@ pub(crate) async fn write_provider_oauth(
     )
     .unwrap_or(i64::MAX);
     sqlx::query(&db.q(
-        "INSERT INTO provider_oauth (provider, access, refresh, expires_at, account_id, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(provider) DO UPDATE SET access = excluded.access, \
+        "INSERT INTO provider_oauth (user_id, provider, access, refresh, expires_at, account_id, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(user_id, provider) DO UPDATE SET access = excluded.access, \
          refresh = excluded.refresh, expires_at = excluded.expires_at, \
          account_id = excluded.account_id, updated_at = excluded.updated_at",
     ))
+    .bind(user.as_str())
     .bind(provider)
     .bind(&tokens.access)
     .bind(&tokens.refresh)
@@ -655,6 +682,7 @@ pub(crate) async fn write_provider_oauth(
 /// Build the live `ChatGptTokens` for every stored credential.
 fn live_chatgpt_tokens(
     db: &Db,
+    user: &UserId,
     stored: HashMap<String, StoredTokens>,
 ) -> HashMap<String, Arc<ChatGptTokens>> {
     stored
@@ -662,6 +690,7 @@ fn live_chatgpt_tokens(
         .map(|(provider, tokens)| {
             let store = Arc::new(DbTokenStore {
                 db: db.clone(),
+                user: user.clone(),
                 provider: provider.clone(),
             });
             (
@@ -758,12 +787,16 @@ pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 async fn read_provider_oauth<'e, E>(
     db: &Db,
     ex: E,
+    user: &UserId,
 ) -> Result<HashMap<String, StoredTokens>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
-    let sql = db.q("SELECT provider, access, refresh, expires_at, account_id FROM provider_oauth");
-    let rows = sqlx::query(&sql).fetch_all(ex).await?;
+    let sql = db.q(
+        "SELECT provider, access, refresh, expires_at, account_id FROM provider_oauth \
+         WHERE user_id = ?",
+    );
+    let rows = sqlx::query(&sql).bind(user.as_str()).fetch_all(ex).await?;
     let mut out = HashMap::with_capacity(rows.len());
     for r in &rows {
         out.insert(
@@ -779,14 +812,19 @@ where
     Ok(out)
 }
 
-async fn read_providers<'e, E>(db: &Db, ex: E) -> Result<Vec<ProviderRow>, sqlx::Error>
+async fn read_providers<'e, E>(
+    db: &Db,
+    ex: E,
+    user: &UserId,
+) -> Result<Vec<ProviderRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
     let sql = db.q(
-        "SELECT name, kind, base_url, api_key, keep_thinking_signature FROM providers ORDER BY name",
+        "SELECT name, kind, base_url, api_key, keep_thinking_signature FROM providers \
+         WHERE user_id = ? ORDER BY name",
     );
-    let rows = sqlx::query(&sql).fetch_all(ex).await?;
+    let rows = sqlx::query(&sql).bind(user.as_str()).fetch_all(ex).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ProviderRow {
@@ -800,14 +838,14 @@ where
     Ok(out)
 }
 
-async fn read_models<'e, E>(db: &Db, ex: E) -> Result<Vec<ModelRow>, sqlx::Error>
+async fn read_models<'e, E>(db: &Db, ex: E, user: &UserId) -> Result<Vec<ModelRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
     let sql = db.q(
-        "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking FROM models ORDER BY alias",
+        "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking FROM models WHERE user_id = ? ORDER BY alias",
     );
-    let rows = sqlx::query(&sql).fetch_all(ex).await?;
+    let rows = sqlx::query(&sql).bind(user.as_str()).fetch_all(ex).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(ModelRow {
@@ -826,12 +864,21 @@ where
     Ok(out)
 }
 
-async fn read_setting<'e, E>(db: &Db, ex: E, key: &str) -> Result<Option<String>, sqlx::Error>
+async fn read_setting<'e, E>(
+    db: &Db,
+    ex: E,
+    user: &UserId,
+    key: &str,
+) -> Result<Option<String>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
-    let sql = db.q("SELECT value FROM settings WHERE key = ?");
-    let row = sqlx::query(&sql).bind(key).fetch_optional(ex).await?;
+    let sql = db.q("SELECT value FROM settings WHERE user_id = ? AND key = ?");
+    let row = sqlx::query(&sql)
+        .bind(user.as_str())
+        .bind(key)
+        .fetch_optional(ex)
+        .await?;
     match row {
         Some(r) => Ok(Some(r.try_get("value")?)),
         None => Ok(None),
@@ -864,9 +911,13 @@ mod tests {
     // The migration-version uniqueness check that used to live here now covers
     // both dialect directories, in `crate::db::tests`.
     async fn open() -> OpenedConfig {
-        DbConfigStore::open_on(crate::db::testing::db().await, StoreDeps { info: info() })
-            .await
-            .unwrap()
+        DbConfigStore::open_on(
+            crate::db::testing::db().await,
+            StoreDeps { info: info() },
+            UserId::new("1"),
+        )
+        .await
+        .unwrap()
     }
 
     /// The flag has to survive the save→read→build round trip, because it is
@@ -1014,6 +1065,7 @@ mod tests {
 
         write_provider_oauth(
             &o.db,
+            &UserId::new("1"),
             "p",
             &StoredTokens {
                 access: "a".into(),
@@ -1095,6 +1147,7 @@ mod tests {
 
         write_provider_oauth(
             &o.db,
+            &UserId::new("1"),
             "p",
             &StoredTokens {
                 access: "a".into(),
@@ -1120,7 +1173,7 @@ mod tests {
             .expect("update ok");
         assert!(!view.providers[0].has_credential);
         assert!(
-            read_provider_oauth(&o.db, o.db.pool())
+            read_provider_oauth(&o.db, o.db.pool(), &UserId::new("1"))
                 .await
                 .unwrap()
                 .is_empty(),
@@ -1144,6 +1197,7 @@ mod tests {
             .expect("update ok");
         write_provider_oauth(
             &o.db,
+            &UserId::new("1"),
             "p",
             &StoredTokens {
                 access: "a".into(),
@@ -1164,7 +1218,9 @@ mod tests {
             .await
             .expect("update ok");
 
-        let left = read_provider_oauth(&o.db, o.db.pool()).await.unwrap();
+        let left = read_provider_oauth(&o.db, o.db.pool(), &UserId::new("1"))
+            .await
+            .unwrap();
         assert!(
             left.is_empty(),
             "the orphaned credential survived: {left:?}"

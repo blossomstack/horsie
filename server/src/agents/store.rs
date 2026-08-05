@@ -2,6 +2,7 @@
 //! List-typed columns are JSON; `AgentRepo` is the storage twin of the wire
 //! `session_api::RepoConfig` (protocol types are not storage types).
 
+use crate::auth::UserId;
 use crate::db::Db;
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -36,19 +37,20 @@ pub struct AgentRow {
 
 pub struct AgentStore {
     db: Db,
+    /// Bound once, here, rather than passed per call.
+    user: UserId,
 }
 
 impl AgentStore {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, user: UserId) -> Self {
+        Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<AgentRow>, String> {
-        let rows = sqlx::query(
-            &self
-                .db
-                .q(&format!("SELECT {COLS} FROM agents ORDER BY name")),
-        )
+        let rows = sqlx::query(&self.db.q(&format!(
+            "SELECT {COLS} FROM agents WHERE user_id = ? ORDER BY name"
+        )))
+        .bind(self.user.as_str())
         .fetch_all(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
@@ -56,11 +58,10 @@ impl AgentStore {
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<AgentRow>, String> {
-        let row = sqlx::query(
-            &self
-                .db
-                .q(&format!("SELECT {COLS} FROM agents WHERE name = ?")),
-        )
+        let row = sqlx::query(&self.db.q(&format!(
+            "SELECT {COLS} FROM agents WHERE user_id = ? AND name = ?"
+        )))
+        .bind(self.user.as_str())
         .bind(name)
         .fetch_optional(self.db.pool())
         .await
@@ -72,8 +73,9 @@ impl AgentStore {
     /// would discard the existing preset).
     pub async fn insert(&self, row: &AgentRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO agents ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO agents (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
+        .bind(self.user.as_str())
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.model)
@@ -95,7 +97,7 @@ impl AgentStore {
         let res = sqlx::query(&self.db.q(
             "UPDATE agents SET description = ?, model = ?, repos = ?, \
              plugins = ?, mcp_servers = ?, memory_spaces = ?, thinking_effort = ?, \
-             updated_at = ? WHERE name = ?",
+             updated_at = ? WHERE user_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.model)
@@ -105,6 +107,7 @@ impl AgentStore {
         .bind(to_json(&row.memory_spaces)?)
         .bind(&row.thinking_effort)
         .bind(&row.updated_at)
+        .bind(self.user.as_str())
         .bind(&row.name)
         .execute(self.db.pool())
         .await
@@ -113,11 +116,16 @@ impl AgentStore {
     }
 
     pub async fn delete(&self, name: &str) -> Result<bool, String> {
-        let res = sqlx::query(&self.db.q("DELETE FROM agents WHERE name = ?"))
-            .bind(name)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        let res = sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM agents WHERE user_id = ? AND name = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(name)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 }
@@ -158,7 +166,7 @@ mod tests {
     async fn store() -> (AgentStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
-        (AgentStore::new(pool), tmp)
+        (AgentStore::new(pool, crate::auth::UserId::new("1")), tmp)
     }
 
     fn row(name: &str) -> AgentRow {

@@ -88,97 +88,20 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         journal_backend: journal_backend.as_str().to_string(),
     };
-    let opened = DbConfigStore::open_with(
+    // The pool comes up on its own first. Every store below binds a user, and
+    // the user comes from the account `bootstrap` creates — which needs the
+    // database. So the order is: open, bootstrap, then build everything scoped.
+    let db = horsie_server::db::Db::open(
         &db_url,
         cfg.database
             .max_connections
             .unwrap_or(horsie_server::config::DEFAULT_MAX_CONNECTIONS),
-        StoreDeps { info },
     )
     .await
     .map_err(BootError::Config)?;
 
-    // Built after the store, because the database backend shares its handle —
-    // one database, one migrator, one set of connections.
-    //
-    // Which journal a deployment gets is load-bearing and partly defaulted, so
-    // say it out loud: switching an existing deployment from `file` to
-    // `database` starts from an empty log and leaves the old sessions on disk.
-    let journal: Arc<dyn Journal> = match journal_backend {
-        JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
-        JournalBackend::Database => Arc::new(SqlJournal::new(opened.db.clone())),
-    };
-    eprintln!(
-        "journal backend: {} ({})",
-        journal_backend.as_str(),
-        match journal_backend {
-            JournalBackend::File => data_dir.join("actors").display().to_string(),
-            JournalBackend::Database => redact_db_url(&db_url),
-        }
-    );
-
-    // Seed the model-card catalog: bundled defaults plus an optional operator
-    // file. Seed-file parse/read errors are fatal (operator input should fail
-    // loud); DB errors only warn — the admin API stays usable to fix state.
-    // Insert-if-missing semantics mean admin edits survive every restart.
-    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(opened.db.clone()));
-    let seed_path = cli
-        .model_cards_seed
-        .clone()
-        .or_else(|| std::env::var_os("HORSIE_MODEL_CARDS_SEED").map(PathBuf::from));
-    let seeding = (|| -> Result<Vec<horsie_models::model_cards::ModelCardInput>, BootError> {
-        let mut seeds = model_cards::bundled_seed().map_err(BootError::Config)?;
-        if let Some(path) = seed_path {
-            seeds.extend(model_cards::load_seed_file(&path).map_err(BootError::Config)?);
-        }
-        Ok(seeds)
-    })();
-    match seeding {
-        Ok(seeds) => {
-            if let Err(e) = model_cards.seed_if_missing(&seeds).await {
-                eprintln!("warning: seeding model cards failed: {e:?}");
-            }
-        }
-        Err(e) => return Err(e),
-    }
-
-    // Vendor agents publish themselves into the same map sessions select from,
-    // exactly as the local-daemon registry does for dial-in runtimes.
-    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
-        opened.vendors.clone(),
-    ));
-
-    let github = Arc::new(horsie_server::github::GithubService::new(
-        horsie_server::github::GithubStore::new(opened.db.clone()),
-        horsie_server::github::GithubApi::new(),
-    ));
-    let mcp = Arc::new(horsie_server::mcp::McpService::new(
-        horsie_server::mcp::McpStore::new(opened.db.clone()),
-        github.clone(),
-    ));
-    let plugins = Arc::new(PluginService::new(
-        PluginStore::new(opened.db.clone()),
-        MarketplaceStore::new(opened.db.clone()),
-        ArtifactStore::new(data_dir.join("plugins")),
-        artifact_secret(),
-    ));
-    let memory = Arc::new(horsie_server::memory::MemoryService::new(
-        horsie_server::memory::MemoryStore::new(opened.db.clone()),
-    ));
-    let agents = Arc::new(horsie_server::agents::AgentService::new(
-        horsie_server::agents::AgentStore::new(opened.db.clone()),
-        opened.store.clone(),
-    ));
-    let routines = Arc::new(horsie_server::routines::RoutineService::new(
-        horsie_server::routines::RoutineStore::new(opened.db.clone()),
-        agents.clone(),
-    ));
-    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
-        horsie_server::environments::EnvironmentStore::new(opened.db.clone()),
-    ));
-
     let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(opened.db.clone()),
+        horsie_server::auth::AuthStore::new(db.clone()),
         horsie_server::auth::AuthDeps {
             enabled: config::auth_enabled(&cfg),
             state_dir: state_dir.clone(),
@@ -214,6 +137,100 @@ async fn run(cli: Cli) -> Result<(), BootError> {
         );
     }
 
+    // The scope every store below is built for. One account today; resolving it
+    // per request is the next change, not this one.
+    let user = auth
+        .sole_user()
+        .await
+        .map_err(BootError::Config)?
+        .ok_or_else(|| BootError::Config("no account exists after bootstrap".into()))?;
+
+    let opened = DbConfigStore::open_on(db, StoreDeps { info }, user.clone())
+        .await
+        .map_err(BootError::Config)?;
+
+    // Built after the store, because the database backend shares its handle —
+    // one database, one migrator, one set of connections.
+    //
+    // Which journal a deployment gets is load-bearing and partly defaulted, so
+    // say it out loud: switching an existing deployment from `file` to
+    // `database` starts from an empty log and leaves the old sessions on disk.
+    let journal: Arc<dyn Journal> = match journal_backend {
+        JournalBackend::File => Arc::new(FileJournal::new(data_dir.clone())),
+        JournalBackend::Database => Arc::new(SqlJournal::new(opened.db.clone(), user.clone())),
+    };
+    eprintln!(
+        "journal backend: {} ({})",
+        journal_backend.as_str(),
+        match journal_backend {
+            JournalBackend::File => data_dir.join("actors").display().to_string(),
+            JournalBackend::Database => redact_db_url(&db_url),
+        }
+    );
+
+    // Seed the model-card catalog: bundled defaults plus an optional operator
+    // file. Seed-file parse/read errors are fatal (operator input should fail
+    // loud); DB errors only warn — the admin API stays usable to fix state.
+    // Insert-if-missing semantics mean admin edits survive every restart.
+    let model_cards = std::sync::Arc::new(model_cards::ModelCardStore::new(
+        opened.db.clone(),
+        user.clone(),
+    ));
+    let seed_path = cli
+        .model_cards_seed
+        .clone()
+        .or_else(|| std::env::var_os("HORSIE_MODEL_CARDS_SEED").map(PathBuf::from));
+    let seeding = (|| -> Result<Vec<horsie_models::model_cards::ModelCardInput>, BootError> {
+        let mut seeds = model_cards::bundled_seed().map_err(BootError::Config)?;
+        if let Some(path) = seed_path {
+            seeds.extend(model_cards::load_seed_file(&path).map_err(BootError::Config)?);
+        }
+        Ok(seeds)
+    })();
+    match seeding {
+        Ok(seeds) => {
+            if let Err(e) = model_cards.seed_if_missing(&seeds).await {
+                eprintln!("warning: seeding model cards failed: {e:?}");
+            }
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Vendor agents publish themselves into the same map sessions select from,
+    // exactly as the local-daemon registry does for dial-in runtimes.
+    let vendor_agents = Arc::new(horsie_server::runtime_vendor::RuntimeVendorRegistry::new(
+        opened.vendors.clone(),
+    ));
+
+    let github = Arc::new(horsie_server::github::GithubService::new(
+        horsie_server::github::GithubStore::new(opened.db.clone(), user.clone()),
+        horsie_server::github::GithubApi::new(),
+    ));
+    let mcp = Arc::new(horsie_server::mcp::McpService::new(
+        horsie_server::mcp::McpStore::new(opened.db.clone(), user.clone()),
+        github.clone(),
+    ));
+    let plugins = Arc::new(PluginService::new(
+        PluginStore::new(opened.db.clone(), user.clone()),
+        MarketplaceStore::new(opened.db.clone(), user.clone()),
+        ArtifactStore::new(data_dir.join("plugins")),
+        artifact_secret(),
+    ));
+    let memory = Arc::new(horsie_server::memory::MemoryService::new(
+        horsie_server::memory::MemoryStore::new(opened.db.clone(), user.clone()),
+    ));
+    let agents = Arc::new(horsie_server::agents::AgentService::new(
+        horsie_server::agents::AgentStore::new(opened.db.clone(), user.clone()),
+        opened.store.clone(),
+    ));
+    let routines = Arc::new(horsie_server::routines::RoutineService::new(
+        horsie_server::routines::RoutineStore::new(opened.db.clone(), user.clone()),
+        agents.clone(),
+    ));
+    let environments = Arc::new(horsie_server::environments::EnvironmentService::new(
+        horsie_server::environments::EnvironmentStore::new(opened.db.clone(), user.clone()),
+    ));
+
     let runtimes = Arc::new(horsie_server::runtime_manager::RuntimeManager::new(
         horsie_server::runtime_manager::RuntimeDeps {
             vendors: opened.vendors.clone(),
@@ -240,7 +257,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
 
     // Triggering a routine is one code path; the timer is a clock on top of it.
     let workflows = Arc::new(horsie_server::workflows::WorkflowService::new(
-        horsie_server::workflows::WorkflowStore::new(opened.db.clone()),
+        horsie_server::workflows::WorkflowStore::new(opened.db.clone(), user.clone()),
         agents.clone(),
     ));
     let routine_runner = Arc::new(horsie_server::routines::RoutineRunner::new(
@@ -259,6 +276,7 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     let chatgpt = std::sync::Arc::new(
         horsie_server::config::chatgpt_login::ChatGptLoginService::new(
             opened.db.clone(),
+            user.clone(),
             opened.store.clone(),
         ),
     );

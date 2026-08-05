@@ -7,6 +7,7 @@
 //! there is nothing to brute-force — whereas passwords, which have no such
 //! entropy, use argon2id (see `password.rs`).
 
+use crate::auth::UserId;
 use base64::Engine;
 use rand::Rng;
 use sha2::{Digest, Sha256};
@@ -67,7 +68,7 @@ impl TokenKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Principal {
     Anonymous,
-    User(i64),
+    User(UserId),
 }
 
 impl Principal {
@@ -83,10 +84,9 @@ impl Principal {
             return Ok(Self::Anonymous);
         }
         match s.split_once(':') {
-            Some(("user", id)) => id
-                .parse::<i64>()
-                .map(Self::User)
-                .map_err(|_| format!("bad user id in principal {s:?}")),
+            // No parse step: the id is already the string form. An empty one is
+            // still rejected, because `user:` names no account.
+            Some(("user", id)) if !id.is_empty() => Ok(Self::User(UserId::new(id))),
             _ => Err(format!("unrecognized principal {s:?}")),
         }
     }
@@ -186,9 +186,15 @@ mod tests {
 
     #[test]
     fn principals_round_trip_through_the_database_encoding() {
-        assert_eq!(Principal::User(7).to_db(), "user:7");
-        assert_eq!(Principal::from_db("user:7"), Ok(Principal::User(7)));
-        assert!(Principal::from_db("user:seven").is_err());
+        let id = UserId::new("k3m9x0abc7qr");
+        assert_eq!(Principal::User(id.clone()).to_db(), "user:k3m9x0abc7qr");
+        assert_eq!(
+            Principal::from_db("user:k3m9x0abc7qr"),
+            Ok(Principal::User(id))
+        );
+        // Any non-empty id is now well-formed -- the id is opaque, so there is
+        // nothing left to parse and nothing to reject but emptiness.
+        assert!(Principal::from_db("user:").is_err());
         assert!(Principal::from_db("wat").is_err());
     }
 }

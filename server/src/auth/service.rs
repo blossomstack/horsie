@@ -99,6 +99,14 @@ impl AuthService {
         }
     }
 
+    /// The id of the only account, or `None` when there is none yet.
+    ///
+    /// The scope every service is built for while this deployment has one
+    /// account. Replaced outright when a scope is resolved per request.
+    pub async fn sole_user(&self) -> Result<Option<crate::auth::UserId>, String> {
+        self.store.sole_user().await
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -108,17 +116,32 @@ impl AuthService {
     /// `<state_dir>/initial-admin-password` (0600): an operator whose
     /// container logs have rotated would otherwise be locked out of their own
     /// deployment with no recovery short of editing SQLite.
+    ///
+    /// The account is created **even when authentication is disabled**, because
+    /// it is not only a credential — it is the scope every stored row belongs
+    /// to, so a deployment without one has nowhere to put its data. What being
+    /// disabled changes is only whether a password is *announced*: printing one
+    /// nobody can use is noise. The file is still written either way, so
+    /// turning authentication on later is a login rather than a lockout.
     pub async fn bootstrap(&self) -> Result<Option<String>, String> {
-        if !self.enabled || self.store.user_count().await? > 0 {
+        if self.store.user_count().await? > 0 {
             return Ok(None);
         }
         let plain = password::generate_initial();
         let hash = password::hash(&plain)?;
+        // `UserId::bootstrap`, not a random id: this is the first account, and
+        // the migration already backfilled every pre-existing row to it.
         self.store
-            .create_user(ADMIN_USERNAME, &hash, true, now_secs())
+            .create_user(
+                &crate::auth::UserId::bootstrap(),
+                ADMIN_USERNAME,
+                &hash,
+                true,
+                now_secs(),
+            )
             .await?;
         write_secret_file(&self.state_dir.join(INITIAL_PASSWORD_FILE), &plain)?;
-        Ok(Some(plain))
+        Ok(self.enabled.then_some(plain))
     }
 
     pub async fn must_change_password(&self) -> Result<bool, String> {
@@ -544,6 +567,7 @@ fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<(), Strin
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::auth::UserId;
 
     /// File-backed, not `sqlite::memory:` — see the note in `store.rs`'s tests.
     /// The temp dir doubles as the service's state dir, so the generated
@@ -575,12 +599,65 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), generated);
     }
 
+    /// The first account must own what the migration backfilled, or the server
+    /// comes up unable to see its own data.
+    ///
+    /// This is not hypothetical: `0024_user_scoping.sql` backfills every
+    /// pre-existing row to `UserId::bootstrap`, and a random first id orphaned
+    /// all of it — the seeded memory space on a fresh install, and *everything*
+    /// on a deployment that had been running with authentication disabled and
+    /// so had no account row for 0023 to carry across.
     #[tokio::test]
-    async fn bootstrap_does_nothing_when_auth_is_disabled() {
+    async fn the_first_account_owns_what_the_migration_backfilled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::testing::db().await;
+        let svc = AuthService::new(
+            AuthStore::new(db.clone()),
+            AuthDeps {
+                enabled: true,
+                state_dir: tmp.path().to_path_buf(),
+            },
+        );
+        svc.bootstrap().await.unwrap();
+
+        let account = svc.sole_user().await.unwrap().expect("an account exists");
+        let backfilled: String =
+            sqlx::query_scalar(&db.q("SELECT user_id FROM memory_spaces LIMIT 1"))
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(
+            account.as_str(),
+            backfilled,
+            "the account and the backfilled rows must be the same owner"
+        );
+    }
+
+    /// With authentication off there is still an account, because the account
+    /// is the scope every stored row belongs to — a server without one has
+    /// nowhere to put its data and refuses to boot. What is suppressed is only
+    /// the announcement: a password nobody can use is noise in the log.
+    #[tokio::test]
+    async fn disabling_auth_still_creates_the_account_but_announces_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let svc = service(&tmp, false).await;
-        assert!(svc.bootstrap().await.unwrap().is_none());
-        assert!(!tmp.path().join("initial-admin-password").exists());
+
+        assert!(
+            svc.bootstrap().await.unwrap().is_none(),
+            "nothing to print when nobody can log in"
+        );
+        assert!(
+            svc.sole_user().await.unwrap().is_some(),
+            "but the scope has to exist"
+        );
+        // Written anyway, so turning authentication on later is a login rather
+        // than a lockout: by then the account exists, so `bootstrap` is a
+        // no-op and would never mint a second password.
+        assert!(
+            tmp.path().join("initial-admin-password").exists(),
+            "the recovery file is the only way back in after enabling auth"
+        );
     }
 
     #[tokio::test]
@@ -594,7 +671,10 @@ mod tests {
 
         let v = svc.verify(&secret).await.unwrap().expect("verifies");
         assert_eq!(v.kind, TokenKind::Web);
-        assert_eq!(v.principal, Principal::User(1));
+        // Against the account that bootstrap actually created, not a literal:
+        // the id is random now, so there is no id to write down here.
+        let bootstrapped = svc.sole_user().await.unwrap().expect("an account exists");
+        assert_eq!(v.principal, Principal::User(bootstrapped));
 
         // Logout revokes it.
         svc.logout(&secret).await.unwrap();
@@ -732,7 +812,7 @@ mod tests {
         ));
 
         assert!(
-            svc.approve_device(&d.user_code, &Principal::User(1))
+            svc.approve_device(&d.user_code, &Principal::User(UserId::new("1")))
                 .await
                 .unwrap()
         );
@@ -744,7 +824,7 @@ mod tests {
 
         // The access token authenticates as the approver.
         let v = svc.verify(&issued.access_token).await.unwrap().unwrap();
-        assert_eq!(v.principal, Principal::User(1));
+        assert_eq!(v.principal, Principal::User(UserId::new("1")));
         assert_eq!(v.kind, TokenKind::Access);
 
         // A consumed code cannot mint a second pair.
@@ -769,7 +849,7 @@ mod tests {
         // Answering twice is refused.
         assert!(!svc.deny_device(&d.user_code).await.unwrap());
         assert!(
-            !svc.approve_device(&d.user_code, &Principal::User(1))
+            !svc.approve_device(&d.user_code, &Principal::User(UserId::new("1")))
                 .await
                 .unwrap()
         );
@@ -805,7 +885,7 @@ mod tests {
         let svc = service(&tmp, true).await;
         svc.bootstrap().await.unwrap();
         let d = svc.start_device_authorization().await.unwrap();
-        svc.approve_device(&d.user_code, &Principal::User(1))
+        svc.approve_device(&d.user_code, &Principal::User(UserId::new("1")))
             .await
             .unwrap();
         let first = svc.poll_device_token(&d.device_code).await.unwrap();
@@ -852,7 +932,7 @@ mod tests {
         svc.bootstrap().await.unwrap();
 
         let (secret, view) = svc
-            .mint_agent_token("my-laptop", &Principal::User(1))
+            .mint_agent_token("my-laptop", &Principal::User(UserId::new("1")))
             .await
             .unwrap();
         assert!(secret.starts_with("hsk_agt_"), "{secret}");
@@ -860,7 +940,7 @@ mod tests {
 
         let v = svc.verify(&secret).await.unwrap().expect("verifies");
         assert_eq!(v.kind, TokenKind::Agent);
-        assert_eq!(v.principal, Principal::User(1));
+        assert_eq!(v.principal, Principal::User(UserId::new("1")));
 
         let listed = svc.list_agent_tokens().await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -879,7 +959,7 @@ mod tests {
         // A wall of unlabelled secrets is unrevokable in practice: nobody can
         // tell which machine a row belongs to.
         assert!(
-            svc.mint_agent_token("   ", &Principal::User(1))
+            svc.mint_agent_token("   ", &Principal::User(UserId::new("1")))
                 .await
                 .is_err()
         );

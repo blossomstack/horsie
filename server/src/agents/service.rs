@@ -226,6 +226,7 @@ mod tests {
                     journal_backend: "file".into(),
                 },
             },
+            crate::auth::UserId::new("1"),
         )
         .await
         .unwrap();
@@ -268,7 +269,10 @@ mod tests {
             .await
             .unwrap();
         (
-            AgentService::new(AgentStore::new(opened.db.clone()), opened.store.clone()),
+            AgentService::new(
+                AgentStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
+                opened.store.clone(),
+            ),
             tmp,
         )
     }

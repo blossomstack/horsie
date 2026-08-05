@@ -30,6 +30,8 @@
 //!    `?mode=rwc` on the URL.
 
 pub mod journal;
+#[cfg(test)]
+mod scope_audit;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
 
@@ -482,6 +484,181 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sync, 2, "the ack must mean the write reached the disk");
+    }
+
+    /// The bootstrap account keeps a usable id across the retype — `'1'`, the
+    /// text of the integer it had. It is a legitimate id, not a sentinel:
+    /// accounts created after this migration get a random one.
+    #[tokio::test]
+    async fn retyping_the_user_id_preserves_the_bootstrap_row() {
+        let db = testing::db().await;
+        sqlx::query(&db.q(
+            "INSERT INTO auth_users (id, username, password_hash, password_is_generated, \
+             created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ))
+        .bind("1")
+        .bind("admin")
+        .bind("$argon2id$fake")
+        .bind(0_i64)
+        .bind(1_i64)
+        .bind(1_i64)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // Read as a String: the whole point of the migration is that this
+        // column is no longer an integer, and `Any` decodes by runtime type.
+        let id: String = sqlx::query_scalar(&db.q("SELECT id FROM auth_users WHERE username = ?"))
+            .bind("admin")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(id, "1");
+    }
+
+    /// Every scoped table rejects an insert that omits the scope. No column
+    /// carries a default after the backfill, on purpose: a default would make a
+    /// forgotten `user_id` land silently in another account's data.
+    #[tokio::test]
+    async fn the_scope_column_is_required() {
+        let db = testing::db().await;
+        let no_scope = sqlx::query(&db.q(
+            "INSERT INTO memory_spaces (name, description, created_at, updated_at) \
+             VALUES (?, ?, ?, ?)",
+        ))
+        .bind("notes")
+        .bind("")
+        .bind("2026-01-01 00:00:00")
+        .bind("2026-01-01 00:00:00")
+        .execute(db.pool())
+        .await;
+        assert!(
+            no_scope.is_err(),
+            "a missing user_id must be a constraint error, not a default"
+        );
+    }
+
+    /// The composite key is the whole point: the same natural name is free in
+    /// every account.
+    #[tokio::test]
+    async fn two_accounts_may_hold_the_same_name() {
+        let db = testing::db().await;
+        for user in ["1", "k3m9x0abc7qr"] {
+            sqlx::query(&db.q(
+                "INSERT INTO memory_spaces (user_id, name, description, created_at, \
+                 updated_at) VALUES (?, ?, ?, ?, ?)",
+            ))
+            .bind(user)
+            .bind("notes")
+            .bind("")
+            .bind("2026-01-01 00:00:00")
+            .bind("2026-01-01 00:00:00")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        let n: i64 = sqlx::query_scalar(&db.q("SELECT COUNT(*) FROM memory_spaces WHERE name = ?"))
+            .bind("notes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+
+        // 0009_memory.sql seeds a space; the rebuild must have carried it over
+        // and given it the bootstrap account. This is the backfill working.
+        let seeded: i64 = sqlx::query_scalar(
+            &db.q("SELECT COUNT(*) FROM memory_spaces WHERE user_id = ? AND name <> ?"),
+        )
+        .bind("1")
+        .bind("notes")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(seeded, 1, "the seeded space should survive the rebuild");
+    }
+
+    /// The journal's children survive their parent's rebuild. Foreign keys are
+    /// never enabled, so `DROP TABLE journal_logs` fires no cascade -- but that
+    /// is a property worth pinning rather than trusting.
+    #[tokio::test]
+    async fn rebuilding_the_journal_log_table_keeps_its_events() {
+        let db = testing::db().await;
+        sqlx::query(
+            &db.q("INSERT INTO journal_logs (user_id, kind, id, last_seq) VALUES (?, ?, ?, ?)"),
+        )
+        .bind("1")
+        .bind("session")
+        .bind("abc")
+        .bind(1_i64)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let log_id: i64 = sqlx::query_scalar(
+            &db.q("SELECT log_id FROM journal_logs WHERE user_id = ? AND kind = ? AND id = ?"),
+        )
+        .bind("1")
+        .bind("session")
+        .bind("abc")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(&db.q("INSERT INTO journal_events (log_id, seq, payload) VALUES (?, ?, ?)"))
+            .bind(log_id)
+            .bind(1_i64)
+            .bind(b"hello".to_vec())
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // Two accounts, one persistence id: the widened UNIQUE is what allows it.
+        sqlx::query(
+            &db.q("INSERT INTO journal_logs (user_id, kind, id, last_seq) VALUES (?, ?, ?, ?)"),
+        )
+        .bind("k3m9x0abc7qr")
+        .bind("session")
+        .bind("abc")
+        .bind(0_i64)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_vestigial_vendors_table_is_gone() {
+        let db = testing::db().await;
+        assert!(db.execute("SELECT 1 FROM vendors").await.is_err());
+    }
+
+    /// A table rebuild drops that table's indexes with it, and SQLite has no
+    /// way to notice. 0024 lost `idx_memories_space` and `routines_next_run`
+    /// exactly that way, and PostgreSQL kept both because it alters in place —
+    /// so the two backends silently diverged until this was pinned.
+    #[tokio::test]
+    async fn the_indexes_survive_every_table_rebuild() {
+        let db = testing::db().await;
+        let sql = match db.dialect() {
+            Dialect::Sqlite => "SELECT name FROM sqlite_master WHERE type = 'index'",
+            // Cast: `indexname` is PostgreSQL's `name` type, which the Any
+            // driver cannot decode.
+            Dialect::Postgres => "SELECT indexname::text AS name FROM pg_indexes",
+        };
+        let names: Vec<String> = sqlx::query_scalar(&db.q(sql))
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+        for expected in [
+            "idx_memories_space",
+            "routines_next_run",
+            "idx_auth_tokens_hash",
+            "idx_auth_tokens_chain",
+            "idx_auth_tokens_principal",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "{expected} is missing on {:?}; a rebuild dropped it: {names:?}",
+                db.dialect()
+            );
+        }
     }
 
     #[test]

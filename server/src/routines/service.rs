@@ -330,6 +330,7 @@ pub(crate) mod tests {
                     journal_backend: "file".into(),
                 },
             },
+            crate::auth::UserId::new("1"),
         )
         .await
         .unwrap();
@@ -359,7 +360,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let agents = Arc::new(AgentService::new(
-            AgentStore::new(opened.db.clone()),
+            AgentStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             opened.store.clone(),
         ));
         agents
@@ -377,7 +378,7 @@ pub(crate) mod tests {
             .unwrap();
         Fixture {
             routines: Arc::new(RoutineService::new(
-                RoutineStore::new(opened.db.clone()),
+                RoutineStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
                 agents.clone(),
             )),
             agents,

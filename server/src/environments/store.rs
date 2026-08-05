@@ -3,6 +3,7 @@
 //! `session_api::RepoConfig`, `executor::EnvVar`, and `executor::ProvisionStep`
 //! (protocol types are not storage types).
 
+use crate::auth::UserId;
 use crate::db::Db;
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -57,19 +58,20 @@ pub struct EnvironmentRow {
 
 pub struct EnvironmentStore {
     db: Db,
+    /// Bound once, here, rather than passed per call.
+    user: UserId,
 }
 
 impl EnvironmentStore {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, user: UserId) -> Self {
+        Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<EnvironmentRow>, String> {
-        let rows = sqlx::query(
-            &self
-                .db
-                .q(&format!("SELECT {COLS} FROM environments ORDER BY name")),
-        )
+        let rows = sqlx::query(&self.db.q(&format!(
+            "SELECT {COLS} FROM environments WHERE user_id = ? ORDER BY name"
+        )))
+        .bind(self.user.as_str())
         .fetch_all(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
@@ -77,11 +79,10 @@ impl EnvironmentStore {
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<EnvironmentRow>, String> {
-        let row = sqlx::query(
-            &self
-                .db
-                .q(&format!("SELECT {COLS} FROM environments WHERE name = ?")),
-        )
+        let row = sqlx::query(&self.db.q(&format!(
+            "SELECT {COLS} FROM environments WHERE user_id = ? AND name = ?"
+        )))
+        .bind(self.user.as_str())
         .bind(name)
         .fetch_optional(self.db.pool())
         .await
@@ -93,8 +94,9 @@ impl EnvironmentStore {
     /// would discard the existing environment).
     pub async fn insert(&self, row: &EnvironmentRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO environments ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO environments (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
+        .bind(self.user.as_str())
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.vendor)
@@ -113,7 +115,7 @@ impl EnvironmentStore {
     pub async fn replace(&self, row: &EnvironmentRow) -> Result<bool, String> {
         let res = sqlx::query(&self.db.q(
             "UPDATE environments SET description = ?, vendor = ?, repos = ?, \
-             env_vars = ?, provision = ?, updated_at = ? WHERE name = ?",
+             env_vars = ?, provision = ?, updated_at = ? WHERE user_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.vendor)
@@ -121,6 +123,7 @@ impl EnvironmentStore {
         .bind(to_json(&row.env_vars)?)
         .bind(to_json(&row.provision)?)
         .bind(&row.updated_at)
+        .bind(self.user.as_str())
         .bind(&row.name)
         .execute(self.db.pool())
         .await
@@ -129,11 +132,16 @@ impl EnvironmentStore {
     }
 
     pub async fn delete(&self, name: &str) -> Result<bool, String> {
-        let res = sqlx::query(&self.db.q("DELETE FROM environments WHERE name = ?"))
-            .bind(name)
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        let res = sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM environments WHERE user_id = ? AND name = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(name)
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 }
@@ -167,7 +175,10 @@ mod tests {
 
     async fn store() -> (EnvironmentStore, Db) {
         let db = crate::db::testing::db().await;
-        (EnvironmentStore::new(db.clone()), db)
+        (
+            EnvironmentStore::new(db.clone(), crate::auth::UserId::new("1")),
+            db,
+        )
     }
 
     fn row(name: &str) -> EnvironmentRow {

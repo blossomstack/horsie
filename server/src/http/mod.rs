@@ -359,39 +359,44 @@ mod tests {
         let opened = crate::config::DbConfigStore::open(
             &format!("sqlite://{}", db.display()),
             crate::config::StoreDeps { info: test_info() },
+            crate::auth::UserId::new("1"),
         )
         .await
         .unwrap();
         let github = Arc::new(crate::github::GithubService::new(
-            crate::github::GithubStore::new(opened.db.clone()),
+            crate::github::GithubStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             crate::github::GithubApi::new(),
         ));
         let plugins = Arc::new(crate::plugins::PluginService::new(
-            crate::plugins::PluginStore::new(opened.db.clone()),
-            crate::plugins::MarketplaceStore::new(opened.db.clone()),
+            crate::plugins::PluginStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
+            crate::plugins::MarketplaceStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             crate::plugins::ArtifactStore::new(tmp.path().join("plugins")),
             b"test-secret".to_vec(),
         ));
         let mcp = Arc::new(crate::mcp::McpService::new(
-            crate::mcp::McpStore::new(opened.db.clone()),
+            crate::mcp::McpStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             github.clone(),
         ));
         let memory = Arc::new(crate::memory::MemoryService::new(
-            crate::memory::MemoryStore::new(opened.db.clone()),
+            crate::memory::MemoryStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
         ));
         let model_cards = Arc::new(crate::config::model_cards::ModelCardStore::new(
             opened.db.clone(),
+            crate::auth::UserId::new("1"),
         ));
         let agents = Arc::new(crate::agents::AgentService::new(
-            crate::agents::AgentStore::new(opened.db.clone()),
+            crate::agents::AgentStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             opened.store.clone(),
         ));
         let routines = Arc::new(crate::routines::RoutineService::new(
-            crate::routines::RoutineStore::new(opened.db.clone()),
+            crate::routines::RoutineStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             agents.clone(),
         ));
         let environments = Arc::new(crate::environments::EnvironmentService::new(
-            crate::environments::EnvironmentStore::new(opened.db.clone()),
+            crate::environments::EnvironmentStore::new(
+                opened.db.clone(),
+                crate::auth::UserId::new("1"),
+            ),
         ));
         let shared_vendors = Arc::new(std::sync::RwLock::new(vendors));
         let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
@@ -421,7 +426,7 @@ mod tests {
             },
         ));
         let workflows = Arc::new(crate::workflows::WorkflowService::new(
-            crate::workflows::WorkflowStore::new(opened.db.clone()),
+            crate::workflows::WorkflowStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
             agents.clone(),
         ));
         let routine_runner = Arc::new(crate::routines::RoutineRunner::new(
@@ -433,6 +438,7 @@ mod tests {
         ));
         let chatgpt = Arc::new(crate::config::chatgpt_login::ChatGptLoginService::new(
             opened.db.clone(),
+            crate::auth::UserId::new("1"),
             opened.store.clone(),
         ));
         AppState {
@@ -2657,7 +2663,10 @@ mod tests {
         let (state, _pw) = auth_state(&tmp).await;
         let (secret, _view) = state
             .auth
-            .mint_agent_token("my-laptop", &crate::auth::Principal::User(1))
+            .mint_agent_token(
+                "my-laptop",
+                &crate::auth::Principal::User(crate::auth::UserId::new("1")),
+            )
             .await
             .unwrap();
         let agents = state.vendor_agents.clone();

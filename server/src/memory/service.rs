@@ -228,7 +228,10 @@ mod tests {
     async fn service() -> (MemoryService, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
-        (MemoryService::new(MemoryStore::new(pool)), tmp)
+        (
+            MemoryService::new(MemoryStore::new(pool, crate::auth::UserId::new("1"))),
+            tmp,
+        )
     }
 
     fn create(space: &str, name: &str) -> MemoryCreateInput {

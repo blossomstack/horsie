@@ -259,7 +259,10 @@ mod tests {
     use super::*;
 
     async fn service() -> EnvironmentService {
-        EnvironmentService::new(EnvironmentStore::new(crate::db::testing::db().await))
+        EnvironmentService::new(EnvironmentStore::new(
+            crate::db::testing::db().await,
+            crate::auth::UserId::new("1"),
+        ))
     }
 
     fn input(name: &str, vendor: &str) -> EnvironmentInput {
