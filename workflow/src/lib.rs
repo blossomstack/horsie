@@ -11,6 +11,7 @@
 
 mod agent_actor;
 mod context;
+mod hook_translation;
 mod mcp_toolbox;
 mod task_list;
 mod timers;
@@ -26,6 +27,7 @@ pub use context::{
     ContextProvider, Contexts, DefaultToolboxFactory, FixedContextProvider, INSPECT_WORKSPACE_TOOL,
     SKILL_TOOL, ToolboxFactory, conclude_tool_spec,
 };
+pub use hook_translation::{prompt_blocked, translate};
 pub use mcp_toolbox::{CompositeToolbox, McpToolbox};
 pub use task_list::{
     TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, TaskStatus, task_list_tool_spec,
