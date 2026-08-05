@@ -248,10 +248,11 @@ async fn clear_removes_events_and_snapshot_together() {
     // next `persist` allocates a fresh log_id, so the orphans would be
     // permanent and unobservable through the trait.
     for table in ["journal_events", "journal_snapshots", "journal_logs"] {
-        let rows: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+        let rows: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
         assert_eq!(rows, 0, "{table} still holds rows after clear()");
     }
 
