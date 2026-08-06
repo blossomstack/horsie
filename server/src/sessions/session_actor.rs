@@ -59,12 +59,29 @@ const MAIN_AGENT_ID: &str = "main";
 /// can never hold the mailbox — and with it the Stop button — hostage.
 const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn emit_progress(frames: &broadcast::Sender<SessionFrame>, stage: &str, detail: Option<String>) {
-    let _ = frames.send(SessionFrame::Progression {
-        stage: stage.to_string(),
-        detail,
-        at_ms: now_ms(),
-    });
+/// Report turn-preparation progress into an agent's log.
+///
+/// Journaled rather than broadcast. It used to ride an ephemeral frame nobody
+/// could ask for again, so a client that connected mid-preparation saw nothing
+/// and a reload lost the sequence entirely. Four entries per turn buys a
+/// preparation history that reads back like everything else.
+///
+/// Routed through the session's mailbox rather than straight at the agent, so
+/// a caller needs only the session handle it already holds and the entry is
+/// ordered against whatever else the session is doing.
+async fn emit_progress(
+    session: &ActorRef<SessionCommand>,
+    key: AgentKey,
+    stage: &str,
+    detail: Option<String>,
+) {
+    let _ = session
+        .tell(SessionCommand::Progress {
+            key,
+            stage: stage.to_string(),
+            detail,
+        })
+        .await;
 }
 
 /// The baseline system prompt given to every session agent.
@@ -110,6 +127,12 @@ pub enum SessionCommand {
     /// Read this session's recovered state: status, pending ask, inbox.
     Snapshot {
         reply: oneshot::Sender<SessionSnapshot>,
+    },
+    /// Record one turn-preparation stage in `key`'s log. See [`emit_progress`].
+    Progress {
+        key: AgentKey,
+        stage: String,
+        detail: Option<String>,
     },
     /// Watch one agent's position — `(tail_seq, delta_count)`. `agent_id` is
     /// `None`/`"main"` for the primary agent, else a subagent id; the outer
@@ -909,7 +932,16 @@ impl SessionActor {
                         error: format!("step '{step}' could not be started"),
                     }];
                 }
-                emit_progress(&self.frames, "step_started", Some(step.clone()));
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "step_started".into(),
+                            detail: Some(step.clone()),
+                        },
+                    ),
+                )
+                .await;
                 self.report(SessionStatus::Running).await;
                 vec![SessionDomainEvent::StepStarted {
                     at_ms: now_ms(),
@@ -988,6 +1020,24 @@ impl SessionActor {
             let _ = agent
                 .tell(AgentCommand::RecordLifecycle {
                     event: payload,
+                    at_ms: now_ms(),
+                })
+                .await;
+        }
+    }
+
+    /// Record one lifecycle entry on a named agent, when it is resident.
+    async fn record_on(&mut self, key: AgentKey, event: horsie_agentcore::LifecycleEvent) {
+        let agent = match key {
+            AgentKey::Main => self.agents.as_ref().and_then(SessionAgents::main).cloned(),
+            AgentKey::Sub(id) | AgentKey::Step(id) => {
+                self.agents.as_ref().and_then(|a| a.sub(id)).cloned()
+            }
+        };
+        if let Some(agent) = agent {
+            let _ = agent
+                .tell(AgentCommand::RecordLifecycle {
+                    event,
                     at_ms: now_ms(),
                 })
                 .await;
@@ -1608,7 +1658,16 @@ impl SessionActor {
         let (mut events, advance) = match outcome {
             AgentOutcome::UsageRecorded { .. } => unreachable!("handled above"),
             AgentOutcome::Concluded { output, .. } => {
-                emit_progress(&self.frames, "step_concluded", Some(step_name));
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "step_concluded".into(),
+                            detail: Some(step_name),
+                        },
+                    ),
+                )
+                .await;
                 (
                     vec![SessionDomainEvent::StepConcluded {
                         at_ms: now_ms(),
@@ -1719,11 +1778,16 @@ impl SessionActor {
                     .as_str()
                     .map(str::to_string)
                     .unwrap_or_else(|| output.to_string());
-                emit_progress(
-                    &self.frames,
-                    "subagent_completed",
-                    Some(format!("\"{}\" ({id})", rec.label)),
-                );
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "subagent_completed".into(),
+                            detail: Some(format!("\"{}\" ({id})", rec.label)),
+                        },
+                    ),
+                )
+                .await;
                 SessionDomainEvent::SubAgentCompleted {
                     at_ms: now_ms(),
                     id,
@@ -1731,11 +1795,16 @@ impl SessionActor {
                 }
             }
             AgentOutcome::Failed { error, .. } => {
-                emit_progress(
-                    &self.frames,
-                    "subagent_failed",
-                    Some(format!("\"{}\" ({id})", rec.label)),
-                );
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "subagent_failed".into(),
+                            detail: Some(format!("\"{}\" ({id})", rec.label)),
+                        },
+                    ),
+                )
+                .await;
                 SessionDomainEvent::SubAgentFailed {
                     at_ms: now_ms(),
                     id,
@@ -2510,7 +2579,13 @@ impl ContextProvider for SessionContextProvider {
         );
 
         if broadcast {
-            emit_progress(&self.frames, "acquiring_runtime", None);
+            emit_progress(
+                &self.session,
+                self.kind.agent_key(),
+                "acquiring_runtime",
+                None,
+            )
+            .await;
         }
         let runtime_client = self.runtime_client().await?;
         // Hooks run runtime-side and report what they did on the tool response.
@@ -2530,7 +2605,13 @@ impl ContextProvider for SessionContextProvider {
             .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
 
         if broadcast {
-            emit_progress(&self.frames, "scanning_workspace", None);
+            emit_progress(
+                &self.session,
+                self.kind.agent_key(),
+                "scanning_workspace",
+                None,
+            )
+            .await;
         }
         let (ws, shared_scan) = scan_workspace(&runtime_client, None, use_plugins).await;
         // No `SessionStart` here any more. It used to fire on this line, once
@@ -2612,7 +2693,13 @@ impl ContextProvider for SessionContextProvider {
             Vec::new()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
             if broadcast {
-                emit_progress(&self.frames, "connecting_tools", None);
+                emit_progress(
+                    &self.session,
+                    self.kind.agent_key(),
+                    "connecting_tools",
+                    None,
+                )
+                .await;
             }
             mcp_svc
                 .toolboxes_for(&settings.mcp_servers)
@@ -2712,7 +2799,7 @@ impl ContextProvider for SessionContextProvider {
             (None, true) => None,
         };
         if broadcast {
-            emit_progress(&self.frames, "ready", None);
+            emit_progress(&self.session, self.kind.agent_key(), "ready", None).await;
         }
         Ok(Contexts {
             provider,
@@ -3030,6 +3117,16 @@ impl EventSourcedActor for SessionActor {
                     None => None,
                 };
                 let _ = reply.send(view);
+                CommandEffect::none()
+            }
+            SessionCommand::Progress { key, stage, detail } => {
+                self.record_on(
+                    key,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle { stage, detail },
+                    ),
+                )
+                .await;
                 CommandEffect::none()
             }
             SessionCommand::WatchAgent { agent_id, reply } => {
@@ -3358,11 +3455,16 @@ impl EventSourcedActor for SessionActor {
                         subagent_results: Vec::new(),
                     })
                     .await;
-                emit_progress(
-                    &self.frames,
-                    "subagent_spawned",
-                    Some(format!("\"{label}\" ({id})")),
-                );
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "subagent_spawned".into(),
+                            detail: Some(format!("\"{label}\" ({id})")),
+                        },
+                    ),
+                )
+                .await;
                 let _ = reply.send(Ok(id));
                 CommandEffect::none()
             }

@@ -1,7 +1,7 @@
 
 export * from './repoConfig';
 export * from './createSessionRequest';
-export * from './historyPage';
+export * from './messagesPage';
 export * from './agentDocument';
 export * from './getAgentResponse';
 export * from './createSessionResponse';

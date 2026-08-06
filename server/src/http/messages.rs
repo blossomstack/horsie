@@ -23,9 +23,10 @@ use axum::extract::{Path, Query};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use horsie_agentcore::AgentLogEntry;
+use horsie_models::session::{MessageDelta, MessageFrame};
+use horsie_models::session_api::MessagesPage;
 use horsie_workflow::Cursor;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::convert::Infallible;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -59,34 +60,6 @@ pub struct MessagesParams {
     before: Option<u64>,
     /// Page size. Only meaningful with `before`.
     max: Option<usize>,
-}
-
-/// One entry on the wire. `seq` also rides the SSE `id:`, so `Last-Event-ID`
-/// on reconnect *is* the `after=` a fresh request would carry.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EntryFrame<'a> {
-    entry: &'a AgentLogEntry,
-}
-
-/// A chunk of the message being written. Carries the entry it follows, because
-/// a delta means nothing without one — and carries `reset` when the run that
-/// produced the reader's position is gone.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DeltaFrame {
-    entry_seq: u64,
-    delta_seq: usize,
-    text: String,
-    /// Discard whatever partial text you hold: these chunks start a new run.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    reset: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PageBody {
-    entries: Vec<AgentLogEntry>,
 }
 
 /// The `Last-Event-ID` a reconnecting browser sends back.
@@ -155,7 +128,7 @@ async fn page(
     crate::wire_redact::strip_entry_signatures(&mut entries);
     // No `has_more`. Fewer entries than asked for means there are no more,
     // which says the same thing without a second way to say it.
-    Ok(Json(PageBody { entries }).into_response())
+    Ok(Json(MessagesPage { entries }).into_response())
 }
 
 /// The stream form: everything after the cursor, then live.
@@ -208,7 +181,7 @@ async fn stream(
             for entry in &entries {
                 let ev = Event::default()
                     .id(entry.seq.to_string())
-                    .json_data(EntryFrame { entry });
+                    .json_data(MessageFrame::Entry(entry.clone()));
                 match ev {
                     Ok(ev) => {
                         if tx.send(Ok(ev)).await.is_err() {
@@ -229,12 +202,12 @@ async fn stream(
             };
             for (offset, text) in out.deltas.iter().enumerate() {
                 let delta_seq = base + offset + 1;
-                let frame = DeltaFrame {
+                let frame = MessageFrame::Delta(MessageDelta {
                     entry_seq: out.cursor.entry_seq,
-                    delta_seq,
+                    delta_seq: u32::try_from(delta_seq).unwrap_or(u32::MAX),
                     text: text.clone(),
                     reset: out.reset_deltas && offset == 0,
-                };
+                });
                 let id = Cursor {
                     entry_seq: out.cursor.entry_seq,
                     delta_seq,

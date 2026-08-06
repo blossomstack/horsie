@@ -774,24 +774,44 @@ mod tests {
         assert_eq!(part.to_wire_text(), "[subagent \"audit\" completed]");
     }
 
+    /// One tagged union replaces the two the stream used to need. The tag is
+    /// what lets a client match exhaustively instead of inferring the variant
+    /// from which field happens to be present.
     #[test]
-    fn session_event_round_trips_with_type_tag() {
-        let ev = session::SessionEvent::Error(session::ErrorEvent {
-            message: "boom".into(),
+    fn a_message_frame_round_trips_with_its_type_tag() {
+        let delta = session::MessageFrame::Delta(session::MessageDelta {
+            entry_seq: 99,
+            delta_seq: 3,
+            text: "hi".into(),
+            reset: false,
         });
-        let json = serde_json::to_string(&ev).unwrap();
-        assert!(json.contains("\"type\""));
-        let back: session::SessionEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(ev, back);
-    }
+        let json = serde_json::to_string(&delta).unwrap();
+        assert!(json.contains("\"type\":\"Delta\""), "{json}");
+        assert!(
+            json.contains("\"entrySeq\":99"),
+            "camelCase on the wire: {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<session::MessageFrame>(&json).unwrap(),
+            delta
+        );
 
-    #[test]
-    fn agent_stream_event_round_trips_with_type_tag() {
-        let ev = session::AgentStreamEvent::Delta(session::DeltaEvent { text: "hi".into() });
-        let json = serde_json::to_string(&ev).unwrap();
-        assert!(json.contains("\"type\""));
-        let back: session::AgentStreamEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(ev, back);
+        let entry = session::MessageFrame::Entry(agent::AgentLogEntry {
+            seq: 99,
+            at_ms: 1,
+            body: agent::AgentLogBody::Lifecycle(agent::LifecycleEvent::TurnBegan(
+                agent::TurnBeganLifecycle {
+                    consumed: vec!["m1".into()],
+                    answered: vec![],
+                },
+            )),
+        });
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"type\":\"Entry\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<session::MessageFrame>(&json).unwrap(),
+            entry
+        );
     }
 
     #[test]
