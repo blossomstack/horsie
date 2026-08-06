@@ -683,6 +683,12 @@ git commit -m "mcp: carry the server-resolved bearer with each runtime request"
 
 ---
 
+> **Tasks 9–11 are deferred.** Task 8 lands on its own: the credential can travel, and
+> nothing resolves one yet. Where a plugin server's token should be *stored* — a pre-filled
+> row in the existing MCP store, or rows of its own hidden from the picker — is left open
+> until someone hits the case, rather than duplicating a model that already exists on
+> speculation. The design doc records both halves; only the transport is built.
+
 ### Task 9: Plugin servers in the MCP store
 
 A plugin server's tokens need the same row the admin path already refreshes, without the picker offering it or `delete` orphaning it.
