@@ -15,14 +15,19 @@ test.beforeEach(async ({ mock }) => {
   await mock.reset();
 });
 
-/** Drive one completed text turn, then return the mock's captured requests. */
+/**
+ * Drive one completed text turn, then return the mock's captured requests.
+ * `skills` selects bundles on the draft; the groups that do not assert on
+ * plugin content leave it empty so their runtime has nothing to fetch.
+ */
 async function runTurnAndCapture(
   page: import("@playwright/test").Page,
   appBase: string,
   mock: import("./fixtures").MockLlm,
+  skills: string[] = [],
 ): Promise<void> {
   await mock.queueText("Understood.");
-  await createSession(page, appBase);
+  await createSession(page, appBase, { skills });
   await sendMessage(page, "hello");
   await expect(page.getByTestId("assistant-text")).toContainText("Understood.");
   await expectStatus(page, "Idle");
@@ -59,7 +64,7 @@ test("F2: shared plugin-library skill loads into the system prompt", async ({
   appBase,
   mock,
 }) => {
-  await runTurnAndCapture(page, appBase, mock);
+  await runTurnAndCapture(page, appBase, mock, ["e2e-plugin"]);
   // The library is not a workspace, so its header carries the absolute root the
   // per-skill relative paths hang off — the agent's only handle on those files.
   expect(await mock.capturedContains("# Shared skills — ")).toBe(true);
@@ -80,7 +85,7 @@ test("F3: SessionStart hook output reaches the model as framed context", async (
   appBase,
   mock,
 }) => {
-  await runTurnAndCapture(page, appBase, mock);
+  await runTurnAndCapture(page, appBase, mock, ["e2e-plugin"]);
   expect(await mock.capturedContains("E2E_BOOTSTRAP_MARKER")).toBe(true);
   // No quotes in the needle: `capturedContains` matches against
   // `JSON.stringify(body)`, where the frame's own quotes are backslash-escaped.

@@ -244,11 +244,13 @@ export default async function globalSetup(): Promise<void> {
       ],
     });
 
-    // Install the fixture bundle and make it the default for new sessions, so
-    // every session's runtime fetches it without each spec having to name it.
-    // This is the server-side equivalent of the host plugin library the CLI
-    // used to keep, which groups F and T assert against.
-    log("installing the e2e-plugin bundle and marking it default");
+    // Install the fixture bundle. Deliberately NOT marked default-for-new-
+    // sessions: a selected bundle is fetched and unpacked by the runtime before
+    // the session can take a turn, and paying that on every spec both slows the
+    // suite and makes the composer's send-while-starting race reachable. The
+    // specs that assert on plugin content ask for it via
+    // `createSession(..., { skills: ["e2e-plugin"] })`.
+    log("installing the e2e-plugin bundle");
     const installed = await fetch(`${baseURL}/api/plugins`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -256,14 +258,6 @@ export default async function globalSetup(): Promise<void> {
     });
     if (!installed.ok) {
       throw new Error(`installing e2e-plugin: ${installed.status} ${await installed.text()}`);
-    }
-    const defaulted = await fetch(`${baseURL}/api/plugins/e2e-plugin`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ enabledDefault: true }),
-    });
-    if (!defaulted.ok) {
-      throw new Error(`defaulting e2e-plugin: ${defaulted.status} ${await defaulted.text()}`);
     }
 
     // `horsie connect` is the vendor agent: it dials the server and spawns one

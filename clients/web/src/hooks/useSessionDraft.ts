@@ -210,16 +210,26 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
       message,
       agent: {
         model: draft.model.trim(),
-        usePlugins: provisions ? true : undefined,
-        mcpServers: provisions && draft.mcp.length ? draft.mcp : undefined,
+        // Not gated on `provisions` — see `plugins` below.
+        usePlugins: true,
+        // Nor is MCP: a toolbox is composed server-side and never reaches the
+        // runtime at all.
+        mcpServers: draft.mcp.length ? draft.mcp : undefined,
         // Not gated on `provisions`: memories are served by the server itself,
         // so they work on every vendor, including ones that can't provision.
         memorySpaces: draft.memorySpaces.length ? draft.memorySpaces : undefined,
         thinkingEffort: effectiveThinkingEffort || undefined,
       },
       vendor: draft.vendor.trim() || undefined,
+      // Only repos genuinely need a vendor that can build a workspace.
       repos: repos.length ? repos : undefined,
-      plugins: provisions && draft.skills.length ? draft.skills : undefined,
+      // Bundles are not a workspace: the runtime fetches them over its own
+      // outbound connection into a directory of its own, which it can do
+      // whether or not it provisioned anything. Gating this on `provisions`
+      // meant the picker took a selection on `horsie connect` — the most
+      // common self-hosted vendor — and silently dropped it. The same
+      // one-bit-three-jobs mistake #178 fixed on agent presets.
+      plugins: draft.skills.length ? draft.skills : undefined,
     };
   };
 
