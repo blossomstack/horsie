@@ -9,19 +9,19 @@
 )]
 
 use clap::{Parser, Subcommand};
-use horsie::agent::{self, truncate};
+use horsie::agent;
 use horsie::config::HorsieConfig;
 use horsie::connect;
 use horsie::error::CliError;
 use horsie::session::{self, EventsMode};
 use horsie::workflow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
     name = "horsie",
     version,
-    about = "Session-server client: run this machine as a runtime vendor, tail sessions, and manage the plugin library"
+    about = "Session-server client: run this machine as a runtime vendor, and inspect sessions, agents and workflows"
 )]
 struct Cli {
     #[command(subcommand)]

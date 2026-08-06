@@ -99,10 +99,11 @@ async fn provision_into(
     }
     // Only a complete run earns the marker. A partial one must be retried on
     // the next start rather than frozen in place for the session's whole life.
-    if complete {
-        if let Err(e) = std::fs::write(dir.join(MARKER), manifest) {
-            eprintln!("plugins: cannot record the manifest: {e}");
-        }
+    if !complete {
+        return Some(dir.to_path_buf());
+    }
+    if let Err(e) = std::fs::write(dir.join(MARKER), manifest) {
+        eprintln!("plugins: cannot record the manifest: {e}");
     }
     Some(dir.to_path_buf())
 }
