@@ -43,4 +43,8 @@ export interface AgentDocument {
    * The model&#39;s configured context window, when known. Attached by the HTTP
    */
   contextWindow?: number;
+  /**
+   * The log position this document reflects.
+   */
+  asOfSeq: number;
 }

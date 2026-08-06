@@ -509,6 +509,9 @@ pub struct AgentStateView {
     pub usage_total: UsageTotal,
     pub last_turn_usage: Option<Usage>,
     pub context_tokens: u32,
+    /// The log position these values reflect, so a consumer holding a fold can
+    /// tell whether this read is ahead of it or behind.
+    pub as_of_seq: u64,
 }
 
 /// Build the transcript entry for one hook record.
@@ -604,6 +607,7 @@ impl AgentState {
             usage_total: self.usage_total,
             last_turn_usage: self.last_turn_usage.clone(),
             context_tokens: self.context_tokens,
+            as_of_seq: self.tail_seq().unwrap_or(0),
         }
     }
 

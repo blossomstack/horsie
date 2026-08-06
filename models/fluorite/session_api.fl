@@ -78,6 +78,14 @@ struct AgentDocument {
     /// The model's configured context window, when known. Attached by the HTTP
     /// layer from model config — this one field is not agent state.
     context_window: Option<u32>,
+    /// The log position this document reflects.
+    ///
+    /// What makes reading this alongside the log safe rather than a race: a
+    /// consumer records the seq each value was last set from and applies an
+    /// update only if its seq is greater — whichever source it came from. A
+    /// boolean "a live frame has arrived" latch cannot express that, because it
+    /// cannot tell a document that is *ahead* of the fold from one behind it.
+    as_of_seq: u64,
 }
 
 struct GetAgentResponse { agent: AgentDocument }

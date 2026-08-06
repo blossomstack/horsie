@@ -357,6 +357,7 @@ pub async fn get_agent(
         last_turn_usage: view.last_turn_usage,
         context_tokens: view.context_tokens,
         context_window,
+        as_of_seq: view.as_of_seq,
     };
     Ok(Json(GetAgentResponse { agent }))
 }
