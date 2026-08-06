@@ -392,6 +392,10 @@ impl RuntimeVendor {
         // never succeed. The token is checked per attempt, below.
         client_request(server_url, None).map_err(AgentExit::Fatal)?;
 
+        // Nothing this agent owns is running yet, so any bundle directory
+        // without a spec belongs to a runtime that cannot come back.
+        self.sweep_plugin_dirs();
+
         let mut backoff = self.backoff;
         let mut failures: u32 = 0;
         let mut connections: u32 = 0;
@@ -685,9 +689,9 @@ impl RuntimeVendor {
                 let _guard = lock.lock().await;
                 self.halt(&cmd.runtime_id).await;
                 // The session is gone, so the record of how to rebuild its
-                // runtime goes with it — otherwise a deleted session's spec
-                // would outlive it on disk forever.
-                let _ = std::fs::remove_dir_all(self.state_dir.join(&cmd.runtime_id));
+                // runtime goes with it, and so do its bundles — otherwise a
+                // deleted session's state would outlive it on disk forever.
+                self.forget_runtime_dirs(&cmd.runtime_id);
                 self.lifecycle_locks.lock().await.remove(&cmd.runtime_id);
                 Ok(RuntimeVendorEvent::DeleteRuntime(DeleteRuntimeResponse {
                     runtime_id: cmd.runtime_id,
@@ -918,6 +922,48 @@ impl RuntimeVendor {
         self.plugins_root().map(|root| root.join(runtime_id))
     }
 
+    /// Remove bundle directories belonging to runtimes this agent can no longer
+    /// revive.
+    ///
+    /// Called once at startup, where no runtime process is live by definition,
+    /// so anything without a persisted spec is crash debris. A vendor that
+    /// persists no specs at all cannot revive anything, and correctly loses
+    /// every directory here.
+    ///
+    /// Best-effort throughout: an unreadable root or an undeletable directory
+    /// costs disk, and is not worth refusing to start over.
+    fn sweep_plugin_dirs(&self) {
+        let Some(root) = self.plugins_root() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(runtime_id) = name.to_str() else {
+                continue;
+            };
+            if self.spec_path(runtime_id).is_file() {
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+
+    /// Drop everything on disk belonging to a runtime whose session is gone:
+    /// the record of how to rebuild it, and the bundles it materialized.
+    ///
+    /// Deliberately not called from `halt`. Stopping a process is not losing a
+    /// session, and a hibernated runtime must find its bundles still there when
+    /// it wakes — that is what makes materialization a once-per-runtime cost.
+    fn forget_runtime_dirs(&self, runtime_id: &str) {
+        let _ = std::fs::remove_dir_all(self.state_dir.join(runtime_id));
+        if let Some(dir) = self.plugins_path(runtime_id) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     /// The bundle-delivery environment for one runtime. Extracted from
     /// `provision` so the per-runtime path is testable without spawning
     /// anything.
@@ -1113,6 +1159,83 @@ mod tests {
     #[test]
     fn an_agent_serving_no_bundles_adds_no_bundle_env() {
         assert!(agent().bundle_env("rt-1").is_empty());
+    }
+
+    /// Build an agent rooted at `state`, serving bundles out of `state/plugins`.
+    fn agent_with_bundles(state: &Path) -> RuntimeVendor {
+        RuntimeVendor::new(
+            "test-vendor".to_string(),
+            false,
+            Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
+            Arc::new(ConnectedRuntimeRegistry::new()),
+            Arc::new(FixedWorkspaces::new(HashMap::new())),
+            state.to_path_buf(),
+        )
+        .with_bundles(BundleDelivery {
+            base_url: "http://127.0.0.1:3789".to_string(),
+            dir: state.join("plugins").to_string_lossy().into_owned(),
+        })
+    }
+
+    /// Boot is the one moment when "no runtime process is live" is guaranteed,
+    /// so the only question left is whether the runtime still exists at all —
+    /// and the spec file is the same record that decides whether it could be
+    /// revived.
+    #[test]
+    fn boot_sweeps_bundle_dirs_with_no_surviving_spec() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let plugins = state.path().join("plugins");
+        std::fs::create_dir_all(plugins.join("kept/demo")).expect("mkdir");
+        std::fs::create_dir_all(plugins.join("orphan/demo")).expect("mkdir");
+        // `kept` is revivable: it has a persisted spec.
+        std::fs::create_dir_all(state.path().join("kept")).expect("mkdir");
+        std::fs::write(state.path().join("kept/spec.json"), b"{}").expect("write");
+
+        agent_with_bundles(state.path()).sweep_plugin_dirs();
+
+        assert!(
+            plugins.join("kept/demo").is_dir(),
+            "a revivable runtime keeps its bundles"
+        );
+        assert!(!plugins.join("orphan").exists(), "crash debris is removed");
+    }
+
+    /// Deleting a session takes its bundles; stopping a process must not.
+    /// A hibernated runtime has to find them still there when it wakes, which
+    /// is the whole reason materialization can happen once.
+    #[test]
+    fn forgetting_a_runtime_removes_both_its_dirs() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let plugins = state.path().join("plugins");
+        std::fs::create_dir_all(plugins.join("rt-1/demo")).expect("mkdir");
+        std::fs::create_dir_all(state.path().join("rt-1")).expect("mkdir");
+        std::fs::write(state.path().join("rt-1/spec.json"), b"{}").expect("write");
+
+        agent_with_bundles(state.path()).forget_runtime_dirs("rt-1");
+
+        assert!(
+            !state.path().join("rt-1").exists(),
+            "the rebuild record is gone"
+        );
+        assert!(!plugins.join("rt-1").exists(), "and so are its bundles");
+    }
+
+    /// An agent that serves no bundles has no root to sweep, and must not
+    /// wander into the state dir looking for one.
+    #[test]
+    fn sweeping_without_bundles_is_a_noop() {
+        let state = tempfile::tempdir().expect("tempdir");
+        std::fs::write(state.path().join("keep-me"), b"x").expect("write");
+        let agent = RuntimeVendor::new(
+            "test-vendor".to_string(),
+            false,
+            Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
+            Arc::new(ConnectedRuntimeRegistry::new()),
+            Arc::new(FixedWorkspaces::new(HashMap::new())),
+            state.path().to_path_buf(),
+        );
+        agent.sweep_plugin_dirs();
+        assert!(state.path().join("keep-me").is_file());
     }
 
     /// The baseline cannot know this machine's plugin library, so the agent
