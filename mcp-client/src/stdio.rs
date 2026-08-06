@@ -46,14 +46,20 @@ impl StdioTransport {
     /// Spawn `command` with `args` and `env`, and start reading its stdout.
     ///
     /// `cwd` is where the process runs — the workspace, so a server that reads
-    /// files reads the ones the agent is working on.
+    /// files reads the ones the agent is working on. `plugin_root` becomes
+    /// `CLAUDE_PLUGIN_ROOT`, the way a plugin hook already receives it: some
+    /// servers read the variable rather than the `${…}` placeholder.
     pub async fn spawn(
         command: &str,
         args: &[String],
         env: &[(String, String)],
         cwd: Option<&std::path::Path>,
+        plugin_root: Option<&std::path::Path>,
     ) -> Result<Self, McpError> {
         let mut cmd = tokio::process::Command::new(command);
+        if let Some(root) = plugin_root {
+            cmd.env("CLAUDE_PLUGIN_ROOT", root);
+        }
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -216,7 +222,7 @@ mod tests {
 
     async fn spawn(script: &str) -> StdioTransport {
         let (cmd, args) = echo_server(script);
-        StdioTransport::spawn(&cmd, &args, &[], None)
+        StdioTransport::spawn(&cmd, &args, &[], None, None)
             .await
             .expect("spawn")
     }
@@ -303,9 +309,28 @@ mod tests {
         assert!(t.request("ping", json!({})).await.is_err());
     }
 
+    /// The child is a plugin-owned process and learns its own root the way a
+    /// hook does — a server script that reads the variable finds it set.
+    #[tokio::test]
+    async fn the_child_is_told_its_plugin_root() {
+        let root = std::path::Path::new("/tmp/horsie-test-plugin-root");
+        let (cmd, args) = echo_server(
+            r#"while read -r line; do
+                 id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+                 printf '{"jsonrpc":"2.0","id":%s,"result":{"root":"%s"}}\n' "$id" "$CLAUDE_PLUGIN_ROOT"
+               done"#,
+        );
+        let t = StdioTransport::spawn(&cmd, &args, &[], None, Some(root))
+            .await
+            .expect("spawn");
+        let result = t.request("ping", json!({})).await.unwrap();
+        assert_eq!(result["root"], "/tmp/horsie-test-plugin-root");
+    }
+
     #[tokio::test]
     async fn a_command_that_does_not_exist_fails_to_spawn() {
-        let Err(err) = StdioTransport::spawn("horsie-no-such-binary", &[], &[], None).await else {
+        let Err(err) = StdioTransport::spawn("horsie-no-such-binary", &[], &[], None, None).await
+        else {
             panic!("a missing binary must not spawn");
         };
         assert!(matches!(err, McpError::Transport(_)));

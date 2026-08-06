@@ -135,9 +135,26 @@ struct McpDiscoverRequest  { call_id: String }
 struct McpDiscoverResponse {
     call_id: String,
     tools: Vec<PluginMcpTool>,
-    /// Servers that could not be reached, as `<name>: <why>`. Reported rather
-    /// than dropped, so a broken declaration is visible without being fatal.
-    failures: Vec<String>,
+    /// Servers that contributed no tools. Reported rather than dropped, so a
+    /// broken declaration is visible without being fatal.
+    failures: Vec<McpServerFailure>,
+}
+
+/// It could not be reached at all: no such binary, a refused connection, a
+/// declaration that would not parse.
+struct McpServerUnreachable { server: String, reason: String }
+
+/// It answered `401`. `resource_metadata` is the RFC 9728 URL its
+/// `WWW-Authenticate` named, when it named one.
+struct McpServerNeedsAuth { server: String, resource_metadata: Option<String> }
+
+/// Why a declared server contributed no tools this pass. Typed rather than a
+/// string because the two cases call for different answers: one is a broken
+/// plugin to report, the other is a consent flow to offer.
+#[type_tag = "failure"]
+union McpServerFailure {
+    Unreachable(McpServerUnreachable),
+    NeedsAuth(McpServerNeedsAuth),
 }
 
 /// Call one tool on a plugin-declared MCP server. `tool` is the namespaced name

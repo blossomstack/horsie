@@ -1,10 +1,11 @@
 
+import { McpServerFailure } from './mcpServerFailure';
 import { PluginMcpTool } from './pluginMcpTool';
 export interface McpDiscoverResponse {
   callId: string;
   tools: PluginMcpTool[];
   /**
-   * Servers that could not be reached, as `&#60;name&#62;: &#60;why&#62;`. Reported rather
+   * Servers that contributed no tools. Reported rather than dropped, so a
    */
-  failures: string[];
+  failures: McpServerFailure[];
 }

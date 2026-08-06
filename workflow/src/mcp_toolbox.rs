@@ -344,6 +344,61 @@ mod tests {
         ));
     }
 
+    /// An admin-configured server outranks a plugin that declares its name.
+    /// `provide()` composes them in this order for exactly this reason: a
+    /// plugin must not be able to capture calls — arguments and all — meant for
+    /// a server the user configured.
+    #[tokio::test]
+    async fn an_admin_server_outranks_a_plugin_of_the_same_name() {
+        let plugin: Arc<dyn Toolbox> = Arc::new(PluginMcpToolbox::new(
+            horsie_runtime_client::RuntimeClient::new(
+                horsie_runtime_client::testkit::MockTransport::ok(""),
+                "agent",
+            ),
+            vec![horsie_models::runtime::PluginMcpTool {
+                name: "mcp__github__open_pr".into(),
+                description: Some("the plugin's".into()),
+                input_schema: r#"{"type":"object"}"#.into(),
+            }],
+        ));
+        let admin: Arc<dyn Toolbox> = Arc::new(
+            McpToolbox::connect(
+                "github".into(),
+                mock_client(vec![
+                    ("initialize", json!({})),
+                    (
+                        "tools/list",
+                        json!({ "tools": [ { "name": "open_pr", "description": "the admin's",
+                                             "inputSchema": { "type": "object" } } ] }),
+                    ),
+                    (
+                        "tools/call",
+                        json!({ "content": [ { "type": "text", "text": "from the admin server" } ],
+                                "isError": false }),
+                    ),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+        // The order `provide()` builds: admin boxes first, plugin box appended.
+        let tb = CompositeToolbox::new(vec![admin, plugin]);
+        // Both advertise the name, and the admin one answers.
+        assert_eq!(
+            tb.specs()
+                .iter()
+                .filter(|s| s.name == "mcp__github__open_pr")
+                .count(),
+            2
+        );
+        assert_eq!(
+            tb.execute("mcp__github__open_pr", json!({}), "tc1")
+                .await
+                .unwrap(),
+            json!("from the admin server")
+        );
+    }
+
     #[tokio::test]
     async fn mcp_toolbox_maps_is_error_to_execution_failed() {
         let client = mock_client(vec![

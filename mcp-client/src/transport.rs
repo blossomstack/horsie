@@ -37,6 +37,11 @@ pub trait BearerProvider: Send + Sync {
 pub struct HttpTransport {
     endpoint: String,
     auth: Arc<dyn BearerProvider>,
+    /// Headers the caller declared, sent on every request exactly as given.
+    /// A plugin's `.mcp.json` carries its token this way, and it is not always
+    /// an `Authorization: Bearer` — rewriting one into that shape is how a
+    /// working declaration stops working.
+    headers: Vec<(String, String)>,
     http: reqwest::Client,
     next_id: AtomicU64,
     session_id: Mutex<Option<String>>,
@@ -44,9 +49,21 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     pub fn new(endpoint: String, auth: Arc<dyn BearerProvider>) -> Self {
+        Self::with_headers(endpoint, auth, Vec::new())
+    }
+
+    /// As [`HttpTransport::new`], plus static headers on every request. A
+    /// resolved bearer still wins the `Authorization` slot: it is refreshable
+    /// and a declared one is not.
+    pub fn with_headers(
+        endpoint: String,
+        auth: Arc<dyn BearerProvider>,
+        headers: Vec<(String, String)>,
+    ) -> Self {
         Self {
             endpoint,
             auth,
+            headers,
             // Bounded like every other HTTP client in the repo. An MCP server that
             // accepts the connection and then goes silent used to hang the run in
             // a place `Stop` cannot reach (#61 item 5); the deadline is what makes
@@ -70,6 +87,17 @@ impl HttpTransport {
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .json(body);
+        // A resolved bearer owns the `Authorization` slot — it refreshes and a
+        // declared one cannot — so the declared header is dropped rather than
+        // sent alongside it. `header` appends, and a server reading the first
+        // value would otherwise see the stale one.
+        let bearer_wins = token.is_some();
+        for (k, v) in &self.headers {
+            if bearer_wins && k.eq_ignore_ascii_case("authorization") {
+                continue;
+            }
+            req = req.header(k, v);
+        }
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
@@ -119,16 +147,23 @@ impl McpTransport for HttpTransport {
         }
 
         let status = resp.status();
-        let ctype = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let ctype = header("content-type").unwrap_or_default();
+        // Captured before the body is consumed: this is what says *how* to
+        // authenticate, and it is the only actionable part of a 401.
+        let www_authenticate = header("www-authenticate");
         let text = resp
             .text()
             .await
             .map_err(|e| McpError::Transport(e.to_string()))?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(McpError::Unauthorized { www_authenticate });
+        }
         if !status.is_success() {
             return Err(McpError::Transport(format!("http {status}: {text}")));
         }
@@ -321,11 +356,94 @@ mod tests {
         assert_eq!(v["ok"], json!(true));
     }
 
+    /// A refresh that changes nothing leaves the 401 to the caller — and it
+    /// arrives as `Unauthorized`, keeping the challenge that says where to go
+    /// and get a token, rather than flattened into a transport error.
     #[tokio::test]
     async fn request_propagates_401_when_token_unchanged() {
         let url = mock_needs_new_token().await;
         let t = HttpTransport::new(url, Arc::new(StaticProvider));
         let err = t.request("tools/call", json!({})).await.unwrap_err();
-        assert!(matches!(err, McpError::Transport(_)));
+        let McpError::Unauthorized { www_authenticate } = err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            www_authenticate
+                .as_deref()
+                .is_none_or(|c| c.starts_with("Bearer")),
+            "{www_authenticate:?}"
+        );
+    }
+
+    /// Declared headers reach the wire as declared: a header that is not
+    /// `Authorization` survives, and a non-`Bearer` scheme is not rewritten.
+    #[tokio::test]
+    async fn declared_headers_reach_the_request_unaltered() {
+        async fn handle(headers: axum::http::HeaderMap) -> impl axum::response::IntoResponse {
+            let seen = |k: &str| {
+                headers
+                    .get(k)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            axum::Json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": { "key": seen("x-api-key"), "auth": seen("authorization") }
+            }))
+        }
+        let app = axum::Router::new().route("/", axum::routing::post(handle));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let t = HttpTransport::with_headers(
+            format!("http://{addr}/"),
+            Arc::new(NoProvider),
+            vec![
+                ("X-API-Key".to_string(), "k".to_string()),
+                ("Authorization".to_string(), "token abc".to_string()),
+            ],
+        );
+        let v = t.request("initialize", json!({})).await.unwrap();
+        assert_eq!(v["key"], json!("k"));
+        assert_eq!(v["auth"], json!("token abc"));
+    }
+
+    /// A resolved bearer still wins the `Authorization` slot: it refreshes and
+    /// a declared one cannot.
+    #[tokio::test]
+    async fn a_resolved_bearer_replaces_a_declared_authorization() {
+        async fn handle(headers: axum::http::HeaderMap) -> impl axum::response::IntoResponse {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            axum::Json(json!({ "jsonrpc": "2.0", "id": 1, "result": { "auth": auth } }))
+        }
+        let app = axum::Router::new().route("/", axum::routing::post(handle));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let t = HttpTransport::with_headers(
+            format!("http://{addr}/"),
+            Arc::new(StaticProvider),
+            vec![("Authorization".to_string(), "token declared".to_string())],
+        );
+        let v = t.request("initialize", json!({})).await.unwrap();
+        assert_eq!(v["auth"], json!("Bearer old"));
+    }
+
+    /// No credential at all: a plugin server that authenticates with a header,
+    /// or none.
+    struct NoProvider;
+
+    #[async_trait]
+    impl BearerProvider for NoProvider {
+        async fn bearer(&self, _force: bool) -> Result<Option<String>, McpError> {
+            Ok(None)
+        }
     }
 }
