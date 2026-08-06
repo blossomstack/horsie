@@ -1,7 +1,14 @@
 import { ArrowUp, Square } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { SessionStatusKind } from "../api/types";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
+import { SessionStatusKind, type CatalogEntryView } from "../api/types";
 import { statusMeta } from "../lib/status";
+import { EntryMenu, filterEntries, invocationPrefix } from "./EntryMenu";
 
 /**
  * The composer: one field, one button, riding inside it.
@@ -22,6 +29,7 @@ export function Composer({
   busy,
   blockedReason = null,
   idlePlaceholder = "Message the agent…",
+  entries = [],
   onSend,
   onStop,
 }: {
@@ -32,10 +40,14 @@ export function Composer({
    * rather than sent a message, so the two surfaces do not ask for the same
    * thing. */
   idlePlaceholder?: string;
+  /** What the selected bundles offer, for the `/` and `@` typeahead. Empty
+   * where there is nothing to complete against. */
+  entries?: CatalogEntryView[];
   onSend: (text: string) => void;
   onStop: () => void;
 }) {
   const [text, setText] = useState("");
+  const [active, setActive] = useState(0);
   const ref = useRef<HTMLTextAreaElement>(null);
   const meta = statusMeta(status);
   const running = status === SessionStatusKind.Running;
@@ -57,14 +69,63 @@ export function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [text]);
 
+  // The menu is open exactly when the field holds a name still being typed.
+  // Derived rather than stored, so there is no state to get out of step with
+  // the text — deleting back to `/` reopens it, typing a space closes it.
+  const invocation = invocationPrefix(text);
+  const matches = useMemo(
+    () =>
+      invocation
+        ? filterEntries(entries, invocation.sigil, invocation.query)
+        : [],
+    [entries, invocation],
+  );
+  const menuOpen = matches.length > 0;
+  const index = Math.min(active, matches.length - 1);
+
+  const pick = (entry: CatalogEntryView) => {
+    // Trailing space: the name is chosen, and what follows is arguments.
+    setText(`${entry.kind === "agent" ? "@" : "/"}${entry.name} `);
+    setActive(0);
+    ref.current?.focus();
+  };
+
   const submit = () => {
     const trimmed = text.trim();
     if (!trimmed || !meta.canSend || busy || blocked) return;
     onSend(trimmed);
     setText("");
+    setActive(0);
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
+    // The menu owns the keys it needs while it is open. Enter in particular:
+    // with the menu up it picks, and sending a half-typed `/rev` instead is
+    // the mistake this ordering exists to prevent.
+    if (menuOpen) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setActive((i) => (i + 1) % matches.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setActive((i) => (i - 1 + matches.length) % matches.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        pick(matches[index]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Nothing to close: the menu is derived from the text, so the way out
+        // is to stop the text being an invocation.
+        setText(`${text} `);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       submit();
@@ -78,54 +139,62 @@ export function Composer({
           2px offset outline had nowhere to go but the sliver below it, and
           the only segment `overflow-hidden` did not clip read as a solid
           coloured line ruled under the input. One control, one ring. */}
-      <div className="panel relative overflow-hidden transition-shadow focus-within:border-amber focus-within:shadow-[0_0_0_3px_var(--focus-ring)]">
-        <textarea
-          ref={ref}
-          rows={1}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
-          data-testid="composer-input"
-          aria-label="Message the agent"
-          placeholder={
-            !meta.canSend
-              ? meta.hint
-              : awaiting
-                ? "Answer the agent…"
-                : running
-                  ? "Queue a message for the next turn…"
-                  : idlePlaceholder
-          }
-          disabled={!meta.canSend}
-          // `pr-14` reserves the button's lane so a long line never runs
-          // underneath it.
-          className="max-h-[200px] w-full resize-none bg-transparent py-3 pl-3.5 pr-14 text-[0.9375rem] leading-relaxed text-legend outline-none placeholder:text-faint disabled:opacity-60"
-        />
+      <div className="relative">
+        {menuOpen && (
+          <EntryMenu entries={matches} activeIndex={index} onPick={pick} />
+        )}
+        <div className="panel relative overflow-hidden transition-shadow focus-within:border-amber focus-within:shadow-[0_0_0_3px_var(--focus-ring)]">
+          <textarea
+            ref={ref}
+            rows={1}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={onKeyDown}
+            data-testid="composer-input"
+            aria-label="Message the agent"
+            placeholder={
+              !meta.canSend
+                ? meta.hint
+                : awaiting
+                  ? "Answer the agent…"
+                  : running
+                    ? "Queue a message for the next turn…"
+                    : idlePlaceholder
+            }
+            disabled={!meta.canSend}
+            // `pr-14` reserves the button's lane so a long line never runs
+            // underneath it.
+            className="max-h-[200px] w-full resize-none bg-transparent py-3 pl-3.5 pr-14 text-[0.9375rem] leading-relaxed text-legend outline-none placeholder:text-faint disabled:opacity-60"
+          />
 
-        <div className="absolute bottom-2 right-2">
-          {running ? (
-            <button
-              className="key key-stop !h-8 !w-8 !p-0"
-              onClick={onStop}
-              disabled={busy}
-              title="Stop this turn — queued messages are kept"
-              aria-label="Stop this turn"
-              data-testid="composer-stop"
-            >
-              <Square size={12} className="fill-current" aria-hidden />
-            </button>
-          ) : (
-            <button
-              className="key key-go !h-8 !w-8 !p-0"
-              onClick={submit}
-              disabled={!text.trim() || !meta.canSend || busy || blocked}
-              title={blockedReason ?? "Send — Enter sends, Shift+Enter starts a new line"}
-              aria-label="Send message"
-              data-testid="composer-send"
-            >
-              <ArrowUp size={15} aria-hidden />
-            </button>
-          )}
+          <div className="absolute bottom-2 right-2">
+            {running ? (
+              <button
+                className="key key-stop !h-8 !w-8 !p-0"
+                onClick={onStop}
+                disabled={busy}
+                title="Stop this turn — queued messages are kept"
+                aria-label="Stop this turn"
+                data-testid="composer-stop"
+              >
+                <Square size={12} className="fill-current" aria-hidden />
+              </button>
+            ) : (
+              <button
+                className="key key-go !h-8 !w-8 !p-0"
+                onClick={submit}
+                disabled={!text.trim() || !meta.canSend || busy || blocked}
+                title={
+                  blockedReason ??
+                  "Send — Enter sends, Shift+Enter starts a new line"
+                }
+                aria-label="Send message"
+                data-testid="composer-send"
+              >
+                <ArrowUp size={15} aria-hidden />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

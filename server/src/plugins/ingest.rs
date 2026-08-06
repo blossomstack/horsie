@@ -64,7 +64,9 @@ pub struct PluginBundle {
     pub name: String,
     pub version: Option<String>,
     pub description: Option<String>,
-    pub skill_count: u32,
+    /// Everything the bundle offers: its commands, skills and agents. Derived
+    /// here, once, so nothing downstream re-scans a checkout to find out.
+    pub catalog: Vec<horsie_support::plugin::catalog::CatalogEntry>,
     pub has_hooks: bool,
     /// One sentence per hook event this bundle declares that horsie cannot fire.
     /// Surfaced rather than dropped: a bundle that ingests cleanly and then has
@@ -218,7 +220,7 @@ fn pack(
         .map(str::to_string)
         .or_else(|| horsie_support::git::head_sha(checkout));
     let description = root.description().map(str::to_string);
-    let skill_count = u32::try_from(root.skill_dirs.len()).unwrap_or(u32::MAX);
+    let catalog = horsie_support::plugin::catalog::build(&root);
     let has_hooks = plugin_root.join("hooks").join("hooks.json").is_file();
     let unsupported_hooks = horsie_support::plugin::hooks::read(plugin_root)
         .map(|h| {
@@ -234,7 +236,7 @@ fn pack(
         name,
         version,
         description,
-        skill_count,
+        catalog,
         has_hooks,
         unsupported_hooks,
         zip_bytes,
@@ -243,6 +245,38 @@ fn pack(
         git_ref: git_ref.map(str::to_string),
         subpath,
     })
+}
+
+/// Unpack an artifact back into a directory tree — [`zip_dir`] read backwards.
+///
+/// Only the catalogue backfill needs this: runtimes unpack their own copies.
+/// It lives here anyway, beside the packing it inverts, so the two conventions
+/// cannot drift apart in separate files.
+///
+/// An entry whose path escapes `into` is skipped rather than written. These
+/// archives are ones this server packed itself, so that cannot happen today —
+/// but a path-traversal guard that exists only where an attacker is expected is
+/// a guard someone deletes.
+pub(super) fn unpack_zip(bytes: &[u8], into: &Path) -> Result<(), String> {
+    let mut zip =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).map_err(|e| e.to_string())?;
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i).map_err(|e| e.to_string())?;
+        let Some(rel) = file.enclosed_name() else {
+            continue;
+        };
+        let out = into.join(rel);
+        if file.is_dir() {
+            std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut w = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+        std::io::copy(&mut file, &mut w).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Deterministically zip a directory tree, excluding `.git`.
@@ -319,7 +353,11 @@ mod tests {
         for s in ["a", "b"] {
             let d = root.join("skills").join(s);
             std::fs::create_dir_all(&d).unwrap();
-            std::fs::write(d.join("SKILL.md"), format!("---\nname: {s}\n---\nbody")).unwrap();
+            std::fs::write(
+                d.join("SKILL.md"),
+                format!("---\nname: {s}\ndescription: d\n---\nbody"),
+            )
+            .unwrap();
         }
         let h = root.join("hooks");
         std::fs::create_dir_all(&h).unwrap();
@@ -351,7 +389,11 @@ mod tests {
     fn write_skill(dir: &Path, name: &str) {
         let s = dir.join("skills").join(name);
         std::fs::create_dir_all(&s).unwrap();
-        std::fs::write(s.join("SKILL.md"), format!("---\nname: {name}\n---\nbody")).unwrap();
+        std::fs::write(
+            s.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: d\n---\nbody"),
+        )
+        .unwrap();
     }
 
     /// Commit whatever is at `root` and return a `file://` URL for it.
@@ -412,7 +454,11 @@ mod tests {
         let root = tmp.path().join("src");
         let root = root.as_path();
         std::fs::create_dir_all(root.join("skills/s")).unwrap();
-        std::fs::write(root.join("skills/s/SKILL.md"), "---\nname: s\n---\nb").unwrap();
+        std::fs::write(
+            root.join("skills/s/SKILL.md"),
+            "---\nname: s\ndescription: d\n---\nb",
+        )
+        .unwrap();
         std::fs::create_dir_all(root.join("hooks")).unwrap();
         std::fs::write(
             root.join("hooks/hooks.json"),
@@ -451,7 +497,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("src");
         std::fs::create_dir_all(repo.join("skills/a")).unwrap();
-        std::fs::write(repo.join("skills/a/SKILL.md"), "---\nname: a\n---\nb").unwrap();
+        std::fs::write(
+            repo.join("skills/a/SKILL.md"),
+            "---\nname: a\ndescription: d\n---\nb",
+        )
+        .unwrap();
         std::fs::create_dir_all(repo.join("hooks")).unwrap();
         std::fs::write(
             repo.join("hooks/hooks.json"),
@@ -484,7 +534,11 @@ mod tests {
         .unwrap();
         let s = repo.join(".claude/skills/impeccable");
         std::fs::create_dir_all(&s).unwrap();
-        std::fs::write(s.join("SKILL.md"), "---\nname: impeccable\n---\nb").unwrap();
+        std::fs::write(
+            s.join("SKILL.md"),
+            "---\nname: impeccable\ndescription: d\n---\nb",
+        )
+        .unwrap();
         git(&repo, &["init", "-q"]);
         git(&repo, &["config", "user.email", "t@t"]);
         git(&repo, &["config", "user.name", "t"]);
@@ -494,7 +548,13 @@ mod tests {
         let ing =
             expect_plugin(ingest_git(&url_target(&format!("file://{}", repo.display()))).unwrap());
         assert_eq!(ing.name, "impeccable");
-        assert_eq!(ing.skill_count, 1);
+        assert_eq!(
+            ing.catalog
+                .iter()
+                .filter(|e| e.kind == horsie_support::plugin::catalog::CatalogKind::Skill)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -543,7 +603,13 @@ mod tests {
         let url = format!("file://{}", repo.display());
         let ing = expect_plugin(ingest_git(&url_target(&url)).unwrap());
         assert_eq!(ing.name, "demo");
-        assert_eq!(ing.skill_count, 2);
+        assert_eq!(
+            ing.catalog
+                .iter()
+                .filter(|e| e.kind == horsie_support::plugin::catalog::CatalogKind::Skill)
+                .count(),
+            2
+        );
         assert!(ing.has_hooks);
         assert!(!ing.hash.is_empty());
         assert!(ing.version.is_some());
@@ -573,14 +639,24 @@ mod tests {
         .unwrap();
         let s = plugin.join(".claude/skills/impeccable");
         std::fs::create_dir_all(&s).unwrap();
-        std::fs::write(s.join("SKILL.md"), "---\nname: impeccable\n---\nb").unwrap();
+        std::fs::write(
+            s.join("SKILL.md"),
+            "---\nname: impeccable\ndescription: d\n---\nb",
+        )
+        .unwrap();
         // A file at the repo root that must NOT end up in the artifact.
         std::fs::write(repo.join("README.md"), "not part of the bundle").unwrap();
         let url = commit_repo(&repo);
 
         let b = expect_plugin(ingest_git(&url_target(&url)).unwrap());
         assert_eq!(b.name, "impeccable");
-        assert_eq!(b.skill_count, 1);
+        assert_eq!(
+            b.catalog
+                .iter()
+                .filter(|e| e.kind == horsie_support::plugin::catalog::CatalogKind::Skill)
+                .count(),
+            1
+        );
         assert_eq!(b.subpath.as_deref(), Some("./plugin"));
         assert_eq!(
             b.url, url,
@@ -667,7 +743,13 @@ mod tests {
             })
             .unwrap(),
         );
-        assert_eq!(b.skill_count, 1);
+        assert_eq!(
+            b.catalog
+                .iter()
+                .filter(|e| e.kind == horsie_support::plugin::catalog::CatalogKind::Skill)
+                .count(),
+            1
+        );
         assert_eq!(b.subpath.as_deref(), Some("./plugins/beta"));
     }
 

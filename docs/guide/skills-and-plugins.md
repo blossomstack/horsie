@@ -88,10 +88,11 @@ Every session on that runtime then sees the library's skills, and the plugin
 hooks horsie supports run on your machine. Installs and updates are picked up on
 the next session scan — no reconnect needed.
 
-horsie runs seven hook events today: `SessionStart` once per agent load and
-`SubagentStart` once per subagent, `UserPromptSubmit` on every prompt, `Stop`
-when a turn ends and `SubagentStop` when a subagent's does, and
-`PreToolUse`/`PostToolUse` around every tool call. A bundle declaring an event
+horsie runs eight hook events today: `SessionStart` once per agent load and
+`SubagentStart` once per subagent, `UserPromptSubmit` on every prompt and
+`UserPromptExpansion` on every slash command, `Stop` when a turn ends and
+`SubagentStop` when a subagent's does, and `PreToolUse`/`PostToolUse` around
+every tool call. A bundle declaring an event
 horsie cannot fire still installs — its skills work — and the events it cannot
 run are named rather than silently ignored.
 
@@ -137,6 +138,28 @@ and the memory tools sit outside it and stay available. A declared `model` is
 honoured only when it names a model your horsie actually has; in practice agents
 declare `inherit`, `sonnet` or `opus`, so they inherit the session's model rather
 than silently switching your provider.
+
+A bundle's `commands/*.md` become **slash commands**. Send `/name args` as your
+message and horsie expands it into that file's template before the model sees
+anything — `$ARGUMENTS` becomes everything you typed after the name, and `$1`,
+`$2` … the individual words. A command's name is its filename, so
+`commands/review.md` is `/review`.
+
+Skills answer to `/` too, and a bundle's agents to `@`: `/brainstorming a new
+API` and `@code-reviewer this diff` each expand into an instruction naming the
+thing, which is what sends the agent to its skill or spawns the subagent. Start
+a message with either character and horsie offers what your selected bundles
+declare; the **Skills** settings page lists the same entries per bundle, so you
+can see what installing one actually gave you.
+
+Two things this deliberately does not do. `` !`cmd` `` — running a shell inside
+a template — is left as written rather than executed; ask the agent to run the
+command instead, since it has a shell. And `allowed-tools` on a command is not
+read: a command narrowing your toolbox mid-session would be a surprise rather
+than a convenience.
+
+A `/name` horsie does not recognise is sent as you wrote it — a message may
+legitimately start with a slash, and `/etc/hosts` has to survive being typed.
 
 Any hook, on any event, may answer `{"continue": false, "stopReason": "…"}`.
 horsie stops the agent that ran it and shows the reason: a tool hook's halt

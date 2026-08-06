@@ -39,6 +39,7 @@ export function toolScope(
     case "SessionStart":
     case "SessionEnd":
     case "UserPromptSubmit":
+    case "UserPromptExpansion":
     case "Stop":
     case "StopFailure":
     case "SubagentStart":
@@ -161,6 +162,7 @@ function outcomeSummary(r: HookRecord): HookSummary {
           return failed(a.value.outcome.value.reason);
       }
     case "UserPromptSubmit":
+    case "UserPromptExpansion":
       switch (a.value.outcome.outcome) {
         case "Ran":
           return a.value.outcome.value.additionalContext

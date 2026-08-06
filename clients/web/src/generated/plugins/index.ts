@@ -1,4 +1,5 @@
 
+export * from './catalogEntryView';
 export * from './pluginView';
 export * from './marketplacePluginView';
 export * from './marketplaceView';

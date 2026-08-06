@@ -32,6 +32,10 @@ use tokio_tungstenite::tungstenite::Message;
 #[derive(Default)]
 struct Recorder {
     signals: Mutex<Vec<String>>,
+    /// Workspace scans, counted apart from `signals` — that log is the
+    /// lifecycle one, `"<action>:<runtime_id>"`, and tests assert on it
+    /// exactly.
+    scans: std::sync::atomic::AtomicUsize,
     live: Mutex<BTreeSet<String>>,
     /// The most recent create request, so a test can assert what the server
     /// actually put on the wire (workspaces, env, provision steps).
@@ -60,6 +64,7 @@ fn event_name(event: &horsie_models::runtime::ServerHookEvent) -> &'static str {
         E::SessionStart(_) => "SessionStart",
         E::SubagentStart(_) => "SubagentStart",
         E::UserPromptSubmit(_) => "UserPromptSubmit",
+        E::UserPromptExpansion(_) => "UserPromptExpansion",
         E::Stop(_) => "Stop",
         E::SubagentStop(_) => "SubagentStop",
     }
@@ -76,6 +81,7 @@ fn action_name(action: &horsie_models::hooks::HookAction) -> &'static str {
         A::SessionStart(_) => "SessionStart",
         A::SessionEnd(_) => "SessionEnd",
         A::UserPromptSubmit(_) => "UserPromptSubmit",
+        A::UserPromptExpansion(_) => "UserPromptExpansion",
         A::Stop(_) => "Stop",
         A::StopFailure(_) => "StopFailure",
         A::SubagentStart(_) => "SubagentStart",
@@ -178,6 +184,14 @@ impl FakeRuntimeVendor {
             resume: None,
             owner: crate::auth::Principal::Anonymous,
         }
+    }
+
+    /// How many workspace scans the server asked for. The catalogue lives in
+    /// the database, so an expansion that scans is an expansion that regressed.
+    pub fn scan_count(&self) -> usize {
+        self.recorder
+            .scans
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Lifecycle signals in order, each `"<action>:<runtime_id>"` — e.g.
@@ -757,6 +771,9 @@ async fn run_agent<S>(
                         None
                     }
                     RuntimeInboundMessage::ScanWorkspace(req) => {
+                        recorder
+                            .scans
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         Some(RuntimeOutboundMessage::ScanResult(ScanResponse {
                             call_id: req.call_id,
                             workspaces: vec![WorkspaceScan {

@@ -1,5 +1,6 @@
-import { Loader2, RotateCcw, Trash2, Webhook } from "lucide-react";
-import type { PluginView } from "../../../api/types";
+import { ChevronRight, Loader2, RotateCcw, Trash2, Webhook } from "lucide-react";
+import { useState } from "react";
+import type { CatalogEntryView, PluginView } from "../../../api/types";
 import { cn } from "../../../lib/cn";
 import {
   useRemovePlugin,
@@ -7,10 +8,33 @@ import {
   useUpdatePlugin,
 } from "../../../hooks/usePlugins";
 
+/** What a user types to reach an entry. Agents answer to `@`, the rest to `/`. */
+export function sigilFor(kind: string): string {
+  return kind === "agent" ? "@" : "/";
+}
+
+/** `2 commands · 1 skill`, in catalogue order, with the empty kinds left out. */
+function summarise(catalog: CatalogEntryView[]): string {
+  const counts: [string, string][] = [
+    ["command", "command"],
+    ["skill", "skill"],
+    ["agent", "agent"],
+  ];
+  const parts = counts
+    .map(([kind, noun]) => {
+      const n = catalog.filter((e) => e.kind === kind).length;
+      return n === 0 ? null : `${n} ${noun}${n === 1 ? "" : "s"}`;
+    })
+    .filter((p): p is string => p !== null);
+  return parts.length === 0 ? "nothing horsie runs" : parts.join(" · ");
+}
+
 export function BundleRow({ bundle }: { bundle: PluginView }) {
   const setDefault = useSetPluginDefault();
   const update = useUpdatePlugin();
   const remove = useRemovePlugin();
+  const [open, setOpen] = useState(false);
+  const catalog = bundle.catalog ?? [];
 
   return (
     <div
@@ -41,9 +65,45 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
           {bundle.description && (
             <p className="mt-0.5 text-xs text-dim">{bundle.description}</p>
           )}
-          <p className="mt-0.5 text-[0.6875rem] text-faint">
-            {bundle.skillCount} skill{bundle.skillCount === 1 ? "" : "s"}
-          </p>
+          {/* The counts are the disclosure: what a bundle *offers* is the
+              question this page exists to answer, and the entries below are
+              the exact strings to type. */}
+          <button
+            type="button"
+            className="mt-0.5 flex items-center gap-1 text-[0.6875rem] text-faint hover:text-dim"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+            disabled={catalog.length === 0}
+          >
+            <ChevronRight
+              size={11}
+              className={cn("transition-transform", open && "rotate-90")}
+            />
+            {summarise(catalog)}
+          </button>
+          {open && catalog.length > 0 && (
+            <ul className="mt-1.5 space-y-1">
+              {catalog.map((entry) => (
+                <li
+                  key={`${entry.kind}:${entry.name}`}
+                  className="flex items-baseline gap-2 text-[0.6875rem]"
+                >
+                  <code className="shrink-0 text-dim">
+                    {sigilFor(entry.kind)}
+                    {entry.name}
+                  </code>
+                  {entry.argumentHint && (
+                    <span className="shrink-0 text-faint">
+                      {entry.argumentHint}
+                    </span>
+                  )}
+                  <span className="truncate text-faint">
+                    {entry.description}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         <div className="flex shrink-0 items-center gap-2">

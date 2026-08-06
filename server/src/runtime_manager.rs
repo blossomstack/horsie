@@ -431,6 +431,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::plugins::PluginProvisioner for FakeProvisioner {
+        async fn catalog(
+            &self,
+            _names: &[String],
+        ) -> Vec<horsie_support::plugin::catalog::CatalogEntry> {
+            Vec::new()
+        }
+
         async fn resolve(
             &self,
             names: &[String],

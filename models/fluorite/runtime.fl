@@ -138,6 +138,10 @@ struct SessionStartInput { source: SessionStartSource }
 /// same type, and the id is then the only thing telling two apart.
 struct SubagentStartInput { agent_id: String, agent_type: String }
 struct UserPromptSubmitInput { prompt: String }
+/// An invocation about to be expanded. `command` is the matcher domain — the
+/// name, so a hook can guard `/deploy` rather than every prompt — and `kind`
+/// says which of `command`, `skill` or `agent` it named.
+struct UserPromptExpansionInput { prompt: String, command: String, kind: String }
 /// `stop_hook_active` is true when horsie is only still running because a
 /// previous `Stop` hook blocked. A cooperative hook returns early rather than
 /// looping; the server's hard cap exists for the hooks that do not.
@@ -162,6 +166,7 @@ union ServerHookEvent {
     SessionStart(SessionStartInput),
     SubagentStart(SubagentStartInput),
     UserPromptSubmit(UserPromptSubmitInput),
+    UserPromptExpansion(UserPromptExpansionInput),
     Stop(StopInput),
     SubagentStop(SubagentStopInput),
 }

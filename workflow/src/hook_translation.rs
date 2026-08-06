@@ -14,7 +14,7 @@
 use horsie_models::agent::{ContentPart, HookEntry, Message, Role, TextPart};
 use horsie_models::hooks::{
     HookAction, HookRecord, PostToolBatchOutcome, SessionStartOutcome, StopOutcome,
-    SubagentStartOutcome, SubagentStopOutcome, UserPromptSubmitOutcome,
+    SubagentStartOutcome, SubagentStopOutcome, UserPromptExpansionOutcome, UserPromptSubmitOutcome,
 };
 
 /// The message a hook record contributes to the prompt, if any.
@@ -40,6 +40,16 @@ pub fn translate(entry: &HookEntry) -> Option<Message> {
                 // A blocked prompt never starts a run, so there is no turn to
                 // annotate; the seam abandons it. See [`start_blocked`].
                 UserPromptSubmitOutcome::Blocked(_) | UserPromptSubmitOutcome::Failed(_) => None,
+            },
+        ),
+        HookAction::UserPromptExpansion(r) => (
+            "UserPromptExpansion",
+            match &r.outcome {
+                UserPromptExpansionOutcome::Ran(c) => c.additional_context.as_deref(),
+                // A refused expansion never starts a run, so there is no turn
+                // to annotate. See [`start_blocked`].
+                UserPromptExpansionOutcome::Blocked(_)
+                | UserPromptExpansionOutcome::Failed(_) => None,
             },
         ),
         HookAction::Stop(r) => (
@@ -140,6 +150,14 @@ pub fn start_blocked(records: &[HookRecord]) -> Option<String> {
                     .unwrap_or_else(|| "a UserPromptSubmit hook blocked this prompt".to_string()),
             ),
             UserPromptSubmitOutcome::Ran(_) | UserPromptSubmitOutcome::Failed(_) => None,
+        },
+        HookAction::UserPromptExpansion(u) => match &u.outcome {
+            UserPromptExpansionOutcome::Blocked(b) => {
+                Some(b.reason.clone().unwrap_or_else(|| {
+                    "a UserPromptExpansion hook blocked this command".to_string()
+                }))
+            }
+            UserPromptExpansionOutcome::Ran(_) | UserPromptExpansionOutcome::Failed(_) => None,
         },
         // Listed rather than `_`, so an event that gains the power to refuse a
         // turn cannot be silently ignored here.

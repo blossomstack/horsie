@@ -161,6 +161,22 @@ struct UserPromptSubmitRecord {
 }
 
 #[type_tag = "outcome"]
+union UserPromptExpansionOutcome {
+    Ran(ContextInjected),
+    // The expansion is refused and the prompt never becomes a turn.
+    Blocked(HookBlocked),
+    Failed(HookFailed),
+}
+
+/// `command` is the matcher domain: the name being expanded, so a hook can
+/// guard one command rather than every prompt.
+struct UserPromptExpansionRecord {
+    command: String,
+    system_message: Option<String>,
+    outcome: UserPromptExpansionOutcome,
+}
+
+#[type_tag = "outcome"]
 union StopOutcome {
     Ran(ContextInjected),
     // *Blocked from stopping* — the turn continues with `reason` as its input.
@@ -278,6 +294,7 @@ union HookAction {
     SessionStart(SessionStartRecord),
     SessionEnd(SessionEndRecord),
     UserPromptSubmit(UserPromptSubmitRecord),
+    UserPromptExpansion(UserPromptExpansionRecord),
     Stop(StopRecord),
     StopFailure(StopFailureRecord),
     SubagentStart(SubagentStartRecord),

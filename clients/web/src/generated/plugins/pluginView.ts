@@ -1,4 +1,5 @@
 
+import { CatalogEntryView } from './catalogEntryView';
 /**
  * A library entry as shown in the web UI (metadata only — never the bytes).
  */
@@ -15,9 +16,9 @@ export interface PluginView {
   sourceUrl: string;
   sourceRef?: string;
   /**
-   * Number of SKILL.md skills the bundle provides.
+   * Everything the bundle offers, sorted by kind then name.
    */
-  skillCount: number;
+  catalog: CatalogEntryView[];
   /**
    * Whether the bundle ships hooks horsie will run.
    */

@@ -20,6 +20,7 @@ export * from './sessionStartSource';
 export * from './sessionStartInput';
 export * from './subagentStartInput';
 export * from './userPromptSubmitInput';
+export * from './userPromptExpansionInput';
 export * from './stopInput';
 export * from './subagentStopInput';
 export * from './serverHookEvent';

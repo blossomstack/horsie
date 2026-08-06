@@ -153,17 +153,26 @@ pub trait ContextProvider: Send + Sync {
     /// after it, which is why the context these hooks inject used to bypass the
     /// conversation entirely.
     ///
-    /// Returns the records to journal. Their consequences are read off them by
-    /// the caller — the agent translates the context and
-    /// [`crate::start_blocked`] reads a refusal — so this never decides
-    /// anything itself.
-    async fn start_hooks(
-        &self,
-        turn: StartTurn,
-    ) -> Result<Vec<horsie_models::hooks::HookRecord>, ContextError> {
+    /// Returns the records to journal, and optionally a rewritten prompt. Their
+    /// consequences are read off them by the caller — the agent translates the
+    /// context and [`crate::start_blocked`] reads a refusal — so this never
+    /// decides anything itself.
+    async fn start_hooks(&self, turn: StartTurn) -> Result<TurnPreparation, ContextError> {
         let _ = turn;
-        Ok(Vec::new())
+        Ok(TurnPreparation::default())
     }
+}
+
+/// What the pre-run seam produced.
+///
+/// `records` are journaled and their consequences read off them by the caller.
+/// `message` is set only when something *rewrote* the turn's input — today, a
+/// slash command expanding into its template. `None` means "unchanged", which
+/// is not the same as "empty": a turn with no user message at all is a resume.
+#[derive(Debug, Default)]
+pub struct TurnPreparation {
+    pub records: Vec<horsie_models::hooks::HookRecord>,
+    pub message: Option<String>,
 }
 
 /// Why a run's contexts could not be produced.

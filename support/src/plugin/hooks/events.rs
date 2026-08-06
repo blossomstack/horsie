@@ -3,7 +3,7 @@
 //! Three facts per event, each of which the rest of the system used to
 //! re-derive: what its stdin payload looks like (see `invoke.rs`), what its
 //! `matcher` selects on, and which output fields it may set. Claude Code
-//! documents 31 events; the sixteen absent here need a horsie subsystem that
+//! documents 31 events; the fifteen absent here need a horsie subsystem that
 //! does not exist, so they are refused rather than modelled.
 
 /// A hook event horsie can describe.
@@ -19,6 +19,7 @@ pub enum HookEvent {
     SessionStart,
     SessionEnd,
     UserPromptSubmit,
+    UserPromptExpansion,
     Stop,
     StopFailure,
     SubagentStart,
@@ -84,6 +85,7 @@ impl HookEvent {
             "SessionStart" => Ok(HookEvent::SessionStart),
             "SessionEnd" => Ok(HookEvent::SessionEnd),
             "UserPromptSubmit" => Ok(HookEvent::UserPromptSubmit),
+            "UserPromptExpansion" => Ok(HookEvent::UserPromptExpansion),
             "Stop" => Ok(HookEvent::Stop),
             "StopFailure" => Ok(HookEvent::StopFailure),
             "SubagentStart" => Ok(HookEvent::SubagentStart),
@@ -95,24 +97,12 @@ impl HookEvent {
 
             // No horsie concept: no permission model (horsie runs unattended by
             // design), no context compaction, no worktrees, no file watcher, no
-            // slash commands, no agent teams, no MCP elicitation, no display
-            // layer. Each would need a subsystem, not a call site.
-            "UserPromptExpansion"
-            | "PermissionRequest"
-            | "PermissionDenied"
-            | "PreCompact"
-            | "PostCompact"
-            | "FileChanged"
-            | "ConfigChange"
-            | "DirectoryAdded"
-            | "Setup"
-            | "MessageDisplay"
-            | "TeammateIdle"
-            | "WorktreeCreate"
-            | "WorktreeRemove"
-            | "Elicitation"
-            | "ElicitationResult"
-            | "InstructionsLoaded" => Err(Unsupported::NoConcept),
+            // agent teams, no MCP elicitation, no display layer. Each would need
+            // a subsystem, not a call site.
+            "PermissionRequest" | "PermissionDenied" | "PreCompact" | "PostCompact"
+            | "FileChanged" | "ConfigChange" | "DirectoryAdded" | "Setup" | "MessageDisplay"
+            | "TeammateIdle" | "WorktreeCreate" | "WorktreeRemove" | "Elicitation"
+            | "ElicitationResult" | "InstructionsLoaded" => Err(Unsupported::NoConcept),
 
             _ => Err(Unsupported::Unknown),
         }
@@ -128,6 +118,7 @@ impl HookEvent {
             HookEvent::SessionStart => "SessionStart",
             HookEvent::SessionEnd => "SessionEnd",
             HookEvent::UserPromptSubmit => "UserPromptSubmit",
+            HookEvent::UserPromptExpansion => "UserPromptExpansion",
             HookEvent::Stop => "Stop",
             HookEvent::StopFailure => "StopFailure",
             HookEvent::SubagentStart => "SubagentStart",
@@ -155,6 +146,10 @@ impl HookEvent {
             | HookEvent::SessionStart
             | HookEvent::SubagentStart
             | HookEvent::UserPromptSubmit
+            // Wired with slash commands: it fires where the expansion happens,
+            // which is the pre-run seam, immediately before `UserPromptSubmit`
+            // sees the result.
+            | HookEvent::UserPromptExpansion
             | HookEvent::Stop
             // A subagent's turn end used to fire `Stop`, because the sink that
             // fires it was not gated on the agent's kind — the same conflation
@@ -195,6 +190,7 @@ impl HookEvent {
             HookEvent::PostToolUseFailure
             | HookEvent::PostToolBatch
             | HookEvent::UserPromptSubmit
+            | HookEvent::UserPromptExpansion
             | HookEvent::Stop
             | HookEvent::SubagentStop => &[SystemMessage, Decision, AdditionalContext, Halt],
             // No `decision`: neither can refuse anything, because by the time
@@ -379,7 +375,7 @@ mod tests {
     /// widening what the library knows must not silently widen what horsie
     /// claims to run.
     #[test]
-    fn all_fifteen_seam_events_are_described_and_the_other_sixteen_are_not() {
+    fn all_sixteen_seam_events_are_described_and_the_other_fifteen_are_not() {
         let mut described = 0;
         let mut no_concept = 0;
         for name in ALL_31 {
@@ -392,13 +388,13 @@ mod tests {
                 Err(Unsupported::Unknown) => panic!("{name} is documented but classified Unknown"),
             }
         }
-        assert_eq!(described, 15, "described set changed");
-        assert_eq!(no_concept, 16, "absent set changed");
+        assert_eq!(described, 16, "described set changed");
+        assert_eq!(no_concept, 15, "absent set changed");
     }
 
     /// Wiring an event is a deliberate act. This is the list this change moves.
     #[test]
-    fn exactly_seven_events_are_wired() {
+    fn exactly_eight_events_are_wired() {
         let wired: Vec<&str> = ALL_31
             .iter()
             .filter_map(|n| HookEvent::parse(n).ok())
@@ -410,6 +406,7 @@ mod tests {
             vec![
                 "SessionStart",
                 "UserPromptSubmit",
+                "UserPromptExpansion",
                 "PreToolUse",
                 "PostToolUse",
                 "SubagentStart",

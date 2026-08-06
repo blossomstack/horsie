@@ -46,4 +46,19 @@ pub trait PluginProvisioner: Send + Sync {
 
     /// Bundle names flagged `enabled_default` — used when a session selects none.
     async fn default_names(&self) -> Vec<String>;
+
+    /// Everything the named bundles offer, merged. Empty `names` resolves to
+    /// the default-enabled set, mirroring what provisioning does with the same
+    /// input.
+    ///
+    /// A database read: the catalogue was derived when the bundle was
+    /// installed, so answering "is `/commit` a command?" costs no runtime and
+    /// no filesystem. That is the whole point — the seam runs on the way into
+    /// every turn, and a prompt that merely starts with a slash must not pay
+    /// for a scan.
+    ///
+    /// A name two bundles both declare goes to the first alphabetically; the
+    /// loser is logged. The rule skills and agents already use.
+    async fn catalog(&self, names: &[String])
+    -> Vec<horsie_support::plugin::catalog::CatalogEntry>;
 }

@@ -36,3 +36,44 @@ test("U1: a catalogue URL registers a source, and an entry installs from it", as
   // …and the catalogue stops offering it.
   await expect(page.getByTestId("entry-install-e2e-beta")).toBeDisabled();
 });
+
+test("U2: an installed bundle lists what it offers, and `/` completes it", async ({
+  page,
+  appBase,
+}) => {
+  // Depends on U1 having installed `e2e-beta`. The suite is serial and these
+  // live in one file so that ordering is a fact rather than a hope.
+  await page.goto(`${appBase}/settings/skills`);
+  const bundle = page.getByTestId("bundle-row").filter({ hasText: "e2e-beta" });
+  await expect(bundle).toBeVisible();
+
+  // The catalogue derived at ingest, counted by kind…
+  const disclosure = bundle.getByRole("button", { expanded: false });
+  await expect(disclosure).toContainText("1 skill");
+  await disclosure.click();
+  // …and listed as the exact string a user types.
+  await expect(bundle).toContainText("/e2e-beta-skill");
+
+  // The same catalogue, reached from the composer with no session in existence.
+  await page.goto(`${appBase}/`);
+  await page.getByTestId("new-session-button").click();
+  await page.getByTestId("config-skills").click();
+  await page
+    .locator("label")
+    .filter({ hasText: "e2e-beta" })
+    .getByRole("checkbox")
+    .check();
+  await page.keyboard.press("Escape");
+
+  await page.getByTestId("composer-input").fill("/");
+  await expect(page.getByTestId("entry-menu")).toBeVisible();
+  await expect(page.getByTestId("entry-menu")).toContainText("/e2e-beta-skill");
+
+  // Enter picks rather than sends — the hazard the whole key ordering exists
+  // to prevent.
+  await page.getByTestId("composer-input").press("Enter");
+  await expect(page.getByTestId("composer-input")).toHaveValue(
+    "/e2e-beta-skill ",
+  );
+  await expect(page.getByTestId("entry-menu")).toHaveCount(0);
+});

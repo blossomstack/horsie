@@ -1,6 +1,6 @@
 //! Deciding whether a directory is an installable plugin, and describing it.
 
-use super::{PluginManifest, agents, skills};
+use super::{PluginManifest, agents, commands, skills};
 use std::path::{Path, PathBuf};
 
 /// An inspected plugin directory.
@@ -9,6 +9,7 @@ pub struct PluginRoot {
     pub manifest: Option<PluginManifest>,
     pub skill_dirs: Vec<PathBuf>,
     pub agent_files: Vec<PathBuf>,
+    pub command_files: Vec<PathBuf>,
 }
 
 impl PluginRoot {
@@ -19,11 +20,13 @@ impl PluginRoot {
         let manifest = PluginManifest::read(dir)?;
         let skill_dirs = skills::skill_dirs(dir, manifest.as_ref());
         let agent_files = agents::agent_files(dir, manifest.as_ref());
+        let command_files = commands::command_files(dir, manifest.as_ref());
         Ok(PluginRoot {
             dir: dir.to_path_buf(),
             manifest,
             skill_dirs,
             agent_files,
+            command_files,
         })
     }
 
@@ -47,13 +50,16 @@ impl PluginRoot {
     }
 
     /// A plugin is installable when it provides something horsie runs: skills,
-    /// hooks, or agents.
+    /// hooks, agents, or commands.
     ///
     /// This was skills-only, which refused a hooks-only plugin at install even
     /// though horsie would have run its hooks perfectly well — the whole class
     /// of guard-only plugins, and MCP-only ones once Phase 4 lands.
     pub fn is_installable(&self) -> bool {
-        !self.skill_dirs.is_empty() || !self.agent_files.is_empty() || self.declares_hooks()
+        !self.skill_dirs.is_empty()
+            || !self.agent_files.is_empty()
+            || !self.command_files.is_empty()
+            || self.declares_hooks()
     }
 
     /// Whether `hooks/hooks.json` declares anything at all, runnable or not.
@@ -78,9 +84,14 @@ impl PluginRoot {
                 .join(", ")
         };
         format!(
-            "nothing horsie can run: no */SKILL.md under {}, no *.md under {}, no hooks/hooks.json",
+            "nothing horsie can run: no */SKILL.md under {}, no *.md under {} or {}, \
+             no hooks/hooks.json",
             relative(skills::skill_locations(&self.dir, self.manifest.as_ref())),
             relative(agents::agent_locations(&self.dir, self.manifest.as_ref())),
+            relative(commands::command_locations(
+                &self.dir,
+                self.manifest.as_ref()
+            )),
         )
     }
 }

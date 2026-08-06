@@ -5,8 +5,10 @@
 //! `docs/superpowers/specs/2026-08-02-plugin-marketplace-design.md`.
 
 pub mod agents;
+pub mod catalog;
 #[cfg(feature = "git")]
 pub mod checkout;
+pub mod commands;
 pub mod grants;
 pub mod hooks;
 pub mod layout;

@@ -9,7 +9,7 @@ use sqlx::any::AnyRow;
 use std::collections::HashSet;
 
 const COLS: &str = "name, source_kind, source_url, source_ref, source_subpath, version, \
-     description, skill_count, has_hooks, artifact_hash, artifact_size, enabled_default, \
+     description, catalog, has_hooks, artifact_hash, artifact_size, enabled_default, \
      marketplace, marketplace_entry, created_at, updated_at";
 
 /// One row of the `plugins` table.
@@ -24,7 +24,11 @@ pub struct PluginRow {
     pub source_subpath: Option<String>,
     pub version: Option<String>,
     pub description: Option<String>,
-    pub skill_count: u32,
+    /// Everything this bundle offers, derived at ingest. Empty when the column
+    /// is NULL (a row installed before catalogues existed) or unreadable — the
+    /// service backfills the first, and the second must degrade to "no entries"
+    /// rather than fail a list nobody could then repair.
+    pub catalog: Vec<horsie_support::plugin::catalog::CatalogEntry>,
     pub has_hooks: bool,
     pub artifact_hash: String,
     pub artifact_size: u64,
@@ -75,14 +79,14 @@ impl PluginStore {
     pub async fn upsert(&self, row: &PluginRow) -> Result<(), String> {
         let sql = self.db.q(
             "INSERT INTO plugins (user_id, name, source_kind, source_url, source_ref, source_subpath, \
-             version, description, skill_count, has_hooks, artifact_hash, artifact_size, \
+             version, description, catalog, has_hooks, artifact_hash, artifact_size, \
              enabled_default, marketplace, marketplace_entry, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(user_id, name) DO UPDATE SET source_kind = excluded.source_kind, \
              source_url = excluded.source_url, source_ref = excluded.source_ref, \
              source_subpath = excluded.source_subpath, \
              version = excluded.version, description = excluded.description, \
-             skill_count = excluded.skill_count, has_hooks = excluded.has_hooks, \
+             catalog = excluded.catalog, has_hooks = excluded.has_hooks, \
              artifact_hash = excluded.artifact_hash, artifact_size = excluded.artifact_size, \
              enabled_default = excluded.enabled_default, marketplace = excluded.marketplace, \
              marketplace_entry = excluded.marketplace_entry, updated_at = excluded.updated_at",
@@ -96,7 +100,7 @@ impl PluginStore {
             .bind(&row.source_subpath)
             .bind(&row.version)
             .bind(&row.description)
-            .bind(i64::from(row.skill_count))
+            .bind(serde_json::to_string(&row.catalog).unwrap_or_else(|_| "[]".to_string()))
             .bind(i64::from(row.has_hooks))
             .bind(&row.artifact_hash)
             .bind(i64::try_from(row.artifact_size).unwrap_or(i64::MAX))
@@ -195,7 +199,9 @@ fn row_to_plugin(row: &AnyRow) -> Result<PluginRow, String> {
         source_subpath: get_os("source_subpath")?,
         version: get_os("version")?,
         description: get_os("description")?,
-        skill_count: u32::try_from(get_i("skill_count")?).unwrap_or(0),
+        catalog: get_os("catalog")?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
         has_hooks: get_i("has_hooks")? != 0,
         artifact_hash: get_s("artifact_hash")?,
         artifact_size: u64::try_from(get_i("artifact_size")?).unwrap_or(0),
@@ -212,6 +218,17 @@ fn row_to_plugin(row: &AnyRow) -> Result<PluginRow, String> {
 mod tests {
     use super::*;
     use crate::db::testing;
+    use horsie_support::plugin::catalog::{CatalogEntry, CatalogKind};
+
+    fn entry(kind: CatalogKind, name: &str) -> CatalogEntry {
+        CatalogEntry {
+            kind,
+            name: name.into(),
+            description: "d".into(),
+            argument_hint: None,
+            template: (kind == CatalogKind::Command).then(|| "body".to_string()),
+        }
+    }
 
     fn row(name: &str, hash: &str) -> PluginRow {
         PluginRow {
@@ -222,7 +239,10 @@ mod tests {
             source_subpath: None,
             version: Some("1.0.0".into()),
             description: Some("d".into()),
-            skill_count: 2,
+            catalog: vec![
+                entry(CatalogKind::Command, "commit"),
+                entry(CatalogKind::Skill, "tdd"),
+            ],
             has_hooks: true,
             artifact_hash: hash.into(),
             artifact_size: 123,
@@ -241,7 +261,11 @@ mod tests {
             assert!(s.list().await.unwrap().is_empty());
             s.upsert(&row("demo", "h1")).await.unwrap();
             let got = s.get("demo").await.unwrap().unwrap();
-            assert_eq!(got.skill_count, 2);
+            assert_eq!(
+                got.catalog,
+                row("demo", "h1").catalog,
+                "the catalogue survives the round trip"
+            );
             assert!(got.has_hooks);
             assert!(!got.enabled_default);
 
