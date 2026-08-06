@@ -7,6 +7,7 @@ import {
   Plug,
   Server,
   Workflow,
+  Check,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -16,6 +17,7 @@ import { useMemorySpaces } from "../hooks/useMemory";
 import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
 import type { SessionDetail } from "../api/types";
+import { cn } from "../lib/cn";
 import { basename } from "../lib/format";
 import type {
   ConfigDraft,
@@ -47,6 +49,18 @@ export interface PickerSpec {
   width: string;
   testId: string;
   body: (close: () => void) => ReactNode;
+}
+
+/** Keep selected picker choices legible without changing the compact menu layout. */
+function optionClass(selected: boolean): string {
+  return cn(
+    "flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm",
+    selected ? "bg-raised text-legend" : "hover:bg-raised",
+  );
+}
+
+function SelectedMark() {
+  return <Check size={14} className="ml-auto shrink-0" aria-hidden />;
 }
 
 /** A list of tickable names — repos, skills, MCP servers, memory spaces all
@@ -141,9 +155,11 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
         <>
           <button
             type="button"
-            className="flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm hover:bg-raised"
+            className={optionClass(d.workflow === "")}
             data-testid="workflow-option"
             data-value=""
+            data-selected={d.workflow === ""}
+            aria-pressed={d.workflow === ""}
             onClick={() => {
               d.setWorkflow("");
               close();
@@ -151,6 +167,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           >
             None
             <span className="ml-auto text-[0.6875rem] text-faint">one agent</span>
+            {d.workflow === "" && <SelectedMark />}
           </button>
           {d.workflows.length === 0 ? (
             <EmptyLink to="/workflows">Define a workflow to run one</EmptyLink>
@@ -159,15 +176,18 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
               <button
                 key={w}
                 type="button"
-                className="flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm hover:bg-raised"
+                className={optionClass(d.workflow === w)}
                 data-testid="workflow-option"
                 data-value={w}
+                data-selected={d.workflow === w}
+                aria-pressed={d.workflow === w}
                 onClick={() => {
                   d.setWorkflow(w);
                   close();
                 }}
               >
                 <span className="font-mono">{w}</span>
+                {d.workflow === w && <SelectedMark />}
               </button>
             ))
           )}
@@ -202,9 +222,11 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
             <button
               key={v.name}
               type="button"
-              className="flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm hover:bg-raised"
+              className={optionClass(d.vendor === v.name)}
               data-testid="runtime-option"
               data-value={v.name}
+              data-selected={d.vendor === v.name}
+              aria-pressed={d.vendor === v.name}
               onClick={() => {
                 d.setVendor(v.name);
                 close();
@@ -212,6 +234,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
             >
               <span className="font-mono">{v.name}</span>
               {v.isDefault && <span className="text-[0.6875rem] text-faint">default</span>}
+              {d.vendor === v.name && <SelectedMark />}
             </button>
           ))
         ),
@@ -362,16 +385,21 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           <button
             key={m.alias}
             type="button"
-            className="flex w-full flex-col rounded-[var(--radius-chip)] px-2 py-1.5 text-left hover:bg-raised"
+            className={optionClass(draft.model === m.alias)}
             data-testid="model-option"
             data-value={m.alias}
+            data-selected={draft.model === m.alias}
+            aria-pressed={draft.model === m.alias}
             onClick={() => {
               draft.setModel(m.alias);
               close();
             }}
           >
-            <span className="font-mono text-sm text-legend">{m.alias}</span>
-            <span className="text-[0.6875rem] text-faint">{m.modelId}</span>
+            <span className="min-w-0 flex-1">
+              <span className="block font-mono text-sm text-legend">{m.alias}</span>
+              <span className="block text-[0.6875rem] text-faint">{m.modelId}</span>
+            </span>
+            {draft.model === m.alias && <SelectedMark />}
           </button>
         ))
       ),
@@ -390,7 +418,10 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
       testId: "config-thinking",
       body: () => (
         <div className="space-y-0.5">
-          <label className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised">
+          <label
+            className={cn(optionClass(draft.thinkingEffort === ""), "cursor-pointer")}
+            data-selected={draft.thinkingEffort === ""}
+          >
             <input
               type="radio"
               name="thinking-effort"
@@ -402,11 +433,13 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
                 ? `default (${draft.modelDefaultThinkingEffort})`
                 : "default"}
             </span>
+            {draft.thinkingEffort === "" && <SelectedMark />}
           </label>
           {draft.thinkingEfforts.map((e) => (
             <label
               key={e}
-              className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised"
+              className={cn(optionClass(draft.thinkingEffort === e), "cursor-pointer")}
+              data-selected={draft.thinkingEffort === e}
             >
               <input
                 type="radio"
@@ -415,6 +448,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
                 onChange={() => draft.setThinkingEffort(e)}
               />
               <span className="min-w-0 flex-1 truncate font-mono">{e}</span>
+              {draft.thinkingEffort === e && <SelectedMark />}
             </label>
           ))}
         </div>
