@@ -50,10 +50,12 @@ pub enum HookInvocation<'a> {
     UserPromptSubmit {
         prompt: &'a str,
     },
-    /// A slash command about to be expanded into its template.
+    /// An invocation about to be expanded: a command into its template, a
+    /// skill or an agent into an instruction naming it.
     UserPromptExpansion {
         prompt: &'a str,
         command: &'a str,
+        kind: &'a str,
     },
     Stop {
         last_assistant_message: Option<&'a str>,
@@ -156,10 +158,15 @@ impl HookInvocation<'_> {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": prompt,
             }),
-            HookInvocation::UserPromptExpansion { prompt, command } => json!({
+            HookInvocation::UserPromptExpansion {
+                prompt,
+                command,
+                kind,
+            } => json!({
                 "hook_event_name": "UserPromptExpansion",
                 "prompt": prompt,
                 "command": command,
+                "kind": kind,
             }),
             HookInvocation::Stop {
                 last_assistant_message,

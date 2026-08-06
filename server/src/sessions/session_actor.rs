@@ -733,6 +733,8 @@ impl SessionActor {
             agent_type: None,
             unattended: self.spec.is_unattended(),
             session: ctx.self_ref(),
+            plugins: self.spec.plugins.clone(),
+            plugin_library: self.deps.plugins.clone(),
             frames: self.frames.clone(),
             last_client: Mutex::new(None),
         });
@@ -812,6 +814,8 @@ impl SessionActor {
             agent_type: None,
             unattended: self.spec.is_unattended(),
             session: ctx.self_ref(),
+            plugins: self.spec.plugins.clone(),
+            plugin_library: self.deps.plugins.clone(),
             frames: self.frames.clone(),
             last_client: Mutex::new(None),
         });
@@ -1018,6 +1022,8 @@ impl SessionActor {
             agent_type,
             unattended: self.spec.is_unattended(),
             session: ctx.self_ref(),
+            plugins: self.spec.plugins.clone(),
+            plugin_library: self.deps.plugins.clone(),
             frames: self.frames.clone(),
             last_client: Mutex::new(None),
         });
@@ -2233,6 +2239,12 @@ struct SessionContextProvider {
     unattended: bool,
     /// The owning session's mailbox — routes the server-owned tools.
     session: ActorRef<SessionCommand>,
+    /// The plugin bundles this session selected, and the library that can say
+    /// what they offer. Together they answer "is `/commit` a command?" from the
+    /// database, with no runtime involved — which is what lets a prompt merely
+    /// *starting* with a slash cost nothing.
+    plugins: Vec<String>,
+    plugin_library: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
     frames: broadcast::Sender<SessionFrame>,
     /// The client the most recent `provide()` resolved. Cheap to keep — cloning
     /// shares the same in-flight-call tracking — and it is what lets
@@ -2292,6 +2304,96 @@ impl SessionContextProvider {
         Ok(scoped_client(&self.kind, client))
     }
 
+    /// Expand `/name` or `@name`, if this prompt is one.
+    ///
+    /// Returns the message to send in place of the prompt, and whatever
+    /// `UserPromptExpansion` hooks produced. `None` leaves the prompt exactly
+    /// as the user wrote it — which covers a message that merely begins with a
+    /// slash, since an unknown name is not an error. `/etc/hosts` has to
+    /// survive being sent.
+    ///
+    /// The catalogue is a database read: it was derived when the bundle was
+    /// installed. Nothing here touches the runtime, so a prompt that turns out
+    /// not to be an invocation costs one indexed lookup.
+    async fn expand_invocation(
+        &self,
+        client: &RuntimeClient,
+        prompt: &str,
+    ) -> (Option<String>, Vec<HookRecord>) {
+        use horsie_support::plugin::catalog::{self, CatalogKind};
+        use horsie_support::plugin::commands;
+
+        if !self.use_plugins() {
+            return (None, Vec::new());
+        }
+        let Some(library) = &self.plugin_library else {
+            return (None, Vec::new());
+        };
+        // Cheapest test first: neither sigil, nothing to look up.
+        let Some((sigil, name, args)) = commands::parse_invocation(prompt, '/')
+            .map(|(n, a)| ('/', n, a))
+            .or_else(|| commands::parse_invocation(prompt, '@').map(|(n, a)| ('@', n, a)))
+        else {
+            return (None, Vec::new());
+        };
+
+        let catalog = library.catalog(&self.plugins).await;
+        // The sigil is part of the identity: `@review` must not find a command
+        // called `review`, or `@` would silently become a second `/`.
+        let Some(entry) = catalog
+            .iter()
+            .find(|e| e.name == name && e.kind.sigil() == sigil)
+        else {
+            return (None, Vec::new());
+        };
+
+        let records = client
+            .run_hooks(ServerHookEvent::UserPromptExpansion(
+                UserPromptExpansionInput {
+                    prompt: prompt.to_string(),
+                    command: name.to_string(),
+                    kind: entry.kind.element().to_string(),
+                },
+            ))
+            .await
+            .unwrap_or_default();
+        // A hook that refused stops the expansion here, rather than being
+        // noticed a layer later with the work already done. `start_blocked`,
+        // not the halt: `{"decision":"block"}` and `continue: false` are two
+        // different statements and only the second sets a halt.
+        if horsie_workflow::start_blocked(&records).is_some() {
+            return (None, records);
+        }
+
+        let body = match entry.kind {
+            CatalogKind::Command => {
+                commands::expand(entry.template.as_deref().unwrap_or_default(), args)
+            }
+            // A skill and an agent have no template. The expansion names the
+            // thing and hands over the arguments; the agent then reaches for
+            // the skill tool or `spawn_agent` exactly as it would have if the
+            // user had asked in prose.
+            CatalogKind::Skill => match args {
+                "" => format!("Use the `{name}` skill.", name = entry.name),
+                _ => format!("Use the `{name}` skill. {args}", name = entry.name),
+            },
+            CatalogKind::Agent => match args {
+                "" => format!(
+                    "Delegate this to the `{name}` agent via `spawn_agent`.",
+                    name = entry.name
+                ),
+                _ => format!(
+                    "Delegate this to the `{name}` agent via `spawn_agent`: {args}",
+                    name = entry.name
+                ),
+            },
+        };
+        (
+            Some(catalog::frame(entry.kind, &entry.name, args, &body)),
+            records,
+        )
+    }
+
     /// The `agent_type` a `SubagentStart` / `SubagentStop` hook matches on.
     ///
     /// The plugin-declared type when the spawn named one, so a hook may select
@@ -2344,6 +2446,21 @@ impl ContextProvider for SessionContextProvider {
         }
         let mut message = None;
         if let Some(prompt) = turn.prompt {
+            // Expansion runs before `UserPromptSubmit`, which is where the spec
+            // puts it: a submit guard reads the prompt the model will see, not
+            // the four characters the user typed to summon it.
+            let (expansion, expansion_records) = self.expand_invocation(&client, &prompt).await;
+            records.extend(expansion_records);
+            // A refused expansion never becomes a turn — `start_blocked` reads
+            // the refusal off these records one layer up — so there is nothing
+            // left to submit.
+            if horsie_workflow::start_blocked(&records).is_some() {
+                return Ok(TurnPreparation {
+                    records,
+                    message: Some(prompt),
+                });
+            }
+            let prompt = expansion.unwrap_or(prompt);
             records.extend(
                 client
                     .run_hooks(ServerHookEvent::UserPromptSubmit(UserPromptSubmitInput {
@@ -5357,6 +5474,8 @@ mod tests {
             kind,
             unattended: false,
             session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: None,
             frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
         };
@@ -5407,6 +5526,8 @@ mod tests {
             agent_type: None,
             unattended: false,
             session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: None,
             frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
         };
@@ -5444,6 +5565,8 @@ mod tests {
             agent_type: None,
             unattended,
             session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: None,
             frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
         };
@@ -5915,6 +6038,339 @@ mod tests {
         out
     }
 
+    // --- Slash commands, skills and agents ---
+
+    /// A plugin library scripted with a fixed catalogue.
+    ///
+    /// The seam's question is "what does this name mean?", and the answer comes
+    /// from the database. Ingesting a real bundle to answer it would test
+    /// `pack()` a second time and pay for a git clone per case.
+    struct FakeLibrary(Vec<horsie_support::plugin::catalog::CatalogEntry>);
+
+    #[async_trait]
+    impl crate::plugins::PluginProvisioner for FakeLibrary {
+        async fn resolve(
+            &self,
+            _names: &[String],
+        ) -> Result<Vec<crate::plugins::PluginArtifactRef>, String> {
+            Ok(Vec::new())
+        }
+        fn mint_token(&self, _session_id: &str, _hashes: &[String]) -> String {
+            String::new()
+        }
+        async fn default_names(&self) -> Vec<String> {
+            Vec::new()
+        }
+        async fn catalog(
+            &self,
+            _names: &[String],
+        ) -> Vec<horsie_support::plugin::catalog::CatalogEntry> {
+            self.0.clone()
+        }
+    }
+
+    fn catalog_entry(
+        kind: horsie_support::plugin::catalog::CatalogKind,
+        name: &str,
+        template: Option<&str>,
+    ) -> horsie_support::plugin::catalog::CatalogEntry {
+        horsie_support::plugin::catalog::CatalogEntry {
+            kind,
+            name: name.into(),
+            description: "d".into(),
+            argument_hint: None,
+            template: template.map(str::to_string),
+        }
+    }
+
+    async fn catalog_harness(
+        entries: Vec<horsie_support::plugin::catalog::CatalogEntry>,
+    ) -> (ActorFixture, ActorRef<SessionCommand>, Uuid) {
+        catalog_harness_with(entries, Vec::new()).await
+    }
+
+    async fn catalog_harness_with(
+        entries: Vec<horsie_support::plugin::catalog::CatalogEntry>,
+        hook_records: Vec<Vec<HookRecord>>,
+    ) -> (ActorFixture, ActorRef<SessionCommand>, Uuid) {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
+            .hook_records(hook_records)
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        let mut vendors = HashMap::new();
+        vendors.insert("mock".to_string(), agent.link());
+        let vendors = Arc::new(std::sync::RwLock::new(vendors));
+        let deps = ServerDeps {
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
+            provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            vendors,
+            github_tokens: None,
+            mcp: None,
+            plugins: Some(Arc::new(FakeLibrary(entries))),
+            memory: None,
+        };
+        let f = ActorFixture {
+            deps,
+            agent,
+            _tmp: tmp,
+        };
+        let id = Uuid::new_v4();
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "mock", &actor_spec_fixture())
+            .await
+            .expect("create");
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            Arc::new(PromptRecorder(Arc::default())) as Arc<dyn LlmProvider>,
+        );
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                test_frames(),
+            ),
+            Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
+        );
+        (f, session, id)
+    }
+
+    fn catalog_provider(
+        f: &ActorFixture,
+        session: &ActorRef<SessionCommand>,
+        id: Uuid,
+    ) -> SessionContextProvider {
+        SessionContextProvider {
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings: actor_spec_fixture().agent,
+            step_output_schema: None,
+            session_id: id,
+            kind: SessionAgentKind::Main,
+            agent_type: None,
+            unattended: false,
+            session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: f.deps.plugins.clone(),
+            frames: test_frames(),
+            last_client: Mutex::new(None),
+        }
+    }
+
+    /// The prompt the seam produced for this turn — the whole point of the
+    /// expansion, since it is what the model actually reads.
+    async fn prepared_message(provider: &SessionContextProvider, prompt: &str) -> Option<String> {
+        provider
+            .start_hooks(StartTurn {
+                start_source: None,
+                prompt: Some(prompt.to_string()),
+            })
+            .await
+            .expect("prepare")
+            .message
+    }
+
+    #[tokio::test]
+    async fn a_slash_command_expands_into_its_framed_template() {
+        let (f, session, id) = catalog_harness(vec![catalog_entry(
+            horsie_support::plugin::catalog::CatalogKind::Command,
+            "review",
+            Some("Review $1 for bugs. Full args: $ARGUMENTS"),
+        )])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        let message = prepared_message(&provider, "/review src/a.rs carefully")
+            .await
+            .expect("a command expands");
+        assert!(
+            message.starts_with("<command name=\"review\" args=\"src/a.rs carefully\">"),
+            "framed so a client can tell an invocation from typed text: {message}"
+        );
+        assert!(message.contains("Review src/a.rs for bugs."), "{message}");
+        assert!(
+            message.contains("Full args: src/a.rs carefully"),
+            "{message}"
+        );
+    }
+
+    /// A skill and an agent have no template, so expansion names the thing and
+    /// lets the agent reach for the tool it already has.
+    #[tokio::test]
+    async fn a_skill_and_an_agent_expand_under_their_own_sigils() {
+        use horsie_support::plugin::catalog::CatalogKind;
+        let (f, session, id) = catalog_harness(vec![
+            catalog_entry(CatalogKind::Skill, "tdd", None),
+            catalog_entry(CatalogKind::Agent, "reviewer", None),
+        ])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+
+        let skill = prepared_message(&provider, "/tdd on the parser")
+            .await
+            .unwrap();
+        assert!(skill.starts_with("<skill name=\"tdd\""), "{skill}");
+        assert!(skill.contains("Use the `tdd` skill."), "{skill}");
+        assert!(skill.contains("on the parser"), "{skill}");
+
+        let agent = prepared_message(&provider, "@reviewer this diff")
+            .await
+            .unwrap();
+        assert!(agent.starts_with("<agent name=\"reviewer\""), "{agent}");
+        assert!(agent.contains("spawn_agent"), "{agent}");
+
+        // The sigil is part of the identity: `@` must not become a second `/`.
+        assert_eq!(
+            prepared_message(&provider, "@tdd").await.as_deref(),
+            Some("@tdd"),
+            "a skill is not reachable as an agent"
+        );
+    }
+
+    /// An unknown name is left exactly as written: a message may legitimately
+    /// begin with a slash, and refusing it would make `/etc/hosts` unsendable.
+    #[tokio::test]
+    async fn an_unknown_name_leaves_the_prompt_alone() {
+        let (f, session, id) = catalog_harness(vec![catalog_entry(
+            horsie_support::plugin::catalog::CatalogKind::Command,
+            "review",
+            Some("body"),
+        )])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        for prompt in [
+            "/nosuch thing",
+            "/etc/hosts is a file",
+            "hello",
+            "mail me at a@b.com",
+        ] {
+            assert_eq!(
+                prepared_message(&provider, prompt).await.as_deref(),
+                Some(prompt),
+                "{prompt} must reach the model unchanged"
+            );
+        }
+    }
+
+    /// Expanding costs no runtime call — which is the whole reason the
+    /// catalogue moved to the server.
+    #[tokio::test]
+    async fn expansion_makes_no_workspace_scan() {
+        let (f, session, id) = catalog_harness(vec![catalog_entry(
+            horsie_support::plugin::catalog::CatalogKind::Command,
+            "review",
+            Some("body"),
+        )])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        prepared_message(&provider, "/review a.rs").await;
+        assert_eq!(
+            f.agent.scan_count(),
+            0,
+            "the seam answers from the database, not the sandbox"
+        );
+    }
+
+    /// `UserPromptExpansion` fires for the entry being expanded, carrying its
+    /// name as the matcher domain and its kind alongside — and before
+    /// `UserPromptSubmit` sees the result, which is the order the spec gives
+    /// them.
+    #[tokio::test]
+    async fn expansion_is_hooked_before_submission() {
+        let (f, session, id) = catalog_harness(vec![catalog_entry(
+            horsie_support::plugin::catalog::CatalogKind::Command,
+            "review",
+            Some("body"),
+        )])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        prepared_message(&provider, "/review a.rs").await;
+
+        let events = f.agent.hook_events();
+        let expansion = events.iter().position(|e| *e == "UserPromptExpansion");
+        let submit = events.iter().position(|e| *e == "UserPromptSubmit");
+        assert!(
+            expansion.is_some(),
+            "the expansion must be hooked: {events:?}"
+        );
+        assert!(
+            expansion < submit,
+            "expansion runs first, so a submit guard reads what the model will: {events:?}"
+        );
+        let named: Vec<(String, String)> = f
+            .agent
+            .server_hook_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                horsie_models::runtime::ServerHookEvent::UserPromptExpansion(i) => {
+                    Some((i.command, i.kind))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named, vec![("review".to_string(), "command".to_string())]);
+    }
+
+    /// A hook answering `{"decision":"block"}` must stop the expansion itself,
+    /// not merely be noticed a layer later with the work already done. The
+    /// block is not a halt, and reading only the halt is how this regressed.
+    #[tokio::test]
+    async fn a_blocking_expansion_hook_stops_the_expansion() {
+        let blocked = HookRecord {
+            plugin: "guard".into(),
+            duration_ms: 0,
+            halt: None,
+            action: HookAction::UserPromptExpansion(
+                horsie_models::hooks::UserPromptExpansionRecord {
+                    command: "review".into(),
+                    system_message: None,
+                    outcome: horsie_models::hooks::UserPromptExpansionOutcome::Blocked(
+                        horsie_models::hooks::HookBlocked {
+                            reason: Some("not this one".into()),
+                        },
+                    ),
+                },
+            ),
+        };
+        let (f, session, id) = catalog_harness_with(
+            vec![catalog_entry(
+                horsie_support::plugin::catalog::CatalogKind::Command,
+                "review",
+                Some("the template"),
+            )],
+            vec![vec![blocked]],
+        )
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        let prep = provider
+            .start_hooks(StartTurn {
+                start_source: None,
+                prompt: Some("/review a.rs".to_string()),
+            })
+            .await
+            .expect("prepare");
+        assert_eq!(
+            prep.message.as_deref(),
+            Some("/review a.rs"),
+            "a refused expansion leaves the prompt as typed"
+        );
+        assert_eq!(
+            horsie_workflow::start_blocked(&prep.records).as_deref(),
+            Some("not this one"),
+            "and the refusal still abandons the turn"
+        );
+        assert!(
+            !f.agent.hook_events().contains(&"UserPromptSubmit"),
+            "a refused prompt never becomes a submission: {:?}",
+            f.agent.hook_events()
+        );
+    }
+
     // --- Plugin agents ---
 
     /// A session whose runtime library declares `code-reviewer`, with a
@@ -6014,6 +6470,8 @@ mod tests {
             agent_type: Some("code-reviewer".to_string()),
             unattended: false,
             session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: None,
             frames: test_frames(),
             last_client: Mutex::new(None),
         }
@@ -6101,6 +6559,8 @@ mod tests {
             agent_type: Some("uninstalled-agent".to_string()),
             unattended: false,
             session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: None,
             frames: test_frames(),
             last_client: Mutex::new(None),
         };

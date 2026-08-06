@@ -413,6 +413,50 @@ impl PluginProvisioner for PluginService {
         token::sign(&self.token_secret, session_id, hashes, TOKEN_TTL_SECS)
     }
 
+    async fn catalog(
+        &self,
+        names: &[String],
+    ) -> Vec<horsie_support::plugin::catalog::CatalogEntry> {
+        let selected: Vec<String> = if names.is_empty() {
+            self.default_names().await
+        } else {
+            names.to_vec()
+        };
+        // Sorted, so "first wins" is a rule rather than whatever order the
+        // caller happened to pass.
+        let mut wanted = selected;
+        wanted.sort();
+        let mut seen: std::collections::HashMap<(String, char), String> =
+            std::collections::HashMap::new();
+        let mut out = Vec::new();
+        for name in &wanted {
+            let Ok(Some(mut row)) = self.store.get(name).await else {
+                continue;
+            };
+            if row.catalog.is_empty() {
+                self.backfill(&mut row).await;
+            }
+            for entry in row.catalog {
+                // Keyed by name *and* sigil: `/review` and `@review` are two
+                // different things a user can type, so they do not collide.
+                let key = (entry.name.clone(), entry.kind.sigil());
+                match seen.get(&key) {
+                    Some(kept) => tracing::warn!(
+                        plugin = %row.name,
+                        kept = %kept,
+                        name = %entry.name,
+                        "duplicate catalogue entry; keeping first"
+                    ),
+                    None => {
+                        seen.insert(key, row.name.clone());
+                        out.push(entry);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     async fn default_names(&self) -> Vec<String> {
         self.store
             .list()

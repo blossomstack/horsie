@@ -182,6 +182,12 @@ impl FakeRuntimeVendor {
         }
     }
 
+    /// How many workspace scans the server asked for. The catalogue lives in
+    /// the database, so an expansion that scans is an expansion that regressed.
+    pub fn scan_count(&self) -> usize {
+        self.signals().iter().filter(|s| *s == "scan").count()
+    }
+
     /// Lifecycle signals in order, each `"<action>:<runtime_id>"` — e.g.
     /// `"create:9f3a…"`. One entry per explicit signal, which is what makes
     /// "every user action is exactly one vendor signal" assertable.
@@ -759,6 +765,7 @@ async fn run_agent<S>(
                         None
                     }
                     RuntimeInboundMessage::ScanWorkspace(req) => {
+                        recorder.record("scan");
                         Some(RuntimeOutboundMessage::ScanResult(ScanResponse {
                             call_id: req.call_id,
                             workspaces: vec![WorkspaceScan {
