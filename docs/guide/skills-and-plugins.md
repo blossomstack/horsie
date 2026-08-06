@@ -174,9 +174,14 @@ next to the workspace, and running it on the server host would be both wrong and
 a way for a plugin to execute commands there. That is the difference from the MCP
 servers you add in **Settings → MCP**, which run in the server process and can do
 OAuth. A plugin server authenticates with whatever its declaration carries in
-`env` or `headers`; if it needs an interactive login, add it as a Settings server
-instead. A plugin server that will not start contributes no tools and is logged —
-it never stops the session.
+`env` or `headers`, sent exactly as written; if it needs an interactive login,
+add it as a Settings server instead. A plugin server that will not start
+contributes no tools and is logged — it never stops the session.
+
+Two servers cannot share a name. If a plugin declares one your **Settings → MCP**
+list already has, the one you configured wins and the plugin's is ignored; if two
+plugins declare the same name, the first wins. Either way the loser is logged
+rather than silently merged.
 
 Any hook, on any event, may answer `{"continue": false, "stopReason": "…"}`.
 horsie stops the agent that ran it and shows the reason: a tool hook's halt

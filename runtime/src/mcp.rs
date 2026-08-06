@@ -272,7 +272,9 @@ fn as_failure(server: &str, error: &McpError) -> McpServerFailure {
                     .map(str::to_string),
             })
         }
-        other => unreachable(server, other),
+        e @ (McpError::Transport(_) | McpError::Protocol(_) | McpError::Rpc { .. }) => {
+            unreachable(server, e)
+        }
     }
 }
 

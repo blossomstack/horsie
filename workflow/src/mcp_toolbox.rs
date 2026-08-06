@@ -12,7 +12,8 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// Composes several toolboxes into one, routing `execute` to the first box that
-/// advertises the tool. `specs` is the concatenation of all boxes' specs.
+/// advertises the tool. `specs` is every box's specs, first spelling of a name
+/// winning.
 pub struct CompositeToolbox {
     boxes: Vec<Arc<dyn Toolbox>>,
 }
@@ -26,7 +27,16 @@ impl CompositeToolbox {
 #[async_trait]
 impl Toolbox for CompositeToolbox {
     fn specs(&self) -> Vec<ToolSpec> {
-        self.boxes.iter().flat_map(|b| b.specs()).collect()
+        // Deduplicated by name, keeping the first — which is the box `execute`
+        // would route to, so the schema the model is shown is the one that will
+        // actually run. Advertising both would also be a provider error: every
+        // one of them rejects a tool list with a repeated name.
+        let mut seen = std::collections::HashSet::new();
+        self.boxes
+            .iter()
+            .flat_map(|b| b.specs())
+            .filter(|s| seen.insert(s.name.clone()))
+            .collect()
     }
 
     async fn execute(
@@ -383,14 +393,15 @@ mod tests {
         );
         // The order `provide()` builds: admin boxes first, plugin box appended.
         let tb = CompositeToolbox::new(vec![admin, plugin]);
-        // Both advertise the name, and the admin one answers.
-        assert_eq!(
-            tb.specs()
-                .iter()
-                .filter(|s| s.name == "mcp__github__open_pr")
-                .count(),
-            2
-        );
+        // Advertised once — a repeated tool name is a provider error — and it
+        // is the admin server's schema, which is the one that will run.
+        let specs: Vec<_> = tb
+            .specs()
+            .into_iter()
+            .filter(|s| s.name == "mcp__github__open_pr")
+            .collect();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].description, "the admin's");
         assert_eq!(
             tb.execute("mcp__github__open_pr", json!({}), "tc1")
                 .await
