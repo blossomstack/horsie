@@ -957,13 +957,13 @@ impl RuntimeVendor {
     /// not provision its bundles, which is the same class of degradation as a
     /// bundle that would not download.
     fn prepare_plugins_dir(&self, runtime_id: &str) {
-        if let Some(dir) = self.plugins_path(runtime_id) {
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                note(&format!(
-                    "vendor agent: cannot create bundle dir {}: {e}",
-                    dir.display()
-                ));
-            }
+        if let Some(dir) = self.plugins_path(runtime_id)
+            && let Err(e) = std::fs::create_dir_all(&dir)
+        {
+            note(&format!(
+                "vendor agent: cannot create bundle dir {}: {e}",
+                dir.display()
+            ));
         }
     }
 
