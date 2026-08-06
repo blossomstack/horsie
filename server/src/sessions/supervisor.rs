@@ -339,6 +339,16 @@ pub struct SessionSupervisor {
     /// which the API reports as unknown rather than guessing.
     status: BTreeMap<SessionId, SessionStatus>,
     last_activity: BTreeMap<SessionId, Instant>,
+    /// One per-agent position registry per session, owned here rather than by
+    /// the session actor so that unloading an idle session does not disconnect
+    /// whoever is reading it.
+    ///
+    /// That is not a nicety: a disconnected browser reconnects, a reconnect
+    /// loads the session, and a loaded session goes idle again — so a channel
+    /// tied to the actor's life turns idle offload into an offload/reconnect/
+    /// load loop. Keeping it here means a reader simply waits, and hears from
+    /// the session the next time something wakes it.
+    positions: BTreeMap<SessionId, crate::sessions::Positions>,
 }
 
 impl SessionSupervisor {
@@ -364,6 +374,7 @@ impl SessionSupervisor {
             children: BTreeMap::new(),
             status: BTreeMap::new(),
             last_activity: BTreeMap::new(),
+            positions: BTreeMap::new(),
         }
     }
 
@@ -411,6 +422,7 @@ impl SessionSupervisor {
             spec.clone(),
             self.deps.clone(),
             ctx.self_ref(),
+            self.positions_for(id),
         ));
         self.children.insert(id.clone(), child.clone());
         Some(child)
@@ -439,6 +451,17 @@ impl SessionSupervisor {
         self.children.remove(id);
         self.status.remove(id);
         self.last_activity.remove(id);
+        // The registry outlives the actor while anyone is still reading: an
+        // unloaded session has nothing to say until something reloads it, and
+        // ending the stream would only make the client reconnect and reload it.
+        if self.positions.get(id).is_none_or(|p| !p.watched()) {
+            self.positions.remove(id);
+        }
+    }
+
+    /// This session's position registry, created on first use.
+    fn positions_for(&mut self, id: &SessionId) -> crate::sessions::Positions {
+        self.positions.entry(id.clone()).or_default().clone()
     }
 
     /// Unload every session that has been idle past the timeout.
@@ -827,23 +850,18 @@ impl EventSourcedActor for SessionSupervisor {
                 agent_id,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id) {
-                    Some(child) => {
-                        let (tx, rx) = oneshot::channel();
-                        let _ = child
-                            .tell(SessionCommand::WatchAgent {
-                                agent_id,
-                                reply: tx,
-                            })
-                            .await;
-                        tokio::spawn(async move {
-                            let _ = reply.send(rx.await.ok().flatten());
-                        });
-                    }
-                    None => {
-                        let _ = reply.send(None);
-                    }
+                // Answered here, not by the actor, and deliberately without
+                // loading: waiting on a session is no reason to wake one. The
+                // reader's first read is what loads it, and after that it only
+                // looks again when the position moves — which can only happen
+                // if something else already woke the session.
+                if !state.sessions.contains_key(&id) {
+                    let _ = reply.send(None);
+                    return CommandEffect::none();
                 }
+                let wire_id = agent_id.as_deref().unwrap_or("main");
+                let rx = self.positions_for(&id).for_agent(wire_id).subscribe();
+                let _ = reply.send(Some(rx));
                 CommandEffect::none()
             }
             SessionSupervisorCommand::AgentState {
@@ -1422,20 +1440,78 @@ mod tests {
         }
     }
 
-    // `a_subscriber_survives_an_offload` lived here. It asserted that the
-    // supervisor-owned `SessionFrame` channel outlived an offload, so a client
-    // watching a session was not disconnected by one.
-    //
-    // Both the channel and the session-scoped stream are gone: everything a
-    // client reads now rides one agent log. The per-agent position watch is
-    // owned by the agent actor, so an offload does end the connection and the
-    // browser reconnects — which is exactly what the *agent* stream already did
-    // before this change, since its broadcast was owned by the session actor
-    // too. Parity, not a regression; but status and inbox updates, which used
-    // to ride the surviving session channel, now share the agent stream's
-    // behaviour. Restoring survive-across-offload would mean hoisting the watch
-    // to the supervisor the way `frames` was hoisted, and is worth doing if
-    // reconnect churn shows up.
+    /// A reader parked on an agent's position must survive an idle offload.
+    ///
+    /// Not a nicety — it is what stops offload from being a loop. Disconnect a
+    /// browser and it reconnects; a reconnect reads, a read loads the session,
+    /// and a loaded session goes idle and offloads again. Keeping the channel
+    /// on the supervisor rather than the actor means the reader simply waits.
+    ///
+    /// This is the same property the old session-frame channel had, restored
+    /// per-agent now that one log carries everything a client reads.
+    #[tokio::test]
+    async fn a_reader_survives_an_offload_and_hears_the_reload() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let sup = spawn_root(
+            SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx,
+                manual_config(&clock),
+            ),
+            journal,
+        );
+        let id = create(&sup).await;
+        let mut rx = sup
+            .ask(|reply| SessionSupervisorCommand::WatchAgent {
+                id: id.clone(),
+                agent_id: None,
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("the main agent is watchable");
+        // Subscribing must not load the session: waiting on one is no reason to
+        // wake it, and a subscribe that loaded would restart the idle clock on
+        // every reconnect.
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::UsageStats {
+                id: id.clone(),
+                reply,
+            })
+            .await
+            .unwrap();
+
+        clock.advance(Duration::from_secs(181));
+        sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+        assert!(
+            await_signal(&f.agent, &format!("hibernate:{id}")).await,
+            "the session must actually unload for this test to mean anything"
+        );
+
+        assert!(
+            rx.has_changed().is_ok(),
+            "an offload must not disconnect a reader"
+        );
+
+        // And the same receiver hears the session's next move.
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::UserMessage {
+                id: id.clone(),
+                text: "hello".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+            .await
+            .expect("the reloaded session must publish into the same channel")
+            .expect("the channel is still open");
+    }
+
     #[tokio::test]
     async fn an_idle_session_is_unloaded_and_hibernated() {
         let f = fixture().await;

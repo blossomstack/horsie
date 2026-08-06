@@ -128,10 +128,25 @@ pub fn page_after(log: &[AgentLogEntry], after: u64) -> &[AgentLogEntry] {
     &log[start..]
 }
 
-/// Everything from the very beginning — a client with no cursor at all.
+/// How many entries a cursorless connect replays at most.
+///
+/// A session that has run for months should not resend its whole history every
+/// time someone opens it. The client is told when the cap bit and pages back
+/// with `before=` for the rest.
+pub const REPLAY_CAP: usize = 5_000;
+
+/// The newest `REPLAY_CAP` entries — what a client with no cursor at all gets —
+/// and whether anything was left behind.
+///
+/// Returns the truncation as a flag rather than leaving it to be inferred from
+/// the first entry's `seq`: a front-trimmed log has no seq 0 either, and that
+/// case wants the opposite answer.
 #[must_use]
-pub fn page_from_start(log: &[AgentLogEntry]) -> &[AgentLogEntry] {
-    log
+pub fn replay_window(log: &[AgentLogEntry]) -> (&[AgentLogEntry], bool) {
+    if log.len() <= REPLAY_CAP {
+        return (log, false);
+    }
+    (&log[log.len() - REPLAY_CAP..], true)
 }
 
 #[cfg(test)]
@@ -261,12 +276,34 @@ mod tests {
         assert_eq!(seqs(page_after(&log, 42)), vec![100, 101, 102, 103, 104]);
     }
 
+    /// A cursorless connect gets the newest window, not the whole history — a
+    /// session that has run for months must not resend all of it on every open.
+    #[test]
+    fn a_replay_is_capped_to_the_newest_window() {
+        let short = fixture(0..10);
+        let (entries, more) = replay_window(&short);
+        assert_eq!(entries.len(), 10);
+        assert!(!more, "a log under the cap is replayed whole");
+
+        let long: Vec<AgentLogEntry> = (0..(REPLAY_CAP as u64 + 25)).map(entry).collect();
+        let (entries, more) = replay_window(&long);
+        assert_eq!(entries.len(), REPLAY_CAP);
+        assert!(more, "the caller must learn the cap bit, not infer it");
+        assert_eq!(
+            entries.first().unwrap().seq,
+            25,
+            "the window is the newest entries, so paging back from its first \
+             seq reaches what was left out"
+        );
+        assert_eq!(entries.last().unwrap().seq, REPLAY_CAP as u64 + 24);
+    }
+
     #[test]
     fn an_empty_log_answers_every_cursor_with_nothing() {
         let log: Vec<AgentLogEntry> = vec![];
         assert!(page_before(&log, None, 10).entries.is_empty());
         assert!(page_before(&log, Some(1), 10).entries.is_empty());
         assert!(page_after(&log, 0).is_empty());
-        assert!(page_from_start(&log).is_empty());
+        assert!(replay_window(&log).0.is_empty());
     }
 }

@@ -130,19 +130,6 @@ pub enum SessionCommand {
         stage: String,
         detail: Option<String>,
     },
-    /// Watch one agent's position — `(tail_seq, delta_count)`. `agent_id` is
-    /// `None`/`"main"` for the primary agent, else a subagent id; the outer
-    /// `None` means no such agent. A cold subagent is spawned on demand,
-    /// exactly as a read does.
-    ///
-    /// A `watch`, not a subscription to the data: it holds only the latest
-    /// position and overwrites, so a slow reader cannot fall behind it and
-    /// there is nothing to overflow. Readers fetch what changed with
-    /// [`Self::ReadLog`].
-    WatchAgent {
-        agent_id: Option<String>,
-        reply: oneshot::Sender<Option<tokio::sync::watch::Receiver<(u64, usize)>>>,
-    },
     /// Read one agent's current values (task list, usage) for its document.
     AgentState {
         agent_id: Option<String>,
@@ -637,6 +624,12 @@ pub struct SessionActor {
     /// reach the runtime client the run already acquired instead of asking
     /// the manager for a fresh one.
     context_provider: Option<Arc<SessionContextProvider>>,
+    /// The supervisor's per-agent position channels for this session.
+    ///
+    /// Cloned in rather than created here: it has to outlive this actor, so
+    /// that unloading an idle session leaves a reader waiting rather than
+    /// disconnecting it.
+    positions: crate::sessions::Positions,
 }
 
 impl SessionActor {
@@ -645,6 +638,7 @@ impl SessionActor {
         spec: SessionSpec,
         deps: ServerDeps,
         parent: ActorRef<SessionSupervisorCommand>,
+        positions: crate::sessions::Positions,
     ) -> Self {
         // The spec decides which of the two this session is, once and for all.
         let orchestrator: Arc<dyn Orchestrator> = match &spec.workflow {
@@ -663,6 +657,7 @@ impl SessionActor {
             pending_step: None,
             orchestrator,
             context_provider: None,
+            positions,
         }
     }
 
@@ -746,6 +741,7 @@ impl SessionActor {
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let agent_ctx = AgentRuntimeContext {
             context_provider: context_provider.clone(),
+            position: self.positions.for_agent(MAIN_AGENT_ID),
             parent: Arc::new(StopHookParent {
                 inner: Arc::new(SessionParent {
                     target: ctx.self_ref(),
@@ -833,6 +829,7 @@ impl SessionActor {
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let agent_ctx = AgentRuntimeContext {
             context_provider: context_provider.clone(),
+            position: self.positions.for_agent(&agent_id.to_string()),
             parent: Arc::new(StopHookParent {
                 inner: Arc::new(SessionParent {
                     target: ctx.self_ref(),
@@ -1079,6 +1076,7 @@ impl SessionActor {
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let agent_ctx = AgentRuntimeContext {
             context_provider: context_provider.clone(),
+            position: self.positions.for_agent(&id.to_string()),
             parent: Arc::new(StopHookParent {
                 inner: Arc::new(SessionParent {
                     target: ctx.self_ref(),
@@ -3068,20 +3066,6 @@ impl EventSourcedActor for SessionActor {
                 .await;
                 CommandEffect::none()
             }
-            SessionCommand::WatchAgent { agent_id, reply } => {
-                // Resolving first means watching a cold subagent spawns it, so
-                // a reader sees its output the moment it wakes.
-                let agent = self.resolve_agent(state, ctx, agent_id.as_deref());
-                let rx = match agent {
-                    Some((_, agent)) => agent
-                        .ask(|reply| AgentCommand::WatchPosition { reply })
-                        .await
-                        .ok(),
-                    None => None,
-                };
-                let _ = reply.send(rx);
-                CommandEffect::none()
-            }
             SessionCommand::Answer { answers, reply } => {
                 self.on_answer(state, answers, reply).await
             }
@@ -4008,7 +3992,13 @@ mod tests {
     async fn drain_does_nothing_when_the_inbox_is_empty() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            crate::sessions::Positions::default(),
+        );
         let actions = decisions(&actor, &SessionState::default());
         assert!(actions.is_empty());
     }
@@ -4017,7 +4007,13 @@ mod tests {
     async fn drain_does_nothing_while_a_turn_is_already_running() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            crate::sessions::Positions::default(),
+        );
         let state = fold(vec![
             queued("m1", "one"),
             SessionDomainEvent::TurnBegan {
@@ -4039,7 +4035,13 @@ mod tests {
     async fn drain_refuses_once_the_session_is_unrecoverable() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            crate::sessions::Positions::default(),
+        );
         let state = fold(vec![
             queued("m1", "one"),
             SessionDomainEvent::SessionFailed {
@@ -4085,7 +4087,13 @@ mod tests {
             .await
             .unwrap();
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), f.deps, parent),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps,
+                parent,
+                crate::sessions::Positions::default(),
+            ),
             journal.clone(),
         );
         // Recovery reconciles the interrupted turn first (event 4); wait for
@@ -4131,7 +4139,13 @@ mod tests {
     async fn stop_then_a_queued_message_starts_the_next_turn() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            crate::sessions::Positions::default(),
+        );
         let running = fold(vec![
             queued("m1", "one"),
             SessionDomainEvent::TurnBegan {
@@ -4158,7 +4172,13 @@ mod tests {
     async fn drain_consumes_the_whole_inbox_and_starts_a_turn() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            crate::sessions::Positions::default(),
+        );
         let state = fold(vec![queued("m1", "one"), queued("m2", "two")]);
         let actions = decisions(&actor, &state);
         assert_eq!(actions.len(), 1);
@@ -4172,7 +4192,13 @@ mod tests {
     async fn drain_abandons_pending_asks_rather_than_answering_them() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            crate::sessions::Positions::default(),
+        );
         let state = fold(vec![
             SessionDomainEvent::AskRecorded {
                 at_ms: 0,
@@ -4210,7 +4236,13 @@ mod tests {
     async fn parked_on_two_asks() -> (SessionActor, SessionState) {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            crate::sessions::Positions::default(),
+        );
         let state = fold(vec![
             SessionDomainEvent::AskRecorded {
                 at_ms: 0,
@@ -4323,7 +4355,13 @@ mod tests {
     async fn answering_a_session_that_is_not_parked_is_refused() {
         let f = actor_fixture().await;
         let parent = spawn_deaf_supervisor();
-        let mut actor = SessionActor::new(Uuid::new_v4(), actor_spec_fixture(), f.deps, parent);
+        let mut actor = SessionActor::new(
+            Uuid::new_v4(),
+            actor_spec_fixture(),
+            f.deps,
+            parent,
+            crate::sessions::Positions::default(),
+        );
         let (tx, rx) = oneshot::channel();
 
         let effect = actor
@@ -4395,7 +4433,13 @@ mod tests {
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), f.deps.clone(), parent),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                parent,
+                crate::sessions::Positions::default(),
+            ),
             journal,
         );
 
@@ -4486,7 +4530,13 @@ mod tests {
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), f.deps.clone(), parent),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                parent,
+                crate::sessions::Positions::default(),
+            ),
             journal.clone(),
         );
         (f, session, id, journal)
@@ -4582,7 +4632,13 @@ mod tests {
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, spec, f.deps.clone(), parent),
+            SessionActor::new(
+                id,
+                spec,
+                f.deps.clone(),
+                parent,
+                crate::sessions::Positions::default(),
+            ),
             journal.clone(),
         );
         (f, session, id, journal)
@@ -4807,6 +4863,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -4894,6 +4951,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -4930,7 +4988,13 @@ mod tests {
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, spec, f.deps.clone(), spawn_deaf_supervisor()),
+            SessionActor::new(
+                id,
+                spec,
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
+            ),
             journal.clone(),
         );
         session.tell(SessionCommand::Provision).await.unwrap();
@@ -5060,6 +5124,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -5289,6 +5354,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -5331,18 +5397,11 @@ mod tests {
             })
             .await
             .unwrap();
-        let _ = session
-            .ask(|reply| SessionCommand::WatchAgent {
-                agent_id: None,
-                reply,
-            })
-            .await
-            .unwrap();
 
         assert_eq!(
             counting.replays(),
             after_recovery,
-            "history, agent state and subscribe must all be served from memory"
+            "history and agent state must both be served from memory"
         );
     }
 
@@ -5832,6 +5891,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -6124,6 +6184,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
             ),
             Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
         );
@@ -6413,6 +6474,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
             ),
             Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
         );
@@ -7087,7 +7149,13 @@ mod tests {
         // Loading must start no runs: C stays owed until someone acts.
         let parent = spawn_deaf_supervisor();
         let session2 = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), _f.deps.clone(), parent),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                _f.deps.clone(),
+                parent,
+                crate::sessions::Positions::default(),
+            ),
             journal.clone(),
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -7157,7 +7225,13 @@ mod tests {
         // Second incarnation on the same journal.
         let parent = spawn_deaf_supervisor();
         let session2 = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), f.deps.clone(), parent),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                parent,
+                crate::sessions::Positions::default(),
+            ),
             journal.clone(),
         );
         wait_for_tree(&journal, id, |t| {

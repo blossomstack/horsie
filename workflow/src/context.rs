@@ -246,6 +246,13 @@ impl ContextProvider for FixedContextProvider {
 pub struct AgentRuntimeContext {
     /// Per-run context supplier; see [`ContextProvider`].
     pub context_provider: Arc<dyn ContextProvider>,
+    /// Where this agent publishes `(tail_seq, delta_count)` for readers.
+    ///
+    /// Injected rather than created by the actor so its lifetime can be longer
+    /// than the actor's: a session agent's belongs to the supervisor, which is
+    /// what lets an idle offload leave a reader waiting instead of
+    /// disconnecting it into a reconnect-then-reload loop.
+    pub position: Arc<tokio::sync::watch::Sender<(u64, usize)>>,
     /// Whoever spawned this agent; receives its terminal outcome.
     pub parent: Arc<dyn AgentOutcomeSink>,
     pub session_id: Uuid,

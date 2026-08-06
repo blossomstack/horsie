@@ -20,38 +20,61 @@ pub mod supervisor;
 pub mod title_tool;
 pub mod workflow;
 
-/// Live broadcast frames for one agent's SSE stream.
+/// Where each of a session's agents has got to, for readers to wait on.
 ///
-/// `Appended` is the only frame that belongs to a log, and it is published from
-/// the agent actor's post-persist hook — so it is durable by the time it is
-/// broadcast, and no journal read is needed to serve it. The rest are current
-/// values or run-scoped noise.
-#[derive(Debug, Clone)]
-/// `large_enum_variant`: `Appended` carries a `HistoryEntry`, whose `Hook` arm
-/// holds a whole `HookRecord`. The type is fluorite-generated so the variant
-/// cannot be boxed, and a frame is moved once per append.
-#[allow(clippy::large_enum_variant)]
-pub enum AgentFrame {
-    /// One transcript append, durable. `entry.id()` is the stream's SSE id and
-    /// the history cursor — one vocabulary for both. Not every append is a
-    /// message the model saw; see `HistoryEntry`.
-    Appended {
-        entry: horsie_agentcore::HistoryEntry,
-    },
-    /// Streaming text delta. Ephemeral: never journaled, never replayed.
-    Delta { text: String },
-    /// A tool call started. Ephemeral.
-    ToolStart { tool_call_id: String, name: String },
-    /// A turn finished, with its own usage.
-    TurnCompleted {
-        iterations: u32,
-        usage: horsie_agentcore::Usage,
-        at_ms: u64,
-    },
-    /// The agent's task list, whole — never a delta.
-    TaskListChanged {
-        tasks: Vec<horsie_workflow::TaskRecord>,
-    },
+/// **Owned by the supervisor, not by the session.** An idle session unloads,
+/// and a reader parked on one of these must not be disconnected by that: the
+/// alternative is a loop, because a disconnected browser reconnects, a
+/// reconnect loads the session, and a loaded session goes idle again. The
+/// channel outliving the actor is what breaks that cycle — a reader simply
+/// waits, and hears from the session the next time something actually wakes it.
+///
+/// This is the same shape the old session-frame channel had, and for the same
+/// reason; it is per-agent now because that is what a reader subscribes to.
+///
+/// A `watch` carries only `(tail_seq, delta_count)`. It keeps the latest value
+/// and overwrites, so a slow reader cannot fall behind it and there is nothing
+/// to overflow — the data itself is read from the agent's state.
+/// Keyed by the *wire* agent id — `"main"`, or a subagent/step uuid — not by
+/// `AgentKey`. The supervisor answers a subscribe without loading the session,
+/// and telling a `Sub` uuid from a `Step` uuid needs session state it
+/// deliberately does not read. A uuid is one or the other and never both, so
+/// the wire id is already unambiguous.
+#[derive(Clone, Default)]
+pub struct Positions(
+    std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                String,
+                std::sync::Arc<tokio::sync::watch::Sender<(u64, usize)>>,
+            >,
+        >,
+    >,
+);
+
+impl Positions {
+    /// This agent's channel, created on first use.
+    #[must_use]
+    pub fn for_agent(&self, id: &str) -> std::sync::Arc<tokio::sync::watch::Sender<(u64, usize)>> {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(id.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))))
+            .clone()
+    }
+
+    /// Whether anyone is still waiting on any of these, so the supervisor can
+    /// drop the registry of a session nobody is watching.
+    #[must_use]
+    pub fn watched(&self) -> bool {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.values().any(|tx| tx.receiver_count() > 0)
+    }
+}
+
+impl std::fmt::Debug for Positions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Positions")
+    }
 }
 
 /// Why a message could not be accepted. There is no "busy" here by design: a

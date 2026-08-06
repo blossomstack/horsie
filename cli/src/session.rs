@@ -70,10 +70,14 @@ struct Envelope<'a> {
 /// A durable entry's `seq`; a delta's position within the entry it follows.
 /// Both are resumable, which is new — the old stream could only resume from an
 /// append, so a reconnect mid-message replayed the whole message.
-fn resume_cursor(frame: &MessageFrame) -> String {
+fn resume_cursor(frame: &MessageFrame) -> Option<String> {
     match frame {
-        MessageFrame::Entry(e) => e.seq.to_string(),
-        MessageFrame::Delta(d) => format!("{}.{}", d.entry_seq, d.delta_seq),
+        MessageFrame::Entry(e) => Some(e.seq.to_string()),
+        MessageFrame::Delta(d) => Some(format!("{}.{}", d.entry_seq, d.delta_seq)),
+        // Describes the window that follows rather than sitting in it, so it
+        // holds no position of its own. Advancing on it would move the cursor
+        // to somewhere nothing has been received from yet.
+        MessageFrame::Window(_) => None,
     }
 }
 
@@ -122,12 +126,14 @@ impl SessionSink {
         // cursor is derived from the frame rather than taken from `sse_id`,
         // because the two must agree and only one of them is typed.
         let id = resume_cursor(&event);
-        self.cursor = Some(id.clone());
+        if let Some(id) = &id {
+            self.cursor = Some(id.clone());
+        }
         if !self.mode.allows(&event) {
             return Ok(false);
         }
         let line = serde_json::to_string(&Envelope {
-            id: Some(id.as_str()),
+            id: id.as_deref(),
             event: &event,
         })
         .map_err(|e| CliError::Io(format!("serialize event: {e}")))?;

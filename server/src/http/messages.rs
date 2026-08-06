@@ -23,7 +23,7 @@ use axum::extract::{Path, Query};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use horsie_models::session::{MessageDelta, MessageFrame};
+use horsie_models::session::{MessageDelta, MessageFrame, MessageWindow};
 use horsie_models::session_api::MessagesPage;
 use horsie_workflow::Cursor;
 use serde::Deserialize;
@@ -156,6 +156,9 @@ async fn stream(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(STREAM_BUFFER);
     tokio::spawn(async move {
         let mut cursor = after;
+        // A resuming reader already knows what window it is in; only a
+        // cursorless one is owed the announcement, and only once.
+        let mut announced = after.is_some();
         loop {
             let out = state
                 .supervisor
@@ -174,6 +177,27 @@ async fn stream(
                 // connection already takes.
                 return;
             };
+
+            // The window frame, when there is one, precedes the entries it
+            // describes — a client needs to know whether it is looking at the
+            // whole log before it decides anything about the top of it.
+            if let Some(window) = out.window.as_ref().filter(|_| !announced) {
+                announced = true;
+                let frame = MessageFrame::Window(MessageWindow {
+                    has_more_before: window.has_more_before,
+                    earliest_seq: window.earliest_seq,
+                });
+                match Event::default().json_data(frame) {
+                    Ok(ev) => {
+                        if tx.send(Ok(ev)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to serialize the window frame");
+                    }
+                }
+            }
 
             let advanced = !out.is_empty();
             let mut entries = out.entries;
@@ -224,7 +248,13 @@ async fn stream(
                     }
                 }
             }
-            cursor = Some(out.cursor);
+            // Only advance on something actually received. An empty log would
+            // otherwise leave the cursor claiming entry 0 — a position it does
+            // not hold — and `page_after(log, 0)` skips seq 0, so the session's
+            // very first entry would never be sent.
+            if advanced {
+                cursor = Some(out.cursor);
+            }
 
             // Nothing new, so wait to be told there is. `changed()` also
             // returns immediately if the position moved while we were writing,

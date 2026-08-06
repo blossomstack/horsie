@@ -214,6 +214,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
 
     let (tx, mut outcomes) = tokio::sync::mpsc::channel(8);
     let ctx = AgentRuntimeContext {
+        position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
         context_provider: Arc::new(FixedContextProvider {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(ReadFileToolbox),
@@ -318,6 +319,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
 
     let (tx, mut outcomes) = tokio::sync::mpsc::channel(8);
     let ctx = AgentRuntimeContext {
+        position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
         context_provider: Arc::new(FixedContextProvider {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(AskUserToolbox),
@@ -421,6 +423,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         let session_id = uuid::Uuid::new_v4();
         let (tx, _outcomes) = tokio::sync::mpsc::channel(8);
         let ctx = AgentRuntimeContext {
+            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             context_provider: Arc::new(HangingContextProvider),
             parent: Arc::new(OutcomeChannel(tx)),
             session_id,
@@ -491,6 +494,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
 
     let (tx, _outcomes) = tokio::sync::mpsc::channel(8);
     let ctx = AgentRuntimeContext {
+        position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
         context_provider: Arc::new(FixedContextProvider {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(ReadFileToolbox),
@@ -546,6 +550,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     // and has nothing left to fix.
     let (tx2, _o2) = tokio::sync::mpsc::channel(8);
     let ctx2 = AgentRuntimeContext {
+        position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
         context_provider: Arc::new(FixedContextProvider {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(ReadFileToolbox),

@@ -189,16 +189,6 @@ pub enum AgentCommand {
     /// ordering is the only reason this is a command at all — nothing here is
     /// journaled.
     RecordDelta { text: String },
-    /// Watch this agent's position: `(tail_seq, delta_count)`.
-    ///
-    /// A `watch` rather than a broadcast of the data itself. It holds only the
-    /// latest value and overwrites, so a slow reader cannot fall behind it —
-    /// it simply sees a larger jump when it next looks. That is what makes
-    /// overflow structurally impossible here rather than a case to handle:
-    /// there is no buffer of pending items to overrun.
-    WatchPosition {
-        reply: tokio::sync::oneshot::Sender<tokio::sync::watch::Receiver<(u64, usize)>>,
-    },
     /// Stop this actor. Sent when the session it belongs to unloads: the agent
     /// is resident for the session's *loaded* lifetime, not forever, and going
     /// cold must not leave a task behind holding a whole transcript in memory.
@@ -249,6 +239,10 @@ pub enum AbandonedStart {
 /// after an entry it has not seen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadOutcome {
+    /// Set only on a cursorless read: what the replayed window covers, and
+    /// whether the cap left anything behind. A resuming caller already knows
+    /// where it is, so it gets `None`.
+    pub window: Option<ReplayWindow>,
     /// Durable entries after the caller's `entry_seq`.
     pub entries: Vec<AgentLogEntry>,
     /// Chunks of the message still being written, after the caller's
@@ -264,10 +258,18 @@ pub struct ReadOutcome {
     pub cursor: crate::agent_log::Cursor,
 }
 
+/// What a cursorless replay covered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayWindow {
+    pub has_more_before: bool,
+    pub earliest_seq: Option<u64>,
+}
+
 impl ReadOutcome {
     /// Nothing new — the reader is exactly where the agent is.
     fn nothing(cursor: crate::agent_log::Cursor) -> Self {
         Self {
+            window: None,
             entries: Vec::new(),
             deltas: Vec::new(),
             reset_deltas: false,
@@ -633,9 +635,16 @@ impl AgentState {
     ) -> ReadOutcome {
         let tail = self.tail_seq();
         let Some(cursor) = after else {
-            // No position at all: everything, from the beginning.
+            // No position at all: the newest window, capped. A long-running
+            // session must not resend its whole history on every open, and the
+            // caller is told when the cap bit so it can page back for the rest.
+            let (entries, truncated) = crate::agent_log::replay_window(&self.log);
             return ReadOutcome {
-                entries: crate::agent_log::page_from_start(&self.log).to_vec(),
+                window: Some(ReplayWindow {
+                    has_more_before: truncated,
+                    earliest_seq: entries.first().map(|e| e.seq),
+                }),
+                entries: entries.to_vec(),
                 deltas: deltas.to_vec(),
                 reset_deltas: false,
                 cursor: crate::agent_log::Cursor {
@@ -650,6 +659,7 @@ impl AgentState {
             // Behind the tail. The deltas belong after the entries this reader
             // is only now receiving, so they wait for the next step.
             return ReadOutcome {
+                window: None,
                 cursor: crate::agent_log::Cursor {
                     entry_seq: entries.last().map_or(cursor.entry_seq, |e| e.seq),
                     delta_seq: 0,
@@ -662,6 +672,7 @@ impl AgentState {
 
         if cursor.delta_seq > deltas.len() {
             return ReadOutcome {
+                window: None,
                 entries: Vec::new(),
                 deltas: deltas.to_vec(),
                 reset_deltas: true,
@@ -677,6 +688,7 @@ impl AgentState {
         }
 
         ReadOutcome {
+            window: None,
             entries: Vec::new(),
             deltas: deltas[cursor.delta_seq..].to_vec(),
             reset_deltas: false,
@@ -805,11 +817,17 @@ pub struct AgentActor {
     /// `(tail_seq, delta_count)`, published for readers to wait on. Only the
     /// position travels through here; the data itself is read from state, which
     /// is what leaves nothing to overflow.
-    position: tokio::sync::watch::Sender<(u64, usize)>,
+    ///
+    /// Held behind an `Arc` because the *owner* is whoever outlives this actor
+    /// — for a session agent that is the supervisor, so an idle offload does
+    /// not disconnect a reader and send it round the reconnect-reload loop. A
+    /// standalone agent owns its own and the distinction costs nothing.
+    position: std::sync::Arc<tokio::sync::watch::Sender<(u64, usize)>>,
 }
 
 impl AgentActor {
     pub fn new(ctx: AgentRuntimeContext, params: AgentParams) -> Self {
+        let position = ctx.position.clone();
         Self {
             ctx,
             params,
@@ -822,7 +840,7 @@ impl AgentActor {
             start_hook_fired: false,
             cancel_acks: Vec::new(),
             deltas: Vec::new(),
-            position: tokio::sync::watch::Sender::new((0, 0)),
+            position,
         }
     }
 
@@ -1721,14 +1739,6 @@ impl EventSourcedActor for AgentActor {
                 let _ = reply.send(crate::agent_log::page_before(&state.log, before, max));
                 CommandEffect::none()
             }
-            AgentCommand::WatchPosition { reply } => {
-                // Published before handing the receiver over, so a reader that
-                // subscribes between two changes still learns where the agent
-                // is rather than waiting for the next one.
-                self.publish_position(state);
-                let _ = reply.send(self.position.subscribe());
-                CommandEffect::none()
-            }
             AgentCommand::GetUsage { reply } => {
                 let _ = reply.send(state.usage_snapshot());
                 CommandEffect::none()
@@ -1772,6 +1782,11 @@ impl EventSourcedActor for AgentActor {
     }
 
     async fn on_recovery_complete(&mut self, state: &AgentState, ctx: &mut ActorContext<Self>) {
+        // Announce where this incarnation starts. The channel outlives the
+        // actor, so after an idle offload it still holds the position from
+        // before — republishing costs nothing and keeps a reader that has been
+        // waiting through the offload from having to guess.
+        self.publish_position(state);
         // Re-arm every surviving timer with its remaining delay (fires immediately if
         // already due). Do this whether parked or mid-run, so timers keep firing.
         let now = now_ms();
@@ -2467,6 +2482,7 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(StubContext),
+            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(StubParent),
             session_id,
         };
@@ -2547,6 +2563,7 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(NoContext),
+            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(DeafParent),
             session_id,
         };
@@ -2625,6 +2642,7 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(MockContext(provider.clone())),
+            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(ReportingParent(tx)),
             session_id,
         };
@@ -2771,6 +2789,7 @@ mod tests {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = AgentRuntimeContext {
                 context_provider: provider,
+                position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
                 parent: Arc::new(ReportingParent(tx)),
                 session_id: uuid::Uuid::new_v4(),
             };
@@ -2966,6 +2985,7 @@ mod tests {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = AgentRuntimeContext {
                 context_provider: Arc::new(GoneContext),
+                position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
                 parent: Arc::new(ReportingParent(tx)),
                 session_id: uuid::Uuid::new_v4(),
             };
@@ -4447,6 +4467,7 @@ mod fence_tests {
         let (tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(HangingProvider),
+            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(OutcomeChannel(tx)),
             session_id: uuid::Uuid::new_v4(),
         };

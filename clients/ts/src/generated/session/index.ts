@@ -10,6 +10,7 @@ export * from './askAnswerInput';
 export * from './sessionDetail';
 export * from './subAgentView';
 export * from './messageFrame';
+export * from './messageWindow';
 export * from './messageDelta';
 export * from './progressionEvent';
 export * from './usageView';

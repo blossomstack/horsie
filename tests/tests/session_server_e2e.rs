@@ -606,11 +606,25 @@ async fn create_message_sse_roundtrip() {
         joined.contains("hello from the agent"),
         "assistant text missing from stream: {joined}"
     );
-    // *Every* frame carries an SSE id now, and it is the cursor a page uses —
-    // one vocabulary for reading and streaming, and a reconnect can resume from
-    // any frame rather than only from the last durable append.
-    let ids: Vec<String> = events.iter().filter_map(|e| e.id.clone()).collect();
-    assert_eq!(ids.len(), events.len(), "every frame is resumable");
+    // Every frame that holds a *position* carries an SSE id — entries and
+    // deltas alike, so a reconnect can resume from any of them rather than only
+    // from the last durable append. The window frame is the one exception: it
+    // describes the window that follows rather than sitting in it, so giving it
+    // an id would let a reconnect resume from somewhere nothing was received.
+    let positioned: Vec<&Ev> = events.iter().filter(|e| e.kind != "Window").collect();
+    let ids: Vec<String> = positioned.iter().filter_map(|e| e.id.clone()).collect();
+    assert_eq!(
+        ids.len(),
+        positioned.len(),
+        "every positioned frame is resumable"
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|e| e.kind == "Window")
+            .all(|e| e.id.is_none()),
+        "the window frame holds no position"
+    );
     let unique: std::collections::HashSet<&String> = ids.iter().collect();
     assert_eq!(unique.len(), ids.len(), "ids must be unique: {ids:?}");
     // Entry ids are plain integers and strictly increase; a delta's is

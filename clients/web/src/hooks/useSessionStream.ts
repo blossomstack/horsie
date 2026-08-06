@@ -97,8 +97,13 @@ interface State {
    * with, which is also how the echo learns it can go. */
   optimistic: { id: string; text: string; serverId?: string }[];
   connected: boolean;
-  /** Whether a scroll-back page reached the start of the log. */
-  reachedStart: boolean;
+  /** Whether older entries exist before the oldest one held.
+   *
+   * Told by the server's window frame rather than inferred from the first
+   * entry's `seq`: a cursorless connect replays a capped window, and a log
+   * front-trimmed for context management would also start above zero — the two
+   * look identical from here and want opposite answers. */
+  hasMoreBefore: boolean;
   loadingMore: boolean;
   /** The agent document's task list, and the log position it reflects.
    *
@@ -115,7 +120,7 @@ const INITIAL: State = {
   deltas: [],
   optimistic: [],
   connected: false,
-  reachedStart: false,
+  hasMoreBefore: false,
   loadingMore: false,
   docTasks: null,
 };
@@ -173,6 +178,9 @@ function reducer(state: State, action: Action): State {
           ),
         };
       }
+      if (frame.type === "Window") {
+        return { ...state, hasMoreBefore: frame.value.hasMoreBefore };
+      }
       // A reset means the run that produced the chunks we hold is gone.
       return {
         ...state,
@@ -186,9 +194,10 @@ function reducer(state: State, action: Action): State {
       return {
         ...state,
         entries: merged,
-        // Fewer than asked for means the start of the log — the only signal
-        // there is, and the only one there needs to be.
-        reachedStart: action.page.entries.length < PAGE,
+        // Fewer than asked for means we reached the start. On a page that is
+        // the whole signal — unlike the replay, where the cap is not the
+        // client's own limit and so has to be stated.
+        hasMoreBefore: action.page.entries.length >= PAGE,
         loadingMore: false,
       };
     }
@@ -386,7 +395,7 @@ export function useSessionStream(
 
   const earliestRef = useRef<number | null>(null);
   earliestRef.current = state.entries[0]?.seq ?? null;
-  const canLoadMore = !state.reachedStart && !state.loadingMore;
+  const canLoadMore = state.hasMoreBefore && !state.loadingMore;
   const canLoadMoreRef = useRef(canLoadMore);
   canLoadMoreRef.current = canLoadMore;
 
@@ -575,12 +584,7 @@ export function useSessionStream(
       streamError: folded.error,
       connected: state.connected,
       tasks,
-      // Nothing older exists if the oldest entry we hold is seq 0 — and the
-      // stream replays from the start, so that is the normal case rather than
-      // something a scroll-back has to discover. `reachedStart` covers the
-      // other one: a log front-trimmed for context management has no seq 0, so
-      // "fewer entries than asked for" is the only remaining signal.
-      hasMoreBefore: !state.reachedStart && (state.entries[0]?.seq ?? 0) > 0,
+      hasMoreBefore: state.hasMoreBefore,
       loadingMore: state.loadingMore,
       progression: folded.progression,
     };
