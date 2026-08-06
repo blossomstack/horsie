@@ -985,10 +985,14 @@ impl RuntimeVendor {
     /// Remember what this runtime was made of, so a later get can rebuild it
     /// without the server having to re-send anything.
     ///
-    /// 0600 because the spec's `env` is where the server puts what it mints. A
-    /// vendor fixed to user-owned directories is handed none of that today, but
-    /// nothing in the protocol promises that, and this file sits on the same
-    /// machine as the workspaces it would grant access to.
+    /// 0600 because the spec's `env` is where the server puts what it mints,
+    /// including the token a runtime fetches its bundles with — every vendor is
+    /// handed that, and this file sits on the same machine as the workspaces it
+    /// would grant access to.
+    ///
+    /// That token outlives its own validity here: a revive replays whatever was
+    /// written, expiry included. Nothing on the happy path re-fetches, so it is
+    /// unreachable rather than fixed — see blossomstack/horsie#242.
     fn write_spec_file(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), String> {
         let path = self.spec_path(runtime_id);
         if let Some(parent) = path.parent() {
