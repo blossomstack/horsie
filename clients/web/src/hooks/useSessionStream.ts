@@ -575,7 +575,12 @@ export function useSessionStream(
       streamError: folded.error,
       connected: state.connected,
       tasks,
-      hasMoreBefore: !state.reachedStart && state.entries.length > 0,
+      // Nothing older exists if the oldest entry we hold is seq 0 — and the
+      // stream replays from the start, so that is the normal case rather than
+      // something a scroll-back has to discover. `reachedStart` covers the
+      // other one: a log front-trimmed for context management has no seq 0, so
+      // "fewer entries than asked for" is the only remaining signal.
+      hasMoreBefore: !state.reachedStart && (state.entries[0]?.seq ?? 0) > 0,
       loadingMore: state.loadingMore,
       progression: folded.progression,
     };

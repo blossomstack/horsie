@@ -1,21 +1,26 @@
-// Group I — windowed history load. The transcript paints from
-// `GET /agents/main/history` (never an SSE replay) and then streams live over a
-// live-only SSE connection. These verify the browser wiring end-to-end: a
-// reloaded session repaints from history, live updates continue afterward, and
-// the scroll-back affordance stays hidden for a short transcript.
+// Group I — windowed log load. The transcript paints from
+// `GET /sessions/:id/messages`, which replays the log from the start and then
+// goes live on the same connection. These verify the browser wiring end-to-end:
+// a reloaded session repaints, live updates continue afterward, and the
+// scroll-back affordance stays hidden for a short transcript.
 
 import { test, expect } from "./fixtures";
 import { createSession, sendMessage, expectStatus } from "./helpers";
 
-/** How many LLM messages a `/history` page holds.
+/** How many LLM messages a page of the log holds.
  *
- * A page is a list of transcript *entries*, and not every entry is a message the
- * model saw — a plugin hook record is an entry too. Counting entries would make
- * this test's turn arithmetic depend on whether a plugin happened to be loaded.
+ * A page is a list of log *entries*, and not every entry is a message the model
+ * saw — a plugin hook record is one, and so is every session lifecycle event.
+ * Counting entries would make this test's turn arithmetic depend on how many
+ * of those happened to land.
  */
+// The window is asked for in entries, and a turn contributes several lifecycle
+// entries besides its two messages — so a page sized for "52 messages" has to
+// be sized well past 52.
 function llmMessageCount(page: unknown): number {
-  const entries = (page as { entries?: { type?: string }[] }).entries ?? [];
-  return entries.filter((e) => e.type === "Llm").length;
+  const entries =
+    (page as { entries?: { body?: { type?: string } }[] }).entries ?? [];
+  return entries.filter((e) => e.body?.type === "Llm").length;
 }
 
 
@@ -23,7 +28,7 @@ test.beforeEach(async ({ mock }) => {
   await mock.reset();
 });
 
-test("I1: a reloaded session repaints from /history and keeps streaming live", async ({
+test("I1: a reloaded session repaints from the log and keeps streaming live", async ({
   page,
   appBase,
   mock,
@@ -34,16 +39,16 @@ test("I1: a reloaded session repaints from /history and keeps streaming live", a
   await expect(page.getByTestId("assistant-text")).toContainText("first answer");
   await expectStatus(page, "Idle");
 
-  // Reload: the transcript must come back via the windowed /history load, not a
-  // full SSE replay.
+  // Reload: the transcript comes back from the log, which the stream replays
+  // from the start — there is no separate read to fall out of step with it.
   await page.reload();
   await expect(
     page.locator('[data-testid="message"][data-role="User"]'),
   ).toContainText("first question");
   await expect(page.getByTestId("assistant-text")).toContainText("first answer");
 
-  // A new turn after reload proves the live-only SSE stream is delivering
-  // events (not relying on replay).
+  // A new turn after the reload proves the same connection that replayed is
+  // still delivering live.
   await mock.queueText("second answer");
   await sendMessage(page, "second question");
   await expect(page.getByTestId("assistant-text").last()).toContainText(
@@ -55,7 +60,7 @@ test("I1: a reloaded session repaints from /history and keeps streaming live", a
   await expect(page.getByTestId("history-load-more")).toHaveCount(0);
 });
 
-test("I2: a long session windows the tail and scroll-up loads older messages", async ({
+test("I2: a long session replays whole, so there is nothing to scroll back for", async ({
   page,
   appBase,
   mock,
@@ -78,7 +83,7 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
     .poll(
       async () => {
         const [h, s] = await Promise.all([
-          page.request.get(`${appBase}/api/sessions/${id}/agents/main/history?limit=200`),
+          page.request.get(`${appBase}/api/sessions/${id}/messages?aid=main&max=1000`),
           page.request.get(`${appBase}/api/sessions/${id}`),
         ]);
         const count = llmMessageCount(await h.json());
@@ -105,7 +110,7 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
       .poll(
         async () => {
           const [h, s] = await Promise.all([
-            page.request.get(`${appBase}/api/sessions/${id}/agents/main/history?limit=200`),
+            page.request.get(`${appBase}/api/sessions/${id}/messages?aid=main&max=1000`),
             page.request.get(`${appBase}/api/sessions/${id}`),
           ]);
           const count = llmMessageCount(await h.json());
@@ -117,20 +122,27 @@ test("I2: a long session windows the tail and scroll-up loads older messages", a
       .toBe(`${2 * i}:Idle`);
   }
 
-  // Fresh load → tail window only: newest turn present, oldest absent. Assert
-  // on the oldest *assistant* text ("answer 1") — the user's "question 1" also
-  // appears as the session title/sidebar row, so it isn't transcript-specific.
+  // A fresh load replays the log from the start and then goes live on the same
+  // connection, so the whole transcript is present — oldest turn included.
+  //
+  // This used to paint a 50-message tail and fetch older pages on scroll-up.
+  // The window existed because a read and a subscription were two requests, and
+  // the tail was how the client kept the first one small enough to land before
+  // the second. With one request there is no seam to keep small: the client
+  // asks once, from the beginning.
+  //
+  // The paging form of the endpoint is still there (`?before=&max=`) and still
+  // tested server-side; the web client simply has no reason to reach for it.
+  // If replay cost becomes real on a long session, windowing here is the
+  // optimization — and it would be a client change alone.
   await page.reload();
   await expect(page.getByTestId("assistant-text").last()).toContainText(
     "answer 26",
   );
-  await expect(page.getByText("answer 1", { exact: true })).toHaveCount(0);
-  await expect(page.getByTestId("history-load-more")).toBeVisible();
-
-  // Scroll to the top to pull the older page; the oldest turn appears.
-  const scroller = page.getByTestId("transcript-scroll");
-  await scroller.evaluate((el) => (el.scrollTop = 0));
+  // Assert on the oldest *assistant* text — the user's "question 1" also
+  // appears as the session title, so it is not transcript-specific.
   await expect(page.getByText("answer 1", { exact: true })).toBeVisible({
     timeout: 10_000,
   });
+  await expect(page.getByTestId("history-load-more")).toHaveCount(0);
 });
