@@ -29,8 +29,6 @@ use uuid::Uuid;
 /// subagent's uuid. One spelling, shared by every agent-scoped route.
 pub const MAIN_AGENT: &str = "main";
 
-/// Default and maximum messages returned by one `/history` page.
-
 /// The wire shape of one queued message. Shared with the SSE layer so the
 /// detail endpoint and `InboxChanged` can never disagree about the queue.
 pub fn wire_queued_message(m: InboxMessage) -> QueuedMessage {

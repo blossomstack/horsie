@@ -20,32 +20,6 @@ pub mod supervisor;
 pub mod title_tool;
 pub mod workflow;
 
-/// Live broadcast frames for one session's SSE stream — session-scoped current
-/// values only. A transcript belongs to an agent, not a session, so it is not
-/// here; see [`AgentFrame`]. None of these carries a cursor: a client that
-/// misses one re-reads the session document.
-#[derive(Debug, Clone)]
-pub enum SessionFrame {
-    /// Live status transition (durable status lives in the registry).
-    Status { status: spec::SessionStatus },
-    /// A turn failed (also recorded as `last_error`).
-    Error { message: String },
-    /// The queue of accepted-but-unanswered messages, whole (the detail
-    /// endpoint is the durable source, folded from the session journal).
-    InboxChanged {
-        queued: Vec<session_actor::InboxMessage>,
-    },
-    /// A resource-preparation progression (live signal; also journaled by the
-    /// session for audit).
-    Progression {
-        stage: String,
-        detail: Option<String>,
-        at_ms: u64,
-    },
-    /// The session's agent roster changed — a subagent spawned or finished.
-    AgentTreeChanged,
-}
-
 /// Live broadcast frames for one agent's SSE stream.
 ///
 /// `Appended` is the only frame that belongs to a log, and it is published from

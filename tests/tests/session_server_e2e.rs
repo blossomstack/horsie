@@ -42,15 +42,6 @@ fn page_messages(page: &serde_json::Value) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// The lifecycle entries on a page or stream, by kind.
-fn lifecycle_kinds(entries: &[serde_json::Value]) -> Vec<String> {
-    entries
-        .iter()
-        .filter(|e| e["body"]["type"] == serde_json::json!("Lifecycle"))
-        .filter_map(|e| e["body"]["value"]["kind"].as_str().map(str::to_string))
-        .collect()
-}
-
 // ── harness ──────────────────────────────────────────────────────────────────
 
 struct Server {

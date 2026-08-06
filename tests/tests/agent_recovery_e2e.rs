@@ -15,8 +15,7 @@
 use async_trait::async_trait;
 use horsie_actor::{InMemoryJournal, Journal, spawn_root};
 use horsie_agentcore::{
-    AgentEvent, ContentPart, EventSink, EventSinkError, LlmProvider, Message, Role, ToolCallError,
-    ToolCallPart, ToolSpec, Toolbox,
+    ContentPart, LlmProvider, Message, Role, ToolCallError, ToolCallPart, ToolSpec, Toolbox,
 };
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
@@ -30,14 +29,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 // ── harness ──────────────────────────────────────────────────────────────────
-
-struct NoopSink;
-#[async_trait]
-impl EventSink for NoopSink {
-    async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
-        Ok(())
-    }
-}
 
 /// Forwards the agent's terminal outcome to the test, so it can await the turn
 /// instead of polling the journal.

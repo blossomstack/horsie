@@ -11,15 +11,14 @@
 //! command is addressed to it, and dropped again once it has been idle for
 //! [`SupervisorConfig::idle_timeout`].
 
+use crate::sessions::UserMessageError;
 use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::session_actor::{
-    AnswerError, AskAnswer, FRAME_BROADCAST_CAPACITY, SessionActor, SessionCommand,
-    SessionSnapshot, SessionUsageStats,
+    AnswerError, AskAnswer, SessionActor, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
 };
-use crate::sessions::{SessionFrame, UserMessageError};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_models::session::{
@@ -340,10 +339,6 @@ pub struct SessionSupervisor {
     /// which the API reports as unknown rather than guessing.
     status: BTreeMap<SessionId, SessionStatus>,
     last_activity: BTreeMap<SessionId, Instant>,
-    /// One live-frame channel per session, owned here rather than by the actor
-    /// so that unloading a session does not disconnect whoever is watching it.
-    /// An entry outlives its actor only while something still holds a receiver.
-    frames: BTreeMap<SessionId, broadcast::Sender<SessionFrame>>,
 }
 
 impl SessionSupervisor {
@@ -369,7 +364,6 @@ impl SessionSupervisor {
             children: BTreeMap::new(),
             status: BTreeMap::new(),
             last_activity: BTreeMap::new(),
-            frames: BTreeMap::new(),
         }
     }
 
@@ -412,13 +406,11 @@ impl SessionSupervisor {
                 return None;
             }
         };
-        let frames = self.frames_for(id);
         let child = ctx.spawn(SessionActor::new(
             uuid,
             spec.clone(),
             self.deps.clone(),
             ctx.self_ref(),
-            frames,
         ));
         self.children.insert(id.clone(), child.clone());
         Some(child)
@@ -443,28 +435,10 @@ impl SessionSupervisor {
             }));
     }
 
-    /// This session's live-frame channel, created on first use.
-    fn frames_for(&mut self, id: &SessionId) -> broadcast::Sender<SessionFrame> {
-        self.frames
-            .entry(id.clone())
-            .or_insert_with(|| broadcast::channel(FRAME_BROADCAST_CAPACITY).0)
-            .clone()
-    }
-
     fn forget(&mut self, id: &SessionId) {
         self.children.remove(id);
         self.status.remove(id);
         self.last_activity.remove(id);
-        // The channel outlives the actor while anyone is still watching: an
-        // unloaded session has nothing to say until something reloads it, and
-        // ending the stream would only make the client reconnect and reload it.
-        if self
-            .frames
-            .get(id)
-            .is_none_or(|tx| tx.receiver_count() == 0)
-        {
-            self.frames.remove(id);
-        }
     }
 
     /// Unload every session that has been idle past the timeout.
@@ -718,8 +692,6 @@ impl EventSourcedActor for SessionSupervisor {
                     }
                 }
                 self.forget(&id);
-                // A deleted session has no stream to keep alive.
-                self.frames.remove(&id);
                 let _ = reply.send(Ok(()));
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionDeleted { id }])
             }

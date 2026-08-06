@@ -422,7 +422,7 @@ mod tests {
         serde_json::to_string(&MessageFrame::Entry(AgentLogEntry {
             seq,
             at_ms: 0,
-            body: AgentLogBody::Llm(Message::user(&format!("m{seq}"), "hi", 0)),
+            body: AgentLogBody::Llm(Message::user(format!("m{seq}"), "hi", 0)),
         }))
         .unwrap()
     }

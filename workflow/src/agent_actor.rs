@@ -1755,7 +1755,7 @@ impl EventSourcedActor for AgentActor {
         // are dropped the moment one lands. This is also what keeps the delta
         // sub-sequence short and restartable: it counts within one entry, never
         // across the session.
-        if events.iter().any(|e| coarse_appends_an_entry(e)) {
+        if events.iter().any(coarse_appends_an_entry) {
             self.deltas.clear();
         }
         self.publish_position(state);
@@ -2419,13 +2419,6 @@ mod tests {
             Err(crate::ContextError::retryable("no context"))
         }
     }
-    struct StubSink;
-    #[async_trait]
-    impl EventSink for StubSink {
-        async fn emit(&self, _: horsie_agentcore::AgentEvent) -> Result<(), EventSinkError> {
-            Ok(())
-        }
-    }
     struct StubParent;
     #[async_trait]
     impl AgentOutcomeSink for StubParent {
@@ -2513,13 +2506,6 @@ mod tests {
         impl ContextProvider for NoContext {
             async fn provide(&self) -> Result<Contexts, ContextError> {
                 Err(ContextError::retryable("no context"))
-            }
-        }
-        struct NoopSink;
-        #[async_trait]
-        impl EventSink for NoopSink {
-            async fn emit(&self, _: horsie_agentcore::AgentEvent) -> Result<(), EventSinkError> {
-                Ok(())
             }
         }
         struct DeafParent;
@@ -3362,7 +3348,7 @@ mod tests {
             AgentActor::apply_event(
                 state,
                 AgentDomainEvent::MessageComplete {
-                    message: Message::user(&format!("m{i}"), "x", i),
+                    message: Message::user(format!("m{i}"), "x", i),
                 },
             )
         })
@@ -4437,14 +4423,6 @@ mod fence_tests {
     impl ContextProvider for HangingProvider {
         async fn provide(&self) -> Result<Contexts, ContextError> {
             std::future::pending().await
-        }
-    }
-
-    struct NoopSink;
-    #[async_trait]
-    impl EventSink for NoopSink {
-        async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
-            Ok(())
         }
     }
 
