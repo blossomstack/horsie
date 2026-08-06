@@ -54,6 +54,24 @@ pub mod agent {
             }
         }
     }
+
+    impl AgentLogBody {
+        /// This entry's own identity, where it has one.
+        ///
+        /// Not a cursor — `AgentLogEntry::seq` is the cursor, and splitting the
+        /// two is what let ordering stop depending on a scan. This is the id a
+        /// tool result joins its call on, and the id a client dedupes an
+        /// optimistic echo against. A lifecycle entry has neither need and so
+        /// has no id.
+        #[must_use]
+        pub fn id(&self) -> Option<&str> {
+            match self {
+                Self::Llm(m) => Some(&m.id),
+                Self::Hook(h) => Some(&h.id),
+                Self::Lifecycle(_) => None,
+            }
+        }
+    }
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]

@@ -1,7 +1,7 @@
 //! Wire-boundary redaction: fields that exist only for provider replay and are
 //! meaningless to API clients.
 
-use horsie_models::agent::{ContentPart, HistoryEntry, Message};
+use horsie_models::agent::{AgentLogBody, AgentLogEntry, ContentPart, Message};
 
 /// Drop thinking-block signatures from messages on their way to a client.
 ///
@@ -10,11 +10,11 @@ use horsie_models::agent::{ContentPart, HistoryEntry, Message};
 /// renders `text` only (`clients/web/src/components/ThinkingBlock.tsx`). They
 /// stay in the agent's in-memory state and journal, where provider replay needs
 /// them; this strips only the copies handed to HTTP and SSE clients.
-/// A hook entry has no signature to strip — it never came from a provider — so
-/// only the LLM entries are touched.
-pub fn strip_entry_signatures(entries: &mut [HistoryEntry]) {
+/// Neither a hook nor a lifecycle entry has a signature to strip — neither came
+/// from a provider — so only the LLM entries are touched.
+pub fn strip_entry_signatures(entries: &mut [AgentLogEntry]) {
     for entry in entries.iter_mut() {
-        if let HistoryEntry::Llm(message) = entry {
+        if let AgentLogBody::Llm(message) = &mut entry.body {
             strip_message_signature(message);
         }
     }

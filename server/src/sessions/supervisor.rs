@@ -98,20 +98,23 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Hand back a live frame subscriber, or `None` if the session is unknown.
-    Subscribe {
-        id: SessionId,
-        reply: oneshot::Sender<Option<broadcast::Receiver<SessionFrame>>>,
-    },
-    /// Read a window of a session's conversation history. `agent_id` selects
-    /// the agent: absent or `"main"` for the primary agent, else a subagent
-    /// id. The outer `None` means the session is unknown; an inner `None`
-    /// means the agent is.
-    History {
+    /// Read forward from a cursor in one of a session's agent logs. `agent_id`
+    /// selects the agent: absent or `"main"` for the primary agent, else a
+    /// subagent id. The outer `None` means the session is unknown; an inner
+    /// `None` means the agent is.
+    ReadLog {
         id: SessionId,
         agent_id: Option<String>,
-        query: horsie_workflow::HistoryQuery,
-        reply: oneshot::Sender<Option<horsie_workflow::AgentHistoryPage>>,
+        after: Option<horsie_workflow::Cursor>,
+        reply: oneshot::Sender<Option<horsie_workflow::ReadOutcome>>,
+    },
+    /// Read a window backwards from a cursor — scroll-back.
+    PageLog {
+        id: SessionId,
+        agent_id: Option<String>,
+        before: Option<u64>,
+        max: usize,
+        reply: oneshot::Sender<Option<horsie_workflow::LogPage>>,
     },
     /// Read a session's aggregated usage.
     UsageStats {
@@ -141,12 +144,16 @@ pub enum SessionSupervisorCommand {
         answers: Vec<AskAnswer>,
         reply: oneshot::Sender<Result<(), AnswerError>>,
     },
-    /// Subscribe to one agent's live frames (`None` when the session or agent
-    /// is unknown).
-    SubscribeAgent {
+    /// Watch one agent's position — `(tail_seq, delta_count)` — so a reader
+    /// knows when to look again. `None` when the session or agent is unknown.
+    ///
+    /// A `watch`, not a subscription to the data: it holds only the latest
+    /// position and overwrites, so a slow reader cannot fall behind it and
+    /// there is nothing to overflow.
+    WatchAgent {
         id: SessionId,
         agent_id: Option<String>,
-        reply: oneshot::Sender<Option<broadcast::Receiver<crate::sessions::AgentFrame>>>,
+        reply: oneshot::Sender<Option<tokio::sync::watch::Receiver<(u64, usize)>>>,
     },
     /// Read one agent's current values, for its document.
     AgentState {
@@ -716,30 +723,47 @@ impl EventSourcedActor for SessionSupervisor {
                 let _ = reply.send(Ok(()));
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionDeleted { id }])
             }
-            SessionSupervisorCommand::Subscribe { id, reply } => {
-                // Answered here, not by the actor: a broadcast channel is
-                // transport, not state the actor owns, and watching a session
-                // is no reason to load one.
-                let receiver = state
-                    .sessions
-                    .contains_key(&id)
-                    .then(|| self.frames_for(&id).subscribe());
-                let _ = reply.send(receiver);
-                CommandEffect::none()
-            }
-            SessionSupervisorCommand::History {
+            SessionSupervisorCommand::ReadLog {
                 id,
                 agent_id,
-                query,
+                after,
                 reply,
             } => {
                 match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::History {
+                            .tell(SessionCommand::ReadLog {
                                 agent_id,
-                                query,
+                                after,
+                                reply: tx,
+                            })
+                            .await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok().flatten());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::PageLog {
+                id,
+                agent_id,
+                before,
+                max,
+                reply,
+            } => {
+                match self.ensure_loaded(ctx, state, &id) {
+                    Some(child) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = child
+                            .tell(SessionCommand::PageLog {
+                                agent_id,
+                                before,
+                                max,
                                 reply: tx,
                             })
                             .await;
@@ -826,7 +850,7 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::SubscribeAgent {
+            SessionSupervisorCommand::WatchAgent {
                 id,
                 agent_id,
                 reply,
@@ -835,7 +859,7 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::SubscribeAgent {
+                            .tell(SessionCommand::WatchAgent {
                                 agent_id,
                                 reply: tx,
                             })

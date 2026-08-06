@@ -4,8 +4,9 @@ use crate::context::{
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentResult, ContentPart, EventSink,
-    EventSinkError, HandoffCall, HistoryEntry, LlmProvider, Message, Role, Toolbox, Usage,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentLogBody, AgentLogEntry,
+    AgentResult, ContentPart, EventSink, EventSinkError, HandoffCall, LifecycleEvent, LlmProvider,
+    Message, Role, Toolbox, Usage,
 };
 use horsie_models::now_ms;
 use serde::{Deserialize, Serialize};
@@ -155,12 +156,41 @@ pub enum AgentCommand {
         action: crate::task_list::TaskListAction,
         reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
-    /// Read a window of conversation history from in-memory state — no journal
-    /// access, no run. Answers the server's paginated `/history` reads so a long
-    /// session can be viewed without replaying its whole transcript.
-    GetHistory {
-        query: HistoryQuery,
-        reply: tokio::sync::oneshot::Sender<AgentHistoryPage>,
+    /// Read forward from a cursor: durable entries plus, when the caller has
+    /// caught up to the tail, the deltas of the message still being written.
+    ///
+    /// Answered from in-memory state — no journal access, no run. `after` of
+    /// `None` means "from the very beginning", which is what a client with no
+    /// position at all asks for.
+    ReadLog {
+        after: Option<crate::agent_log::Cursor>,
+        reply: tokio::sync::oneshot::Sender<ReadOutcome>,
+    },
+    /// Read a window *backwards* from a cursor — scroll-back. Separate from
+    /// [`Self::ReadLog`] because it answers a different question and never
+    /// carries deltas: nothing is being typed in the past.
+    PageLog {
+        before: Option<u64>,
+        max: usize,
+        reply: tokio::sync::oneshot::Sender<crate::agent_log::LogPage>,
+    },
+    /// One chunk of the message currently being written.
+    ///
+    /// Routed through the mailbox rather than straight to readers so it is
+    /// ordered against the entries around it: a chunk cannot overtake the entry
+    /// it precedes, and the entry that supersedes it cannot land first. That
+    /// ordering is the only reason this is a command at all — nothing here is
+    /// journaled.
+    RecordDelta { text: String },
+    /// Watch this agent's position: `(tail_seq, delta_count)`.
+    ///
+    /// A `watch` rather than a broadcast of the data itself. It holds only the
+    /// latest value and overwrites, so a slow reader cannot fall behind it —
+    /// it simply sees a larger jump when it next looks. That is what makes
+    /// overflow structurally impossible here rather than a case to handle:
+    /// there is no buffer of pending items to overrun.
+    WatchPosition {
+        reply: tokio::sync::oneshot::Sender<tokio::sync::watch::Receiver<(u64, usize)>>,
     },
     /// Stop this actor. Sent when the session it belongs to unloads: the agent
     /// is resident for the session's *loaded* lifetime, not forever, and going
@@ -205,47 +235,44 @@ pub enum AbandonedStart {
     Failed(crate::ContextError),
 }
 
-/// A windowed history request over the agent's message log.
+/// What a live reader gets for one step forward.
 ///
-/// The two cursors are the same space — a message id — read in opposite
-/// directions, and they are mutually exclusive: `after` wins if both are set.
-/// Because `state.messages` is append-only and never truncated, a cursor stays
-/// valid for the life of the session, which is what lets a live stream resume
-/// from one without any journal involvement.
-#[derive(Debug, Clone, Default)]
-pub struct HistoryQuery {
-    /// Return the `limit` messages immediately *before* this message id. `None`
-    /// requests the latest (tail) window — the initial view.
-    pub before: Option<String>,
-    /// Return up to `limit` messages immediately *after* this message id — the
-    /// forward page a reconnecting stream backfills with.
-    pub after: Option<String>,
-    /// Maximum messages to return.
-    pub limit: usize,
+/// Entries and deltas are answered together because they are two halves of one
+/// position, and separating them would let a client hold a delta that belongs
+/// after an entry it has not seen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadOutcome {
+    /// Durable entries after the caller's `entry_seq`.
+    pub entries: Vec<AgentLogEntry>,
+    /// Chunks of the message still being written, after the caller's
+    /// `delta_seq`. Empty when the caller is behind the tail — live typing
+    /// means nothing to a reader that has not caught up to the entry it
+    /// follows.
+    pub deltas: Vec<String>,
+    /// The caller's delta position is impossible for the run now in flight, so
+    /// it was talking to one that has since restarted. `deltas` therefore
+    /// starts from the beginning and the caller must discard what it holds.
+    pub reset_deltas: bool,
+    /// Where the caller now is.
+    pub cursor: crate::agent_log::Cursor,
 }
 
-/// One page of conversation history — messages alone. Current values (task
-/// list, usage) are a different category and live on the agent document, so a
-/// page means exactly one thing regardless of which cursor produced it.
-#[derive(Debug, Clone)]
-pub struct AgentHistoryPage {
-    pub entries: Vec<HistoryEntry>,
-    /// Whether older messages exist before the returned window.
-    pub has_more_before: bool,
-    /// Whether newer messages exist after the returned window — how a forward
-    /// backfill learns it must ask for another page.
-    pub has_more_after: bool,
-}
+impl ReadOutcome {
+    /// Nothing new — the reader is exactly where the agent is.
+    fn nothing(cursor: crate::agent_log::Cursor) -> Self {
+        Self {
+            entries: Vec::new(),
+            deltas: Vec::new(),
+            reset_deltas: false,
+            cursor,
+        }
+    }
 
-impl AgentHistoryPage {
-    /// Just the LLM messages in this window, for callers that reason about the
-    /// conversation rather than the transcript. Non-model entries are skipped,
-    /// so a page of `n` entries may yield fewer than `n` messages.
-    pub fn messages(&self) -> impl Iterator<Item = &Message> {
-        self.entries.iter().filter_map(|e| match e {
-            HistoryEntry::Llm(m) => Some(m),
-            HistoryEntry::Hook(_) => None,
-        })
+    /// Whether this outcome is worth sending. A wakeup can lose a race with
+    /// another reader and find nothing changed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.deltas.is_empty() && !self.reset_deltas
     }
 }
 
@@ -321,6 +348,18 @@ pub enum AgentDomainEvent {
         snapshot: crate::task_list::TaskListState,
         at_ms: u64,
     },
+    /// Something that happened to the session, recorded here so there is one
+    /// ordered record for a client to read rather than a second stream to
+    /// reconcile against this one.
+    ///
+    /// The session actor still owns every one of these and remains the only
+    /// thing that decides them; it tells the agent to record it. Journaled by
+    /// the agent because the agent is the sole writer of its own log, which is
+    /// what makes the order deterministic without any merge.
+    LifecycleRecorded {
+        event: LifecycleEvent,
+        at_ms: u64,
+    },
 }
 
 /// The conversation history reconstructed by folding [`AgentDomainEvent`]s, plus
@@ -338,13 +377,22 @@ pub struct AgentState {
     /// renamed event variants did on 2026-08-02. Add optional fields; never
     /// rename or repurpose one.
     ///
-    /// This one *was* renamed, from `messages: Vec<Message>`, when the element
-    /// type became a union. Renaming rather than retyping in place is
-    /// deliberate: serde ignores the now-unknown `messages` key and defaults
-    /// this to empty, so a pre-change snapshot yields an empty transcript
-    /// instead of failing `recover()` and taking the supervisor down with it.
+    /// This one has been renamed twice — from `messages: Vec<Message>` when the
+    /// element type became a union, and from `history: Vec<HistoryEntry>` when
+    /// entries gained a sequence number. Renaming rather than retyping in place
+    /// is deliberate both times: serde ignores the now-unknown key and defaults
+    /// this to empty, so an old snapshot yields an empty transcript instead of
+    /// failing `recover()` and taking the supervisor down with it.
     #[serde(default)]
-    pub history: Vec<HistoryEntry>,
+    pub log: Vec<AgentLogEntry>,
+    /// The next `seq` to hand out.
+    ///
+    /// Deterministic across replay for the same reason `hook:{n}` is: the fold
+    /// is deterministic, so re-running it produces the same numbers. Held in
+    /// state rather than derived from `log.len()` so that front-trimming the
+    /// log for context management stays possible without renumbering.
+    #[serde(default)]
+    pub next_seq: u64,
     /// Active timers — durable so they re-arm on recovery and back `list`/`cancel`.
     #[serde(default)]
     pub timers: Vec<crate::timers::TimerRecord>,
@@ -493,10 +541,30 @@ impl AgentState {
     /// `seq`.
     #[must_use]
     pub fn hook_entry_count(&self) -> usize {
-        self.history
+        self.log
             .iter()
-            .filter(|e| matches!(e, HistoryEntry::Hook(_)))
+            .filter(|e| matches!(e.body, AgentLogBody::Hook(_)))
             .count()
+    }
+
+    /// Append `body` at the next sequence number.
+    ///
+    /// The single place a `seq` is handed out, so the fold cannot produce a gap
+    /// or a duplicate by accident.
+    fn push(&mut self, at_ms: u64, body: AgentLogBody) {
+        self.log.push(AgentLogEntry {
+            seq: self.next_seq,
+            at_ms,
+            body,
+        });
+        self.next_seq += 1;
+    }
+
+    /// The seq of the newest entry, or `None` for an empty log. The tail a
+    /// cursor is compared against.
+    #[must_use]
+    pub fn tail_seq(&self) -> Option<u64> {
+        self.log.last().map(|e| e.seq)
     }
 
     /// What the model sees: the transcript, with every hook entry translated
@@ -508,11 +576,16 @@ impl AgentState {
     /// [`crate::hook_translation::translate`] is where that is decided, in one
     /// exhaustive match, and any future non-model entry inherits the obligation.
     pub fn prompt_messages(&self) -> Vec<Message> {
-        self.history
+        self.log
             .iter()
-            .filter_map(|e| match e {
-                HistoryEntry::Llm(m) => Some(m.clone()),
-                HistoryEntry::Hook(h) => crate::hook_translation::translate(h),
+            .filter_map(|e| match &e.body {
+                AgentLogBody::Llm(m) => Some(m.clone()),
+                AgentLogBody::Hook(h) => crate::hook_translation::translate(h),
+                // Every lifecycle variant, present and future. This arm is the
+                // reason `Lifecycle` is one union rather than nine flattened
+                // ones: provider isolation cannot be forgotten for a variant
+                // added later.
+                AgentLogBody::Lifecycle(_) => None,
             })
             .collect()
     }
@@ -527,49 +600,79 @@ impl AgentState {
         }
     }
 
-    /// Answer a windowed [`HistoryQuery`] from the in-memory message log,
-    /// returning the half-open window `[start, end)` of `messages`.
+    /// Answer a forward read from `after`, against the deltas now in flight.
     ///
-    /// - `after`: forward from just past that message, up to `limit`.
-    /// - `before`: the `limit` messages ending just before that message.
-    /// - neither: the tail, the last `limit` messages.
+    /// Three cases, and the third is the whole reason the cursor has two parts:
     ///
-    /// An unresolvable `after` cursor yields an empty window with nothing owed
-    /// in either direction, which is the honest answer: the caller asked to
-    /// continue from a message this log does not contain, so it must re-seed
-    /// from the tail rather than be handed a silently wrong window. An
-    /// unresolvable `before` falls back to the tail, preserving the existing
-    /// scroll-back behaviour.
-    pub fn history_page(&self, query: &HistoryQuery) -> AgentHistoryPage {
-        let len = self.history.len();
-        let position = |id: &String| self.history.iter().position(|e| e.id() == id.as_str());
-        let (start, end) = match (&query.after, &query.before) {
-            (Some(id), _) => match position(id) {
-                Some(pos) => {
-                    let start = pos + 1;
-                    (start, start.saturating_add(query.limit).min(len))
-                }
-                // Unresolvable: report nothing owed in *either* direction rather
-                // than letting `start == len` imply a backward page the caller
-                // never asked for.
-                None => {
-                    return AgentHistoryPage {
-                        entries: Vec::new(),
-                        has_more_before: false,
-                        has_more_after: false,
-                    };
-                }
-            },
-            (None, Some(id)) => {
-                let end = position(id).unwrap_or(len);
-                (end.saturating_sub(query.limit), end)
-            }
-            (None, None) => (len.saturating_sub(query.limit), len),
+    /// - **Behind the tail.** Entries only. Live typing means nothing to a
+    ///   reader that has not reached the entry those deltas follow, and sending
+    ///   them would place chunks of a message above messages it comes after.
+    /// - **Caught up.** The deltas past the caller's own position.
+    /// - **Claiming more deltas than exist.** Impossible for the run now in
+    ///   flight, so the caller was talking to one that has since restarted —
+    ///   entry `N` is still the tail after a crash, but the new run starts its
+    ///   deltas again from one. Answered with everything and a reset. A single
+    ///   flat counter would have reissued the same numbers to different content
+    ///   and nothing could have noticed.
+    #[must_use]
+    pub fn read_from(
+        &self,
+        after: Option<crate::agent_log::Cursor>,
+        deltas: &[String],
+    ) -> ReadOutcome {
+        let tail = self.tail_seq();
+        let Some(cursor) = after else {
+            // No position at all: everything, from the beginning.
+            return ReadOutcome {
+                entries: crate::agent_log::page_from_start(&self.log).to_vec(),
+                deltas: deltas.to_vec(),
+                reset_deltas: false,
+                cursor: crate::agent_log::Cursor {
+                    entry_seq: tail.unwrap_or(0),
+                    delta_seq: deltas.len(),
+                },
+            };
         };
-        AgentHistoryPage {
-            entries: self.history[start..end].to_vec(),
-            has_more_before: start > 0,
-            has_more_after: end < len,
+
+        let entries = crate::agent_log::page_after(&self.log, cursor.entry_seq).to_vec();
+        if !entries.is_empty() {
+            // Behind the tail. The deltas belong after the entries this reader
+            // is only now receiving, so they wait for the next step.
+            return ReadOutcome {
+                cursor: crate::agent_log::Cursor {
+                    entry_seq: entries.last().map_or(cursor.entry_seq, |e| e.seq),
+                    delta_seq: 0,
+                },
+                entries,
+                deltas: Vec::new(),
+                reset_deltas: false,
+            };
+        }
+
+        if cursor.delta_seq > deltas.len() {
+            return ReadOutcome {
+                entries: Vec::new(),
+                deltas: deltas.to_vec(),
+                reset_deltas: true,
+                cursor: crate::agent_log::Cursor {
+                    entry_seq: cursor.entry_seq,
+                    delta_seq: deltas.len(),
+                },
+            };
+        }
+
+        if cursor.delta_seq == deltas.len() {
+            return ReadOutcome::nothing(cursor);
+        }
+
+        ReadOutcome {
+            entries: Vec::new(),
+            deltas: deltas[cursor.delta_seq..].to_vec(),
+            reset_deltas: false,
+            cursor: crate::agent_log::Cursor {
+                entry_seq: cursor.entry_seq,
+                delta_seq: deltas.len(),
+            },
         }
     }
 
@@ -679,6 +782,19 @@ pub struct AgentActor {
     /// the run task sends that as its very last act, so every journal write it
     /// could make has already happened by then.
     cancel_acks: Vec<tokio::sync::oneshot::Sender<()>>,
+    /// Chunks of the message currently being written, since the newest log
+    /// entry. Cleared whenever an entry lands, because the entry supersedes
+    /// them.
+    ///
+    /// Deliberately not journaled and not part of the fold. A delta's useful
+    /// life ends when the finished message arrives — under a second — and
+    /// persisting one would put a write transaction on the critical path of
+    /// every token for data nothing will ever read again.
+    deltas: Vec<String>,
+    /// `(tail_seq, delta_count)`, published for readers to wait on. Only the
+    /// position travels through here; the data itself is read from state, which
+    /// is what leaves nothing to overflow.
+    position: tokio::sync::watch::Sender<(u64, usize)>,
 }
 
 impl AgentActor {
@@ -694,7 +810,20 @@ impl AgentActor {
             preparing: false,
             start_hook_fired: false,
             cancel_acks: Vec::new(),
+            deltas: Vec::new(),
+            position: tokio::sync::watch::Sender::new((0, 0)),
         }
+    }
+
+    /// Publish where this agent now is, waking every reader parked on it.
+    ///
+    /// Called after anything that moves either half of the position. Sending
+    /// the same value twice is harmless — a reader that finds nothing new
+    /// simply parks again.
+    fn publish_position(&self, state: &AgentState) {
+        let _ = self
+            .position
+            .send((state.tail_seq().unwrap_or(0), self.deltas.len()));
     }
 
     /// Same actor, publishing its durable history to `observer` — what a session
@@ -857,7 +986,6 @@ impl AgentActor {
         let self_ref = ctx.self_ref();
         let context_provider = self.ctx.context_provider.clone();
         let allow_timers = self.params.allow_timers;
-        let inner_sink = self.ctx.event_sink.clone();
         let configured_prompt = self.params.system_prompt.clone();
         // An explicit optional handoff tool (e.g. the server crate's `ask_user`
         // tool for interactive sessions) always wins over the workflow `conclude`
@@ -950,7 +1078,6 @@ impl AgentActor {
             // still flows through the actor's single mailbox (`PersistProgress`),
             // never the journal directly.
             let sink: Arc<dyn EventSink> = Arc::new(PersistSink {
-                inner: inner_sink,
                 actor: self_ref.clone(),
             });
             let outcome = run_with_retries(
@@ -1317,27 +1444,28 @@ impl EventSourcedActor for AgentActor {
             AgentDomainEvent::InputMessage { message } => {
                 // A new turn began — the agent is no longer parked.
                 state.parked = false;
-                state.history.push(HistoryEntry::Llm(message));
+                let at_ms = message.created_at_ms;
+                state.push(at_ms, AgentLogBody::Llm(message));
             }
             AgentDomainEvent::MessageComplete { message } => {
-                state.history.push(HistoryEntry::Llm(message));
+                let at_ms = message.created_at_ms;
+                state.push(at_ms, AgentLogBody::Llm(message));
             }
             AgentDomainEvent::HookRan { record, seq, at_ms } => {
-                state
-                    .history
-                    .push(HistoryEntry::Hook(hook_entry(record, seq, at_ms)));
+                state.push(at_ms, AgentLogBody::Hook(hook_entry(record, seq, at_ms)));
             }
             AgentDomainEvent::ToolComplete {
                 tool_call_id,
                 output,
                 is_error,
                 at_ms,
-            } => state.history.push(HistoryEntry::Llm(Message::tool_result(
-                tool_call_id,
-                output,
-                is_error,
+            } => state.push(
                 at_ms,
-            ))),
+                AgentLogBody::Llm(Message::tool_result(tool_call_id, output, is_error, at_ms)),
+            ),
+            AgentDomainEvent::LifecycleRecorded { event, at_ms } => {
+                state.push(at_ms, AgentLogBody::Lifecycle(event));
+            }
             AgentDomainEvent::TimerArmed { record, .. } => state.timers.push(record),
             AgentDomainEvent::TimerCancelled { ids, .. } => {
                 state.timers.retain(|t| !ids.contains(&t.id));
@@ -1394,7 +1522,7 @@ impl EventSourcedActor for AgentActor {
                     // A fresh agent has nothing in its transcript; anything else
                     // was folded from a journal. No framework flag needed to
                     // tell a cold start from a rehydration.
-                    start_source: (!self.start_hook_fired).then_some(if state.history.is_empty() {
+                    start_source: (!self.start_hook_fired).then_some(if state.log.is_empty() {
                         horsie_models::runtime::SessionStartSource::Startup
                     } else {
                         horsie_models::runtime::SessionStartSource::Resume
@@ -1566,8 +1694,25 @@ impl EventSourcedActor for AgentActor {
                     }
                 }
             }
-            AgentCommand::GetHistory { query, reply } => {
-                let _ = reply.send(state.history_page(&query));
+            AgentCommand::RecordDelta { text } => {
+                self.deltas.push(text);
+                self.publish_position(state);
+                CommandEffect::none()
+            }
+            AgentCommand::ReadLog { after, reply } => {
+                let _ = reply.send(state.read_from(after, &self.deltas));
+                CommandEffect::none()
+            }
+            AgentCommand::PageLog { before, max, reply } => {
+                let _ = reply.send(crate::agent_log::page_before(&state.log, before, max));
+                CommandEffect::none()
+            }
+            AgentCommand::WatchPosition { reply } => {
+                // Published before handing the receiver over, so a reader that
+                // subscribes between two changes still learns where the agent
+                // is rather than waiting for the next one.
+                self.publish_position(state);
+                let _ = reply.send(self.position.subscribe());
                 CommandEffect::none()
             }
             AgentCommand::GetUsage { reply } => {
@@ -1595,6 +1740,15 @@ impl EventSourcedActor for AgentActor {
         self.events_since_snapshot = self
             .events_since_snapshot
             .saturating_add(events.len() as u64);
+        // An entry supersedes every chunk that preceded it — the finished
+        // message says everything they were building towards — so the deltas
+        // are dropped the moment one lands. This is also what keeps the delta
+        // sub-sequence short and restartable: it counts within one entry, never
+        // across the session.
+        if events.iter().any(|e| coarse_appends_an_entry(e)) {
+            self.deltas.clear();
+        }
+        self.publish_position(state);
         let Some(observer) = &self.observer else {
             return;
         };
@@ -1637,7 +1791,7 @@ impl EventSourcedActor for AgentActor {
         if state.parked {
             return;
         }
-        if state.history.is_empty() {
+        if state.log.is_empty() {
             return;
         }
         let history = repair_unanswered_tool_calls(state.prompt_messages());
@@ -1844,15 +1998,18 @@ impl EventSink for CapturingSink {
 /// Persists each coarse domain event by `ask`ing the agent actor and awaiting the
 /// durable write before returning — this is what gives the agent loop end-to-end
 /// backpressure. Persistence flows through the actor's mailbox
-/// ([`AgentCommand::PersistProgress`]), never the journal directly. Every event is
-/// also forwarded to the inner observation sink.
+/// ([`AgentCommand::PersistProgress`]), never the journal directly.
+///
+/// This is the only sink. There used to be a second one forwarding every event
+/// to a broadcast so a live stream could accumulate its own copy of the
+/// transcript; readers now read the agent's state instead, so the copy — and
+/// the ordering problem between it and the original — is gone.
 ///
 /// `InputMessage` is intentionally NOT persisted here: the actor persists the input
 /// itself when handling `Run`/`InjectToolResult`, so a turn-restarting retry that
 /// re-emits the input can never double-persist it into two consecutive user
 /// messages.
 struct PersistSink {
-    inner: Arc<dyn EventSink>,
     actor: ActorRef<AgentCommand>,
 }
 
@@ -1881,8 +2038,36 @@ impl EventSink for PersistSink {
                 Err(_actor_gone) => {}
             }
         }
-        self.inner.emit(event).await
+        // Text chunks go through the same mailbox, unjournaled. `tell` rather
+        // than `ask`: nothing durable happens, so there is nothing to wait for
+        // — but it still travels the mailbox, which is what keeps a chunk from
+        // overtaking the entry it precedes.
+        if let AgentEvent::TextChunk(chunk) = &event {
+            let _ = self
+                .actor
+                .tell(AgentCommand::RecordDelta {
+                    text: chunk.text.clone(),
+                })
+                .await;
+        }
+        Ok(())
     }
+}
+
+/// Whether folding this event appends a log entry — i.e. consumes a `seq`.
+///
+/// Kept beside [`AgentState::apply_event`] deliberately: the two must agree, and
+/// a variant added to one without the other would either strand deltas under an
+/// entry that superseded them or clear them for an event that appended nothing.
+fn coarse_appends_an_entry(e: &AgentDomainEvent) -> bool {
+    matches!(
+        e,
+        AgentDomainEvent::InputMessage { .. }
+            | AgentDomainEvent::MessageComplete { .. }
+            | AgentDomainEvent::ToolComplete { .. }
+            | AgentDomainEvent::HookRan { .. }
+            | AgentDomainEvent::LifecycleRecorded { .. }
+    )
 }
 
 /// Map a single streaming event to the coarse domain event that should be
@@ -2275,7 +2460,6 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(StubContext),
-            event_sink: Arc::new(StubSink),
             parent: Arc::new(StubParent),
             session_id,
         };
@@ -2354,7 +2538,7 @@ mod tests {
                 self.seen
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((label, state.history.len()));
+                    .push((label, state.log.len()));
             }
         }
 
@@ -2363,7 +2547,6 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(NoContext),
-            event_sink: Arc::new(NoopSink),
             parent: Arc::new(DeafParent),
             session_id,
         };
@@ -2442,7 +2625,6 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(MockContext(provider.clone())),
-            event_sink: Arc::new(StubSink),
             parent: Arc::new(ReportingParent(tx)),
             session_id,
         };
@@ -2589,7 +2771,6 @@ mod tests {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = AgentRuntimeContext {
                 context_provider: provider,
-                event_sink: Arc::new(StubSink),
                 parent: Arc::new(ReportingParent(tx)),
                 session_id: uuid::Uuid::new_v4(),
             };
@@ -2747,18 +2928,15 @@ mod tests {
             assert_eq!(llm.calls(), 0, "the model must never be reached");
 
             let page = agent
-                .ask(|reply| AgentCommand::GetHistory {
-                    query: HistoryQuery {
-                        before: None,
-                        after: None,
-                        limit: 50,
-                    },
+                .ask(|reply| AgentCommand::PageLog {
+                    before: None,
+                    max: 50,
                     reply,
                 })
                 .await
                 .unwrap();
             assert_eq!(page.entries.len(), 1, "the record, and nothing else");
-            assert!(matches!(page.entries[0], HistoryEntry::Hook(_)));
+            assert!(matches!(page.entries[0].body, AgentLogBody::Hook(_)));
         }
 
         /// A preparation failure must classify itself exactly as the same
@@ -2788,7 +2966,6 @@ mod tests {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = AgentRuntimeContext {
                 context_provider: Arc::new(GoneContext),
-                event_sink: Arc::new(StubSink),
                 parent: Arc::new(ReportingParent(tx)),
                 session_id: uuid::Uuid::new_v4(),
             };
@@ -2851,11 +3028,8 @@ mod tests {
         };
         let first = fold();
         let second = fold();
-        assert_eq!(first.history[0].created_at_ms(), 1_700_000_000_123);
-        assert_eq!(
-            first.history[0].created_at_ms(),
-            second.history[0].created_at_ms()
-        );
+        assert_eq!(first.log[0].at_ms, 1_700_000_000_123);
+        assert_eq!(first.log[0].at_ms, second.log[0].at_ms);
     }
 
     #[test]
@@ -2936,7 +3110,7 @@ mod tests {
         );
         state = with_hook(state, "guard", "tc1", 0);
 
-        assert_eq!(state.history.len(), 2, "both entries are in the transcript");
+        assert_eq!(state.log.len(), 2, "both entries are in the transcript");
         let prompt = state.prompt_messages();
         assert_eq!(prompt.len(), 1, "only the user message reaches the model");
         assert_eq!(prompt[0].role, Role::User);
@@ -3002,7 +3176,7 @@ mod tests {
         state = with_hook(state, "linter", "tc1", 1);
         state = with_hook(state, "guard", "tc2", 2);
 
-        let ids: Vec<&str> = state.history.iter().map(HistoryEntry::id).collect();
+        let ids: Vec<&str> = state.log.iter().filter_map(|e| e.body.id()).collect();
         assert_eq!(ids, vec!["hook:0", "hook:1", "hook:2"]);
     }
 
@@ -3048,8 +3222,8 @@ mod tests {
                 at_ms: 7,
             },
         );
-        assert_eq!(state.history.len(), 1);
-        assert_eq!(state.history[0].id(), "hook:0");
+        assert_eq!(state.log.len(), 1);
+        assert_eq!(state.log[0].body.id().unwrap(), "hook:0");
         let prompt = state.prompt_messages();
         assert_eq!(
             prompt.len(),
@@ -3060,11 +3234,15 @@ mod tests {
         assert_eq!(prompt[0].id, "hook-context:hook:0");
     }
 
-    /// A page is a window over the transcript, hook entries included, and the
-    /// cursor resolves against either kind — otherwise scroll-back would skip
+    /// A page is a window over the log, hook entries included, and every entry
+    /// consumes a number whatever kind it is — otherwise scroll-back would skip
     /// or stall on a hook row.
+    ///
+    /// The seq is what carries this now. The old id-keyed cursor had to reason
+    /// about two disjoint id spaces (`result:{tool_call_id}` and `hook:{n}`) to
+    /// stay unambiguous; one counter over all of them has nothing to disambiguate.
     #[test]
-    fn history_pages_across_mixed_entries() {
+    fn the_log_numbers_every_kind_of_entry_in_one_sequence() {
         let mut state = AgentActor::initial_state();
         state = AgentActor::apply_event(
             state,
@@ -3083,28 +3261,194 @@ mod tests {
             },
         );
 
-        let tail = state.history_page(&HistoryQuery {
-            before: None,
-            after: None,
-            limit: 2,
-        });
-        assert_eq!(page_ids(&tail), vec!["hook:0", "result:tc1"]);
-        assert!(tail.has_more_before, "the user message is still owed");
+        assert_eq!(
+            state.log.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "message, hook and tool result each take one number"
+        );
+        assert_eq!(state.next_seq, 3);
 
-        // The cursor resolves against a hook entry, not just a message.
-        let forward = state.history_page(&HistoryQuery {
-            before: None,
-            after: Some("hook:0".to_string()),
-            limit: 10,
-        });
-        assert_eq!(page_ids(&forward), vec!["result:tc1"]);
+        let tail = crate::agent_log::page_before(&state.log, None, 2);
+        assert_eq!(
+            tail.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
 
-        let back = state.history_page(&HistoryQuery {
-            before: Some("hook:0".to_string()),
-            after: None,
-            limit: 10,
-        });
-        assert_eq!(page_ids(&back), vec!["u"]);
+        // The cursor resolves against a hook entry exactly like a message.
+        let forward = crate::agent_log::page_after(&state.log, 1);
+        assert_eq!(forward.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2]);
+
+        let back = crate::agent_log::page_before(&state.log, Some(1), 10);
+        assert_eq!(
+            back.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0]
+        );
+    }
+
+    /// The property the whole design rests on: the same events fold to the same
+    /// numbers, every time. Deterministic order comes from the agent being the
+    /// sole writer of its own log, so replaying its journal has to reproduce
+    /// exactly what ran live — otherwise a client's cursor means something
+    /// different after a restart than it did before one.
+    ///
+    /// Asserted rather than argued, because nothing else would catch a fold
+    /// that started numbering from a clock, a uuid, or `log.len()` on a
+    /// front-trimmed log.
+    #[test]
+    fn folding_the_same_events_twice_produces_the_same_sequence() {
+        let events = || {
+            vec![
+                AgentDomainEvent::InputMessage {
+                    message: user_msg("hello"),
+                },
+                AgentDomainEvent::MessageComplete {
+                    message: Message::user("a1", "hi", 2),
+                },
+                AgentDomainEvent::ToolComplete {
+                    tool_call_id: "tc1".into(),
+                    output: "ok".into(),
+                    is_error: false,
+                    at_ms: 3,
+                },
+                // Not an entry: it must not consume a number, or two replays
+                // that differ only in timer activity would disagree.
+                AgentDomainEvent::Parked { at_ms: 4 },
+                AgentDomainEvent::LifecycleRecorded {
+                    event: LifecycleEvent::TurnEnded(horsie_agentcore::TurnEndedLifecycle {
+                        outcome: horsie_agentcore::TurnOutcome::Ended(
+                            horsie_agentcore::EmptyOutcome {},
+                        ),
+                    }),
+                    at_ms: 5,
+                },
+            ]
+        };
+        let fold = || {
+            events()
+                .into_iter()
+                .fold(AgentActor::initial_state(), AgentActor::apply_event)
+        };
+        let shape = |s: &AgentState| -> Vec<(u64, Option<String>)> {
+            s.log
+                .iter()
+                .map(|e| (e.seq, e.body.id().map(str::to_string)))
+                .collect()
+        };
+
+        let first = fold();
+        let second = fold();
+        assert_eq!(shape(&first), shape(&second));
+        assert_eq!(
+            first.log.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+            "four entries; the park consumed no number"
+        );
+        assert_eq!(first.next_seq, 4);
+        assert_eq!(first.next_seq, second.next_seq);
+    }
+
+    fn log_upto(n: u64) -> AgentState {
+        (0..n).fold(AgentActor::initial_state(), |state, i| {
+            AgentActor::apply_event(
+                state,
+                AgentDomainEvent::MessageComplete {
+                    message: Message::user(&format!("m{i}"), "x", i),
+                },
+            )
+        })
+    }
+
+    fn chunks(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Live typing means nothing to a reader that has not reached the entry
+    /// those chunks follow — sending them would draw fragments of a message
+    /// above messages it comes after.
+    #[test]
+    fn a_reader_behind_the_tail_gets_entries_and_no_deltas() {
+        let state = log_upto(5);
+        let out = state.read_from(
+            Some(crate::agent_log::Cursor {
+                entry_seq: 1,
+                delta_seq: 0,
+            }),
+            &chunks(&["x", "y"]),
+        );
+        assert_eq!(
+            out.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert!(out.deltas.is_empty());
+        assert_eq!(out.cursor.entry_seq, 4);
+        assert_eq!(out.cursor.delta_seq, 0);
+    }
+
+    #[test]
+    fn a_caught_up_reader_gets_the_deltas_after_its_own() {
+        let state = log_upto(5);
+        let out = state.read_from(
+            Some(crate::agent_log::Cursor {
+                entry_seq: 4,
+                delta_seq: 1,
+            }),
+            &chunks(&["x", "y", "z"]),
+        );
+        assert!(out.entries.is_empty());
+        assert_eq!(out.deltas, vec!["y", "z"]);
+        assert!(!out.reset_deltas);
+        assert_eq!(out.cursor.delta_seq, 3);
+    }
+
+    /// The trap the two-part cursor exists to close.
+    ///
+    /// Entry 4 is still the tail after a crash, but the run that emitted the
+    /// reader's 50 deltas is gone and the new one has emitted two. `50 > 2` is
+    /// impossible for a live run, so the mismatch is arithmetic — and a single
+    /// flat counter would have reissued 5..55 to different content with nothing
+    /// able to notice.
+    #[test]
+    fn a_restarted_run_is_detected_and_answered_with_a_reset() {
+        let state = log_upto(5);
+        let out = state.read_from(
+            Some(crate::agent_log::Cursor {
+                entry_seq: 4,
+                delta_seq: 50,
+            }),
+            &chunks(&["a", "b"]),
+        );
+        assert!(
+            out.reset_deltas,
+            "50 deltas cannot precede a run that has 2"
+        );
+        assert_eq!(out.deltas, vec!["a", "b"]);
+        assert_eq!(out.cursor.delta_seq, 2);
+    }
+
+    #[test]
+    fn a_reader_exactly_at_the_position_gets_nothing() {
+        let state = log_upto(5);
+        let out = state.read_from(
+            Some(crate::agent_log::Cursor {
+                entry_seq: 4,
+                delta_seq: 2,
+            }),
+            &chunks(&["a", "b"]),
+        );
+        assert!(out.is_empty(), "a wakeup that lost a race sends nothing");
+    }
+
+    #[test]
+    fn a_reader_with_no_cursor_gets_everything() {
+        let state = log_upto(3);
+        let out = state.read_from(None, &chunks(&["a"]));
+        assert_eq!(
+            out.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(out.deltas, vec!["a"]);
+        assert_eq!(out.cursor.entry_seq, 2);
+        assert_eq!(out.cursor.delta_seq, 1);
     }
 
     /// State is snapshotted, so a mixed transcript has to survive a round trip
@@ -3123,19 +3467,19 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let back: AgentState = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(
-            back.history
+        // Both halves of an entry have to survive: the id it joins on and the
+        // seq it is ordered by. A snapshot that kept the bodies but lost the
+        // numbering would leave every live cursor pointing at the wrong entry.
+        let shape = |s: &AgentState| -> Vec<(u64, Option<String>)> {
+            s.log
                 .iter()
-                .map(HistoryEntry::id)
-                .collect::<Vec<_>>(),
-            state
-                .history
-                .iter()
-                .map(HistoryEntry::id)
-                .collect::<Vec<_>>()
-        );
-        match &back.history[1] {
-            HistoryEntry::Hook(h) => {
+                .map(|e| (e.seq, e.body.id().map(str::to_string)))
+                .collect()
+        };
+        assert_eq!(shape(&back), shape(&state));
+        assert_eq!(back.next_seq, state.next_seq);
+        match &back.log[1].body {
+            AgentLogBody::Hook(h) => {
                 assert_eq!(h.record.plugin, "guard");
                 // The externally-tagged union has to survive the round trip,
                 // outcome and all — a snapshot is what a recovered transcript
@@ -3201,7 +3545,7 @@ mod tests {
             },
         );
 
-        assert_eq!(state.history.len(), 3);
+        assert_eq!(state.log.len(), 3);
         let messages = state.prompt_messages();
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[1].role, Role::Assistant);
@@ -3228,9 +3572,9 @@ mod tests {
                 message: user_msg("hi"),
             },
         );
-        let before = state.history.len();
+        let before = state.log.len();
         state = AgentActor::apply_event(state, AgentDomainEvent::RunCancelled { at_ms: 0 });
-        assert_eq!(state.history.len(), before);
+        assert_eq!(state.log.len(), before);
     }
 
     #[test]
@@ -3642,93 +3986,6 @@ mod tests {
             );
         }
         state
-    }
-
-    fn page_ids(page: &AgentHistoryPage) -> Vec<String> {
-        page.entries.iter().map(|e| e.id().to_string()).collect()
-    }
-
-    #[test]
-    fn history_tail_returns_the_last_window() {
-        let state = with_messages(&["a", "b", "c", "d"]);
-        let page = state.history_page(&HistoryQuery {
-            before: None,
-            after: None,
-            limit: 2,
-        });
-        assert_eq!(page_ids(&page), ["c", "d"]);
-        assert!(page.has_more_before, "a and b precede this window");
-        assert!(!page.has_more_after, "d is the newest message");
-    }
-
-    #[test]
-    fn history_before_cursor_pages_backward() {
-        let state = with_messages(&["a", "b", "c", "d"]);
-        let page = state.history_page(&HistoryQuery {
-            before: Some("c".into()),
-            after: None,
-            limit: 2,
-        });
-        // Two messages immediately before "c": "a", "b".
-        assert_eq!(page_ids(&page), ["a", "b"]);
-        assert!(!page.has_more_before);
-        assert!(page.has_more_after, "c and d follow this window");
-    }
-
-    #[test]
-    fn history_after_cursor_pages_forward() {
-        let state = with_messages(&["a", "b", "c", "d"]);
-        let page = state.history_page(&HistoryQuery {
-            before: None,
-            after: Some("b".into()),
-            limit: 2,
-        });
-        assert_eq!(page_ids(&page), ["c", "d"]);
-        assert!(page.has_more_before);
-        assert!(!page.has_more_after, "the window reaches the head");
-    }
-
-    #[test]
-    fn history_after_cursor_reports_more_when_the_window_is_full() {
-        let state = with_messages(&["a", "b", "c", "d"]);
-        let page = state.history_page(&HistoryQuery {
-            before: None,
-            after: Some("a".into()),
-            limit: 2,
-        });
-        assert_eq!(page_ids(&page), ["b", "c"]);
-        assert!(
-            page.has_more_after,
-            "d is still owed — backfill must page on"
-        );
-    }
-
-    /// A cursor naming a message this log does not have cannot be honoured, and
-    /// guessing a window would hand the caller a silently wrong transcript.
-    #[test]
-    fn history_after_unknown_cursor_owes_nothing() {
-        let state = with_messages(&["a", "b"]);
-        let page = state.history_page(&HistoryQuery {
-            before: None,
-            after: Some("ghost".into()),
-            limit: 10,
-        });
-        assert!(page.entries.is_empty());
-        assert!(!page.has_more_after);
-        assert!(!page.has_more_before);
-    }
-
-    #[test]
-    fn history_tail_shorter_than_limit_has_no_more() {
-        let state = with_messages(&["a", "b"]);
-        let page = state.history_page(&HistoryQuery {
-            before: None,
-            after: None,
-            limit: 10,
-        });
-        assert_eq!(page_ids(&page), ["a", "b"]);
-        assert!(!page.has_more_before);
-        assert!(!page.has_more_after);
     }
 
     #[test]
@@ -4198,7 +4455,6 @@ mod fence_tests {
         let (tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(HangingProvider),
-            event_sink: Arc::new(NoopSink),
             parent: Arc::new(OutcomeChannel(tx)),
             session_id: uuid::Uuid::new_v4(),
         };
@@ -4251,12 +4507,9 @@ mod fence_tests {
 
         let (reply, rx) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::GetHistory {
-                query: HistoryQuery {
-                    before: None,
-                    after: None,
-                    limit: 50,
-                },
+            .tell(AgentCommand::PageLog {
+                before: None,
+                max: 50,
                 reply,
             })
             .await

@@ -1,7 +1,7 @@
 use crate::agent_actor::UsageTotal;
 use crate::mcp_toolbox::CompositeToolbox;
 use async_trait::async_trait;
-use horsie_agentcore::{EventSink, LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
+use horsie_agentcore::{LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
 use horsie_runtime_client::{RuntimeClient, add_runtime_tools};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -246,7 +246,6 @@ impl ContextProvider for FixedContextProvider {
 pub struct AgentRuntimeContext {
     /// Per-run context supplier; see [`ContextProvider`].
     pub context_provider: Arc<dyn ContextProvider>,
-    pub event_sink: Arc<dyn EventSink>,
     /// Whoever spawned this agent; receives its terminal outcome.
     pub parent: Arc<dyn AgentOutcomeSink>,
     pub session_id: Uuid,

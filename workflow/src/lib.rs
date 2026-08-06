@@ -10,6 +10,7 @@
 //! them, not here.
 
 mod agent_actor;
+mod agent_log;
 mod context;
 mod hook_translation;
 mod mcp_toolbox;
@@ -18,10 +19,10 @@ mod timers;
 mod workspace;
 
 pub use agent_actor::{
-    AgentActor, AgentCommand, AgentDomainEvent, AgentHistoryPage, AgentObserver, AgentParams,
-    AgentState, AgentStateView, AgentUsageSnapshot, HistoryQuery, UsageTotal, hook_entry,
-    hook_entry_id,
+    AgentActor, AgentCommand, AgentDomainEvent, AgentObserver, AgentParams, AgentState,
+    AgentStateView, AgentUsageSnapshot, ReadOutcome, UsageTotal, hook_entry, hook_entry_id,
 };
+pub use agent_log::{Cursor, LogPage, page_after, page_before, page_from_start};
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL, ContextError,
     ContextProvider, Contexts, DefaultToolboxFactory, FixedContextProvider, INSPECT_WORKSPACE_TOOL,
