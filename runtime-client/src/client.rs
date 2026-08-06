@@ -13,6 +13,10 @@ use uuid::Uuid;
 pub enum RuntimeCallError {
     Transport(TransportError),
     ToolFailed(String),
+    /// An MCP server refused the credential it was given. Distinct from
+    /// [`RuntimeCallError::ToolFailed`] because it is the one failure the
+    /// caller can fix: refresh the token and call again.
+    McpRefused(String),
 }
 
 impl std::fmt::Display for RuntimeCallError {
@@ -20,6 +24,7 @@ impl std::fmt::Display for RuntimeCallError {
         match self {
             Self::Transport(e) => write!(f, "transport: {e}"),
             Self::ToolFailed(r) => write!(f, "tool failed: {r}"),
+            Self::McpRefused(s) => write!(f, "the MCP server '{s}' refused the credential"),
         }
     }
 }
@@ -262,10 +267,11 @@ impl RuntimeClient {
     /// servers that could not be reached.
     pub async fn mcp_discover(
         &self,
+        credentials: Vec<horsie_models::runtime::McpCredential>,
     ) -> Result<horsie_models::runtime::McpDiscoverResponse, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.inner
-            .mcp_discover(&call_id)
+            .mcp_discover(&call_id, credentials)
             .await
             .map_err(RuntimeCallError::Transport)
     }
@@ -274,16 +280,27 @@ impl RuntimeClient {
     ///
     /// Tracked like an ordinary tool call, so a cancel reaches it: an MCP server
     /// that goes silent must not be un-stoppable.
+    /// `Err(McpRefused)` when the server refused the credential, so the caller
+    /// can refresh it and try once more — the one MCP failure that is not the
+    /// agent's problem.
     pub async fn mcp_invoke(
         &self,
         call_id: &str,
         tool: &str,
         arguments: String,
+        credentials: Vec<horsie_models::runtime::McpCredential>,
     ) -> Result<String, RuntimeCallError> {
         self.track(call_id);
-        let outcome = self.inner.mcp_invoke(call_id, tool, arguments).await;
+        let outcome = self
+            .inner
+            .mcp_invoke(call_id, tool, arguments, credentials)
+            .await;
         self.untrack(call_id);
-        match outcome.map_err(RuntimeCallError::Transport)? {
+        let response = outcome.map_err(RuntimeCallError::Transport)?;
+        if let Some(needs_auth) = response.needs_auth {
+            return Err(RuntimeCallError::McpRefused(needs_auth.server));
+        }
+        match response.result {
             ToolResult::Ok(output) => Ok(output.stdout),
             ToolResult::Err(ToolError { reason }) => Err(RuntimeCallError::ToolFailed(reason)),
         }

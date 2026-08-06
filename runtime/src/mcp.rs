@@ -13,7 +13,7 @@
 
 use horsie_mcp_client::{HttpTransport, McpClient, McpError, StdioTransport};
 use horsie_models::runtime::{
-    McpServerFailure, McpServerNeedsAuth, McpServerUnreachable, PluginMcpTool,
+    McpCredential, McpServerFailure, McpServerNeedsAuth, McpServerUnreachable, PluginMcpTool,
 };
 use horsie_support::plugin::mcp::{McpTransportSpec, PluginMcpServer};
 use std::collections::BTreeMap;
@@ -73,7 +73,7 @@ pub struct DeclaredServer {
     pub plugin_root: PathBuf,
 }
 
-/// Live connections, keyed by declared server name.
+/// Live connections, keyed by [`ConnectionKey`].
 ///
 /// The value is a `OnceCell` rather than the client itself so the map lock is
 /// held only long enough to claim a slot: a handshake that spawns `npx` can
@@ -81,8 +81,13 @@ pub struct DeclaredServer {
 /// server behind the slowest one.
 #[derive(Default)]
 pub struct McpRegistry {
-    clients: Mutex<BTreeMap<String, Arc<OnceCell<Arc<McpClient>>>>>,
+    clients: Mutex<BTreeMap<ConnectionKey, Arc<OnceCell<Arc<McpClient>>>>>,
 }
+
+/// A connection is identified by its server *and* the credential it was built
+/// with. A refreshed token must open a new connection rather than being
+/// answered by one still presenting the token the server just rejected.
+type ConnectionKey = (String, Option<String>);
 
 /// What one discovery pass produced.
 pub struct Discovery {
@@ -136,9 +141,16 @@ impl McpRegistry {
     ///
     /// `cwd` is where a stdio server runs — the first workspace, so a server
     /// that reads files reads the ones the agent is working on.
-    pub async fn discover(&self, plugins_dir: &Path, cwd: Option<&Path>) -> Discovery {
+    pub async fn discover(
+        &self,
+        plugins_dir: &Path,
+        cwd: Option<&Path>,
+        credentials: &[McpCredential],
+    ) -> Discovery {
         let (declared, mut failures) = Self::declared(plugins_dir);
-        let passes = declared.iter().map(|d| self.list_one(d, cwd));
+        let passes = declared
+            .iter()
+            .map(|d| self.list_one(d, cwd, bearer_for(credentials, &d.server.name)));
         // Collected in declaration order rather than completion order, so the
         // tool list a session sees does not depend on which server happened to
         // be quickest today.
@@ -157,10 +169,11 @@ impl McpRegistry {
         &self,
         declared: &DeclaredServer,
         cwd: Option<&Path>,
+        bearer: Option<String>,
     ) -> Result<Vec<PluginMcpTool>, McpServerFailure> {
         let name = &declared.server.name;
         let pass = async {
-            let client = self.connect(declared, cwd).await.map_err(|e| {
+            let client = self.connect(declared, cwd, bearer).await.map_err(|e| {
                 tracing::warn!(server = %name, error = %e, "MCP server unavailable");
                 as_failure(name, &e)
             })?;
@@ -196,7 +209,8 @@ impl McpRegistry {
         cwd: Option<&Path>,
         tool: &str,
         arguments: serde_json::Value,
-    ) -> Result<String, String> {
+        credentials: &[McpCredential],
+    ) -> Result<Invoked, String> {
         let Some((server_name, tool_name)) = split_namespaced(tool) else {
             return Err(format!("'{tool}' is not an MCP tool name"));
         };
@@ -204,18 +218,27 @@ impl McpRegistry {
         let Some(declared) = declared.into_iter().find(|d| d.server.name == server_name) else {
             return Err(format!("no plugin declares an MCP server '{server_name}'"));
         };
-        let client = self
-            .connect(&declared, cwd)
-            .await
-            .map_err(|e| format!("{server_name}: {e}"))?;
-        let outcome = client
-            .call_tool(tool_name, arguments)
-            .await
-            .map_err(|e| format!("{server_name}: {e}"))?;
-        if outcome.is_error {
-            return Err(clamp(outcome.text));
+        let bearer = bearer_for(credentials, server_name);
+        let call = async {
+            let client = self.connect(&declared, cwd, bearer).await?;
+            client.call_tool(tool_name, arguments).await
+        };
+        match call.await {
+            Ok(outcome) if outcome.is_error => Err(clamp(outcome.text)),
+            Ok(outcome) => Ok(Invoked::Ran(clamp(outcome.text))),
+            // Kept apart from an ordinary failure: the caller can refresh the
+            // credential and try again, which it cannot do for anything else.
+            Err(McpError::Unauthorized { www_authenticate }) => {
+                Ok(Invoked::NeedsAuth(McpServerNeedsAuth {
+                    server: server_name.to_string(),
+                    resource_metadata: www_authenticate
+                        .as_deref()
+                        .and_then(resource_metadata_of)
+                        .map(str::to_string),
+                }))
+            }
+            Err(e) => Err(format!("{server_name}: {e}")),
         }
-        Ok(clamp(outcome.text))
     }
 
     /// The live client for a server, connecting and handshaking on first use.
@@ -226,12 +249,13 @@ impl McpRegistry {
         &self,
         declared: &DeclaredServer,
         cwd: Option<&Path>,
+        bearer: Option<String>,
     ) -> Result<Arc<McpClient>, McpError> {
         let cell = {
             let mut clients = self.clients.lock().await;
             Arc::clone(
                 clients
-                    .entry(declared.server.name.clone())
+                    .entry((declared.server.name.clone(), bearer.clone()))
                     .or_insert_with(|| Arc::new(OnceCell::new())),
             )
         };
@@ -247,7 +271,7 @@ impl McpRegistry {
                 // they go on the wire exactly as declared.
                 McpTransportSpec::Http { url, headers } => Arc::new(HttpTransport::with_headers(
                     url.clone(),
-                    Arc::new(NoBearer),
+                    Arc::new(SuppliedBearer(bearer.clone())),
                     headers.clone(),
                 )) as Arc<_>,
             }));
@@ -286,14 +310,34 @@ fn resource_metadata_of(challenge: &str) -> Option<&str> {
     unquoted.split('"').next().filter(|s| !s.is_empty())
 }
 
-/// A plugin-declared server authenticates with what its declaration carries, so
-/// there is no bearer to resolve.
-struct NoBearer;
+/// What one `invoke` produced.
+pub enum Invoked {
+    Ran(String),
+    /// The server refused the credential. Reported rather than returned as an
+    /// error so the caller can refresh and try once more.
+    NeedsAuth(McpServerNeedsAuth),
+}
+
+/// The credential the server resolved for this server, if any.
+fn bearer_for(credentials: &[McpCredential], server: &str) -> Option<String> {
+    credentials
+        .iter()
+        .find(|c| c.server == server)
+        .map(|c| c.bearer.clone())
+}
+
+/// The bearer the server sent with this request, or none — a plugin server that
+/// authenticates with a declared header, or not at all.
+///
+/// `force` is ignored: refresh lives on the server, which is the only side with
+/// the refresh token and somewhere to store the result. A forced retry arrives
+/// as a *new request* carrying a new credential.
+struct SuppliedBearer(Option<String>);
 
 #[async_trait::async_trait]
-impl horsie_mcp_client::BearerProvider for NoBearer {
+impl horsie_mcp_client::BearerProvider for SuppliedBearer {
     async fn bearer(&self, _force: bool) -> Result<Option<String>, McpError> {
-        Ok(None)
+        Ok(self.0.clone())
     }
 }
 
@@ -457,7 +501,9 @@ mod tests {
             "broken",
             r#"{"mcpServers":{"nope":{"command":"horsie-no-such-binary"}}}"#,
         );
-        let discovery = McpRegistry::default().discover(plugins.path(), None).await;
+        let discovery = McpRegistry::default()
+            .discover(plugins.path(), None, &[])
+            .await;
         assert!(discovery.tools.is_empty());
         assert_eq!(discovery.failures.len(), 1);
         assert_eq!(reasons(&discovery.failures)[0].0, "nope");
@@ -472,7 +518,9 @@ mod tests {
             "mcpServers": { "docs": { "command": "sh", "args": ["-c", LISTING_SERVER] } }
         });
         declare(plugins.path(), "p", &json.to_string());
-        let discovery = McpRegistry::default().discover(plugins.path(), None).await;
+        let discovery = McpRegistry::default()
+            .discover(plugins.path(), None, &[])
+            .await;
         assert!(discovery.failures.is_empty(), "{:?}", discovery.failures);
         assert_eq!(discovery.tools.len(), 1);
         assert_eq!(discovery.tools[0].name, "mcp__docs__search");
@@ -524,7 +572,7 @@ mod tests {
         let started = std::time::Instant::now();
         let discovery = tokio::time::timeout(
             DISCOVER_TIMEOUT + Duration::from_secs(10),
-            McpRegistry::default().discover(plugins.path(), None),
+            McpRegistry::default().discover(plugins.path(), None, &[]),
         )
         .await
         .expect("discovery must not outlive one budget");
@@ -550,9 +598,13 @@ mod tests {
                 None,
                 "mcp__big__anything",
                 serde_json::json!({}),
+                &[],
             )
             .await
             .unwrap();
+        let Invoked::Ran(out) = out else {
+            panic!("expected a result");
+        };
         assert!(out.len() < OUTPUT_CLAMP + 200, "{} bytes", out.len());
         assert!(out.contains("truncated"), "{}", &out[out.len() - 60..]);
     }

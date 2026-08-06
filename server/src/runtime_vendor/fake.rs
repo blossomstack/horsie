@@ -808,6 +808,7 @@ async fn run_agent<S>(
                                 result: ToolResult::Err(horsie_models::runtime::ToolError {
                                     reason: "the fake vendor hosts no MCP servers".to_string(),
                                 }),
+                                needs_auth: None,
                             },
                         ))
                     }

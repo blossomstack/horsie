@@ -2664,7 +2664,10 @@ impl ContextProvider for SessionContextProvider {
         // user already configured must not capture those calls, arguments and
         // all.
         if use_plugins {
-            match runtime_client.mcp_discover().await {
+            // No credentials to send yet: nothing on this side resolves one.
+            // The path is here so the server can start doing so without another
+            // wire change — see the plugin MCP auth design.
+            match runtime_client.mcp_discover(Vec::new()).await {
                 Ok(discovery) => {
                     for failure in &discovery.failures {
                         match failure {
@@ -2685,6 +2688,7 @@ impl ContextProvider for SessionContextProvider {
                         mcp.push(Arc::new(horsie_workflow::PluginMcpToolbox::new(
                             runtime_client.clone(),
                             discovery.tools,
+                            Arc::new(horsie_workflow::NoPluginCredentials),
                         )));
                     }
                 }

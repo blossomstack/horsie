@@ -1,7 +1,6 @@
 
-/**
- * Connect to every MCP server the loaded plugins declare and list their tools.
- */
+import { McpCredential } from './mcpCredential';
 export interface McpDiscoverRequest {
   callId: string;
+  credentials: McpCredential[];
 }

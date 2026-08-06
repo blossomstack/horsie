@@ -67,6 +67,28 @@ impl Toolbox for CompositeToolbox {
 pub struct PluginMcpToolbox {
     client: horsie_runtime_client::RuntimeClient,
     tools: Vec<horsie_models::runtime::PluginMcpTool>,
+    credentials: Arc<dyn PluginCredentials>,
+}
+
+/// Resolves the bearer for one plugin-declared server.
+///
+/// The MCP client lives in the runtime; this is what keeps the *credential* on
+/// the server, where the refresh token and the consent flow are. `force` is the
+/// transport's post-`401` signal, relayed: it must bypass any cache.
+#[async_trait]
+pub trait PluginCredentials: Send + Sync {
+    async fn resolve(&self, server: &str, force: bool) -> Option<String>;
+}
+
+/// No credentials at all — every plugin server authenticates with what its own
+/// declaration carries, or not at all.
+pub struct NoPluginCredentials;
+
+#[async_trait]
+impl PluginCredentials for NoPluginCredentials {
+    async fn resolve(&self, _server: &str, _force: bool) -> Option<String> {
+        None
+    }
 }
 
 impl PluginMcpToolbox {
@@ -76,8 +98,39 @@ impl PluginMcpToolbox {
     pub fn new(
         client: horsie_runtime_client::RuntimeClient,
         tools: Vec<horsie_models::runtime::PluginMcpTool>,
+        credentials: Arc<dyn PluginCredentials>,
     ) -> Self {
-        Self { client, tools }
+        Self {
+            client,
+            tools,
+            credentials,
+        }
+    }
+
+    /// The credential for this tool's server, as the one-element list the
+    /// request carries. Only the server being called is sent: a request has no
+    /// business shipping tokens for servers it will not touch.
+    async fn credentials_for(
+        &self,
+        tool: &str,
+        force: bool,
+    ) -> Vec<horsie_models::runtime::McpCredential> {
+        let Some(server) = tool
+            .strip_prefix("mcp__")
+            .and_then(|rest| rest.split_once("__"))
+            .map(|(server, _)| server)
+        else {
+            return Vec::new();
+        };
+        self.credentials
+            .resolve(server, force)
+            .await
+            .map(|bearer| horsie_models::runtime::McpCredential {
+                server: server.to_string(),
+                bearer,
+            })
+            .into_iter()
+            .collect()
     }
 }
 
@@ -109,9 +162,24 @@ impl Toolbox for PluginMcpToolbox {
                 "no plugin MCP tool named '{name}'"
             )));
         }
-        self.client
-            .mcp_invoke(tool_call_id, name, input.to_string())
-            .await
+        let creds = self.credentials_for(name, false).await;
+        let first = self
+            .client
+            .mcp_invoke(tool_call_id, name, input.to_string(), creds)
+            .await;
+        // A refused credential costs one retry with a forced-fresh token, and
+        // exactly one: a server that refuses a fresh token is refusing the
+        // user, not the token.
+        let outcome = match first {
+            Err(horsie_runtime_client::RuntimeCallError::McpRefused(_)) => {
+                let fresh = self.credentials_for(name, true).await;
+                self.client
+                    .mcp_invoke(tool_call_id, name, input.to_string(), fresh)
+                    .await
+            }
+            other => other,
+        };
+        outcome
             .map(Value::String)
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
     }
@@ -221,6 +289,7 @@ mod tests {
                     input_schema: "not json".into(),
                 },
             ],
+            Arc::new(NoPluginCredentials),
         );
         let specs = tb.specs();
         assert_eq!(specs[0].name, "mcp__docs__search");
@@ -237,7 +306,7 @@ mod tests {
             horsie_runtime_client::testkit::MockTransport::ok(""),
             "agent",
         );
-        let tb = PluginMcpToolbox::new(client, Vec::new());
+        let tb = PluginMcpToolbox::new(client, Vec::new(), Arc::new(NoPluginCredentials));
         let err = tb
             .execute("mcp__docs__search", json!({}), "tc1")
             .await
@@ -370,6 +439,7 @@ mod tests {
                 description: Some("the plugin's".into()),
                 input_schema: r#"{"type":"object"}"#.into(),
             }],
+            Arc::new(NoPluginCredentials),
         ));
         let admin: Arc<dyn Toolbox> = Arc::new(
             McpToolbox::connect(

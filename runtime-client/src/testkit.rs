@@ -387,6 +387,7 @@ impl RuntimeTransport for MockTransport {
                     result: ToolResult::Err(ToolError {
                         reason: "no plugin MCP servers in a mock transport".to_string(),
                     }),
+                    needs_auth: None,
                 }))
             }
             // A cancel draws no reply, so relaying one would hang a real

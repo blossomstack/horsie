@@ -17,6 +17,7 @@ export * from './pluginSkill';
 export * from './pluginAgent';
 export * from './scanResponse';
 export * from './pluginMcpTool';
+export * from './mcpCredential';
 export * from './mcpDiscoverRequest';
 export * from './mcpDiscoverResponse';
 export * from './mcpServerUnreachable';

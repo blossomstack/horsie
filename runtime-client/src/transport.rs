@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
-    CancelCallRequest, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest, RunHooksRequest,
-    RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse, ServerHookEvent,
-    ToolCall, ToolCallRequest, ToolResult,
+    CancelCallRequest, McpCredential, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest,
+    McpInvokeResponse, RunHooksRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest,
+    ScanResponse, ServerHookEvent, ToolCall, ToolCallRequest, ToolResult,
 };
 use thiserror::Error;
 
@@ -139,10 +139,15 @@ pub trait RuntimeTransport: Send + Sync {
     ///
     /// One request for all of them: a session wants the whole list or none, and
     /// a server that cannot start contributes nothing rather than failing.
-    async fn mcp_discover(&self, call_id: &str) -> Result<McpDiscoverResponse, TransportError> {
+    async fn mcp_discover(
+        &self,
+        call_id: &str,
+        credentials: Vec<McpCredential>,
+    ) -> Result<McpDiscoverResponse, TransportError> {
         let reply = self
             .relay(RuntimeInboundMessage::McpDiscover(McpDiscoverRequest {
                 call_id: call_id.to_string(),
+                credentials,
             }))
             .await?;
         match reply {
@@ -163,16 +168,18 @@ pub trait RuntimeTransport: Send + Sync {
         call_id: &str,
         tool: &str,
         arguments: String,
-    ) -> Result<ToolResult, TransportError> {
+        credentials: Vec<McpCredential>,
+    ) -> Result<McpInvokeResponse, TransportError> {
         let reply = self
             .relay(RuntimeInboundMessage::McpInvoke(McpInvokeRequest {
                 call_id: call_id.to_string(),
                 tool: tool.to_string(),
                 arguments,
+                credentials,
             }))
             .await?;
         match reply {
-            RuntimeOutboundMessage::McpResult(resp) => Ok(resp.result),
+            RuntimeOutboundMessage::McpResult(resp) => Ok(resp),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::Provisioning(_)
             | RuntimeOutboundMessage::ProvisionFailed(_)

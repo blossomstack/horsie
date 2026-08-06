@@ -131,7 +131,15 @@ struct PluginMcpTool {
 /// One request rather than one per server: a session wants the whole tool list
 /// or none of it, and a server that cannot start contributes nothing rather than
 /// failing the scan.
-struct McpDiscoverRequest  { call_id: String }
+/// A bearer the *server* resolved for one declared server, sent with the
+/// request that needs it.
+///
+/// Placement never moves: the MCP client stays in the runtime and the
+/// credential travels instead. Refresh, storage and the consent flow all stay
+/// on the server, and this side never holds a token longer than the call.
+struct McpCredential { server: String, bearer: String }
+
+struct McpDiscoverRequest  { call_id: String, credentials: Vec<McpCredential> }
 struct McpDiscoverResponse {
     call_id: String,
     tools: Vec<PluginMcpTool>,
@@ -159,8 +167,20 @@ union McpServerFailure {
 
 /// Call one tool on a plugin-declared MCP server. `tool` is the namespaced name
 /// from discovery; the runtime splits it back into server and tool.
-struct McpInvokeRequest  { call_id: String, tool: String, arguments: String }
-struct McpInvokeResponse { call_id: String, result: ToolResult }
+struct McpInvokeRequest  {
+    call_id: String,
+    tool: String,
+    arguments: String,
+    credentials: Vec<McpCredential>,
+}
+struct McpInvokeResponse {
+    call_id: String,
+    result: ToolResult,
+    /// Set when the call failed because the server refused the credential.
+    /// The caller refreshes and retries once rather than handing the agent a
+    /// tool error it can do nothing about.
+    needs_auth: Option<McpServerNeedsAuth>,
+}
 
 // --- Server-initiated hooks ---
 

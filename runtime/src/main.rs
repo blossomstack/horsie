@@ -15,6 +15,7 @@ use horsie_models::runtime::{
     RuntimeOutboundMessage, RuntimeProvisionFailed, RuntimeProvisioning, RuntimeReady,
     ScanResponse, ToolCallResponse, ToolError, ToolOutput, ToolResult,
 };
+use horsie_runtime::mcp::Invoked;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -523,6 +524,7 @@ async fn run_loop<S>(
                     RuntimeInboundMessage::McpDiscover(req) => {
                         let call_id = req.call_id.clone();
                         let map_id = req.call_id.clone();
+                        let credentials = req.credentials.clone();
                         let registry = registry.clone();
                         let mcp = mcp.clone();
                         let sink_clone = sink.clone();
@@ -533,7 +535,10 @@ async fn run_loop<S>(
                         // not wait them all out.
                         let handle = tokio::spawn(async move {
                             let discovery = match registry.plugins_dir() {
-                                Some(dir) => mcp.discover(dir, registry.default_cwd()).await,
+                                Some(dir) => {
+                                    mcp.discover(dir, registry.default_cwd(), &credentials)
+                                        .await
+                                }
                                 None => horsie_runtime::mcp::Discovery {
                                     tools: Vec::new(),
                                     failures: Vec::new(),
@@ -563,6 +568,7 @@ async fn run_loop<S>(
                         let map_id = req.call_id.clone();
                         let tool = req.tool.clone();
                         let arguments = req.arguments.clone();
+                        let credentials = req.credentials.clone();
                         let registry = registry.clone();
                         let mcp = mcp.clone();
                         let sink_clone = sink.clone();
@@ -571,26 +577,45 @@ async fn run_loop<S>(
                         let handle = tokio::spawn(async move {
                             let args: serde_json::Value =
                                 serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null);
-                            let result = match registry.plugins_dir() {
-                                Some(dir) => mcp
-                                    .invoke(dir, registry.default_cwd(), &tool, args)
+                            let (result, needs_auth) = match registry.plugins_dir() {
+                                Some(dir) => match mcp
+                                    .invoke(dir, registry.default_cwd(), &tool, args, &credentials)
                                     .await
-                                    .map(|stdout| {
+                                {
+                                    Ok(Invoked::Ran(stdout)) => (
                                         ToolResult::Ok(ToolOutput {
                                             stdout,
                                             stderr: String::new(),
                                             exit_code: 0,
-                                        })
-                                    })
-                                    .unwrap_or_else(|reason| ToolResult::Err(ToolError { reason })),
-                                None => ToolResult::Err(ToolError {
-                                    reason: "this runtime has no plugin library".to_string(),
-                                }),
+                                        }),
+                                        None,
+                                    ),
+                                    // Reported alongside the error rather than
+                                    // instead of it: a caller that cannot
+                                    // refresh still gets something to show.
+                                    Ok(Invoked::NeedsAuth(a)) => (
+                                        ToolResult::Err(ToolError {
+                                            reason: format!(
+                                                "the MCP server '{}' refused the credential",
+                                                a.server
+                                            ),
+                                        }),
+                                        Some(a),
+                                    ),
+                                    Err(reason) => (ToolResult::Err(ToolError { reason }), None),
+                                },
+                                None => (
+                                    ToolResult::Err(ToolError {
+                                        reason: "this runtime has no plugin library".to_string(),
+                                    }),
+                                    None,
+                                ),
                             };
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::McpResult(McpInvokeResponse {
                                     call_id: call_id.clone(),
                                     result,
+                                    needs_auth,
                                 }),
                             );
                             if let Ok(json) = response {
