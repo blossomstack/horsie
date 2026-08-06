@@ -165,6 +165,7 @@ mod tests {
                         let resp = RuntimeOutboundMessage::ScanResult(
                             horsie_models::runtime::ScanResponse {
                                 shared_skills: vec![],
+                                shared_agents: None,
                                 shared_root: None,
                                 call_id: req.call_id,
                                 workspaces: vec![horsie_models::runtime::WorkspaceScan {

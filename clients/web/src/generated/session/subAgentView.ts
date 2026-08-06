@@ -11,6 +11,10 @@ export interface SubAgentView {
   label?: string;
   depth: number;
   /**
+   * The plugin-declared agent type this subagent runs as, when it was
+   */
+  agentType?: string;
+  /**
    * &#34;running&#34; | &#34;completed&#34; | &#34;failed&#34;.
    */
   status: string;

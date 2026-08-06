@@ -12,7 +12,8 @@ mod invoke;
 mod process;
 
 pub use events::{
-    HookEvent, OutputField, Unsupported, claude_aliases, matcher_applies, matcher_selects,
+    HookEvent, OutputField, Unsupported, claude_aliases, horsie_tools_for, matcher_applies,
+    matcher_selects,
 };
 pub use invoke::HookInvocation;
 // `HookDecl`, `HookTransport` and `PluginHooks` are declared below.

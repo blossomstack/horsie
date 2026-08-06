@@ -269,6 +269,38 @@ pub fn claude_aliases(horsie_tool: &str) -> &'static [&'static str] {
     }
 }
 
+/// The horsie tools a Claude Code tool name stands for — [`claude_aliases`]
+/// read backwards.
+///
+/// Needed because an agent's `tools` frontmatter is an allowlist written in
+/// Claude's vocabulary, and horsie's allowlist filters on horsie's. Derived from
+/// the same table rather than written out a second time, so the two directions
+/// cannot drift; a test asserts they are inverses.
+///
+/// Empty for a name horsie has no tool for (`TodoWrite`, `WebFetch`, …). That is
+/// the honest answer: an allowlist naming only those grants nothing, because
+/// there is nothing to grant.
+pub fn horsie_tools_for(claude_tool: &str) -> Vec<&'static str> {
+    HORSIE_TOOLS
+        .iter()
+        .filter(|t| claude_aliases(t).contains(&claude_tool))
+        .copied()
+        .collect()
+}
+
+/// Every horsie tool the alias table knows. The one place both directions of
+/// the mapping are enumerated.
+const HORSIE_TOOLS: &[&str] = &[
+    "bash",
+    "read_file",
+    "write_file",
+    "find_and_replace",
+    "replace_lines",
+    "list_files",
+    "glob",
+    "grep",
+];
+
 /// Whether a hook's `matcher` selects an occurrence, given that occurrence's
 /// matchable names.
 ///
@@ -524,5 +556,27 @@ mod tests {
     fn tools_without_a_claude_equivalent_alias_to_nothing() {
         assert!(claude_aliases("set_env").is_empty());
         assert_eq!(claude_aliases("bash"), ["Bash"]);
+    }
+
+    /// The two directions are one table. Written out twice they would drift,
+    /// and the drift would be silent: an agent's `tools` allowlist would grant
+    /// a tool its hooks could not match, or the reverse.
+    #[test]
+    fn the_alias_table_reads_the_same_in_both_directions() {
+        for horsie in HORSIE_TOOLS {
+            for claude in claude_aliases(horsie) {
+                assert!(
+                    horsie_tools_for(claude).contains(horsie),
+                    "{horsie} aliases to {claude}, which must map back"
+                );
+            }
+        }
+        // Claude's two in-place editors both reach horsie's two.
+        assert_eq!(
+            horsie_tools_for("Edit"),
+            ["find_and_replace", "replace_lines"]
+        );
+        // A Claude tool horsie has no equivalent for grants nothing.
+        assert!(horsie_tools_for("TodoWrite").is_empty());
     }
 }

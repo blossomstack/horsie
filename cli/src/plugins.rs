@@ -1066,11 +1066,16 @@ mod tests {
         );
     }
 
-    /// A plugin with nothing but unrunnable hooks fails to install, and the
-    /// error says which hooks — the difference between "wrong plugin" and
-    /// "wrong version of horsie".
+    /// A plugin with nothing but unrunnable hooks **installs**, and the
+    /// unrunnable events are reported rather than fatal.
+    ///
+    /// It used to be refused, because installability was skills-only. That
+    /// refused every guard-only plugin in the ecosystem — including ones whose
+    /// hooks horsie runs perfectly well — for want of a `SKILL.md`. The
+    /// difference between "wrong plugin" and "wrong version of horsie" is what
+    /// `hook_report` says, not whether the install failed.
     #[test]
-    fn a_hooks_only_plugin_is_refused_and_names_the_events() {
+    fn a_hooks_only_plugin_installs_and_its_unrunnable_events_are_reported() {
         let src = TempDir::new().unwrap();
         let cp = src.path().join(".claude-plugin");
         std::fs::create_dir_all(&cp).unwrap();
@@ -1091,16 +1096,19 @@ mod tests {
         let home = TempDir::new().unwrap();
         let p = paths(home.path());
         crate::marketplace::add(&p, &file_url(src.path()), None, None, false).unwrap();
-        let err = install(
+        let installed = install(
             &p,
             &InstallTarget::parse("hooksonly@acme"),
             None,
             None,
             false,
         )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("WorktreeCreate"), "must name the event: {err}");
+        .expect("a hooks-only plugin is a plugin");
+        let reasons = hook_report(&p.plugins.join(&installed));
+        assert!(
+            reasons.iter().any(|r| r.contains("WorktreeCreate")),
+            "must name the event horsie cannot fire: {reasons:?}"
+        );
     }
 
     /// A plugin's manifest name may differ from its catalogue name, so `update`

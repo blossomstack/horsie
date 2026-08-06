@@ -294,6 +294,7 @@ fn agent_roster(tree: &[(Uuid, SubAgentRecord)]) -> Vec<SubAgentView> {
         parent: None,
         label: None,
         depth: 0,
+        agent_type: None,
         status: "running".to_string(),
         error: None,
         spawned_at_ms: 0,
@@ -503,6 +504,7 @@ fn to_wire_subagent(id: Uuid, rec: &SubAgentRecord) -> SubAgentView {
         },
         label: Some(rec.label.clone()),
         depth: rec.depth,
+        agent_type: rec.agent_type.clone(),
         status: match rec.status {
             SubAgentStatus::Running => "running",
             SubAgentStatus::Completed => "completed",
@@ -532,6 +534,7 @@ mod tests {
             label: "research".into(),
             task: "dig".into(),
             depth: 2,
+            agent_type: None,
             status,
             output: Some("answer".into()),
             error: None,

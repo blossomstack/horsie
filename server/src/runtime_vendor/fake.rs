@@ -172,6 +172,7 @@ impl FakeRuntimeVendor {
             supports_provisioning: true,
             bash_stdout: "ok".to_string(),
             hook_records: Vec::new(),
+            shared_agents: Vec::new(),
             faults: Faults::default(),
             block: false,
             resume: None,
@@ -195,6 +196,17 @@ impl FakeRuntimeVendor {
     /// in order. Which event fired — and how often — is the server's decision,
     /// so it is asserted here rather than inferred from the records that came
     /// back.
+    /// The same events, whole rather than named — for a test that needs the
+    /// payload (an `agent_type`, a `stop_hook_active`) and not just the name.
+    #[must_use]
+    pub fn server_hook_events(&self) -> Vec<horsie_models::runtime::ServerHookEvent> {
+        self.recorder
+            .server_hook_events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     #[must_use]
     pub fn hook_events(&self) -> Vec<&'static str> {
         self.recorder
@@ -319,6 +331,8 @@ pub struct FakeRuntimeVendorBuilder {
     /// repeats once exhausted. A `Stop` continuation loop asks many times, and a
     /// script that ran dry would look like a hook that stopped blocking.
     hook_records: Vec<Vec<horsie_models::hooks::HookRecord>>,
+    /// Agent definitions this runtime's plugin library reports, verbatim.
+    shared_agents: Vec<horsie_models::runtime::PluginAgent>,
     faults: Faults,
     block: bool,
     /// Runtime state carried over from a previous agent process — see
@@ -368,14 +382,23 @@ impl FakeRuntimeVendorBuilder {
         self
     }
 
-    /// Canned stdout every `ToolCall` answers with.
+    /// Script the plugin library's agent definitions, so a test can exercise
+    /// the whole selection path — spawn, resolve, prompt — over the real wire.
     #[must_use]
+    pub fn shared_agents(mut self, agents: Vec<horsie_models::runtime::PluginAgent>) -> Self {
+        self.shared_agents = agents;
+        self
+    }
+
     /// Answer each `RunHooks` with the next entry, repeating the last.
+    #[must_use]
     pub fn hook_records(mut self, records: Vec<Vec<horsie_models::hooks::HookRecord>>) -> Self {
         self.hook_records = records;
         self
     }
 
+    /// Canned stdout every `ToolCall` answers with.
+    #[must_use]
     pub fn bash_stdout(mut self, value: &str) -> Self {
         self.bash_stdout = value.to_string();
         self
@@ -547,6 +570,7 @@ async fn run_agent<S>(
         supports_provisioning,
         bash_stdout,
         hook_records,
+        shared_agents,
         faults,
         block: _,
         resume: _,
@@ -744,6 +768,7 @@ async fn run_agent<S>(
                                 platform: Some("linux-x86_64".to_string()),
                             }],
                             shared_skills: vec![],
+                            shared_agents: Some(shared_agents.clone()),
                             shared_root: None,
                         }))
                     }
