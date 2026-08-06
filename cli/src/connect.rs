@@ -327,13 +327,7 @@ pub async fn run(
         // The runtimes run on this machine, so whatever address reaches the
         // server from here reaches it from them.
         base_url: server.trim_end_matches('/').to_string(),
-        dir: state_dir.join("bundles").to_string_lossy().into_owned(),
-        cache_dir: Some(
-            state_dir
-                .join("bundle-cache")
-                .to_string_lossy()
-                .into_owned(),
-        ),
+        dir: state_dir.join("plugins").to_string_lossy().into_owned(),
     });
     if let Some(p) = &plugins {
         agent = agent.with_host_library(p.dir.clone(), p.sources.clone(), p.hook_path.clone());

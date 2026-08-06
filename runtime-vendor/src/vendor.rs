@@ -32,7 +32,7 @@ use horsie_models::runtime_vendor::{
 };
 use horsie_runtime_client::RuntimeTransport;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -176,10 +176,8 @@ pub struct BundleDelivery {
     /// Base URL reaching the server *from where the runtimes run* — loopback
     /// for a local agent, an advertise address for a remote one.
     pub base_url: String,
-    /// Path the runtime unpacks bundles into and scans.
+    /// Root under which each runtime gets its own directory to unpack into.
     pub dir: String,
-    /// Optional content-hash cache, so repeat sessions skip re-fetching.
-    pub cache_dir: Option<String>,
 }
 
 /// One live runtime this agent owns.
@@ -219,9 +217,9 @@ pub struct RuntimeVendor {
     host_sources: Option<PathBuf>,
     hook_path: Vec<PathBuf>,
     /// How this agent's runtimes fetch server-managed bundles: the base URL
-    /// that reaches the server from where they run, the directory they unpack
-    /// into, and an optional content-hash cache. All three are the agent's
-    /// knowledge, not the server's — it sends only hashes and a token.
+    /// that reaches the server from where they run, and the root they unpack
+    /// into. Both are the agent's knowledge, not the server's — it sends only
+    /// hashes and a token.
     bundles: Option<BundleDelivery>,
     /// How long to wait between connection attempts. A field rather than a
     /// constant so tests can run the reconnect path on a millisecond scale.
@@ -804,22 +802,7 @@ impl RuntimeVendor {
         };
 
         let mut env = request.env.clone();
-        if let Some(b) = &self.bundles {
-            env.push(EnvVar {
-                name: horsie_models::ENV_PLUGINS_BASE.to_string(),
-                value: b.base_url.clone(),
-            });
-            env.push(EnvVar {
-                name: horsie_models::ENV_PLUGINS_DIR.to_string(),
-                value: b.dir.clone(),
-            });
-            if let Some(cache) = &b.cache_dir {
-                env.push(EnvVar {
-                    name: horsie_models::ENV_PLUGINS_CACHE.to_string(),
-                    value: cache.clone(),
-                });
-            }
-        }
+        env.extend(self.bundle_env(runtime_id));
 
         let config = RuntimeConfig {
             workspaces,
@@ -920,6 +903,39 @@ impl RuntimeVendor {
             serde_json::to_vec_pretty(&spec).map_err(|e| format!("encode capability spec: {e}"))?;
         std::fs::write(&path, bytes).map_err(|e| format!("write capability file: {e}"))?;
         Ok(path)
+    }
+
+    /// Root under which each runtime materializes its session's bundles.
+    /// `None` when this agent serves none.
+    fn plugins_root(&self) -> Option<&Path> {
+        self.bundles.as_ref().map(|b| Path::new(b.dir.as_str()))
+    }
+
+    /// Where `runtime_id` materializes its session's bundles. One directory per
+    /// runtime: the runtime scans the whole directory it is given, so a shared
+    /// one would show a session every other session's skills.
+    fn plugins_path(&self, runtime_id: &str) -> Option<PathBuf> {
+        self.plugins_root().map(|root| root.join(runtime_id))
+    }
+
+    /// The bundle-delivery environment for one runtime. Extracted from
+    /// `provision` so the per-runtime path is testable without spawning
+    /// anything.
+    fn bundle_env(&self, runtime_id: &str) -> Vec<EnvVar> {
+        let Some(b) = &self.bundles else {
+            return Vec::new();
+        };
+        let mut env = vec![EnvVar {
+            name: horsie_models::ENV_PLUGINS_BASE.to_string(),
+            value: b.base_url.clone(),
+        }];
+        if let Some(dir) = self.plugins_path(runtime_id) {
+            env.push(EnvVar {
+                name: horsie_models::ENV_PLUGINS_DIR.to_string(),
+                value: dir.to_string_lossy().into_owned(),
+            });
+        }
+        env
     }
 
     /// Where this agent writes a runtime's sandbox capability file. Public so
@@ -1061,6 +1077,42 @@ mod tests {
             std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(60),
         ))
+    }
+
+    /// A shared bundles directory would let one session scan another's skills,
+    /// because the runtime scans the whole directory it is pointed at.
+    #[test]
+    fn the_bundle_env_names_a_directory_per_runtime() {
+        let agent = agent().with_bundles(BundleDelivery {
+            base_url: "http://127.0.0.1:3789".to_string(),
+            dir: "/state/plugins".to_string(),
+        });
+        let value = |vars: &[EnvVar], name: &str| {
+            vars.iter()
+                .find(|v| v.name == name)
+                .map(|v| v.value.clone())
+        };
+
+        let one = agent.bundle_env("rt-1");
+        let two = agent.bundle_env("rt-2");
+
+        assert_eq!(
+            value(&one, horsie_models::ENV_PLUGINS_DIR).as_deref(),
+            Some("/state/plugins/rt-1")
+        );
+        assert_eq!(
+            value(&two, horsie_models::ENV_PLUGINS_DIR).as_deref(),
+            Some("/state/plugins/rt-2")
+        );
+        assert_eq!(
+            value(&one, horsie_models::ENV_PLUGINS_BASE).as_deref(),
+            Some("http://127.0.0.1:3789")
+        );
+    }
+
+    #[test]
+    fn an_agent_serving_no_bundles_adds_no_bundle_env() {
+        assert!(agent().bundle_env("rt-1").is_empty());
     }
 
     /// The baseline cannot know this machine's plugin library, so the agent
