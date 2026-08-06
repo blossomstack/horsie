@@ -585,7 +585,16 @@ impl EventSourcedActor for SessionSupervisor {
                 // session's life — that single call site *is* the guarantee.
                 // Detached, because a create legitimately runs for minutes and
                 // the first turn's `get` is what waits for it.
+                //
+                // The gate is taken *before* the spawn and before the reply, so
+                // it is already in place when the caller returns. A session is
+                // created with its first message now, so the first turn starts
+                // the moment this reply lands; without the gate it could ask
+                // the vendor for a runtime nobody had asked it to make, and be
+                // told — truthfully, and terminally — that no such runtime
+                // exists.
                 let runtimes = self.deps.runtimes.clone();
+                let gate = runtimes.begin_provisioning(&id);
                 let vendor = spec.vendor.clone();
                 let spec_for_create = spec.clone();
                 let create_id = id.clone();
@@ -593,6 +602,7 @@ impl EventSourcedActor for SessionSupervisor {
                     if let Err(e) = runtimes.create(&create_id, &vendor, &spec_for_create).await {
                         tracing::error!(session = %create_id, error = %e, "runtime create failed");
                     }
+                    gate.done();
                 });
                 let _ = reply.send(id.clone());
                 // A fresh session's status is not a guess, so seed the cache:

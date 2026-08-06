@@ -18,6 +18,7 @@ use crate::runtime_vendor::{
 };
 use crate::sessions::spec::{SessionSpec, SharedVendors};
 use horsie_runtime_client::RuntimeClient;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// What can go wrong acquiring a runtime, split by what the session should do
@@ -48,12 +49,61 @@ pub struct RuntimeDeps {
 
 pub struct RuntimeManager {
     deps: RuntimeDeps,
+    /// Sessions whose `create` is still in flight, so a `get` can wait for it
+    /// rather than ask the vendor about a runtime it has not been told to make
+    /// yet.
+    ///
+    /// A create legitimately runs for minutes, so it is detached and the first
+    /// turn waits on it — but a session is created *with* its first message
+    /// now, so that turn starts immediately, and without this gate it could
+    /// reach the vendor first. The vendor then answers truthfully that it has
+    /// no such runtime, which is `Gone`, which is terminal: a session
+    /// permanently dead because it asked one beat too early.
+    provisioning: std::sync::Mutex<HashMap<String, tokio::sync::watch::Receiver<bool>>>,
 }
 
 impl RuntimeManager {
     #[must_use]
     pub fn new(deps: RuntimeDeps) -> Self {
-        Self { deps }
+        Self {
+            deps,
+            provisioning: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Register a session's create as in flight, before it starts.
+    ///
+    /// Called synchronously by the one caller that provisions, so the gate is
+    /// in place before that caller's reply can reach anyone who might send a
+    /// message. Completing the returned guard opens it, whether the create
+    /// succeeded or not: a failure is for the turn to report, and a turn that
+    /// waits forever reports nothing.
+    pub fn begin_provisioning(&self, session: &str) -> ProvisioningGuard {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        if let Ok(mut map) = self.provisioning.lock() {
+            map.insert(session.to_string(), rx);
+        }
+        ProvisioningGuard { done: tx }
+    }
+
+    /// Wait for an in-flight create, if there is one. Returns immediately for a
+    /// session already provisioned — including one provisioned by an earlier
+    /// incarnation of the server, which has no gate at all.
+    async fn await_provisioning(&self, session: &str) {
+        let Some(mut rx) = self
+            .provisioning
+            .lock()
+            .ok()
+            .and_then(|map| map.get(session).cloned())
+        else {
+            return;
+        };
+        // `wait_for` is satisfied at once when the value is already `true`, so a
+        // late waiter never blocks on a create that has finished.
+        let _ = rx.wait_for(|done| *done).await;
+        if let Ok(mut map) = self.provisioning.lock() {
+            map.remove(session);
+        }
     }
 
     fn vendor(&self, vendor: &str) -> Result<Arc<RuntimeVendorLink>, RuntimeError> {
@@ -207,6 +257,7 @@ impl RuntimeManager {
     /// means the next tool call finds it; binding to the link meant every tool
     /// call for the rest of that turn failed on a dead socket.
     pub async fn get(&self, session: &str, vendor: &str) -> Result<RuntimeClient, RuntimeError> {
+        self.await_provisioning(session).await;
         let link = self.vendor(vendor)?;
         link.get(session).await.map_err(|e| match e {
             VendorError::Gone(m) => RuntimeError::Gone(m),
@@ -254,6 +305,29 @@ impl RuntimeManager {
             session,
             vendor,
         }
+    }
+}
+
+/// Held for as long as a session's create is running. Dropping it, or calling
+/// [`ProvisioningGuard::done`], releases every `get` waiting on that session.
+///
+/// Release on drop is the point: a create that panics or is cancelled must not
+/// leave the first turn waiting on a create that will never finish.
+pub struct ProvisioningGuard {
+    done: tokio::sync::watch::Sender<bool>,
+}
+
+impl ProvisioningGuard {
+    /// The create has finished — successfully or not. Waiters proceed and ask
+    /// the vendor, which is now the authority on whether the runtime exists.
+    pub fn done(self) {
+        let _ = self.done.send(true);
+    }
+}
+
+impl Drop for ProvisioningGuard {
+    fn drop(&mut self) {
+        let _ = self.done.send(true);
     }
 }
 
@@ -557,6 +631,61 @@ mod tests {
             "credentials are short-lived and must be re-minted on every create, never cached"
         );
         assert_eq!(minter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A `get` that arrives before the create it is waiting for must wait, not
+    /// ask the vendor and be told the runtime does not exist.
+    ///
+    /// That answer is `Gone`, which is terminal, so the session would be dead
+    /// for good — and the window is not hypothetical: a session is created with
+    /// its first message, so the first turn starts as soon as the create call
+    /// replies, while provisioning is still detached behind it.
+    #[tokio::test]
+    async fn a_get_waits_for_the_create_it_raced() {
+        let agent = FakeRuntimeVendor::builder("v")
+            .serve_in_process()
+            .await
+            .unwrap();
+        let m = manager(published(&agent, "v"));
+
+        // Exactly the supervisor's order: take the gate, then detach the create.
+        let gate = m.begin_provisioning("s1");
+        let m2 = m.clone();
+        let created = tokio::spawn(async move {
+            // Long enough that a `get` issued right away cannot have been
+            // scheduled after it by luck.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            m2.create("s1", "v", &session_spec("v"))
+                .await
+                .expect("create");
+            gate.done();
+        });
+
+        m.get("s1", "v")
+            .await
+            .expect("get must wait for the create");
+        assert_eq!(
+            agent.signals(),
+            vec!["create:s1".to_string(), "get:s1".to_string()],
+            "the create has to have happened first"
+        );
+        created.await.unwrap();
+    }
+
+    /// A create that never finishes cleanly still releases its waiters: the
+    /// vendor is the authority on whether the runtime exists, and a turn that
+    /// waits forever cannot report anything at all.
+    #[tokio::test]
+    async fn a_dropped_gate_releases_the_waiters() {
+        let agent = FakeRuntimeVendor::builder("v")
+            .serve_in_process()
+            .await
+            .unwrap();
+        let m = manager(published(&agent, "v"));
+        let gate = m.begin_provisioning("s1");
+        drop(gate);
+        // No create ever ran, so this fails — but it fails, rather than hangs.
+        assert!(m.get("s1", "v").await.is_err());
     }
 
     #[tokio::test]
