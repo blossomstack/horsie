@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook } from "@testing-library/react";
+import { render, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
@@ -17,7 +17,10 @@ import { useConfigPickers } from "./configPickers";
 // picker at all.
 const settings: SettingsView = {
   providers: [],
-  models: [{ alias: "sonnet", provider: "p", modelId: "m1" }],
+  models: [
+    { alias: "sonnet", provider: "p", modelId: "m1" },
+    { alias: "haiku", provider: "p", modelId: "m2" },
+  ],
   vendors: [
     { name: "local", isDefault: true, capabilities: { supportsProvisioning: false } },
     { name: "velos", isDefault: false, capabilities: { supportsProvisioning: true } },
@@ -87,6 +90,23 @@ function keys(d: ConfigDraft): string[] {
   return result.current.map((p) => p.key);
 }
 
+function renderPickerBody(d: ConfigDraft, key: string) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  client.setQueryData(settingsKey, settings);
+  const { result } = renderHook(() => useConfigPickers(d), {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>
+        <MemoryRouter>{children}</MemoryRouter>
+      </QueryClientProvider>
+    ),
+  });
+  const picker = result.current.find((p) => p.key === key);
+  if (!picker) throw new Error(`missing picker ${key}`);
+  return render(<MemoryRouter>{picker.body(() => {})}</MemoryRouter>);
+}
+
 describe("useConfigPickers", () => {
   // Where the work runs belongs to the invocation, not to the saved preset, so
   // an agent draft has no runtime channel and must be offered no Runtime key.
@@ -139,5 +159,43 @@ describe("useConfigPickers", () => {
       "memory",
       "model",
     ]);
+  });
+
+  it("marks the selected runtime and model options", () => {
+    const runtime = renderPickerBody(sessionDraft(), "runtime");
+    expect(runtime.getByRole("button", { name: /local/ }).getAttribute("data-selected")).toBe(
+      "true",
+    );
+    expect(runtime.getByRole("button", { name: /velos/ }).getAttribute("data-selected")).not.toBe(
+      "true",
+    );
+
+    const model = renderPickerBody(sessionDraft({ model: "sonnet" }), "model");
+    expect(model.getByRole("button", { name: /sonnet/ }).getAttribute("data-selected")).toBe(
+      "true",
+    );
+    expect(model.getByRole("button", { name: /haiku/ }).getAttribute("data-selected")).not.toBe(
+      "true",
+    );
+  });
+
+  it("marks the selected workflow option", () => {
+    const view = renderPickerBody(workflowDraft("triage"), "workflow");
+    expect(view.getByRole("button", { name: /triage/ }).getAttribute("data-selected")).toBe(
+      "true",
+    );
+    expect(view.getByRole("button", { name: /^None/ }).getAttribute("data-selected")).not.toBe(
+      "true",
+    );
+  });
+
+  it("highlights the selected thinking effort without replacing its radio", () => {
+    const view = renderPickerBody(
+      sessionDraft({ thinkingEfforts: ["low", "high"], thinkingEffort: "high" }),
+      "thinking",
+    );
+    const high = view.getByText("high").closest("label");
+    expect(high?.getAttribute("data-selected")).toBe("true");
+    expect(high?.querySelector<HTMLInputElement>("input[type=radio]")?.checked).toBe(true);
   });
 });

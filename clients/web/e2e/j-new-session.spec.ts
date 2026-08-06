@@ -19,6 +19,17 @@ test("J1: the New button opens an editable draft at /", async ({ page, appBase }
   await expect(page.getByTestId("config-repos")).toHaveCount(0);
   await expect(page.getByTestId("config-skills")).toBeVisible();
   await expect(page.getByTestId("config-mcp")).toBeVisible();
+
+  await page.getByTestId("config-runtime").click();
+  await expect(page.locator('[data-testid="runtime-option"][data-selected="true"]')).toContainText(
+    "e2e",
+  );
+  await page.keyboard.press("Escape");
+
+  await page.getByTestId("config-model").click();
+  await expect(page.locator('[data-testid="model-option"][data-selected="true"]')).toContainText(
+    "mock",
+  );
 });
 
 test("J2: a created session keeps the same row, now read-only", async ({
