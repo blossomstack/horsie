@@ -87,10 +87,7 @@ pub struct InteractiveOrchestrator;
 
 impl Orchestrator for InteractiveOrchestrator {
     fn next_actions(&self, state: &SessionState) -> Vec<AgentAction> {
-        // Nothing runs before the runtime it would run on exists. This is the
-        // whole of that wait: the status is journaled, so it survives the
-        // process dying mid-create, which no in-memory gate could.
-        if state.status == SessionStatus::Provisioning {
+        if !has_runtime(state) {
             return Vec::new();
         }
         let mut actions = wake_owed_parents(state);
@@ -105,6 +102,21 @@ impl Orchestrator for InteractiveOrchestrator {
             SessionCommandKind::UserMessage | SessionCommandKind::Answer => Ok(()),
         }
     }
+}
+
+/// Whether this session has a runtime to run on.
+///
+/// Nothing starts before the runtime it would run on exists. Both answers are
+/// journaled statuses, so they survive the process dying mid-create — which no
+/// in-memory gate could. `ProvisioningFailed` is the second of them: a create
+/// that failed on something retryable leaves a session with no runtime at all,
+/// and a turn started there would ask a vendor for one and be told, terminally,
+/// that it is gone.
+pub fn has_runtime(state: &SessionState) -> bool {
+    !matches!(
+        state.status,
+        SessionStatus::Provisioning | SessionStatus::ProvisioningFailed { .. }
+    )
 }
 
 /// Wake every idle subagent parent whose children have results it has not been

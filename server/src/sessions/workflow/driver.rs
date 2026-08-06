@@ -65,7 +65,7 @@ impl Orchestrator for WorkflowOrchestrator {
         // A run has no first message to hold it back — `AdvanceRun` fires at
         // load and starts step one by itself — so it needs the same wait a
         // conversation gets, and for the same reason.
-        if state.status == crate::sessions::spec::SessionStatus::Provisioning {
+        if !crate::sessions::orchestrator::has_runtime(state) {
             return Vec::new();
         }
         // A run that has not folded a `StepStarted` yet still reads as

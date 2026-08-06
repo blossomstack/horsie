@@ -186,6 +186,18 @@ pub enum SessionStatus {
     Failed {
         reason: String,
     },
+    /// The create failed on something retryable — an offline vendor, a token
+    /// that could not be minted. Distinct from [`SessionStatus::Failed`], which
+    /// looks the same to a reader and means the opposite to the session: a
+    /// failed turn *has* a runtime and can simply run again, while this one has
+    /// none and must build one first.
+    ///
+    /// Safe to re-attempt for the same reason `Provisioning` is: a session whose
+    /// create never succeeded has never run a turn, so there is no work in a
+    /// workspace for a rebuild to destroy.
+    ProvisioningFailed {
+        reason: String,
+    },
     /// Terminal. The session can never run again — today only because its
     /// runtime is gone and re-provisioning would silently destroy work.
     Unrecoverable {
@@ -200,7 +212,13 @@ pub fn status_kind(s: &SessionStatus) -> SessionStatusKind {
         SessionStatus::Idle => SessionStatusKind::Idle,
         SessionStatus::Running => SessionStatusKind::Running,
         SessionStatus::AwaitingInput { .. } => SessionStatusKind::AwaitingInput,
-        SessionStatus::Failed { .. } => SessionStatusKind::Failed,
+        // Deliberately the same wire discriminant as a failed turn: to a
+        // reader both are "it did not work, the reason is in `last_error`, send
+        // again". What differs is what *sending again* does, and that is the
+        // session's business, not the client's.
+        SessionStatus::Failed { .. } | SessionStatus::ProvisioningFailed { .. } => {
+            SessionStatusKind::Failed
+        }
         SessionStatus::Unrecoverable { .. } => SessionStatusKind::Unrecoverable,
     }
 }
@@ -208,9 +226,9 @@ pub fn status_kind(s: &SessionStatus) -> SessionStatusKind {
 /// The failure reason a status carries, if any.
 pub fn status_reason(s: &SessionStatus) -> Option<String> {
     match s {
-        SessionStatus::Unrecoverable { reason } | SessionStatus::Failed { reason } => {
-            Some(reason.clone())
-        }
+        SessionStatus::Unrecoverable { reason }
+        | SessionStatus::Failed { reason }
+        | SessionStatus::ProvisioningFailed { reason } => Some(reason.clone()),
         SessionStatus::Provisioning
         | SessionStatus::Idle
         | SessionStatus::Running
