@@ -76,13 +76,13 @@ async fn provision_into(
     if already_materialized(dir, manifest) {
         return Some(dir.to_path_buf());
     }
-    // Whatever a previous manifest left behind is not what this session
-    // selected, and the scanner reads the whole directory.
-    let _ = std::fs::remove_dir_all(dir);
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("plugins: cannot create plugins dir {}: {e}", dir.display());
         return None;
     }
+    // Whatever a previous manifest left behind is not what this session
+    // selected, and the scanner reads the whole directory.
+    clear_dir(dir);
     let client = match reqwest::Client::builder().build() {
         Ok(c) => c,
         Err(e) => {
@@ -106,6 +106,27 @@ async fn provision_into(
         eprintln!("plugins: cannot record the manifest: {e}");
     }
     Some(dir.to_path_buf())
+}
+
+/// Empty `dir` without removing `dir` itself.
+///
+/// The distinction is load-bearing under a sandbox. This directory is the unit
+/// the vendor granted, and it is granted by path: removing it and making a new
+/// one needs a write on the *parent*, which this runtime has no grant for. So a
+/// `remove_dir_all` here fails the whole provision — silently, since fetching is
+/// best-effort — and the session comes up with no skills.
+fn clear_dir(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
 }
 
 /// Whether `dir` was already built from exactly this manifest.
@@ -265,12 +286,22 @@ mod tests {
         std::fs::write(dir.join("stale/SKILL.md"), b"old").unwrap();
         std::fs::write(dir.join(MARKER), b"[{\"name\":\"stale\",\"hash\":\"old\"}]").unwrap();
 
+        let before = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&dir).unwrap());
         provision_into(&manifest, &base, &dir, None).await;
         assert!(
             !dir.join("stale").exists(),
             "the previous selection is gone"
         );
         assert!(dir.join("demo/skills/a/SKILL.md").is_file());
+        // The directory itself must survive: it is what the sandbox grants, by
+        // path, and re-creating it needs a write on the parent the runtime has
+        // no grant for. Removing it makes every sandboxed provision fail — and
+        // fail silently, because fetching is best-effort.
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&dir).unwrap()),
+            before,
+            "the granted directory was replaced rather than emptied"
+        );
     }
 
     /// No marker after a partial run, so the next start retries. Today a bundle

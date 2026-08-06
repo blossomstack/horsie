@@ -790,6 +790,8 @@ impl RuntimeVendor {
             None
         };
 
+        self.prepare_plugins_dir(runtime_id);
+
         let mut env = request.env.clone();
         env.extend(self.bundle_env(runtime_id));
 
@@ -941,6 +943,27 @@ impl RuntimeVendor {
         let _ = std::fs::remove_dir_all(self.state_dir.join(runtime_id));
         if let Some(dir) = self.plugins_path(runtime_id) {
             let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// Create the directory this runtime will materialize its bundles into.
+    ///
+    /// The runtime cannot do this for itself under a sandbox: the grant names
+    /// that directory by path, and creating it is a write on the *parent*,
+    /// which is deliberately not granted. So the agent — which owns the machine
+    /// and is not confined — makes it, and the runtime only ever writes inside.
+    ///
+    /// Best-effort: a failure here surfaces as the runtime reporting it could
+    /// not provision its bundles, which is the same class of degradation as a
+    /// bundle that would not download.
+    fn prepare_plugins_dir(&self, runtime_id: &str) {
+        if let Some(dir) = self.plugins_path(runtime_id) {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                note(&format!(
+                    "vendor agent: cannot create bundle dir {}: {e}",
+                    dir.display()
+                ));
+            }
         }
     }
 
@@ -1143,6 +1166,20 @@ mod tests {
     #[test]
     fn an_agent_serving_no_bundles_adds_no_bundle_env() {
         assert!(agent().bundle_env("rt-1").is_empty());
+    }
+
+    /// A sandboxed runtime is granted its bundle dir *by path*, so creating it
+    /// would be a write on the ungranted parent. The agent is not confined and
+    /// makes it first; without this every sandboxed provision fails silently.
+    #[test]
+    fn the_agent_creates_the_bundle_dir_the_runtime_cannot() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let agent = agent_with_bundles(state.path());
+        assert!(!state.path().join("plugins/rt-1").exists());
+
+        agent.prepare_plugins_dir("rt-1");
+
+        assert!(state.path().join("plugins/rt-1").is_dir());
     }
 
     /// Build an agent rooted at `state`, serving bundles out of `state/plugins`.
