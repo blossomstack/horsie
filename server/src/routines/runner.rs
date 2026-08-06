@@ -273,14 +273,11 @@ pub(crate) mod tests {
     ) -> bool {
         for _ in 0..100 {
             let page = sup
-                .ask(|reply| SessionSupervisorCommand::History {
+                .ask(|reply| SessionSupervisorCommand::PageLog {
                     id: id.to_string(),
                     agent_id: None,
-                    query: horsie_workflow::HistoryQuery {
-                        before: None,
-                        after: None,
-                        limit: 50,
-                    },
+                    before: None,
+                    max: 50,
                     reply,
                 })
                 .await

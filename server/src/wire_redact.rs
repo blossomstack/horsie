@@ -40,13 +40,17 @@ mod tests {
     use super::*;
     use horsie_models::agent::{Role, TextPart, ThinkingPart};
 
-    fn entries(signature: Option<&str>) -> Vec<HistoryEntry> {
-        vec![HistoryEntry::Llm(assistant_with_thinking(signature))]
+    fn entries(signature: Option<&str>) -> Vec<AgentLogEntry> {
+        vec![AgentLogEntry {
+            seq: 0,
+            at_ms: 0,
+            body: AgentLogBody::Llm(assistant_with_thinking(signature)),
+        }]
     }
 
-    fn parts(entries: &[HistoryEntry]) -> &[ContentPart] {
-        match &entries[0] {
-            HistoryEntry::Llm(m) => &m.parts,
+    fn parts(entries: &[AgentLogEntry]) -> &[ContentPart] {
+        match &entries[0].body {
+            AgentLogBody::Llm(m) => &m.parts,
             other => panic!("expected an Llm entry, got {other:?}"),
         }
     }
@@ -127,11 +131,15 @@ mod tests {
                 },
             ),
         };
-        let hook = HistoryEntry::Hook(HookEntry {
-            id: "hook:0".into(),
-            created_at_ms: 7,
-            record,
-        });
+        let hook = AgentLogEntry {
+            seq: 3,
+            at_ms: 7,
+            body: AgentLogBody::Hook(HookEntry {
+                id: "hook:0".into(),
+                created_at_ms: 7,
+                record,
+            }),
+        };
         let mut es = vec![hook.clone()];
         strip_entry_signatures(&mut es);
         assert_eq!(

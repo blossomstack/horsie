@@ -946,6 +946,54 @@ impl SessionActor {
         }
     }
 
+    /// Tell each agent about the session events it needs to show.
+    ///
+    /// This is the whole of "session events reach the client": the session
+    /// still owns and journals every one of them, and hands the viewer-facing
+    /// subset to the agent whose log a person would be reading. One direction
+    /// only — an agent never tells the session anything back through here.
+    ///
+    /// **Resident agents only**, because this hook has no `ActorContext` to
+    /// spawn with. That is not the limitation it looks like: `main` is spawned
+    /// at recovery and stays for the session's loaded life, and every
+    /// subagent-targeted event happens while that subagent is running. A miss
+    /// is therefore a bug worth hearing about rather than a case to handle,
+    /// which is what the warning is for.
+    async fn record_lifecycle(&mut self, events: &[SessionDomainEvent]) {
+        for event in events {
+            let (target, Some(payload)) = crate::sessions::lifecycle_routing::route(event) else {
+                continue;
+            };
+            let agent = match &target {
+                crate::sessions::lifecycle_routing::LifecycleTarget::None => continue,
+                crate::sessions::lifecycle_routing::LifecycleTarget::Main => {
+                    self.agents.as_ref().and_then(SessionAgents::main).cloned()
+                }
+                crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Main) => {
+                    self.agents.as_ref().and_then(SessionAgents::main).cloned()
+                }
+                crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Sub(id))
+                | crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Step(id)) => {
+                    self.agents.as_ref().and_then(|a| a.sub(*id)).cloned()
+                }
+            };
+            let Some(agent) = agent else {
+                tracing::warn!(
+                    session = %self.id,
+                    ?target,
+                    "no resident agent to record a session event on; it will be missing from the log"
+                );
+                continue;
+            };
+            let _ = agent
+                .tell(AgentCommand::RecordLifecycle {
+                    event: payload,
+                    at_ms: now_ms(),
+                })
+                .await;
+        }
+    }
+
     /// Resolve an agent selector to its resident actor: `None`/`"main"` for the
     /// primary agent, else a subagent id. A cold node — one in the persisted
     /// tree with no actor since this session loaded — is spawned on demand, so
@@ -2885,6 +2933,7 @@ impl EventSourcedActor for SessionActor {
         if tree_changed {
             let _ = self.frames.send(SessionFrame::AgentTreeChanged);
         }
+        self.record_lifecycle(events).await;
     }
 
     async fn handle_command(
@@ -5203,43 +5252,16 @@ mod tests {
         }
     }
 
-    /// Drain whatever the agent stream has produced so far.
-    fn drain_frames(rx: &mut broadcast::Receiver<AgentFrame>) -> Vec<AgentFrame> {
-        let mut out = Vec::new();
-        while let Ok(frame) = rx.try_recv() {
-            out.push(frame);
-        }
-        out
-    }
-
-    fn appended_ids(frames: &[AgentFrame]) -> Vec<String> {
-        frames
-            .iter()
-            .filter_map(|f| match f {
-                AgentFrame::Appended { entry } => Some(entry.id().to_string()),
-                AgentFrame::Delta { .. }
-                | AgentFrame::ToolStart { .. }
-                | AgentFrame::TurnCompleted { .. }
-                | AgentFrame::TaskListChanged { .. } => None,
-            })
-            .collect()
-    }
-
-    /// The invariant the old two-vocabulary design could not even state: the
-    /// transcript you get by accumulating stream appends is the transcript
-    /// `/history` hands you. They are two projections of one append-only log.
+    /// The invariant the old two-vocabulary design could not even state, now
+    /// nearly a tautology: reading forward and paging backwards return the same
+    /// entries, in the same order, because there is one log and one writer.
+    ///
+    /// Worth keeping precisely because it used to be hard. Two projections of
+    /// one append-only log could disagree when one of them was a broadcast a
+    /// subscriber might have joined late; neither of these can.
     #[tokio::test]
-    async fn the_stream_and_history_agree_on_the_transcript() {
+    async fn reading_forward_and_paging_back_agree_on_the_log() {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
-        let mut rx = session
-            .ask(|reply| SessionCommand::SubscribeAgent {
-                agent_id: None,
-                reply,
-            })
-            .await
-            .unwrap()
-            .expect("the main agent is subscribable");
-
         session
             .ask(|reply| SessionCommand::UserMessage {
                 text: "go".into(),
@@ -5249,20 +5271,33 @@ mod tests {
             .unwrap()
             .unwrap();
         wait_for_journal_len(&journal, id, 2).await;
-        // Let the turn's appends land on the broadcast.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let streamed = appended_ids(&drain_frames(&mut rx));
-        let stored: Vec<String> = main_history(&session)
+        let streamed: Vec<u64> = session
+            .ask(|reply| SessionCommand::ReadLog {
+                agent_id: None,
+                after: None,
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("main agent log")
+            .entries
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        let stored: Vec<u64> = main_history(&session)
             .await
             .entries
             .iter()
-            .map(|e| e.id().to_string())
+            .map(|e| e.seq)
             .collect();
-        assert!(!streamed.is_empty(), "the turn must produce appends");
+        assert!(!streamed.is_empty(), "the turn must produce entries");
+        assert_eq!(streamed, stored);
         assert_eq!(
-            streamed, stored,
-            "stream appends and history must be the same transcript, in the same order"
+            streamed,
+            (0..streamed.len() as u64).collect::<Vec<_>>(),
+            "no gaps and no reordering"
         );
     }
 
@@ -5315,13 +5350,12 @@ mod tests {
 
         let _ = main_history(&session).await;
         let _ = session
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::ReadLog {
                 agent_id: None,
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: Some("m1".into()),
-                    limit: 10,
-                },
+                after: Some(horsie_workflow::Cursor {
+                    entry_seq: 0,
+                    delta_seq: 0,
+                }),
                 reply,
             })
             .await
@@ -5334,7 +5368,7 @@ mod tests {
             .await
             .unwrap();
         let _ = session
-            .ask(|reply| SessionCommand::SubscribeAgent {
+            .ask(|reply| SessionCommand::WatchAgent {
                 agent_id: None,
                 reply,
             })
@@ -5605,7 +5639,7 @@ mod tests {
         assert_eq!(sub.agent_id(), sub_id.to_string());
     }
 
-    fn user_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+    fn user_texts(page: &horsie_workflow::LogPage) -> Vec<String> {
         page.messages()
             .filter(|m| m.role == horsie_agentcore::Role::User)
             .flat_map(|m| m.parts.iter())
@@ -5622,7 +5656,7 @@ mod tests {
     /// A user message's subagent-result parts, rendered the way the wire sees
     /// them — the counterpart to `user_texts` now that a result is a part of
     /// its own rather than text merged into what the person said.
-    fn subagent_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+    fn subagent_texts(page: &horsie_workflow::LogPage) -> Vec<String> {
         page.messages()
             .flat_map(|m| m.parts.iter())
             .filter_map(|p| match p {
@@ -5660,15 +5694,12 @@ mod tests {
     async fn agent_history(
         session: &ActorRef<SessionCommand>,
         agent_id: Option<String>,
-    ) -> horsie_workflow::AgentHistoryPage {
+    ) -> horsie_workflow::LogPage {
         session
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::PageLog {
                 agent_id,
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: None,
-                    limit: 50,
-                },
+                before: None,
+                max: 50,
                 reply,
             })
             .await
@@ -5676,12 +5707,13 @@ mod tests {
             .expect("agent history")
     }
 
-    fn hook_ids(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+    fn hook_ids(page: &horsie_workflow::LogPage) -> Vec<String> {
         page.entries
             .iter()
-            .filter_map(|e| match e {
-                horsie_agentcore::HistoryEntry::Hook(h) => Some(h.id.clone()),
-                horsie_agentcore::HistoryEntry::Llm(_) => None,
+            .filter_map(|e| match &e.body {
+                horsie_agentcore::AgentLogBody::Hook(h) => Some(h.id.clone()),
+                horsie_agentcore::AgentLogBody::Llm(_)
+                | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
             })
             .collect()
     }
@@ -5853,8 +5885,8 @@ mod tests {
             .await
             .entries
             .iter()
-            .filter_map(|e| match e {
-                horsie_agentcore::HistoryEntry::Llm(m)
+            .filter_map(|e| match &e.body {
+                horsie_agentcore::AgentLogBody::Llm(m)
                     if m.role == horsie_agentcore::Role::User =>
                 {
                     Some(m.parts.iter().fold(String::new(), |mut acc, p| {
@@ -5864,8 +5896,9 @@ mod tests {
                         acc
                     }))
                 }
-                horsie_agentcore::HistoryEntry::Llm(_)
-                | horsie_agentcore::HistoryEntry::Hook(_) => None,
+                horsie_agentcore::AgentLogBody::Llm(_)
+                | horsie_agentcore::AgentLogBody::Hook(_)
+                | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
             })
             .collect()
     }
@@ -5876,12 +5909,13 @@ mod tests {
             .await
             .entries
             .iter()
-            .filter_map(|e| match e {
-                horsie_agentcore::HistoryEntry::Hook(h) => match &h.record.action {
+            .filter_map(|e| match &e.body {
+                horsie_agentcore::AgentLogBody::Hook(h) => match &h.record.action {
                     HookAction::Stop(r) => Some(r.outcome.clone()),
                     other => panic!("only Stop hooks run in these tests, got {other:?}"),
                 },
-                horsie_agentcore::HistoryEntry::Llm(_) => None,
+                horsie_agentcore::AgentLogBody::Llm(_)
+                | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
             })
             .collect()
     }
@@ -6831,20 +6865,17 @@ mod tests {
         );
     }
 
-    async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::AgentHistoryPage {
+    async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::LogPage {
         session
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::PageLog {
                 agent_id: None,
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: None,
-                    limit: 50,
-                },
+                before: None,
+                max: 50,
                 reply,
             })
             .await
             .unwrap()
-            .expect("main agent history")
+            .expect("main agent log")
     }
 
     #[tokio::test]
@@ -7140,13 +7171,10 @@ mod tests {
         })
         .await;
         let page = session2
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::PageLog {
                 agent_id: Some(p.to_string()),
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: None,
-                    limit: 20,
-                },
+                before: None,
+                max: 20,
                 reply,
             })
             .await
@@ -7201,13 +7229,10 @@ mod tests {
         );
         // The transcript stays pageable: the resident actor answers history.
         let page = session2
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::PageLog {
                 agent_id: Some(sub.to_string()),
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: None,
-                    limit: 10,
-                },
+                before: None,
+                max: 10,
                 reply,
             })
             .await

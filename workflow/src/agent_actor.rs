@@ -174,6 +174,13 @@ pub enum AgentCommand {
         max: usize,
         reply: tokio::sync::oneshot::Sender<crate::agent_log::LogPage>,
     },
+    /// Record something that happened to the session in this agent's log.
+    ///
+    /// Sent by the session actor, which still owns the fact — this only makes
+    /// it visible in the one ordered thing a client reads. Journaled here
+    /// because the agent is the sole writer of its own log, which is what makes
+    /// the order deterministic with no merge anywhere.
+    RecordLifecycle { event: LifecycleEvent, at_ms: u64 },
     /// One chunk of the message currently being written.
     ///
     /// Routed through the mailbox rather than straight to readers so it is
@@ -1693,6 +1700,9 @@ impl EventSourcedActor for AgentActor {
                         CommandEffect::none()
                     }
                 }
+            }
+            AgentCommand::RecordLifecycle { event, at_ms } => {
+                CommandEffect::persist(vec![AgentDomainEvent::LifecycleRecorded { event, at_ms }])
             }
             AgentCommand::RecordDelta { text } => {
                 self.deltas.push(text);

@@ -227,7 +227,6 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(ReadFileToolbox),
         }),
-        event_sink: Arc::new(NoopSink),
         parent: Arc::new(OutcomeChannel(tx)),
         session_id,
     };
@@ -332,7 +331,6 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(AskUserToolbox),
         }),
-        event_sink: Arc::new(NoopSink),
         parent: Arc::new(OutcomeChannel(tx)),
         session_id,
     };
@@ -433,7 +431,6 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         let (tx, _outcomes) = tokio::sync::mpsc::channel(8);
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(HangingContextProvider),
-            event_sink: Arc::new(NoopSink),
             parent: Arc::new(OutcomeChannel(tx)),
             session_id,
         };
@@ -507,7 +504,6 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(ReadFileToolbox),
         }),
-        event_sink: Arc::new(NoopSink),
         parent: Arc::new(OutcomeChannel(tx)),
         session_id,
     };
@@ -528,12 +524,9 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         loop {
             let (reply, rx) = tokio::sync::oneshot::channel();
             agent
-                .tell(AgentCommand::GetHistory {
-                    query: horsie_workflow::HistoryQuery {
-                        before: None,
-                        after: None,
-                        limit: 100,
-                    },
+                .tell(AgentCommand::PageLog {
+                    before: None,
+                    max: 100,
                     reply,
                 })
                 .await
@@ -566,7 +559,6 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(ReadFileToolbox),
         }),
-        event_sink: Arc::new(NoopSink),
         parent: Arc::new(OutcomeChannel(tx2)),
         session_id,
     };
@@ -584,12 +576,9 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (reply, rx) = tokio::sync::oneshot::channel();
     agent2
-        .tell(AgentCommand::GetHistory {
-            query: horsie_workflow::HistoryQuery {
-                before: None,
-                after: None,
-                limit: 100,
-            },
+        .tell(AgentCommand::PageLog {
+            before: None,
+            max: 100,
             reply,
         })
         .await

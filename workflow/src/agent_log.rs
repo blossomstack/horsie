@@ -72,6 +72,19 @@ pub struct LogPage {
     pub entries: Vec<AgentLogEntry>,
 }
 
+impl LogPage {
+    /// Just the LLM messages in this window, for callers reasoning about the
+    /// conversation rather than the log. Hook and lifecycle entries are
+    /// skipped, so a page of `n` entries may yield fewer than `n` messages.
+    pub fn messages(&self) -> impl Iterator<Item = &horsie_agentcore::Message> {
+        self.entries.iter().filter_map(|e| match &e.body {
+            horsie_agentcore::AgentLogBody::Llm(m) => Some(m),
+            horsie_agentcore::AgentLogBody::Hook(_)
+            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+        })
+    }
+}
+
 /// Index of the entry numbered `seq`, if the log holds it.
 fn index_of(log: &[AgentLogEntry], seq: u64) -> Option<usize> {
     log.binary_search_by_key(&seq, |e| e.seq).ok()

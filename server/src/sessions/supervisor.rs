@@ -1450,73 +1450,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_subscriber_survives_an_offload() {
-        // The frame channel is transport, not the actor's state. Killing it at
-        // offload ends every SSE stream on the session, the browser reconnects,
-        // the reconnect loads the session again — a ~3 minute churn loop for as
-        // long as a tab is open.
-        let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps.clone(),
-                gtx,
-                manual_config(&clock),
-            ),
-            journal,
-        );
-        let id = create(&sup).await;
-        let mut sub = sup
-            .ask(|reply| SessionSupervisorCommand::Subscribe {
-                id: id.clone(),
-                reply,
-            })
-            .await
-            .unwrap()
-            .expect("subscribed");
-        // Subscribing does not load a session, so ask for something that does.
-        let _ = sup
-            .ask(|reply| SessionSupervisorCommand::UsageStats {
-                id: id.clone(),
-                reply,
-            })
-            .await
-            .unwrap();
-
-        clock.advance(Duration::from_secs(181));
-        sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
-        assert!(
-            await_signal(&f.agent, &format!("hibernate:{id}")).await,
-            "the session must actually unload for this test to mean anything"
-        );
-
-        assert!(
-            !matches!(sub.try_recv(), Err(broadcast::error::TryRecvError::Closed)),
-            "an offload must not close a live subscriber's stream"
-        );
-
-        // And the same receiver still sees the session's next frame.
-        let _ = sup
-            .ask(|reply| SessionSupervisorCommand::UserMessage {
-                id: id.clone(),
-                text: "hello".into(),
-                reply,
-            })
-            .await
-            .unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), sub.recv())
-            .await
-            .expect("a frame must arrive within the timeout");
-        assert!(
-            frame.is_ok(),
-            "the reloaded session publishes to the same channel"
-        );
-    }
-
+    // `a_subscriber_survives_an_offload` lived here. It asserted that the
+    // supervisor-owned `SessionFrame` channel outlived an offload, so a client
+    // watching a session was not disconnected by one.
+    //
+    // Both the channel and the session-scoped stream are gone: everything a
+    // client reads now rides one agent log. The per-agent position watch is
+    // owned by the agent actor, so an offload does end the connection and the
+    // browser reconnects — which is exactly what the *agent* stream already did
+    // before this change, since its broadcast was owned by the session actor
+    // too. Parity, not a regression; but status and inbox updates, which used
+    // to ride the surviving session channel, now share the agent stream's
+    // behaviour. Restoring survive-across-offload would mean hoisting the watch
+    // to the supervisor the way `frames` was hoisted, and is worth doing if
+    // reconnect churn shows up.
     #[tokio::test]
     async fn an_idle_session_is_unloaded_and_hibernated() {
         let f = fixture().await;
@@ -1583,12 +1530,12 @@ mod tests {
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
 
         for _ in 0..3 {
-            sup.ask(|reply| SessionSupervisorCommand::Subscribe {
-                id: id.clone(),
-                reply,
-            })
-            .await
-            .unwrap();
+            // A cheap call that does not load the session, so the loop tests
+            // reload behaviour rather than its own side effects.
+            let _ = sup
+                .ask(|reply| SessionSupervisorCommand::List { reply })
+                .await
+                .unwrap();
             clock.advance(Duration::from_secs(181));
             sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
             let _ = sup
