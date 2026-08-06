@@ -9,9 +9,12 @@
 use crate::sessions::AgentFrame;
 use async_trait::async_trait;
 use horsie_agentcore::{AgentEvent, EventSink, EventSinkError, HistoryEntry, Message};
+// `TaskItem`/`TaskStatus` come from `agent`, not `session`: the task list is the
+// agent's own tool state, and the agent log carries it.
+use horsie_models::agent::{TaskItem, TaskStatus as WireTaskStatus};
 use horsie_models::session::{
-    AgentStreamEvent, AppendedEvent, DeltaEvent, ResyncEvent, TaskItem, TaskListEvent,
-    TaskStatus as WireTaskStatus, ToolStartEvent, TurnCompletedEvent,
+    AgentStreamEvent, AppendedEvent, DeltaEvent, ResyncEvent, TaskListEvent, ToolStartEvent,
+    TurnCompletedEvent,
 };
 use horsie_workflow::{AgentDomainEvent, AgentObserver, AgentState, TaskStatus as AgentTaskStatus};
 use tokio::sync::broadcast;

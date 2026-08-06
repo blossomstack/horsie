@@ -4,6 +4,12 @@ package session;
 use agent.Message;
 use agent.HistoryEntry;
 use agent.Usage;
+// `task_list` is the agent's own tool state, so `TaskItem` lives with the agent
+// and is imported back here rather than defined here. Also required by the
+// dependency direction: `agent.fl` carries the log entry that reports a task
+// list, and `agent` cannot import from `session` while `session` imports agent.
+use agent.TaskItem;
+use agent.TaskStatus;
 
 /// User-visible lifecycle state of a session. Failure reasons ride separately
 /// in `last_error` so the enum stays a plain discriminant.
@@ -196,20 +202,6 @@ struct ToolStartEvent { tool_call_id: String, name: String }
 /// `scanning_workspace`, `connecting_tools`, `ready`); `detail` is optional
 /// human text; `at_ms` is the unix-epoch millisecond it occurred.
 struct ProgressionEvent { stage: String, detail: Option<String>, at_ms: u64 }
-
-/// Status of one entry in the agent's `task_list` tool state.
-enum TaskStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-/// One entry in the agent's `task_list` tool state.
-struct TaskItem {
-    id: u32,
-    content: String,
-    status: TaskStatus,
-}
 
 /// The agent's `task_list` tool state, sent whole on every mutation
 /// (create/insert/update_status) — never a delta.

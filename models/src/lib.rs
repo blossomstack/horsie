@@ -647,6 +647,51 @@ mod tests {
     };
     use super::session;
 
+    /// Pins the three-level nesting the log depends on: the body union tags the
+    /// arm, the lifecycle union tags the kind, and the outcome union tags again
+    /// inside that. Nothing else asserts the wire shape, and a codegen change
+    /// that flattened any level would be silently accepted by every other test.
+    #[test]
+    fn a_lifecycle_entry_round_trips_with_its_tag() {
+        let entry = agent::AgentLogEntry {
+            seq: 7,
+            at_ms: 1_700_000_000_000,
+            body: agent::AgentLogBody::Lifecycle(agent::LifecycleEvent::TurnEnded(
+                agent::TurnEndedLifecycle {
+                    outcome: agent::TurnOutcome::Failed(agent::FailedOutcome {
+                        error: "boom".into(),
+                    }),
+                },
+            )),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["body"]["type"], "Lifecycle", "{json}");
+        assert_eq!(json["body"]["value"]["kind"], "TurnEnded", "{json}");
+        assert_eq!(json["body"]["value"]["value"]["outcome"]["kind"], "Failed");
+        assert_eq!(json["atMs"], 1_700_000_000_000u64, "camelCase on the wire");
+        let back: agent::AgentLogEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(back, entry);
+    }
+
+    /// A task list rides the log as a whole snapshot, so a client that folds it
+    /// needs no separate read to know the current plan.
+    #[test]
+    fn a_task_list_entry_carries_the_whole_list() {
+        let body = agent::AgentLogBody::Lifecycle(agent::LifecycleEvent::TaskList(
+            agent::TaskListLifecycle {
+                tasks: vec![agent::TaskItem {
+                    id: 1,
+                    content: "do the thing".into(),
+                    status: agent::TaskStatus::InProgress,
+                }],
+            },
+        ));
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["value"]["value"]["tasks"][0]["status"], "InProgress");
+        let back: agent::AgentLogBody = serde_json::from_value(json).unwrap();
+        assert_eq!(back, body);
+    }
+
     fn result_part(label: &str) -> agent::SubAgentResultPart {
         agent::SubAgentResultPart {
             subagent_id: "11111111-1111-1111-1111-111111111111".into(),

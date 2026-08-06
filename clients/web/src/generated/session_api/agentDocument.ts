@@ -1,6 +1,6 @@
 
+import { TaskItem } from '../agent';
 import { Usage } from '../agent';
-import { TaskItem } from '../session';
 import { UsageView } from '../session';
 /**
  * One agent&#39;s current values. The subagent-only fields (`parent`, `label`,

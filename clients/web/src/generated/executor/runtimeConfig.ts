@@ -8,10 +8,6 @@ import { WorkspaceConfig } from './workspaceConfig';
 export interface RuntimeConfig {
   workspaces: WorkspaceConfig[];
   /**
-   * Shared plugin library root, exposed to agents as the `horsie_shared`
-   */
-  pluginsDir?: string;
-  /**
    * Directories prepended to PATH when running plugin hooks (e.g. the node bin
    */
   hookPath: string[];
