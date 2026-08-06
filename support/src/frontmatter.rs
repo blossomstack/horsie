@@ -1,9 +1,8 @@
 //! The `---`-fenced key/value header Claude Code puts on skills, agents and
 //! commands.
 //!
-//! Only flat `key: value` scalars are read, which is all the format uses. It is
-//! not YAML and does not try to be: a parser that accepted nested structures
-//! would accept documents no consumer of this format can produce.
+//! Frontmatter is YAML, but consumers only need a small set of scalar fields;
+//! structured provider-specific fields are validated and ignored.
 
 /// Split `---\n<frontmatter>\n---\n<body>` into its two halves.
 ///
@@ -25,21 +24,19 @@ pub fn split(content: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Every `key: value` pair in a header, in declaration order.
-///
-/// A line with no colon ends the read: the header is flat by construction, so a
-/// line that is not a pair means the document is not what it claimed to be, and
-/// guessing past it would invent fields.
+/// Every scalar key/value pair in a YAML frontmatter mapping, in declaration
+/// order. Structured fields are valid YAML but are not exposed to consumers
+/// that only need scalar metadata.
 #[must_use]
-pub fn pairs(front: &str) -> Option<Vec<(&str, &str)>> {
+pub fn pairs(front: &str) -> Option<Vec<(String, String)>> {
+    let value: serde_yaml::Value = serde_yaml::from_str(front).ok()?;
+    let mapping = value.as_mapping()?;
     let mut out = Vec::new();
-    for line in front.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    for (key, value) in mapping {
+        let (Some(key), Some(value)) = (key.as_str(), value.as_str()) else {
             continue;
-        }
-        let (key, value) = line.split_once(':')?;
-        out.push((key.trim(), unquote(value.trim())));
+        };
+        out.push((key.to_string(), value.to_string()));
     }
     Some(out)
 }
@@ -88,7 +85,10 @@ mod tests {
     #[test]
     fn tolerates_crlf() {
         let (front, body) = split("---\r\nname: x\r\n---\r\nbody").unwrap();
-        assert_eq!(pairs(front).unwrap(), vec![("name", "x")]);
+        assert_eq!(
+            pairs(front).unwrap(),
+            vec![("name".to_string(), "x".to_string())]
+        );
         assert_eq!(body, "body");
     }
 
@@ -103,7 +103,10 @@ mod tests {
         let (front, _) = split("---\nname: x\ndescription: \"a, b\"\n---\n").unwrap();
         assert_eq!(
             pairs(front).unwrap(),
-            vec![("name", "x"), ("description", "a, b")]
+            vec![
+                ("name".to_string(), "x".to_string()),
+                ("description".to_string(), "a, b".to_string())
+            ]
         );
     }
 
@@ -113,6 +116,44 @@ mod tests {
     fn a_non_pair_line_rejects_the_whole_header() {
         let (front, _) = split("---\nname: x\njust prose\n---\n").unwrap();
         assert!(pairs(front).is_none());
+    }
+
+    #[test]
+    fn accepts_multiline_yaml_fields() {
+        let (front, _) = split(
+            "---\nname: impeccable\ndescription: Design fluency\nallowed-tools:\n  - Bash(npx impeccable *)\n  - Bash(node scripts/*)\n---\n",
+        )
+        .unwrap();
+        let pairs = pairs(front).unwrap();
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| *key == "name" && *value == "impeccable")
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| *key == "description" && *value == "Design fluency")
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_structured_fields() {
+        let (front, _) = split(
+            "---\nname: x\nmetadata:\n  nested: true\n  values:\n    - one\n    - two\ndescription: d\n---\n",
+        )
+        .unwrap();
+        let pairs = pairs(front).unwrap();
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| *key == "name" && *value == "x")
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| *key == "description" && *value == "d")
+        );
     }
 
     #[test]

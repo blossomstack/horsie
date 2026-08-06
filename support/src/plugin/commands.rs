@@ -85,7 +85,7 @@ pub fn parse(name: &str, content: &str) -> Option<PluginCommandDef> {
         template: body.trim().to_string(),
     };
     for (key, value) in crate::frontmatter::pairs(front)? {
-        match key {
+        match key.as_str() {
             "description" => def.description = value.to_string(),
             "argument-hint" => def.argument_hint = Some(value.to_string()),
             // `allowed-tools` has no consumer: horsie does not run a template's
