@@ -8,7 +8,6 @@
 //! substitution engine does no I/O and is testable without a sandbox.
 
 use super::PluginManifest;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Command roots for a plugin: the manifest override when declared, else
@@ -68,8 +67,6 @@ pub struct PluginCommandDef {
     pub description: String,
     /// `argument-hint`, shown beside the name in a picker.
     pub argument_hint: Option<String>,
-    /// `allowed-tools`, in Claude's vocabulary. Empty means "not declared".
-    pub allowed_tools: Vec<String>,
     /// The template below the header.
     pub template: String,
 }
@@ -85,32 +82,32 @@ pub fn parse(name: &str, content: &str) -> Option<PluginCommandDef> {
         name: name.to_string(),
         description: String::new(),
         argument_hint: None,
-        allowed_tools: Vec::new(),
         template: body.trim().to_string(),
     };
     for (key, value) in crate::frontmatter::pairs(front)? {
         match key {
             "description" => def.description = value.to_string(),
             "argument-hint" => def.argument_hint = Some(value.to_string()),
-            "allowed-tools" => def.allowed_tools = crate::frontmatter::comma_list(value),
-            // `disable-model-invocation` and `hide-from-slash-command-tool`
-            // both describe a slash-command tool offered to the *model*.
-            // horsie's commands are a user affordance and are never offered to
-            // one, so reading these would imply a capability that is absent.
+            // `allowed-tools` has no consumer: horsie does not run a template's
+            // `` !`cmd` `` snippets, and narrowing a turn's toolbox from a
+            // command is a separate decision. `disable-model-invocation` and
+            // `hide-from-slash-command-tool` both describe a slash-command tool
+            // offered to the *model*, which horsie does not have.
             _ => {}
         }
     }
     (!def.description.is_empty()).then_some(def)
 }
 
-/// A prompt that names a command: `/name` optionally followed by arguments.
+/// A prompt that names an entry: `<sigil>name` optionally followed by
+/// arguments. `/` names a command or a skill, `@` an agent.
 ///
-/// `None` for anything else, including a bare `/` and a message that merely
-/// contains a slash. Deliberately only the *first* line's leading token — a
-/// paragraph mentioning `/etc/hosts` is prose, not an invocation.
+/// `None` for anything else, including a bare sigil and a message that merely
+/// contains one. Deliberately only the leading token — a paragraph mentioning
+/// `/etc/hosts` is prose, not an invocation.
 #[must_use]
-pub fn parse_invocation(prompt: &str) -> Option<(&str, &str)> {
-    let rest = prompt.strip_prefix('/')?;
+pub fn parse_invocation(prompt: &str, sigil: char) -> Option<(&str, &str)> {
+    let rest = prompt.strip_prefix(sigil)?;
     let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     let name = &rest[..name_end];
     if name.is_empty()
@@ -158,37 +155,22 @@ pub fn split_args(args: &str) -> Vec<String> {
     out
 }
 
-/// Every `` !`cmd` `` in a template, in order and deduplicated.
-///
-/// Separate from [`expand`] so the caller can run them — which needs a sandbox —
-/// and hand the outputs back to a function that does no I/O.
-#[must_use]
-pub fn shell_snippets(template: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut rest = template;
-    while let Some(start) = rest.find("!`") {
-        let after = &rest[start + 2..];
-        let Some(end) = after.find('`') else { break };
-        let snippet = after[..end].to_string();
-        if !snippet.is_empty() && !out.contains(&snippet) {
-            out.push(snippet);
-        }
-        rest = &after[end + 1..];
-    }
-    out
-}
-
 /// Substitute a command's template.
 ///
-/// `shell` maps each `` !`cmd` `` to what it produced; a snippet with no entry
-/// is replaced by nothing, which is what a refused or unrun snippet should
-/// leave behind.
+/// `$ARGUMENTS` is everything the user typed after the name; `$1`..`$9` are
+/// positional. An unset position substitutes nothing, which is what a template
+/// with an optional tail expects — not a literal `$3`.
+///
+/// `` !`cmd` `` is *not* run. Two of the 29 published commands interpolate a
+/// shell, both gathering `git status`-shaped context; a template can simply ask
+/// the agent to run those, and it has bash. The snippet is left as written so a
+/// reader can see what the author meant.
 #[must_use]
-pub fn expand(template: &str, args: &str, shell: &BTreeMap<String, String>) -> String {
+pub fn expand(template: &str, args: &str) -> String {
     let positional = split_args(args);
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
-    while let Some(i) = rest.find(['$', '!']) {
+    while let Some(i) = rest.find('$') {
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
         if let Some(after) = tail.strip_prefix("$ARGUMENTS") {
@@ -200,43 +182,18 @@ pub fn expand(template: &str, args: &str, shell: &BTreeMap<String, String>) -> S
             && let Some(digit) = after.chars().next().and_then(|c| c.to_digit(10))
             && digit > 0
         {
-            // An unset position substitutes nothing: a template with an
-            // optional tail expects exactly that, not a literal `$3`.
             if let Some(value) = positional.get(digit as usize - 1) {
                 out.push_str(value);
             }
             rest = &after[1..];
             continue;
         }
-        if let Some(after) = tail.strip_prefix("!`")
-            && let Some(end) = after.find('`')
-        {
-            if let Some(output) = shell.get(&after[..end]) {
-                out.push_str(output);
-            }
-            rest = &after[end + 1..];
-            continue;
-        }
-        // A `$` or `!` that starts nothing is literal text.
+        // A `$` that starts nothing is literal text.
         out.push_str(&tail[..1]);
         rest = &tail[1..];
     }
     out.push_str(rest);
     out
-}
-
-/// Frame an expanded command as the message the model reads.
-///
-/// The same shape hook-injected context uses, and for the same reason: a client
-/// must be able to tell an invocation from something the person typed by hand,
-/// and the model must read the body rather than the frame.
-#[must_use]
-pub fn frame(name: &str, args: &str, body: &str) -> String {
-    if args.is_empty() {
-        format!("<command name=\"{name}\">\n{body}\n</command>")
-    } else {
-        format!("<command name=\"{name}\" args=\"{args}\">\n{body}\n</command>")
-    }
 }
 
 #[cfg(test)]
@@ -268,36 +225,48 @@ mod tests {
     fn a_command_without_a_description_is_not_one() {
         assert!(parse("x", "---\nargument-hint: <file>\n---\nbody").is_none());
         assert!(parse("x", "no frontmatter").is_none());
-        let def = parse("review", "---\ndescription: reviews\nargument-hint: <path>\nallowed-tools: Bash, Read\n---\ncheck $1").unwrap();
+        let def = parse(
+            "review",
+            "---\ndescription: reviews\nargument-hint: <path>\nallowed-tools: Bash, Read\n---\ncheck $1",
+        )
+        .unwrap();
         assert_eq!(def.name, "review");
         assert_eq!(def.argument_hint.as_deref(), Some("<path>"));
-        assert_eq!(def.allowed_tools, ["Bash", "Read"]);
         assert_eq!(def.template, "check $1");
     }
 
     #[test]
-    fn an_invocation_is_a_leading_slash_name() {
+    fn an_invocation_is_a_leading_sigil_name() {
         assert_eq!(
-            parse_invocation("/review src/a.rs"),
+            parse_invocation("/review src/a.rs", '/'),
             Some(("review", "src/a.rs"))
         );
-        assert_eq!(parse_invocation("/review"), Some(("review", "")));
-        assert_eq!(parse_invocation("/re-view_2"), Some(("re-view_2", "")));
-        // Not invocations: a bare slash, a path, prose containing one.
-        assert!(parse_invocation("/").is_none());
-        assert!(parse_invocation("/etc/hosts").is_none());
-        assert!(parse_invocation("see /review for details").is_none());
-        assert!(parse_invocation("hello").is_none());
+        assert_eq!(parse_invocation("/review", '/'), Some(("review", "")));
+        assert_eq!(parse_invocation("/re-view_2", '/'), Some(("re-view_2", "")));
+        // `@` names an agent, and the two sigils never answer for each other.
+        assert_eq!(
+            parse_invocation("@reviewer this", '@'),
+            Some(("reviewer", "this"))
+        );
+        assert!(parse_invocation("@reviewer", '/').is_none());
+        assert!(parse_invocation("/review", '@').is_none());
+        // Not invocations: a bare sigil, a path, prose containing one.
+        assert!(parse_invocation("/", '/').is_none());
+        assert!(parse_invocation("/etc/hosts", '/').is_none());
+        assert!(parse_invocation("see /review for details", '/').is_none());
+        assert!(parse_invocation("hello", '/').is_none());
+        // An email is not an agent, which is why `@` is leading-token only.
+        assert!(parse_invocation("mail me at a@b.com", '@').is_none());
     }
 
     /// A command taking a paragraph is ordinary, so arguments run past the
     /// first line.
     #[test]
     fn arguments_span_the_whole_remainder() {
-        let (name, args) = parse_invocation("/summarize the first\nand the second").unwrap();
+        let (name, args) = parse_invocation("/summarize the first\nand the second", '/').unwrap();
         assert_eq!(name, "summarize");
         assert_eq!(args, "the first\nand the second");
-        let (_, only_tail) = parse_invocation("/summarize\nbody only").unwrap();
+        let (_, only_tail) = parse_invocation("/summarize\nbody only", '/').unwrap();
         assert_eq!(only_tail, "body only");
     }
 
@@ -315,36 +284,19 @@ mod tests {
 
     #[test]
     fn substitutes_arguments_positionally_and_wholesale() {
-        let none = BTreeMap::new();
-        assert_eq!(expand("run $ARGUMENTS now", "a b", &none), "run a b now");
-        assert_eq!(expand("$1 then $2", "a b", &none), "a then b");
+        assert_eq!(expand("run $ARGUMENTS now", "a b"), "run a b now");
+        assert_eq!(expand("$1 then $2", "a b"), "a then b");
         // An unset position leaves nothing, not a literal `$3`.
-        assert_eq!(expand("[$1][$3]", "only", &none), "[only][]");
+        assert_eq!(expand("[$1][$3]", "only"), "[only][]");
         // A `$` that starts nothing is text.
-        assert_eq!(expand("costs $5.00 and $x", "", &none), "costs .00 and $x");
+        assert_eq!(expand("costs $5.00 and $x", ""), "costs .00 and $x");
     }
 
+    /// horsie does not run a template's shell snippets, so one survives
+    /// substitution verbatim rather than vanishing.
     #[test]
-    fn substitutes_shell_snippets_that_were_run() {
-        let mut shell = BTreeMap::new();
-        shell.insert("git status".to_string(), "clean".to_string());
-        assert_eq!(
-            shell_snippets("a !`git status` b !`git status`"),
-            ["git status"]
-        );
-        assert_eq!(expand("on !`git status` now", "", &shell), "on clean now");
-        // Not run (refused, or no Bash declared): the snippet leaves nothing.
-        assert_eq!(expand("on !`rm -rf /` now", "", &shell), "on  now");
-        // A lone `!` is text.
-        assert_eq!(expand("hi! there", "", &shell), "hi! there");
-    }
-
-    #[test]
-    fn frames_the_invocation_around_the_body() {
-        assert_eq!(
-            frame("review", "a.rs", "check a.rs"),
-            "<command name=\"review\" args=\"a.rs\">\ncheck a.rs\n</command>"
-        );
-        assert!(!frame("review", "", "b").contains("args="));
+    fn a_shell_snippet_is_left_as_written() {
+        assert_eq!(expand("on !`git status` now", ""), "on !`git status` now");
+        assert_eq!(expand("hi! there", ""), "hi! there");
     }
 }

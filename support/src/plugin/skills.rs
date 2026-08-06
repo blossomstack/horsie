@@ -40,6 +40,27 @@ pub fn skill_dirs(plugin_root: &Path, manifest: Option<&PluginManifest>) -> Vec<
     out
 }
 
+/// A skill's `name` and `description`, read from its `SKILL.md` frontmatter.
+///
+/// `None` when either is missing: a skill a picker cannot label and a model
+/// cannot choose between is not one. Deliberately the same two fields, read the
+/// same way, as the runtime-side reader in `horsie_workflow` — the server and
+/// the runtime must agree about what a skill is.
+#[must_use]
+pub fn parse(content: &str) -> Option<(String, String)> {
+    let (front, _) = crate::frontmatter::split(content)?;
+    let mut name = None;
+    let mut description = None;
+    for (key, value) in crate::frontmatter::pairs(front)? {
+        match key {
+            "name" => name = Some(value.to_string()),
+            "description" => description = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Some((name?, description?))
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
