@@ -9,7 +9,6 @@ pub mod catalog;
 #[cfg(feature = "git")]
 pub mod checkout;
 pub mod commands;
-pub mod grants;
 pub mod hooks;
 pub mod layout;
 pub mod manifest;

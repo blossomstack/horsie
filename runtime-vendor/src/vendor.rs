@@ -208,13 +208,9 @@ pub struct RuntimeVendor {
     /// capability spec. The library default is off; `horsie connect` turns it
     /// on unless started with `--no-sandbox`.
     sandbox: bool,
-    /// The host plugin library this agent serves, resolved agent-side by the
-    /// CLI. Never sent by the server — it is a property of this machine.
-    host_library: Option<PathBuf>,
-    /// Root of the shared clones the host library's symlinks point into. The
-    /// sandbox resolves through symlinks, so this must be granted alongside the
-    /// library itself or the runtime cannot read any installed plugin.
-    host_sources: Option<PathBuf>,
+    /// Directories prepended to PATH when a runtime runs a plugin hook (the
+    /// node bin dir, typically). A property of this machine, resolved
+    /// agent-side; never sent by the server.
     hook_path: Vec<PathBuf>,
     /// How this agent's runtimes fetch server-managed bundles: the base URL
     /// that reaches the server from where they run, and the root they unpack
@@ -278,8 +274,6 @@ impl RuntimeVendor {
             workspaces,
             state_dir,
             sandbox: false,
-            host_library: None,
-            host_sources: None,
             hook_path: Vec::new(),
             bundles: None,
             backoff: Backoff::default(),
@@ -335,19 +329,10 @@ impl RuntimeVendor {
         self
     }
 
-    /// Serve a host plugin library to every runtime this agent spawns.
-    ///
-    /// `sources` is the root the library's symlinks point into; both it and the
-    /// library are added to the sandbox capability spec this agent writes.
+    /// Directories prepended to PATH when a runtime runs plugin hooks, and
+    /// granted read access in the sandbox.
     #[must_use]
-    pub fn with_host_library(
-        mut self,
-        dir: PathBuf,
-        sources: Option<PathBuf>,
-        hook_path: Vec<PathBuf>,
-    ) -> Self {
-        self.host_library = Some(dir);
-        self.host_sources = sources;
+    pub fn with_hook_path(mut self, hook_path: Vec<PathBuf>) -> Self {
         self.hook_path = hook_path;
         self
     }
@@ -810,10 +795,6 @@ impl RuntimeVendor {
 
         let config = RuntimeConfig {
             workspaces,
-            plugins_dir: self
-                .host_library
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
             hook_path: self
                 .hook_path
                 .iter()
@@ -872,18 +853,10 @@ impl RuntimeVendor {
 
     /// Persist the effective capability spec for a runtime and return its path.
     ///
-    /// The spec is this vendor's [`baseline`](crate::baseline) plus read
-    /// grants for the host plugin library — without them a sandboxed runtime
-    /// is handed a `--plugins-dir` it has no capability to read.
+    /// The spec is this vendor's [`baseline`](crate::baseline) plus the
+    /// per-runtime grants below.
     fn write_caps_file(&self, runtime_id: &str) -> Result<PathBuf, String> {
         let mut spec = crate::baseline::baseline_capabilities()?;
-        let sources: Vec<PathBuf> = self.host_sources.iter().cloned().collect();
-        spec.grants
-            .extend(horsie_support::plugin::grants::plugin_library_grants(
-                self.host_library.as_deref(),
-                &sources,
-                &self.hook_path,
-            ));
         // The runtime mirrors its per-agent cwd and env into this directory. The
         // baseline grants the working dir and a few system reads and nothing
         // else, so without this the first `set_env` inside a sandboxed runtime
@@ -1236,50 +1209,6 @@ mod tests {
         );
         agent.sweep_plugin_dirs();
         assert!(state.path().join("keep-me").is_file());
-    }
-
-    /// The baseline cannot know this machine's plugin library, so the agent
-    /// must inject the grants for it. Without this a sandboxed runtime is
-    /// handed a `--plugins-dir` it has no capability to read — and since
-    /// installed plugins are symlinks into `sources/`, the target root has to
-    /// be granted too or every read still fails.
-    #[test]
-    fn the_written_caps_file_grants_the_host_plugin_library_and_its_sources() {
-        let state = tempfile::tempdir().expect("tempdir");
-        let agent = RuntimeVendor::new(
-            "test-vendor".to_string(),
-            false,
-            Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
-            Arc::new(ConnectedRuntimeRegistry::new()),
-            Arc::new(FixedWorkspaces::new(HashMap::new())),
-            state.path().to_path_buf(),
-        )
-        .with_host_library(
-            PathBuf::from("/data/plugins"),
-            Some(PathBuf::from("/data/sources")),
-            vec![PathBuf::from("/opt/node/bin")],
-        );
-
-        let path = agent.write_caps_file("rt-1").expect("write caps");
-        let written: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).expect("read caps")).expect("parse caps");
-        // The grant union is fluorite-tagged: `{"type":"Dir","value":{"path":…}}`.
-        let granted: Vec<&str> = written["grants"]
-            .as_array()
-            .expect("grants array")
-            .iter()
-            .filter_map(|g| {
-                g.get("value")
-                    .and_then(|v| v.get("path"))
-                    .and_then(serde_json::Value::as_str)
-            })
-            .collect();
-
-        assert!(granted.contains(&"/data/plugins"), "granted: {granted:?}");
-        assert!(granted.contains(&"/data/sources"), "granted: {granted:?}");
-        assert!(granted.contains(&"/opt/node/bin"), "granted: {granted:?}");
-        // The baseline's own grants survive alongside them.
-        assert!(granted.contains(&"/usr"), "granted: {granted:?}");
     }
 
     /// With no host library there is nothing to merge, and the written file is

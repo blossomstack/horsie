@@ -169,11 +169,10 @@ async fn run(cli: Cli) -> Result<(), String> {
         // Containers reach the server the same way they reach us: over the
         // advertise address, which is routable from velos's container network.
         base_url: format!("http://{}", cli.advertise.trim_end_matches('/')),
-        // A fixed in-container path: the container is ephemeral and isolated,
-        // so one dir per runtime buys nothing, and there is nothing to cache
-        // across containers.
+        // A fixed in-container root; the agent appends the runtime id under it.
+        // One container holds one runtime, so the extra level buys nothing
+        // here — it costs nothing either, and keeps one shape for every vendor.
         dir: "/horsie/plugins".to_string(),
-        cache_dir: None,
     });
 
     println!(

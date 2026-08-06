@@ -99,7 +99,6 @@ fn config(ws: &Path, provision: Vec<ProvisionStep>) -> RuntimeConfig {
             name: "main".into(),
             path: ws.to_string_lossy().into_owned(),
         }],
-        plugins_dir: None,
         hook_path: vec![],
         env: vec![],
         provision,

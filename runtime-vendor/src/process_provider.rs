@@ -66,10 +66,6 @@ fn child_args(
         args.push("--workspace".to_string());
         args.push(format!("{}={}", ws.name, ws.path));
     }
-    if let Some(dir) = &config.plugins_dir {
-        args.push("--plugins-dir".to_string());
-        args.push(dir.clone());
-    }
     for hp in &config.hook_path {
         args.push("--hook-path".to_string());
         args.push(hp.clone());
@@ -231,7 +227,6 @@ mod tests {
     fn config() -> RuntimeConfig {
         RuntimeConfig {
             workspaces: vec![],
-            plugins_dir: None,
             hook_path: vec![],
             env: vec![],
             provision: vec![],
@@ -266,13 +261,12 @@ mod tests {
     }
 
     #[test]
-    fn workspaces_plugins_and_caps_still_map_as_before() {
+    fn workspaces_hooks_and_caps_still_map_as_before() {
         let mut cfg = config();
         cfg.workspaces = vec![horsie_models::executor::WorkspaceConfig {
             name: "main".to_string(),
             path: "/work".to_string(),
         }];
-        cfg.plugins_dir = Some("/lib".to_string());
         cfg.hook_path = vec!["/node/bin".to_string()];
         let args = child_args(
             "r1",
@@ -289,7 +283,10 @@ mod tests {
             arg_after(&args, "--workspace").as_deref(),
             Some("main=/work")
         );
-        assert_eq!(arg_after(&args, "--plugins-dir").as_deref(), Some("/lib"));
+        assert!(
+            !args.iter().any(|a| a == "--plugins-dir"),
+            "the host plugin library is gone; a runtime's skills are the bundles it fetches"
+        );
         assert_eq!(
             arg_after(&args, "--hook-path").as_deref(),
             Some("/node/bin")
