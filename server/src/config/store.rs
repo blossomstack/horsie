@@ -183,7 +183,13 @@ impl ConfigStore for DbConfigStore {
     }
 
     async fn update(&self, update: SettingsUpdate) -> Result<SettingsView, String> {
-        let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
+        // `begin_write`, not `begin`: this transaction reads the existing
+        // providers before rewriting them, and a deferred transaction that
+        // upgrades to a write that late loses to any writer that committed in
+        // between — SQLite answers `database is locked` and no busy timeout
+        // retries it. Sessions journal constantly, so saving settings while one
+        // is working is exactly that race.
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
 
         if let Some(providers) = &update.providers {
             let existing = read_providers(&self.db, &mut *tx, &self.user)

@@ -144,9 +144,9 @@ pub async fn create_session(
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
-            // A freshly created session is loaded and idle; its runtime is
-            // being provisioned in the background.
-            session: summary(&id, &rec, Some(&SessionStatus::Idle)),
+            // A freshly created session is loaded and building its runtime,
+            // with the message above already queued behind it.
+            session: summary(&id, &rec, Some(&SessionStatus::Provisioning)),
         }),
     ))
 }
@@ -486,7 +486,8 @@ pub(crate) fn wire_pending_ask(ask: &PendingAsk) -> PendingAskView {
 pub(crate) fn wire_pending_asks(status: &SessionStatus) -> Vec<PendingAskView> {
     match status {
         SessionStatus::AwaitingInput { asks } => asks.iter().map(wire_pending_ask).collect(),
-        SessionStatus::Idle
+        SessionStatus::Provisioning
+        | SessionStatus::Idle
         | SessionStatus::Running
         | SessionStatus::Failed { .. }
         | SessionStatus::Unrecoverable { .. } => Vec::new(),

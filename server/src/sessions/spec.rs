@@ -162,6 +162,14 @@ pub struct PendingAsk {
 /// wire shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum SessionStatus {
+    /// The runtime is being built and nothing may run yet. Where a session
+    /// starts its life, and the one status that is *not* reached by a turn: it
+    /// is journaled by the session's own `ProvisioningStarted` and left by the
+    /// event that records how the create ended.
+    ///
+    /// A session found in this state at load was interrupted mid-provision, so
+    /// it is safe to re-attempt — no turn can have run under it.
+    Provisioning,
     /// Loaded and not working. The resting state, and where a session lands
     /// after a turn ends, is stopped, or is found interrupted at load.
     #[default]
@@ -188,6 +196,7 @@ pub enum SessionStatus {
 /// Project a storage status onto its wire discriminant.
 pub fn status_kind(s: &SessionStatus) -> SessionStatusKind {
     match s {
+        SessionStatus::Provisioning => SessionStatusKind::Provisioning,
         SessionStatus::Idle => SessionStatusKind::Idle,
         SessionStatus::Running => SessionStatusKind::Running,
         SessionStatus::AwaitingInput { .. } => SessionStatusKind::AwaitingInput,
@@ -202,7 +211,10 @@ pub fn status_reason(s: &SessionStatus) -> Option<String> {
         SessionStatus::Unrecoverable { reason } | SessionStatus::Failed { reason } => {
             Some(reason.clone())
         }
-        SessionStatus::Idle | SessionStatus::Running | SessionStatus::AwaitingInput { .. } => None,
+        SessionStatus::Provisioning
+        | SessionStatus::Idle
+        | SessionStatus::Running
+        | SessionStatus::AwaitingInput { .. } => None,
     }
 }
 

@@ -380,6 +380,24 @@ impl SessionSupervisor {
             return Some(child.clone());
         }
         let record = state.sessions.get(id)?;
+        let spec = record.spec.clone();
+        self.spawn_session(ctx, id, &spec)
+    }
+
+    /// Spawn the actor for `id` and remember it.
+    ///
+    /// Separate from [`Self::ensure_loaded`] because creating a session has to
+    /// spawn one that is not in `state` yet: the `SessionCreated` event is still
+    /// being persisted when the session is first told to provision.
+    fn spawn_session(
+        &mut self,
+        ctx: &ActorContext<Self>,
+        id: &SessionId,
+        spec: &SessionSpec,
+    ) -> Option<ActorRef<SessionCommand>> {
+        if let Some(child) = self.children.get(id) {
+            return Some(child.clone());
+        }
         let uuid = match Uuid::parse_str(id) {
             Ok(uuid) => uuid,
             Err(e) => {
@@ -390,7 +408,7 @@ impl SessionSupervisor {
         let frames = self.frames_for(id);
         let child = ctx.spawn(SessionActor::new(
             uuid,
-            record.spec.clone(),
+            spec.clone(),
             self.deps.clone(),
             ctx.self_ref(),
             frames,
@@ -455,8 +473,13 @@ impl SessionSupervisor {
             .keys()
             .filter(|id| {
                 // A running session is never a candidate: a long tool call must
-                // not be unloaded out from under itself.
-                if self.status.get(*id) == Some(&SessionStatus::Running) {
+                // not be unloaded out from under itself. Nor is one still
+                // provisioning — unloading would strand the create's reply and
+                // cost the next load a whole second attempt.
+                if matches!(
+                    self.status.get(*id),
+                    Some(&SessionStatus::Running | &SessionStatus::Provisioning)
+                ) {
                     return false;
                 }
                 self.last_activity
@@ -581,34 +604,25 @@ impl EventSourcedActor for SessionSupervisor {
                 reply,
             } => {
                 let id = Uuid::new_v4().to_string();
-                // The runtime is provisioned exactly here, exactly once in a
-                // session's life — that single call site *is* the guarantee.
-                // Detached, because a create legitimately runs for minutes and
-                // the first turn's `get` is what waits for it.
+                // The session owns its runtime's whole life, so creating one is
+                // the first thing it is asked to do rather than something done
+                // to it. Two things follow, and both are the point.
                 //
-                // The gate is taken *before* the spawn and before the reply, so
-                // it is already in place when the caller returns. A session is
-                // created with its first message now, so the first turn starts
-                // the moment this reply lands; without the gate it could ask
-                // the vendor for a runtime nobody had asked it to make, and be
-                // told — truthfully, and terminally — that no such runtime
-                // exists.
-                let runtimes = self.deps.runtimes.clone();
-                let gate = runtimes.begin_provisioning(&id);
-                let vendor = spec.vendor.clone();
-                let spec_for_create = spec.clone();
-                let create_id = id.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = runtimes.create(&create_id, &vendor, &spec_for_create).await {
-                        tracing::error!(session = %create_id, error = %e, "runtime create failed");
-                    }
-                    gate.done();
-                });
+                // `Provision` is enqueued here, before the reply — so it is
+                // ahead of the first message in the same mailbox, and the wait
+                // is ordinary actor sequencing rather than a gate beside the
+                // runtime manager. And the attempt is journaled by the session,
+                // so a process that dies mid-create leaves a session that knows
+                // to finish it, which no in-memory gate could.
+                let child = self.spawn_session(ctx, &id, &spec);
+                if let Some(child) = &child {
+                    let _ = child.tell(SessionCommand::Provision).await;
+                }
                 let _ = reply.send(id.clone());
-                // A fresh session's status is not a guess, so seed the cache:
-                // it is idle, with a runtime being provisioned behind it.
-                self.status.insert(id.clone(), SessionStatus::Idle);
-                self.publish(&id, &SessionStatus::Idle);
+                // Not a guess: a fresh session is provisioning, and says so
+                // until its vendor confirms the runtime.
+                self.status.insert(id.clone(), SessionStatus::Provisioning);
+                self.publish(&id, &SessionStatus::Provisioning);
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionCreated {
                     id,
                     spec,
@@ -1362,9 +1376,23 @@ mod tests {
             journal.clone(),
         );
         let id = create(&sup).await;
+        // Creating a session loads it — it has a runtime to build — so unload it
+        // first. Seeding the journal behind a live actor would prove nothing
+        // about where a *reload* reads its status from.
+        assert!(
+            await_signal(&f.agent, &format!("create:{id}")).await,
+            "the create has to finish before the session can go idle"
+        );
+        clock.advance(Duration::from_secs(181));
+        sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+        assert!(
+            await_signal(&f.agent, &format!("hibernate:{id}")).await,
+            "the session must actually unload for this test to mean anything"
+        );
 
         // The session asked a question in an earlier incarnation. `Create` left
-        // `Idle` in the cache, so a cache read would answer with the wrong thing.
+        // a status in the cache, so a cache read would answer with the wrong
+        // thing.
         let pid = SessionActor::persistence_id_for(Uuid::parse_str(&id).unwrap());
         journal
             .persist(

@@ -187,11 +187,11 @@ async fn start_server_on(
 
 /// Create a session and wait until its runtime actually exists.
 ///
-/// The wait is not politeness. Provisioning is detached — `Create` answers
-/// before the runtime is asked for — so a session reporting `Idle` says nothing
-/// about whether its runtime exists, and a turn that beats the create to the
-/// vendor gets a terminal `Gone` (horsie#232). Every test here means "a session
-/// that is up", so this is where that is established, once.
+/// A session now says `Provisioning` until its vendor confirms the runtime, so
+/// leaving that status is itself the answer — but these tests take vendors away
+/// and restart servers, and the vendor's own signal is the shortest statement of
+/// "the create happened". Every test here means "a session that is up", so this
+/// is where that is established, once.
 async fn create_session(
     client: &reqwest::Client,
     addr: &SocketAddr,
@@ -350,19 +350,10 @@ async fn wait_status(client: &reqwest::Client, addr: &SocketAddr, id: &str, want
 
 /// Poll a fake agent's signals until `signal` appears, or the deadline passes.
 ///
-/// Provisioning is detached — `SessionSupervisorCommand::Create` spawns it and
-/// answers immediately, because a real create legitimately runs for minutes.
-/// So a session reporting `Idle` says nothing about whether its runtime exists
-/// yet, and a test that takes the vendor away, or restarts the server, has to
-/// wait for `create:<id>` first or it is racing the create it meant to happen
-/// before.
-///
-/// A `get` issued while a create is in flight *at the agent* waits for it. One
-/// issued before the server has finished assembling the spec — which does real
-/// I/O for plugin refs and GitHub tokens — does not: the agent has never heard
-/// of the runtime, so it answers `Gone`, which is terminal. That window is
-/// horsie#232, and it is why waiting on the signal rather than on `Idle` is the
-/// honest thing for a test to do.
+/// A create legitimately runs for minutes, so the session runs it off its own
+/// mailbox and stays `Provisioning` until it has an answer. A test that takes
+/// the vendor away, or restarts the server, has to wait for `create:<id>` first
+/// or it is racing the create it meant to happen before.
 async fn wait_for_signal(agent: &FakeRuntimeVendor, signal: &str) {
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
@@ -455,6 +446,74 @@ fn kinds(events: &[Ev]) -> Vec<String> {
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
+
+/// horsie#232, end to end: the message a session is created with must not
+/// outrun the create it rides on.
+///
+/// The vendor holds every create open, so the whole window is under the test's
+/// control rather than a scheduling accident. Inside it the session has to
+/// report `Provisioning` and ask the vendor for nothing; released, it has to
+/// run the message it was carrying all along.
+#[tokio::test]
+async fn a_first_turn_waits_for_the_create_it_rides_on() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("answered once the runtime was up");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .block_creates()
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "agent": { "model": "mock", "use_plugins": false },
+        "vendor": "mock",
+        "message": "hello"
+    });
+    let res = client
+        .post(format!("http://{}/api/sessions", server.addr))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201);
+    let v: serde_json::Value = res.json().await.unwrap();
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        v["session"]["status"], "Provisioning",
+        "a session is not idle before it has a runtime"
+    );
+
+    wait_status(&client, &server.addr, &id, "Provisioning").await;
+    assert!(
+        !agent.signals().iter().any(|s| s.starts_with("get:")),
+        "nothing may ask the vendor for a runtime it has not been told to build; saw {:?}",
+        agent.signals()
+    );
+
+    agent.release_creates();
+    wait_status(&client, &server.addr, &id, "Idle").await;
+    let page: serde_json::Value = client
+        .get(format!(
+            "http://{}/api/sessions/{id}/agents/main/history?limit=50",
+            server.addr
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&page_messages(&page)).unwrap();
+    assert!(
+        text.contains("answered once the runtime was up"),
+        "the message the session was created with is still owed an answer: {text}"
+    );
+
+    server.shutdown().await;
+}
 
 #[tokio::test]
 async fn create_message_sse_roundtrip() {

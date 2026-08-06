@@ -118,7 +118,7 @@ impl MemoryStore {
     /// key, so a bare `UPDATE memory_spaces SET name = ?` would orphan every
     /// memory in it -- all three statements run in one transaction.
     pub async fn rename_space(&self, old: &str, new: &str, updated_at: &str) -> Result<(), String> {
-        let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
         let existing = sqlx::query(&self.db.q(&format!(
             "SELECT {SPACE_COLS} FROM memory_spaces WHERE user_id = ? AND name = ?"
         )))
@@ -175,7 +175,7 @@ impl MemoryStore {
     /// Delete a space and every memory in it. Returns false when the space did
     /// not exist.
     pub async fn delete_space(&self, name: &str) -> Result<bool, String> {
-        let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
         sqlx::query(
             &self
                 .db
@@ -282,7 +282,7 @@ impl MemoryStore {
     /// Insert a memory, returning its assigned id. Verifies the space exists in
     /// the same transaction as the insert, since there is no FK to do it.
     pub async fn create_memory(&self, row: &MemoryRow) -> Result<i64, String> {
-        let mut tx = self.db.pool().begin().await.map_err(|e| e.to_string())?;
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
         let space = sqlx::query(
             &self
                 .db

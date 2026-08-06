@@ -87,6 +87,12 @@ pub struct InteractiveOrchestrator;
 
 impl Orchestrator for InteractiveOrchestrator {
     fn next_actions(&self, state: &SessionState) -> Vec<AgentAction> {
+        // Nothing runs before the runtime it would run on exists. This is the
+        // whole of that wait: the status is journaled, so it survives the
+        // process dying mid-create, which no in-memory gate could.
+        if state.status == SessionStatus::Provisioning {
+            return Vec::new();
+        }
         let mut actions = wake_owed_parents(state);
         if let Some(turn) = main_turn(state) {
             actions.push(turn);
@@ -246,6 +252,17 @@ mod tests {
         };
         assert_eq!(input.message.as_deref(), Some("a\n\nb"));
         assert_eq!(consumed.len(), 2);
+    }
+
+    /// The message that created the session waits for the runtime it will run
+    /// on. This is the whole of the wait — there is no gate anywhere else,
+    /// because a status the journal already carries is the only thing that
+    /// could survive the create being interrupted.
+    #[test]
+    fn a_provisioning_session_starts_nothing() {
+        let mut s = with_inbox(&["hello"]);
+        s.status = SessionStatus::Provisioning;
+        assert!(InteractiveOrchestrator.next_actions(&s).is_empty());
     }
 
     #[test]

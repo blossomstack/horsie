@@ -117,6 +117,21 @@ pub enum SessionCommand {
         agent_id: Option<String>,
         reply: oneshot::Sender<Option<horsie_workflow::AgentStateView>>,
     },
+    /// Build this session's runtime.
+    ///
+    /// Sent once, by the supervisor, as part of creating the session — and
+    /// again by the session itself when it loads to find a create that the
+    /// process died inside. It is idempotent against a runtime that already
+    /// exists: a session that is past provisioning ignores it, which is what
+    /// keeps "provisioned exactly once" true without any bookkeeping beyond the
+    /// status the journal already carries.
+    Provision,
+    /// Internal: the detached create finished. Carries the vendor's own error
+    /// rather than a summary, because that string is what the user is shown.
+    FinishProvisioning {
+        error: Option<String>,
+        terminal: bool,
+    },
     /// The supervisor wants to unload this session. Answers `false` if a run
     /// started in the meantime, in which case nothing has changed and the idle
     /// clock simply restarts.
@@ -209,6 +224,30 @@ pub enum SessionCommand {
 /// order. Stamped where the event is built, immediately before it is persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionDomainEvent {
+    /// This session's runtime is being built. Journaled *before* the vendor is
+    /// called, which is the whole of the fix for a first turn outrunning its
+    /// own create: the status it produces starts nothing, so a message that
+    /// arrives meanwhile queues instead of asking a vendor that has never
+    /// heard of the runtime.
+    ///
+    /// Finding this unfinished at load means the process died mid-create. That
+    /// is safe to re-attempt precisely because no turn can have run under it.
+    ProvisioningStarted {
+        at_ms: u64,
+    },
+    /// The vendor confirmed the runtime. The session becomes ordinary here,
+    /// and whatever queued behind the create starts.
+    ProvisioningSucceeded {
+        at_ms: u64,
+    },
+    /// The create failed. `terminal` carries the one distinction that matters:
+    /// a live vendor refusing to produce the runtime ends the session, while an
+    /// offline vendor or a failed token mint leaves it retryable.
+    ProvisioningFailed {
+        at_ms: u64,
+        error: String,
+        terminal: bool,
+    },
     /// A user message was accepted. Durable *before* anything is done with it,
     /// so an accepted message survives a crash and is still owed an answer.
     MessageQueued {
@@ -2542,6 +2581,27 @@ impl EventSourcedActor for SessionActor {
 
     fn apply_event(mut state: SessionState, event: SessionDomainEvent) -> SessionState {
         match event {
+            SessionDomainEvent::ProvisioningStarted { .. } => {
+                state.status = SessionStatus::Provisioning;
+            }
+            SessionDomainEvent::ProvisioningSucceeded { .. } => {
+                state.status = SessionStatus::Idle;
+                state.last_error = None;
+            }
+            SessionDomainEvent::ProvisioningFailed {
+                error, terminal, ..
+            } => {
+                state.status = if terminal {
+                    SessionStatus::Unrecoverable {
+                        reason: error.clone(),
+                    }
+                } else {
+                    SessionStatus::Failed {
+                        reason: error.clone(),
+                    }
+                };
+                state.last_error = Some(error);
+            }
             SessionDomainEvent::MessageQueued { id, text, at_ms } => {
                 state.inbox.push(InboxMessage { id, text, at_ms });
             }
@@ -2817,12 +2877,81 @@ impl EventSourcedActor for SessionActor {
                 });
                 CommandEffect::none()
             }
+            SessionCommand::Provision => {
+                // Two senders, and only two: the supervisor, immediately after
+                // creating this session, when nothing is journaled and the
+                // status is therefore the default `Idle`; and this actor's own
+                // recovery, when it loads to find a create the process died
+                // inside. Any other status means a create already answered, and
+                // re-running one would rebuild a workspace someone may be
+                // using — the thing this design exists to make impossible.
+                if !matches!(
+                    state.status,
+                    SessionStatus::Idle | SessionStatus::Provisioning
+                ) {
+                    return CommandEffect::none();
+                }
+                let runtimes = self.deps.runtimes.clone();
+                let session = self.id.to_string();
+                let vendor = self.spec.vendor.clone();
+                let spec = self.spec.clone();
+                let me = ctx.self_ref();
+                // Off the mailbox: a real create runs for minutes, and this
+                // actor has to keep answering reads, stops and deletes
+                // throughout. The status it just journaled is what holds the
+                // turn back meanwhile.
+                tokio::spawn(async move {
+                    let (error, terminal) = match runtimes.create(&session, &vendor, &spec).await {
+                        Ok(()) => (None, false),
+                        // Exactly the split `get` makes: only a live vendor
+                        // refusing to produce the runtime is terminal. An
+                        // offline vendor or a failed token mint is a bad
+                        // moment, not a dead session.
+                        Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true),
+                        Err(e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_))) => {
+                            (Some(e.to_string()), false)
+                        }
+                    };
+                    let _ = me
+                        .tell(SessionCommand::FinishProvisioning { error, terminal })
+                        .await;
+                });
+                self.report(SessionStatus::Provisioning).await;
+                CommandEffect::persist(vec![SessionDomainEvent::ProvisioningStarted {
+                    at_ms: now_ms(),
+                }])
+            }
+            SessionCommand::FinishProvisioning { error, terminal } => {
+                let event = match error {
+                    None => SessionDomainEvent::ProvisioningSucceeded { at_ms: now_ms() },
+                    Some(error) => SessionDomainEvent::ProvisioningFailed {
+                        at_ms: now_ms(),
+                        error,
+                        terminal,
+                    },
+                };
+                let next = Self::apply_event(state.clone(), event.clone());
+                self.report(next.status.clone()).await;
+                if let Some(reason) = next.last_error.clone() {
+                    let _ = self.frames.send(SessionFrame::Error { message: reason });
+                }
+                let mut events = vec![event];
+                // The runtime landed, so whatever queued behind it starts now.
+                // A failure drains nothing: the messages stay owed, and the
+                // next thing the user sends is what tries again.
+                events.extend(self.flush_then_drain(&next, ctx).await);
+                CommandEffect::persist(events)
+            }
             SessionCommand::PrepareOffload { reply } => {
                 // A run started while the supervisor was deciding: refuse, and
                 // let the idle clock start again. This is the invariant that
                 // keeps a forty-minute tool call from being unloaded out from
                 // under itself — the main agent's run, or any subagent's.
-                if state.status == SessionStatus::Running || state.mode.subagents().has_active() {
+                if matches!(
+                    state.status,
+                    SessionStatus::Running | SessionStatus::Provisioning
+                ) || state.mode.subagents().has_active()
+                {
                     let _ = reply.send(false);
                     return CommandEffect::none();
                 }
@@ -3106,6 +3235,16 @@ impl EventSourcedActor for SessionActor {
                 .tell(SessionCommand::ReconcileSubAgents)
                 .await;
         }
+        // A create the process died inside. Finishing it is the whole reason
+        // provisioning is journaled rather than held in a map beside the
+        // runtime manager: nothing else can know a create was ever started.
+        // Re-attempting is safe here and nowhere else — `Provisioning` is
+        // precisely the state in which no turn has run, so there is no work in
+        // the workspace for a rebuild to destroy.
+        if state.status == SessionStatus::Provisioning {
+            let _ = ctx.self_ref().tell(SessionCommand::Provision).await;
+            return;
+        }
         if state.status == SessionStatus::Running {
             let _ = ctx
                 .self_ref()
@@ -3151,6 +3290,78 @@ mod tests {
     /// performs it, so these tests assert on the decision.
     fn decisions(actor: &SessionActor, state: &SessionState) -> Vec<AgentAction> {
         actor.orchestrator.next_actions(state)
+    }
+
+    /// A session is `Provisioning` from the moment its create is journaled
+    /// until the event that says how the create ended. Nothing else reaches
+    /// this status, and no turn can run inside it.
+    #[test]
+    fn a_created_session_provisions_before_it_is_idle() {
+        let started = fold(vec![SessionDomainEvent::ProvisioningStarted { at_ms: 0 }]);
+        assert_eq!(started.status, SessionStatus::Provisioning);
+
+        let ready = fold(vec![
+            SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
+            SessionDomainEvent::ProvisioningSucceeded { at_ms: 1 },
+        ]);
+        assert_eq!(ready.status, SessionStatus::Idle);
+    }
+
+    /// The message the session was created with waits in the inbox rather than
+    /// racing the vendor, and is still owed an answer once the runtime lands.
+    #[test]
+    fn a_message_sent_while_provisioning_waits_for_the_runtime() {
+        let waiting = fold(vec![
+            SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
+            queued("m1", "hello"),
+        ]);
+        assert_eq!(waiting.status, SessionStatus::Provisioning);
+        assert_eq!(waiting.inbox.len(), 1, "the message is owed an answer");
+
+        let ready = SessionActor::apply_event(
+            waiting,
+            SessionDomainEvent::ProvisioningSucceeded { at_ms: 2 },
+        );
+        assert_eq!(ready.status, SessionStatus::Idle);
+        assert_eq!(ready.inbox.len(), 1, "still owed, now startable");
+    }
+
+    /// A create that failed on something retryable — an offline vendor, a
+    /// GitHub token that could not be minted — leaves a session that can try
+    /// again, and reports the reason the vendor actually gave rather than the
+    /// "no such runtime" a later `get` would have invented.
+    #[test]
+    fn a_retryable_create_failure_is_reported_verbatim() {
+        let s = fold(vec![
+            SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
+            SessionDomainEvent::ProvisioningFailed {
+                at_ms: 1,
+                error: "runtime vendor unavailable: vendor 'local' is not connected".into(),
+                terminal: false,
+            },
+        ]);
+        assert_eq!(
+            s.status,
+            SessionStatus::Failed {
+                reason: "runtime vendor unavailable: vendor 'local' is not connected".into(),
+            }
+        );
+        assert!(s.last_error.is_some());
+    }
+
+    /// A live vendor refusing to build the runtime is the terminal case, and
+    /// the only one: it is the same `Gone` a `get` reports.
+    #[test]
+    fn a_terminal_create_failure_ends_the_session() {
+        let s = fold(vec![
+            SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
+            SessionDomainEvent::ProvisioningFailed {
+                at_ms: 1,
+                error: "runtime is gone: vendor cannot provision".into(),
+                terminal: true,
+            },
+        ]);
+        assert!(matches!(s.status, SessionStatus::Unrecoverable { .. }));
     }
 
     #[test]
@@ -3464,11 +3675,26 @@ mod tests {
     }
 
     async fn actor_fixture() -> ActorFixture {
+        actor_fixture_from(crate::runtime_vendor::fake::FakeRuntimeVendor::builder(
+            "mock",
+        ))
+        .await
+    }
+
+    /// The same fixture over a fake told to hold its creates, so a test can put
+    /// a message underneath one that is genuinely in flight.
+    async fn actor_fixture_blocking_creates() -> ActorFixture {
+        actor_fixture_from(
+            crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock").block_creates(),
+        )
+        .await
+    }
+
+    async fn actor_fixture_from(
+        builder: crate::runtime_vendor::fake::FakeRuntimeVendorBuilder,
+    ) -> ActorFixture {
         let tmp = tempfile::tempdir().unwrap();
-        let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
-            .serve_in_process()
-            .await
-            .expect("fake agent");
+        let agent = builder.serve_in_process().await.expect("fake agent");
         let mut vendors = HashMap::new();
         vendors.insert("mock".to_string(), agent.link());
         let vendors = Arc::new(std::sync::RwLock::new(vendors));
@@ -4374,6 +4600,187 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("tree condition not met within 2s");
+    }
+
+    /// Spawn a session actor over a fresh journal, provisioning nothing. The
+    /// session owns its create now, so a test that wants a runtime asks for one.
+    fn spawn_unprovisioned(
+        f: &ActorFixture,
+        id: Uuid,
+    ) -> (ActorRef<SessionCommand>, Arc<dyn horsie_actor::Journal>) {
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                test_frames(),
+            ),
+            journal.clone(),
+        );
+        (session, journal)
+    }
+
+    /// The bug in one test: a message that arrives while the create is still in
+    /// flight must queue, not ask a vendor that has never heard of the runtime.
+    ///
+    /// The create is held open for the whole window, so this is a statement
+    /// about the design and not about scheduling luck — and the wait is the
+    /// session's own journaled status, which is what makes it survive a restart
+    /// where an in-memory gate would not.
+    #[tokio::test]
+    async fn a_message_arriving_mid_create_waits_for_the_runtime() {
+        let f = actor_fixture_blocking_creates().await;
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+        );
+        let id = Uuid::new_v4();
+        let (session, journal) = spawn_unprovisioned(&f, id);
+
+        session.tell(SessionCommand::Provision).await.unwrap();
+        let (tx, _rx) = oneshot::channel();
+        session
+            .tell(SessionCommand::UserMessage {
+                text: "hello".into(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+
+        let waiting = wait_for_state(&journal, id, "a queued message under a live create", |s| {
+            s.status == SessionStatus::Provisioning && !s.inbox.is_empty()
+        })
+        .await;
+        assert_eq!(
+            waiting.inbox.len(),
+            1,
+            "the message is owed an answer, not spent on a runtime that does not exist"
+        );
+        assert!(
+            !f.agent.signals().iter().any(|s| s.starts_with("get:")),
+            "nothing may ask the vendor for a runtime it has not been told to build"
+        );
+
+        f.agent.release_creates();
+        wait_for_state(&journal, id, "the queued message running", |s| {
+            s.inbox.is_empty() && s.status != SessionStatus::Provisioning
+        })
+        .await;
+    }
+
+    /// The capability an in-memory gate cannot have: a create the process died
+    /// inside is finished by the next incarnation.
+    ///
+    /// Re-attempting is safe here and only here — `Provisioning` means no turn
+    /// has ever run, so there is no work in the workspace to destroy.
+    #[tokio::test]
+    async fn a_create_interrupted_by_a_restart_is_re_attempted_at_load() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        // A journal that stops at `ProvisioningStarted` is exactly what a
+        // process killed mid-create leaves behind. Seeded rather than produced
+        // by a first incarnation, because the detached create holds a reference
+        // to the actor it reports to — so dropping a handle is not death.
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        journal
+            .persist(
+                &SessionActor::persistence_id_for(id),
+                &[
+                    serde_json::to_vec(&SessionDomainEvent::ProvisioningStarted { at_ms: 0 })
+                        .unwrap(),
+                    serde_json::to_vec(&queued("m1", "hello")).unwrap(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let _session2 = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                test_frames(),
+            ),
+            journal.clone(),
+        );
+        wait_for_state(&journal, id, "the runtime finished after a restart", |s| {
+            s.status != SessionStatus::Provisioning
+        })
+        .await;
+        assert!(
+            f.agent
+                .signals()
+                .iter()
+                .any(|s| s == &format!("create:{id}")),
+            "the interrupted create has to be finished by somebody"
+        );
+    }
+
+    /// A run has no first message to hold it back — `AdvanceRun` fires at load
+    /// and starts step one by itself. So it needs the same wait a conversation
+    /// gets, and for the same reason: the step would ask for a runtime nobody
+    /// had been told to build.
+    #[tokio::test]
+    async fn a_runs_first_step_waits_for_the_create_too() {
+        let f = actor_fixture_blocking_creates().await;
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+        );
+        let id = Uuid::new_v4();
+        let mut spec = actor_spec_fixture();
+        spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
+            workflow: "fix-bug".into(),
+        };
+        spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                spec,
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                test_frames(),
+            ),
+            journal.clone(),
+        );
+        session.tell(SessionCommand::Provision).await.unwrap();
+
+        wait_for_state(&journal, id, "a run holding at its create", |s| {
+            s.status == SessionStatus::Provisioning
+        })
+        .await;
+        let held = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert!(
+            held.mode.run().is_none_or(|r| r.steps.is_empty()),
+            "no step may start before the runtime it would run on"
+        );
+
+        f.agent.release_creates();
+        wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
+    }
+
+    /// Poll the folded session state until it satisfies `pred`.
+    async fn wait_for_state(
+        journal: &Arc<dyn horsie_actor::Journal>,
+        session_id: Uuid,
+        what: &str,
+        pred: impl Fn(&SessionState) -> bool,
+    ) -> SessionState {
+        for _ in 0..200 {
+            let state = crate::sessions::events::fold_session_state(journal, session_id).await;
+            if pred(&state) {
+                return state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{what} not reached within 2s");
     }
 
     /// Entry count of the session's own journal (`session/<id>`), not the
