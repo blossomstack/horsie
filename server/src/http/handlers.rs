@@ -487,6 +487,7 @@ pub(crate) fn wire_pending_asks(status: &SessionStatus) -> Vec<PendingAskView> {
     match status {
         SessionStatus::AwaitingInput { asks } => asks.iter().map(wire_pending_ask).collect(),
         SessionStatus::Provisioning
+        | SessionStatus::ProvisioningFailed { .. }
         | SessionStatus::Idle
         | SessionStatus::Running
         | SessionStatus::Failed { .. }
