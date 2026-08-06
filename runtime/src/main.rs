@@ -53,10 +53,6 @@ struct Cli {
     /// sandbox. The file fully defines the allowed capabilities.
     #[arg(long = "sandbox-caps")]
     sandbox_caps: Option<PathBuf>,
-    /// Shared plugin library root, exposed to agents as the `horsie_shared`
-    /// workspace (read-only). Absent → no shared library.
-    #[arg(long = "plugins-dir")]
-    plugins_dir: Option<PathBuf>,
     /// Directory prepended to PATH when running plugin hooks (repeatable), e.g. the
     /// node bin dir.
     #[arg(long = "hook-path")]
@@ -224,12 +220,9 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
         }
     };
 
-    // Fetch the session's selected plugin bundles (if the server injected a
-    // manifest) and scan that dir; otherwise fall back to any `--plugins-dir`.
-    let plugins_dir = match horsie_runtime::plugins_fetch::provision_plugins().await {
-        Some(dir) => Some(dir),
-        None => cli.plugins_dir,
-    };
+    // The session's selected bundles, fetched by this runtime over its own
+    // outbound connection. The only source of skills there is.
+    let plugins_dir = horsie_runtime::plugins_fetch::provision_plugins().await;
     let registry = Arc::new(
         horsie_runtime::workspace::WorkspaceRegistry::new(cli.workspaces)
             .with_plugins(plugins_dir, cli.hook_path),

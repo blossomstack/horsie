@@ -32,7 +32,7 @@ use horsie_models::runtime_vendor::{
 };
 use horsie_runtime_client::RuntimeTransport;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -176,10 +176,8 @@ pub struct BundleDelivery {
     /// Base URL reaching the server *from where the runtimes run* — loopback
     /// for a local agent, an advertise address for a remote one.
     pub base_url: String,
-    /// Path the runtime unpacks bundles into and scans.
+    /// Root under which each runtime gets its own directory to unpack into.
     pub dir: String,
-    /// Optional content-hash cache, so repeat sessions skip re-fetching.
-    pub cache_dir: Option<String>,
 }
 
 /// One live runtime this agent owns.
@@ -210,18 +208,14 @@ pub struct RuntimeVendor {
     /// capability spec. The library default is off; `horsie connect` turns it
     /// on unless started with `--no-sandbox`.
     sandbox: bool,
-    /// The host plugin library this agent serves, resolved agent-side by the
-    /// CLI. Never sent by the server — it is a property of this machine.
-    host_library: Option<PathBuf>,
-    /// Root of the shared clones the host library's symlinks point into. The
-    /// sandbox resolves through symlinks, so this must be granted alongside the
-    /// library itself or the runtime cannot read any installed plugin.
-    host_sources: Option<PathBuf>,
+    /// Directories prepended to PATH when a runtime runs a plugin hook (the
+    /// node bin dir, typically). A property of this machine, resolved
+    /// agent-side; never sent by the server.
     hook_path: Vec<PathBuf>,
     /// How this agent's runtimes fetch server-managed bundles: the base URL
-    /// that reaches the server from where they run, the directory they unpack
-    /// into, and an optional content-hash cache. All three are the agent's
-    /// knowledge, not the server's — it sends only hashes and a token.
+    /// that reaches the server from where they run, and the root they unpack
+    /// into. Both are the agent's knowledge, not the server's — it sends only
+    /// hashes and a token.
     bundles: Option<BundleDelivery>,
     /// How long to wait between connection attempts. A field rather than a
     /// constant so tests can run the reconnect path on a millisecond scale.
@@ -280,8 +274,6 @@ impl RuntimeVendor {
             workspaces,
             state_dir,
             sandbox: false,
-            host_library: None,
-            host_sources: None,
             hook_path: Vec::new(),
             bundles: None,
             backoff: Backoff::default(),
@@ -337,19 +329,10 @@ impl RuntimeVendor {
         self
     }
 
-    /// Serve a host plugin library to every runtime this agent spawns.
-    ///
-    /// `sources` is the root the library's symlinks point into; both it and the
-    /// library are added to the sandbox capability spec this agent writes.
+    /// Directories prepended to PATH when a runtime runs plugin hooks, and
+    /// granted read access in the sandbox.
     #[must_use]
-    pub fn with_host_library(
-        mut self,
-        dir: PathBuf,
-        sources: Option<PathBuf>,
-        hook_path: Vec<PathBuf>,
-    ) -> Self {
-        self.host_library = Some(dir);
-        self.host_sources = sources;
+    pub fn with_hook_path(mut self, hook_path: Vec<PathBuf>) -> Self {
         self.hook_path = hook_path;
         self
     }
@@ -393,6 +376,10 @@ impl RuntimeVendor {
         // an error the operator sees once rather than a retry loop that can
         // never succeed. The token is checked per attempt, below.
         client_request(server_url, None).map_err(AgentExit::Fatal)?;
+
+        // Nothing this agent owns is running yet, so any bundle directory
+        // without a spec belongs to a runtime that cannot come back.
+        self.sweep_plugin_dirs();
 
         let mut backoff = self.backoff;
         let mut failures: u32 = 0;
@@ -687,9 +674,9 @@ impl RuntimeVendor {
                 let _guard = lock.lock().await;
                 self.halt(&cmd.runtime_id).await;
                 // The session is gone, so the record of how to rebuild its
-                // runtime goes with it — otherwise a deleted session's spec
-                // would outlive it on disk forever.
-                let _ = std::fs::remove_dir_all(self.state_dir.join(&cmd.runtime_id));
+                // runtime goes with it, and so do its bundles — otherwise a
+                // deleted session's state would outlive it on disk forever.
+                self.forget_runtime_dirs(&cmd.runtime_id);
                 self.lifecycle_locks.lock().await.remove(&cmd.runtime_id);
                 Ok(RuntimeVendorEvent::DeleteRuntime(DeleteRuntimeResponse {
                     runtime_id: cmd.runtime_id,
@@ -803,30 +790,13 @@ impl RuntimeVendor {
             None
         };
 
+        self.prepare_plugins_dir(runtime_id);
+
         let mut env = request.env.clone();
-        if let Some(b) = &self.bundles {
-            env.push(EnvVar {
-                name: horsie_models::ENV_PLUGINS_BASE.to_string(),
-                value: b.base_url.clone(),
-            });
-            env.push(EnvVar {
-                name: horsie_models::ENV_PLUGINS_DIR.to_string(),
-                value: b.dir.clone(),
-            });
-            if let Some(cache) = &b.cache_dir {
-                env.push(EnvVar {
-                    name: horsie_models::ENV_PLUGINS_CACHE.to_string(),
-                    value: cache.clone(),
-                });
-            }
-        }
+        env.extend(self.bundle_env(runtime_id));
 
         let config = RuntimeConfig {
             workspaces,
-            plugins_dir: self
-                .host_library
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
             hook_path: self
                 .hook_path
                 .iter()
@@ -885,16 +855,15 @@ impl RuntimeVendor {
 
     /// Persist the effective capability spec for a runtime and return its path.
     ///
-    /// The spec is this vendor's [`baseline`](crate::baseline) plus read
-    /// grants for the host plugin library — without them a sandboxed runtime
-    /// is handed a `--plugins-dir` it has no capability to read.
+    /// The spec is this vendor's [`baseline`](crate::baseline) plus the
+    /// directory this runtime materializes its session's bundles into and the
+    /// hook interpreter dirs. The bundles dir is read-write: the sandbox is
+    /// applied before the runtime fetches, so it unpacks under confinement.
     fn write_caps_file(&self, runtime_id: &str) -> Result<PathBuf, String> {
         let mut spec = crate::baseline::baseline_capabilities()?;
-        let sources: Vec<PathBuf> = self.host_sources.iter().cloned().collect();
         spec.grants
-            .extend(horsie_support::plugin::grants::plugin_library_grants(
-                self.host_library.as_deref(),
-                &sources,
+            .extend(horsie_support::plugin::grants::session_plugin_grants(
+                self.plugins_path(runtime_id).as_deref(),
                 &self.hook_path,
             ));
         // The runtime mirrors its per-agent cwd and env into this directory. The
@@ -922,6 +891,102 @@ impl RuntimeVendor {
         Ok(path)
     }
 
+    /// Root under which each runtime materializes its session's bundles.
+    /// `None` when this agent serves none.
+    fn plugins_root(&self) -> Option<&Path> {
+        self.bundles.as_ref().map(|b| Path::new(b.dir.as_str()))
+    }
+
+    /// Where `runtime_id` materializes its session's bundles. One directory per
+    /// runtime: the runtime scans the whole directory it is given, so a shared
+    /// one would show a session every other session's skills.
+    fn plugins_path(&self, runtime_id: &str) -> Option<PathBuf> {
+        self.plugins_root().map(|root| root.join(runtime_id))
+    }
+
+    /// Remove bundle directories belonging to runtimes this agent can no longer
+    /// revive.
+    ///
+    /// Called once at startup, where no runtime process is live by definition,
+    /// so anything without a persisted spec is crash debris. A vendor that
+    /// persists no specs at all cannot revive anything, and correctly loses
+    /// every directory here.
+    ///
+    /// Best-effort throughout: an unreadable root or an undeletable directory
+    /// costs disk, and is not worth refusing to start over.
+    fn sweep_plugin_dirs(&self) {
+        let Some(root) = self.plugins_root() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(runtime_id) = name.to_str() else {
+                continue;
+            };
+            if self.spec_path(runtime_id).is_file() {
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+
+    /// Drop everything on disk belonging to a runtime whose session is gone:
+    /// the record of how to rebuild it, and the bundles it materialized.
+    ///
+    /// Deliberately not called from `halt`. Stopping a process is not losing a
+    /// session, and a hibernated runtime must find its bundles still there when
+    /// it wakes — that is what makes materialization a once-per-runtime cost.
+    fn forget_runtime_dirs(&self, runtime_id: &str) {
+        let _ = std::fs::remove_dir_all(self.state_dir.join(runtime_id));
+        if let Some(dir) = self.plugins_path(runtime_id) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// Create the directory this runtime will materialize its bundles into.
+    ///
+    /// The runtime cannot do this for itself under a sandbox: the grant names
+    /// that directory by path, and creating it is a write on the *parent*,
+    /// which is deliberately not granted. So the agent — which owns the machine
+    /// and is not confined — makes it, and the runtime only ever writes inside.
+    ///
+    /// Best-effort: a failure here surfaces as the runtime reporting it could
+    /// not provision its bundles, which is the same class of degradation as a
+    /// bundle that would not download.
+    fn prepare_plugins_dir(&self, runtime_id: &str) {
+        if let Some(dir) = self.plugins_path(runtime_id)
+            && let Err(e) = std::fs::create_dir_all(&dir)
+        {
+            note(&format!(
+                "vendor agent: cannot create bundle dir {}: {e}",
+                dir.display()
+            ));
+        }
+    }
+
+    /// The bundle-delivery environment for one runtime. Extracted from
+    /// `provision` so the per-runtime path is testable without spawning
+    /// anything.
+    fn bundle_env(&self, runtime_id: &str) -> Vec<EnvVar> {
+        let Some(b) = &self.bundles else {
+            return Vec::new();
+        };
+        let mut env = vec![EnvVar {
+            name: horsie_models::ENV_PLUGINS_BASE.to_string(),
+            value: b.base_url.clone(),
+        }];
+        if let Some(dir) = self.plugins_path(runtime_id) {
+            env.push(EnvVar {
+                name: horsie_models::ENV_PLUGINS_DIR.to_string(),
+                value: dir.to_string_lossy().into_owned(),
+            });
+        }
+        env
+    }
+
     /// Where this agent writes a runtime's sandbox capability file. Public so
     /// the process provider can be pointed at the same path.
     #[must_use]
@@ -943,10 +1008,14 @@ impl RuntimeVendor {
     /// Remember what this runtime was made of, so a later get can rebuild it
     /// without the server having to re-send anything.
     ///
-    /// 0600 because the spec's `env` is where the server puts what it mints. A
-    /// vendor fixed to user-owned directories is handed none of that today, but
-    /// nothing in the protocol promises that, and this file sits on the same
-    /// machine as the workspaces it would grant access to.
+    /// 0600 because the spec's `env` is where the server puts what it mints,
+    /// including the token a runtime fetches its bundles with — every vendor is
+    /// handed that, and this file sits on the same machine as the workspaces it
+    /// would grant access to.
+    ///
+    /// That token outlives its own validity here: a revive replays whatever was
+    /// written, expiry included. Nothing on the happy path re-fetches, so it is
+    /// unreachable rather than fixed — see blossomstack/horsie#242.
     fn write_spec_file(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), String> {
         let path = self.spec_path(runtime_id);
         if let Some(parent) = path.parent() {
@@ -1063,13 +1132,139 @@ mod tests {
         ))
     }
 
-    /// The baseline cannot know this machine's plugin library, so the agent
-    /// must inject the grants for it. Without this a sandboxed runtime is
-    /// handed a `--plugins-dir` it has no capability to read — and since
-    /// installed plugins are symlinks into `sources/`, the target root has to
-    /// be granted too or every read still fails.
+    /// A shared bundles directory would let one session scan another's skills,
+    /// because the runtime scans the whole directory it is pointed at.
     #[test]
-    fn the_written_caps_file_grants_the_host_plugin_library_and_its_sources() {
+    fn the_bundle_env_names_a_directory_per_runtime() {
+        let agent = agent().with_bundles(BundleDelivery {
+            base_url: "http://127.0.0.1:3789".to_string(),
+            dir: "/state/plugins".to_string(),
+        });
+        let value = |vars: &[EnvVar], name: &str| {
+            vars.iter()
+                .find(|v| v.name == name)
+                .map(|v| v.value.clone())
+        };
+
+        let one = agent.bundle_env("rt-1");
+        let two = agent.bundle_env("rt-2");
+
+        assert_eq!(
+            value(&one, horsie_models::ENV_PLUGINS_DIR).as_deref(),
+            Some("/state/plugins/rt-1")
+        );
+        assert_eq!(
+            value(&two, horsie_models::ENV_PLUGINS_DIR).as_deref(),
+            Some("/state/plugins/rt-2")
+        );
+        assert_eq!(
+            value(&one, horsie_models::ENV_PLUGINS_BASE).as_deref(),
+            Some("http://127.0.0.1:3789")
+        );
+    }
+
+    #[test]
+    fn an_agent_serving_no_bundles_adds_no_bundle_env() {
+        assert!(agent().bundle_env("rt-1").is_empty());
+    }
+
+    /// A sandboxed runtime is granted its bundle dir *by path*, so creating it
+    /// would be a write on the ungranted parent. The agent is not confined and
+    /// makes it first; without this every sandboxed provision fails silently.
+    #[test]
+    fn the_agent_creates_the_bundle_dir_the_runtime_cannot() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let agent = agent_with_bundles(state.path());
+        assert!(!state.path().join("plugins/rt-1").exists());
+
+        agent.prepare_plugins_dir("rt-1");
+
+        assert!(state.path().join("plugins/rt-1").is_dir());
+    }
+
+    /// Build an agent rooted at `state`, serving bundles out of `state/plugins`.
+    fn agent_with_bundles(state: &Path) -> RuntimeVendor {
+        RuntimeVendor::new(
+            "test-vendor".to_string(),
+            false,
+            Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
+            Arc::new(ConnectedRuntimeRegistry::new()),
+            Arc::new(FixedWorkspaces::new(HashMap::new())),
+            state.to_path_buf(),
+        )
+        .with_bundles(BundleDelivery {
+            base_url: "http://127.0.0.1:3789".to_string(),
+            dir: state.join("plugins").to_string_lossy().into_owned(),
+        })
+    }
+
+    /// Boot is the one moment when "no runtime process is live" is guaranteed,
+    /// so the only question left is whether the runtime still exists at all —
+    /// and the spec file is the same record that decides whether it could be
+    /// revived.
+    #[test]
+    fn boot_sweeps_bundle_dirs_with_no_surviving_spec() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let plugins = state.path().join("plugins");
+        std::fs::create_dir_all(plugins.join("kept/demo")).expect("mkdir");
+        std::fs::create_dir_all(plugins.join("orphan/demo")).expect("mkdir");
+        // `kept` is revivable: it has a persisted spec.
+        std::fs::create_dir_all(state.path().join("kept")).expect("mkdir");
+        std::fs::write(state.path().join("kept/spec.json"), b"{}").expect("write");
+
+        agent_with_bundles(state.path()).sweep_plugin_dirs();
+
+        assert!(
+            plugins.join("kept/demo").is_dir(),
+            "a revivable runtime keeps its bundles"
+        );
+        assert!(!plugins.join("orphan").exists(), "crash debris is removed");
+    }
+
+    /// Deleting a session takes its bundles; stopping a process must not.
+    /// A hibernated runtime has to find them still there when it wakes, which
+    /// is the whole reason materialization can happen once.
+    #[test]
+    fn forgetting_a_runtime_removes_both_its_dirs() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let plugins = state.path().join("plugins");
+        std::fs::create_dir_all(plugins.join("rt-1/demo")).expect("mkdir");
+        std::fs::create_dir_all(state.path().join("rt-1")).expect("mkdir");
+        std::fs::write(state.path().join("rt-1/spec.json"), b"{}").expect("write");
+
+        agent_with_bundles(state.path()).forget_runtime_dirs("rt-1");
+
+        assert!(
+            !state.path().join("rt-1").exists(),
+            "the rebuild record is gone"
+        );
+        assert!(!plugins.join("rt-1").exists(), "and so are its bundles");
+    }
+
+    /// An agent that serves no bundles has no root to sweep, and must not
+    /// wander into the state dir looking for one.
+    #[test]
+    fn sweeping_without_bundles_is_a_noop() {
+        let state = tempfile::tempdir().expect("tempdir");
+        std::fs::write(state.path().join("keep-me"), b"x").expect("write");
+        let agent = RuntimeVendor::new(
+            "test-vendor".to_string(),
+            false,
+            Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
+            Arc::new(ConnectedRuntimeRegistry::new()),
+            Arc::new(FixedWorkspaces::new(HashMap::new())),
+            state.path().to_path_buf(),
+        );
+        agent.sweep_plugin_dirs();
+        assert!(state.path().join("keep-me").is_file());
+    }
+
+    /// The sandbox is applied before the runtime fetches its bundles, so the
+    /// directory it unpacks into has to be writable — a read grant leaves the
+    /// unpack failing, and provisioning is best-effort, so it fails silently to
+    /// "no skills".
+    #[test]
+    fn the_written_caps_file_grants_the_runtimes_own_plugins_dir_and_hook_path() {
         let state = tempfile::tempdir().expect("tempdir");
         let agent = RuntimeVendor::new(
             "test-vendor".to_string(),
@@ -1079,32 +1274,38 @@ mod tests {
             Arc::new(FixedWorkspaces::new(HashMap::new())),
             state.path().to_path_buf(),
         )
-        .with_host_library(
-            PathBuf::from("/data/plugins"),
-            Some(PathBuf::from("/data/sources")),
-            vec![PathBuf::from("/opt/node/bin")],
-        );
+        .with_bundles(BundleDelivery {
+            base_url: "http://127.0.0.1:3789".to_string(),
+            dir: "/state/plugins".to_string(),
+        })
+        .with_hook_path(vec![PathBuf::from("/opt/node/bin")]);
 
         let path = agent.write_caps_file("rt-1").expect("write caps");
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read caps")).expect("parse caps");
         // The grant union is fluorite-tagged: `{"type":"Dir","value":{"path":…}}`.
-        let granted: Vec<&str> = written["grants"]
-            .as_array()
-            .expect("grants array")
-            .iter()
-            .filter_map(|g| {
-                g.get("value")
-                    .and_then(|v| v.get("path"))
-                    .and_then(serde_json::Value::as_str)
-            })
-            .collect();
+        let grant = |path: &str| {
+            written["grants"]
+                .as_array()
+                .expect("grants array")
+                .iter()
+                .find(|g| {
+                    g.get("value")
+                        .and_then(|v| v.get("path"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some(path)
+                })
+                .cloned()
+        };
 
-        assert!(granted.contains(&"/data/plugins"), "granted: {granted:?}");
-        assert!(granted.contains(&"/data/sources"), "granted: {granted:?}");
-        assert!(granted.contains(&"/opt/node/bin"), "granted: {granted:?}");
+        let plugins = grant("/state/plugins/rt-1").expect("the runtime's own plugins dir");
+        assert_eq!(plugins["value"]["access"], "ReadWrite");
+        let hooks = grant("/opt/node/bin").expect("the hook interpreter dir");
+        assert_eq!(hooks["value"]["access"], "Read");
+        // Another runtime's directory is not granted.
+        assert!(grant("/state/plugins/rt-2").is_none());
         // The baseline's own grants survive alongside them.
-        assert!(granted.contains(&"/usr"), "granted: {granted:?}");
+        assert!(grant("/usr").is_some());
     }
 
     /// With no host library there is nothing to merge, and the written file is

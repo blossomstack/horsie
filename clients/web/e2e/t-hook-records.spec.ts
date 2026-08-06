@@ -22,7 +22,7 @@ test("T1: hook records render, tool-scoped and standalone, and survive a reload"
 }) => {
   await mock.queueToolCall("bash", { command: "echo E2E_HOOKED" });
   await mock.queueText("Done.");
-  await createSession(page, appBase);
+  await createSession(page, appBase, { skills: ["e2e-plugin"] });
   await sendMessage(page, "run the tool");
   await expectStatus(page, "Idle");
 

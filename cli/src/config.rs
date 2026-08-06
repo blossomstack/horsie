@@ -27,29 +27,18 @@ pub struct HorsieConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {
-    /// Ephemeral runtime state: the shared local-runtime-vendor socket and
-    /// pidfile. Defaults to `$XDG_STATE_HOME/horsie`, else
-    /// `$HOME/.local/state/horsie` (same path on macOS and Linux).
+    /// Ephemeral runtime state: the shared local-runtime-vendor socket, the
+    /// per-runtime scratch dirs, and the bundles each runtime materializes.
+    /// Defaults to `$XDG_STATE_HOME/horsie`, else `$HOME/.local/state/horsie`
+    /// (same path on macOS and Linux).
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
-    /// Durable data: the shared plugin library (`plugins_dir`) and the shared
-    /// clones (`<data_dir>/sources`). Defaults to `$XDG_DATA_HOME/horsie`, else
-    /// `$HOME/.local/share/horsie` (same path on macOS and Linux).
-    #[serde(default = "default_data_dir")]
-    pub data_dir: PathBuf,
-    /// Shared plugin library root (`horsie plugin install` clones here). Exposed to
-    /// opted-in agents as the `horsie_shared` workspace. Defaults to
-    /// `<data_dir>/plugins`.
-    #[serde(default = "default_plugins_dir")]
-    pub plugins_dir: PathBuf,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             state_dir: default_state_dir(),
-            data_dir: default_data_dir(),
-            plugins_dir: default_plugins_dir(),
         }
     }
 }
@@ -253,50 +242,25 @@ fn user_config_path_from(
     Some(config_dir.join("horsie").join("config.json"))
 }
 
-/// Default state dir for ephemeral runtime files (control socket, pidfile):
-/// `$XDG_STATE_HOME/horsie` if set, else `$HOME/.local/state/horsie`. Same path
-/// on macOS and Linux.
+/// Default state dir: `$XDG_STATE_HOME/horsie` if set, else
+/// `$HOME/.local/state/horsie`. Same path on macOS and Linux.
 fn default_state_dir() -> PathBuf {
-    storage_dir_from(
-        std::env::var_os("XDG_STATE_HOME"),
-        std::env::var_os("HOME"),
-        ".local/state",
-        "state",
-    )
+    state_dir_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
 }
 
-/// Default data dir for durable data (plugin library, shared clones):
-/// `$XDG_DATA_HOME/horsie` if set, else `$HOME/.local/share/horsie`. Same path
-/// on macOS and Linux.
-fn default_data_dir() -> PathBuf {
-    storage_dir_from(
-        std::env::var_os("XDG_DATA_HOME"),
-        std::env::var_os("HOME"),
-        ".local/share",
-        "data",
-    )
-}
-
-/// Default shared plugin library root: `<data_dir>/plugins`.
-fn default_plugins_dir() -> PathBuf {
-    default_data_dir().join("plugins")
-}
-
-/// Pure core of the storage-dir defaults: prefer a non-empty XDG base var joined
-/// with `horsie`; else `$HOME/<home_subdir>/horsie`; else, when neither env var
-/// is available (rare), a relative `./.horsie/<fallback_leaf>` so state and data
-/// stay distinct without a home directory.
-fn storage_dir_from(
+/// Pure core of the state-dir default, so the fallback chain is testable
+/// without touching process env: prefer a non-empty `$XDG_STATE_HOME` joined
+/// with `horsie`; else `$HOME/.local/state/horsie`; else, when neither is
+/// available (rare), a relative `./.horsie/state`.
+fn state_dir_from(
     xdg_base: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
-    home_subdir: &str,
-    fallback_leaf: &str,
 ) -> PathBuf {
     match xdg_base {
         Some(x) if !x.is_empty() => PathBuf::from(x).join("horsie"),
         _ => match home {
-            Some(h) if !h.is_empty() => PathBuf::from(h).join(home_subdir).join("horsie"),
-            _ => PathBuf::from("./.horsie").join(fallback_leaf),
+            Some(h) if !h.is_empty() => PathBuf::from(h).join(".local/state").join("horsie"),
+            _ => PathBuf::from("./.horsie").join("state"),
         },
     }
 }
@@ -309,28 +273,29 @@ mod tests {
     #[test]
     fn default_config_is_empty_but_valid() {
         let cfg = HorsieConfig::default();
-        // State and data resolve to distinct dirs (different XDG bases / leaves).
-        assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
-        assert_eq!(
-            cfg.storage.plugins_dir,
-            cfg.storage.data_dir.join("plugins")
-        );
+        assert!(cfg.storage.state_dir.ends_with("horsie"));
+        assert!(cfg.default_server.is_none());
     }
 
     #[test]
     fn unknown_fields_are_ignored() {
-        // An old daemon config (providers/models/sandbox/hackamore) still parses.
+        // An old daemon config still parses, including the storage keys this
+        // CLI no longer has — `data_dir` and `plugins_dir` went with plugin
+        // management, and a user's existing file must not become an error.
         let cfg: HorsieConfig = serde_json::from_str(
             r#"{
                 "providers": { "p": { "type": "anthropic", "base_url": "http://localhost:1" } },
                 "models": { "m": { "provider": "p", "model_id": "id" } },
                 "sandbox": { "capabilities_file": "/etc/horsie/caps.json" },
-                "storage": { "state_dir": "/var/state", "data_dir": "/var/data" }
+                "storage": {
+                    "state_dir": "/var/state",
+                    "data_dir": "/var/data",
+                    "plugins_dir": "/var/data/plugins"
+                }
             }"#,
         )
         .unwrap();
         assert_eq!(cfg.storage.state_dir, PathBuf::from("/var/state"));
-        assert_eq!(cfg.storage.data_dir, PathBuf::from("/var/data"));
     }
 
     #[test]
@@ -408,42 +373,28 @@ mod tests {
     }
 
     #[test]
-    fn storage_dir_prefers_xdg() {
-        let state = storage_dir_from(
-            Some("/xdg/state".into()),
-            Some("/home/u".into()),
-            ".local/state",
-            "state",
-        );
+    fn state_dir_prefers_xdg() {
+        let state = state_dir_from(Some("/xdg/state".into()), Some("/home/u".into()));
         assert_eq!(state, PathBuf::from("/xdg/state/horsie"));
-        let data = storage_dir_from(
-            Some("/xdg/data".into()),
-            Some("/home/u".into()),
-            ".local/share",
-            "data",
-        );
-        assert_eq!(data, PathBuf::from("/xdg/data/horsie"));
     }
 
     #[test]
-    fn storage_dir_falls_back_to_home() {
+    fn state_dir_falls_back_to_home() {
         // Unset and empty XDG both fall through to the $HOME subdir.
         for xdg in [None, Some("".into())] {
-            let p = storage_dir_from(xdg, Some("/home/u".into()), ".local/state", "state");
+            let p = state_dir_from(xdg, Some("/home/u".into()));
             assert_eq!(p, PathBuf::from("/home/u/.local/state/horsie"));
         }
-        let p = storage_dir_from(None, Some("/home/u".into()), ".local/share", "data");
-        assert_eq!(p, PathBuf::from("/home/u/.local/share/horsie"));
     }
 
     #[test]
-    fn storage_dir_falls_back_to_relative_without_env() {
-        // Neither XDG nor HOME → distinct relative leaves, never colliding.
-        let state = storage_dir_from(None, None, ".local/state", "state");
-        let data = storage_dir_from(Some("".into()), Some("".into()), ".local/share", "data");
-        assert_eq!(state, PathBuf::from("./.horsie/state"));
-        assert_eq!(data, PathBuf::from("./.horsie/data"));
-        assert_ne!(state, data);
+    fn state_dir_falls_back_to_relative_without_env() {
+        // Neither XDG nor HOME → a relative dir rather than an absolute guess.
+        assert_eq!(state_dir_from(None, None), PathBuf::from("./.horsie/state"));
+        assert_eq!(
+            state_dir_from(Some("".into()), Some("".into())),
+            PathBuf::from("./.horsie/state")
+        );
     }
 
     #[test]

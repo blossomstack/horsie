@@ -213,12 +213,9 @@ pub const ENV_PLUGINS_BASE: &str = "HORSIE_PLUGINS_BASE";
 pub const ENV_PLUGINS_TOKEN: &str = "HORSIE_PLUGINS_TOKEN";
 
 /// Directory the runtime unpacks fetched bundles into and scans as its
-/// plugins_dir.
+/// plugins_dir. One per runtime: the runtime scans the whole directory, so a
+/// shared one would show a session another session's skills.
 pub const ENV_PLUGINS_DIR: &str = "HORSIE_PLUGINS_DIR";
-
-/// Optional content-hash cache dir (local vendor) so repeated sessions avoid
-/// re-fetching and re-unpacking identical bundles.
-pub const ENV_PLUGINS_CACHE: &str = "HORSIE_PLUGINS_CACHE";
 
 impl capabilities::CapabilitySpec {
     /// Load and parse a capability file (the runtime's `--sandbox-caps` path, or a

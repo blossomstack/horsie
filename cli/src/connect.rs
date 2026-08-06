@@ -23,6 +23,37 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// Resolve the hook interpreter dirs: the configured override, else
+/// auto-discover `node` from the ambient environment (its parent dir). Empty
+/// when neither resolves.
+///
+/// Resolved unconditionally. It used to be gated on a populated host plugin
+/// library, which meant a user whose skills all came from the server got no
+/// interpreter and none of their bundles' hooks could run.
+pub fn resolve_hook_path(configured: Option<Vec<PathBuf>>) -> Vec<PathBuf> {
+    if let Some(paths) = configured {
+        return paths;
+    }
+    which_dir("node").into_iter().collect()
+}
+
+/// The directory containing `bin` on the current `PATH`, via `command -v`.
+fn which_dir(bin: &str) -> Option<PathBuf> {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {bin}"))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+    PathBuf::from(path).parent().map(Path::to_path_buf)
+}
+
 /// Locate the sibling `horsie-runtime` binary next to this executable — the
 /// default `horsie connect` uses when the config sets no explicit `runtime.bin`.
 pub fn default_runtime_bin() -> PathBuf {
@@ -106,20 +137,6 @@ pub fn connection_summary(server: &str, vendor_name: &str, workspaces: &[String]
         .collect::<Vec<_>>()
         .join(", ");
     format!("connected to {server} as vendor \"{vendor_name}\" · {list}")
-}
-
-/// One-line note about the host plugin library, printed when serving one.
-pub fn plugins_summary(plugins_dir: &Path, count: usize) -> String {
-    format!("plugins: {count} installed from {}", plugins_dir.display())
-}
-
-/// The resolved host plugin library served to every runtime this agent spawns.
-pub struct PluginLibrary {
-    pub dir: PathBuf,
-    /// Root of the clones `dir`'s symlinks point into; granted to the sandbox
-    /// alongside the library itself.
-    pub sources: Option<PathBuf>,
-    pub hook_path: Vec<PathBuf>,
 }
 
 /// Warn when more than one workspace maps to the same directory, and when the
@@ -217,7 +234,7 @@ pub async fn run(
     vendor_name: &str,
     background: bool,
     state_dir: &Path,
-    plugins: Option<PluginLibrary>,
+    hook_path: Vec<PathBuf>,
     sandbox: bool,
 ) -> Result<i32, CliError> {
     let endpoint = server_to_endpoint(server)?;
@@ -307,7 +324,7 @@ pub async fn run(
             Arc::new(p)
         });
 
-    let mut agent = RuntimeVendor::new(
+    let agent = RuntimeVendor::new(
         vendor_name.to_string(),
         // A fixed, user-owned directory: no repo checkout, no bundle install.
         false,
@@ -327,25 +344,11 @@ pub async fn run(
         // The runtimes run on this machine, so whatever address reaches the
         // server from here reaches it from them.
         base_url: server.trim_end_matches('/').to_string(),
-        dir: state_dir.join("bundles").to_string_lossy().into_owned(),
-        cache_dir: Some(
-            state_dir
-                .join("bundle-cache")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-    });
-    if let Some(p) = &plugins {
-        agent = agent.with_host_library(p.dir.clone(), p.sources.clone(), p.hook_path.clone());
-    }
+        dir: state_dir.join("plugins").to_string_lossy().into_owned(),
+    })
+    .with_hook_path(hook_path);
 
     println!("{}", connection_summary(server, vendor_name, &normalized));
-    if let Some(p) = &plugins {
-        println!(
-            "{}",
-            plugins_summary(&p.dir, crate::plugins::count_installed(&p.dir))
-        );
-    }
     println!("{}", shared_directory_notice(&table));
     println!("open {server} in your browser to start a session");
 

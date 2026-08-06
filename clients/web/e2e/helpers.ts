@@ -5,13 +5,19 @@ import { expect, type Page } from "@playwright/test";
 
 /**
  * Start a new-chat draft: navigate to `/`, wait for the draft config bar, and
- * optionally pick a model. Creates NOTHING server-side — the session is created
- * by the first `sendMessage`.
+ * optionally pick a model and skill bundles. Creates NOTHING server-side — the
+ * session is created by the first `sendMessage`.
+ *
+ * `skills` is opt-in per spec rather than a default on the bundle, because a
+ * selected bundle is fetched and unpacked by the runtime before the session can
+ * take a turn. Paying that on all ~75 specs slows every one of them down and
+ * makes the composer's send-while-starting race reachable; only the specs that
+ * assert on plugin content should ask for it.
  */
 export async function createSession(
   page: Page,
   appBase: string,
-  opts: { model?: string } = {},
+  opts: { model?: string; skills?: string[] } = {},
 ): Promise<void> {
   await page.goto(appBase);
   await expect(page.getByTestId("config-model")).toBeVisible();
@@ -20,6 +26,18 @@ export async function createSession(
     await page
       .locator(`[data-testid="model-option"][data-value="${opts.model}"]`)
       .click();
+  }
+  if (opts.skills?.length) {
+    const picker = page.getByTestId("config-skills");
+    await picker.click();
+    for (const name of opts.skills) {
+      await page
+        .locator("label", { hasText: new RegExp(`^${name}$`) })
+        .getByRole("checkbox")
+        .check();
+    }
+    // Close the popover so the composer is clickable again.
+    await picker.click();
   }
 }
 

@@ -165,6 +165,12 @@ interface State {
    * `InboxChanged`; a queue this tab has never been told about is `null`,
    * which is different from a queue known to be empty. */
   queued: QueuedMessage[] | null;
+  /** Whether a live `InboxChanged` has arrived. Until one has, the detail
+   * endpoint is the better authority and may re-seed — a session whose inbox
+   * drained *before* this view subscribed broadcast its `InboxChanged` to
+   * nobody, and seeding once would leave the drained message on screen for
+   * good. Same hazard the `lastError` seed below exists for. */
+  sawLiveInbox: boolean;
   streaming: string;
   liveStatus: SessionStatusKind | null;
   livePendingAsks: PendingAskView[] | null;
@@ -200,6 +206,7 @@ const INITIAL: State = {
   hookEntryIds: {},
   optimistic: [],
   queued: null,
+  sawLiveInbox: false,
   streaming: "",
   liveStatus: null,
   livePendingAsks: null,
@@ -454,7 +461,7 @@ function reducer(state: State, action: Action): State {
       };
     }
     case "seed-queue":
-      return state.queued === null ? { ...state, queued: action.queued } : state;
+      return state.sawLiveInbox ? state : { ...state, queued: action.queued };
     // The durable task list, from the agent document. Same guard shape as
     // `seed-queue`: a live frame is always fresher, so once one has arrived
     // this is a no-op. Without it, a session the server had offloaded came
@@ -530,6 +537,7 @@ function reducer(state: State, action: Action): State {
           return {
             ...state,
             queued,
+            sawLiveInbox: true,
             // A queued message the server now owns is rendered from the queue;
             // dropping the echo here is also what keeps several messages
             // merged into one turn from leaving orphan echoes behind, since

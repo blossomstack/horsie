@@ -81,17 +81,18 @@ export default async function globalSetup(): Promise<void> {
     "---\nname: e2e-skill\ndescription: E2E_SKILL_DESC exercise the workspace skill loader\n---\nDo the workspace thing.\n",
   );
 
-  // Shared plugin library the runtime scans via --plugins-dir (group F): one
-  // plugin providing a shared skill and a SessionStart hook whose stdout becomes
-  // the agent's `# Session bootstrap` block.
-  const pluginsLib = path.join(tmpDir, "plugins-lib");
-  const sharedSkillDir = path.join(pluginsLib, "e2e-plugin", "skills", "e2e-shared-skill");
+  // A bundle installed into the server and marked default-for-new-sessions, so
+  // every session's runtime fetches it (group F): one plugin providing a shared
+  // skill and a SessionStart hook whose stdout becomes the agent's
+  // `# Session bootstrap` block.
+  const pluginRepo = path.join(tmpDir, "e2e-plugin");
+  const sharedSkillDir = path.join(pluginRepo, "skills", "e2e-shared-skill");
   fs.mkdirSync(sharedSkillDir, { recursive: true });
   fs.writeFileSync(
     path.join(sharedSkillDir, "SKILL.md"),
     "---\nname: e2e-shared-skill\ndescription: E2E_SHARED_DESC exercise the shared skill loader\n---\nDo the shared thing.\n",
   );
-  const hooksDir = path.join(pluginsLib, "e2e-plugin", "hooks");
+  const hooksDir = path.join(pluginRepo, "hooks");
   fs.mkdirSync(hooksDir, { recursive: true });
   fs.writeFileSync(
     path.join(hooksDir, "hooks.json"),
@@ -118,6 +119,27 @@ export default async function globalSetup(): Promise<void> {
       },
     }),
   );
+
+  fs.mkdirSync(path.join(pluginRepo, ".claude-plugin"), { recursive: true });
+  fs.writeFileSync(
+    path.join(pluginRepo, ".claude-plugin", "plugin.json"),
+    JSON.stringify({
+      name: "e2e-plugin",
+      version: "0.1.0",
+      description: "E2E fixture: a shared skill and two hooks",
+    }),
+  );
+  const gitInit = (dir: string) => {
+    const run = (args: string[]) =>
+      execFileSync("git", ["-C", dir, ...args], { stdio: "ignore" });
+    run(["init", "-q"]);
+    run(["config", "user.email", "e2e@example.com"]);
+    run(["config", "user.name", "e2e"]);
+    run(["add", "-A"]);
+    run(["commit", "-qm", "init"]);
+  };
+  gitInit(pluginRepo);
+  const pluginUrl = `file://${pluginRepo}`;
 
   // A local git marketplace so group U can exercise the real ingest path —
   // clone, parse the index, resolve an entry, pack — without the network.
@@ -148,13 +170,7 @@ export default async function globalSetup(): Promise<void> {
       ],
     }),
   );
-  const gitIn = (args: string[]) =>
-    execFileSync("git", ["-C", marketDir, ...args], { stdio: "ignore" });
-  gitIn(["init", "-q"]);
-  gitIn(["config", "user.email", "e2e@example.com"]);
-  gitIn(["config", "user.name", "e2e"]);
-  gitIn(["add", "-A"]);
-  gitIn(["commit", "-qm", "init"]);
+  gitInit(marketDir);
   const marketplaceUrl = `file://${marketDir}`;
 
   const configPath = path.join(tmpDir, "config.json");
@@ -228,9 +244,25 @@ export default async function globalSetup(): Promise<void> {
       ],
     });
 
+    // Install the fixture bundle. Deliberately NOT marked default-for-new-
+    // sessions: a selected bundle is fetched and unpacked by the runtime before
+    // the session can take a turn, and paying that on every spec both slows the
+    // suite and makes the composer's send-while-starting race reachable. The
+    // specs that assert on plugin content ask for it via
+    // `createSession(..., { skills: ["e2e-plugin"] })`.
+    log("installing the e2e-plugin bundle");
+    const installed = await fetch(`${baseURL}/api/plugins`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourceUrl: pluginUrl }),
+    });
+    if (!installed.ok) {
+      throw new Error(`installing e2e-plugin: ${installed.status} ${await installed.text()}`);
+    }
+
     // `horsie connect` is the vendor agent: it dials the server and spawns one
-    // `horsie-runtime` per session. The runtime binary and the shared plugin
-    // library reach it through the CLI config, not through flags.
+    // `horsie-runtime` per session. Its skills are the bundles the server hands
+    // each session, which the runtime fetches itself.
     const connectConfig = path.join(scratch, "..", "horsie-connect.json");
     fs.writeFileSync(
       connectConfig,
@@ -238,9 +270,6 @@ export default async function globalSetup(): Promise<void> {
         runtime: { bin: runtimeBin },
         storage: {
           state_dir: path.join(path.dirname(connectConfig), "connect-state"),
-          // Shared plugin library scanned when a session has plugins enabled
-          // (the default), surfacing shared skills + SessionStart bootstrap.
-          plugins_dir: pluginsLib,
         },
       }),
     );

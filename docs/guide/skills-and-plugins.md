@@ -4,11 +4,11 @@ A **skill/plugin bundle** is a package of skills (and optional hooks) that an
 agent can use during a session. You install bundles from git repositories once,
 then select which ones a session loads.
 
-Bundles are provisioned into the sandbox at session start, so they need a
-**provisioning runtime** — the **velos** vendor. The local runtime doesn't
-install server bundles, but it can load skills from a plugin library on its own
-machine — see [Skills on your own machine](#skills-on-your-own-machine-host-library).
-See [Runtime vendors](runtime-vendors.md).
+Every runtime loads bundles the same way, whichever vendor it runs on: it
+fetches the ones its session selected over its own outbound connection at
+startup. That includes the local runtime — see
+[Skills on your own machine](#skills-on-your-own-machine) for where the files
+go there. See [Runtime vendors](runtime-vendors.md).
 
 ## Install a bundle
 
@@ -74,19 +74,23 @@ plugins directory, which does not require it to have built a workspace.
 The same Skills picker sits on an agent preset, so every session that preset
 starts loads the same bundles.
 
-## Skills on your own machine (host library)
+## Skills on your own machine
 
-If you run the **local** vendor (`horsie connect`), the runtime loads skills
-from a plugin library on that machine instead of server bundles:
+The **local** vendor (`horsie connect`) works the same way as any other: its
+skills are the bundles selected for the session, fetched from the server. There
+is no separate library to install into on that machine, and no CLI commands that
+manage one.
 
-1. Install plugins with the CLI: `horsie plugin install <git-url>`
-   (`horsie plugin list` / `update` / `remove` manage the library).
-2. Start `horsie connect` as usual — it passes the library to the runtime
-   automatically. The confirmation line shows `plugins: N installed from …`.
+What is different is where the files land. A runtime materializes its session's
+bundles into a directory of its own under the CLI's state dir, once, when the
+runtime is created. Restarting the runtime — which horsie does on its own, when
+a session that was idle long enough comes back — reuses what is already there
+rather than downloading it again. Deleting the session deletes the directory,
+and anything left by a crash is cleared the next time `horsie connect` starts.
 
-Every session on that runtime then sees the library's skills, and the plugin
-hooks horsie supports run on your machine. Installs and updates are picked up on
-the next session scan — no reconnect needed.
+Change a session's Skills selection and the next runtime it gets materializes
+the new set, replacing the old one. The plugin hooks horsie supports run on your
+machine, under the same sandbox as the rest of the runtime.
 
 horsie runs eight hook events today: `SessionStart` once per agent load and
 `SubagentStart` once per subagent, `UserPromptSubmit` on every prompt and
@@ -179,55 +183,34 @@ horsie reads the repository's own plugin packaging rather than guessing:
   from a subdirectory, this says which one.
 
 A repository whose marketplace lists *several* plugins cannot be installed by
-URL alone, because there is no way to tell which one you meant. On the server,
-pasting its URL registers it as a marketplace and shows you the list; from the
-CLI, add it as a marketplace and install by name (see below) — the error lists
-the available names.
+URL alone, because there is no way to tell which one you meant. Pasting its URL
+registers it as a marketplace instead and shows you the list, so you can pick.
 
 ### Marketplaces
 
 Some repositories are *marketplaces*: they carry an index of plugins rather than
-a plugin. Add one once, then install from it by name:
+a plugin. Add one in **Settings → Skills** by pasting its URL, and horsie
+records it as a catalogue you can then install from by name. The row shows how
+many plugins it offers, refreshes its index on demand, and can be removed.
 
-```
-horsie marketplace add https://github.com/anthropics/claude-plugins-public
-horsie marketplace show claude-plugins-public
-horsie plugin install agent-sdk-dev@claude-plugins-public
-```
-
-`horsie marketplace list` shows what you have added and how many plugins each
-offers; `update` pulls a fresh index; `remove` drops it.
-
-The CLI's marketplaces and the server's are separate registries: one is
-per-user on a machine, the other is shared server state. They share the same
-resolution rules and the same semantics, not the same rows.
-
-Removing a marketplace does **not** uninstall plugins you installed from it —
-dropping a source is not dropping the software. Use `horsie plugin remove` for
-that.
+Removing a marketplace does **not** uninstall plugins installed from it —
+dropping a source is not dropping the software.
 
 An index entry may point at a different repository than the marketplace itself
 (most entries in the public marketplace do). horsie clones whatever the entry
 names, at the ref it pins, and installs the subdirectory it declares.
 
-Since `<plugin>@<marketplace>` and a git URL are both just text, horsie treats
-an argument as a marketplace reference only when both halves are plain lowercase
-names — so `git@github.com:you/your-plugin.git` is always read as a URL.
+### How bundles reach a session
 
-### How the library is stored
+The server stores each installed plugin as a content-addressed zip. When a
+session's runtime starts, the server hands it the list of `{name, hash}` refs
+that session selected plus a short-lived token, and the runtime fetches each zip
+over its own outbound connection, checks the hash, and unpacks it into a
+directory of its own.
 
-Installed plugins are symlinks into a shared clone under `<data-dir>/sources`,
-one clone per repository and ref. So `horsie plugin update` is a fast-forward
-pull rather than a fresh clone, and two plugins published from one repository
-share a single working copy. `horsie plugin remove` deletes the link and drops
-the clone once nothing else points at it.
-
-This is all-or-none: the whole library applies to every session on the runtime.
-
-**A session that selects server bundles gets exactly those, and the host library
-does not apply to it.** Selecting nothing leaves the host library in place. So
-the library is the default for sessions that express no preference, and an
-explicit selection replaces it rather than adding to it.
+That directory belongs to one runtime. A session sees exactly the bundles it
+selected and never another session's, and the whole thing is deleted when the
+session is.
 
 > Hooks execute with the runtime's privileges on your machine, and they are not
 > only observers: a `PreToolUse` hook can deny a tool call or rewrite its input

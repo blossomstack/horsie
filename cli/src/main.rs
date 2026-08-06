@@ -9,19 +9,19 @@
 )]
 
 use clap::{Parser, Subcommand};
-use horsie::agent::{self, truncate};
+use horsie::agent;
 use horsie::config::HorsieConfig;
 use horsie::connect;
 use horsie::error::CliError;
 use horsie::session::{self, EventsMode};
 use horsie::workflow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
     name = "horsie",
     version,
-    about = "Session-server client: run this machine as a runtime vendor, tail sessions, and manage the plugin library"
+    about = "Session-server client: run this machine as a runtime vendor, and inspect sessions, agents and workflows"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -30,16 +30,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Manage marketplaces — repos that index plugins you can install by name.
-    Marketplace {
-        #[command(subcommand)]
-        action: MarketplaceAction,
-    },
-    /// Manage the shared plugin library (skills + SessionStart hooks for runtimes).
-    Plugin {
-        #[command(subcommand)]
-        action: PluginAction,
-    },
     /// Log in to a session server so other commands can reach it.
     Auth {
         #[command(subcommand)]
@@ -319,211 +309,8 @@ impl ConfigKey {
     }
 }
 
-#[derive(Subcommand)]
-enum MarketplaceAction {
-    /// Add a marketplace by cloning its repo and reading its plugin index.
-    Add {
-        /// Git URL of the marketplace repo.
-        url: String,
-        /// Registered name (default: the index's own name, else the repo basename).
-        #[arg(long)]
-        name: Option<String>,
-        /// Git ref/branch to check out.
-        #[arg(long = "ref")]
-        git_ref: Option<String>,
-        /// Re-add over an existing marketplace of the same name.
-        #[arg(long)]
-        force: bool,
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-    /// List added marketplaces.
-    List {
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-    /// List the plugins a marketplace offers.
-    Show {
-        name: String,
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-    /// Update a marketplace's index (git pull).
-    Update {
-        name: String,
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-    /// Remove a marketplace. Plugins installed from it stay installed.
-    Remove {
-        name: String,
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-}
-
-#[derive(Subcommand)]
-enum PluginAction {
-    /// Install a plugin by cloning its git repo into the shared library.
-    Install {
-        /// Git URL of the plugin repo, or `<plugin>@<marketplace>` to install
-        /// from a marketplace added with `horsie marketplace add`.
-        target: String,
-        /// Install name (default: derived from the URL).
-        #[arg(long)]
-        name: Option<String>,
-        /// Git ref/branch to check out.
-        #[arg(long = "ref")]
-        git_ref: Option<String>,
-        /// Reinstall over an existing plugin of the same name.
-        #[arg(long)]
-        force: bool,
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-    /// List installed plugins.
-    List {
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-    /// Update an installed plugin (git pull).
-    Update {
-        name: String,
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-    /// Remove an installed plugin.
-    Remove {
-        name: String,
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-}
-
-/// Resolve the plugin library paths from config: the symlink farm
-/// (`storage.plugins_dir`) and the shared clones (`<data_dir>/sources`).
-fn resolve_plugin_paths(config: Option<&Path>) -> Result<horsie::plugins::PluginPaths, CliError> {
-    let cfg = HorsieConfig::resolve(config)?;
-    Ok(horsie::plugins::PluginPaths {
-        sources: cfg.storage.data_dir.join("sources"),
-        marketplaces: cfg.storage.data_dir.join("marketplaces"),
-        plugins: cfg.storage.plugins_dir,
-    })
-}
-
 async fn dispatch(command: Command) -> Result<i32, CliError> {
     match command {
-        Command::Marketplace { action } => match action {
-            MarketplaceAction::Add {
-                url,
-                name,
-                git_ref,
-                force,
-                config,
-            } => {
-                let paths = resolve_plugin_paths(config.as_deref())?;
-                let added = horsie::marketplace::add(&paths, &url, name, git_ref, force)?;
-                println!("added marketplace '{added}'");
-                Ok(0)
-            }
-            MarketplaceAction::List { config } => {
-                let paths = resolve_plugin_paths(config.as_deref())?;
-                let markets = horsie::marketplace::list(&paths);
-                if markets.is_empty() {
-                    println!("no marketplaces added");
-                } else {
-                    println!("{:<24} {:>7}  SOURCE", "NAME", "PLUGINS");
-                    for m in markets {
-                        println!("{:<24} {:>7}  {}", m.name, m.plugin_count, m.source);
-                    }
-                }
-                Ok(0)
-            }
-            MarketplaceAction::Show { name, config } => {
-                let paths = resolve_plugin_paths(config.as_deref())?;
-                let plugins = horsie::marketplace::show(&paths, &name)?;
-                if plugins.is_empty() {
-                    println!("marketplace '{name}' offers no plugins");
-                } else {
-                    println!("{:<28} {:<10} DESCRIPTION", "NAME", "VERSION");
-                    for p in plugins {
-                        println!(
-                            "{:<28} {:<10} {}",
-                            p.name,
-                            p.version.as_deref().unwrap_or("-"),
-                            truncate(p.description.as_deref().unwrap_or(""), 60)
-                        );
-                    }
-                }
-                Ok(0)
-            }
-            MarketplaceAction::Update { name, config } => {
-                let paths = resolve_plugin_paths(config.as_deref())?;
-                horsie::marketplace::update(&paths, &name)?;
-                println!("updated marketplace '{name}'");
-                Ok(0)
-            }
-            MarketplaceAction::Remove { name, config } => {
-                let paths = resolve_plugin_paths(config.as_deref())?;
-                horsie::marketplace::remove(&paths, &name)?;
-                println!("removed marketplace '{name}'");
-                Ok(0)
-            }
-        },
-        Command::Plugin { action } => match action {
-            PluginAction::Install {
-                target,
-                name,
-                git_ref,
-                force,
-                config,
-            } => {
-                let paths = resolve_plugin_paths(config.as_deref())?;
-                let target = horsie::plugins::InstallTarget::parse(&target);
-                let installed = horsie::plugins::install(&paths, &target, name, git_ref, force)?;
-                println!(
-                    "installed plugin '{installed}' into {}",
-                    paths.plugins.display()
-                );
-                // Its skills are installed and will work; a hook horsie cannot
-                // fire must not simply go quiet, which is the whole point of
-                // classifying events rather than ignoring unknown ones.
-                for reason in horsie::plugins::hook_report(&paths.plugins.join(&installed)) {
-                    eprintln!("warning: {reason}");
-                }
-                Ok(0)
-            }
-            PluginAction::List { config } => {
-                let paths = resolve_plugin_paths(config.as_deref())?;
-                let plugins = horsie::plugins::list(&paths);
-                if plugins.is_empty() {
-                    println!("no plugins installed");
-                } else {
-                    println!("{:<24} {:<10} SOURCE", "NAME", "VERSION");
-                    for p in plugins {
-                        println!(
-                            "{:<24} {:<10} {}",
-                            p.name,
-                            p.version.as_deref().unwrap_or("-"),
-                            p.source
-                        );
-                    }
-                }
-                Ok(0)
-            }
-            PluginAction::Update { name, config } => {
-                let paths = resolve_plugin_paths(config.as_deref())?;
-                horsie::plugins::update(&paths, &name)?;
-                println!("updated plugin '{name}'");
-                Ok(0)
-            }
-            PluginAction::Remove { name, config } => {
-                let paths = resolve_plugin_paths(config.as_deref())?;
-                horsie::plugins::remove(&paths, &name)?;
-                println!("removed plugin '{name}'");
-                Ok(0)
-            }
-        },
         Command::Auth { action } => match action {
             AuthAction::Login {
                 server,
@@ -681,16 +468,11 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 .bin
                 .clone()
                 .unwrap_or_else(connect::default_runtime_bin);
-            let (plugins_dir, hook_path) = horsie::plugins::library_for_runtime(
-                &cfg.storage.plugins_dir,
-                cfg.runtime.hook_path.clone(),
+            let hook_path = connect::resolve_hook_path(cfg.runtime.hook_path.clone());
+            println!(
+                "note: skills now come from the server per session; a local \
+                 plugin library is no longer read and can be deleted"
             );
-            let sources = cfg.storage.data_dir.join("sources");
-            let plugins = plugins_dir.map(|dir| connect::PluginLibrary {
-                dir,
-                sources: Some(sources),
-                hook_path,
-            });
             connect::run(
                 &runtime_bin,
                 &server,
@@ -698,7 +480,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 &name,
                 background,
                 &cfg.storage.state_dir,
-                plugins,
+                hook_path,
                 !no_sandbox,
             )
             .await

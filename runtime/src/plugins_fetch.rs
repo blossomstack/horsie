@@ -1,19 +1,28 @@
 //! Fetch the session's selected plugin bundles at startup and unpack them into
 //! a plugins dir the existing scanner reads. The server injects a manifest of
 //! `{name, hash}` refs plus a bearer token via env, and the vendor agent adds
-//! the base URL its runtimes can reach the server at; the runtime GETs each zip
-//! over its own outbound connection, verifies the content hash, and
-//! materializes the tree.
+//! the base URL its runtimes can reach the server at plus the directory to
+//! unpack into; the runtime GETs each zip over its own outbound connection,
+//! verifies the content hash, and materializes the tree.
+//!
+//! Materialization happens once per runtime, not once per process. The
+//! directory records the manifest it was built from, and a start that finds a
+//! matching record does nothing — which is what makes a hibernated runtime's
+//! respawn free, and keeps it from presenting an artifact token that has since
+//! expired.
 //!
 //! Fully best-effort: any failure is logged and skipped, so a session never
 //! fails to start because a bundle was unavailable — it just runs without it.
 
-use horsie_models::{
-    ENV_PLUGIN_MANIFEST, ENV_PLUGINS_BASE, ENV_PLUGINS_CACHE, ENV_PLUGINS_DIR, ENV_PLUGINS_TOKEN,
-};
+use horsie_models::{ENV_PLUGIN_MANIFEST, ENV_PLUGINS_BASE, ENV_PLUGINS_DIR, ENV_PLUGINS_TOKEN};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+/// Records the manifest a plugins dir was last materialized from. A plain file,
+/// so `plugin_dirs` — which keeps only entries that are directories — never
+/// mistakes it for a plugin.
+const MARKER: &str = ".manifest.json";
 
 #[derive(Deserialize)]
 struct ArtifactRef {
@@ -35,26 +44,24 @@ impl ArtifactRef {
 }
 
 /// Read the plugin manifest from the environment and materialize the bundles.
-/// Returns the plugins dir when ≥1 bundle landed (to use as `plugins_dir`), or
-/// `None` when there is nothing to provision or nothing succeeded.
+/// Returns the plugins dir whenever the manifest named anything, whether or not
+/// every bundle landed: there is no host library left to fall back to, so the
+/// distinction no longer decides anything.
 pub async fn provision_plugins() -> Option<PathBuf> {
     let manifest = std::env::var(ENV_PLUGIN_MANIFEST).ok()?;
     let dir = PathBuf::from(std::env::var(ENV_PLUGINS_DIR).ok()?);
     let base = std::env::var(ENV_PLUGINS_BASE).ok()?;
     let token = std::env::var(ENV_PLUGINS_TOKEN).ok();
-    let cache = std::env::var(ENV_PLUGINS_CACHE).ok().map(PathBuf::from);
-    provision_into(&manifest, &base, &dir, token.as_deref(), cache.as_deref()).await
+    provision_into(&manifest, &base, &dir, token.as_deref()).await
 }
 
 /// Env-free core (so tests need not touch process env): parse the manifest,
-/// fetch/verify/unpack each bundle into `dir`, using `cache` as a content-hash
-/// unpack cache when provided.
+/// then fetch/verify/unpack each bundle into `dir`.
 async fn provision_into(
     manifest: &str,
     base: &str,
     dir: &Path,
     token: Option<&str>,
-    cache: Option<&Path>,
 ) -> Option<PathBuf> {
     let refs: Vec<ArtifactRef> = match serde_json::from_str(manifest) {
         Ok(r) => r,
@@ -66,10 +73,16 @@ async fn provision_into(
     if refs.is_empty() {
         return None;
     }
+    if already_materialized(dir, manifest) {
+        return Some(dir.to_path_buf());
+    }
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("plugins: cannot create plugins dir {}: {e}", dir.display());
         return None;
     }
+    // Whatever a previous manifest left behind is not what this session
+    // selected, and the scanner reads the whole directory.
+    clear_dir(dir);
     let client = match reqwest::Client::builder().build() {
         Ok(c) => c,
         Err(e) => {
@@ -77,14 +90,48 @@ async fn provision_into(
             return None;
         }
     };
-    let mut any = false;
+    let mut complete = true;
     for r in &refs {
-        match materialize(&client, r, base, dir, token, cache).await {
-            Ok(()) => any = true,
-            Err(e) => eprintln!("plugins: skipping bundle '{}': {e}", r.name),
+        if let Err(e) = materialize(&client, r, base, dir, token).await {
+            eprintln!("plugins: skipping bundle '{}': {e}", r.name);
+            complete = false;
         }
     }
-    any.then(|| dir.to_path_buf())
+    // Only a complete run earns the marker. A partial one must be retried on
+    // the next start rather than frozen in place for the session's whole life.
+    if !complete {
+        return Some(dir.to_path_buf());
+    }
+    if let Err(e) = std::fs::write(dir.join(MARKER), manifest) {
+        eprintln!("plugins: cannot record the manifest: {e}");
+    }
+    Some(dir.to_path_buf())
+}
+
+/// Empty `dir` without removing `dir` itself.
+///
+/// The distinction is load-bearing under a sandbox. This directory is the unit
+/// the vendor granted, and it is granted by path: removing it and making a new
+/// one needs a write on the *parent*, which this runtime has no grant for. So a
+/// `remove_dir_all` here fails the whole provision — silently, since fetching is
+/// best-effort — and the session comes up with no skills.
+fn clear_dir(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
+}
+
+/// Whether `dir` was already built from exactly this manifest.
+fn already_materialized(dir: &Path, manifest: &str) -> bool {
+    std::fs::read_to_string(dir.join(MARKER)).is_ok_and(|recorded| recorded == manifest)
 }
 
 async fn materialize(
@@ -93,17 +140,7 @@ async fn materialize(
     base: &str,
     dir: &Path,
     token: Option<&str>,
-    cache: Option<&Path>,
 ) -> Result<(), String> {
-    let dest = dir.join(&r.name);
-    // Cache hit: link from the shared content-hash cache (local vendor).
-    if let Some(cache) = cache {
-        let cached = cache.join(&r.hash);
-        if cached.is_dir() {
-            copy_dir(&cached, &dest)?;
-            return Ok(());
-        }
-    }
     let mut req = client.get(r.url(base));
     if let Some(t) = token {
         req = req.bearer_auth(t);
@@ -117,15 +154,7 @@ async fn materialize(
     if got != r.hash {
         return Err(format!("hash mismatch (want {}, got {got})", r.hash));
     }
-    match cache {
-        Some(cache) => {
-            let cached = cache.join(&r.hash);
-            unpack_zip(&bytes, &cached)?;
-            copy_dir(&cached, &dest)?;
-        }
-        None => unpack_zip(&bytes, &dest)?,
-    }
-    Ok(())
+    unpack_zip(&bytes, &dir.join(&r.name))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -152,21 +181,6 @@ fn unpack_zip(bytes: &[u8], into: &Path) -> Result<(), String> {
             }
             let mut w = std::fs::File::create(&out).map_err(|e| e.to_string())?;
             std::io::copy(&mut file, &mut w).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-            copy_dir(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -222,7 +236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provision_fetches_verifies_and_unpacks() {
+    async fn provision_fetches_verifies_unpacks_and_marks() {
         let bytes = make_zip();
         let hash = sha256_hex(&bytes);
         let base = serve_once(bytes);
@@ -230,9 +244,89 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("plugins");
-        let out = provision_into(&manifest, &base, &dir, Some("tok"), None).await;
+        let out = provision_into(&manifest, &base, &dir, Some("tok")).await;
         assert_eq!(out.as_deref(), Some(dir.as_path()));
         assert!(dir.join("demo/skills/a/SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(MARKER)).unwrap(),
+            manifest,
+            "a complete materialization records what it was built from"
+        );
+    }
+
+    /// The whole point of the marker: a respawned runtime must not re-fetch.
+    /// The base points at a port nothing listens on, so any fetch attempt would
+    /// fail — and the sentinel file proves the directory was never cleared.
+    #[tokio::test]
+    async fn a_matching_marker_skips_the_fetch_entirely() {
+        let manifest = serde_json::json!([{ "name": "demo", "hash": "abc" }]).to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(dir.join("demo")).unwrap();
+        std::fs::write(dir.join("demo/sentinel"), b"kept").unwrap();
+        std::fs::write(dir.join(MARKER), &manifest).unwrap();
+
+        let out = provision_into(&manifest, "http://127.0.0.1:1", &dir, None).await;
+        assert_eq!(out.as_deref(), Some(dir.as_path()));
+        assert!(dir.join("demo/sentinel").is_file());
+    }
+
+    /// A different selection is not a merge: what the last manifest left has to
+    /// go, or the session scans skills it did not select.
+    #[tokio::test]
+    async fn a_changed_manifest_clears_the_directory() {
+        let bytes = make_zip();
+        let hash = sha256_hex(&bytes);
+        let base = serve_once(bytes);
+        let manifest = serde_json::json!([{ "name": "demo", "hash": hash }]).to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(dir.join("stale")).unwrap();
+        std::fs::write(dir.join("stale/SKILL.md"), b"old").unwrap();
+        std::fs::write(dir.join(MARKER), b"[{\"name\":\"stale\",\"hash\":\"old\"}]").unwrap();
+
+        let before = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&dir).unwrap());
+        provision_into(&manifest, &base, &dir, None).await;
+        assert!(
+            !dir.join("stale").exists(),
+            "the previous selection is gone"
+        );
+        assert!(dir.join("demo/skills/a/SKILL.md").is_file());
+        // The directory itself must survive: it is what the sandbox grants, by
+        // path, and re-creating it needs a write on the parent the runtime has
+        // no grant for. Removing it makes every sandboxed provision fail — and
+        // fail silently, because fetching is best-effort.
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&dir).unwrap()),
+            before,
+            "the granted directory was replaced rather than emptied"
+        );
+    }
+
+    /// No marker after a partial run, so the next start retries. Today a bundle
+    /// that fails once is lost for the life of the session.
+    #[tokio::test]
+    async fn a_partial_materialization_writes_no_marker() {
+        let bytes = make_zip();
+        let hash = sha256_hex(&bytes);
+        // The stub serves exactly one request, so the second ref cannot be
+        // fetched at all.
+        let base = serve_once(bytes);
+        let manifest = serde_json::json!([
+            { "name": "first", "hash": hash },
+            { "name": "second", "hash": "deadbeef" },
+        ])
+        .to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plugins");
+        let out = provision_into(&manifest, &base, &dir, None).await;
+
+        assert_eq!(out.as_deref(), Some(dir.as_path()));
+        assert!(dir.join("first/skills/a/SKILL.md").is_file());
+        assert!(!dir.join("second").exists());
+        assert!(!dir.join(MARKER).exists(), "a partial run must be retried");
     }
 
     #[tokio::test]
@@ -242,9 +336,9 @@ mod tests {
         let manifest = serde_json::json!([{ "name": "demo", "hash": "deadbeef" }]).to_string();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("plugins");
-        let out = provision_into(&manifest, &base, &dir, None, None).await;
-        assert!(out.is_none());
+        provision_into(&manifest, &base, &dir, None).await;
         assert!(!dir.join("demo").exists());
+        assert!(!dir.join(MARKER).exists());
     }
 
     #[test]
@@ -263,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn empty_manifest_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
-        let out = provision_into("[]", "http://unused", &tmp.path().join("p"), None, None).await;
+        let out = provision_into("[]", "http://unused", &tmp.path().join("p"), None).await;
         assert!(out.is_none());
     }
 }
