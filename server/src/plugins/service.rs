@@ -10,8 +10,8 @@ use super::store::{PluginRow, PluginStore};
 use super::token;
 use super::{PluginArtifactRef, PluginProvisioner};
 use horsie_models::plugins::{
-    InstallOutcome, MarketplacePluginView, MarketplaceView, PluginDefaultInput, PluginInstallInput,
-    PluginView,
+    CatalogEntryView, InstallOutcome, MarketplacePluginView, MarketplaceView, PluginDefaultInput,
+    PluginInstallInput, PluginView,
 };
 use horsie_support::plugin::source_location;
 use std::sync::Arc;
@@ -53,13 +53,50 @@ impl PluginService {
     }
 
     pub async fn list(&self) -> Result<Vec<PluginView>, String> {
-        Ok(self
-            .store
-            .list()
-            .await?
-            .into_iter()
-            .map(row_to_view)
-            .collect())
+        let mut rows = self.store.list().await?;
+        for row in &mut rows {
+            if row.catalog.is_empty() {
+                self.backfill(row).await;
+            }
+        }
+        Ok(rows.into_iter().map(row_to_view).collect())
+    }
+
+    /// Re-derive a bundle's catalogue from the artifact it was installed from.
+    ///
+    /// A row installed before catalogues existed has none, and SQL cannot open
+    /// a zip — but the bytes are still on disk, addressed by a hash the row
+    /// already carries. Doing it here rather than in a migration also
+    /// self-heals a column that was somehow lost, and costs one unzip per
+    /// bundle per server lifetime.
+    ///
+    /// Best-effort throughout: a bundle whose artifact has been collected stays
+    /// empty rather than failing a list nobody could then repair.
+    async fn backfill(&self, row: &mut PluginRow) {
+        let path = self.artifacts.path(&row.artifact_hash);
+        let Ok(bytes) = std::fs::read(&path) else {
+            tracing::warn!(plugin = %row.name, "no artifact to catalogue from");
+            return;
+        };
+        let Ok(tmp) = tempfile::tempdir() else {
+            return;
+        };
+        if let Err(e) = super::ingest::unpack_zip(&bytes, tmp.path()) {
+            tracing::warn!(plugin = %row.name, error = %e, "unreadable artifact");
+            return;
+        }
+        let Ok(root) = horsie_support::plugin::PluginRoot::inspect(tmp.path()) else {
+            return;
+        };
+        let catalog = horsie_support::plugin::catalog::build(&root);
+        if catalog.is_empty() {
+            return;
+        }
+        row.catalog = catalog;
+        if let Err(e) = self.store.upsert(row).await {
+            // The read still succeeds; only the cache of it failed.
+            tracing::warn!(plugin = %row.name, error = %e, "could not persist catalogue");
+        }
     }
 
     /// Install a bundle, or register the catalogue a URL turned out to be.
@@ -330,7 +367,7 @@ impl PluginService {
             source_subpath: bundle.subpath,
             version: bundle.version,
             description: bundle.description,
-            skill_count: bundle.skill_count,
+            catalog: bundle.catalog,
             has_hooks: bundle.has_hooks,
             artifact_hash: bundle.hash,
             artifact_size: bundle.zip_bytes.len() as u64,
@@ -417,11 +454,27 @@ fn row_to_view(row: PluginRow) -> PluginView {
         version: row.version,
         source_url: row.source_url,
         source_ref: row.source_ref,
-        skill_count: row.skill_count,
+        catalog: row.catalog.into_iter().map(entry_to_view).collect(),
         has_hooks: row.has_hooks,
         enabled_default: row.enabled_default,
         artifact_size: row.artifact_size,
         marketplace: row.marketplace,
+    }
+}
+
+/// Drop the template on the way out. The server expands, so no client needs a
+/// command's body — and `code-review.md` alone runs past a page.
+fn entry_to_view(entry: horsie_support::plugin::catalog::CatalogEntry) -> CatalogEntryView {
+    CatalogEntryView {
+        kind: match entry.kind {
+            horsie_support::plugin::catalog::CatalogKind::Command => "command",
+            horsie_support::plugin::catalog::CatalogKind::Skill => "skill",
+            horsie_support::plugin::catalog::CatalogKind::Agent => "agent",
+        }
+        .to_string(),
+        name: entry.name,
+        description: entry.description,
+        argument_hint: entry.argument_hint,
     }
 }
 
@@ -478,7 +531,11 @@ mod tests {
     fn write_skill(dir: &Path, name: &str) {
         let s = dir.join("skills").join(name);
         std::fs::create_dir_all(&s).unwrap();
-        std::fs::write(s.join("SKILL.md"), format!("---\nname: {name}\n---\nbody")).unwrap();
+        std::fs::write(
+            s.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: d\n---\nbody"),
+        )
+        .unwrap();
     }
 
     fn commit_repo(root: &Path) -> String {
@@ -543,13 +600,89 @@ mod tests {
         .unwrap();
         let d = root.join("skills").join("a");
         std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("SKILL.md"), "---\nname: a\n---\nx").unwrap();
+        std::fs::write(d.join("SKILL.md"), "---\nname: a\ndescription: d\n---\nx").unwrap();
         git(root, &["init", "-q"]);
         git(root, &["config", "user.email", "t@t"]);
         git(root, &["config", "user.name", "t"]);
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", "init"]);
         format!("file://{}", root.display())
+    }
+
+    /// A bundle's entries reach the client; a command's body does not. The
+    /// server expands, so shipping templates would be waste — `code-review.md`
+    /// alone runs past a page.
+    #[tokio::test]
+    async fn a_view_carries_the_catalogue_without_templates() {
+        let (svc, _artifacts, tmp) = service().await;
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let url = fixture_repo(&repo);
+        std::fs::create_dir_all(repo.join("commands")).unwrap();
+        std::fs::write(
+            repo.join("commands/review.md"),
+            "---\ndescription: reviews a file\nargument-hint: <path>\n---\nReview $1 for bugs",
+        )
+        .unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "cmd"]);
+
+        expect_installed(svc.install(url_input(&url)).await.unwrap());
+        let listed = svc.list().await.unwrap();
+        let view = listed.iter().find(|v| v.name == "demo").unwrap();
+
+        let review = view.catalog.iter().find(|e| e.name == "review").unwrap();
+        assert_eq!(review.kind, "command");
+        assert_eq!(review.description, "reviews a file");
+        assert_eq!(review.argument_hint.as_deref(), Some("<path>"));
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(
+            !json.contains("Review $1 for bugs"),
+            "the template must not reach a client: {json}"
+        );
+    }
+
+    /// A row installed before catalogues existed has none, and SQL cannot open
+    /// a zip. The bytes are still on disk, so reading the list re-derives it.
+    #[tokio::test]
+    async fn a_null_catalogue_is_backfilled_from_the_artifact() {
+        let (svc, _artifacts, tmp) = service().await;
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let url = fixture_repo(&repo);
+        expect_installed(svc.install(url_input(&url)).await.unwrap());
+
+        // Forget it, the way an older row would have arrived.
+        let mut row = svc.store.get("demo").await.unwrap().unwrap();
+        row.catalog = Vec::new();
+        svc.store.upsert(&row).await.unwrap();
+        assert!(
+            svc.store
+                .get("demo")
+                .await
+                .unwrap()
+                .unwrap()
+                .catalog
+                .is_empty()
+        );
+
+        let listed = svc.list().await.unwrap();
+        let view = listed.iter().find(|v| v.name == "demo").unwrap();
+        assert_eq!(
+            view.catalog.iter().filter(|e| e.kind == "skill").count(),
+            1,
+            "the list re-derives what the column lost"
+        );
+        assert!(
+            !svc.store
+                .get("demo")
+                .await
+                .unwrap()
+                .unwrap()
+                .catalog
+                .is_empty(),
+            "and persists it, so the next read is free"
+        );
     }
 
     #[tokio::test]
@@ -561,7 +694,7 @@ mod tests {
 
         let view = expect_installed(svc.install(url_input(&url)).await.unwrap());
         assert_eq!(view.name, "demo");
-        assert_eq!(view.skill_count, 1);
+        assert_eq!(view.catalog.iter().filter(|e| e.kind == "skill").count(), 1);
 
         // Artifact resolves + is fetchable-by-hash; token authorizes it.
         let refs = svc.resolve(&["demo".into()]).await.unwrap();
@@ -631,7 +764,7 @@ mod tests {
 
         let v = expect_installed(svc.install(pick("catalogue", "beta")).await.unwrap());
         assert_eq!(v.name, "beta");
-        assert_eq!(v.skill_count, 1);
+        assert_eq!(v.catalog.iter().filter(|e| e.kind == "skill").count(), 1);
         assert_eq!(v.marketplace.as_deref(), Some("catalogue"));
 
         // The picker now knows not to offer it again.
@@ -778,6 +911,6 @@ mod tests {
 
         let v = svc.update("beta").await.unwrap();
         assert_eq!(v.marketplace.as_deref(), Some("catalogue"));
-        assert_eq!(v.skill_count, 1);
+        assert_eq!(v.catalog.iter().filter(|e| e.kind == "skill").count(), 1);
     }
 }

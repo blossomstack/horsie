@@ -1076,7 +1076,7 @@ mod tests {
         std::fs::create_dir_all(repo.join("skills").join("a")).unwrap();
         std::fs::write(
             repo.join("skills").join("a").join("SKILL.md"),
-            "---\nname: a\n---\nx",
+            "---\nname: a\ndescription: d\n---\nx",
         )
         .unwrap();
         let git = |args: &[&str]| {
@@ -1122,7 +1122,7 @@ mod tests {
             panic!("a plain bundle repo installs rather than registering a source");
         };
         assert_eq!(view.name, "demo");
-        assert_eq!(view.skill_count, 1);
+        assert_eq!(view.catalog.iter().filter(|e| e.kind == "skill").count(), 1);
 
         // Listed.
         let res = app.clone().oneshot(get("/api/plugins")).await.unwrap();
@@ -1166,7 +1166,11 @@ mod tests {
         for entry in ["alpha", "beta"] {
             let d = repo.join("plugins").join(entry).join("skills").join(entry);
             std::fs::create_dir_all(&d).unwrap();
-            std::fs::write(d.join("SKILL.md"), format!("---\nname: {entry}\n---\nx")).unwrap();
+            std::fs::write(
+                d.join("SKILL.md"),
+                format!("---\nname: {entry}\ndescription: d\n---\nx"),
+            )
+            .unwrap();
         }
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
