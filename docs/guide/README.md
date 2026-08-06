@@ -8,9 +8,8 @@ you can close the tab, reconnect, and pick up where you left off.
 
 This guide covers horsie server only. It does **not** cover the separate
 `horsie` CLI — that is a different tool. Today `horsie` is a session-server
-client: `horsie connect` runs this machine as a runtime vendor,
-`horsie session tail` streams session events, and `horsie plugin` manages the
-shared plugin library.
+client: `horsie connect` runs this machine as a runtime vendor and
+`horsie session tail` streams session events.
 
 ## What you can do
 

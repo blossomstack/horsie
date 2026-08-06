@@ -52,8 +52,14 @@ That's the whole file. Notably, **providers, models, velos vendors, the default
 vendor, GitHub, MCP servers, and skill bundles are not here** — they live in the
 database and are managed from the UI. The CLI reads one CLI-owned key,
 `default_server`, which the server ignores. Old files that still set the removed
-`storage.plugins_dir` or `runtime.hook_path` keys keep parsing — the keys are
-ignored (skill bundles are managed from the UI now).
+`storage.plugins_dir` key keep parsing — nothing reads it now that skill bundles
+are managed from the UI.
+
+The two sides read different keys out of the same file. The server owns
+`storage.data_dir` (above); the CLI reads only `storage.state_dir`,
+`runtime.bin`, `runtime.hook_path` and `default_server`, and ignores the rest.
+`runtime.hook_path` names the directories `horsie connect` puts on PATH for
+plugin hooks, and is still honoured.
 
 ## Command-line flags
 

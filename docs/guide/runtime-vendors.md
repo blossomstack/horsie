@@ -100,10 +100,10 @@ agent disconnects, and within 45 seconds if the machine vanishes without
 hanging up (a closed laptop, a dropped VPN); the agent heartbeats every 15
 seconds so the server can tell the two apart.
 
-**What it does not do:** check out GitHub repos, or install server-managed skill
-bundles per session. It *can* load skills from a plugin library you install with
-`horsie plugin install` — see
-[Skills & plugins](skills-and-plugins.md#skills-on-your-own-machine-host-library).
+**What it does not do:** check out GitHub repos. It *does* load the skill
+bundles a session selects — the runtime fetches them itself, which needs no
+workspace to have been provisioned — see
+[Skills & plugins](skills-and-plugins.md#skills-on-your-own-machine).
 
 ## `horsie-velos-runtime` — managed container runtimes
 
