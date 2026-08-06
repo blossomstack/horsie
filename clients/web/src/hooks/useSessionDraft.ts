@@ -83,7 +83,8 @@ export interface WorkflowChannel {
 export interface SessionDraft extends ConfigDraft, RuntimeChannel, WorkflowChannel {
   canSend: boolean;
   blockedReason: string | null;
-  buildRequest: () => CreateSessionRequest;
+  /** A session is created with its first message; there is no create-only call. */
+  buildRequest: (message: string) => CreateSessionRequest;
   /** The same channels as a workflow run. Only meaningful when `workflow` is set. */
   buildRunRequest: (input: string) => WorkflowRunRequest;
 }
@@ -203,9 +204,10 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
         }))
       : [];
 
-  const buildRequest = (): CreateSessionRequest => {
+  const buildRequest = (message: string): CreateSessionRequest => {
     const repos = repoList();
     return {
+      message,
       agent: {
         model: draft.model.trim(),
         usePlugins: provisions ? true : undefined,

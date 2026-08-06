@@ -140,7 +140,7 @@ All routes under `/api` (axum):
 
 | Route | Purpose |
 |---|---|
-| `POST /api/sessions` | Create from `CreateSessionRequest { name?, spec }` → `201 Session`; provisioning async |
+| `POST /api/sessions` | Create from `CreateSessionRequest { name?, spec, message }` → `201 Session`; the first message is required and queued by the create; provisioning async |
 | `GET /api/sessions` | List all sessions, every state |
 | `GET /api/sessions/{id}` | Detail: spec, status, `last_error`, timestamps |
 | `POST /api/sessions/{id}/messages` | Send user message → `202`; output arrives via SSE; `409` if `Running`/`Provisioning` |

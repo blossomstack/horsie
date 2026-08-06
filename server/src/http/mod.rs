@@ -511,10 +511,11 @@ mod tests {
     async fn create_list_get_message_lifecycle_over_http() {
         let tmp = tempfile::tempdir().unwrap();
         let app = app(test_state(&tmp).await);
-        // create
+        // create — with the first message, which is the only shape there is
         let body = serde_json::json!({
             "agent": {"model": "mock"},
-            "vendor": "mock"
+            "vendor": "mock",
+            "message": "first"
         });
         let res = app
             .clone()
@@ -683,13 +684,38 @@ mod tests {
         let app = app(test_state(&tmp).await);
         let body = serde_json::json!({
             "agent": {"model": "mock"},
-            "vendor": "mock"
+            "vendor": "mock",
+            "message": "hi"
         });
         let res = app
             .oneshot(post_json("/api/sessions", &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    /// A session exists to be asked something. Creating one without a message
+    /// used to provision a runtime that nothing would ever reclaim, so the
+    /// field is required and an empty one is not a message.
+    #[tokio::test]
+    async fn a_session_cannot_be_created_without_a_first_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        for body in [
+            serde_json::json!({"agent": {"model": "mock"}, "vendor": "mock"}),
+            serde_json::json!({"agent": {"model": "mock"}, "vendor": "mock", "message": "  "}),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json("/api/sessions", &body))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        }
+        // …and nothing was created on the way to refusing.
+        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let list: ListSessionsResponse = read_json(res).await;
+        assert!(list.sessions.is_empty());
     }
 
     #[tokio::test]
@@ -700,6 +726,7 @@ mod tests {
         let body = serde_json::json!({
             "agent": {"model": "mock"},
             "vendor": "mock",
+            "message": "hi",
             "repos": [
                 {"url": "https://github.com/o/api.git"},
                 {"url": "https://github.com/o/web", "gitRef": "dev"}
@@ -729,7 +756,9 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/sessions",
-                &serde_json::json!({ "agent": { "model": "mock" }, "vendor": "mock" }),
+                &serde_json::json!({
+                    "agent": { "model": "mock" }, "vendor": "mock", "message": "hi"
+                }),
             ))
             .await
             .unwrap();

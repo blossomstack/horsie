@@ -7,11 +7,15 @@
 //! terminal). Everything else — resolving the vendor, assembling the spec,
 //! minting short-lived credentials — happens here.
 //!
-//! **Created once.** [`RuntimeManager::create`] has exactly one caller, at
-//! session creation, and that is the whole of the "provision only once"
-//! guarantee: it is structural, not bookkept. [`RuntimeManager::get`] can
-//! never provision, so no later code path can silently rebuild a workspace the
-//! user believes still exists.
+//! **Created once.** [`RuntimeManager::create`] has exactly one caller — the
+//! session actor that owns the runtime — and [`RuntimeManager::get`] can never
+//! provision, so no later code path can silently rebuild a workspace the user
+//! believes still exists.
+//!
+//! Nothing here waits, and nothing here knows a create is in flight. That
+//! belongs to the session, which journals the attempt and refuses to start a
+//! turn until it has an answer: a wait that survives the process dying
+//! mid-create, which one held in a map beside this manager could not.
 
 use crate::runtime_vendor::{
     RuntimeSpec, RuntimeVendorLink, RuntimeVendorTransport, VendorError, WorkspaceSpec,

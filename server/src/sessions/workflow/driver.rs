@@ -62,6 +62,12 @@ impl WorkflowOrchestrator {
 
 impl Orchestrator for WorkflowOrchestrator {
     fn next_actions(&self, state: &SessionState) -> Vec<AgentAction> {
+        // A run has no first message to hold it back — `AdvanceRun` fires at
+        // load and starts step one by itself — so it needs the same wait a
+        // conversation gets, and for the same reason.
+        if state.status == crate::sessions::spec::SessionStatus::Provisioning {
+            return Vec::new();
+        }
         // A run that has not folded a `StepStarted` yet still reads as
         // `Interactive` — `initial_state` is static and cannot see the spec.
         // This driver is only ever installed on a run, so an absent run means

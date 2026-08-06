@@ -8,7 +8,6 @@ import { SessionConfigBar } from "../components/SessionConfigBar";
 import { useSessionDraft } from "../hooks/useSessionDraft";
 import { useCreateSession } from "../hooks/useSessions";
 import { useRunWorkflow, useWorkflows } from "../hooks/useWorkflows";
-import type { PendingFirstMessageState } from "./SessionView";
 
 export function NewSessionView() {
   // The workflow page's `Run` link arrives with one preselected. A query
@@ -23,9 +22,8 @@ export function NewSessionView() {
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
 
-  // A run is created *with* its input — the first step is handed it, and there
-  // is no conversation to send it into — so unlike a session it needs no
-  // pending-first-message hand-off.
+  // A run is created *with* its input, and so now is a session: both are one
+  // call that starts the work, and neither hands a message to the next view.
   const startRun = async (text: string) => {
     const res = await run.mutateAsync({
       name: draft.workflow,
@@ -34,16 +32,14 @@ export function NewSessionView() {
     navigate(`/sessions/${res.session.id}`);
   };
 
+  // The message rides the create, so there is nothing left to race: the server
+  // queues it into the session's inbox before this call returns, and
+  // SessionView renders it from the session it fetches on mount. What used to
+  // be handed over in router state — and lost on a reload — is now simply
+  // already there.
   const startSession = async (text: string) => {
-    const res = await create.mutateAsync(draft.buildRequest());
-    // Navigate first so SessionView fully mounts (its own session fetch +
-    // live SSE connect) before the first message is sent — sending it here
-    // instead raced the server's async provisioning under CI's slower
-    // scheduling, sometimes leaving the turn stuck. SessionView picks this
-    // up on mount via router state and sends it through the normal
-    // useSendMessage path, same as every later message.
-    const state: PendingFirstMessageState = { pendingFirstMessage: text };
-    navigate(`/sessions/${res.session.id}`, { state });
+    const res = await create.mutateAsync(draft.buildRequest(text));
+    navigate(`/sessions/${res.session.id}`);
   };
 
   const handleSend = async (text: string) => {

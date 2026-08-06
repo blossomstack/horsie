@@ -13,6 +13,15 @@ export type MockResponse =
   | { type: "error"; status: number; message: string }
   | { type: "thinking"; text: string; signature: string };
 
+/**
+ * How long a held-back first answer waits, in milliseconds.
+ *
+ * Long enough for the browser to navigate off the draft, mount the session view
+ * and get both of its streams connected; short enough that a suite of 74 cases
+ * does not notice. Only the tests that watch a turn *while it runs* pay it.
+ */
+export const FIRST_TURN_HOLD_MS = 400;
+
 /** Programs the mock LLM's FIFO response queue over its control plane. */
 export class MockLlm {
   constructor(private readonly url: string) {}
@@ -47,9 +56,20 @@ export class MockLlm {
     return bodies.some((b) => JSON.stringify(b).includes(needle));
   }
 
-  /** Clear the queue + per-session state. Call in beforeEach. */
-  reset(): Promise<void> {
-    return this.post("/reset");
+  /**
+   * Clear the queue + per-session state, and hold this test's first answer.
+   * Call in beforeEach.
+   *
+   * The hold is the default because a session's first turn now starts with the
+   * session itself — the create carries the first message — so with a
+   * zero-latency mock the turn can begin and end while the browser is still
+   * navigating to it. No client could watch that, and a real provider never
+   * behaves that way. Holding the first answer restores the assumption every
+   * case here was written under: the page is subscribed before anything
+   * happens. Pass 0 for a test that genuinely wants the instant case.
+   */
+  reset(holdFirstMs: number = FIRST_TURN_HOLD_MS): Promise<void> {
+    return this.post("/reset", { holdFirstMs });
   }
   queue(r: MockResponse): Promise<void> {
     return this.post("/queue", r);

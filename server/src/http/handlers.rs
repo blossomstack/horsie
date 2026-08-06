@@ -89,10 +89,22 @@ pub(crate) fn summary(
     }
 }
 
+/// Create a session and queue its first message, in that order and in one
+/// call.
+///
+/// The message is not optional. A create-only route provisioned a runtime for
+/// a session nobody had said anything to, and nothing reclaimed it: the idle
+/// sweep only walks *loaded* session actors, and a session that never received
+/// a message never loads. Every other way a session comes into being — an agent
+/// preset, a workflow run, a routine — already creates and messages together;
+/// this makes that the only shape.
 pub async fn create_session(
     Scope(state): Scope,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, Api> {
+    if req.message.trim().is_empty() {
+        return Err(Api::unprocessable("message must not be empty"));
+    }
     let spec = build_session_spec(
         &state.config_store,
         req.name,
@@ -110,6 +122,20 @@ pub async fn create_session(
         reply,
     })
     .await?;
+    // Queued, not run: the runtime is still provisioning behind this call, and
+    // the inbox is what holds a message until it is there. A client that reads
+    // the session back sees its own message in `inbox` before any turn starts.
+    ask(&state, |reply| SessionSupervisorCommand::UserMessage {
+        id: id.clone(),
+        text: req.message,
+        reply,
+    })
+    .await?
+    .map_err(|e| match e {
+        UserMessageError::NotFound => Api::not_found("no such session"),
+        UserMessageError::Unrecoverable(reason) => Api::conflict("unrecoverable", reason),
+        UserMessageError::Rejected(why) => Api::conflict("not-a-conversation", why),
+    })?;
     let rec = SessionRecord {
         spec,
         created_at,
@@ -118,9 +144,9 @@ pub async fn create_session(
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
-            // A freshly created session is loaded and idle; its runtime is
-            // being provisioned in the background.
-            session: summary(&id, &rec, Some(&SessionStatus::Idle)),
+            // A freshly created session is loaded and building its runtime,
+            // with the message above already queued behind it.
+            session: summary(&id, &rec, Some(&SessionStatus::Provisioning)),
         }),
     ))
 }
@@ -460,7 +486,8 @@ pub(crate) fn wire_pending_ask(ask: &PendingAsk) -> PendingAskView {
 pub(crate) fn wire_pending_asks(status: &SessionStatus) -> Vec<PendingAskView> {
     match status {
         SessionStatus::AwaitingInput { asks } => asks.iter().map(wire_pending_ask).collect(),
-        SessionStatus::Idle
+        SessionStatus::Provisioning
+        | SessionStatus::Idle
         | SessionStatus::Running
         | SessionStatus::Failed { .. }
         | SessionStatus::Unrecoverable { .. } => Vec::new(),

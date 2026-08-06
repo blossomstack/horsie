@@ -29,6 +29,13 @@ export const UNKNOWN_STATUS: StatusMeta = {
 };
 
 const META: Record<SessionStatusKind, StatusMeta> = {
+  [SessionStatusKind.Provisioning]: {
+    label: "Provisioning",
+    tone: "live",
+    busy: true,
+    canSend: true,
+    hint: "Building this session's runtime — anything you send runs as soon as it is up.",
+  },
   [SessionStatusKind.Idle]: {
     label: "Idle",
     tone: "ready",
