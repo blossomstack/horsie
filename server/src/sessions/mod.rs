@@ -40,17 +40,17 @@ pub mod workflow;
 /// and telling a `Sub` uuid from a `Step` uuid needs session state it
 /// deliberately does not read. A uuid is one or the other and never both, so
 /// the wire id is already unambiguous.
+/// `(tail_seq, delta_count)` — how far an agent has got.
+pub type Position = (u64, usize);
+
+/// One agent's channel. `Arc` because the supervisor and the agent both hold
+/// it, and the supervisor's copy is what keeps it alive across an offload.
+pub type PositionSender = std::sync::Arc<tokio::sync::watch::Sender<Position>>;
+
+type PositionMap = std::collections::HashMap<String, PositionSender>;
+
 #[derive(Clone, Default)]
-pub struct Positions(
-    std::sync::Arc<
-        std::sync::Mutex<
-            std::collections::HashMap<
-                String,
-                std::sync::Arc<tokio::sync::watch::Sender<(u64, usize)>>,
-            >,
-        >,
-    >,
-);
+pub struct Positions(std::sync::Arc<std::sync::Mutex<PositionMap>>);
 
 impl Positions {
     /// This agent's channel, created on first use.
