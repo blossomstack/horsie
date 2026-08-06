@@ -625,8 +625,17 @@ async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
     let url = format!("http://{}/api/sessions/{id}/events", server.addr);
     let client2 = client.clone();
     let sse = tokio::spawn(async move {
+        // A *non-empty* queue: subscribing now announces the queue as it
+        // already stands, so the first frame on this stream is an empty
+        // `InboxChanged` and stopping on any of them would stop before the
+        // message under test was even sent.
         collect_sse(&client2, &url, None, |evs| {
-            evs.iter().any(|e| e.kind == "InboxChanged")
+            evs.iter().any(|e| {
+                e.kind == "InboxChanged"
+                    && e.data["value"]["queued"]
+                        .as_array()
+                        .is_some_and(|q| !q.is_empty())
+            })
         })
         .await
     });
@@ -654,7 +663,7 @@ async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
     let events = sse.await.unwrap();
     let queued = events
         .iter()
-        .find(|e| e.kind == "InboxChanged")
+        .rfind(|e| e.kind == "InboxChanged")
         .unwrap_or_else(|| panic!("no InboxChanged frame: {:?}", kinds(&events)));
     let q = queued.data["value"]["queued"].as_array().unwrap();
     assert_eq!(q.len(), 1, "{}", queued.data);

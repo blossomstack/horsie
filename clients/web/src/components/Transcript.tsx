@@ -217,6 +217,36 @@ export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
   return turns;
 }
 
+/** Which turn the live tail continues, or `null` when it starts a turn of its
+ * own below everything.
+ *
+ * The running turn is the last one built from messages the server has actually
+ * consumed — so trailing *pending* bubbles are skipped, and a consumed message
+ * stops the search. Both halves matter and they pull in opposite directions:
+ *
+ * - A message sent while the agent works is queued and drawn after the turn it
+ *   will follow. Treating the last turn as live handed the tail to that bubble
+ *   and left the running work group on its past-tense summary — "Ran 2 tools"
+ *   over a tool with five seconds left.
+ * - A message the server has consumed is part of the conversation, and what the
+ *   agent says next belongs *after* it. Treating the last assistant turn as
+ *   live folded a new turn's output into the previous one, drawing the answer
+ *   above the message that asked for it.
+ *
+ * Position was only ever a proxy for "the turn that is running". This is the
+ * thing itself: pending messages are not part of the conversation yet, so they
+ * cannot end it. */
+export function liveTurnIndex(turns: TurnGroup[]): number | null {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i];
+    if (turn.kind === "assistant") return i;
+    if (turn.kind === "user" && !turn.msg.queued && !turn.msg.optimistic) {
+      return null;
+    }
+  }
+  return null;
+}
+
 export function Transcript({
   items,
   streaming,
@@ -235,9 +265,9 @@ export function Transcript({
   // the live tail — and its caret — is reachable during the gap between
   // "Running" and the first token or tool.
   const hasLive = showLive;
-  const lastTurn = turns[turns.length - 1];
-  // A live tail with no interleaved user message continues the last entry.
-  const mergeLiveIntoLastTurn = hasLive && lastTurn?.kind === "assistant";
+  // The turn the live tail belongs to; `null` means it has nowhere to attach
+  // and stands on its own below the conversation.
+  const liveIndex = hasLive ? liveTurnIndex(turns) : null;
 
   return (
     <div className="mx-auto flex w-full max-w-[54rem] flex-col gap-7 px-4 py-7 sm:px-6">
@@ -252,14 +282,12 @@ export function Transcript({
             msgs={t.msgs}
             showThinking={showThinking}
             live={
-              mergeLiveIntoLastTurn && i === turns.length - 1
-                ? { text: streaming, orphanTools }
-                : undefined
+              liveIndex === i ? { text: streaming, orphanTools } : undefined
             }
           />
         ),
       )}
-      {hasLive && !mergeLiveIntoLastTurn && (
+      {hasLive && liveIndex === null && (
         <AssistantTurn
           key="streaming"
           msgs={[]}

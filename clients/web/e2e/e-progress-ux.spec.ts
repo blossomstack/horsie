@@ -92,6 +92,37 @@ test("E3: a running tool shows a live status on a multi-item work-group row", as
   await expect(page.getByTestId("work-group-summary")).toHaveText("Ran 2 tools");
 });
 
+/// A message sent while the agent is working is accepted into the queue and
+/// drawn after the turn it will follow — so the running turn is no longer the
+/// last one. The live row has to stay with the work that is running, not
+/// follow the bubble down.
+///
+/// This is the case that made E3 flaky without anyone sending a second
+/// message: a stale copy of the queue drew a phantom bubble in exactly this
+/// position, and the running work group flipped to its past-tense summary.
+test("E3b: a message queued mid-turn does not take the live row with it", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.queueToolCall("bash", { command: "echo quick" });
+  await mock.queueToolCall("bash", { command: "sleep 5" });
+  await createSession(page, appBase);
+
+  await sendMessage(page, "run two things, one slow");
+  await expectStatus(page, "Running");
+  await expect(page.getByTestId("work-group-summary")).toHaveText("Running bash");
+
+  // Queued, not answered: the turn above is still holding the runtime.
+  await sendMessage(page, "and this one waits its turn");
+  await expect(page.getByTestId("queued-marker")).toBeVisible();
+
+  await expect(page.getByTestId("work-group-summary")).toHaveText("Running bash");
+
+  await page.getByTestId("composer-stop").click();
+  await expectStatus(page, "Idle");
+});
+
 test("E4: ask_user always renders as a standalone question, breaking out of a preceding work group", async ({
   page,
   appBase,

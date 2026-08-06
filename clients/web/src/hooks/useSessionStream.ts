@@ -161,16 +161,18 @@ interface State {
    * account of them arrives — either in the queue or in the transcript.
    * `serverId` is the id the send was acknowledged with, once it resolves. */
   optimistic: { id: string; text: string; serverId?: string }[];
-  /** The server's queue. Seeded from the session detail and kept live by
-   * `InboxChanged`; a queue this tab has never been told about is `null`,
-   * which is different from a queue known to be empty. */
-  queued: QueuedMessage[] | null;
-  /** Whether a live `InboxChanged` has arrived. Until one has, the detail
-   * endpoint is the better authority and may re-seed — a session whose inbox
-   * drained *before* this view subscribed broadcast its `InboxChanged` to
-   * nobody, and seeding once would leave the drained message on screen for
-   * good. Same hazard the `lastError` seed below exists for. */
-  sawLiveInbox: boolean;
+  /** The server's queue, from `InboxChanged` and nothing else.
+   *
+   * The session detail endpoint reports the same queue, and seeding from it
+   * used to be how a late-connecting tab caught up — guarded first by "have I
+   * seeded" and then, in #245, by "has a live frame arrived". Both were
+   * managing an ambiguity rather than removing it: two sources for one fact
+   * cannot be ordered against each other, so a read issued before the stream
+   * connected could still land after it. The stream announces the queue on
+   * connect now, which covers the case those guards were for — an inbox that
+   * drained before this view subscribed — without a second source to
+   * reconcile. */
+  queued: QueuedMessage[];
   streaming: string;
   liveStatus: SessionStatusKind | null;
   livePendingAsks: PendingAskView[] | null;
@@ -205,8 +207,7 @@ const INITIAL: State = {
   notices: {},
   hookEntryIds: {},
   optimistic: [],
-  queued: null,
-  sawLiveInbox: false,
+  queued: [],
   streaming: "",
   liveStatus: null,
   livePendingAsks: null,
@@ -233,7 +234,6 @@ type Action =
   | { kind: "ack-optimistic"; id: string; serverId: string }
   // The queue as the *detail* endpoint reported it; ignored once a live frame
   // has arrived, which is always fresher.
-  | { kind: "seed-queue"; queued: QueuedMessage[] }
   | { kind: "seed-tasks"; tasks: TaskItem[] }
   // The failed turn's reason as the *detail* endpoint reported it. A session's
   // first turn starts with the session, so its `Error` frame can be broadcast
@@ -447,7 +447,7 @@ function reducer(state: State, action: Action): State {
     case "ack-optimistic": {
       // Already in the queue → the server's own copy is what we render, and
       // this echo would double it.
-      if (state.queued?.some((q) => q.id === action.serverId)) {
+      if (state.queued.some((q) => q.id === action.serverId)) {
         return {
           ...state,
           optimistic: state.optimistic.filter((o) => o.id !== action.id),
@@ -460,11 +460,9 @@ function reducer(state: State, action: Action): State {
         ),
       };
     }
-    case "seed-queue":
-      return state.sawLiveInbox ? state : { ...state, queued: action.queued };
-    // The durable task list, from the agent document. Same guard shape as
-    // `seed-queue`: a live frame is always fresher, so once one has arrived
-    // this is a no-op. Without it, a session the server had offloaded came
+    // The durable task list, from the agent document. A live frame is always
+    // fresher, so once one has arrived this is a no-op. Without it, a session
+    // the server had offloaded came
     // back from a reload with an empty plan — the list existed, but only in
     // events that had already been broadcast and would never replay.
     case "seed-tasks":
@@ -537,7 +535,6 @@ function reducer(state: State, action: Action): State {
           return {
             ...state,
             queued,
-            sawLiveInbox: true,
             // A queued message the server now owns is rendered from the queue;
             // dropping the echo here is also what keeps several messages
             // merged into one turn from leaving orphan echoes behind, since
@@ -820,11 +817,6 @@ export function useSessionStream(
       .catch(() => {});
   }, [sessionId, needsResync, queryClient]);
 
-  const seedQueue = detail?.inbox;
-  useEffect(() => {
-    if (seedQueue) dispatch({ kind: "seed-queue", queued: seedQueue });
-  }, [seedQueue]);
-
   // The last turn's failure, from the session document. A turn that failed
   // before this view subscribed — which a session's first turn now can, since
   // the create starts it — broadcast its `Error` frame to nobody, and the
@@ -911,7 +903,7 @@ export function useSessionStream(
 
     // Queued first, then this tab's un-acknowledged echoes: everything the
     // server already holds is older than anything still in flight to it.
-    for (const q of state.queued ?? []) {
+    for (const q of state.queued) {
       items.push({
         kind: "message",
         value: {

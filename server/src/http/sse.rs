@@ -185,6 +185,17 @@ pub async fn session_events(
         .map_err(|_| Api::internal("session supervisor unavailable"))?
         .ok_or_else(|| Api::not_found("no such session"))?;
 
+    // Subscribed, so nothing further can be missed — now ask for the queue as
+    // it already stands. The answer comes back through the same broadcast,
+    // which is what orders it against live frames: anything sent before it is
+    // older and superseded, anything after is newer. Reading the queue here and
+    // writing it into `tx` instead would put a snapshot ahead of frames that
+    // predate it, which is the exact shape of bug this replaces.
+    let _ = state
+        .supervisor
+        .tell(SessionSupervisorCommand::PublishInbox { id: id.clone() })
+        .await;
+
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(STREAM_BUFFER);
     tokio::spawn(async move {
         loop {

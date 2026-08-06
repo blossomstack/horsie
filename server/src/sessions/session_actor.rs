@@ -132,6 +132,28 @@ pub enum SessionCommand {
         error: Option<String>,
         terminal: bool,
     },
+    /// Broadcast this session's current values, for a client that has just
+    /// subscribed.
+    ///
+    /// The session stream backfills nothing, so a client that connects between
+    /// two changes would otherwise wait for the next one to learn anything at
+    /// all. Sent through the same broadcast every other frame uses, so it is
+    /// ordered against them: whatever preceded it is older and superseded,
+    /// whatever follows is newer. That ordering is the whole reason this is a
+    /// frame rather than a value the SSE handler reads and writes itself.
+    ///
+    /// **The inbox and nothing else.** A frame belongs here only when this
+    /// stream is the *sole* source of the fact it carries. That is true of the
+    /// queue and of nothing else today: status is also served by the session
+    /// detail endpoint, which the client re-reads on connect, so announcing it
+    /// here would be redundant — and worse, it would make "the status changed"
+    /// indistinguishable from "here is the status", which is a real
+    /// transition every consumer downstream would have to start disambiguating.
+    ///
+    /// `Error` and `Progression` are excluded on their own terms: each is a
+    /// thing that *happened*, and re-sending one on connect would resurface a
+    /// failure the session has already moved past.
+    PublishInbox,
     /// The supervisor wants to unload this session. Answers `false` if a run
     /// started in the meantime, in which case nothing has changed and the idle
     /// clock simply restarts.
@@ -3002,6 +3024,12 @@ impl EventSourcedActor for SessionActor {
             SessionCommand::Answer { answers, reply } => {
                 self.on_answer(state, answers, reply).await
             }
+            SessionCommand::PublishInbox => {
+                let _ = self.frames.send(SessionFrame::InboxChanged {
+                    queued: state.inbox.clone(),
+                });
+                CommandEffect::none()
+            }
             SessionCommand::Snapshot { reply } => {
                 let _ = reply.send(SessionSnapshot {
                     status: state.status.clone(),
@@ -5063,6 +5091,85 @@ mod tests {
             "the runtime has to actually get built: {:?}",
             f.agent.signals()
         );
+    }
+
+    /// A client that connects after a message was accepted has missed the
+    /// `InboxChanged` that announced it, and this stream backfills nothing. So
+    /// it asks, and the answer arrives in-band on the same broadcast — which is
+    /// what lets the stream be the only source of the queue, with no snapshot
+    /// from the detail endpoint to reconcile against.
+    ///
+    /// The queue only. An `Error` is a thing that happened, and re-sending one
+    /// on connect would resurface a failure the session has already moved past;
+    /// status is left alone because the detail endpoint still serves it, and
+    /// announcing it here would make "the status changed" indistinguishable
+    /// from "here is the status".
+    #[tokio::test]
+    async fn a_late_subscriber_is_told_the_queue_it_missed() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        journal
+            .persist(
+                &SessionActor::persistence_id_for(id),
+                &[
+                    serde_json::to_vec(&queued("m1", "still waiting")).unwrap(),
+                    // A failure the session has already moved past.
+                    serde_json::to_vec(&SessionDomainEvent::TurnFailed {
+                        at_ms: 1,
+                        error: "an old failure".into(),
+                    })
+                    .unwrap(),
+                ],
+            )
+            .await
+            .unwrap();
+        let frames = test_frames();
+        let mut loading = frames.subscribe();
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                frames.clone(),
+            ),
+            journal,
+        );
+        // Loading reports the recovered status. Let that land before
+        // subscribing, so what follows is only what the command itself sent.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !matches!(loading.recv().await, Ok(SessionFrame::Status { .. })) {}
+        })
+        .await
+        .expect("a load reports its status");
+
+        let mut rx = frames.subscribe();
+        session.tell(SessionCommand::PublishInbox).await.unwrap();
+
+        let queue = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await {
+                    Ok(SessionFrame::InboxChanged { queued }) => return queued,
+                    Ok(SessionFrame::Error { message }) => {
+                        panic!("a past failure must not be re-sent on connect: {message}")
+                    }
+                    Ok(SessionFrame::Status { .. }) => {
+                        panic!(
+                            "status has a durable source; announcing it here would make a \
+                                transition indistinguishable from an announcement"
+                        )
+                    }
+                    Ok(_) => {}
+                    Err(e) => panic!("the queue has to arrive on the stream: {e}"),
+                }
+            }
+        })
+        .await
+        .expect("the queue has to arrive on the stream");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].text, "still waiting");
     }
 
     /// Poll the folded session state until it satisfies `pred`.

@@ -103,6 +103,14 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: oneshot::Sender<Option<broadcast::Receiver<SessionFrame>>>,
     },
+    /// Ask the session to broadcast its queue, for a client that has just
+    /// subscribed and would otherwise wait for the next change to learn it.
+    ///
+    /// Unlike [`Self::Subscribe`], this *does* load the session: answering
+    /// "what is true now" requires the state, and the only thing that holds it
+    /// is the actor. Sent after subscribing, so the frames it produces land in
+    /// the new subscriber's stream.
+    PublishInbox { id: SessionId },
     /// Read a window of a session's conversation history. `agent_id` selects
     /// the agent: absent or `"main"` for the primary agent, else a subagent
     /// id. The outer `None` means the session is unknown; an inner `None`
@@ -725,6 +733,12 @@ impl EventSourcedActor for SessionSupervisor {
                     .contains_key(&id)
                     .then(|| self.frames_for(&id).subscribe());
                 let _ = reply.send(receiver);
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::PublishInbox { id } => {
+                if let Some(child) = self.ensure_loaded(ctx, state, &id) {
+                    let _ = child.tell(SessionCommand::PublishInbox).await;
+                }
                 CommandEffect::none()
             }
             SessionSupervisorCommand::History {
