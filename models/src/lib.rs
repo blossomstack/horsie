@@ -881,7 +881,6 @@ mod tests {
         let msg = RuntimeOutboundMessage::ScanResult(ScanResponse {
             shared_skills: vec![],
             shared_agents: None,
-            shared_commands: None,
             shared_root: None,
             call_id: "c1".into(),
             workspaces: vec![WorkspaceScan {

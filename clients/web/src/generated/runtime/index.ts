@@ -15,7 +15,6 @@ export * from './scannedFile';
 export * from './workspaceScan';
 export * from './pluginSkill';
 export * from './pluginAgent';
-export * from './pluginCommand';
 export * from './scanResponse';
 export * from './sessionStartSource';
 export * from './sessionStartInput';

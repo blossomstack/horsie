@@ -100,14 +100,6 @@ struct PluginAgent {
     rel_path: String,
     content: String,
 }
-/// A slash command discovered in the shared plugin library. Its *name* is the
-/// file's stem, which the server derives from `rel_path` — the format has no
-/// `name` field.
-struct PluginCommand {
-    plugin: String,
-    rel_path: String,
-    content: String,
-}
 struct ScanResponse {
     call_id: String,
     workspaces: Vec<WorkspaceScan>,
@@ -115,9 +107,6 @@ struct ScanResponse {
     /// Agent definitions from the same library. Optional so an older runtime
     /// binary still deserializes against a newer server.
     shared_agents: Option<Vec<PluginAgent>>,
-    /// Slash commands from the same library. Optional for the same reason
-    /// `shared_agents` is.
-    shared_commands: Option<Vec<PluginCommand>>,
     /// Absolute path of the shared plugin library root, when one is configured
     /// and the request asked for it. Optional so an older runtime binary still
     /// deserializes against a newer server.

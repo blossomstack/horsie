@@ -175,7 +175,6 @@ impl FakeRuntimeVendor {
             bash_stdout: "ok".to_string(),
             hook_records: Vec::new(),
             shared_agents: Vec::new(),
-            shared_commands: Vec::new(),
             faults: Faults::default(),
             block: false,
             resume: None,
@@ -336,8 +335,6 @@ pub struct FakeRuntimeVendorBuilder {
     hook_records: Vec<Vec<horsie_models::hooks::HookRecord>>,
     /// Agent definitions this runtime's plugin library reports, verbatim.
     shared_agents: Vec<horsie_models::runtime::PluginAgent>,
-    /// Slash commands this runtime's plugin library reports, verbatim.
-    shared_commands: Vec<horsie_models::runtime::PluginCommand>,
     faults: Faults,
     block: bool,
     /// Runtime state carried over from a previous agent process — see
@@ -392,13 +389,6 @@ impl FakeRuntimeVendorBuilder {
     #[must_use]
     pub fn shared_agents(mut self, agents: Vec<horsie_models::runtime::PluginAgent>) -> Self {
         self.shared_agents = agents;
-        self
-    }
-
-    /// Script the plugin library's slash commands, the same way.
-    #[must_use]
-    pub fn shared_commands(mut self, commands: Vec<horsie_models::runtime::PluginCommand>) -> Self {
-        self.shared_commands = commands;
         self
     }
 
@@ -583,7 +573,6 @@ async fn run_agent<S>(
         bash_stdout,
         hook_records,
         shared_agents,
-        shared_commands,
         faults,
         block: _,
         resume: _,
@@ -782,7 +771,6 @@ async fn run_agent<S>(
                             }],
                             shared_skills: vec![],
                             shared_agents: Some(shared_agents.clone()),
-                            shared_commands: Some(shared_commands.clone()),
                             shared_root: None,
                         }))
                     }

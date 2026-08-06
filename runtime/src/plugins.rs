@@ -7,7 +7,7 @@
 //! `.claude-plugin/plugin.json` field points (string or array of paths). Hooks
 //! are declared in `hooks/hooks.json`.
 
-use horsie_models::runtime::{PluginAgent, PluginCommand, PluginSkill};
+use horsie_models::runtime::{PluginAgent, PluginSkill};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -96,35 +96,6 @@ pub fn discover_agents(plugins_dir: &Path) -> Vec<PluginAgent> {
             };
             if let Ok(content) = std::fs::read_to_string(file) {
                 out.push(PluginAgent {
-                    plugin: name.clone(),
-                    rel_path: rel.to_string_lossy().into_owned(),
-                    content,
-                });
-            }
-        }
-    }
-    out
-}
-
-/// Enumerate every installed plugin's slash commands, on the same terms as
-/// [`discover_agents`]: paths relative to `plugins_dir`, contents unparsed.
-pub fn discover_commands(plugins_dir: &Path) -> Vec<PluginCommand> {
-    let mut out = Vec::new();
-    for plugin_root in plugin_dirs(plugins_dir) {
-        let Ok(root) = horsie_support::plugin::PluginRoot::inspect(&plugin_root) else {
-            continue;
-        };
-        let fallback = plugin_root
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let name = root.name(&fallback);
-        for file in &root.command_files {
-            let Ok(rel) = file.strip_prefix(plugins_dir) else {
-                continue;
-            };
-            if let Ok(content) = std::fs::read_to_string(file) {
-                out.push(PluginCommand {
                     plugin: name.clone(),
                     rel_path: rel.to_string_lossy().into_owned(),
                     content,

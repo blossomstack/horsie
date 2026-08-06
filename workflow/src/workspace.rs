@@ -23,8 +23,6 @@ pub struct SharedContext {
     /// The library's agent definitions, by name — the catalogue `spawn_agent`
     /// offers and resolves against. Kept sorted for a stable listing.
     pub agents: Arc<AgentCatalog>,
-    /// The library's slash commands, by name.
-    pub commands: Arc<CommandCatalog>,
     /// Absolute path of the library root, when the runtime reported one. Named in
     /// the prompt's shared-skills header so the agent can reach a skill's files
     /// with the ordinary filesystem tools — the library is not a workspace, so an
@@ -39,13 +37,12 @@ pub struct SharedContext {
 pub struct SharedScan {
     pub skills: SkillSet,
     pub agents: AgentCatalog,
-    pub commands: CommandCatalog,
     pub root: Option<String>,
 }
 
 impl SharedContext {
     pub fn is_empty(&self) -> bool {
-        self.skills.is_empty() && self.agents.is_empty() && self.commands.is_empty()
+        self.skills.is_empty() && self.agents.is_empty()
     }
 }
 
@@ -102,60 +99,6 @@ impl FromIterator<CatalogAgent> for AgentCatalog {
             }
         }
         Self { agents }
-    }
-}
-
-/// The plugin-declared slash commands a session may invoke, keyed by name.
-///
-/// Same collision rule as agents and skills: a name is a global handle, so the
-/// first plugin to declare one keeps it.
-#[derive(Default)]
-pub struct CommandCatalog {
-    commands: BTreeMap<String, CatalogCommand>,
-}
-
-/// One catalogue entry and the plugin that declared it.
-#[derive(Clone, Debug)]
-pub struct CatalogCommand {
-    pub plugin: String,
-    pub def: horsie_support::plugin::commands::PluginCommandDef,
-}
-
-impl CommandCatalog {
-    pub fn is_empty(&self) -> bool {
-        self.commands.is_empty()
-    }
-    pub fn len(&self) -> usize {
-        self.commands.len()
-    }
-    pub fn get(&self, name: &str) -> Option<&CatalogCommand> {
-        self.commands.get(name)
-    }
-    pub fn names(&self) -> Vec<String> {
-        self.commands.keys().cloned().collect()
-    }
-    pub fn iter(&self) -> impl Iterator<Item = &CatalogCommand> {
-        self.commands.values()
-    }
-}
-
-impl FromIterator<CatalogCommand> for CommandCatalog {
-    fn from_iter<I: IntoIterator<Item = CatalogCommand>>(iter: I) -> Self {
-        let mut commands: BTreeMap<String, CatalogCommand> = BTreeMap::new();
-        for entry in iter {
-            match commands.get(&entry.def.name) {
-                Some(kept) => tracing::warn!(
-                    plugin = %entry.plugin,
-                    kept = %kept.plugin,
-                    name = %entry.def.name,
-                    "duplicate slash command name; keeping first"
-                ),
-                None => {
-                    commands.insert(entry.def.name.clone(), entry);
-                }
-            }
-        }
-        Self { commands }
     }
 }
 
@@ -265,7 +208,6 @@ pub async fn scan(
             let shared = interpret_shared(
                 resp.shared_skills,
                 resp.shared_agents.unwrap_or_default(),
-                resp.shared_commands.unwrap_or_default(),
                 resp.shared_root.as_deref(),
             );
             (interpret(resp.workspaces), shared)
@@ -283,7 +225,6 @@ pub async fn scan(
 fn interpret_shared(
     raw: Vec<PluginSkill>,
     raw_agents: Vec<horsie_models::runtime::PluginAgent>,
-    raw_commands: Vec<horsie_models::runtime::PluginCommand>,
     root: Option<&str>,
 ) -> SharedScan {
     let mut skills = BTreeMap::new();
@@ -325,32 +266,9 @@ fn interpret_shared(
             },
         )
         .collect();
-    let commands = raw_commands
-        .into_iter()
-        .filter_map(|pc| {
-            // The name is the filename: the format carries none, so it is
-            // derived here rather than trusted from the content.
-            let name = horsie_support::plugin::commands::name_of(Path::new(&pc.rel_path))?;
-            match horsie_support::plugin::commands::parse(&name, &pc.content) {
-                Some(def) => Some(CatalogCommand {
-                    plugin: pc.plugin,
-                    def,
-                }),
-                None => {
-                    tracing::warn!(
-                        plugin = %pc.plugin,
-                        path = %pc.rel_path,
-                        "skipping slash command with no description"
-                    );
-                    None
-                }
-            }
-        })
-        .collect();
     SharedScan {
         skills: SkillSet { skills },
         agents,
-        commands,
         root: root.map(str::to_string),
     }
 }
@@ -867,7 +785,6 @@ mod tests {
                 plugin_agent("fd", "reviewer", "model: sonnet\ntools: Read, Grep\n"),
                 plugin_agent("fd", "explorer", ""),
             ],
-            Vec::new(),
             None,
         );
         assert_eq!(
@@ -892,7 +809,6 @@ mod tests {
                 plugin_agent("fd", "reviewer", ""),
                 plugin_agent("other", "reviewer", ""),
             ],
-            Vec::new(),
             None,
         );
         assert_eq!(scan.agents.len(), 1);
@@ -905,7 +821,7 @@ mod tests {
     fn an_unparseable_agent_is_skipped_not_half_loaded() {
         let mut broken = plugin_agent("fd", "reviewer", "");
         broken.content = "no frontmatter at all".into();
-        let scan = interpret_shared(Vec::new(), vec![broken], Vec::new(), None);
+        let scan = interpret_shared(Vec::new(), vec![broken], None);
         assert!(scan.agents.is_empty());
     }
 
@@ -916,7 +832,6 @@ mod tests {
                 plugin_skill("brainstorming", "sp/skills/brainstorming", "explore"),
                 plugin_skill("brainstorming", "other/skills/brainstorming", "dup"),
             ],
-            Vec::new(),
             Vec::new(),
             Some("/opt/plugins"),
         );
@@ -940,7 +855,6 @@ mod tests {
                 "sp/skills/brainstorming",
                 "d",
             )],
-            Vec::new(),
             Vec::new(),
             None,
         );
@@ -971,13 +885,11 @@ mod tests {
         let scan = interpret_shared(
             vec![plugin_skill("tdd", "sp/skills/tdd", "write tests first")],
             Vec::new(),
-            Vec::new(),
             Some("/opt/plugins"),
         );
         let shared = SharedContext {
             skills: Arc::new(scan.skills),
             agents: Arc::default(),
-            commands: Arc::default(),
             root: scan.root,
         };
         let prompt = compose_system_prompt(Some("You are a coder."), &ctx, Some(&shared)).unwrap();
@@ -1005,7 +917,6 @@ mod tests {
         assert!(shared_inspect(&SkillSet::default(), None).contains("skills: none"));
         let scan = interpret_shared(
             vec![plugin_skill("tdd", "sp/skills/tdd", "d")],
-            Vec::new(),
             Vec::new(),
             Some("/opt/plugins"),
         );

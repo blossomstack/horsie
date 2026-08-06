@@ -166,7 +166,6 @@ mod tests {
                             horsie_models::runtime::ScanResponse {
                                 shared_skills: vec![],
                                 shared_agents: None,
-                                shared_commands: None,
                                 shared_root: None,
                                 call_id: req.call_id,
                                 workspaces: vec![horsie_models::runtime::WorkspaceScan {

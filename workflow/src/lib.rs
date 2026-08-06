@@ -34,6 +34,6 @@ pub use task_list::{
 };
 pub use timers::{CancelSelector, TimerId, TimerKind, TimerRecord, TimerView, timer_tool_specs};
 pub use workspace::{
-    AgentCatalog, CatalogAgent, CatalogCommand, CommandCatalog, SharedContext, SharedScan, Skill,
-    SkillSet, WorkspaceContext, compose_system_prompt, scan as scan_workspace,
+    AgentCatalog, CatalogAgent, SharedContext, SharedScan, Skill, SkillSet, WorkspaceContext,
+    compose_system_prompt, scan as scan_workspace,
 };
