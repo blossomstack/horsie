@@ -445,7 +445,7 @@ fn plugin(name: &str, hash: &str) -> horsie_server::plugins::PluginRow {
         source_subpath: None,
         version: None,
         description: None,
-        skill_count: 0,
+        catalog: Vec::new(),
         has_hooks: false,
         artifact_hash: hash.into(),
         artifact_size: 1,

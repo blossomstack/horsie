@@ -6,6 +6,7 @@ import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
 import { SessionConfigBar } from "../components/SessionConfigBar";
 import { useSessionDraft } from "../hooks/useSessionDraft";
+import { useEntryCatalog } from "../hooks/useEntryCatalog";
 import { useCreateSession } from "../hooks/useSessions";
 import { useRunWorkflow, useWorkflows } from "../hooks/useWorkflows";
 
@@ -14,6 +15,9 @@ export function NewSessionView() {
   // string rather than router state, so the link survives a reload.
   const [params] = useSearchParams();
   const draft = useSessionDraft(params.get("workflow") ?? "");
+  // Checking and unchecking a bundle changes what `/` offers, with no session
+  // and no runtime in the picture.
+  const entries = useEntryCatalog(draft.skills);
   const create = useCreateSession();
   const run = useRunWorkflow();
   // Already fetched for the picker; this reads the same cache entry.
@@ -122,6 +126,7 @@ export function NewSessionView() {
           status={SessionStatusKind.Idle}
           busy={create.isPending || run.isPending}
           blockedReason={draft.blockedReason}
+          entries={entries}
           idlePlaceholder={
             draft.workflow
               ? "What this run is about — the first step is handed it."

@@ -15,6 +15,7 @@ import { Transcript } from "../components/Transcript";
 import { WorkflowRunView } from "./workflows/WorkflowRunView";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { useSessionStream } from "../hooks/useSessionStream";
+import { useEntryCatalog } from "../hooks/useEntryCatalog";
 import { useUiSettings } from "../hooks/useUiSettings";
 import {
   useDeleteSession,
@@ -53,6 +54,8 @@ export function SessionView() {
   const { id, agentId } = useParams<{ id: string; agentId?: string }>();
   const navigate = useNavigate();
   const { data: detail, isLoading } = useSession(id);
+  // The session's own bundles decide what `/` and `@` offer.
+  const entries = useEntryCatalog(detail?.plugins);
   const {
     stream,
     addOptimisticUser,
@@ -461,6 +464,7 @@ export function SessionView() {
             <Composer
               status={status}
               busy={send.isPending}
+              entries={entries}
               onSend={(text) => handleSend(id, text)}
               onStop={handleStop}
             />

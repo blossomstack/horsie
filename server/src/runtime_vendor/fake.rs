@@ -32,6 +32,10 @@ use tokio_tungstenite::tungstenite::Message;
 #[derive(Default)]
 struct Recorder {
     signals: Mutex<Vec<String>>,
+    /// Workspace scans, counted apart from `signals` — that log is the
+    /// lifecycle one, `"<action>:<runtime_id>"`, and tests assert on it
+    /// exactly.
+    scans: std::sync::atomic::AtomicUsize,
     live: Mutex<BTreeSet<String>>,
     /// The most recent create request, so a test can assert what the server
     /// actually put on the wire (workspaces, env, provision steps).
@@ -185,7 +189,9 @@ impl FakeRuntimeVendor {
     /// How many workspace scans the server asked for. The catalogue lives in
     /// the database, so an expansion that scans is an expansion that regressed.
     pub fn scan_count(&self) -> usize {
-        self.signals().iter().filter(|s| *s == "scan").count()
+        self.recorder
+            .scans
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Lifecycle signals in order, each `"<action>:<runtime_id>"` — e.g.
@@ -765,7 +771,9 @@ async fn run_agent<S>(
                         None
                     }
                     RuntimeInboundMessage::ScanWorkspace(req) => {
-                        recorder.record("scan");
+                        recorder
+                            .scans
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         Some(RuntimeOutboundMessage::ScanResult(ScanResponse {
                             call_id: req.call_id,
                             workspaces: vec![WorkspaceScan {

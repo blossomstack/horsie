@@ -52,7 +52,7 @@ const bundles: PluginView[] = [
   {
     name: "bundle-a",
     sourceUrl: "",
-    skillCount: 1,
+    catalog: [],
     hasHooks: false,
     enabledDefault: true,
     artifactSize: 0,
@@ -60,7 +60,7 @@ const bundles: PluginView[] = [
   {
     name: "bundle-b",
     sourceUrl: "",
-    skillCount: 1,
+    catalog: [],
     hasHooks: false,
     enabledDefault: false,
     artifactSize: 0,
