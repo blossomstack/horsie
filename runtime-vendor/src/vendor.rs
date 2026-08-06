@@ -854,9 +854,16 @@ impl RuntimeVendor {
     /// Persist the effective capability spec for a runtime and return its path.
     ///
     /// The spec is this vendor's [`baseline`](crate::baseline) plus the
-    /// per-runtime grants below.
+    /// directory this runtime materializes its session's bundles into and the
+    /// hook interpreter dirs. The bundles dir is read-write: the sandbox is
+    /// applied before the runtime fetches, so it unpacks under confinement.
     fn write_caps_file(&self, runtime_id: &str) -> Result<PathBuf, String> {
         let mut spec = crate::baseline::baseline_capabilities()?;
+        spec.grants
+            .extend(horsie_support::plugin::grants::session_plugin_grants(
+                self.plugins_path(runtime_id).as_deref(),
+                &self.hook_path,
+            ));
         // The runtime mirrors its per-agent cwd and env into this directory. The
         // baseline grants the working dir and a few system reads and nothing
         // else, so without this the first `set_env` inside a sandboxed runtime
@@ -1209,6 +1216,55 @@ mod tests {
         );
         agent.sweep_plugin_dirs();
         assert!(state.path().join("keep-me").is_file());
+    }
+
+    /// The sandbox is applied before the runtime fetches its bundles, so the
+    /// directory it unpacks into has to be writable — a read grant leaves the
+    /// unpack failing, and provisioning is best-effort, so it fails silently to
+    /// "no skills".
+    #[test]
+    fn the_written_caps_file_grants_the_runtimes_own_plugins_dir_and_hook_path() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let agent = RuntimeVendor::new(
+            "test-vendor".to_string(),
+            false,
+            Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
+            Arc::new(ConnectedRuntimeRegistry::new()),
+            Arc::new(FixedWorkspaces::new(HashMap::new())),
+            state.path().to_path_buf(),
+        )
+        .with_bundles(BundleDelivery {
+            base_url: "http://127.0.0.1:3789".to_string(),
+            dir: "/state/plugins".to_string(),
+        })
+        .with_hook_path(vec![PathBuf::from("/opt/node/bin")]);
+
+        let path = agent.write_caps_file("rt-1").expect("write caps");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read caps")).expect("parse caps");
+        // The grant union is fluorite-tagged: `{"type":"Dir","value":{"path":…}}`.
+        let grant = |path: &str| {
+            written["grants"]
+                .as_array()
+                .expect("grants array")
+                .iter()
+                .find(|g| {
+                    g.get("value")
+                        .and_then(|v| v.get("path"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some(path)
+                })
+                .cloned()
+        };
+
+        let plugins = grant("/state/plugins/rt-1").expect("the runtime's own plugins dir");
+        assert_eq!(plugins["value"]["access"], "ReadWrite");
+        let hooks = grant("/opt/node/bin").expect("the hook interpreter dir");
+        assert_eq!(hooks["value"]["access"], "Read");
+        // Another runtime's directory is not granted.
+        assert!(grant("/state/plugins/rt-2").is_none());
+        // The baseline's own grants survive alongside them.
+        assert!(grant("/usr").is_some());
     }
 
     /// With no host library there is nothing to merge, and the written file is
