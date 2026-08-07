@@ -7,10 +7,7 @@ use crate::error::CliError;
 use crate::server_client::ServerClient;
 use crate::session::relative;
 use horsie_models::now_ms;
-use horsie_models::routines::{
-    DailySchedule, MonthlySchedule, RoutineRunResponse, RoutineSchedule, RoutineView, Weekday,
-    WeeklySchedule, YearlySchedule,
-};
+use horsie_models::routines::{RoutineRunResponse, RoutineSchedule, RoutineView, Weekday};
 
 pub async fn list(server: &str) -> Result<(), CliError> {
     let routines = ServerClient::new(server).await?.list_routines().await?;

@@ -473,7 +473,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[test]
     fn next_run_measures_an_interval_from_now_and_never_re_arms_a_once() {
         assert_eq!(
             next_run_at(&RoutineSchedule::Manual(ManualSchedule {}), true, 1_000),

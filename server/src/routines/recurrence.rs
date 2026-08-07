@@ -82,16 +82,14 @@ fn monthly(m: &MonthlySchedule, now: Timestamp) -> Option<u64> {
 fn yearly(y: &YearlySchedule, now: Timestamp) -> Option<u64> {
     let tz = TimeZone::get(&y.timezone).ok()?;
     let start = now.to_zoned(tz.clone()).date();
-    let mut year = start.year();
     // A leap-day rule can skip three years between valid candidates (2026,
     // 2027, 2028…), plus the year being tested: eight keeps the scan bounded.
-    for _ in 0..8 {
+    for year in start.year()..start.year() + 8 {
         if let Some(date) = Date::new(year, y.month as i8, y.day_of_month as i8).ok()
             && let Some(ms) = occurrence_after(date, &tz, y.hour, y.minute, now)
         {
             return Some(ms);
         }
-        year += 1;
     }
     None
 }
