@@ -536,3 +536,232 @@ impl Component for WorkflowRun {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    //! The graph: what starts a run, how a transition routes, and what a retry
+    //! appends.
+    use super::super::testing::*;
+    use super::super::*;
+    use super::*;
+
+    use horsie_agentcore::LlmProvider;
+
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    /// A run's snapshot nested one tree per step. Each must land under that step's
+    /// agent id, and the run itself must survive.
+    #[test]
+    fn a_workflow_snapshot_lands_each_steps_tree_under_that_step() {
+        let step_agent = "3f1a2b4c-0000-4000-8000-0000000000aa";
+        let child_id = "3f1a2b4c-0000-4000-8000-0000000000bb";
+        let legacy = serde_json::json!({
+            "status": "Running",
+            "mode": { "kind": "Workflow", "run": {
+                "status": "Running",
+                "steps": [{
+                    "step": "review", "agent": step_agent, "attempt": 1, "from": null,
+                    "via": null, "input": "go", "status": "Running", "output": null,
+                    "error": null, "started_at_ms": 1, "ended_at_ms": null,
+                    "subagents": { "nodes": { child_id: {
+                        "parent": "Main", "label": "helper", "task": "t", "depth": 1,
+                        "status": "Completed", "output": "kid done", "error": null,
+                        "notified": false
+                    }}}
+                }],
+                "output": null, "error": null
+            }}
+        });
+        let state: SessionState = serde_json::from_value(legacy).unwrap();
+        let owner = TreeOwner::Step(Uuid::parse_str(step_agent).unwrap());
+        let child = Uuid::parse_str(child_id).unwrap();
+        assert_eq!(state.subagents.owner_of(child), Some(owner));
+        assert_eq!(state.run.as_ref().unwrap().steps.len(), 1);
+        // The aggregate that answered 0 before this change.
+        assert_eq!(state.subagents.owed().len(), 1);
+    }
+
+    /// The whole point: a run starts itself, its first step's output picks the
+    /// branch, and the branch's step ends the run.
+    #[tokio::test]
+    async fn a_run_starts_itself_and_routes_on_its_first_steps_output() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+                || {
+                    Ok(horsie_agentcore::CompletionResponse {
+                        parts: vec![horsie_agentcore::ContentPart::Text(
+                            horsie_agentcore::TextPart {
+                                text: "fixed".to_string(),
+                            },
+                        )],
+                        stop_reason: horsie_agentcore::StopReason::EndTurn,
+                        usage: horsie_agentcore::Usage::without_cache(1, 1),
+                    })
+                },
+            ),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+
+        // Nobody sent a message: creating the run is what starts it.
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+
+        let visited: Vec<&str> = run.steps.iter().map(|s| s.step.as_str()).collect();
+        assert_eq!(
+            visited,
+            vec!["triage", "fix"],
+            "p0 must route to `fix`; triage concluded with {:?}",
+            run.steps[0].output
+        );
+        // The condition that matched is recorded, which is what draws the edge.
+        assert_eq!(
+            run.steps[1].via.as_deref(),
+            Some("output.severity == \"p0\"")
+        );
+        assert_eq!(run.steps[1].from, Some(0));
+        // Each step is its own agent, derived from the session and the index.
+        assert_eq!(
+            run.steps[0].agent,
+            crate::sessions::workflow::WorkflowRunSpec::step_agent_id(id, 0)
+        );
+        assert_ne!(run.steps[0].agent, run.steps[1].agent);
+        // The second step was handed the first's output under a header.
+        assert!(
+            run.steps[1].input.contains("## Input from step `triage`"),
+            "{}",
+            run.steps[1].input
+        );
+        assert!(run.steps[1].input.starts_with("Fix it."));
+    }
+
+    /// The `else` branch, and the run's output being the last step's.
+    #[tokio::test]
+    async fn a_non_matching_condition_takes_the_catch_all() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p2"})))]).then_repeating_with(
+                || {
+                    Ok(horsie_agentcore::CompletionResponse {
+                        parts: vec![horsie_agentcore::ContentPart::Text(
+                            horsie_agentcore::TextPart {
+                                text: "filed".to_string(),
+                            },
+                        )],
+                        stop_reason: horsie_agentcore::StopReason::EndTurn,
+                        usage: horsie_agentcore::Usage::without_cache(1, 1),
+                    })
+                },
+            ),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+        let visited: Vec<&str> = run.steps.iter().map(|s| s.step.as_str()).collect();
+        assert_eq!(visited, vec!["triage", "file"]);
+        assert!(run.steps[1].via.is_none());
+    }
+
+    /// Retrying appends an attempt rather than replacing one, so the earlier
+    /// attempt stays readable and the graph can stack them.
+    #[tokio::test]
+    async fn retrying_a_step_appends_an_attempt_on_the_same_edge() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+                || {
+                    Ok(horsie_agentcore::CompletionResponse {
+                        parts: vec![horsie_agentcore::ContentPart::Text(
+                            horsie_agentcore::TextPart {
+                                text: "fixed".to_string(),
+                            },
+                        )],
+                        stop_reason: horsie_agentcore::StopReason::EndTurn,
+                        usage: horsie_agentcore::Usage::without_cache(1, 1),
+                    })
+                },
+            ),
+        );
+        let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
+        wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+
+        session
+            .ask(|reply| SessionCommand::Run(RunCommand::RetryStep { index: 1, reply }))
+            .await
+            .unwrap()
+            .unwrap();
+        let run = wait_for_run(&journal, id, |r| r.steps.len() == 3).await;
+        assert_eq!(run.steps[2].step, "fix");
+        assert_eq!(run.steps[2].attempt, 2, "the retry numbers itself");
+        // It sits where the original sat, so it draws on the same edge.
+        assert_eq!(run.steps[2].from, run.steps[1].from);
+        assert_eq!(run.steps[2].via, run.steps[1].via);
+        // The first attempt is untouched.
+        assert_eq!(
+            run.steps[1].status,
+            crate::sessions::workflow::StepStatus::Concluded
+        );
+    }
+
+    /// A run has no first message to hold it back — `AdvanceRun` fires at load
+    /// and starts step one by itself. So it needs the same wait a conversation
+    /// gets, and for the same reason: the step would ask for a runtime nobody
+    /// had been told to build.
+    #[tokio::test]
+    async fn a_runs_first_step_waits_for_the_create_too() {
+        let f = actor_fixture_blocking_creates().await;
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+        );
+        let id = Uuid::new_v4();
+        let mut spec = actor_spec_fixture();
+        spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
+            workflow: "fix-bug".into(),
+        };
+        spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let session = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                spec,
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
+            ),
+            journal.clone(),
+        );
+        session
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .await
+            .unwrap();
+
+        wait_for_state(&journal, id, "a run holding at its create", |s| {
+            s.status == SessionStatus::Provisioning
+        })
+        .await;
+        let held = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert!(
+            held.run.as_ref().is_none_or(|r| r.steps.is_empty()),
+            "no step may start before the runtime it would run on"
+        );
+
+        f.agent.release_creates();
+        wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
+    }
+}

@@ -1,0 +1,1313 @@
+//! The shared harness every component's tests are built on.
+//!
+//! Split out because the tests do not partition the way the code does. They are
+//! organised around *scenario setup* — does this test need a live session, a
+//! journal, a prompt recorder, a run mid-step — rather than around the unit
+//! under test, so the stop-hook tests and the plugin-agent tests share
+//! `agent_harness`, and the expansion tests build on `spawn_session_with_provider`.
+//!
+//! Keeping the harness here is what lets a test live beside the component it
+//! covers instead of beside the fixture it happens to reuse. Anything used by
+//! more than one test belongs in this file; anything used by exactly one belongs
+//! next to it.
+
+#![allow(dead_code)]
+
+use super::{ReadCommand, SubAgentCommand, TurnCommand};
+use super::{
+    context::{SessionAgentKind, SessionContextProvider},
+    *,
+};
+use crate::sessions::spec::AgentSettings;
+use horsie_agentcore::LlmProvider;
+use horsie_models::hooks::{HookAction, StopOutcome};
+use horsie_workflow::{ContextProvider, StartTurn};
+use std::sync::PoisonError;
+
+pub(super) fn queued(id: &str, text: &str) -> SessionDomainEvent {
+    SessionDomainEvent::MessageQueued {
+        id: id.to_string(),
+        text: text.to_string(),
+        at_ms: 0,
+    }
+}
+
+pub(super) fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
+    events
+        .into_iter()
+        .fold(SessionState::default(), SessionActor::apply_event)
+}
+
+/// What this actor's orchestrator decides for a state. `drain` used to be a
+/// method here; the decision moved to the orchestrator and the actor only
+/// performs it, so these tests assert on the decision.
+pub(super) fn decisions(actor: &SessionActor, state: &SessionState) -> Vec<AgentAction> {
+    actor.next_actions(state)
+}
+
+pub(super) fn actor_spec_fixture() -> SessionSpec {
+    use crate::sessions::spec::WorkspaceDef;
+    SessionSpec {
+        name: Some("test".into()),
+        agent: AgentSettings {
+            model: "mock".into(),
+            allowed_tools: None,
+            use_plugins: None,
+            max_iterations: None,
+            max_retries: 0,
+            mcp_servers: vec![],
+            memory_spaces: vec![],
+            thinking_effort: None,
+            max_concurrent_subagents: None,
+        },
+        workspaces: vec![WorkspaceDef {
+            name: "main".into(),
+        }],
+        provision: vec![],
+        vendor: "mock".into(),
+        plugins: vec![],
+        origin: crate::sessions::spec::SessionOrigin::User,
+        workflow: None,
+    }
+}
+
+pub(super) struct ActorFixture {
+    pub(super) deps: ServerDeps,
+    pub(super) agent: crate::runtime_vendor::fake::FakeRuntimeVendor,
+    pub(super) _tmp: tempfile::TempDir,
+}
+
+pub(super) async fn actor_fixture() -> ActorFixture {
+    actor_fixture_from(crate::runtime_vendor::fake::FakeRuntimeVendor::builder(
+        "mock",
+    ))
+    .await
+}
+
+/// The same fixture over a fake told to hold its creates, so a test can put
+/// a message underneath one that is genuinely in flight.
+pub(super) async fn actor_fixture_blocking_creates() -> ActorFixture {
+    actor_fixture_from(
+        crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock").block_creates(),
+    )
+    .await
+}
+
+pub(super) async fn actor_fixture_from(
+    builder: crate::runtime_vendor::fake::FakeRuntimeVendorBuilder,
+) -> ActorFixture {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = builder.serve_in_process().await.expect("fake agent");
+    let mut vendors = HashMap::new();
+    vendors.insert("mock".to_string(), agent.link());
+    let vendors = Arc::new(std::sync::RwLock::new(vendors));
+    let deps = ServerDeps {
+        runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
+        provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        vendors,
+        github_tokens: None,
+        mcp: None,
+        plugins: None,
+        memory: None,
+    };
+    ActorFixture {
+        deps,
+        agent,
+        _tmp: tmp,
+    }
+}
+
+/// A supervisor stand-in for tests that spawn a bare `SessionActor`: it
+/// answers nothing, and exists only so `report()`'s `.tell()` has a live
+/// mailbox to land in.
+pub(super) struct DeafSupervisor;
+
+#[async_trait]
+impl EventSourcedActor for DeafSupervisor {
+    type Command = SessionSupervisorCommand;
+    type Event = ();
+    type State = ();
+
+    fn persistence_id(&self) -> PersistenceId {
+        PersistenceId::new("test", "deaf-supervisor")
+    }
+
+    fn initial_state() {}
+
+    fn apply_event((): (), (): ()) {}
+
+    async fn handle_command(
+        &mut self,
+        (): &(),
+        _cmd: SessionSupervisorCommand,
+        _ctx: &mut ActorContext<Self>,
+    ) -> CommandEffect<()> {
+        CommandEffect::none()
+    }
+}
+
+/// The frame channel a supervisor would hand the actor. Owned by the test,
+/// exactly as the real one is owned by the supervisor rather than the actor.
+pub(super) fn spawn_deaf_supervisor() -> ActorRef<SessionSupervisorCommand> {
+    horsie_actor::spawn_root(
+        DeafSupervisor,
+        Arc::new(horsie_actor::InMemoryJournal::new()),
+    )
+}
+
+/// A session parked on two questions, with an actor to answer them on.
+pub(super) async fn parked_on_two_asks() -> (SessionActor, SessionState) {
+    let f = actor_fixture().await;
+    let parent = spawn_deaf_supervisor();
+    let actor = SessionActor::new(
+        Uuid::new_v4(),
+        actor_spec_fixture(),
+        f.deps,
+        parent,
+        crate::sessions::Positions::default(),
+    );
+    let state = fold(vec![
+        SessionDomainEvent::AskRecorded {
+            at_ms: 0,
+            tool_call_id: Some("call-1".into()),
+            question: "which branch?".into(),
+        },
+        SessionDomainEvent::AskRecorded {
+            at_ms: 0,
+            tool_call_id: Some("call-2".into()),
+            question: "which model?".into(),
+        },
+    ]);
+    (actor, state)
+}
+
+pub(super) fn answer(id: &str, text: &str) -> AskAnswer {
+    AskAnswer {
+        tool_call_id: id.to_string(),
+        text: text.to_string(),
+    }
+}
+
+/// An `LlmProvider` that hangs until released, so a test can hold a run
+/// genuinely `Running` for as long as it needs to.
+pub(super) struct BlockingProvider {
+    pub(super) gate: tokio::sync::Notify,
+}
+
+impl BlockingProvider {
+    pub(super) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            gate: tokio::sync::Notify::new(),
+        })
+    }
+
+    pub(super) fn release(&self) {
+        self.gate.notify_one();
+    }
+}
+
+#[async_trait]
+impl LlmProvider for BlockingProvider {
+    fn model_id(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        _request: horsie_agentcore::CompletionRequest<'_>,
+        _message_id: &str,
+        _events: &dyn horsie_agentcore::EventSink,
+    ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+        self.gate.notified().await;
+        Ok(horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::Text(
+                horsie_agentcore::TextPart {
+                    text: "done".to_string(),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::EndTurn,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        })
+    }
+}
+
+/// A provider whose every call immediately ends the turn with plain text.
+pub(super) struct EchoProvider;
+
+#[async_trait]
+impl LlmProvider for EchoProvider {
+    fn model_id(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        _request: horsie_agentcore::CompletionRequest<'_>,
+        _message_id: &str,
+        _events: &dyn horsie_agentcore::EventSink,
+    ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+        Ok(horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::Text(
+                horsie_agentcore::TextPart {
+                    text: "sub answer".to_string(),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::EndTurn,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        })
+    }
+}
+
+pub(super) async fn spawn_session_with_provider(
+    provider: Arc<dyn LlmProvider>,
+) -> (
+    ActorFixture,
+    ActorRef<SessionCommand>,
+    Uuid,
+    Arc<dyn horsie_actor::Journal>,
+) {
+    let f = actor_fixture().await;
+    let id = Uuid::new_v4();
+    f.deps
+        .runtimes
+        .create(&id.to_string(), "mock", &actor_spec_fixture())
+        .await
+        .expect("create");
+    f.deps
+        .provider_registry
+        .write()
+        .unwrap()
+        .insert("mock".to_string(), provider);
+    let parent = spawn_deaf_supervisor();
+    let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
+    let session = horsie_actor::spawn_root(
+        SessionActor::new(
+            id,
+            actor_spec_fixture(),
+            f.deps.clone(),
+            parent,
+            crate::sessions::Positions::default(),
+        ),
+        journal.clone(),
+    );
+    (f, session, id, journal)
+}
+
+/// A two-step run: `triage` branches on its output to `fix` or `file`.
+pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::WorkflowRunSpec {
+    use crate::sessions::workflow::{TransitionSpec, WorkflowRunSpec, WorkflowStepSpec};
+    let settings = |()| AgentSettings {
+        model: "mock".into(),
+        allowed_tools: None,
+        use_plugins: None,
+        max_iterations: None,
+        max_retries: 0,
+        mcp_servers: vec![],
+        memory_spaces: vec![],
+        thinking_effort: None,
+        max_concurrent_subagents: None,
+    };
+    WorkflowRunSpec {
+        workflow: "fix-bug".into(),
+        start: "triage".into(),
+        steps: vec![
+            WorkflowStepSpec {
+                name: "triage".into(),
+                agent: "triager".into(),
+                prompt: "Triage it.".into(),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {"severity": {"type": "string"}}
+                })),
+                transitions: vec![
+                    TransitionSpec {
+                        to: "fix".into(),
+                        condition: Some("output.severity == \"p0\"".into()),
+                    },
+                    TransitionSpec {
+                        to: "file".into(),
+                        condition: None,
+                    },
+                ],
+                settings: settings(()),
+            },
+            WorkflowStepSpec {
+                name: "fix".into(),
+                agent: "coder".into(),
+                prompt: "Fix it.".into(),
+                output_schema: None,
+                transitions: vec![],
+                settings: settings(()),
+            },
+            WorkflowStepSpec {
+                name: "file".into(),
+                agent: "writer".into(),
+                prompt: "File it.".into(),
+                output_schema: None,
+                transitions: vec![],
+                settings: settings(()),
+            },
+        ],
+        input: input.to_string(),
+        max_steps: 100,
+    }
+}
+
+/// A session that is a run of [`run_spec_fixture`], on a scripted provider.
+pub(super) async fn spawn_run_with_provider(
+    provider: Arc<dyn LlmProvider>,
+) -> (
+    ActorFixture,
+    ActorRef<SessionCommand>,
+    Uuid,
+    Arc<dyn horsie_actor::Journal>,
+) {
+    let f = actor_fixture().await;
+    let id = Uuid::new_v4();
+    let mut spec = actor_spec_fixture();
+    spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
+        workflow: "fix-bug".into(),
+    };
+    spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
+    f.deps
+        .runtimes
+        .create(&id.to_string(), "mock", &spec)
+        .await
+        .expect("create");
+    f.deps
+        .provider_registry
+        .write()
+        .unwrap()
+        .insert("mock".to_string(), provider);
+    let parent = spawn_deaf_supervisor();
+    let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
+    let session = horsie_actor::spawn_root(
+        SessionActor::new(
+            id,
+            spec,
+            f.deps.clone(),
+            parent,
+            crate::sessions::Positions::default(),
+        ),
+        journal.clone(),
+    );
+    (f, session, id, journal)
+}
+
+/// Poll the folded run until `pred` holds (2s cap).
+pub(super) async fn wait_for_run(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    session_id: Uuid,
+    pred: impl Fn(&crate::sessions::workflow::WorkflowRunState) -> bool,
+) -> crate::sessions::workflow::WorkflowRunState {
+    for _ in 0..200 {
+        let state = crate::sessions::events::fold_session_state(journal, session_id).await;
+        if let Some(run) = state.run.as_ref()
+            && pred(run)
+        {
+            return run.clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let state = crate::sessions::events::fold_session_state(journal, session_id).await;
+    panic!(
+        "run never satisfied the predicate: {:?}",
+        state.run.as_ref()
+    );
+}
+
+/// A scripted `conclude` call carrying this output.
+///
+/// A step that has an output schema *and* may ask gets the kind-tagged
+/// conclude schema, so the output nests under `output` rather than being
+/// the payload — sending it bare submits `null`, and every condition reads
+/// false.
+pub(super) fn concludes(output: serde_json::Value) -> horsie_agentcore::CompletionResponse {
+    horsie_agentcore::CompletionResponse {
+        parts: vec![horsie_agentcore::ContentPart::ToolCall(
+            horsie_agentcore::ToolCallPart {
+                id: "c-1".into(),
+                name: "conclude".into(),
+                input: serde_json::json!({"kind": "submit", "output": output}),
+            },
+        )],
+        stop_reason: horsie_agentcore::StopReason::ToolUse,
+        usage: horsie_agentcore::Usage::without_cache(1, 1),
+    }
+}
+
+/// Poll the session's folded state until the tree satisfies `pred` (2s
+/// cap). Subagent progress is journal-first, so the fold is the honest
+/// thing to wait on.
+pub(super) async fn wait_for_tree(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    session_id: Uuid,
+    pred: impl Fn(&crate::sessions::subagents::SubAgentForest) -> bool,
+) {
+    for _ in 0..200 {
+        let state = crate::sessions::events::fold_session_state(journal, session_id).await;
+        if pred(&state.subagents) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("tree condition not met within 2s");
+}
+
+/// Spawn a session actor over a fresh journal, provisioning nothing. The
+/// session owns its create now, so a test that wants a runtime asks for one.
+pub(super) fn spawn_unprovisioned(
+    f: &ActorFixture,
+    id: Uuid,
+) -> (ActorRef<SessionCommand>, Arc<dyn horsie_actor::Journal>) {
+    let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
+    let session = horsie_actor::spawn_root(
+        SessionActor::new(
+            id,
+            actor_spec_fixture(),
+            f.deps.clone(),
+            spawn_deaf_supervisor(),
+            crate::sessions::Positions::default(),
+        ),
+        journal.clone(),
+    );
+    (session, journal)
+}
+
+/// Poll the folded session state until it satisfies `pred`.
+pub(super) async fn wait_for_state(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    session_id: Uuid,
+    what: &str,
+    pred: impl Fn(&SessionState) -> bool,
+) -> SessionState {
+    for _ in 0..200 {
+        let state = crate::sessions::events::fold_session_state(journal, session_id).await;
+        if pred(&state) {
+            return state;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("{what} not reached within 2s");
+}
+
+/// Entry count of the session's own journal (`session/<id>`), not the
+/// agent's.
+pub(super) async fn session_journal_len(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    session_id: Uuid,
+) -> u64 {
+    use futures_util::StreamExt;
+    let pid = SessionActor::persistence_id_for(session_id);
+    let mut count = 0u64;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only inspection: counts what was journaled, which no actor reports"
+    )]
+    let mut stream = journal.replay(&pid, 0).await;
+    while let Some(item) = stream.next().await {
+        if item.is_ok() {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Poll the session's own journal until it holds at least `n` entries
+/// (2s cap).
+pub(super) async fn wait_for_journal_len(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    session_id: Uuid,
+    n: u64,
+) {
+    for _ in 0..200 {
+        if session_journal_len(journal, session_id).await >= n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("journal did not reach {n} entries within 2s");
+}
+
+/// Wraps a journal and counts `replay` calls, so a test can assert that
+/// serving reads and streams never touches durable storage.
+pub(super) struct CountingJournal {
+    pub(super) inner: horsie_actor::InMemoryJournal,
+    pub(super) replays: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingJournal {
+    pub(super) fn new() -> Self {
+        Self {
+            inner: horsie_actor::InMemoryJournal::new(),
+            replays: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(super) fn replays(&self) -> usize {
+        self.replays.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl horsie_actor::Journal for CountingJournal {
+    async fn persist(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+        events: &[Vec<u8>],
+    ) -> horsie_actor::JournalResult<()> {
+        self.inner.persist(pid, events).await
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this decorator's whole job is to count the inner journal's replays"
+    )]
+    async fn replay(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+        after_seq: u64,
+    ) -> futures_util::stream::BoxStream<'_, horsie_actor::JournalResult<(u64, Vec<u8>)>> {
+        self.replays
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.replay(pid, after_seq).await
+    }
+
+    async fn save_snapshot(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+        state: Vec<u8>,
+        seq_nr: u64,
+    ) -> horsie_actor::JournalResult<()> {
+        self.inner.save_snapshot(pid, state, seq_nr).await
+    }
+
+    async fn latest_snapshot(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+    ) -> horsie_actor::JournalResult<Option<(Vec<u8>, u64)>> {
+        self.inner.latest_snapshot(pid).await
+    }
+
+    async fn delete_events_before(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+        seq_nr: u64,
+    ) -> horsie_actor::JournalResult<()> {
+        self.inner.delete_events_before(pid, seq_nr).await
+    }
+
+    async fn copy_snapshot(
+        &self,
+        from: &horsie_actor::PersistenceId,
+        to: &horsie_actor::PersistenceId,
+    ) -> horsie_actor::JournalResult<()> {
+        self.inner.copy_snapshot(from, to).await
+    }
+
+    async fn clear(&self, pid: &horsie_actor::PersistenceId) -> horsie_actor::JournalResult<()> {
+        self.inner.clear(pid).await
+    }
+}
+
+pub(super) async fn spawn_sub(session: &ActorRef<SessionCommand>, label: &str, task: &str) -> Uuid {
+    session
+        .ask(|reply| {
+            SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                caller: crate::sessions::subagents::SubAgentParent::Main,
+                label: label.into(),
+                task: task.into(),
+                agent_type: None,
+                reply,
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+pub(super) fn user_texts(page: &horsie_workflow::LogPage) -> Vec<String> {
+    page.messages()
+        .filter(|m| m.role == horsie_agentcore::Role::User)
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
+            horsie_agentcore::ContentPart::Text(t) => Some(t.text.clone()),
+            horsie_agentcore::ContentPart::ToolCall(_)
+            | horsie_agentcore::ContentPart::ToolResult(_)
+            | horsie_agentcore::ContentPart::Thinking(_)
+            | horsie_agentcore::ContentPart::SubAgentResult(_) => None,
+        })
+        .collect()
+}
+
+/// A user message's subagent-result parts, rendered the way the wire sees
+/// them — the counterpart to `user_texts` now that a result is a part of
+/// its own rather than text merged into what the person said.
+pub(super) fn subagent_texts(page: &horsie_workflow::LogPage) -> Vec<String> {
+    page.messages()
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
+            horsie_agentcore::ContentPart::SubAgentResult(r) => Some(r.to_wire_text()),
+            horsie_agentcore::ContentPart::Text(_)
+            | horsie_agentcore::ContentPart::ToolCall(_)
+            | horsie_agentcore::ContentPart::ToolResult(_)
+            | horsie_agentcore::ContentPart::Thinking(_) => None,
+        })
+        .collect()
+}
+
+pub(super) fn hook_record(plugin: &str, call: &str) -> HookRecord {
+    HookRecord {
+        plugin: plugin.to_string(),
+        duration_ms: 4,
+        halt: None,
+        action: horsie_models::hooks::HookAction::PreToolUse(
+            horsie_models::hooks::PreToolUseRecord {
+                call: horsie_models::hooks::ToolScope {
+                    tool: "bash".to_string(),
+                    tool_call_id: call.to_string(),
+                },
+                system_message: None,
+                outcome: horsie_models::hooks::PreToolUseOutcome::Denied(
+                    horsie_models::hooks::HookDenied {
+                        reason: Some("not allowed".into()),
+                    },
+                ),
+            },
+        ),
+    }
+}
+
+pub(super) async fn agent_history(
+    session: &ActorRef<SessionCommand>,
+    agent_id: Option<String>,
+) -> horsie_workflow::LogPage {
+    session
+        .ask(|reply| {
+            SessionCommand::Read(ReadCommand::PageLog {
+                agent_id,
+                before: None,
+                max: 50,
+                reply,
+            })
+        })
+        .await
+        .unwrap()
+        .expect("agent history")
+}
+
+pub(super) fn hook_ids(page: &horsie_workflow::LogPage) -> Vec<String> {
+    page.entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            horsie_agentcore::AgentLogBody::Hook(h) => Some(h.id.clone()),
+            horsie_agentcore::AgentLogBody::Llm(_)
+            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+        })
+        .collect()
+}
+
+pub(super) fn stop_record(outcome: StopOutcome) -> HookRecord {
+    HookRecord {
+        plugin: "stopper".into(),
+        duration_ms: 1,
+        halt: None,
+        action: HookAction::Stop(horsie_models::hooks::StopRecord {
+            system_message: None,
+            outcome,
+        }),
+    }
+}
+
+pub(super) fn stop_blocked(reason: &str) -> Vec<HookRecord> {
+    vec![stop_record(StopOutcome::Blocked(
+        horsie_models::hooks::HookBlocked {
+            reason: Some(reason.to_string()),
+        },
+    ))]
+}
+
+/// An `EchoProvider` that also keeps every text part it was prompted with,
+/// so a test can assert on what the model was actually told rather than on
+/// what the transcript would translate to.
+#[derive(Default)]
+pub(super) struct PromptRecorder(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl LlmProvider for PromptRecorder {
+    fn model_id(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        request: horsie_agentcore::CompletionRequest<'_>,
+        _message_id: &str,
+        _events: &dyn horsie_agentcore::EventSink,
+    ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+        let mut seen = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        for m in request.messages {
+            for p in &m.parts {
+                if let horsie_agentcore::ContentPart::Text(t) = p {
+                    seen.push(t.text.clone());
+                }
+            }
+        }
+        drop(seen);
+        Ok(horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::Text(
+                horsie_agentcore::TextPart {
+                    text: "done".to_string(),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::EndTurn,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        })
+    }
+}
+
+/// A session whose runtime answers every `RunHooks` from `records`, with an
+/// LLM that concludes on the first call.
+pub(super) async fn stop_harness(
+    records: Vec<Vec<HookRecord>>,
+) -> (ActorFixture, ActorRef<SessionCommand>) {
+    let (f, session, _, _, _) = stop_harness_full(records).await;
+    (f, session)
+}
+
+/// The same harness, also handing back every prompt the model was sent.
+pub(super) async fn stop_harness_with_prompts(
+    records: Vec<Vec<HookRecord>>,
+) -> (
+    ActorFixture,
+    ActorRef<SessionCommand>,
+    Arc<Mutex<Vec<String>>>,
+) {
+    let (f, session, prompts, _, _) = stop_harness_full(records).await;
+    (f, session, prompts)
+}
+
+/// The same harness, also handing back the journal, for a test that has to
+/// read what was *persisted*. A spurious failure is overwritten in the
+/// status by whatever lands next; the journal keeps it.
+pub(super) async fn stop_harness_with_journal(
+    records: Vec<Vec<HookRecord>>,
+) -> (
+    ActorFixture,
+    ActorRef<SessionCommand>,
+    Uuid,
+    Arc<dyn horsie_actor::Journal>,
+) {
+    let (f, session, _, id, journal) = stop_harness_full(records).await;
+    (f, session, id, journal)
+}
+
+pub(super) async fn stop_harness_full(
+    records: Vec<Vec<HookRecord>>,
+) -> (
+    ActorFixture,
+    ActorRef<SessionCommand>,
+    Arc<Mutex<Vec<String>>>,
+    Uuid,
+    Arc<dyn horsie_actor::Journal>,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
+        .hook_records(records)
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let mut vendors = HashMap::new();
+    vendors.insert("mock".to_string(), agent.link());
+    let vendors = Arc::new(std::sync::RwLock::new(vendors));
+    let deps = ServerDeps {
+        runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
+        provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        vendors,
+        github_tokens: None,
+        mcp: None,
+        plugins: None,
+        memory: None,
+    };
+    let f = ActorFixture {
+        deps,
+        agent,
+        _tmp: tmp,
+    };
+    let id = Uuid::new_v4();
+    f.deps
+        .runtimes
+        .create(&id.to_string(), "mock", &actor_spec_fixture())
+        .await
+        .expect("create");
+    let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+    f.deps.provider_registry.write().unwrap().insert(
+        "mock".to_string(),
+        Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>,
+    );
+    let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
+    let session = horsie_actor::spawn_root(
+        SessionActor::new(
+            id,
+            actor_spec_fixture(),
+            f.deps.clone(),
+            spawn_deaf_supervisor(),
+            crate::sessions::Positions::default(),
+        ),
+        journal.clone(),
+    );
+    (f, session, prompts, id, journal)
+}
+
+/// Every user-role message in the main agent's transcript, in order — which
+/// is one per turn, so its length is the number of turns that ran.
+pub(super) async fn turn_inputs(session: &ActorRef<SessionCommand>) -> Vec<String> {
+    agent_history(session, None)
+        .await
+        .entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            horsie_agentcore::AgentLogBody::Llm(m) if m.role == horsie_agentcore::Role::User => {
+                Some(m.parts.iter().fold(String::new(), |mut acc, p| {
+                    if let horsie_agentcore::ContentPart::Text(t) = p {
+                        acc.push_str(&t.text);
+                    }
+                    acc
+                }))
+            }
+            horsie_agentcore::AgentLogBody::Llm(_)
+            | horsie_agentcore::AgentLogBody::Hook(_)
+            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+        })
+        .collect()
+}
+
+/// The `Stop` outcomes journaled on the main agent's transcript.
+pub(super) async fn stop_outcomes(session: &ActorRef<SessionCommand>) -> Vec<StopOutcome> {
+    agent_history(session, None)
+        .await
+        .entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            horsie_agentcore::AgentLogBody::Hook(h) => match &h.record.action {
+                HookAction::Stop(r) => Some(r.outcome.clone()),
+                other => panic!("only Stop hooks run in these tests, got {other:?}"),
+            },
+            horsie_agentcore::AgentLogBody::Llm(_)
+            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+        })
+        .collect()
+}
+
+/// Wait until the transcript stops growing, so a test asserting "no further
+/// turn ran" observes a real stop rather than a race it won.
+pub(super) async fn settled_inputs(session: &ActorRef<SessionCommand>) -> Vec<String> {
+    let mut last = turn_inputs(session).await;
+    let mut stable = 0;
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let now = turn_inputs(session).await;
+        if now == last {
+            stable += 1;
+            if stable == 5 {
+                return now;
+            }
+        } else {
+            stable = 0;
+            last = now;
+        }
+    }
+    last
+}
+
+pub(super) async fn send(session: &ActorRef<SessionCommand>, text: &str) {
+    session
+        .ask(|reply| {
+            SessionCommand::Turn(TurnCommand::UserMessage {
+                text: text.into(),
+                reply,
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// Every session event that reached the journal, as its serialized payload.
+/// Matched on as text, because the variant name is what a test cares about
+/// and decoding buys nothing over reading it.
+pub(super) async fn journaled_events(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    session_id: Uuid,
+) -> Vec<String> {
+    use futures_util::StreamExt;
+    let pid = SessionActor::persistence_id_for(session_id);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only inspection: names what was journaled, which no actor reports"
+    )]
+    let mut stream = journal.replay(&pid, 0).await;
+    let mut out = Vec::new();
+    while let Some(item) = stream.next().await {
+        if let Ok((_, bytes)) = item {
+            out.push(String::from_utf8_lossy(&bytes).into_owned());
+        }
+    }
+    out
+}
+
+/// A plugin library scripted with a fixed catalogue.
+///
+/// The seam's question is "what does this name mean?", and the answer comes
+/// from the database. Ingesting a real bundle to answer it would test
+/// `pack()` a second time and pay for a git clone per case.
+pub(super) struct FakeLibrary(Vec<horsie_support::plugin::catalog::CatalogEntry>);
+
+#[async_trait]
+impl crate::plugins::PluginProvisioner for FakeLibrary {
+    async fn resolve(
+        &self,
+        _names: &[String],
+    ) -> Result<Vec<crate::plugins::PluginArtifactRef>, String> {
+        Ok(Vec::new())
+    }
+
+    fn mint_token(&self, _session_id: &str, _hashes: &[String]) -> String {
+        String::new()
+    }
+
+    async fn default_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn catalog(
+        &self,
+        _names: &[String],
+    ) -> Vec<horsie_support::plugin::catalog::CatalogEntry> {
+        self.0.clone()
+    }
+}
+
+pub(super) fn catalog_entry(
+    kind: horsie_support::plugin::catalog::CatalogKind,
+    name: &str,
+    template: Option<&str>,
+) -> horsie_support::plugin::catalog::CatalogEntry {
+    horsie_support::plugin::catalog::CatalogEntry {
+        kind,
+        name: name.into(),
+        description: "d".into(),
+        argument_hint: None,
+        template: template.map(str::to_string),
+    }
+}
+
+pub(super) async fn catalog_harness(
+    entries: Vec<horsie_support::plugin::catalog::CatalogEntry>,
+) -> (ActorFixture, ActorRef<SessionCommand>, Uuid) {
+    catalog_harness_with(entries, Vec::new()).await
+}
+
+pub(super) async fn catalog_harness_with(
+    entries: Vec<horsie_support::plugin::catalog::CatalogEntry>,
+    hook_records: Vec<Vec<HookRecord>>,
+) -> (ActorFixture, ActorRef<SessionCommand>, Uuid) {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
+        .hook_records(hook_records)
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let mut vendors = HashMap::new();
+    vendors.insert("mock".to_string(), agent.link());
+    let vendors = Arc::new(std::sync::RwLock::new(vendors));
+    let deps = ServerDeps {
+        runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
+        provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        vendors,
+        github_tokens: None,
+        mcp: None,
+        plugins: Some(Arc::new(FakeLibrary(entries))),
+        memory: None,
+    };
+    let f = ActorFixture {
+        deps,
+        agent,
+        _tmp: tmp,
+    };
+    let id = Uuid::new_v4();
+    f.deps
+        .runtimes
+        .create(&id.to_string(), "mock", &actor_spec_fixture())
+        .await
+        .expect("create");
+    f.deps.provider_registry.write().unwrap().insert(
+        "mock".to_string(),
+        Arc::new(PromptRecorder(Arc::default())) as Arc<dyn LlmProvider>,
+    );
+    let session = horsie_actor::spawn_root(
+        SessionActor::new(
+            id,
+            actor_spec_fixture(),
+            f.deps.clone(),
+            spawn_deaf_supervisor(),
+            crate::sessions::Positions::default(),
+        ),
+        Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
+    );
+    (f, session, id)
+}
+
+pub(super) fn catalog_provider(
+    f: &ActorFixture,
+    session: &ActorRef<SessionCommand>,
+    id: Uuid,
+) -> SessionContextProvider {
+    SessionContextProvider {
+        runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
+        registry: f.deps.provider_registry.clone(),
+        mcp: None,
+        memory: None,
+        settings: actor_spec_fixture().agent,
+        step_output_schema: None,
+        session_id: id,
+        kind: SessionAgentKind::Main,
+        agent_type: None,
+        unattended: false,
+        session: session.clone(),
+        plugins: Vec::new(),
+        plugin_library: f.deps.plugins.clone(),
+        last_client: Mutex::new(None),
+    }
+}
+
+/// The prompt the seam produced for this turn — the whole point of the
+/// expansion, since it is what the model actually reads.
+pub(super) async fn prepared_message(
+    provider: &SessionContextProvider,
+    prompt: &str,
+) -> Option<String> {
+    provider
+        .start_hooks(StartTurn {
+            start_source: None,
+            prompt: Some(prompt.to_string()),
+        })
+        .await
+        .expect("prepare")
+        .message
+}
+
+/// A session whose runtime library declares `code-reviewer`, with a
+/// `PromptRecorder` so the test can assert what the model was actually
+/// told rather than what the transcript would render.
+pub(super) async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, Uuid) {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
+        .shared_agents(vec![horsie_models::runtime::PluginAgent {
+            plugin: "feature-dev".into(),
+            rel_path: "feature-dev/agents/code-reviewer.md".into(),
+            content: "---\nname: code-reviewer\ndescription: reviews diffs\n\
+                      tools: Read, Grep\n---\nReport only high-confidence bugs."
+                .into(),
+        }])
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let mut vendors = HashMap::new();
+    vendors.insert("mock".to_string(), agent.link());
+    let vendors = Arc::new(std::sync::RwLock::new(vendors));
+    let deps = ServerDeps {
+        runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
+        provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        vendors,
+        github_tokens: None,
+        mcp: None,
+        plugins: None,
+        memory: None,
+    };
+    let f = ActorFixture {
+        deps,
+        agent,
+        _tmp: tmp,
+    };
+    let id = Uuid::new_v4();
+    f.deps
+        .runtimes
+        .create(&id.to_string(), "mock", &actor_spec_fixture())
+        .await
+        .expect("create");
+    let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+    f.deps.provider_registry.write().unwrap().insert(
+        "mock".to_string(),
+        Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>,
+    );
+    let session = horsie_actor::spawn_root(
+        SessionActor::new(
+            id,
+            actor_spec_fixture(),
+            f.deps.clone(),
+            spawn_deaf_supervisor(),
+            crate::sessions::Positions::default(),
+        ),
+        Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
+    );
+    drop(prompts);
+    (f, session, id)
+}
+
+pub(super) async fn spawn_typed(
+    session: &ActorRef<SessionCommand>,
+    agent_type: Option<&str>,
+) -> Result<Uuid, String> {
+    session
+        .ask(|reply| {
+            SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                caller: crate::sessions::subagents::SubAgentParent::Main,
+                label: "review".into(),
+                task: "look at the diff".into(),
+                agent_type: agent_type.map(str::to_string),
+                reply,
+            })
+        })
+        .await
+        .unwrap()
+}
+
+/// A provider for one subagent of `agent_harness`'s session, optionally
+/// carrying a session-level tool allowlist.
+pub(super) fn typed_provider(
+    f: &ActorFixture,
+    session: &ActorRef<SessionCommand>,
+    id: Uuid,
+    sub: Uuid,
+    allowed_tools: Option<Vec<String>>,
+) -> SessionContextProvider {
+    let mut settings = actor_spec_fixture().agent;
+    settings.allowed_tools = allowed_tools;
+    SessionContextProvider {
+        runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
+        registry: f.deps.provider_registry.clone(),
+        mcp: None,
+        memory: None,
+        settings,
+        step_output_schema: None,
+        session_id: id,
+        kind: SessionAgentKind::Sub(sub),
+        agent_type: Some("code-reviewer".to_string()),
+        unattended: false,
+        session: session.clone(),
+        plugins: Vec::new(),
+        plugin_library: None,
+        last_client: Mutex::new(None),
+    }
+}
+
+pub(super) async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::LogPage {
+    session
+        .ask(|reply| {
+            SessionCommand::Read(ReadCommand::PageLog {
+                agent_id: None,
+                before: None,
+                max: 50,
+                reply,
+            })
+        })
+        .await
+        .unwrap()
+        .expect("main agent log")
+}
+
+/// Fails any completion whose conversation contains `needle`; answers
+/// everything else with plain text. Distinguishes the subagent's run from
+/// the main agent's when both share one provider.
+pub(super) struct FailOnNeedleProvider {
+    pub(super) needle: String,
+}
+
+#[async_trait]
+impl LlmProvider for FailOnNeedleProvider {
+    fn model_id(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        request: horsie_agentcore::CompletionRequest<'_>,
+        _message_id: &str,
+        _events: &dyn horsie_agentcore::EventSink,
+    ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+        let hit = request
+            .messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .any(|p| matches!(p, horsie_agentcore::ContentPart::Text(t) if t.text.contains(&self.needle)));
+        if hit {
+            return Err(horsie_agentcore::LlmError::ApiError {
+                status: 401,
+                message: "bad key".to_string(),
+            });
+        }
+        Ok(horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::Text(
+                horsie_agentcore::TextPart {
+                    text: "fine".to_string(),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::EndTurn,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        })
+    }
+}
+
+/// Answers a step by never returning, and everything else with plain text.
+///
+/// A step must stay in flight for the length of these tests: it is the tree a
+/// spawn belongs in, and a concluded step takes its tree out of play. Told
+/// apart by the step's own prompt, which no subagent conversation carries.
+pub(super) struct StepStallsProvider;
+
+#[async_trait]
+impl LlmProvider for StepStallsProvider {
+    fn model_id(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        request: horsie_agentcore::CompletionRequest<'_>,
+        _message_id: &str,
+        _events: &dyn horsie_agentcore::EventSink,
+    ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+        let is_step = request.messages.iter().any(|m| {
+            m.parts.iter().any(|p| {
+                matches!(p, horsie_agentcore::ContentPart::Text(t) if t.text.contains("Triage it."))
+            })
+        });
+        if is_step {
+            // Never returns. The step stays `Running` and its tree stays live.
+            std::future::pending::<()>().await;
+        }
+        Ok(horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::Text(
+                horsie_agentcore::TextPart {
+                    text: "sub answer".to_string(),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::EndTurn,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        })
+    }
+}
+
+/// A run whose first step is in flight and stays there, so it has a tree that
+/// spawns belong in.
+pub(super) async fn a_run_with_a_step_in_flight() -> (
+    ActorFixture,
+    ActorRef<SessionCommand>,
+    Uuid,
+    Arc<dyn horsie_actor::Journal>,
+) {
+    let (f, session, id, journal) = spawn_run_with_provider(Arc::new(StepStallsProvider)).await;
+    wait_for_run(&journal, id, |r| r.current().is_some()).await;
+    (f, session, id, journal)
+}
