@@ -152,6 +152,7 @@ impl SessionActor {
                 continue;
             };
             let _ = agent
+                .actor
                 .tell(AgentCommand::RecordLifecycle {
                     event: payload,
                     at_ms: now_ms(),
@@ -173,6 +174,7 @@ impl SessionActor {
         };
         if let Some(agent) = agent {
             let _ = agent
+                .actor
                 .tell(AgentCommand::RecordLifecycle {
                     event,
                     at_ms: now_ms(),

@@ -39,14 +39,17 @@ use turns::Turns;
 use crate::sessions::{
     ask_tool::ASK_USER_TOOL,
     orchestrator::AgentAction,
-    spec::{PendingAsk, ServerDeps, SessionSpec, SessionStatus},
+    spec::{ServerDeps, SessionSpec, SessionStatus},
     supervisor::SessionSupervisorCommand,
 };
 use async_trait::async_trait;
-use context::{SessionAgentKind, SessionContextProvider, session_run_def};
+use context::{SessionAgentKind, SessionContextProvider};
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_models::now_ms;
-use horsie_workflow::{AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRuntimeContext};
+use horsie_workflow::{
+    AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext,
+};
+use serde_json::Value;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -62,24 +65,35 @@ const MAIN_AGENT_ID: &str = "main";
 /// can never hold the mailbox — and with it the Stop button — hostage.
 const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// One resident agent: its mailbox, and the provider that assembles its turns.
+///
+/// The two travel together because cancelling needs both — the mailbox to stop
+/// the loop, and the provider to reach the runtime client the run in flight
+/// already acquired. Keeping the provider on the actor instead, as a single
+/// field, meant only the main agent had one, so cancelling a workflow step
+/// silently skipped the sandbox half.
+#[derive(Clone)]
+struct ResidentAgent {
+    actor: ActorRef<AgentCommand>,
+    provider: Arc<SessionContextProvider>,
+}
+
 /// The agent actors a session hosts.
 ///
 /// An enum rather than an `Option` plus a map: a session's topology is decided
 /// at creation and never changes, and a workflow run has no main agent at all.
 enum SessionAgents {
     Interactive {
-        main: ActorRef<AgentCommand>,
-        subs: HashMap<Uuid, ActorRef<AgentCommand>>,
+        main: ResidentAgent,
+        subs: HashMap<Uuid, ResidentAgent>,
     },
     /// A workflow run: step agents and their subagents, all keyed by id. There
     /// is no main agent — the definition, not a person, decides who runs.
-    Workflow {
-        live: HashMap<Uuid, ActorRef<AgentCommand>>,
-    },
+    Workflow { live: HashMap<Uuid, ResidentAgent> },
 }
 
 impl SessionAgents {
-    fn interactive(main: ActorRef<AgentCommand>) -> Self {
+    fn interactive(main: ResidentAgent) -> Self {
         Self::Interactive {
             main,
             subs: HashMap::new(),
@@ -93,14 +107,14 @@ impl SessionAgents {
     }
 
     /// The session's primary agent, for the kinds that have one.
-    fn main(&self) -> Option<&ActorRef<AgentCommand>> {
+    fn main(&self) -> Option<&ResidentAgent> {
         match self {
             Self::Interactive { main, .. } => Some(main),
             Self::Workflow { .. } => None,
         }
     }
 
-    fn sub(&self, id: Uuid) -> Option<&ActorRef<AgentCommand>> {
+    fn sub(&self, id: Uuid) -> Option<&ResidentAgent> {
         match self {
             Self::Interactive { subs, .. } => subs.get(&id),
             Self::Workflow { live } => live.get(&id),
@@ -108,14 +122,14 @@ impl SessionAgents {
     }
 
     /// The agent registered under `key`, if it is still resident.
-    fn get(&self, key: AgentKey) -> Option<&ActorRef<AgentCommand>> {
+    fn get(&self, key: AgentKey) -> Option<&ResidentAgent> {
         match key {
             AgentKey::Main => self.main(),
             AgentKey::Sub(id) | AgentKey::Step(id) => self.sub(id),
         }
     }
 
-    fn insert_sub(&mut self, id: Uuid, agent: ActorRef<AgentCommand>) {
+    fn insert_sub(&mut self, id: Uuid, agent: ResidentAgent) {
         match self {
             Self::Interactive { subs, .. } => {
                 subs.insert(id, agent);
@@ -127,7 +141,7 @@ impl SessionAgents {
     }
 
     /// Every agent, emptying the set. Used when the session unloads.
-    fn drain_all(&mut self) -> Vec<ActorRef<AgentCommand>> {
+    fn drain_all(&mut self) -> Vec<ResidentAgent> {
         match self {
             Self::Interactive { main, subs } => {
                 let mut out: Vec<_> = subs.drain().map(|(_, a)| a).collect();
@@ -137,6 +151,26 @@ impl SessionAgents {
             Self::Workflow { live } => live.drain().map(|(_, a)| a).collect(),
         }
     }
+}
+
+/// Everything that differs between the three kinds of agent a session spawns.
+///
+/// The rest — the runtime provider, the plugin library, the MCP and memory
+/// services, the session's own mailbox — is identical for all three and lives on
+/// the actor, which is why one spawner can serve them all.
+struct AgentPlan {
+    kind: SessionAgentKind,
+    /// Whose settings this agent runs under: the session's, or a step's own
+    /// preset. This is also where its model and thinking effort come from.
+    settings: crate::sessions::spec::AgentSettings,
+    /// A step's declared output schema, which becomes its `conclude` tool's
+    /// input schema. `None` for every other kind.
+    step_output_schema: Option<Value>,
+    /// The plugin-declared agent type a typed subagent runs as.
+    agent_type: Option<String>,
+    /// A tool whose call ends the turn without ending the run. Only the main
+    /// agent has one, and only when someone is there to answer it.
+    handoff_tool: Option<String>,
 }
 
 pub struct SessionActor {
@@ -149,14 +183,6 @@ pub struct SessionActor {
     /// which is why the topology inside is a value rather than a second
     /// `Option`: a session's shape is decided at creation and never changes.
     agents: Option<SessionAgents>,
-    /// The step being started, for the instant between the orchestrator naming
-    /// it and the `StepStarted` event landing in the log. Only
-    /// `perform_run_action` sets it, and it clears it in the same call.
-    pending_step: Option<(u32, String)>,
-    /// The main agent's context provider, kept so [`Self::cancel_run`] can
-    /// reach the runtime client the run already acquired instead of asking
-    /// the manager for a fresh one.
-    context_provider: Option<Arc<SessionContextProvider>>,
     /// The supervisor's per-agent position channels for this session.
     ///
     /// Cloned in rather than created here: it has to outlive this actor, so
@@ -179,8 +205,6 @@ impl SessionActor {
             deps,
             parent,
             agents: None,
-            pending_step: None,
-            context_provider: None,
             positions,
         }
     }
@@ -201,10 +225,26 @@ impl SessionActor {
             .await;
     }
 
-    /// Spawn the resident agent. Cheap and runtime-free: the provider, toolbox
-    /// and system prompt are resolved per run, on the run's own task.
-    fn spawn_main_agent(&mut self, ctx: &ActorContext<Self>) {
-        let context_provider = Arc::new(SessionContextProvider {
+    /// Spawn one of this session's agents and register it.
+    ///
+    /// The single spawner for all three kinds. Cheap and runtime-free: the
+    /// provider, toolbox and system prompt are resolved per run, on the run's
+    /// own task, so this costs nothing but a mailbox.
+    ///
+    /// Main is registered as the session's primary; a subagent and a step both
+    /// register under their own id, which is also the id they journal under.
+    fn spawn_agent(&mut self, ctx: &ActorContext<Self>, plan: AgentPlan) -> ResidentAgent {
+        // A subagent and a step journal under their own id; the main agent
+        // journals under the session's, because its transcript *is* the
+        // session's. The position channel follows the same split.
+        let (journal_id, position) = match plan.kind {
+            SessionAgentKind::Main => (self.id, self.positions.for_agent(MAIN_AGENT_ID)),
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
+                (id, self.positions.for_agent(&id.to_string()))
+            }
+        };
+        let key = plan.kind.agent_key();
+        let provider = Arc::new(SessionContextProvider {
             runtimes: self
                 .deps
                 .runtimes
@@ -212,41 +252,81 @@ impl SessionActor {
             registry: self.deps.provider_registry.clone(),
             mcp: self.deps.mcp.clone(),
             memory: self.deps.memory.clone(),
-            settings: self.spec.agent.clone(),
-            step_output_schema: None,
+            step_output_schema: plan.step_output_schema.clone(),
             session_id: self.id,
-            kind: SessionAgentKind::Main,
-            agent_type: None,
+            kind: plan.kind,
+            agent_type: plan.agent_type,
             unattended: self.spec.is_unattended(),
             session: ctx.self_ref(),
             plugins: self.spec.plugins.clone(),
             plugin_library: self.deps.plugins.clone(),
             last_client: Mutex::new(None),
+            settings: plan.settings.clone(),
         });
-        self.context_provider = Some(context_provider.clone());
-        let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
+        let mut params = AgentParams::from_def(&AgentRunDef {
+            system_prompt: None,
+            // The schema is what makes `conclude` typed, and typed output is
+            // what a transition condition reads.
+            output_schema: plan.step_output_schema.clone(),
+            // Asking rides on `conclude`, so only a step that already has one
+            // can ask. A step that declares no output ends its turn with plain
+            // text, and that text is its output — forcing a terminal tool on it
+            // would fail the run the moment the model simply answered.
+            allow_ask_user: plan.step_output_schema.is_some() && !self.spec.is_unattended(),
+            allow_timers: None,
+            max_iterations: plan.settings.max_iterations,
+            max_retries: Some(plan.settings.max_retries),
+            allowed_tools: plan.settings.allowed_tools.clone(),
+        });
         params.interactive = true;
-        // Only when the tool exists: an unattended session is not offered
-        // `ask_user`, and naming a handoff tool the toolbox does not carry
-        // would leave the loop watching for a call that can never come.
-        if !self.spec.is_unattended() {
-            params.optional_handoff_tool = Some(ASK_USER_TOOL.to_string());
-        }
-        params.thinking_effort = self
-            .spec
-            .agent
+        // Named only when the tool exists: naming a handoff tool the toolbox
+        // does not carry would leave the loop watching for a call that can never
+        // come. A step deliberately has none — its terminal tool is `conclude`,
+        // and naming `ask_user` beside it would stop the loop treating
+        // `conclude` as terminal.
+        params.optional_handoff_tool = plan.handoff_tool;
+        params.thinking_effort = plan
+            .settings
             .thinking_effort
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let agent_ctx = AgentRuntimeContext {
-            context_provider: context_provider.clone(),
-            position: self.positions.for_agent(MAIN_AGENT_ID),
-            parent: StopHookParent::wrap(ctx.self_ref(), AgentKey::Main, context_provider.clone()),
-            session_id: self.id,
+            context_provider: provider.clone(),
+            position,
+            parent: StopHookParent::wrap(ctx.self_ref(), key, provider.clone()),
+            session_id: journal_id,
         };
-        self.agents = Some(SessionAgents::interactive(
-            ctx.spawn(AgentActor::new(agent_ctx, params)),
-        ));
+        let resident = ResidentAgent {
+            actor: ctx.spawn(AgentActor::new(agent_ctx, params)),
+            provider,
+        };
+        match plan.kind {
+            SessionAgentKind::Main => {
+                self.agents = Some(SessionAgents::interactive(resident.clone()));
+            }
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
+                if let Some(agents) = self.agents.as_mut() {
+                    agents.insert_sub(id, resident.clone());
+                }
+            }
+        }
+        resident
+    }
+
+    /// The session's primary agent, spawned once at load.
+    fn spawn_main_agent(&mut self, ctx: &ActorContext<Self>) {
+        self.spawn_agent(
+            ctx,
+            AgentPlan {
+                kind: SessionAgentKind::Main,
+                settings: self.spec.agent.clone(),
+                step_output_schema: None,
+                agent_type: None,
+                // An unattended session is not offered `ask_user`: nobody is
+                // there to answer, so a question would park the run forever.
+                handoff_tool: (!self.spec.is_unattended()).then(|| ASK_USER_TOOL.to_string()),
+            },
+        );
     }
 
     /// Resolve an agent selector to its resident actor: `None`/`"main"` for the
@@ -260,16 +340,11 @@ impl SessionActor {
         agent_id: Option<&str>,
     ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
         match agent_id {
-            None | Some("main") => self
-                .agents
-                .as_ref()
-                .and_then(SessionAgents::main)
-                .cloned()
-                .map(|a| (AgentKey::Main, a)),
+            None | Some("main") => self.agent().map(|actor| (AgentKey::Main, actor)),
             Some(raw) => {
                 let id = Uuid::parse_str(raw).ok()?;
                 if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
-                    return Some((AgentKey::Sub(id), agent.clone()));
+                    return Some((AgentKey::Sub(id), agent.actor.clone()));
                 }
                 // The type comes off the record, not from the caller: a cold
                 // node woken to answer a read must run as what it was spawned as.
@@ -282,8 +357,56 @@ impl SessionActor {
         }
     }
 
-    fn agent(&self) -> Option<&ActorRef<AgentCommand>> {
-        self.agents.as_ref().and_then(SessionAgents::main)
+    fn agent(&self) -> Option<ActorRef<AgentCommand>> {
+        self.agents
+            .as_ref()
+            .and_then(SessionAgents::main)
+            .map(|a| a.actor.clone())
+    }
+
+    /// Cancel one agent's run and wait for it to actually be over.
+    ///
+    /// Two halves, in this order. The sandbox is told to abandon what it is
+    /// running first, using the client that agent's own `provide()` cached —
+    /// asking the manager for a fresh one would round-trip the vendor on this
+    /// mailbox, and a vendor mid-tool-call cannot answer a lifecycle request
+    /// until the call it is relaying resolves. Then the agent's loop is stopped.
+    ///
+    /// Waiting matters: the caller is about to record a turn boundary, and a run
+    /// still winding down can still append to the agent journal.
+    async fn cancel_agent(&mut self, key: AgentKey) {
+        let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)).cloned() else {
+            return;
+        };
+        if let Some(client) = agent.provider.cached_client() {
+            client.cancel_in_flight().await;
+        }
+        let (tx, rx) = oneshot::channel();
+        let _ = agent
+            .actor
+            .tell(AgentCommand::Cancel { ack: Some(tx) })
+            .await;
+        if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
+            tracing::warn!(
+                session = %self.id,
+                "cancelled run did not finish within {CANCEL_TIMEOUT:?}; proceeding"
+            );
+        }
+    }
+
+    /// Cancel whatever this session is running: the step in flight for a run,
+    /// the main agent otherwise. A run used to be skipped here entirely, so
+    /// deleting one mid-step left its sandbox call running.
+    async fn cancel_in_flight(&mut self, state: &SessionState) {
+        let step = state
+            .run
+            .as_ref()
+            .and_then(|r| r.current().and_then(|i| r.get(i)))
+            .map(|s| s.agent);
+        match step {
+            Some(agent) => self.cancel_agent(AgentKey::Step(agent)).await,
+            None => self.cancel_agent(AgentKey::Main).await,
+        }
     }
 
     /// Carry out one orchestrator decision: resume the agent it names, report
@@ -298,27 +421,69 @@ impl SessionActor {
         state: &SessionState,
         ctx: &ActorContext<Self>,
     ) -> Vec<SessionDomainEvent> {
-        let AgentAction::StartTurn {
-            who,
-            input,
-            consumed,
-            answered,
-            notified,
-            mark_running,
-        } = action
-        else {
-            return self.perform_run_action(action, ctx).await;
-        };
+        match action {
+            AgentAction::StartTurn {
+                who,
+                input,
+                consumed,
+                answered,
+                notified,
+                mark_running,
+            } => {
+                self.start_turn(
+                    who,
+                    input,
+                    consumed,
+                    answered,
+                    notified,
+                    mark_running,
+                    state,
+                    ctx,
+                )
+                .await
+            }
+            AgentAction::StartStep {
+                index,
+                step,
+                agent,
+                attempt,
+                from,
+                via,
+                input,
+            } => {
+                self.start_step(ctx, index, step, agent, attempt, from, via, input)
+                    .await
+            }
+            AgentAction::Finish { output } => self.finish_run(output).await,
+            AgentAction::Fail { error } => self.fail_run(error).await,
+        }
+    }
+
+    /// Resume the agent a `StartTurn` names, and return the events that record
+    /// it. Split from [`Self::perform`] so neither half needs an `unreachable!`
+    /// for the variants the other owns.
+    #[allow(clippy::too_many_arguments)]
+    async fn start_turn(
+        &mut self,
+        who: AgentKey,
+        input: crate::sessions::orchestrator::TurnInput,
+        consumed: Vec<String>,
+        answered: Vec<String>,
+        notified: Vec<Uuid>,
+        mark_running: Option<Uuid>,
+        state: &SessionState,
+        ctx: &ActorContext<Self>,
+    ) -> Vec<SessionDomainEvent> {
         match who {
             // A subagent parent waking to consume its children's results. It
             // is skipped, not failed, when its actor cannot be reached: the
             // results stay owed and the next boundary retries.
-            // A step is resumed only by `perform_run_action`; the turn path
-            // never names one.
+            // A step is resumed only by `start_step`; the turn path never names
+            // one.
             AgentKey::Step(_) => Vec::new(),
             AgentKey::Sub(id) => {
                 let agent = match self.agents.as_ref().and_then(|a| a.sub(id)) {
-                    Some(agent) => agent.clone(),
+                    Some(agent) => agent.actor.clone(),
                     // A cold node woken for the first time since load: spawn
                     // its resident actor on demand (see `on_recovery_complete`).
                     None => match state.subagents.node(id) {
@@ -448,165 +613,70 @@ impl SessionActor {
         events
     }
 
+    /// Persist `events`, having first let the boundary they create start
+    /// whatever became startable.
+    ///
+    /// The fold is local and one step early — the same fold the runtime will
+    /// apply when it persists — because the drain has to see the state these
+    /// events produce, not the one they were decided against. Every turn
+    /// boundary ends here, which is what stops a result owed to a subagent
+    /// parent stranding when no further outcome can arrive.
+    async fn persist_and_advance(
+        &mut self,
+        state: &SessionState,
+        mut events: Vec<SessionDomainEvent>,
+        ctx: &ActorContext<Self>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        let next = events
+            .iter()
+            .cloned()
+            .fold(state.clone(), Self::apply_event);
+        events.extend(self.flush_then_drain(&next, ctx).await);
+        CommandEffect::persist(events)
+    }
+
+    /// Route one agent's outcome to the component that owns what it means.
+    ///
+    /// The one command routed by *identity* rather than by variant: the same
+    /// `Concluded` means "the turn is over", "this step's output picks the next
+    /// step", or "tell the parent its child is done", depending only on which
+    /// agent sent it. Banking usage first is what lets each of those three read
+    /// the outcome as a turn that ended, rather than re-answering a variant that
+    /// means the same thing to all of them.
     async fn on_agent_outcome(
         &mut self,
         state: &SessionState,
         outcome: AgentOutcome,
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
-        let outcome_session = match &outcome {
-            AgentOutcome::Concluded { session_id, .. }
-            | AgentOutcome::Asked { session_id, .. }
-            | AgentOutcome::Parked { session_id }
-            | AgentOutcome::Failed { session_id, .. }
-            | AgentOutcome::UsageRecorded { session_id, .. } => *session_id,
+        // Usage is banked for every agent alike, and always: the tokens were
+        // spent whatever became of the turn that spent them. The main agent
+        // banks under a fixed name because its journal is keyed by the session
+        // id; every other agent banks under its own.
+        let (who, end) = match TurnEnd::split(outcome) {
+            Ok(pair) => pair,
+            Err((session_id, usage_total)) => {
+                let agent_id = match session_id == self.id {
+                    true => MAIN_AGENT_ID.to_string(),
+                    false => session_id.to_string(),
+                };
+                return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
+                    at_ms: now_ms(),
+                    agent_id,
+                    usage_total,
+                }]);
+            }
         };
         // In a run, an outcome is a step's or one of a step's subagents'.
         if let Some(run) = state.run.as_ref() {
-            if let Some(index) = run.index_of_agent(outcome_session) {
-                return self.on_step_outcome(state, index, outcome, ctx).await;
-            }
-            return self
-                .on_sub_agent_outcome(state, outcome_session, outcome, ctx)
-                .await;
+            return match run.index_of_agent(who) {
+                Some(index) => self.on_step_outcome(state, index, end, ctx).await,
+                None => self.on_sub_agent_outcome(state, who, end, ctx).await,
+            };
         }
-        if outcome_session != self.id {
-            return self
-                .on_sub_agent_outcome(state, outcome_session, outcome, ctx)
-                .await;
-        }
-        // Usage is always recorded: the tokens were spent whatever became of
-        // the turn that spent them.
-        if let AgentOutcome::UsageRecorded { usage_total, .. } = outcome {
-            return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
-                at_ms: now_ms(),
-                agent_id: MAIN_AGENT_ID.to_string(),
-                usage_total,
-            }]);
-        }
-        let (mut events, drained) = match outcome {
-            AgentOutcome::UsageRecorded { .. } => unreachable!("handled above"),
-            AgentOutcome::Concluded { .. } => {
-                self.report(SessionStatus::Idle).await;
-                (
-                    vec![SessionDomainEvent::TurnEnded { at_ms: now_ms() }],
-                    true,
-                )
-            }
-            AgentOutcome::Asked { asks, .. } => {
-                self.report(SessionStatus::AwaitingInput {
-                    asks: asks
-                        .iter()
-                        .map(|a| PendingAsk {
-                            tool_call_id: a.tool_call_id.clone(),
-                            question: a.question.clone(),
-                        })
-                        .collect(),
-                })
-                .await;
-                (
-                    asks.into_iter()
-                        .map(|a| SessionDomainEvent::AskRecorded {
-                            at_ms: now_ms(),
-                            tool_call_id: a.tool_call_id,
-                            question: a.question,
-                        })
-                        .collect::<Vec<_>>(),
-                    // An ask is a turn boundary too: a message queued while the
-                    // agent was working becomes the answer.
-                    true,
-                )
-            }
-            AgentOutcome::Failed {
-                error, terminal, ..
-            } => {
-                // A runtime that a live vendor cannot produce is the one
-                // terminal failure: re-provisioning would silently rebuild a
-                // workspace the user believes they still have. Everything else
-                // — provider errors, tool errors, a vendor that is merely
-                // offline — is a failed turn they can retry.
-                if terminal {
-                    self.report(SessionStatus::Unrecoverable {
-                        reason: error.clone(),
-                    })
-                    .await;
-                    (
-                        vec![SessionDomainEvent::SessionFailed {
-                            at_ms: now_ms(),
-                            reason: error,
-                        }],
-                        false,
-                    )
-                } else {
-                    self.report(SessionStatus::Failed {
-                        reason: error.clone(),
-                    })
-                    .await;
-                    // Deliberately no drain: a stuck cause (expired key, dead
-                    // vendor) would otherwise turn three queued messages into
-                    // three back-to-back failures. The next message drains them.
-                    (
-                        vec![SessionDomainEvent::TurnFailed {
-                            at_ms: now_ms(),
-                            error,
-                        }],
-                        false,
-                    )
-                }
-            }
-            AgentOutcome::Parked { .. } => {
-                let error = "agent parked; timers are not supported in sessions".to_string();
-                self.report(SessionStatus::Failed {
-                    reason: error.clone(),
-                })
-                .await;
-                (
-                    vec![SessionDomainEvent::TurnFailed {
-                        at_ms: now_ms(),
-                        error,
-                    }],
-                    false,
-                )
-            }
-        };
-        if drained {
-            let mut next = state.clone();
-            for e in &events {
-                next = Self::apply_event(next, e.clone());
-            }
-            events.extend(self.flush_then_drain(&next, ctx).await);
-        }
-        CommandEffect::persist(events)
-    }
-
-    /// Cancel the run in flight, if any, and wait for it to actually be over.
-    ///
-    /// Waiting matters: the caller is about to record a turn boundary, and a
-    /// run that is still winding down can still append to the agent journal.
-    async fn cancel_run(&mut self) {
-        let Some(agent) = self.agent().cloned() else {
-            return;
-        };
-        // Tell the sandbox to abandon what it is running first, so the wait
-        // below is over an already-cancelled call rather than a live one. Uses
-        // the client the run itself already acquired in `provide()` — asking
-        // the manager for a fresh one would round-trip the vendor on this very
-        // mailbox, and a vendor mid-tool-call cannot answer a lifecycle
-        // request until the tool call it is relaying resolves.
-        if let Some(client) = self
-            .context_provider
-            .as_ref()
-            .and_then(|cp| cp.cached_client())
-        {
-            client.cancel_in_flight().await;
-        }
-        let (tx, rx) = oneshot::channel();
-        let _ = agent.tell(AgentCommand::Cancel { ack: Some(tx) }).await;
-        if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
-            tracing::warn!(
-                session = %self.id,
-                "cancelled run did not finish within {CANCEL_TIMEOUT:?}; proceeding"
-            );
+        match who == self.id {
+            true => self.on_main_outcome(state, end, ctx).await,
+            false => self.on_sub_agent_outcome(state, who, end, ctx).await,
         }
     }
 
@@ -618,8 +688,8 @@ impl SessionActor {
         for agent in agents.drain_all() {
             // Cancel first: a stopped mailbox makes the run task's next persist
             // fail, but an in-flight tool call would run to completion first.
-            let _ = agent.tell(AgentCommand::Cancel { ack: None }).await;
-            let _ = agent.tell(AgentCommand::Shutdown).await;
+            let _ = agent.actor.tell(AgentCommand::Cancel { ack: None }).await;
+            let _ = agent.actor.tell(AgentCommand::Shutdown).await;
         }
     }
 }

@@ -138,7 +138,7 @@ impl RuntimeLifecycle {
                 CommandEffect::stop()
             }
             LifecycleCommand::Delete { reply } => {
-                actor.cancel_run().await;
+                actor.cancel_in_flight(state).await;
                 actor.stop_agents().await;
                 actor
                     .deps

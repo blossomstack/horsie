@@ -25,9 +25,10 @@ pub use agent_actor::{
 };
 pub use agent_log::{Cursor, LogPage, REPLAY_CAP, page_after, page_before, replay_window};
 pub use context::{
-    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, CONCLUDE_TOOL, ContextError,
-    ContextProvider, Contexts, DefaultToolboxFactory, FixedContextProvider, INSPECT_WORKSPACE_TOOL,
-    SKILL_TOOL, StartTurn, ToolboxFactory, TurnPreparation, conclude_tool_spec,
+    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, CONCLUDE_TOOL,
+    ContextError, ContextProvider, Contexts, DefaultToolboxFactory, FixedContextProvider,
+    INSPECT_WORKSPACE_TOOL, SKILL_TOOL, StartTurn, ToolboxFactory, TurnPreparation,
+    conclude_tool_spec,
 };
 pub use hook_translation::{start_blocked, translate};
 pub use mcp_toolbox::{CompositeToolbox, McpToolbox, PluginMcpToolbox};

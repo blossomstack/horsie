@@ -13,13 +13,13 @@ use super::LifecycleCommand;
 use super::component::{ActionCx, Component};
 use super::{
     AgentAction, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent, SessionState,
-    TurnCommand,
+    TurnCommand, TurnEnd,
 };
 use super::{AnswerError, AskAnswer};
 use crate::sessions::UserMessageError;
 use crate::sessions::spec::PendingAsk;
 use crate::sessions::spec::SessionStatus;
-use horsie_actor::{ActorContext, EventSourcedActor};
+use horsie_actor::ActorContext;
 use horsie_models::agent::ToolResultInput;
 use horsie_models::now_ms;
 use horsie_workflow::AgentCommand;
@@ -56,18 +56,13 @@ impl Turns {
                     let _ = reply.send(());
                     return CommandEffect::none();
                 }
-                actor.cancel_run().await;
+                actor.cancel_in_flight(state).await;
                 let _ = reply.send(());
                 actor.report(SessionStatus::Idle).await;
-                let mut events = vec![SessionDomainEvent::TurnStopped { at_ms: now_ms() }];
                 // Stop is a turn boundary like any other, so anything the user
                 // queued while the cancelled turn ran starts the next one.
-                let next = SessionActor::apply_event(
-                    state.clone(),
-                    SessionDomainEvent::TurnStopped { at_ms: now_ms() },
-                );
-                events.extend(actor.flush_then_drain(&next, ctx).await);
-                CommandEffect::persist(events)
+                let stopped = vec![SessionDomainEvent::TurnStopped { at_ms: now_ms() }];
+                actor.persist_and_advance(state, stopped, ctx).await
             }
             TurnCommand::Answer { answers, reply } => actor.on_answer(state, answers, reply).await,
             TurnCommand::ReconcileInterrupted => {
@@ -146,6 +141,111 @@ impl SessionActor {
             answered: answers.into_iter().map(|a| a.tool_call_id).collect(),
         }])
     }
+    /// What the main agent's turn ending means for the session.
+    ///
+    /// Three of the four are turn boundaries that let the inbox drain; a failure
+    /// deliberately is not. Lives here rather than in the actor's routing
+    /// because "the turn is over" is this component's fact — the same outcome
+    /// means something else entirely to a step or a subagent.
+    pub(super) async fn on_main_outcome(
+        &mut self,
+        state: &SessionState,
+        end: TurnEnd,
+        ctx: &ActorContext<Self>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        let (events, drains) = match end {
+            TurnEnd::Concluded { .. } => {
+                self.report(SessionStatus::Idle).await;
+                (
+                    vec![SessionDomainEvent::TurnEnded { at_ms: now_ms() }],
+                    true,
+                )
+            }
+            TurnEnd::Asked { asks } => {
+                self.report(SessionStatus::AwaitingInput {
+                    asks: asks
+                        .iter()
+                        .map(|a| PendingAsk {
+                            tool_call_id: a.tool_call_id.clone(),
+                            question: a.question.clone(),
+                        })
+                        .collect(),
+                })
+                .await;
+                (
+                    asks.into_iter()
+                        .map(|a| SessionDomainEvent::AskRecorded {
+                            at_ms: now_ms(),
+                            tool_call_id: a.tool_call_id,
+                            question: a.question,
+                        })
+                        .collect::<Vec<_>>(),
+                    // An ask is a turn boundary too: a message queued while the
+                    // agent was working becomes the answer.
+                    true,
+                )
+            }
+            // A runtime that a live vendor cannot produce is the one terminal
+            // failure: re-provisioning would silently rebuild a workspace the
+            // user believes they still have. Everything else — provider errors,
+            // tool errors, a vendor that is merely offline — is a failed turn
+            // they can retry.
+            TurnEnd::Failed {
+                error,
+                terminal: true,
+            } => {
+                self.report(SessionStatus::Unrecoverable {
+                    reason: error.clone(),
+                })
+                .await;
+                (
+                    vec![SessionDomainEvent::SessionFailed {
+                        at_ms: now_ms(),
+                        reason: error,
+                    }],
+                    false,
+                )
+            }
+            // Deliberately no drain: a stuck cause (expired key, dead vendor)
+            // would otherwise turn three queued messages into three back-to-back
+            // failures. The next message drains them.
+            TurnEnd::Failed {
+                error,
+                terminal: false,
+            } => {
+                self.report(SessionStatus::Failed {
+                    reason: error.clone(),
+                })
+                .await;
+                (
+                    vec![SessionDomainEvent::TurnFailed {
+                        at_ms: now_ms(),
+                        error,
+                    }],
+                    false,
+                )
+            }
+            TurnEnd::Parked => {
+                let error = "agent parked; timers are not supported in sessions".to_string();
+                self.report(SessionStatus::Failed {
+                    reason: error.clone(),
+                })
+                .await;
+                (
+                    vec![SessionDomainEvent::TurnFailed {
+                        at_ms: now_ms(),
+                        error,
+                    }],
+                    false,
+                )
+            }
+        };
+        match drains {
+            true => self.persist_and_advance(state, events, ctx).await,
+            false => CommandEffect::persist(events),
+        }
+    }
+
     pub(super) async fn on_user_message(
         &mut self,
         state: &SessionState,
@@ -173,23 +273,18 @@ impl SessionActor {
         let message_id = id.clone();
         let _ = reply.send(Ok(message_id));
 
-        // Fold the queue locally so the drain sees the message it is about to
-        // persist — same fold the runtime will apply, just one step early.
-        let next = SessionActor::apply_event(state.clone(), queued.clone());
-        let mut events = vec![queued];
         // A session whose create failed has no runtime, so the message that the
         // UI invited ("send a message to try again") has to build one rather
         // than start a turn that would ask for it. The message stays queued and
         // the create's own completion drains it, exactly as at session creation.
-        if matches!(next.status, SessionStatus::ProvisioningFailed { .. }) {
+        if matches!(state.status, SessionStatus::ProvisioningFailed { .. }) {
             let _ = ctx
                 .self_ref()
                 .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
                 .await;
-        } else {
-            events.extend(self.flush_then_drain(&next, ctx).await);
+            return CommandEffect::persist(vec![queued]);
         }
-        CommandEffect::persist(events)
+        self.persist_and_advance(state, vec![queued], ctx).await
     }
 }
 

@@ -17,7 +17,7 @@ use crate::sessions::{
     workflow::WorkflowRunState,
 };
 use horsie_models::hooks::HookRecord;
-use horsie_workflow::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
+use horsie_workflow::{AgentOutcome, AgentUsageSnapshot, AskedQuestion, UsageTotal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -387,6 +387,54 @@ pub enum SessionDomainEvent {
         at_ms: u64,
         error: String,
     },
+}
+
+/// How a turn ended.
+///
+/// [`AgentOutcome`] minus `UsageRecorded`, which is not a way a turn ends at
+/// all — it is banked identically for every agent a session hosts, so
+/// `on_agent_outcome` answers it once before routing. Narrowing it away here is
+/// what lets the three components that handle an outcome match exhaustively on
+/// the four real cases, instead of each carrying an `unreachable!` for a variant
+/// it can never be handed.
+pub(super) enum TurnEnd {
+    /// The agent produced its output — structured, or its final text.
+    Concluded { output: Value },
+    /// The agent parked on one or more questions for the user.
+    Asked { asks: Vec<AskedQuestion> },
+    /// `terminal` means the agent's sandbox is gone and no later message can
+    /// bring it back; anything else is a turn the user can retry.
+    Failed { error: String, terminal: bool },
+    /// The agent parked awaiting its timers, which sessions do not support.
+    Parked,
+}
+
+impl TurnEnd {
+    /// Separate the two things an outcome can be: a turn that ended, or usage to
+    /// bank. Both carry the agent that reported them.
+    ///
+    /// A `Result` rather than an `Option` so the caller cannot reach the routing
+    /// path with usage still in hand — the narrowing is total, and nothing below
+    /// it needs a case for a variant that never arrives.
+    pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), (Uuid, UsageTotal)> {
+        match outcome {
+            AgentOutcome::Concluded { session_id, output } => {
+                Ok((session_id, Self::Concluded { output }))
+            }
+            AgentOutcome::Asked { session_id, asks } => Ok((session_id, Self::Asked { asks })),
+            AgentOutcome::Parked { session_id } => Ok((session_id, Self::Parked)),
+            AgentOutcome::Failed {
+                session_id,
+                error,
+                terminal,
+                ..
+            } => Ok((session_id, Self::Failed { error, terminal })),
+            AgentOutcome::UsageRecorded {
+                session_id,
+                usage_total,
+            } => Err((session_id, usage_total)),
+        }
+    }
 }
 
 /// One answer to one pending ask.

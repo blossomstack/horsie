@@ -9,13 +9,11 @@
 //! construction, is the whole of what makes this component inert in a
 //! conversation.
 
-use super::CANCEL_TIMEOUT;
 use super::component::{ActionCx, Component};
-use super::context::{SessionAgentKind, SessionContextProvider};
-use super::hooks::StopHookParent;
+use super::context::SessionAgentKind;
 use super::{
-    AgentAction, AgentKey, CommandEffect, RunCommand, SessionActor, SessionCommand,
-    SessionDomainEvent, SessionState,
+    AgentAction, AgentKey, AgentPlan, CommandEffect, RunCommand, SessionActor, SessionCommand,
+    SessionDomainEvent, SessionState, TurnEnd,
 };
 use crate::sessions::spec::{PendingAsk, SessionStatus};
 use crate::sessions::workflow::WorkflowRunState;
@@ -23,9 +21,8 @@ use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_actor::EventSourcedActor;
 use horsie_models::now_ms;
-use horsie_workflow::AgentActor;
-use horsie_workflow::{AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext};
-use std::sync::{Arc, Mutex};
+use horsie_workflow::AgentCommand;
+use serde_json::Value;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -56,89 +53,73 @@ impl WorkflowRun {
 /// fields — the roster, the supervisor link, the spawn helpers. An inherent
 /// `impl` in a child module sees them, so moving the code needed no plumbing.
 impl SessionActor {
-    /// Carry out a decision that belongs to a workflow run rather than to a
-    /// turn: start a step, or end the run.
-    pub(super) async fn perform_run_action(
+    /// Begin one execution of one step: spawn its agent and hand it the input.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn start_step(
         &mut self,
-        action: AgentAction,
         ctx: &ActorContext<Self>,
+        index: u32,
+        step: String,
+        agent: Uuid,
+        attempt: u32,
+        from: Option<u32>,
+        via: Option<String>,
+        input: String,
     ) -> Vec<SessionDomainEvent> {
-        match action {
-            AgentAction::StartStep {
-                index,
-                step,
-                agent,
-                attempt,
-                from,
-                via,
-                input,
-            } => {
-                // The name is not in the log yet — this event is what puts it
-                // there — so hand it to the spawner directly.
-                self.pending_step = Some((index, step.clone()));
-                let spawned = self.spawn_step_agent(ctx, index, agent);
-                self.pending_step = None;
-                let Some(actor) = spawned else {
-                    return vec![SessionDomainEvent::RunFailed {
-                        at_ms: now_ms(),
-                        error: format!("step '{step}' is no longer in this workflow"),
-                    }];
-                };
-                if actor
-                    .tell(AgentCommand::Resume {
-                        results: Vec::new(),
-                        message: Some(input.clone()),
-                        subagent_results: Vec::new(),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return vec![SessionDomainEvent::RunFailed {
-                        at_ms: now_ms(),
-                        error: format!("step '{step}' could not be started"),
-                    }];
-                }
-                self.record_on(
-                    AgentKey::Main,
-                    horsie_agentcore::LifecycleEvent::Provisioning(
-                        horsie_agentcore::ProvisioningLifecycle {
-                            stage: "step_started".into(),
-                            detail: Some(step.clone()),
-                        },
-                    ),
-                )
-                .await;
-                self.report(SessionStatus::Running).await;
-                vec![SessionDomainEvent::StepStarted {
-                    at_ms: now_ms(),
-                    index,
-                    step,
-                    agent,
-                    attempt,
-                    from,
-                    via,
-                    input,
-                }]
-            }
-            AgentAction::Finish { output } => {
-                self.report(SessionStatus::Idle).await;
-                vec![SessionDomainEvent::RunFinished {
-                    at_ms: now_ms(),
-                    output,
-                }]
-            }
-            AgentAction::Fail { error } => {
-                self.report(SessionStatus::Failed {
-                    reason: error.clone(),
-                })
-                .await;
-                vec![SessionDomainEvent::RunFailed {
-                    at_ms: now_ms(),
-                    error,
-                }]
-            }
-            AgentAction::StartTurn { .. } => unreachable!("handled by `perform`"),
+        // The name is not in the log yet — this event is what puts it there —
+        // so it is handed to the spawner rather than looked up.
+        let Some(actor) = self.spawn_step_agent(ctx, agent, &step) else {
+            return vec![SessionDomainEvent::RunFailed {
+                at_ms: now_ms(),
+                error: format!("step '{step}' is no longer in this workflow"),
+            }];
+        };
+        if actor
+            .tell(AgentCommand::Resume {
+                results: Vec::new(),
+                message: Some(input.clone()),
+                subagent_results: Vec::new(),
+            })
+            .await
+            .is_err()
+        {
+            return vec![SessionDomainEvent::RunFailed {
+                at_ms: now_ms(),
+                error: format!("step '{step}' could not be started"),
+            }];
         }
+        self.report(SessionStatus::Running).await;
+        vec![SessionDomainEvent::StepStarted {
+            at_ms: now_ms(),
+            index,
+            step,
+            agent,
+            attempt,
+            from,
+            via,
+            input,
+        }]
+    }
+
+    /// The run reached a terminal step and succeeded.
+    pub(super) async fn finish_run(&mut self, output: Value) -> Vec<SessionDomainEvent> {
+        self.report(SessionStatus::Idle).await;
+        vec![SessionDomainEvent::RunFinished {
+            at_ms: now_ms(),
+            output,
+        }]
+    }
+
+    /// The run cannot continue — no transition matched, or a step failed.
+    pub(super) async fn fail_run(&mut self, error: String) -> Vec<SessionDomainEvent> {
+        self.report(SessionStatus::Failed {
+            reason: error.clone(),
+        })
+        .await;
+        vec![SessionDomainEvent::RunFailed {
+            at_ms: now_ms(),
+            error,
+        }]
     }
     /// Re-run one execution from the log.
     ///
@@ -168,19 +149,8 @@ impl SessionActor {
         let mut events = Vec::new();
         // Cancel whatever is in flight first, so the retry is the only writer.
         if let Some(current) = run.current() {
-            if let Some(agent) = run
-                .get(current)
-                .and_then(|s| self.agents.as_ref().and_then(|a| a.sub(s.agent)))
-                .cloned()
-            {
-                let (tx, rx) = oneshot::channel();
-                let _ = agent.tell(AgentCommand::Cancel { ack: Some(tx) }).await;
-                if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
-                    tracing::warn!(
-                        session = %self.id,
-                        "cancelled step did not finish within {CANCEL_TIMEOUT:?}; proceeding"
-                    );
-                }
+            if let Some(step) = run.get(current) {
+                self.cancel_agent(AgentKey::Step(step.agent)).await;
             }
             events.push(SessionDomainEvent::StepCancelled {
                 at_ms: now_ms(),
@@ -201,19 +171,22 @@ impl SessionActor {
             .as_ref()
             .map(|r| r.attempts_of(&target.step) + 1)
             .unwrap_or(1);
-        let action = AgentAction::StartStep {
-            index: new_index,
-            step: target.step.clone(),
-            agent: crate::sessions::workflow::WorkflowRunSpec::step_agent_id(self.id, new_index),
-            attempt,
-            // The retry sits where the original sat, so the graph draws it on
-            // the same edge rather than inventing a new one.
-            from: target.from,
-            via: target.via.clone(),
-            input: target.input.clone(),
-        };
         let _ = reply.send(Ok(()));
-        events.extend(self.perform_run_action(action, ctx).await);
+        events.extend(
+            self.start_step(
+                ctx,
+                new_index,
+                target.step.clone(),
+                crate::sessions::workflow::WorkflowRunSpec::step_agent_id(self.id, new_index),
+                attempt,
+                // The retry sits where the original sat, so the graph draws it
+                // on the same edge rather than inventing a new one.
+                target.from,
+                target.via.clone(),
+                target.input.clone(),
+            )
+            .await,
+        );
         CommandEffect::persist(events)
     }
     /// One step's outcome. Mechanical: map it onto the log entry that records
@@ -224,51 +197,19 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         index: u32,
-        outcome: AgentOutcome,
+        end: TurnEnd,
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
-        // Usage is always recorded: the tokens were spent whatever became of
-        // the step that spent them.
-        if let AgentOutcome::UsageRecorded {
-            usage_total,
-            session_id,
-        } = outcome
-        {
-            return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
-                at_ms: now_ms(),
-                agent_id: session_id.to_string(),
-                usage_total,
-            }]);
-        }
-        let step_name = state
-            .run
-            .as_ref()
-            .and_then(|r| r.get(index))
-            .map(|s| s.step.clone())
-            .unwrap_or_default();
-        let (mut events, advance) = match outcome {
-            AgentOutcome::UsageRecorded { .. } => unreachable!("handled above"),
-            AgentOutcome::Concluded { output, .. } => {
-                self.record_on(
-                    AgentKey::Main,
-                    horsie_agentcore::LifecycleEvent::Provisioning(
-                        horsie_agentcore::ProvisioningLifecycle {
-                            stage: "step_concluded".into(),
-                            detail: Some(step_name),
-                        },
-                    ),
-                )
-                .await;
-                (
-                    vec![SessionDomainEvent::StepConcluded {
-                        at_ms: now_ms(),
-                        index,
-                        output,
-                    }],
-                    true,
-                )
-            }
-            AgentOutcome::Asked { asks, .. } => {
+        let (events, advance) = match end {
+            TurnEnd::Concluded { output } => (
+                vec![SessionDomainEvent::StepConcluded {
+                    at_ms: now_ms(),
+                    index,
+                    output,
+                }],
+                true,
+            ),
+            TurnEnd::Asked { asks } => {
                 self.report(SessionStatus::AwaitingInput {
                     asks: asks
                         .iter()
@@ -292,15 +233,15 @@ impl SessionActor {
                     false,
                 )
             }
-            AgentOutcome::Failed { error, .. } => {
+            // A step that fails fails the run, terminal or not. Retrying it is a
+            // decision for a person: the shared workspace holds whatever the
+            // failed attempt left behind, so re-running blind would redo
+            // half-finished work.
+            TurnEnd::Failed { error, .. } => {
                 self.report(SessionStatus::Failed {
                     reason: error.clone(),
                 })
                 .await;
-                // A step that fails fails the run. Retrying it is a decision
-                // for a person: the shared workspace holds whatever the failed
-                // attempt left behind, so re-running blind would redo
-                // half-finished work.
                 (
                     vec![SessionDomainEvent::StepFailed {
                         at_ms: now_ms(),
@@ -310,7 +251,7 @@ impl SessionActor {
                     false,
                 )
             }
-            AgentOutcome::Parked { .. } => {
+            TurnEnd::Parked => {
                 let error = "step parked; timers are not supported in workflows".to_string();
                 self.report(SessionStatus::Failed {
                     reason: error.clone(),
@@ -326,14 +267,10 @@ impl SessionActor {
                 )
             }
         };
-        if advance {
-            let mut next = state.clone();
-            for e in &events {
-                next = SessionActor::apply_event(next, e.clone());
-            }
-            events.extend(self.flush_then_drain(&next, ctx).await);
+        match advance {
+            true => self.persist_and_advance(state, events, ctx).await,
+            false => CommandEffect::persist(events),
         }
-        CommandEffect::persist(events)
     }
     /// Spawn the agent for one execution of a workflow step.
     ///
@@ -344,81 +281,31 @@ impl SessionActor {
     pub(super) fn spawn_step_agent(
         &mut self,
         ctx: &ActorContext<Self>,
-        index: u32,
         agent_id: Uuid,
+        step_name: &str,
     ) -> Option<ActorRef<AgentCommand>> {
         let run_spec = self.spec.workflow.clone()?;
-        let step_name = {
-            // The name comes from the log when the entry exists (recovery), and
-            // from the definition's order otherwise.
-            let by_index = run_spec.steps.get(index as usize).map(|s| s.name.clone());
-            self.pending_step
-                .as_ref()
-                .filter(|(i, _)| *i == index)
-                .map(|(_, name)| name.clone())
-                .or(by_index)?
-        };
-        let step = run_spec.step(&step_name)?.clone();
-        let context_provider = Arc::new(SessionContextProvider {
-            runtimes: self
-                .deps
-                .runtimes
-                .provider(self.id.to_string(), self.spec.vendor.clone()),
-            registry: self.deps.provider_registry.clone(),
-            mcp: self.deps.mcp.clone(),
-            memory: self.deps.memory.clone(),
-            settings: step.settings.clone(),
-            step_output_schema: step.output_schema.clone(),
-            session_id: self.id,
-            kind: SessionAgentKind::Step(agent_id),
-            agent_type: None,
-            unattended: self.spec.is_unattended(),
-            session: ctx.self_ref(),
-            plugins: self.spec.plugins.clone(),
-            plugin_library: self.deps.plugins.clone(),
-            last_client: Mutex::new(None),
-        });
-        let mut params = AgentParams::from_def(&AgentRunDef {
-            system_prompt: None,
-            // The schema is what makes `conclude` typed, and typed output is
-            // what a transition condition reads.
-            output_schema: step.output_schema.clone(),
-            // Asking rides on `conclude`, so only a step that already has one
-            // can ask. A step that declares no output ends its turn with plain
-            // text, and that text is its output — forcing a terminal tool on it
-            // would fail the run the moment the model simply answered.
-            allow_ask_user: step.output_schema.is_some() && !self.spec.is_unattended(),
-            allow_timers: None,
-            max_iterations: step.settings.max_iterations,
-            max_retries: Some(step.settings.max_retries),
-            allowed_tools: step.settings.allowed_tools.clone(),
-        });
-        params.interactive = true;
-        // Deliberately no handoff tool. A step's terminal tool is `conclude`,
-        // synthesized from its output schema; naming `ask_user` here would stop
-        // the loop treating `conclude` as terminal, so it would try to *execute*
-        // it, get "the conclude tool is terminal and is not executed" back, and
-        // keep going. A step asks through `conclude(kind=ask)` instead.
-        params.thinking_effort = step
-            .settings
-            .thinking_effort
-            .as_deref()
-            .and_then(horsie_agentcore::ThinkingEffort::parse);
-        let agent_ctx = AgentRuntimeContext {
-            context_provider: context_provider.clone(),
-            position: self.positions.for_agent(&agent_id.to_string()),
-            parent: StopHookParent::wrap(
-                ctx.self_ref(),
-                AgentKey::Step(agent_id),
-                context_provider.clone(),
-            ),
-            session_id: agent_id,
-        };
-        let actor = ctx.spawn(AgentActor::new(agent_ctx, params));
-        if let Some(agents) = self.agents.as_mut() {
-            agents.insert_sub(agent_id, actor.clone());
-        }
-        Some(actor)
+        let step = run_spec.step(step_name)?.clone();
+        Some(
+            self.spawn_agent(
+                ctx,
+                AgentPlan {
+                    kind: SessionAgentKind::Step(agent_id),
+                    // A step runs under its own preset, not the session's.
+                    settings: step.settings.clone(),
+                    step_output_schema: step.output_schema.clone(),
+                    agent_type: None,
+                    // Deliberately none. A step's terminal tool is `conclude`,
+                    // synthesized from its output schema; naming `ask_user`
+                    // beside it would stop the loop treating `conclude` as
+                    // terminal, so it would try to *execute* it, get "the
+                    // conclude tool is terminal and is not executed" back, and
+                    // keep going. A step asks through `conclude(kind=ask)`.
+                    handoff_tool: None,
+                },
+            )
+            .actor,
+        )
     }
 }
 
