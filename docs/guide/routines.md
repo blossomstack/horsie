@@ -13,7 +13,7 @@ Sweep a repo for stale dependencies once a week.
 ```
 routine = an agent preset  (model, repos, skills, MCP, memory)
         + a prompt         (the whole instruction each run gets)
-        + a trigger        (manually · repeatedly · once, at a time)
+        + a trigger        (manually · repeatedly · once · daily · weekly · monthly · yearly)
 ```
 
 The configuration lives in the **agent preset**, not in the routine. That is
@@ -38,6 +38,10 @@ one preset, and editing the preset changes all of them at once.
      - *Only when I run it* — no timer; the run button and the API still work.
      - *Repeatedly* — every N minutes. The minimum is one minute.
      - *Once, at a time* — a single firing at an instant you pick.
+     - *Daily / Weekly / Monthly / Yearly* — calendar triggers at a wall-clock
+       time. Each carries its own IANA timezone (the form defaults to your
+       browser's); weekly lets you pick any weekdays, monthly a day of the
+       month, yearly a month and day.
    - **Timer active** — clear this to pause the schedule. Pausing never takes
      away the run button.
 
@@ -106,6 +110,15 @@ Two consequences worth knowing:
   once, not a day's worth of catch-up.
 - **Once** — fires at its instant and never re-arms. An instant already in the
   past never fires; edit the routine to move it forward.
+- **Calendar triggers** — daily, weekly, monthly and yearly schedules fire at
+  their wall-clock time in the routine's own timezone. The next firing is the
+  next occurrence after the previous one, so a server that was down while a
+  firing came due runs **once, late**, never a backlog — the same contract as
+  *Repeatedly*. A month without the day you picked (the 31st, 29–31 February)
+  is skipped; Feb 29 recurs only in leap years. Around a daylight-saving
+  change the wall-clock time is kept: a time that does not exist that day
+  (spring forward) fires at the shifted time, and a time that occurs twice
+  (fall back) fires once.
 - **A run that fails to start** — an offline runtime, a model that was removed —
   is recorded on the routine's page as its last error, and the schedule still
   advances. A broken routine waits for its next interval rather than retrying
