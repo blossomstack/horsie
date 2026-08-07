@@ -186,13 +186,12 @@ impl RoutineRunner {
 pub(crate) mod tests {
     use super::*;
     use crate::routines::service::tests::{Fixture, fixture, input};
-    use crate::routines::store::Schedule;
-    use crate::runtime_vendor::RuntimeVendorLink;
+        use crate::runtime_vendor::RuntimeVendorLink;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::spec::{ServerDeps, SessionSpec};
     use crate::sessions::supervisor::SessionSupervisor;
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
-    use horsie_models::routines::{EverySchedule, RoutineSchedule};
+    use horsie_models::routines::{EverySchedule, ManualSchedule, RoutineSchedule};
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -376,7 +375,7 @@ pub(crate) mod tests {
     #[test]
     fn a_manual_schedule_is_never_due() {
         assert_eq!(
-            crate::routines::next_run_at(&Schedule::Manual, true, 1_000),
+            crate::routines::next_run_at(&RoutineSchedule::Manual(ManualSchedule {}), true, 1_000),
             None
         );
     }

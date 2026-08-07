@@ -6,10 +6,11 @@
 //! configured — are live state, re-checked by the runner at every trigger.
 
 use crate::agents::AgentService;
-use crate::routines::store::{RoutineRow, RoutineStore, RunOutcome, Schedule};
+use crate::routines::store::{RoutineRow, RoutineStore, RunOutcome};
 use horsie_models::routines::{
-    EverySchedule, ManualSchedule, OnceSchedule, RoutineInput, RoutineSchedule, RoutineView,
+    ManualSchedule, RoutineInput, RoutineSchedule, RoutineView, Weekday,
 };
+use jiff::tz::TimeZone;
 use std::sync::Arc;
 
 /// The shortest interval a recurring routine may use. A floor rather than a
@@ -44,14 +45,19 @@ impl std::error::Error for RoutineError {}
 /// `Every` is measured from `now`, not from a fixed origin: a server that was
 /// down for a day resumes with one run rather than a day of backlog. `Once`
 /// only fires if its instant is still ahead; a paused routine never fires.
-pub fn next_run_at(schedule: &Schedule, enabled: bool, now_ms: u64) -> Option<u64> {
+/// The calendar arms delegate to [`crate::routines::recurrence::next_occurrence`].
+pub fn next_run_at(schedule: &RoutineSchedule, enabled: bool, now_ms: u64) -> Option<u64> {
     if !enabled {
         return None;
     }
     match schedule {
-        Schedule::Manual => None,
-        Schedule::Every { interval_secs } => Some(now_ms.saturating_add(interval_secs * 1_000)),
-        Schedule::Once { at_ms } => (*at_ms > now_ms).then_some(*at_ms),
+        RoutineSchedule::Manual(_) => None,
+        RoutineSchedule::Every(e) => Some(now_ms.saturating_add(e.interval_secs * 1_000)),
+        RoutineSchedule::Once(o) => (o.at_ms > now_ms).then_some(o.at_ms),
+        s @ (RoutineSchedule::Daily(_)
+        | RoutineSchedule::Weekly(_)
+        | RoutineSchedule::Monthly(_)
+        | RoutineSchedule::Yearly(_)) => crate::routines::recurrence::next_occurrence(s, now_ms),
     }
 }
 
@@ -191,7 +197,7 @@ impl RoutineService {
     }
 
     /// Save-time validation, returning the resolved schedule and enabled flag.
-    async fn validate(&self, input: &RoutineInput) -> Result<(Schedule, bool), RoutineError> {
+    async fn validate(&self, input: &RoutineInput) -> Result<(RoutineSchedule, bool), RoutineError> {
         crate::memory::validate_slug(&input.name).map_err(RoutineError::Invalid)?;
         if input.prompt.trim().is_empty() {
             return Err(RoutineError::Invalid(
@@ -203,42 +209,102 @@ impl RoutineService {
         self.agents.get(&input.agent).await.map_err(|_| {
             RoutineError::Invalid(format!("unknown agent preset '{}'", input.agent))
         })?;
-        let schedule = storage_schedule(input.schedule.as_ref());
-        if let Schedule::Every { interval_secs } = &schedule
-            && *interval_secs < MIN_INTERVAL_SECS
-        {
-            return Err(RoutineError::Invalid(format!(
-                "interval must be at least {MIN_INTERVAL_SECS} seconds"
-            )));
-        }
+        let schedule = input
+            .schedule
+            .clone()
+            .unwrap_or(RoutineSchedule::Manual(ManualSchedule {}));
+        validate_schedule(&schedule)?;
         Ok((schedule, input.enabled.unwrap_or(true)))
     }
 }
 
-/// Wire schedule → storage schedule; an absent schedule means manual.
-fn storage_schedule(wire: Option<&RoutineSchedule>) -> Schedule {
-    match wire {
-        None | Some(RoutineSchedule::Manual(_)) => Schedule::Manual,
-        Some(RoutineSchedule::Every(EverySchedule { interval_secs })) => Schedule::Every {
-            interval_secs: *interval_secs,
-        },
-        Some(RoutineSchedule::Once(OnceSchedule { at_ms })) => Schedule::Once { at_ms: *at_ms },
+/// Save-time validation for a schedule. Covers what is stable at save: the
+/// interval floor, the IANA timezone name, and that the calendar fields are
+/// in range. The agent's own contents are live state, re-checked by the
+/// runner at every trigger.
+fn validate_schedule(schedule: &RoutineSchedule) -> Result<(), RoutineError> {
+    match schedule {
+        RoutineSchedule::Every(e) if e.interval_secs < MIN_INTERVAL_SECS => Err(
+            RoutineError::Invalid(format!(
+                "interval must be at least {MIN_INTERVAL_SECS} seconds"
+            )),
+        ),
+        RoutineSchedule::Daily(d) => validate_clock(&d.timezone, d.hour, d.minute),
+        RoutineSchedule::Weekly(w) => {
+            validate_clock(&w.timezone, w.hour, w.minute)?;
+            if w.weekdays.is_empty() {
+                return Err(RoutineError::Invalid(
+                    "weekly schedule needs at least one weekday".to_string(),
+                ));
+            }
+            if w.weekdays
+                .windows(2)
+                .any(|p| weekday_rank(&p[0]) >= weekday_rank(&p[1]))
+            {
+                return Err(RoutineError::Invalid(
+                    "weekdays must be unique and in Mon–Sun order".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        RoutineSchedule::Monthly(m) => {
+            validate_clock(&m.timezone, m.hour, m.minute)?;
+            validate_day_of_month(m.day_of_month)
+        }
+        RoutineSchedule::Yearly(y) => {
+            validate_clock(&y.timezone, y.hour, y.minute)?;
+            if !(1..=12).contains(&y.month) {
+                return Err(RoutineError::Invalid(format!(
+                    "month must be 1–12, got {}",
+                    y.month
+                )));
+            }
+            validate_day_of_month(y.day_of_month)
+        }
+        RoutineSchedule::Manual(_) | RoutineSchedule::Every(_) | RoutineSchedule::Once(_) => Ok(()),
     }
 }
 
-fn wire_schedule(schedule: &Schedule) -> RoutineSchedule {
-    match schedule {
-        Schedule::Manual => RoutineSchedule::Manual(ManualSchedule {}),
-        Schedule::Every { interval_secs } => RoutineSchedule::Every(EverySchedule {
-            interval_secs: *interval_secs,
-        }),
-        Schedule::Once { at_ms } => RoutineSchedule::Once(OnceSchedule { at_ms: *at_ms }),
+fn validate_clock(timezone: &str, hour: u32, minute: u32) -> Result<(), RoutineError> {
+    TimeZone::get(timezone)
+        .map_err(|_| RoutineError::Invalid(format!("unknown timezone '{timezone}'")))?;
+    if hour > 23 {
+        return Err(RoutineError::Invalid(format!(
+            "hour must be 0–23, got {hour}"
+        )));
+    }
+    if minute > 59 {
+        return Err(RoutineError::Invalid(format!(
+            "minute must be 0–59, got {minute}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_day_of_month(day: u32) -> Result<(), RoutineError> {
+    if !(1..=31).contains(&day) {
+        return Err(RoutineError::Invalid(format!(
+            "day of month must be 1–31, got {day}"
+        )));
+    }
+    Ok(())
+}
+
+fn weekday_rank(d: &Weekday) -> u8 {
+    match d {
+        Weekday::Mon => 1,
+        Weekday::Tue => 2,
+        Weekday::Wed => 3,
+        Weekday::Thu => 4,
+        Weekday::Fri => 5,
+        Weekday::Sat => 6,
+        Weekday::Sun => 7,
     }
 }
 
 fn row_from_input(
     input: RoutineInput,
-    schedule: Schedule,
+    schedule: RoutineSchedule,
     enabled: bool,
     now_ms: u64,
     created_at: String,
@@ -267,7 +333,7 @@ fn routine_view(row: &RoutineRow) -> RoutineView {
         description: row.description.clone(),
         agent: row.agent.clone(),
         prompt: row.prompt.clone(),
-        schedule: wire_schedule(&row.schedule),
+        schedule: row.schedule.clone(),
         enabled: row.enabled,
         next_run_at_ms: row.next_run_at_ms,
         last_run_at_ms: row.last_run_at_ms,
@@ -292,6 +358,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::agents::AgentStore;
     use crate::config::ConfigStore;
+    use horsie_models::routines::{
+        DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
+        WeeklySchedule, YearlySchedule,
+    };
     use horsie_models::agents::AgentPresetInput;
     use horsie_models::settings::{ModelInput, ProviderInput, SettingsUpdate};
 
@@ -400,23 +470,74 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[test]
     fn next_run_measures_an_interval_from_now_and_never_re_arms_a_once() {
-        assert_eq!(next_run_at(&Schedule::Manual, true, 1_000), None);
         assert_eq!(
-            next_run_at(&Schedule::Every { interval_secs: 60 }, true, 1_000),
+            next_run_at(&RoutineSchedule::Manual(ManualSchedule {}), true, 1_000),
+            None
+        );
+        assert_eq!(
+            next_run_at(
+                &RoutineSchedule::Every(EverySchedule { interval_secs: 60 }),
+                true,
+                1_000
+            ),
             Some(61_000)
         );
         assert_eq!(
-            next_run_at(&Schedule::Once { at_ms: 5_000 }, true, 1_000),
+            next_run_at(
+                &RoutineSchedule::Once(OnceSchedule { at_ms: 5_000 }),
+                true,
+                1_000
+            ),
             Some(5_000)
         );
         // Already past, so it never fires; and a paused routine never fires.
         assert_eq!(
-            next_run_at(&Schedule::Once { at_ms: 500 }, true, 1_000),
+            next_run_at(
+                &RoutineSchedule::Once(OnceSchedule { at_ms: 500 }),
+                true,
+                1_000
+            ),
             None
         );
         assert_eq!(
-            next_run_at(&Schedule::Every { interval_secs: 60 }, false, 1_000),
+            next_run_at(
+                &RoutineSchedule::Every(EverySchedule { interval_secs: 60 }),
+                false,
+                1_000
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn next_run_arms_a_calendar_schedule_to_its_next_occurrence() {
+        // 1970-01-01T00:00:01Z is a Thursday: daily 09:00 UTC is ~9h away.
+        assert_eq!(
+            next_run_at(
+                &RoutineSchedule::Daily(DailySchedule {
+                    timezone: "UTC".into(),
+                    hour: 9,
+                    minute: 0,
+                }),
+                true,
+                1_000
+            ),
+            // 09:00:00 UTC on 1970-01-01, which is 9h after midnight.
+            Some(9 * 3_600 * 1_000)
+        );
+        // A paused calendar routine never fires.
+        assert_eq!(
+            next_run_at(
+                &RoutineSchedule::Daily(DailySchedule {
+                    timezone: "UTC".into(),
+                    hour: 9,
+                    minute: 0,
+                }),
+                false,
+                1_000
+            ),
             None
         );
     }
@@ -482,6 +603,116 @@ pub(crate) mod tests {
             s.create(fast, 0).await.unwrap_err(),
             RoutineError::Invalid(m) if m.contains("60")
         ));
+
+        let bad_zone = input(
+            "a",
+            Some(RoutineSchedule::Daily(DailySchedule {
+                timezone: "Not/AZone".into(),
+                hour: 9,
+                minute: 0,
+            })),
+        );
+        assert!(matches!(
+            s.create(bad_zone, 0).await.unwrap_err(),
+            RoutineError::Invalid(m) if m.contains("timezone")
+        ));
+
+        let bad_hour = input(
+            "a",
+            Some(RoutineSchedule::Daily(DailySchedule {
+                timezone: "UTC".into(),
+                hour: 24,
+                minute: 0,
+            })),
+        );
+        assert!(matches!(
+            s.create(bad_hour, 0).await.unwrap_err(),
+            RoutineError::Invalid(m) if m.contains("hour")
+        ));
+
+        let no_days = input(
+            "a",
+            Some(RoutineSchedule::Weekly(WeeklySchedule {
+                timezone: "UTC".into(),
+                hour: 9,
+                minute: 0,
+                weekdays: vec![],
+            })),
+        );
+        assert!(matches!(
+            s.create(no_days, 0).await.unwrap_err(),
+            RoutineError::Invalid(m) if m.contains("weekday")
+        ));
+
+        let dup_days = input(
+            "a",
+            Some(RoutineSchedule::Weekly(WeeklySchedule {
+                timezone: "UTC".into(),
+                hour: 9,
+                minute: 0,
+                weekdays: vec![Weekday::Mon, Weekday::Mon],
+            })),
+        );
+        assert!(matches!(
+            s.create(dup_days, 0).await.unwrap_err(),
+            RoutineError::Invalid(_)
+        ));
+
+        let bad_month_day = input(
+            "a",
+            Some(RoutineSchedule::Monthly(MonthlySchedule {
+                timezone: "UTC".into(),
+                hour: 9,
+                minute: 0,
+                day_of_month: 32,
+            })),
+        );
+        assert!(matches!(
+            s.create(bad_month_day, 0).await.unwrap_err(),
+            RoutineError::Invalid(m) if m.contains("day of month")
+        ));
+
+        let bad_year = input(
+            "a",
+            Some(RoutineSchedule::Yearly(YearlySchedule {
+                timezone: "UTC".into(),
+                hour: 9,
+                minute: 0,
+                month: 13,
+                day_of_month: 1,
+            })),
+        );
+        assert!(matches!(
+            s.create(bad_year, 0).await.unwrap_err(),
+            RoutineError::Invalid(m) if m.contains("month")
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_arms_a_weekly_schedule_to_its_next_weekday() {
+        let (s, _t) = service().await;
+        // 1970-01-01T00:00:01Z is a Thursday; Mon/Wed/Fri 09:00 → Friday 09:00.
+        let v = s
+            .create(
+                input(
+                    "triages",
+                    Some(RoutineSchedule::Weekly(WeeklySchedule {
+                        timezone: "UTC".into(),
+                        hour: 9,
+                        minute: 0,
+                        weekdays: vec![Weekday::Mon, Weekday::Wed, Weekday::Fri],
+                    })),
+                ),
+                1_000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            v.next_run_at_ms,
+            // Friday 09:00:00 UTC = Thursday 00:00:00 + 24h + 9h.
+            Some((24 + 9) * 3_600 * 1_000),
+            "the next firing is Friday 09:00"
+        );
     }
 
     #[tokio::test]

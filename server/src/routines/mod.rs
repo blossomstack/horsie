@@ -6,6 +6,7 @@
 //! `RoutineRunner`, which every trigger path goes through, and the
 //! `RoutineScheduler`, which is just a clock on top of the runner.
 
+mod recurrence;
 mod runner;
 mod scheduler;
 mod service;
@@ -14,4 +15,4 @@ mod store;
 pub use runner::RoutineRunner;
 pub use scheduler::{RoutineScheduler, TICK_INTERVAL};
 pub use service::{MIN_INTERVAL_SECS, RoutineError, RoutineService, next_run_at};
-pub use store::{RoutineRow, RoutineStore, RunOutcome, Schedule};
+pub use store::{RoutineRow, RoutineStore, RunOutcome};
