@@ -15,7 +15,7 @@ use super::{
     AgentAction, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent, SessionState,
     TurnCommand,
 };
-use super::{AnswerError, AskAnswer, derive_title};
+use super::{AnswerError, AskAnswer};
 use crate::sessions::UserMessageError;
 use crate::sessions::spec::PendingAsk;
 use crate::sessions::spec::SessionStatus;
@@ -157,13 +157,10 @@ impl SessionActor {
             let _ = reply.send(Err(UserMessageError::Unrecoverable(reason.clone())));
             return CommandEffect::none();
         }
-        // An unnamed session is titled from its first message, once.
-        if self.spec.name.is_none()
-            && let Some(title) = derive_title(&text)
-            && let Err(error) = self.rename_session(title).await
-        {
-            tracing::warn!(session = %self.id, error, "failed to persist fallback session title");
-        }
+        // An unnamed session is titled from its first message, once. The rule is
+        // `SessionCore`'s — a session's name is its own bookkeeping, not the
+        // turn's — so this only says when to apply it.
+        self.title_from_first_message(&text).await;
 
         let queued = SessionDomainEvent::MessageQueued {
             id: Uuid::new_v4().to_string(),
@@ -494,16 +491,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join(MERGE_SEPARATOR);
         assert_eq!(merged, "one\n\ntwo");
-    }
-
-    #[test]
-    fn a_title_is_derived_from_the_first_line_only() {
-        assert_eq!(derive_title("hello\nworld").as_deref(), Some("hello"));
-        assert!(derive_title("   \n").is_none());
-        let long = "x".repeat(TITLE_MAX_CHARS + 10);
-        let title = derive_title(&long).unwrap();
-        assert!(title.ends_with('…'));
-        assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1);
     }
 
     #[tokio::test]

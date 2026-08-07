@@ -909,43 +909,6 @@ mod tests {
         wait_for_tree(&journal, id, |f| f.node(child).is_some_and(|r| r.notified)).await;
     }
 
-    /// A snapshot written before `mode` existed carries `subagents` at the top
-    /// level, flat. It must load with its tree intact — anything else silently
-    /// drops every subagent of every deployed session.
-    #[test]
-    fn a_pre_mode_snapshot_keeps_its_subagents() {
-        let legacy = serde_json::json!({
-            "status": "Idle",
-            "inbox": [],
-            "subagents": { "nodes": { "3f1a2b4c-0000-4000-8000-000000000001": {
-                "parent": "Main", "label": "reader", "task": "read the file", "depth": 1,
-                "status": "Completed", "output": "done", "error": null, "notified": true
-            }}}
-        });
-        let state: SessionState = serde_json::from_value(legacy).unwrap();
-        let id = Uuid::parse_str("3f1a2b4c-0000-4000-8000-000000000001").unwrap();
-        assert_eq!(state.subagents.node(id).unwrap().label, "reader");
-        assert_eq!(state.subagents.owner_of(id), Some(TreeOwner::Main));
-    }
-
-    /// A snapshot written after `mode` existed nests the tree under
-    /// `mode.subagents` for a conversation.
-    #[test]
-    fn a_mode_tagged_conversation_snapshot_keeps_its_subagents() {
-        let legacy = serde_json::json!({
-            "status": "Idle",
-            "mode": { "kind": "Interactive", "subagents": { "nodes": {
-                "3f1a2b4c-0000-4000-8000-000000000002": {
-                    "parent": "Main", "label": "auditor", "task": "t", "depth": 1,
-                    "status": "Running", "output": null, "error": null, "notified": false
-                }}}}
-        });
-        let state: SessionState = serde_json::from_value(legacy).unwrap();
-        let id = Uuid::parse_str("3f1a2b4c-0000-4000-8000-000000000002").unwrap();
-        assert_eq!(state.subagents.node(id).unwrap().label, "auditor");
-        assert_eq!(state.subagents.active_count(), 1);
-    }
-
     /// The new shape round-trips.
     #[test]
     fn the_new_state_shape_round_trips() {

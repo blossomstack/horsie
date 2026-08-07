@@ -16,6 +16,22 @@ use horsie_actor::ActorContext;
 use horsie_models::now_ms;
 use horsie_workflow::AgentCommand;
 
+/// Longest auto-derived session title, in characters.
+const TITLE_MAX_CHARS: usize = crate::sessions::title_tool::SESSION_TITLE_MAX_CHARS;
+
+/// A short title derived from a user's first message.
+fn derive_title(text: &str) -> Option<String> {
+    let first_line = text.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return None;
+    }
+    if first_line.chars().count() <= TITLE_MAX_CHARS {
+        return Some(first_line.to_string());
+    }
+    let truncated: String = first_line.chars().take(TITLE_MAX_CHARS).collect();
+    Some(format!("{}…", truncated.trim_end()))
+}
+
 /// SessionCore.
 pub(super) struct SessionCore;
 
@@ -54,6 +70,24 @@ impl SessionCore {
 /// fields — the roster, the supervisor link, the spawn helpers. An inherent
 /// `impl` in a child module sees them, so moving the code needed no plumbing.
 impl SessionActor {
+    /// Title an as-yet-unnamed session from the first thing the user says.
+    ///
+    /// Best-effort and fire-and-forget: a session that could not be titled is
+    /// still a session, so a failure is logged and the message goes on to start
+    /// its turn. The built-in title tool overwrites this later if the agent
+    /// picks something better.
+    pub(super) async fn title_from_first_message(&mut self, text: &str) {
+        if self.spec.name.is_some() {
+            return;
+        }
+        let Some(title) = derive_title(text) else {
+            return;
+        };
+        if let Err(error) = self.rename_session(title).await {
+            tracing::warn!(session = %self.id, error, "failed to persist fallback session title");
+        }
+    }
+
     /// Persist a session title through the supervisor, then publish it.
     pub(super) async fn rename_session(&mut self, title: String) -> Result<String, String> {
         let id = self.id.to_string();
@@ -171,5 +205,24 @@ impl Component for SessionCore {
             }
             other => unreachable!("SessionCore was handed {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// The fallback title: the first line, elided to fit. It exists so a
+    /// session is never nameless in the list while the agent is still working
+    /// out what to call it.
+    #[test]
+    fn a_title_is_derived_from_the_first_line_only() {
+        assert_eq!(derive_title("hello\nworld").as_deref(), Some("hello"));
+        assert!(derive_title("   \n").is_none());
+        let long = "x".repeat(TITLE_MAX_CHARS + 10);
+        let title = derive_title(&long).unwrap();
+        assert!(title.ends_with('…'));
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1);
     }
 }

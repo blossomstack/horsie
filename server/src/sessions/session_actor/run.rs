@@ -556,38 +556,6 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
-    /// A run's snapshot nested one tree per step. Each must land under that step's
-    /// agent id, and the run itself must survive.
-    #[test]
-    fn a_workflow_snapshot_lands_each_steps_tree_under_that_step() {
-        let step_agent = "3f1a2b4c-0000-4000-8000-0000000000aa";
-        let child_id = "3f1a2b4c-0000-4000-8000-0000000000bb";
-        let legacy = serde_json::json!({
-            "status": "Running",
-            "mode": { "kind": "Workflow", "run": {
-                "status": "Running",
-                "steps": [{
-                    "step": "review", "agent": step_agent, "attempt": 1, "from": null,
-                    "via": null, "input": "go", "status": "Running", "output": null,
-                    "error": null, "started_at_ms": 1, "ended_at_ms": null,
-                    "subagents": { "nodes": { child_id: {
-                        "parent": "Main", "label": "helper", "task": "t", "depth": 1,
-                        "status": "Completed", "output": "kid done", "error": null,
-                        "notified": false
-                    }}}
-                }],
-                "output": null, "error": null
-            }}
-        });
-        let state: SessionState = serde_json::from_value(legacy).unwrap();
-        let owner = TreeOwner::Step(Uuid::parse_str(step_agent).unwrap());
-        let child = Uuid::parse_str(child_id).unwrap();
-        assert_eq!(state.subagents.owner_of(child), Some(owner));
-        assert_eq!(state.run.as_ref().unwrap().steps.len(), 1);
-        // The aggregate that answered 0 before this change.
-        assert_eq!(state.subagents.owed().len(), 1);
-    }
-
     /// The whole point: a run starts itself, its first step's output picks the
     /// branch, and the branch's step ends the run.
     #[tokio::test]

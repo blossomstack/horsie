@@ -20,7 +20,7 @@ use super::{
 };
 use crate::sessions::spec::AgentSettings;
 use horsie_agentcore::LlmProvider;
-use horsie_models::hooks::{HookAction, StopOutcome};
+use horsie_models::hooks::{HookAction, HookRecord, StopOutcome};
 use horsie_workflow::{ContextProvider, StartTurn};
 use std::sync::PoisonError;
 
