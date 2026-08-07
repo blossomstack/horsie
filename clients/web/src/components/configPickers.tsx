@@ -471,9 +471,8 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
   const value = (items: string[]) =>
     items.length ? items.join(", ") : "None";
 
-  const readout = (label: string, items: string[]) => () => (
+  const readout = (items: string[]) => () => (
     <div className="space-y-1.5 px-1 py-0.5">
-      <p className="legend">{label}</p>
       {items.length === 0 ? (
         <p className="text-sm text-faint">None</p>
       ) : (
@@ -510,7 +509,7 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
             marked: true,
             width,
             testId: `config-${key}`,
-            body: readout(legend, items),
+            body: readout(items),
           },
         ];
 
@@ -523,7 +522,7 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
       marked: true,
       width: "w-56",
       testId: "config-runtime",
-      body: readout("Runtime", [detail.vendor]),
+      body: readout([detail.vendor]),
     },
     ...optional("repos", "Repos", <FolderGit2 size={15} />, "w-80", detail.repos.map(basename)),
     ...optional("skills", "Skills", <Boxes size={15} />, "w-80", detail.plugins),
@@ -537,7 +536,7 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
       marked: true,
       width: "w-72",
       testId: "config-model",
-      body: readout("Model", [detail.model]),
+      body: readout([detail.model]),
     },
   ];
 
@@ -550,7 +549,7 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
       marked: true,
       width: "w-52",
       testId: "config-thinking",
-      body: readout("Thinking effort", [detail.thinkingEffort]),
+      body: readout([detail.thinkingEffort]),
     });
   }
 

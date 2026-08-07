@@ -1,4 +1,4 @@
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionDetail } from "../api/types";
@@ -60,6 +60,12 @@ describe("SessionConfigBar locked mode", () => {
     expect(getByTestId("config-model").getAttribute("aria-label")).toBe(
       "Model — sonnet",
     );
+  });
+
+  it("shows the locked setting name once in the model popup", () => {
+    const { getByTestId, getAllByText } = renderLocked(detail());
+    fireEvent.click(getByTestId("config-model"));
+    expect(getAllByText("Model")).toHaveLength(1);
   });
 
   it("omits a workspace channel the session does not have", () => {
