@@ -3,7 +3,13 @@ import { SessionStatusKind } from "../api/types";
 /** Panel lamp colours. `live` is a value in motion, `attention` is a control
  * waiting on the operator, `fault` is a stopped machine, `off` is an
  * unlit lamp — a channel the server has nothing to report for. */
-export type StatusTone = "live" | "ready" | "attention" | "fault" | "off";
+export type StatusTone =
+  | "live"
+  | "ready"
+  | "idle"
+  | "attention"
+  | "fault"
+  | "off";
 
 interface StatusMeta {
   label: string;
@@ -38,7 +44,7 @@ const META: Record<SessionStatusKind, StatusMeta> = {
   },
   [SessionStatusKind.Idle]: {
     label: "Idle",
-    tone: "ready",
+    tone: "idle",
     busy: false,
     canSend: true,
     hint: "Ready for your next message.",
@@ -83,6 +89,7 @@ export function statusMeta(
 export const TONE_TEXT: Record<StatusTone, string> = {
   live: "text-amber-ink",
   ready: "text-lamp-ok",
+  idle: "text-dim",
   attention: "text-orange",
   fault: "text-red-ink",
   off: "text-faint",
