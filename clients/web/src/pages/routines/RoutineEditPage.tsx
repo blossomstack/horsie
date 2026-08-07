@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError } from "../../api/client";
 import type { RoutineInput, RoutineSchedule, RoutineView } from "../../api/types";
+import { Weekday } from "../../api/types";
 import { useAgents } from "../../hooks/useAgents";
 import {
   useCreateRoutine,
@@ -10,7 +11,9 @@ import {
 } from "../../hooks/useRoutines";
 import {
   MIN_INTERVAL_SECS,
+  browserTimezone,
   fromLocalInputValue,
+  timezoneOptions,
   toLocalInputValue,
 } from "../../lib/schedule";
 
@@ -37,6 +40,22 @@ type ScheduleKind = RoutineSchedule["type"];
 /** One hour, the sanest starting cadence for a recurring routine. */
 const DEFAULT_INTERVAL_SECS = 3600;
 
+/** The canonical Mon–Sun order the server requires. */
+const WEEKDAY_ORDER: Weekday[] = [
+  Weekday.Mon,
+  Weekday.Tue,
+  Weekday.Wed,
+  Weekday.Thu,
+  Weekday.Fri,
+  Weekday.Sat,
+  Weekday.Sun,
+];
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
 function RoutineForm({ initial }: { initial?: RoutineView }) {
   const editing = !!initial;
   const create = useCreateRoutine();
@@ -62,13 +81,54 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
       ? toLocalInputValue(initial.schedule.value.atMs)
       : "",
   );
+  type CalendarValue = {
+    timezone: string;
+    hour: number;
+    minute: number;
+    weekdays?: Weekday[];
+    dayOfMonth?: number;
+    month?: number;
+  };
+  const calendarInitial: CalendarValue | null =
+    initial?.schedule.type === "Daily" ||
+    initial?.schedule.type === "Weekly" ||
+    initial?.schedule.type === "Monthly" ||
+    initial?.schedule.type === "Yearly"
+      ? initial.schedule.value
+      : null;
+  const [timezone, setTimezone] = useState(
+    calendarInitial?.timezone ?? browserTimezone(),
+  );
+  const [timeOfDay, setTimeOfDay] = useState(
+    calendarInitial
+      ? `${String(calendarInitial.hour).padStart(2, "0")}:${String(calendarInitial.minute).padStart(2, "0")}`
+      : "09:00",
+  );
+  const [weekdays, setWeekdays] = useState<Set<Weekday>>(
+    new Set(initial?.schedule.type === "Weekly" ? initial.schedule.value.weekdays : []),
+  );
+  const [dayOfMonth, setDayOfMonth] = useState<string>(
+    calendarInitial?.dayOfMonth != null ? String(calendarInitial.dayOfMonth) : "1",
+  );
+  const [month, setMonth] = useState<number>(calendarInitial?.month ?? 1);
   const [error, setError] = useState<string | null>(null);
 
   const busy = create.isPending || update.isPending;
+  const hourOf = (t: string) => Number(t.split(":")[0]);
+  const minuteOf = (t: string) => Number(t.split(":")[1]);
+  const timeIsValid = /^\d{2}:\d{2}$/.test(timeOfDay);
+  const dayValid = Number(dayOfMonth) >= 1 && Number(dayOfMonth) <= 31;
+  const calendarValid =
+    timezone !== "" &&
+    timeIsValid &&
+    (kind !== "Weekly" || weekdays.size > 0) &&
+    (kind !== "Monthly" || dayValid) &&
+    (kind !== "Yearly" || (month >= 1 && month <= 12 && dayValid));
   const scheduleValid =
     kind === "Manual" ||
     (kind === "Every" && intervalSecs >= MIN_INTERVAL_SECS) ||
-    (kind === "Once" && !Number.isNaN(fromLocalInputValue(atLocal)));
+    (kind === "Once" && !Number.isNaN(fromLocalInputValue(atLocal))) ||
+    calendarValid;
   const canSave =
     !busy &&
     routineName.trim() !== "" &&
@@ -82,6 +142,42 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
         return { type: "Every", value: { intervalSecs } };
       case "Once":
         return { type: "Once", value: { atMs: fromLocalInputValue(atLocal) } };
+      case "Daily":
+        return {
+          type: "Daily",
+          value: { timezone, hour: hourOf(timeOfDay), minute: minuteOf(timeOfDay) },
+        };
+      case "Weekly":
+        return {
+          type: "Weekly",
+          value: {
+            timezone,
+            hour: hourOf(timeOfDay),
+            minute: minuteOf(timeOfDay),
+            weekdays: WEEKDAY_ORDER.filter((d) => weekdays.has(d)),
+          },
+        };
+      case "Monthly":
+        return {
+          type: "Monthly",
+          value: {
+            timezone,
+            hour: hourOf(timeOfDay),
+            minute: minuteOf(timeOfDay),
+            dayOfMonth: Number(dayOfMonth),
+          },
+        };
+      case "Yearly":
+        return {
+          type: "Yearly",
+          value: {
+            timezone,
+            hour: hourOf(timeOfDay),
+            minute: minuteOf(timeOfDay),
+            month,
+            dayOfMonth: Number(dayOfMonth),
+          },
+        };
       case "Manual":
         return { type: "Manual", value: {} };
     }
@@ -194,6 +290,10 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                 <option value="Manual">Only when I run it</option>
                 <option value="Every">Repeatedly</option>
                 <option value="Once">Once, at a time</option>
+                <option value="Daily">Daily, at a time</option>
+                <option value="Weekly">Weekly, on chosen days</option>
+                <option value="Monthly">Monthly, on a day</option>
+                <option value="Yearly">Yearly, on a date</option>
               </select>
 
               {kind === "Every" && (
@@ -222,6 +322,111 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                   onChange={(e) => setAtLocal(e.target.value)}
                   data-testid="routine-at-input"
                 />
+              )}
+
+              {["Daily", "Weekly", "Monthly", "Yearly"].includes(kind) && (
+                <>
+                  <label className="flex items-center gap-2 text-sm text-dim">
+                    at
+                    <input
+                      className="field"
+                      type="time"
+                      value={timeOfDay}
+                      onChange={(e) => setTimeOfDay(e.target.value)}
+                      data-testid="routine-time-input"
+                    />
+                    <select
+                      className="field"
+                      value={timezone}
+                      onChange={(e) => setTimezone(e.target.value)}
+                      data-testid="routine-timezone-select"
+                    >
+                      {timezoneOptions().map((z) => (
+                        <option key={z} value={z}>
+                          {z}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {kind === "Weekly" && (
+                    <div className="flex flex-wrap items-center gap-1">
+                      {WEEKDAY_ORDER.map((d) => (
+                        <button
+                          key={d}
+                          type="button"
+                          className={`chip ${weekdays.has(d) ? "bg-raised text-legend" : ""}`}
+                          aria-pressed={weekdays.has(d)}
+                          onClick={() =>
+                            setWeekdays((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(d)) next.delete(d);
+                              else next.add(d);
+                              return next;
+                            })
+                          }
+                          data-testid={`weekday-${d.toLowerCase()}`}
+                        >
+                          {d}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        className="chip"
+                        onClick={() => setWeekdays(new Set(WEEKDAY_ORDER.slice(0, 5)))}
+                      >
+                        Mon–Fri
+                      </button>
+                    </div>
+                  )}
+
+                  {kind === "Monthly" && (
+                    <label className="flex items-center gap-2 text-sm text-dim">
+                      on the
+                      <input
+                        className="field w-20"
+                        type="number"
+                        min={1}
+                        max={31}
+                        value={dayOfMonth}
+                        onChange={(e) => setDayOfMonth(e.target.value)}
+                        data-testid="routine-day-of-month"
+                      />
+                      day
+                    </label>
+                  )}
+
+                  {kind === "Yearly" && (
+                    <label className="flex items-center gap-2 text-sm text-dim">
+                      on
+                      <select
+                        className="field"
+                        value={month}
+                        onChange={(e) => setMonth(Number(e.target.value))}
+                        data-testid="routine-month"
+                      >
+                        {MONTH_NAMES.map((m, i) => (
+                          <option key={m} value={i + 1}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        className="field w-20"
+                        type="number"
+                        min={1}
+                        max={31}
+                        value={dayOfMonth}
+                        onChange={(e) => setDayOfMonth(e.target.value)}
+                        data-testid="routine-day-of-month"
+                      />
+                    </label>
+                  )}
+
+                  {kind === "Weekly" && weekdays.size === 0 && (
+                    <p className="text-xs text-red-ink">Pick at least one day.</p>
+                  )}
+                </>
               )}
             </div>
             {kind === "Every" && intervalSecs < MIN_INTERVAL_SECS && (

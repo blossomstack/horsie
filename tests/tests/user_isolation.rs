@@ -463,7 +463,9 @@ fn routine(name: &str) -> horsie_server::routines::RoutineRow {
         description: String::new(),
         agent: "reviewer".into(),
         prompt: "go".into(),
-        schedule: horsie_server::routines::Schedule::Manual,
+        schedule: horsie_models::routines::RoutineSchedule::Manual(
+            horsie_models::routines::ManualSchedule {},
+        ),
         enabled: true,
         next_run_at_ms: Some(100),
         last_run_at_ms: None,

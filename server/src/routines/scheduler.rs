@@ -108,7 +108,9 @@ mod tests {
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::users::{Shared, UserServices};
     use horsie_models::agents::AgentPresetInput;
-    use horsie_models::routines::{EverySchedule, OnceSchedule, RoutineInput, RoutineSchedule};
+    use horsie_models::routines::{
+        EverySchedule, OnceSchedule, RoutineInput, RoutineSchedule, Weekday, WeeklySchedule,
+    };
     use horsie_models::settings::{ModelInput, ProviderInput, SettingsUpdate};
 
     /// One account, configured far enough that a routine can actually start a
@@ -333,6 +335,64 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_weekly_routine_fires_once_due_and_re_arms_to_the_next_weekday() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::testing::db().await;
+        let users = registry(db.clone(), &tmp);
+        let a = account(&users, &UserId::bootstrap(), true).await;
+        let scheduler = RoutineScheduler::new(db, users);
+
+        // 1970-01-01T00:00:01Z is a Thursday; Mon/Wed/Fri 09:00 UTC → Friday 09:00.
+        a.services
+            .routines
+            .create(
+                routine(
+                    "triages",
+                    RoutineSchedule::Weekly(WeeklySchedule {
+                        timezone: "UTC".into(),
+                        hour: 9,
+                        minute: 0,
+                        weekdays: vec![Weekday::Mon, Weekday::Wed, Weekday::Fri],
+                    }),
+                ),
+                1_000,
+            )
+            .await
+            .unwrap();
+        let first = a
+            .services
+            .routines
+            .get("triages")
+            .await
+            .unwrap()
+            .next_run_at_ms;
+        // Friday 09:00:00 UTC = Thursday 00:00:00 + 24h + 9h.
+        assert_eq!(first, Some((24 + 9) * 3_600 * 1_000));
+
+        scheduler.tick(first.unwrap() - 1).await;
+        assert!(
+            sessions(&a.services.supervisor).await.is_empty(),
+            "not due yet"
+        );
+
+        scheduler.tick(first.unwrap()).await;
+        assert_eq!(sessions(&a.services.supervisor).await.len(), 1);
+        let view = a.services.routines.get("triages").await.unwrap();
+        // Friday 09:00 fired → re-arms to Monday 09:00, three days later.
+        assert_eq!(
+            view.next_run_at_ms,
+            Some(first.unwrap() + 3 * 24 * 3_600 * 1_000)
+        );
+
+        scheduler.tick(first.unwrap()).await;
+        assert_eq!(
+            sessions(&a.services.supervisor).await.len(),
+            1,
+            "no double fire"
         );
     }
 

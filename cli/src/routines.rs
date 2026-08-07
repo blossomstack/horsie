@@ -7,7 +7,7 @@ use crate::error::CliError;
 use crate::server_client::ServerClient;
 use crate::session::relative;
 use horsie_models::now_ms;
-use horsie_models::routines::{RoutineRunResponse, RoutineSchedule, RoutineView};
+use horsie_models::routines::{RoutineRunResponse, RoutineSchedule, RoutineView, Weekday};
 
 pub async fn list(server: &str) -> Result<(), CliError> {
     let routines = ServerClient::new(server).await?.list_routines().await?;
@@ -30,13 +30,56 @@ pub async fn invoke(server: &str, name: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// One label per schedule arm: "manual", "every 3600s", "once".
+/// One label per schedule arm: "manual", "every 3600s", "once",
+/// "daily 09:05 Asia/Shanghai", "weekly mon,wed,fri 09:00 …".
 fn schedule_label(schedule: &RoutineSchedule) -> String {
     match schedule {
         RoutineSchedule::Manual(_) => "manual".to_string(),
         RoutineSchedule::Every(e) => format!("every {}s", e.interval_secs),
         RoutineSchedule::Once(_) => "once".to_string(),
+        RoutineSchedule::Daily(d) => {
+            format!("daily {:02}:{:02} {}", d.hour, d.minute, d.timezone)
+        }
+        RoutineSchedule::Weekly(w) => {
+            let days = w
+                .weekdays
+                .iter()
+                .map(weekday_abbr)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("weekly {days} {:02}:{:02} {}", w.hour, w.minute, w.timezone)
+        }
+        RoutineSchedule::Monthly(m) => format!(
+            "monthly {}th {:02}:{:02} {}",
+            m.day_of_month, m.hour, m.minute, m.timezone
+        ),
+        RoutineSchedule::Yearly(y) => format!(
+            "yearly {}-{} {:02}:{:02} {}",
+            month_abbr(y.month),
+            y.day_of_month,
+            y.hour,
+            y.minute,
+            y.timezone
+        ),
     }
+}
+
+fn weekday_abbr(d: &Weekday) -> &'static str {
+    match d {
+        Weekday::Mon => "mon",
+        Weekday::Tue => "tue",
+        Weekday::Wed => "wed",
+        Weekday::Thu => "thu",
+        Weekday::Fri => "fri",
+        Weekday::Sat => "sat",
+        Weekday::Sun => "sun",
+    }
+}
+
+fn month_abbr(month: u32) -> &'static str {
+    [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ][(month - 1) as usize]
 }
 
 fn enabled_label(enabled: bool) -> &'static str {
@@ -101,7 +144,10 @@ fn render_invoke(base: &str, session_id: &str) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use horsie_models::routines::{EverySchedule, ManualSchedule, OnceSchedule};
+    use horsie_models::routines::{
+        DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
+        WeeklySchedule, YearlySchedule,
+    };
 
     fn routine(name: &str) -> RoutineView {
         RoutineView {
@@ -155,6 +201,42 @@ mod tests {
         assert_eq!(
             schedule_label(&RoutineSchedule::Once(OnceSchedule { at_ms: 0 })),
             "once"
+        );
+        assert_eq!(
+            schedule_label(&RoutineSchedule::Daily(DailySchedule {
+                timezone: "Asia/Shanghai".into(),
+                hour: 9,
+                minute: 5,
+            })),
+            "daily 09:05 Asia/Shanghai"
+        );
+        assert_eq!(
+            schedule_label(&RoutineSchedule::Weekly(WeeklySchedule {
+                timezone: "Asia/Shanghai".into(),
+                hour: 9,
+                minute: 0,
+                weekdays: vec![Weekday::Mon, Weekday::Wed, Weekday::Fri],
+            })),
+            "weekly mon,wed,fri 09:00 Asia/Shanghai"
+        );
+        assert_eq!(
+            schedule_label(&RoutineSchedule::Monthly(MonthlySchedule {
+                timezone: "UTC".into(),
+                hour: 9,
+                minute: 0,
+                day_of_month: 15,
+            })),
+            "monthly 15th 09:00 UTC"
+        );
+        assert_eq!(
+            schedule_label(&RoutineSchedule::Yearly(YearlySchedule {
+                timezone: "UTC".into(),
+                hour: 9,
+                minute: 0,
+                month: 2,
+                day_of_month: 15,
+            })),
+            "yearly feb-15 09:00 UTC"
         );
     }
 

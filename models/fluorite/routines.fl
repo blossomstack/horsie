@@ -17,6 +17,37 @@ struct EverySchedule { interval_secs: u64 }
 /// instant already in the past never fires; move it forward to re-arm.
 struct OnceSchedule { at_ms: u64 }
 
+/// Day of the week, Mon first — the order the UI renders.
+enum Weekday {
+    Mon,
+    Tue,
+    Wed,
+    Thu,
+    Fri,
+    Sat,
+    Sun,
+}
+
+/// Every day at `hour:minute` in `timezone`.
+struct DailySchedule { timezone: String, hour: u32, minute: u32 }
+
+/// On the listed weekdays at `hour:minute` in `timezone`. At least one day;
+/// duplicates are rejected at save.
+struct WeeklySchedule {
+    timezone: String,
+    hour: u32,
+    minute: u32,
+    weekdays: Vec<Weekday>,
+}
+
+/// On `day_of_month` of every month in `timezone`. Months without that day
+/// (the 31st, the 29th–31st in February) are skipped entirely.
+struct MonthlySchedule { timezone: String, hour: u32, minute: u32, day_of_month: u32 }
+
+/// On `month`/`day_of_month` every year in `timezone`. Invalid dates
+/// (Feb 29 in a non-leap year) recur only when valid.
+struct YearlySchedule { timezone: String, hour: u32, minute: u32, month: u32, day_of_month: u32 }
+
 /// When a routine fires by itself. A union rather than a kind + optional
 /// fields, so "every, with no interval" cannot be expressed.
 #[type_tag = "type"]
@@ -24,6 +55,10 @@ union RoutineSchedule {
     Manual(ManualSchedule),
     Every(EverySchedule),
     Once(OnceSchedule),
+    Daily(DailySchedule),
+    Weekly(WeeklySchedule),
+    Monthly(MonthlySchedule),
+    Yearly(YearlySchedule),
 }
 
 /// A routine as shown to clients: its definition, plus what the schedule and

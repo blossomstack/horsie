@@ -42,6 +42,7 @@ eval              = { workspace = true }
 thiserror         = { workspace = true }
 async-trait       = { workspace = true }
 jsonwebtoken      = { workspace = true }
+jiff              = "0.2"
 base64            = { workspace = true }
 sha2              = { workspace = true }
 hex               = { workspace = true }
