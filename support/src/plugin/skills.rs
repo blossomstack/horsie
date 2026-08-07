@@ -52,7 +52,7 @@ pub fn parse(content: &str) -> Option<(String, String)> {
     let mut name = None;
     let mut description = None;
     for (key, value) in crate::frontmatter::pairs(front)? {
-        match key {
+        match key.as_str() {
             "name" => name = Some(value.to_string()),
             "description" => description = Some(value.to_string()),
             _ => {}

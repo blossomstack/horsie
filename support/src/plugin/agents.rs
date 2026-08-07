@@ -97,11 +97,11 @@ pub fn parse(content: &str) -> Option<PluginAgentDef> {
         prompt: body.trim().to_string(),
     };
     for (key, value) in crate::frontmatter::pairs(front)? {
-        match key {
+        match key.as_str() {
             "name" => def.name = value.to_string(),
             "description" => def.description = value.to_string(),
             "model" => def.model = Some(value.to_string()),
-            "tools" => def.tools = crate::frontmatter::comma_list(value),
+            "tools" => def.tools = crate::frontmatter::comma_list(&value),
             // `color`, `effort` and `initialPrompt` are read by nothing, so
             // they are not modelled. `effort` would need the definition when
             // the subagent's *actor* is built, and no library scan exists that
