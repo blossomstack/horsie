@@ -14,6 +14,7 @@ mod handlers;
 mod marketplaces;
 mod mcp;
 mod memory;
+mod messages;
 mod model_cards;
 mod plugins;
 mod routines;
@@ -136,22 +137,16 @@ pub fn app(state: AppState) -> Router {
             "/api/session-groups/{name}",
             put(groups::rename_group).delete(groups::delete_group),
         )
-        .route("/api/sessions/{id}/messages", post(handlers::send_message))
         .route("/api/sessions/{id}/answers", post(handlers::answer_asks))
         .route(
             "/api/sessions/{id}/agents/{agent_id}",
             get(handlers::get_agent),
         )
         .route(
-            "/api/sessions/{id}/agents/{agent_id}/history",
-            get(handlers::get_history),
-        )
-        .route(
-            "/api/sessions/{id}/agents/{agent_id}/events",
-            get(sse::agent_events),
+            "/api/sessions/{id}/messages",
+            post(handlers::send_message).get(messages::read_messages),
         )
         .route("/api/sessions/{id}/stop", post(handlers::stop_session))
-        .route("/api/sessions/{id}/events", get(sse::session_events))
         .route("/api/events", get(sse::global_events))
         .route(
             "/api/config",

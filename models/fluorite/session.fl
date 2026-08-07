@@ -1,9 +1,15 @@
-/// Wire types for the session server: session views and the SSE event union.
+/// Wire types for the session server: session views and the messages stream.
 package session;
 
 use agent.Message;
-use agent.HistoryEntry;
+use agent.AgentLogEntry;
 use agent.Usage;
+// `task_list` is the agent's own tool state, so `TaskItem` lives with the agent
+// and is imported back here rather than defined here. Also required by the
+// dependency direction: `agent.fl` carries the log entry that reports a task
+// list, and `agent` cannot import from `session` while `session` imports agent.
+use agent.TaskItem;
+use agent.TaskStatus;
 
 /// User-visible lifecycle state of a session. Failure reasons ride separately
 /// in `last_error` so the enum stays a plain discriminant.
@@ -158,62 +164,58 @@ struct SubAgentView {
     ended_at_ms: u64,
 }
 
-// --- SSE event payloads ---
+// --- The messages stream ---
 
-/// One transcript append — a user message, an assistant message, or a tool
-/// result. Carries the SSE id `message.id`, which is also the history cursor:
-/// one vocabulary for the log, whichever way you read it.
-struct AppendedEvent { entry: HistoryEntry }
-
-/// The stream lagged and dropped frames. The client must backfill with
-/// `history?after=<its cursor>` and re-read the documents; the server does not
-/// replay, because a live stream is not a log.
-struct ResyncEvent { }
-
-/// The session's agent roster changed (a subagent spawned, finished, or failed).
-struct AgentTreeEvent { agents: Vec<SubAgentView> }
-/// `at_ms` is the unix-epoch millisecond the turn completed.
-struct TurnCompletedEvent { iterations: u32, usage: Usage, at_ms: u64 }
-/// The queue as it stands now, sent whole on every change — never a delta.
-/// Emitted when a message is accepted and again when a turn carries messages
-/// out of the queue, so a second tab needs no reload to stay honest.
-struct InboxChangedEvent { queued: Vec<QueuedMessage> }
-/// Live status transition. Sent without an SSE id (the session detail endpoint
-/// is the durable source for status).
-/// `pending_asks` rides along so a client learns what to answer the moment the
-/// agent parks, without refetching the session
-struct StatusChangedEvent {
-    status: SessionStatusKind,
-    reason: Option<String>,
-    pending_asks: Vec<PendingAskView>,
+/// One frame on `GET /sessions/:id/messages`.
+///
+/// Two arms because there are two kinds of thing to carry, and they differ in
+/// exactly one respect that matters: an `Entry` is durable and replayable, a
+/// `Delta` is neither. A tagged union rather than "whichever field is present"
+/// so a client's match is exhaustive and a third arm cannot be added silently.
+#[type_tag = "type"]
+union MessageFrame {
+    Window(MessageWindow),
+    Entry(AgentLogEntry),
+    Delta(MessageDelta),
 }
-struct ErrorEvent { message: String }
-/// Streaming text delta — live only, never journaled, never carries an SSE id.
-struct DeltaEvent { text: String }
-struct ToolStartEvent { tool_call_id: String, name: String }
+
+/// The first frame of a replay, describing the window that follows.
+///
+/// A cursorless connect replays at most a capped number of the newest entries,
+/// so a long-running session does not resend its whole history on every open.
+/// `has_more_before` says whether the cap actually bit — the client cannot
+/// infer it from the first entry's `seq`, because a log front-trimmed for
+/// context management has no seq 0 either, and the two cases want opposite
+/// behaviour. Sent only when there is no cursor: a resuming client already
+/// knows where it is.
+struct MessageWindow {
+    /// Older entries exist before this window; page back with `before=` to get
+    /// them.
+    has_more_before: bool,
+    /// The seq of the oldest entry in this window, which is the cursor to page
+    /// back from. Absent when the window is empty.
+    earliest_seq: Option<u64>,
+}
+
+/// A chunk of the message being written.
+///
+/// Carries the entry it follows, because a chunk means nothing without one.
+/// `delta_seq` restarts at 1 after every entry, which is what makes a stale
+/// position detectable: a client claiming more chunks than this run has emitted
+/// was talking to a run that has since restarted, and `reset` says so.
+struct MessageDelta {
+    entry_seq: u64,
+    delta_seq: u32,
+    text: String,
+    /// Discard the partial text you hold: these chunks start a new run.
+    reset: bool,
+}
+
 /// A resource-preparation progression — shown live while a turn spins up and
-/// kept for audit. `stage` is a stable key (`provisioning_runtime`,
+/// kept for audit. `stage` is a stable key (`acquiring_runtime`,
 /// `scanning_workspace`, `connecting_tools`, `ready`); `detail` is optional
 /// human text; `at_ms` is the unix-epoch millisecond it occurred.
 struct ProgressionEvent { stage: String, detail: Option<String>, at_ms: u64 }
-
-/// Status of one entry in the agent's `task_list` tool state.
-enum TaskStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-/// One entry in the agent's `task_list` tool state.
-struct TaskItem {
-    id: u32,
-    content: String,
-    status: TaskStatus,
-}
-
-/// The agent's `task_list` tool state, sent whole on every mutation
-/// (create/insert/update_status) — never a delta.
-struct TaskListEvent { tasks: Vec<TaskItem> }
 
 /// Cumulative token usage across a session's completed turns. `u64` (not the
 /// per-turn `Usage`'s `u32`) because it sums re-sent context over many turns.
@@ -224,34 +226,6 @@ struct UsageView {
     output_tokens: u64,
     cache_creation_tokens: Option<u64>,
     cache_read_tokens: Option<u64>,
-}
-
-/// A frame on one agent's stream (`/sessions/:id/agents/:agent_id/events`).
-///
-/// `Appended` is the only frame with an SSE id, because it is the only one that
-/// belongs to a log. The rest are either current values the client re-reads
-/// (`TurnCompleted`, `TaskListChanged`) or ephemeral run noise (`Delta`,
-/// `ToolStart`) that has no meaning outside a live turn.
-#[type_tag = "type"]
-union AgentStreamEvent {
-    Appended(AppendedEvent),
-    TurnCompleted(TurnCompletedEvent),
-    TaskListChanged(TaskListEvent),
-    Delta(DeltaEvent),
-    ToolStart(ToolStartEvent),
-    Resync(ResyncEvent),
-}
-
-/// A frame on the session stream (`/sessions/:id/events`). Session-scoped
-/// current values only — never a transcript, which is per-agent. None carries
-/// an SSE id: a client re-reads the session document rather than accumulating.
-#[type_tag = "type"]
-union SessionEvent {
-    StatusChanged(StatusChangedEvent),
-    InboxChanged(InboxChangedEvent),
-    Error(ErrorEvent),
-    Progressed(ProgressionEvent),
-    AgentTreeChanged(AgentTreeEvent),
 }
 
 /// A status frame on the global `/api/events` stream.

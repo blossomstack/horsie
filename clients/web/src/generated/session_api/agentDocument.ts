@@ -1,6 +1,6 @@
 
+import { TaskItem } from '../agent';
 import { Usage } from '../agent';
-import { TaskItem } from '../session';
 import { UsageView } from '../session';
 /**
  * One agent&#39;s current values. The subagent-only fields (`parent`, `label`,
@@ -43,4 +43,8 @@ export interface AgentDocument {
    * The model&#39;s configured context window, when known. Attached by the HTTP
    */
   contextWindow?: number;
+  /**
+   * The log position this document reflects.
+   */
+  asOfSeq: number;
 }

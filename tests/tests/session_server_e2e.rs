@@ -26,19 +26,19 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The LLM messages on a `/history` page.
+/// The LLM messages on a `/messages` page.
 ///
-/// A page is a list of transcript *entries*, each a tagged union — a hook record
-/// is an entry too, and is deliberately not a message. Tests that reason about
-/// the conversation go through here so a new entry kind cannot silently change
-/// what they count.
+/// A page is a list of log *entries*, each carrying a tagged body — a hook
+/// record and a session lifecycle event are entries too, and neither is a
+/// message. Tests that reason about the conversation go through here so a new
+/// body kind cannot silently change what they count.
 fn page_messages(page: &serde_json::Value) -> Vec<serde_json::Value> {
     page["entries"]
         .as_array()
-        .unwrap_or_else(|| panic!("a history page must carry entries: {page}"))
+        .unwrap_or_else(|| panic!("a messages page must carry entries: {page}"))
         .iter()
-        .filter(|e| e["type"] == serde_json::json!("Llm"))
-        .map(|e| e["value"].clone())
+        .filter(|e| e["body"]["type"] == serde_json::json!("Llm"))
+        .map(|e| e["body"]["value"].clone())
         .collect()
 }
 
@@ -445,6 +445,36 @@ fn kinds(events: &[Ev]) -> Vec<String> {
     events.iter().map(|e| e.kind.clone()).collect()
 }
 
+/// The `kind` of every lifecycle entry on a stream, in order.
+///
+/// Session-scoped facts are entries in the agent's log now, not frames of their
+/// own — so a test that used to look for an `InboxChanged` frame looks for a
+/// `MessageQueued` entry instead, at a known position relative to everything
+/// else rather than on a separate stream with no ordering against it.
+fn stream_lifecycle(events: &[Ev]) -> Vec<String> {
+    events
+        .iter()
+        .filter(|e| e.kind == "Entry")
+        .filter(|e| e.data["value"]["body"]["type"] == serde_json::json!("Lifecycle"))
+        .filter_map(|e| {
+            e.data["value"]["body"]["value"]["kind"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// The lifecycle entries of one kind, with their payloads.
+fn stream_lifecycle_values(events: &[Ev], kind: &str) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter(|e| e.kind == "Entry")
+        .filter(|e| e.data["value"]["body"]["type"] == serde_json::json!("Lifecycle"))
+        .filter(|e| e.data["value"]["body"]["value"]["kind"] == serde_json::json!(kind))
+        .map(|e| e.data["value"]["body"]["value"]["value"].clone())
+        .collect()
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 /// horsie#232, end to end: the message a session is created with must not
@@ -497,7 +527,7 @@ async fn a_first_turn_waits_for_the_create_it_rides_on() {
     wait_status(&client, &server.addr, &id, "Idle").await;
     let page: serde_json::Value = client
         .get(format!(
-            "http://{}/api/sessions/{id}/agents/main/history?limit=50",
+            "http://{}/api/sessions/{id}/messages?aid=main&max=50",
             server.addr
         ))
         .send()
@@ -528,22 +558,23 @@ async fn create_message_sse_roundtrip() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    // A session's first turn starts with the session itself, and a cursorless
-    // connect is live-only — so watching a turn over SSE means watching a
-    // *later* one. That is not a gap: a client joining an existing session
-    // backfills over `/history` and then streams, which is what the web app
-    // does on mount.
+    // A cursorless connect replays the whole log and then goes live, so this
+    // sees the create's own turn as well as the one it sends. That is the
+    // change: there is no longer a "backfill, then subscribe" seam for a turn
+    // to fall through, because the read and the stream are the same request.
     let id = create_session(&client, &server.addr, &agent, "first").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
-    let url = format!(
-        "http://{}/api/sessions/{id}/agents/main/events",
-        server.addr
-    );
+    let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
     let sse = tokio::spawn(async move {
         collect_sse(&client2, &url, None, |evs| {
-            evs.iter().any(|e| e.kind == "TurnCompleted")
+            // Two: the create's turn, replayed, and the one sent below.
+            stream_lifecycle(evs)
+                .iter()
+                .filter(|k| *k == "TurnEnded")
+                .count()
+                >= 2
         })
         .await
     });
@@ -558,8 +589,13 @@ async fn create_message_sse_roundtrip() {
 
     let events = sse.await.unwrap();
     let ks = kinds(&events);
-    assert!(ks.contains(&"Appended".to_string()), "kinds: {ks:?}");
-    assert!(ks.contains(&"TurnCompleted".to_string()), "kinds: {ks:?}");
+    assert!(ks.contains(&"Entry".to_string()), "kinds: {ks:?}");
+    let lifecycle = stream_lifecycle(&events);
+    assert!(
+        lifecycle.iter().any(|k| k == "TurnEnded"),
+        "the turn's end is an entry in the log, in order with the messages it \
+         followed rather than on a stream of its own: {lifecycle:?}"
+    );
     // The assistant's text made it through the stream (in a durable Message event).
     let joined = events
         .iter()
@@ -570,17 +606,39 @@ async fn create_message_sse_roundtrip() {
         joined.contains("hello from the agent"),
         "assistant text missing from stream: {joined}"
     );
-    // Only appends carry an SSE id, and it is the message id — the same cursor
-    // `/history` pages with, so a client has one vocabulary for both.
-    let ids: Vec<String> = events.iter().filter_map(|e| e.id.clone()).collect();
-    assert!(!ids.is_empty());
+    // Every frame that holds a *position* carries an SSE id — entries and
+    // deltas alike, so a reconnect can resume from any of them rather than only
+    // from the last durable append. The window frame is the one exception: it
+    // describes the window that follows rather than sitting in it, so giving it
+    // an id would let a reconnect resume from somewhere nothing was received.
+    let positioned: Vec<&Ev> = events.iter().filter(|e| e.kind != "Window").collect();
+    let ids: Vec<String> = positioned.iter().filter_map(|e| e.id.clone()).collect();
+    assert_eq!(
+        ids.len(),
+        positioned.len(),
+        "every positioned frame is resumable"
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|e| e.kind == "Window")
+            .all(|e| e.id.is_none()),
+        "the window frame holds no position"
+    );
     let unique: std::collections::HashSet<&String> = ids.iter().collect();
     assert_eq!(unique.len(), ids.len(), "ids must be unique: {ids:?}");
-    for ev in &events {
-        if ev.id.is_some() {
-            assert_eq!(ev.kind, "Appended", "only appends may carry an id");
-        }
-    }
+    // Entry ids are plain integers and strictly increase; a delta's is
+    // `<entry>.<n>`, which is what keeps it ordered against the entry it
+    // follows without competing for the same number.
+    let entry_seqs: Vec<u64> = events
+        .iter()
+        .filter(|e| e.kind == "Entry")
+        .filter_map(|e| e.id.as_ref()?.parse().ok())
+        .collect();
+    assert!(
+        entry_seqs.windows(2).all(|w| w[0] < w[1]),
+        "entry ids must strictly increase: {entry_seqs:?}"
+    );
 
     wait_status(&client, &server.addr, &id, "Idle").await;
     assert_eq!(
@@ -622,11 +680,17 @@ async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
     // Subscribe while the turn is in flight — this stands in for a second tab,
     // which must learn about the queue without reloading the page. The inbox is
     // session-scoped, so it rides the session stream, not an agent's.
-    let url = format!("http://{}/api/sessions/{id}/events", server.addr);
+    let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
     let sse = tokio::spawn(async move {
         collect_sse(&client2, &url, None, |evs| {
-            evs.iter().any(|e| e.kind == "InboxChanged")
+            // Two: the create's own message, replayed, and the one queued
+            // mid-turn below.
+            stream_lifecycle(evs)
+                .iter()
+                .filter(|k| *k == "MessageQueued")
+                .count()
+                >= 2
         })
         .await
     });
@@ -650,15 +714,18 @@ async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
         "a queued message carries the id the send acknowledged: {detail}"
     );
 
-    // ... and the live stream says the same thing.
+    // ... and the live stream says the same thing, as an entry in the log
+    // rather than a frame on a second stream with no order against this one.
     let events = sse.await.unwrap();
-    let queued = events
-        .iter()
-        .find(|e| e.kind == "InboxChanged")
-        .unwrap_or_else(|| panic!("no InboxChanged frame: {:?}", kinds(&events)));
-    let q = queued.data["value"]["queued"].as_array().unwrap();
-    assert_eq!(q.len(), 1, "{}", queued.data);
-    assert_eq!(q[0]["text"], "two");
+    // The replay carries the create's own message too, so the one under test is
+    // the last — and the log is what makes "last" meaningful without a second
+    // source to compare against.
+    let queued = stream_lifecycle_values(&events, "MessageQueued");
+    assert_eq!(
+        queued.last().expect("a queued entry")["text"],
+        serde_json::json!("two"),
+        "queued entries: {queued:?}"
+    );
 
     // Letting the turn finish carries the message out of the queue.
     mock.queue_response("second");
@@ -690,12 +757,11 @@ async fn prep_progressions_stream_during_a_turn() {
     // Subscribe before sending so the live progression frames are seen. Prep
     // is session-scoped, so it streams on the session — and the turn's end is
     // observed there as the status returning to Idle.
-    let url = format!("http://{}/api/sessions/{id}/events", server.addr);
+    let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
     let sse = tokio::spawn(async move {
         collect_sse(&client2, &url, None, |evs| {
-            evs.iter()
-                .any(|e| e.kind == "StatusChanged" && e.data["value"]["status"] == "Idle")
+            stream_lifecycle(evs).iter().any(|k| k == "TurnEnded")
         })
         .await
     });
@@ -703,11 +769,12 @@ async fn prep_progressions_stream_during_a_turn() {
     send_message(&client, &server.addr, &id, "hi").await;
 
     let events = sse.await.unwrap();
-    // Preparation stages surface as `Progressed` events before the reply.
-    let stages: Vec<String> = events
+    // Preparation stages are `Provisioning` entries in the log, before the
+    // reply. Journaled rather than live-only, so a client that connects
+    // mid-preparation still learns what happened.
+    let stages: Vec<String> = stream_lifecycle_values(&events, "Provisioning")
         .iter()
-        .filter(|e| e.kind == "Progressed")
-        .filter_map(|e| e.data["value"]["stage"].as_str().map(str::to_string))
+        .filter_map(|v| v["stage"].as_str().map(str::to_string))
         .collect();
     assert!(
         stages.iter().any(|s| s == "scanning_workspace"),
@@ -744,8 +811,7 @@ async fn history_endpoint_returns_windowed_messages() {
         let addr = server.addr;
         let id = id.clone();
         async move {
-            let mut url =
-                format!("http://{addr}/api/sessions/{id}/agents/main/history?limit={limit}");
+            let mut url = format!("http://{addr}/api/sessions/{id}/messages?aid=main&max={limit}");
             if let Some(b) = before {
                 url.push_str(&format!("&before={b}"));
             }
@@ -759,15 +825,14 @@ async fn history_endpoint_returns_windowed_messages() {
                 .unwrap()
         }
     };
-    let history_after = |limit: usize, after: &str| {
+    let history_before = |limit: usize, before: u64| {
         let client = client.clone();
         let addr = server.addr;
         let id = id.clone();
-        let after = after.to_string();
         async move {
             client
                 .get(format!(
-                    "http://{addr}/api/sessions/{id}/agents/main/history?limit={limit}&after={after}"
+                    "http://{addr}/api/sessions/{id}/messages?aid=main&max={limit}&before={before}"
                 ))
                 .send()
                 .await
@@ -799,21 +864,22 @@ async fn history_endpoint_returns_windowed_messages() {
     send_message(&client, &server.addr, &id, "two").await;
     wait_for(4).await;
 
-    // Tail page with a small limit: newest messages, older ones still owed.
+    // Tail page with a small limit. A page is a window of *entries* now, not of
+    // messages: lifecycle entries share the log and share the numbering, which
+    // is the whole point of one ordered thing. So the limit is asserted on
+    // entries, and the reply is found by widening the window.
     let page = history(2, None).await;
-    let msgs = page_messages(&page);
-    assert_eq!(msgs.len(), 2, "tail limit not honored: {page}");
-    assert_eq!(page["hasMoreBefore"], serde_json::json!(true));
-    assert_eq!(
-        page["hasMoreAfter"],
-        serde_json::json!(false),
-        "the tail is the newest window: {page}"
-    );
-    // The newest assistant reply is in the tail window.
-    let joined = page.to_string();
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "tail limit not honored: {page}");
     assert!(
-        joined.contains("second reply"),
-        "tail missing latest: {page}"
+        page.get("hasMoreBefore").is_none() && page.get("hasMoreAfter").is_none(),
+        "fewer entries than asked for is how a client learns there are no more: {page}"
+    );
+    // The newest assistant reply is in a wide enough tail window.
+    let wide = history(100, None).await;
+    assert!(
+        wide.to_string().contains("second reply"),
+        "tail missing latest: {wide}"
     );
 
     // Every message the endpoint serves is stamped, and a turn's messages run
@@ -848,37 +914,31 @@ async fn history_endpoint_returns_windowed_messages() {
         "generation cannot end before it began: {assistant}"
     );
 
-    // Scroll back before the oldest returned id → older messages.
-    let oldest_id = msgs[0]["id"].as_str().unwrap().to_string();
-    let older = history(2, Some(oldest_id.clone())).await;
-    assert_eq!(page_messages(&older).len(), 2);
-    assert_eq!(older["hasMoreBefore"], serde_json::json!(false));
+    // Scroll back from a known seq. The cursor is the entry's own number now,
+    // not its id — which is what turns a lookup that used to scan the whole log
+    // into a binary search, and lets two entries be compared without it.
+    let all_entries = all["entries"].as_array().unwrap();
+    let anchor = all_entries[4]["seq"].as_u64().unwrap();
+    let older = history_before(3, anchor).await;
+    let older_seqs: Vec<u64> = older["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["seq"].as_u64().unwrap())
+        .collect();
     assert_eq!(
-        older["hasMoreAfter"],
-        serde_json::json!(true),
-        "newer messages follow a scroll-back window: {older}"
+        older_seqs,
+        vec![anchor - 3, anchor - 2, anchor - 1],
+        "a scroll-back window ends just before its cursor and excludes it: {older}"
     );
 
-    // Forward from that same id → the newer half, which is what a reconnecting
-    // stream backfills with. The two cursors are one space read both ways.
-    let newer = history_after(2, &oldest_id).await;
-    let newer_msgs = page_messages(&newer);
-    let newer_ids: Vec<&str> = newer_msgs
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect();
+    // A cursor the log does not hold is answered with nothing rather than a
+    // silently-wrong window — the caller must re-seed.
+    let missing = history_before(3, 999_999).await;
     assert!(
-        !newer_ids.contains(&oldest_id.as_str()),
-        "an `after` page must exclude the cursor itself: {newer}"
+        missing["entries"].as_array().unwrap().is_empty(),
+        "an unresolvable cursor owes nothing: {missing}"
     );
-    // `oldest_id` is the second-newest of four, so exactly one follows it.
-    assert_eq!(newer_ids.len(), 1, "{newer}");
-    assert_eq!(
-        newer_ids[0],
-        msgs[1]["id"].as_str().unwrap(),
-        "forward paging must resume at the very next message: {newer}"
-    );
-    assert_eq!(newer["hasMoreAfter"], serde_json::json!(false));
 
     server.shutdown().await;
 }
@@ -1004,7 +1064,7 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
         async move {
             client
                 .get(format!(
-                    "http://{addr}/api/sessions/{id}/agents/main/history?limit=100"
+                    "http://{addr}/api/sessions/{id}/messages?aid=main&max=100"
                 ))
                 .send()
                 .await
@@ -1150,10 +1210,7 @@ async fn last_event_id_replay_is_gap_free() {
     send_message(&client, &server.addr, &id, "two").await;
     wait_status(&client, &server.addr, &id, "Idle").await;
 
-    let url = format!(
-        "http://{}/api/sessions/{id}/agents/main/events",
-        server.addr
-    );
+    let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
 
     // A connect with no cursor is live-only — it does not replay, because a
     // stream is not a log. So drive a third turn with the stream open to learn
@@ -1611,7 +1668,7 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     for _ in 0..3 {
         let page: serde_json::Value = client
             .get(format!(
-                "http://{}/api/sessions/{id}/agents/main/history?limit=50",
+                "http://{}/api/sessions/{id}/messages?aid=main&max=50",
                 server.addr
             ))
             .send()
@@ -1688,7 +1745,7 @@ async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
     // across providers, so the queue is joined with a blank line instead.
     let page: serde_json::Value = client
         .get(format!(
-            "http://{}/api/sessions/{id}/agents/main/history?limit=100",
+            "http://{}/api/sessions/{id}/messages?aid=main&max=100",
             server.addr
         ))
         .send()

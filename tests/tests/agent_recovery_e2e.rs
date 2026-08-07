@@ -15,8 +15,7 @@
 use async_trait::async_trait;
 use horsie_actor::{InMemoryJournal, Journal, spawn_root};
 use horsie_agentcore::{
-    AgentEvent, ContentPart, EventSink, EventSinkError, LlmProvider, Message, Role, ToolCallError,
-    ToolCallPart, ToolSpec, Toolbox,
+    ContentPart, LlmProvider, Message, Role, ToolCallError, ToolCallPart, ToolSpec, Toolbox,
 };
 use horsie_anthropic::AnthropicProvider;
 use horsie_mock_llm::MockLlmServer;
@@ -30,14 +29,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 // ── harness ──────────────────────────────────────────────────────────────────
-
-struct NoopSink;
-#[async_trait]
-impl EventSink for NoopSink {
-    async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
-        Ok(())
-    }
-}
 
 /// Forwards the agent's terminal outcome to the test, so it can await the turn
 /// instead of polling the journal.
@@ -223,11 +214,11 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
 
     let (tx, mut outcomes) = tokio::sync::mpsc::channel(8);
     let ctx = AgentRuntimeContext {
+        position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
         context_provider: Arc::new(FixedContextProvider {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(ReadFileToolbox),
         }),
-        event_sink: Arc::new(NoopSink),
         parent: Arc::new(OutcomeChannel(tx)),
         session_id,
     };
@@ -328,11 +319,11 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
 
     let (tx, mut outcomes) = tokio::sync::mpsc::channel(8);
     let ctx = AgentRuntimeContext {
+        position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
         context_provider: Arc::new(FixedContextProvider {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(AskUserToolbox),
         }),
-        event_sink: Arc::new(NoopSink),
         parent: Arc::new(OutcomeChannel(tx)),
         session_id,
     };
@@ -432,8 +423,8 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         let session_id = uuid::Uuid::new_v4();
         let (tx, _outcomes) = tokio::sync::mpsc::channel(8);
         let ctx = AgentRuntimeContext {
+            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             context_provider: Arc::new(HangingContextProvider),
-            event_sink: Arc::new(NoopSink),
             parent: Arc::new(OutcomeChannel(tx)),
             session_id,
         };
@@ -503,11 +494,11 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
 
     let (tx, _outcomes) = tokio::sync::mpsc::channel(8);
     let ctx = AgentRuntimeContext {
+        position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
         context_provider: Arc::new(FixedContextProvider {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(ReadFileToolbox),
         }),
-        event_sink: Arc::new(NoopSink),
         parent: Arc::new(OutcomeChannel(tx)),
         session_id,
     };
@@ -528,12 +519,9 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         loop {
             let (reply, rx) = tokio::sync::oneshot::channel();
             agent
-                .tell(AgentCommand::GetHistory {
-                    query: horsie_workflow::HistoryQuery {
-                        before: None,
-                        after: None,
-                        limit: 100,
-                    },
+                .tell(AgentCommand::PageLog {
+                    before: None,
+                    max: 100,
                     reply,
                 })
                 .await
@@ -562,11 +550,11 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     // and has nothing left to fix.
     let (tx2, _o2) = tokio::sync::mpsc::channel(8);
     let ctx2 = AgentRuntimeContext {
+        position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
         context_provider: Arc::new(FixedContextProvider {
             provider: provider_at(&mock.url()),
             toolbox: Arc::new(ReadFileToolbox),
         }),
-        event_sink: Arc::new(NoopSink),
         parent: Arc::new(OutcomeChannel(tx2)),
         session_id,
     };
@@ -584,12 +572,9 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (reply, rx) = tokio::sync::oneshot::channel();
     agent2
-        .tell(AgentCommand::GetHistory {
-            query: horsie_workflow::HistoryQuery {
-                before: None,
-                after: None,
-                limit: 100,
-            },
+        .tell(AgentCommand::PageLog {
+            before: None,
+            max: 100,
             reply,
         })
         .await

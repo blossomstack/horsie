@@ -108,6 +108,115 @@ union HistoryEntry {
     Hook(HookEntry),
 }
 
+/// Status of one entry in the agent's `task_list` tool state.
+enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// One entry in the agent's `task_list` tool state.
+struct TaskItem {
+    id: u32,
+    content: String,
+    status: TaskStatus,
+}
+
+// --- The agent log ---------------------------------------------------------
+
+/// One item in an agent's log: the single ordered record a client reads.
+///
+/// The agent actor is its only writer, which is what makes the order
+/// deterministic without any merge — one actor, one mailbox, one fold, and
+/// replay reproduces exactly what ran live.
+struct AgentLogEntry {
+    /// Monotonic within this agent, assigned in the fold. This is the cursor.
+    ///
+    /// Stored rather than implied by position: the log is not front-trimmed
+    /// today, but storing it keeps trimming available for context management
+    /// and lets a cursor resolve by binary search instead of a scan.
+    seq: u64,
+    at_ms: u64,
+    body: AgentLogBody,
+}
+
+/// What one log entry carries.
+///
+/// Three arms, not eight: `AgentState::prompt_messages` is a match over this
+/// union, and a single `Lifecycle` arm mapping to nothing covers every
+/// lifecycle variant that will ever exist. Flattening the variants in here
+/// would make provider isolation a per-variant obligation a future addition
+/// could forget.
+#[type_tag = "type"]
+union AgentLogBody {
+    Llm(Message),
+    Hook(HookEntry),
+    Lifecycle(LifecycleEvent),
+}
+
+/// Something that happened to the session, recorded in the log of the agent it
+/// concerns.
+///
+/// The session actor still owns every one of these; it notifies the agent so
+/// there is one ordered record to read rather than a second stream to reconcile
+/// against this one. Flow is one-directional: session to agent, never back.
+#[type_tag = "kind"]
+union LifecycleEvent {
+    Provisioning(ProvisioningLifecycle),
+    MessageQueued(QueuedLifecycle),
+    TurnBegan(TurnBeganLifecycle),
+    TurnEnded(TurnEndedLifecycle),
+    AskRecorded(AskLifecycle),
+    SubAgent(SubAgentLifecycle),
+    Step(StepLifecycle),
+    TaskList(TaskListLifecycle),
+    SessionFailed(SessionFailedLifecycle),
+}
+
+/// Runtime preparation progress: `acquiring_runtime`, `scanning_workspace`,
+/// `connecting_tools`, `ready`.
+struct ProvisioningLifecycle { stage: String, detail: Option<String> }
+
+/// A message accepted into this agent's inbox and not yet carried into a turn.
+struct QueuedLifecycle { id: String, text: String }
+
+/// A turn started, consuming these queued message ids and answering these asks.
+struct TurnBeganLifecycle { consumed: Vec<String>, answered: Vec<String> }
+
+/// A turn finished, however it finished.
+struct TurnEndedLifecycle { outcome: TurnOutcome }
+
+/// How a turn ended. One entry with an outcome rather than four sibling
+/// lifecycle variants: every consumer that cares about "the turn is over"
+/// should not have to enumerate the ways.
+#[type_tag = "kind"]
+union TurnOutcome {
+    Ended(EmptyOutcome),
+    Failed(FailedOutcome),
+    Stopped(EmptyOutcome),
+    Interrupted(EmptyOutcome),
+}
+
+struct EmptyOutcome {}
+struct FailedOutcome { error: String }
+
+/// The agent asked the user something and is parked on it.
+struct AskLifecycle { tool_call_id: Option<String>, question: String }
+
+/// A subagent this agent spawned, and where it got to. Recorded on the
+/// *parent*, because the parent is what a viewer is reading when it matters.
+struct SubAgentLifecycle { id: String, label: String, status: String }
+
+/// One workflow step's progress, recorded on that step's own agent.
+struct StepLifecycle { index: u32, status: String }
+
+/// The agent's `task_list` state, whole. Both the current value and the
+/// notification that it changed — a client folds it, last one wins.
+struct TaskListLifecycle { tasks: Vec<TaskItem> }
+
+/// Terminal: this session can never run again.
+struct SessionFailedLifecycle { reason: String }
+
 /// Token usage for a model turn
 struct Usage {
     /// The full size of the prompt sent to the model, normalized so this

@@ -1,7 +1,7 @@
 //! Wire-boundary redaction: fields that exist only for provider replay and are
 //! meaningless to API clients.
 
-use horsie_models::agent::{ContentPart, HistoryEntry, Message};
+use horsie_models::agent::{AgentLogBody, AgentLogEntry, ContentPart, Message};
 
 /// Drop thinking-block signatures from messages on their way to a client.
 ///
@@ -10,11 +10,11 @@ use horsie_models::agent::{ContentPart, HistoryEntry, Message};
 /// renders `text` only (`clients/web/src/components/ThinkingBlock.tsx`). They
 /// stay in the agent's in-memory state and journal, where provider replay needs
 /// them; this strips only the copies handed to HTTP and SSE clients.
-/// A hook entry has no signature to strip — it never came from a provider — so
-/// only the LLM entries are touched.
-pub fn strip_entry_signatures(entries: &mut [HistoryEntry]) {
+/// Neither a hook nor a lifecycle entry has a signature to strip — neither came
+/// from a provider — so only the LLM entries are touched.
+pub fn strip_entry_signatures(entries: &mut [AgentLogEntry]) {
     for entry in entries.iter_mut() {
-        if let HistoryEntry::Llm(message) = entry {
+        if let AgentLogBody::Llm(message) = &mut entry.body {
             strip_message_signature(message);
         }
     }
@@ -40,13 +40,17 @@ mod tests {
     use super::*;
     use horsie_models::agent::{Role, TextPart, ThinkingPart};
 
-    fn entries(signature: Option<&str>) -> Vec<HistoryEntry> {
-        vec![HistoryEntry::Llm(assistant_with_thinking(signature))]
+    fn entries(signature: Option<&str>) -> Vec<AgentLogEntry> {
+        vec![AgentLogEntry {
+            seq: 0,
+            at_ms: 0,
+            body: AgentLogBody::Llm(assistant_with_thinking(signature)),
+        }]
     }
 
-    fn parts(entries: &[HistoryEntry]) -> &[ContentPart] {
-        match &entries[0] {
-            HistoryEntry::Llm(m) => &m.parts,
+    fn parts(entries: &[AgentLogEntry]) -> &[ContentPart] {
+        match &entries[0].body {
+            AgentLogBody::Llm(m) => &m.parts,
             other => panic!("expected an Llm entry, got {other:?}"),
         }
     }
@@ -127,11 +131,15 @@ mod tests {
                 },
             ),
         };
-        let hook = HistoryEntry::Hook(HookEntry {
-            id: "hook:0".into(),
-            created_at_ms: 7,
-            record,
-        });
+        let hook = AgentLogEntry {
+            seq: 3,
+            at_ms: 7,
+            body: AgentLogBody::Hook(HookEntry {
+                id: "hook:0".into(),
+                created_at_ms: 7,
+                record,
+            }),
+        };
         let mut es = vec![hook.clone()];
         strip_entry_signatures(&mut es);
         assert_eq!(

@@ -54,6 +54,24 @@ pub mod agent {
             }
         }
     }
+
+    impl AgentLogBody {
+        /// This entry's own identity, where it has one.
+        ///
+        /// Not a cursor — `AgentLogEntry::seq` is the cursor, and splitting the
+        /// two is what let ordering stop depending on a scan. This is the id a
+        /// tool result joins its call on, and the id a client dedupes an
+        /// optimistic echo against. A lifecycle entry has neither need and so
+        /// has no id.
+        #[must_use]
+        pub fn id(&self) -> Option<&str> {
+            match self {
+                Self::Llm(m) => Some(&m.id),
+                Self::Hook(h) => Some(&h.id),
+                Self::Lifecycle(_) => None,
+            }
+        }
+    }
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
@@ -647,6 +665,51 @@ mod tests {
     };
     use super::session;
 
+    /// Pins the three-level nesting the log depends on: the body union tags the
+    /// arm, the lifecycle union tags the kind, and the outcome union tags again
+    /// inside that. Nothing else asserts the wire shape, and a codegen change
+    /// that flattened any level would be silently accepted by every other test.
+    #[test]
+    fn a_lifecycle_entry_round_trips_with_its_tag() {
+        let entry = agent::AgentLogEntry {
+            seq: 7,
+            at_ms: 1_700_000_000_000,
+            body: agent::AgentLogBody::Lifecycle(agent::LifecycleEvent::TurnEnded(
+                agent::TurnEndedLifecycle {
+                    outcome: agent::TurnOutcome::Failed(agent::FailedOutcome {
+                        error: "boom".into(),
+                    }),
+                },
+            )),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["body"]["type"], "Lifecycle", "{json}");
+        assert_eq!(json["body"]["value"]["kind"], "TurnEnded", "{json}");
+        assert_eq!(json["body"]["value"]["value"]["outcome"]["kind"], "Failed");
+        assert_eq!(json["atMs"], 1_700_000_000_000u64, "camelCase on the wire");
+        let back: agent::AgentLogEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(back, entry);
+    }
+
+    /// A task list rides the log as a whole snapshot, so a client that folds it
+    /// needs no separate read to know the current plan.
+    #[test]
+    fn a_task_list_entry_carries_the_whole_list() {
+        let body = agent::AgentLogBody::Lifecycle(agent::LifecycleEvent::TaskList(
+            agent::TaskListLifecycle {
+                tasks: vec![agent::TaskItem {
+                    id: 1,
+                    content: "do the thing".into(),
+                    status: agent::TaskStatus::InProgress,
+                }],
+            },
+        ));
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["value"]["value"]["tasks"][0]["status"], "InProgress");
+        let back: agent::AgentLogBody = serde_json::from_value(json).unwrap();
+        assert_eq!(back, body);
+    }
+
     fn result_part(label: &str) -> agent::SubAgentResultPart {
         agent::SubAgentResultPart {
             subagent_id: "11111111-1111-1111-1111-111111111111".into(),
@@ -711,24 +774,44 @@ mod tests {
         assert_eq!(part.to_wire_text(), "[subagent \"audit\" completed]");
     }
 
+    /// One tagged union replaces the two the stream used to need. The tag is
+    /// what lets a client match exhaustively instead of inferring the variant
+    /// from which field happens to be present.
     #[test]
-    fn session_event_round_trips_with_type_tag() {
-        let ev = session::SessionEvent::Error(session::ErrorEvent {
-            message: "boom".into(),
+    fn a_message_frame_round_trips_with_its_type_tag() {
+        let delta = session::MessageFrame::Delta(session::MessageDelta {
+            entry_seq: 99,
+            delta_seq: 3,
+            text: "hi".into(),
+            reset: false,
         });
-        let json = serde_json::to_string(&ev).unwrap();
-        assert!(json.contains("\"type\""));
-        let back: session::SessionEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(ev, back);
-    }
+        let json = serde_json::to_string(&delta).unwrap();
+        assert!(json.contains("\"type\":\"Delta\""), "{json}");
+        assert!(
+            json.contains("\"entrySeq\":99"),
+            "camelCase on the wire: {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<session::MessageFrame>(&json).unwrap(),
+            delta
+        );
 
-    #[test]
-    fn agent_stream_event_round_trips_with_type_tag() {
-        let ev = session::AgentStreamEvent::Delta(session::DeltaEvent { text: "hi".into() });
-        let json = serde_json::to_string(&ev).unwrap();
-        assert!(json.contains("\"type\""));
-        let back: session::AgentStreamEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(ev, back);
+        let entry = session::MessageFrame::Entry(agent::AgentLogEntry {
+            seq: 99,
+            at_ms: 1,
+            body: agent::AgentLogBody::Lifecycle(agent::LifecycleEvent::TurnBegan(
+                agent::TurnBeganLifecycle {
+                    consumed: vec!["m1".into()],
+                    answered: vec![],
+                },
+            )),
+        });
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"type\":\"Entry\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<session::MessageFrame>(&json).unwrap(),
+            entry
+        );
     }
 
     #[test]

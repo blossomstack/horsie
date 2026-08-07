@@ -10,8 +10,8 @@
 //! promise kept at the next turn boundary.
 
 use crate::runtime_manager::{RuntimeClientProvider, RuntimeError};
+use crate::sessions::UserMessageError;
 use crate::sessions::ask_tool::{ASK_USER_TOOL, AskUserToolbox};
-use crate::sessions::events::{AgentEventSink, BroadcastObserver};
 use crate::sessions::mode::SessionModeState;
 use crate::sessions::orchestrator::{
     AgentAction, InteractiveOrchestrator, Orchestrator, SessionCommandKind,
@@ -21,7 +21,6 @@ use crate::sessions::spec::{AgentSettings, PendingAsk, ServerDeps, SessionSpec, 
 use crate::sessions::subagents::{INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
-use crate::sessions::{AgentFrame, SessionFrame, UserMessageError};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{LlmProvider, Toolbox};
@@ -35,22 +34,18 @@ use horsie_models::runtime::{
 };
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
-    AgentActor, AgentCommand, AgentHistoryPage, AgentOutcome, AgentOutcomeSink, AgentParams,
-    AgentRunDef, AgentRuntimeContext, AgentUsageSnapshot, ContextError, ContextProvider, Contexts,
-    DefaultToolboxFactory, HistoryQuery, SharedContext, StartTurn, ToolboxFactory, TurnPreparation,
-    UsageTotal, compose_system_prompt, scan_workspace,
+    AgentActor, AgentCommand, AgentOutcome, AgentOutcomeSink, AgentParams, AgentRunDef,
+    AgentRuntimeContext, AgentUsageSnapshot, ContextError, ContextProvider, Contexts,
+    DefaultToolboxFactory, SharedContext, StartTurn, ToolboxFactory, TurnPreparation, UsageTotal,
+    compose_system_prompt, scan_workspace,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 use uuid::Uuid;
-
-/// Capacity of a session's live frame broadcast. Slow subscribers see `lagged`
-/// drops and catch up from the journal.
-pub(crate) const FRAME_BROADCAST_CAPACITY: usize = 256;
 
 /// The agent id a session's primary agent reports usage under.
 const MAIN_AGENT_ID: &str = "main";
@@ -60,12 +55,29 @@ const MAIN_AGENT_ID: &str = "main";
 /// can never hold the mailbox — and with it the Stop button — hostage.
 const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn emit_progress(frames: &broadcast::Sender<SessionFrame>, stage: &str, detail: Option<String>) {
-    let _ = frames.send(SessionFrame::Progression {
-        stage: stage.to_string(),
-        detail,
-        at_ms: now_ms(),
-    });
+/// Report turn-preparation progress into an agent's log.
+///
+/// Journaled rather than broadcast. It used to ride an ephemeral frame nobody
+/// could ask for again, so a client that connected mid-preparation saw nothing
+/// and a reload lost the sequence entirely. Four entries per turn buys a
+/// preparation history that reads back like everything else.
+///
+/// Routed through the session's mailbox rather than straight at the agent, so
+/// a caller needs only the session handle it already holds and the entry is
+/// ordered against whatever else the session is doing.
+async fn emit_progress(
+    session: &ActorRef<SessionCommand>,
+    key: AgentKey,
+    stage: &str,
+    detail: Option<String>,
+) {
+    let _ = session
+        .tell(SessionCommand::Progress {
+            key,
+            stage: stage.to_string(),
+            detail,
+        })
+        .await;
 }
 
 /// The baseline system prompt given to every session agent.
@@ -84,13 +96,20 @@ pub enum SessionCommand {
     Stop { reply: oneshot::Sender<()> },
     /// Delete: cancel, tell the vendor, and stop.
     Delete { reply: oneshot::Sender<()> },
-    /// Read a window of conversation history from one of the session's
-    /// agents: `agent_id` absent or `"main"` for the primary agent, otherwise
-    /// a subagent id. `None` answers "no such agent".
-    History {
+    /// Read forward from a cursor in one of the session's agents: `agent_id`
+    /// absent or `"main"` for the primary agent, otherwise a subagent id.
+    /// `None` answers "no such agent".
+    ReadLog {
         agent_id: Option<String>,
-        query: HistoryQuery,
-        reply: oneshot::Sender<Option<AgentHistoryPage>>,
+        after: Option<horsie_workflow::Cursor>,
+        reply: oneshot::Sender<Option<horsie_workflow::ReadOutcome>>,
+    },
+    /// Read a window *backwards* from a cursor — scroll-back.
+    PageLog {
+        agent_id: Option<String>,
+        before: Option<u64>,
+        max: usize,
+        reply: oneshot::Sender<Option<horsie_workflow::LogPage>>,
     },
     /// Read this session's aggregated usage.
     UsageStats {
@@ -105,12 +124,11 @@ pub enum SessionCommand {
     Snapshot {
         reply: oneshot::Sender<SessionSnapshot>,
     },
-    /// Subscribe to one agent's live frames. `agent_id` is `None`/`"main"` for
-    /// the primary agent, else a subagent id; the outer `None` means no such
-    /// agent. A cold subagent is spawned on demand, exactly as `History` does.
-    SubscribeAgent {
-        agent_id: Option<String>,
-        reply: oneshot::Sender<Option<broadcast::Receiver<AgentFrame>>>,
+    /// Record one turn-preparation stage in `key`'s log. See [`emit_progress`].
+    Progress {
+        key: AgentKey,
+        stage: String,
+        detail: Option<String>,
     },
     /// Read one agent's current values (task list, usage) for its document.
     AgentState {
@@ -590,7 +608,6 @@ pub struct SessionActor {
     spec: SessionSpec,
     deps: ServerDeps,
     parent: ActorRef<SessionSupervisorCommand>,
-    frames: broadcast::Sender<SessionFrame>,
     /// The agent actors this session hosts, resident for as long as this actor
     /// is loaded. `None` means exactly one thing — recovery has not finished —
     /// which is why the topology inside is a value rather than a second
@@ -607,22 +624,21 @@ pub struct SessionActor {
     /// reach the runtime client the run already acquired instead of asking
     /// the manager for a fresh one.
     context_provider: Option<Arc<SessionContextProvider>>,
-    /// One live broadcast per agent. Created with the agent and kept for this
-    /// actor's loaded lifetime, so a subscriber survives a turn ending. A
-    /// session nobody watches still publishes — into a channel with no
-    /// receivers, which costs nothing.
-    agent_frames: HashMap<AgentKey, broadcast::Sender<AgentFrame>>,
+    /// The supervisor's per-agent position channels for this session.
+    ///
+    /// Cloned in rather than created here: it has to outlive this actor, so
+    /// that unloading an idle session leaves a reader waiting rather than
+    /// disconnecting it.
+    positions: crate::sessions::Positions,
 }
 
 impl SessionActor {
-    /// `frames` is owned by the supervisor and outlives this actor: a session
-    /// that unloads under a watching client must not disconnect it.
     pub fn new(
         id: Uuid,
         spec: SessionSpec,
         deps: ServerDeps,
         parent: ActorRef<SessionSupervisorCommand>,
-        frames: broadcast::Sender<SessionFrame>,
+        positions: crate::sessions::Positions,
     ) -> Self {
         // The spec decides which of the two this session is, once and for all.
         let orchestrator: Arc<dyn Orchestrator> = match &spec.workflow {
@@ -637,12 +653,11 @@ impl SessionActor {
             spec,
             deps,
             parent,
-            frames,
             agents: None,
             pending_step: None,
             orchestrator,
             context_provider: None,
-            agent_frames: HashMap::new(),
+            positions,
         }
     }
 
@@ -653,9 +668,6 @@ impl SessionActor {
 
     /// Report a status transition to the supervisor's cache and the live stream.
     async fn report(&self, status: SessionStatus) {
-        let _ = self.frames.send(SessionFrame::Status {
-            status: status.clone(),
-        });
         let _ = self
             .parent
             .tell(SessionSupervisorCommand::SessionStatusChanged {
@@ -663,31 +675,6 @@ impl SessionActor {
                 status,
             })
             .await;
-    }
-
-    /// Publish the queue as it stands once `events` fold onto `state`.
-    ///
-    /// One frame per command, carrying the whole queue — never an intermediate.
-    /// A message that is accepted and immediately drained therefore publishes
-    /// an empty inbox once, rather than "queued" followed by "gone", which a
-    /// client would render as a flicker. A no-op when nothing touched the queue,
-    /// so callers may call it unconditionally.
-    fn publish_inbox(&self, state: &SessionState, events: &[SessionDomainEvent]) {
-        if !events.iter().any(|e| {
-            matches!(
-                e,
-                SessionDomainEvent::MessageQueued { .. } | SessionDomainEvent::TurnBegan { .. }
-            )
-        }) {
-            return;
-        }
-        let next = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), Self::apply_event);
-        let _ = self
-            .frames
-            .send(SessionFrame::InboxChanged { queued: next.inbox });
     }
 
     /// Persist a session title through the supervisor, then publish it.
@@ -735,7 +722,6 @@ impl SessionActor {
             session: ctx.self_ref(),
             plugins: self.spec.plugins.clone(),
             plugin_library: self.deps.plugins.clone(),
-            frames: self.frames.clone(),
             last_client: Mutex::new(None),
         });
         self.context_provider = Some(context_provider.clone());
@@ -753,12 +739,9 @@ impl SessionActor {
             .thinking_effort
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
-        let frames = self.agent_frames(AgentKey::Main);
         let agent_ctx = AgentRuntimeContext {
             context_provider: context_provider.clone(),
-            event_sink: Arc::new(AgentEventSink {
-                frames: frames.clone(),
-            }),
+            position: self.positions.for_agent(MAIN_AGENT_ID),
             parent: Arc::new(StopHookParent {
                 inner: Arc::new(SessionParent {
                     target: ctx.self_ref(),
@@ -770,9 +753,9 @@ impl SessionActor {
             }),
             session_id: self.id,
         };
-        self.agents = Some(SessionAgents::interactive(ctx.spawn(
-            AgentActor::with_observer(agent_ctx, params, Arc::new(BroadcastObserver { frames })),
-        )));
+        self.agents = Some(SessionAgents::interactive(
+            ctx.spawn(AgentActor::new(agent_ctx, params)),
+        ));
     }
 
     /// Spawn the agent for one execution of a workflow step.
@@ -816,7 +799,6 @@ impl SessionActor {
             session: ctx.self_ref(),
             plugins: self.spec.plugins.clone(),
             plugin_library: self.deps.plugins.clone(),
-            frames: self.frames.clone(),
             last_client: Mutex::new(None),
         });
         let mut params = AgentParams::from_def(&AgentRunDef {
@@ -845,12 +827,9 @@ impl SessionActor {
             .thinking_effort
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
-        let frames = self.agent_frames(AgentKey::Step(agent_id));
         let agent_ctx = AgentRuntimeContext {
             context_provider: context_provider.clone(),
-            event_sink: Arc::new(AgentEventSink {
-                frames: frames.clone(),
-            }),
+            position: self.positions.for_agent(&agent_id.to_string()),
             parent: Arc::new(StopHookParent {
                 inner: Arc::new(SessionParent {
                     target: ctx.self_ref(),
@@ -862,11 +841,7 @@ impl SessionActor {
             }),
             session_id: agent_id,
         };
-        let actor = ctx.spawn(AgentActor::with_observer(
-            agent_ctx,
-            params,
-            Arc::new(BroadcastObserver { frames }),
-        ));
+        let actor = ctx.spawn(AgentActor::new(agent_ctx, params));
         if let Some(agents) = self.agents.as_mut() {
             agents.insert_sub(agent_id, actor.clone());
         }
@@ -915,7 +890,16 @@ impl SessionActor {
                         error: format!("step '{step}' could not be started"),
                     }];
                 }
-                emit_progress(&self.frames, "step_started", Some(step.clone()));
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "step_started".into(),
+                            detail: Some(step.clone()),
+                        },
+                    ),
+                )
+                .await;
                 self.report(SessionStatus::Running).await;
                 vec![SessionDomainEvent::StepStarted {
                     at_ms: now_ms(),
@@ -936,9 +920,6 @@ impl SessionActor {
                 }]
             }
             AgentAction::Fail { error } => {
-                let _ = self.frames.send(SessionFrame::Error {
-                    message: error.clone(),
-                });
                 self.report(SessionStatus::Failed {
                     reason: error.clone(),
                 })
@@ -952,13 +933,70 @@ impl SessionActor {
         }
     }
 
-    /// The broadcast for one agent, created on first use. Held by the session
-    /// rather than the agent so a subscriber outlives the agent's turn.
-    fn agent_frames(&mut self, key: AgentKey) -> broadcast::Sender<AgentFrame> {
-        self.agent_frames
-            .entry(key)
-            .or_insert_with(|| broadcast::channel(FRAME_BROADCAST_CAPACITY).0)
-            .clone()
+    /// Tell each agent about the session events it needs to show.
+    ///
+    /// This is the whole of "session events reach the client": the session
+    /// still owns and journals every one of them, and hands the viewer-facing
+    /// subset to the agent whose log a person would be reading. One direction
+    /// only — an agent never tells the session anything back through here.
+    ///
+    /// **Resident agents only**, because this hook has no `ActorContext` to
+    /// spawn with. That is not the limitation it looks like: `main` is spawned
+    /// at recovery and stays for the session's loaded life, and every
+    /// subagent-targeted event happens while that subagent is running. A miss
+    /// is therefore a bug worth hearing about rather than a case to handle,
+    /// which is what the warning is for.
+    async fn record_lifecycle(&mut self, events: &[SessionDomainEvent]) {
+        for event in events {
+            let (target, Some(payload)) = crate::sessions::lifecycle_routing::route(event) else {
+                continue;
+            };
+            let agent = match &target {
+                crate::sessions::lifecycle_routing::LifecycleTarget::None => continue,
+                crate::sessions::lifecycle_routing::LifecycleTarget::Main => {
+                    self.agents.as_ref().and_then(SessionAgents::main).cloned()
+                }
+                crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Main) => {
+                    self.agents.as_ref().and_then(SessionAgents::main).cloned()
+                }
+                crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Sub(id))
+                | crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Step(id)) => {
+                    self.agents.as_ref().and_then(|a| a.sub(*id)).cloned()
+                }
+            };
+            let Some(agent) = agent else {
+                tracing::warn!(
+                    session = %self.id,
+                    ?target,
+                    "no resident agent to record a session event on; it will be missing from the log"
+                );
+                continue;
+            };
+            let _ = agent
+                .tell(AgentCommand::RecordLifecycle {
+                    event: payload,
+                    at_ms: now_ms(),
+                })
+                .await;
+        }
+    }
+
+    /// Record one lifecycle entry on a named agent, when it is resident.
+    async fn record_on(&mut self, key: AgentKey, event: horsie_agentcore::LifecycleEvent) {
+        let agent = match key {
+            AgentKey::Main => self.agents.as_ref().and_then(SessionAgents::main).cloned(),
+            AgentKey::Sub(id) | AgentKey::Step(id) => {
+                self.agents.as_ref().and_then(|a| a.sub(id)).cloned()
+            }
+        };
+        if let Some(agent) = agent {
+            let _ = agent
+                .tell(AgentCommand::RecordLifecycle {
+                    event,
+                    at_ms: now_ms(),
+                })
+                .await;
+        }
     }
 
     /// Resolve an agent selector to its resident actor: `None`/`"main"` for the
@@ -1024,7 +1062,6 @@ impl SessionActor {
             session: ctx.self_ref(),
             plugins: self.spec.plugins.clone(),
             plugin_library: self.deps.plugins.clone(),
-            frames: self.frames.clone(),
             last_client: Mutex::new(None),
         });
         let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
@@ -1037,12 +1074,9 @@ impl SessionActor {
             .thinking_effort
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
-        let frames = self.agent_frames(AgentKey::Sub(id));
         let agent_ctx = AgentRuntimeContext {
             context_provider: context_provider.clone(),
-            event_sink: Arc::new(AgentEventSink {
-                frames: frames.clone(),
-            }),
+            position: self.positions.for_agent(&id.to_string()),
             parent: Arc::new(StopHookParent {
                 inner: Arc::new(SessionParent {
                     target: ctx.self_ref(),
@@ -1054,11 +1088,7 @@ impl SessionActor {
             }),
             session_id: id,
         };
-        let actor = ctx.spawn(AgentActor::with_observer(
-            agent_ctx,
-            params,
-            Arc::new(BroadcastObserver { frames }),
-        ));
+        let actor = ctx.spawn(AgentActor::new(agent_ctx, params));
         if let Some(agents) = self.agents.as_mut() {
             agents.insert_sub(id, actor.clone());
         }
@@ -1331,7 +1361,6 @@ impl SessionActor {
         } else {
             events.extend(self.flush_then_drain(&next, ctx).await);
         }
-        self.publish_inbox(state, &events);
         CommandEffect::persist(events)
     }
 
@@ -1407,9 +1436,6 @@ impl SessionActor {
             AgentOutcome::Failed {
                 error, terminal, ..
             } => {
-                let _ = self.frames.send(SessionFrame::Error {
-                    message: error.clone(),
-                });
                 // A runtime that a live vendor cannot produce is the one
                 // terminal failure: re-provisioning would silently rebuild a
                 // workspace the user believes they still have. Everything else
@@ -1446,9 +1472,6 @@ impl SessionActor {
             }
             AgentOutcome::Parked { .. } => {
                 let error = "agent parked; timers are not supported in sessions".to_string();
-                let _ = self.frames.send(SessionFrame::Error {
-                    message: error.clone(),
-                });
                 self.report(SessionStatus::Failed {
                     reason: error.clone(),
                 })
@@ -1469,7 +1492,6 @@ impl SessionActor {
             }
             events.extend(self.flush_then_drain(&next, ctx).await);
         }
-        self.publish_inbox(state, &events);
         CommandEffect::persist(events)
     }
 
@@ -1583,7 +1605,16 @@ impl SessionActor {
         let (mut events, advance) = match outcome {
             AgentOutcome::UsageRecorded { .. } => unreachable!("handled above"),
             AgentOutcome::Concluded { output, .. } => {
-                emit_progress(&self.frames, "step_concluded", Some(step_name));
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "step_concluded".into(),
+                            detail: Some(step_name),
+                        },
+                    ),
+                )
+                .await;
                 (
                     vec![SessionDomainEvent::StepConcluded {
                         at_ms: now_ms(),
@@ -1618,9 +1649,6 @@ impl SessionActor {
                 )
             }
             AgentOutcome::Failed { error, .. } => {
-                let _ = self.frames.send(SessionFrame::Error {
-                    message: error.clone(),
-                });
                 self.report(SessionStatus::Failed {
                     reason: error.clone(),
                 })
@@ -1640,9 +1668,6 @@ impl SessionActor {
             }
             AgentOutcome::Parked { .. } => {
                 let error = "step parked; timers are not supported in workflows".to_string();
-                let _ = self.frames.send(SessionFrame::Error {
-                    message: error.clone(),
-                });
                 self.report(SessionStatus::Failed {
                     reason: error.clone(),
                 })
@@ -1694,11 +1719,16 @@ impl SessionActor {
                     .as_str()
                     .map(str::to_string)
                     .unwrap_or_else(|| output.to_string());
-                emit_progress(
-                    &self.frames,
-                    "subagent_completed",
-                    Some(format!("\"{}\" ({id})", rec.label)),
-                );
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "subagent_completed".into(),
+                            detail: Some(format!("\"{}\" ({id})", rec.label)),
+                        },
+                    ),
+                )
+                .await;
                 SessionDomainEvent::SubAgentCompleted {
                     at_ms: now_ms(),
                     id,
@@ -1706,11 +1736,16 @@ impl SessionActor {
                 }
             }
             AgentOutcome::Failed { error, .. } => {
-                emit_progress(
-                    &self.frames,
-                    "subagent_failed",
-                    Some(format!("\"{}\" ({id})", rec.label)),
-                );
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "subagent_failed".into(),
+                            detail: Some(format!("\"{}\" ({id})", rec.label)),
+                        },
+                    ),
+                )
+                .await;
                 SessionDomainEvent::SubAgentFailed {
                     at_ms: now_ms(),
                     id,
@@ -2245,7 +2280,6 @@ struct SessionContextProvider {
     /// *starting* with a slash cost nothing.
     plugins: Vec<String>,
     plugin_library: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
-    frames: broadcast::Sender<SessionFrame>,
     /// The client the most recent `provide()` resolved. Cheap to keep — cloning
     /// shares the same in-flight-call tracking — and it is what lets
     /// [`SessionActor::cancel_run`] cancel without a fresh vendor round-trip.
@@ -2485,7 +2519,13 @@ impl ContextProvider for SessionContextProvider {
         );
 
         if broadcast {
-            emit_progress(&self.frames, "acquiring_runtime", None);
+            emit_progress(
+                &self.session,
+                self.kind.agent_key(),
+                "acquiring_runtime",
+                None,
+            )
+            .await;
         }
         let runtime_client = self.runtime_client().await?;
         // Hooks run runtime-side and report what they did on the tool response.
@@ -2505,7 +2545,13 @@ impl ContextProvider for SessionContextProvider {
             .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
 
         if broadcast {
-            emit_progress(&self.frames, "scanning_workspace", None);
+            emit_progress(
+                &self.session,
+                self.kind.agent_key(),
+                "scanning_workspace",
+                None,
+            )
+            .await;
         }
         let (ws, shared_scan) = scan_workspace(&runtime_client, None, use_plugins).await;
         // No `SessionStart` here any more. It used to fire on this line, once
@@ -2587,7 +2633,13 @@ impl ContextProvider for SessionContextProvider {
             Vec::new()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
             if broadcast {
-                emit_progress(&self.frames, "connecting_tools", None);
+                emit_progress(
+                    &self.session,
+                    self.kind.agent_key(),
+                    "connecting_tools",
+                    None,
+                )
+                .await;
             }
             mcp_svc
                 .toolboxes_for(&settings.mcp_servers)
@@ -2687,7 +2739,7 @@ impl ContextProvider for SessionContextProvider {
             (None, true) => None,
         };
         if broadcast {
-            emit_progress(&self.frames, "ready", None);
+            emit_progress(&self.session, self.kind.agent_key(), "ready", None).await;
         }
         Ok(Contexts {
             provider,
@@ -2896,7 +2948,7 @@ impl EventSourcedActor for SessionActor {
     /// carries no payload — the roster is a current value, so a client re-reads
     /// the session document rather than accumulating deltas.
     async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], _state: &SessionState) {
-        let tree_changed = events.iter().any(|e| {
+        let _tree_changed = events.iter().any(|e| {
             matches!(
                 e,
                 SessionDomainEvent::SubAgentSpawned { .. }
@@ -2905,9 +2957,8 @@ impl EventSourcedActor for SessionActor {
                     | SessionDomainEvent::SubAgentFailed { .. }
             )
         });
-        if tree_changed {
-            let _ = self.frames.send(SessionFrame::AgentTreeChanged);
-        }
+
+        self.record_lifecycle(events).await;
     }
 
     async fn handle_command(
@@ -2940,7 +2991,6 @@ impl EventSourcedActor for SessionActor {
                     SessionDomainEvent::TurnStopped { at_ms: now_ms() },
                 );
                 events.extend(self.flush_then_drain(&next, ctx).await);
-                self.publish_inbox(state, &events);
                 CommandEffect::persist(events)
             }
             SessionCommand::Delete { reply } => {
@@ -2953,18 +3003,35 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(());
                 CommandEffect::stop()
             }
-            SessionCommand::History {
+            SessionCommand::ReadLog {
                 agent_id,
-                query,
+                after,
                 reply,
             } => {
-                // Read history from the resident actor's in-memory state. No
-                // journal access, no runtime — opening a session to read it
-                // stays free of sandbox cost.
+                // Read from the resident actor's in-memory state. No journal
+                // access, no runtime — opening a session to read it stays free
+                // of sandbox cost.
+                let agent = self.resolve_agent(state, ctx, agent_id.as_deref());
+                let out = match agent {
+                    Some((_, agent)) => agent
+                        .ask(|reply| AgentCommand::ReadLog { after, reply })
+                        .await
+                        .ok(),
+                    None => None,
+                };
+                let _ = reply.send(out);
+                CommandEffect::none()
+            }
+            SessionCommand::PageLog {
+                agent_id,
+                before,
+                max,
+                reply,
+            } => {
                 let agent = self.resolve_agent(state, ctx, agent_id.as_deref());
                 let page = match agent {
                     Some((_, agent)) => agent
-                        .ask(|reply| AgentCommand::GetHistory { query, reply })
+                        .ask(|reply| AgentCommand::PageLog { before, max, reply })
                         .await
                         .ok(),
                     None => None,
@@ -2989,14 +3056,14 @@ impl EventSourcedActor for SessionActor {
                 let _ = reply.send(view);
                 CommandEffect::none()
             }
-            SessionCommand::SubscribeAgent { agent_id, reply } => {
-                // Resolving first means subscribing to a cold subagent spawns
-                // it, so a watcher sees its output the moment it wakes.
-                let key = self
-                    .resolve_agent(state, ctx, agent_id.as_deref())
-                    .map(|(key, _)| key);
-                let rx = key.map(|key| self.agent_frames(key).subscribe());
-                let _ = reply.send(rx);
+            SessionCommand::Progress { key, stage, detail } => {
+                self.record_on(
+                    key,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle { stage, detail },
+                    ),
+                )
+                .await;
                 CommandEffect::none()
             }
             SessionCommand::Answer { answers, reply } => {
@@ -3071,9 +3138,6 @@ impl EventSourcedActor for SessionActor {
                 };
                 let next = Self::apply_event(state.clone(), event.clone());
                 self.report(next.status.clone()).await;
-                if let Some(reason) = next.last_error.clone() {
-                    let _ = self.frames.send(SessionFrame::Error { message: reason });
-                }
                 let mut events = vec![event];
                 // The runtime landed, so whatever queued behind it starts now.
                 // A failure drains nothing: the messages stay owed, and the
@@ -3311,11 +3375,16 @@ impl EventSourcedActor for SessionActor {
                         subagent_results: Vec::new(),
                     })
                     .await;
-                emit_progress(
-                    &self.frames,
-                    "subagent_spawned",
-                    Some(format!("\"{label}\" ({id})")),
-                );
+                self.record_on(
+                    AgentKey::Main,
+                    horsie_agentcore::LifecycleEvent::Provisioning(
+                        horsie_agentcore::ProvisioningLifecycle {
+                            stage: "subagent_spawned".into(),
+                            detail: Some(format!("\"{label}\" ({id})")),
+                        },
+                    ),
+                )
+                .await;
                 let _ = reply.send(Ok(id));
                 CommandEffect::none()
             }
@@ -3912,10 +3981,6 @@ mod tests {
 
     /// The frame channel a supervisor would hand the actor. Owned by the test,
     /// exactly as the real one is owned by the supervisor rather than the actor.
-    fn test_frames() -> broadcast::Sender<SessionFrame> {
-        broadcast::channel(FRAME_BROADCAST_CAPACITY).0
-    }
-
     fn spawn_deaf_supervisor() -> ActorRef<SessionSupervisorCommand> {
         horsie_actor::spawn_root(
             DeafSupervisor,
@@ -3932,7 +3997,7 @@ mod tests {
             actor_spec_fixture(),
             f.deps,
             parent,
-            test_frames(),
+            crate::sessions::Positions::default(),
         );
         let actions = decisions(&actor, &SessionState::default());
         assert!(actions.is_empty());
@@ -3947,7 +4012,7 @@ mod tests {
             actor_spec_fixture(),
             f.deps,
             parent,
-            test_frames(),
+            crate::sessions::Positions::default(),
         );
         let state = fold(vec![
             queued("m1", "one"),
@@ -3975,7 +4040,7 @@ mod tests {
             actor_spec_fixture(),
             f.deps,
             parent,
-            test_frames(),
+            crate::sessions::Positions::default(),
         );
         let state = fold(vec![
             queued("m1", "one"),
@@ -4022,7 +4087,13 @@ mod tests {
             .await
             .unwrap();
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, actor_spec_fixture(), f.deps, parent, test_frames()),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps,
+                parent,
+                crate::sessions::Positions::default(),
+            ),
             journal.clone(),
         );
         // Recovery reconciles the interrupted turn first (event 4); wait for
@@ -4073,7 +4144,7 @@ mod tests {
             actor_spec_fixture(),
             f.deps,
             parent,
-            test_frames(),
+            crate::sessions::Positions::default(),
         );
         let running = fold(vec![
             queued("m1", "one"),
@@ -4106,7 +4177,7 @@ mod tests {
             actor_spec_fixture(),
             f.deps,
             parent,
-            test_frames(),
+            crate::sessions::Positions::default(),
         );
         let state = fold(vec![queued("m1", "one"), queued("m2", "two")]);
         let actions = decisions(&actor, &state);
@@ -4126,7 +4197,7 @@ mod tests {
             actor_spec_fixture(),
             f.deps,
             parent,
-            test_frames(),
+            crate::sessions::Positions::default(),
         );
         let state = fold(vec![
             SessionDomainEvent::AskRecorded {
@@ -4170,7 +4241,7 @@ mod tests {
             actor_spec_fixture(),
             f.deps,
             parent,
-            test_frames(),
+            crate::sessions::Positions::default(),
         );
         let state = fold(vec![
             SessionDomainEvent::AskRecorded {
@@ -4289,7 +4360,7 @@ mod tests {
             actor_spec_fixture(),
             f.deps,
             parent,
-            test_frames(),
+            crate::sessions::Positions::default(),
         );
         let (tx, rx) = oneshot::channel();
 
@@ -4367,7 +4438,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 parent,
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal,
         );
@@ -4464,7 +4535,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 parent,
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -4561,7 +4632,13 @@ mod tests {
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
         let session = horsie_actor::spawn_root(
-            SessionActor::new(id, spec, f.deps.clone(), parent, test_frames()),
+            SessionActor::new(
+                id,
+                spec,
+                f.deps.clone(),
+                parent,
+                crate::sessions::Positions::default(),
+            ),
             journal.clone(),
         );
         (f, session, id, journal)
@@ -4786,7 +4863,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -4874,7 +4951,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -4916,7 +4993,7 @@ mod tests {
                 spec,
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -5047,7 +5124,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -5205,43 +5282,16 @@ mod tests {
         }
     }
 
-    /// Drain whatever the agent stream has produced so far.
-    fn drain_frames(rx: &mut broadcast::Receiver<AgentFrame>) -> Vec<AgentFrame> {
-        let mut out = Vec::new();
-        while let Ok(frame) = rx.try_recv() {
-            out.push(frame);
-        }
-        out
-    }
-
-    fn appended_ids(frames: &[AgentFrame]) -> Vec<String> {
-        frames
-            .iter()
-            .filter_map(|f| match f {
-                AgentFrame::Appended { entry } => Some(entry.id().to_string()),
-                AgentFrame::Delta { .. }
-                | AgentFrame::ToolStart { .. }
-                | AgentFrame::TurnCompleted { .. }
-                | AgentFrame::TaskListChanged { .. } => None,
-            })
-            .collect()
-    }
-
-    /// The invariant the old two-vocabulary design could not even state: the
-    /// transcript you get by accumulating stream appends is the transcript
-    /// `/history` hands you. They are two projections of one append-only log.
+    /// The invariant the old two-vocabulary design could not even state, now
+    /// nearly a tautology: reading forward and paging backwards return the same
+    /// entries, in the same order, because there is one log and one writer.
+    ///
+    /// Worth keeping precisely because it used to be hard. Two projections of
+    /// one append-only log could disagree when one of them was a broadcast a
+    /// subscriber might have joined late; neither of these can.
     #[tokio::test]
-    async fn the_stream_and_history_agree_on_the_transcript() {
+    async fn reading_forward_and_paging_back_agree_on_the_log() {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
-        let mut rx = session
-            .ask(|reply| SessionCommand::SubscribeAgent {
-                agent_id: None,
-                reply,
-            })
-            .await
-            .unwrap()
-            .expect("the main agent is subscribable");
-
         session
             .ask(|reply| SessionCommand::UserMessage {
                 text: "go".into(),
@@ -5251,20 +5301,33 @@ mod tests {
             .unwrap()
             .unwrap();
         wait_for_journal_len(&journal, id, 2).await;
-        // Let the turn's appends land on the broadcast.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let streamed = appended_ids(&drain_frames(&mut rx));
-        let stored: Vec<String> = main_history(&session)
+        let streamed: Vec<u64> = session
+            .ask(|reply| SessionCommand::ReadLog {
+                agent_id: None,
+                after: None,
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("main agent log")
+            .entries
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        let stored: Vec<u64> = main_history(&session)
             .await
             .entries
             .iter()
-            .map(|e| e.id().to_string())
+            .map(|e| e.seq)
             .collect();
-        assert!(!streamed.is_empty(), "the turn must produce appends");
+        assert!(!streamed.is_empty(), "the turn must produce entries");
+        assert_eq!(streamed, stored);
         assert_eq!(
-            streamed, stored,
-            "stream appends and history must be the same transcript, in the same order"
+            streamed,
+            (0..streamed.len() as u64).collect::<Vec<_>>(),
+            "no gaps and no reordering"
         );
     }
 
@@ -5291,7 +5354,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -5317,13 +5380,12 @@ mod tests {
 
         let _ = main_history(&session).await;
         let _ = session
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::ReadLog {
                 agent_id: None,
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: Some("m1".into()),
-                    limit: 10,
-                },
+                after: Some(horsie_workflow::Cursor {
+                    entry_seq: 0,
+                    delta_seq: 0,
+                }),
                 reply,
             })
             .await
@@ -5335,18 +5397,11 @@ mod tests {
             })
             .await
             .unwrap();
-        let _ = session
-            .ask(|reply| SessionCommand::SubscribeAgent {
-                agent_id: None,
-                reply,
-            })
-            .await
-            .unwrap();
 
         assert_eq!(
             counting.replays(),
             after_recovery,
-            "history, agent state and subscribe must all be served from memory"
+            "history and agent state must both be served from memory"
         );
     }
 
@@ -5476,7 +5531,6 @@ mod tests {
             session: session.clone(),
             plugins: Vec::new(),
             plugin_library: None,
-            frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
         };
 
@@ -5528,7 +5582,6 @@ mod tests {
             session: session.clone(),
             plugins: Vec::new(),
             plugin_library: None,
-            frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
         };
         let tools: Vec<String> = provider
@@ -5567,7 +5620,6 @@ mod tests {
             session: session.clone(),
             plugins: Vec::new(),
             plugin_library: None,
-            frames: broadcast::channel(8).0,
             last_client: Mutex::new(None),
         };
         let names = |c: &Contexts| -> Vec<String> {
@@ -5607,7 +5659,7 @@ mod tests {
         assert_eq!(sub.agent_id(), sub_id.to_string());
     }
 
-    fn user_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+    fn user_texts(page: &horsie_workflow::LogPage) -> Vec<String> {
         page.messages()
             .filter(|m| m.role == horsie_agentcore::Role::User)
             .flat_map(|m| m.parts.iter())
@@ -5624,7 +5676,7 @@ mod tests {
     /// A user message's subagent-result parts, rendered the way the wire sees
     /// them — the counterpart to `user_texts` now that a result is a part of
     /// its own rather than text merged into what the person said.
-    fn subagent_texts(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+    fn subagent_texts(page: &horsie_workflow::LogPage) -> Vec<String> {
         page.messages()
             .flat_map(|m| m.parts.iter())
             .filter_map(|p| match p {
@@ -5662,15 +5714,12 @@ mod tests {
     async fn agent_history(
         session: &ActorRef<SessionCommand>,
         agent_id: Option<String>,
-    ) -> horsie_workflow::AgentHistoryPage {
+    ) -> horsie_workflow::LogPage {
         session
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::PageLog {
                 agent_id,
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: None,
-                    limit: 50,
-                },
+                before: None,
+                max: 50,
                 reply,
             })
             .await
@@ -5678,12 +5727,13 @@ mod tests {
             .expect("agent history")
     }
 
-    fn hook_ids(page: &horsie_workflow::AgentHistoryPage) -> Vec<String> {
+    fn hook_ids(page: &horsie_workflow::LogPage) -> Vec<String> {
         page.entries
             .iter()
-            .filter_map(|e| match e {
-                horsie_agentcore::HistoryEntry::Hook(h) => Some(h.id.clone()),
-                horsie_agentcore::HistoryEntry::Llm(_) => None,
+            .filter_map(|e| match &e.body {
+                horsie_agentcore::AgentLogBody::Hook(h) => Some(h.id.clone()),
+                horsie_agentcore::AgentLogBody::Llm(_)
+                | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
             })
             .collect()
     }
@@ -5841,7 +5891,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -5855,8 +5905,8 @@ mod tests {
             .await
             .entries
             .iter()
-            .filter_map(|e| match e {
-                horsie_agentcore::HistoryEntry::Llm(m)
+            .filter_map(|e| match &e.body {
+                horsie_agentcore::AgentLogBody::Llm(m)
                     if m.role == horsie_agentcore::Role::User =>
                 {
                     Some(m.parts.iter().fold(String::new(), |mut acc, p| {
@@ -5866,8 +5916,9 @@ mod tests {
                         acc
                     }))
                 }
-                horsie_agentcore::HistoryEntry::Llm(_)
-                | horsie_agentcore::HistoryEntry::Hook(_) => None,
+                horsie_agentcore::AgentLogBody::Llm(_)
+                | horsie_agentcore::AgentLogBody::Hook(_)
+                | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
             })
             .collect()
     }
@@ -5878,12 +5929,13 @@ mod tests {
             .await
             .entries
             .iter()
-            .filter_map(|e| match e {
-                horsie_agentcore::HistoryEntry::Hook(h) => match &h.record.action {
+            .filter_map(|e| match &e.body {
+                horsie_agentcore::AgentLogBody::Hook(h) => match &h.record.action {
                     HookAction::Stop(r) => Some(r.outcome.clone()),
                     other => panic!("only Stop hooks run in these tests, got {other:?}"),
                 },
-                horsie_agentcore::HistoryEntry::Llm(_) => None,
+                horsie_agentcore::AgentLogBody::Llm(_)
+                | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
             })
             .collect()
     }
@@ -6132,7 +6184,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
         );
@@ -6158,7 +6210,6 @@ mod tests {
             session: session.clone(),
             plugins: Vec::new(),
             plugin_library: f.deps.plugins.clone(),
-            frames: test_frames(),
             last_client: Mutex::new(None),
         }
     }
@@ -6423,7 +6474,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
         );
@@ -6472,7 +6523,6 @@ mod tests {
             session: session.clone(),
             plugins: Vec::new(),
             plugin_library: None,
-            frames: test_frames(),
             last_client: Mutex::new(None),
         }
     }
@@ -6561,7 +6611,6 @@ mod tests {
             session: session.clone(),
             plugins: Vec::new(),
             plugin_library: None,
-            frames: test_frames(),
             last_client: Mutex::new(None),
         };
         let Err(err) = provider.provide().await else {
@@ -6833,20 +6882,17 @@ mod tests {
         );
     }
 
-    async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::AgentHistoryPage {
+    async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::LogPage {
         session
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::PageLog {
                 agent_id: None,
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: None,
-                    limit: 50,
-                },
+                before: None,
+                max: 50,
                 reply,
             })
             .await
             .unwrap()
-            .expect("main agent history")
+            .expect("main agent log")
     }
 
     #[tokio::test]
@@ -7108,7 +7154,7 @@ mod tests {
                 actor_spec_fixture(),
                 _f.deps.clone(),
                 parent,
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -7142,13 +7188,10 @@ mod tests {
         })
         .await;
         let page = session2
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::PageLog {
                 agent_id: Some(p.to_string()),
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: None,
-                    limit: 20,
-                },
+                before: None,
+                max: 20,
                 reply,
             })
             .await
@@ -7187,7 +7230,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 parent,
-                test_frames(),
+                crate::sessions::Positions::default(),
             ),
             journal.clone(),
         );
@@ -7203,13 +7246,10 @@ mod tests {
         );
         // The transcript stays pageable: the resident actor answers history.
         let page = session2
-            .ask(|reply| SessionCommand::History {
+            .ask(|reply| SessionCommand::PageLog {
                 agent_id: Some(sub.to_string()),
-                query: horsie_workflow::HistoryQuery {
-                    before: None,
-                    after: None,
-                    limit: 10,
-                },
+                before: None,
+                max: 10,
                 reply,
             })
             .await

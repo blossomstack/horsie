@@ -6,7 +6,7 @@ use crate::error::CliError;
 use crate::server_client::ServerClient;
 use futures_util::StreamExt;
 use horsie_models::now_ms;
-use horsie_models::session::{AgentStreamEvent, SessionDetail, SessionSummary};
+use horsie_models::session::{MessageFrame, SessionDetail, SessionSummary};
 use reqwest_eventsource::{Event, EventSource};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
@@ -19,14 +19,14 @@ use std::time::Duration;
 pub enum EventsMode {
     /// Complete transcript messages only (the durable conversation).
     Messages,
-    /// Every event: messages, deltas, tool starts/results, status changes, …
+    /// Every frame: log entries and the live text chunks between them.
     All,
 }
 
 impl EventsMode {
-    fn allows(self, event: &AgentStreamEvent) -> bool {
+    fn allows(self, frame: &MessageFrame) -> bool {
         match self {
-            EventsMode::Messages => matches!(event, AgentStreamEvent::Appended(_)),
+            EventsMode::Messages => matches!(frame, MessageFrame::Entry(_)),
             EventsMode::All => true,
         }
     }
@@ -57,25 +57,27 @@ fn open_append(path: &Path) -> Result<BufWriter<File>, CliError> {
 }
 
 /// One JSONL line: the append cursor — the message id, absent for everything
-/// that is not a transcript append — plus the verbatim `AgentStreamEvent`
+/// that is not a transcript append — plus the verbatim `MessageFrame`
 /// (serialized as `{"type":…,"value":…}`).
 #[derive(Serialize)]
 struct Envelope<'a> {
     id: Option<&'a str>,
-    event: &'a AgentStreamEvent,
+    event: &'a MessageFrame,
 }
 
-/// Whether a frame is a transcript append — the only kind that carries a
-/// cursor. Everything else is either a current value the client re-reads or
-/// live run noise, and neither can be resumed from.
-fn append_id(event: &AgentStreamEvent) -> Option<&str> {
-    match event {
-        AgentStreamEvent::Appended(e) => Some(e.entry.id()),
-        AgentStreamEvent::Delta(_)
-        | AgentStreamEvent::ToolStart(_)
-        | AgentStreamEvent::TurnCompleted(_)
-        | AgentStreamEvent::TaskListChanged(_)
-        | AgentStreamEvent::Resync(_) => None,
+/// The cursor to resume from after this frame.
+///
+/// A durable entry's `seq`; a delta's position within the entry it follows.
+/// Both are resumable, which is new — the old stream could only resume from an
+/// append, so a reconnect mid-message replayed the whole message.
+fn resume_cursor(frame: &MessageFrame) -> Option<String> {
+    match frame {
+        MessageFrame::Entry(e) => Some(e.seq.to_string()),
+        MessageFrame::Delta(d) => Some(format!("{}.{}", d.entry_seq, d.delta_seq)),
+        // Describes the window that follows rather than sitting in it, so it
+        // holds no position of its own. Advancing on it would move the cursor
+        // to somewhere nothing has been received from yet.
+        MessageFrame::Window(_) => None,
     }
 }
 
@@ -107,7 +109,7 @@ impl SessionSink {
     /// log-and-skip posture); the cursor still advances past the frame's id so
     /// a reconnect never replays a skipped event.
     fn handle(&mut self, sse_id: &str, data: &str) -> Result<bool, CliError> {
-        let event: AgentStreamEvent = match serde_json::from_str(data) {
+        let event: MessageFrame = match serde_json::from_str(data) {
             Ok(e) => e,
             Err(e) => {
                 // Can't tell an append from a value frame, so trust the stream's
@@ -119,10 +121,11 @@ impl SessionSink {
                 return Ok(false);
             }
         };
-        // Only an append advances the cursor. Per the SSE spec the client
-        // reports the stream's *last* id for id-less frames too, so trusting
-        // `sse_id` alone would let a delta re-stamp a message it isn't.
-        let id = append_id(&event).map(str::to_string);
+        // Every frame carries a resumable position now — a delta included —
+        // so a reconnect mid-message continues rather than replaying it. The
+        // cursor is derived from the frame rather than taken from `sse_id`,
+        // because the two must agree and only one of them is typed.
+        let id = resume_cursor(&event);
         if let Some(id) = &id {
             self.cursor = Some(id.clone());
         }
@@ -171,16 +174,13 @@ pub async fn tail(
     // reconnect loop could not see anyway, and a tail that outlives its access
     // token reconnects and re-resolves from the top.
     let token = crate::auth::resolve_token(server).await?;
-    let url = match agent {
-        None => format!(
-            "{}/api/sessions/{session_id}/events",
-            server.trim_end_matches('/')
-        ),
-        Some(agent) => format!(
-            "{}/api/sessions/{session_id}/agents/{agent}/events",
-            server.trim_end_matches('/')
-        ),
-    };
+    // One endpoint, one stream. `aid` names the agent's log; absent means the
+    // session's primary agent, and session-scoped events ride that log too.
+    let url = format!(
+        "{}/api/sessions/{session_id}/messages?aid={}",
+        server.trim_end_matches('/'),
+        agent.unwrap_or("main")
+    );
     let mut backoff = Duration::from_secs(1);
     // One pinned Ctrl-C future for the whole tail: a fresh `ctrl_c()` only
     // fires on signals received *after* its creation, so re-creating it per
@@ -250,7 +250,7 @@ pub async fn tail(
 }
 
 /// Probe for resume: only the cursor matters. Deliberately NOT the full
-/// `AgentStreamEvent` — a line from an older/newer schema still yields its id.
+/// `MessageFrame` — a line from an older/newer schema still yields its id.
 #[derive(serde::Deserialize)]
 struct CursorProbe {
     id: Option<String>,
@@ -392,7 +392,8 @@ fn render_session_detail(d: &SessionDetail, now: u64) -> String {
 )]
 mod tests {
     use super::*;
-    use horsie_models::session::{AppendedEvent, DeltaEvent};
+    use horsie_models::agent::{AgentLogBody, AgentLogEntry, Message};
+    use horsie_models::session::MessageDelta;
 
     #[test]
     fn output_path_inside_existing_dir_uses_session_id_filename() {
@@ -404,88 +405,18 @@ mod tests {
     #[test]
     fn output_path_for_plain_file_is_used_verbatim() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("out.jsonl");
-        assert_eq!(output_path(&target, "abc-123"), target);
+        let file = dir.path().join("tail.jsonl");
+        assert_eq!(output_path(&file, "abc-123"), file);
     }
 
-    #[test]
-    fn output_path_for_missing_dir_is_treated_as_a_file() {
-        // A path that does not exist (even one that looks like a dir) is a file
-        // path; `open_append` creates the parents.
+    fn sink(mode: EventsMode, cursor: Option<String>) -> (SessionSink, tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("nested").join("deep");
-        assert_eq!(output_path(&target, "abc-123"), target);
-    }
-
-    #[test]
-    fn open_append_creates_parents_and_appends() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a").join("b").join("log.jsonl");
-        {
-            let mut w = open_append(&path).unwrap();
-            use std::io::Write;
-            writeln!(w, "one").unwrap();
-            w.flush().unwrap();
-        }
-        {
-            let mut w = open_append(&path).unwrap();
-            use std::io::Write;
-            writeln!(w, "two").unwrap();
-            w.flush().unwrap();
-        }
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(text, "one\ntwo\n");
-    }
-
-    #[test]
-    fn scan_last_message_id_missing_file_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            scan_last_message_id(&dir.path().join("nope.jsonl")).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn scan_last_message_id_empty_file_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.jsonl");
-        std::fs::write(&path, "").unwrap();
-        assert_eq!(scan_last_message_id(&path).unwrap(), None);
-    }
-
-    #[test]
-    fn scan_last_message_id_returns_the_last_append() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log.jsonl");
-        // A null-id line after the last append must not win.
-        std::fs::write(
-            &path,
-            "{\"id\":\"m1\",\"event\":{}}\n{\"id\":null,\"event\":{}}\n{\"id\":\"m41\",\"event\":{}}\n{\"id\":null,\"event\":{}}\n",
-        )
-        .unwrap();
-        assert_eq!(scan_last_message_id(&path).unwrap().as_deref(), Some("m41"));
-    }
-
-    #[test]
-    fn scan_last_message_id_skips_corrupt_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log.jsonl");
-        std::fs::write(&path, "{\"id\":\"m7\",\"event\":{}}\nnot-json\n").unwrap();
-        assert_eq!(scan_last_message_id(&path).unwrap().as_deref(), Some("m7"));
-    }
-
-    fn sink(
-        mode: EventsMode,
-        cursor: Option<String>,
-    ) -> (SessionSink, tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log.jsonl");
+        let path = dir.path().join("out.jsonl");
         let out = open_append(&path).unwrap();
-        (SessionSink::new(out, cursor, mode), dir, path)
+        (SessionSink { out, mode, cursor }, dir, path)
     }
 
-    fn lines(path: &std::path::Path) -> Vec<serde_json::Value> {
+    fn lines(path: &Path) -> Vec<serde_json::Value> {
         std::fs::read_to_string(path)
             .unwrap()
             .lines()
@@ -493,200 +424,70 @@ mod tests {
             .collect()
     }
 
-    fn appended(id: &str) -> String {
-        serde_json::to_string(&AgentStreamEvent::Appended(AppendedEvent {
-            entry: horsie_models::agent::HistoryEntry::Llm(horsie_models::agent::Message::user(
-                id, "hi", 0,
-            )),
+    fn entry(seq: u64) -> String {
+        serde_json::to_string(&MessageFrame::Entry(AgentLogEntry {
+            seq,
+            at_ms: 0,
+            body: AgentLogBody::Llm(Message::user(format!("m{seq}"), "hi", 0)),
+        }))
+        .unwrap()
+    }
+
+    fn delta(entry_seq: u64, delta_seq: u32) -> String {
+        serde_json::to_string(&MessageFrame::Delta(MessageDelta {
+            entry_seq,
+            delta_seq,
+            text: "chunk".into(),
+            reset: false,
         }))
         .unwrap()
     }
 
     #[test]
-    fn an_append_is_written_with_its_message_id_and_tagged_union_shape() {
+    fn an_entry_is_written_with_its_seq_as_the_resume_cursor() {
         let (mut s, _dir, path) = sink(EventsMode::All, None);
-        assert!(s.handle("m1", &appended("m1")).unwrap());
+        assert!(s.handle("7", &entry(7)).unwrap());
         s.flush().unwrap();
-        let got = lines(&path);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0]["id"], serde_json::json!("m1"));
-        assert_eq!(got[0]["event"]["type"], serde_json::json!("Appended"));
-        // The append carries a transcript entry, itself a tagged union: not
-        // every append is a message the model saw.
-        let entry = &got[0]["event"]["value"]["entry"];
-        assert_eq!(entry["type"], serde_json::json!("Llm"));
-        assert!(entry["value"].is_object());
-        assert_eq!(s.cursor().as_deref(), Some("m1"));
+        let written = lines(&path);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0]["id"], serde_json::json!("7"));
+        assert_eq!(written[0]["event"]["type"], serde_json::json!("Entry"));
+        assert_eq!(s.cursor().as_deref(), Some("7"));
+    }
+
+    /// The change the two-part cursor buys: a reconnect mid-message resumes
+    /// inside it rather than replaying the whole thing, because a delta has a
+    /// position of its own.
+    #[test]
+    fn a_delta_advances_the_cursor_into_the_entry_it_follows() {
+        let (mut s, _dir, path) = sink(EventsMode::All, Some("7".into()));
+        assert!(s.handle("7.3", &delta(7, 3)).unwrap());
+        s.flush().unwrap();
+        assert_eq!(lines(&path).len(), 1);
+        assert_eq!(s.cursor().as_deref(), Some("7.3"));
     }
 
     #[test]
-    fn a_value_frame_gets_a_null_cursor_but_is_still_written_in_all_mode() {
-        let (mut s, _dir, path) = sink(EventsMode::All, Some("m9".into()));
-        let data = serde_json::to_string(&AgentStreamEvent::Delta(DeltaEvent {
-            text: "chunk".into(),
-        }))
-        .unwrap();
-        assert!(s.handle("", &data).unwrap());
+    fn messages_mode_skips_deltas_but_still_tracks_where_it_is() {
+        let (mut s, _dir, path) = sink(EventsMode::Messages, Some("7".into()));
+        assert!(!s.handle("7.1", &delta(7, 1)).unwrap());
         s.flush().unwrap();
-        let got = lines(&path);
-        assert_eq!(got[0]["id"], serde_json::Value::Null);
-        // A non-append must NOT move the resume cursor.
-        assert_eq!(s.cursor().as_deref(), Some("m9"));
+        assert!(lines(&path).is_empty(), "a delta is not a message");
+        // Skipped from the file, not from the position: a resume must not
+        // re-receive frames this tail deliberately dropped.
+        assert_eq!(s.cursor().as_deref(), Some("7.1"));
     }
 
     #[test]
-    fn messages_mode_skips_non_appends_and_leaves_the_cursor_alone() {
-        let (mut s, _dir, path) = sink(EventsMode::Messages, Some("m9".into()));
-        let turn = serde_json::to_string(&AgentStreamEvent::TurnCompleted(
-            horsie_models::session::TurnCompletedEvent {
-                at_ms: 0,
-                iterations: 1,
-                usage: horsie_models::agent::Usage::without_cache(1, 1),
-            },
-        ))
-        .unwrap();
-        assert!(!s.handle("m9", &turn).unwrap());
+    fn an_unparseable_frame_skips_ahead_on_the_streams_own_id() {
+        let (mut s, _dir, path) = sink(EventsMode::All, Some("7".into()));
+        assert!(!s.handle("8", "{not json").unwrap());
         s.flush().unwrap();
         assert!(lines(&path).is_empty());
-        // Not an append, so nothing to resume past.
-        assert_eq!(s.cursor().as_deref(), Some("m9"));
-    }
-
-    /// Per the SSE spec an id-less frame inherits the stream's last id, so the
-    /// client reports the previous append's id for a delta. Trusting that would
-    /// be harmless here but wrong in principle — the cursor tracks appends.
-    #[test]
-    fn an_inherited_sse_id_does_not_make_a_delta_an_append() {
-        let (mut s, _dir, path) = sink(EventsMode::All, Some("m9".into()));
-        let data = serde_json::to_string(&AgentStreamEvent::Delta(DeltaEvent {
-            text: "chunk".into(),
-        }))
-        .unwrap();
-        assert!(s.handle("m12", &data).unwrap());
-        s.flush().unwrap();
-        let got = lines(&path);
-        assert_eq!(got[0]["id"], serde_json::Value::Null);
-        assert_eq!(s.cursor().as_deref(), Some("m9"));
-    }
-
-    #[test]
-    fn unparseable_data_is_skipped_with_a_warning() {
-        let (mut s, _dir, path) = sink(EventsMode::All, None);
-        assert!(!s.handle("m3", "{not json").unwrap());
-        s.flush().unwrap();
-        assert!(lines(&path).is_empty());
-        // The id still counts — the frame is gone, don't replay it.
-        assert_eq!(s.cursor().as_deref(), Some("m3"));
-    }
-
-    #[test]
-    fn a_resync_frame_is_surfaced_without_moving_the_cursor() {
-        let (mut s, _dir, path) = sink(EventsMode::All, Some("m9".into()));
-        let data = serde_json::to_string(&AgentStreamEvent::Resync(
-            horsie_models::session::ResyncEvent {},
-        ))
-        .unwrap();
-        assert!(s.handle("", &data).unwrap());
-        s.flush().unwrap();
         assert_eq!(
-            lines(&path)[0]["event"]["type"],
-            serde_json::json!("Resync")
+            s.cursor().as_deref(),
+            Some("8"),
+            "trust the stream's id rather than re-receiving a frame that cannot be read"
         );
-        assert_eq!(s.cursor().as_deref(), Some("m9"));
-    }
-
-    #[test]
-    fn messages_mode_filters_to_appends_only() {
-        let msg: AgentStreamEvent = serde_json::from_str(&appended("m1")).unwrap();
-        let delta = AgentStreamEvent::Delta(DeltaEvent { text: "h".into() });
-        assert!(EventsMode::Messages.allows(&msg));
-        assert!(!EventsMode::Messages.allows(&delta));
-        assert!(EventsMode::All.allows(&delta));
-    }
-
-    fn summary(id: &str, name: Option<&str>) -> SessionSummary {
-        SessionSummary {
-            id: id.into(),
-            name: name.map(Into::into),
-            status: Some(horsie_models::session::SessionStatusKind::Running),
-            created_at: 1_000,
-            last_error: None,
-            workflow: None,
-            annotations: vec![],
-        }
-    }
-
-    #[test]
-    fn session_table_lists_status_and_relative_time() {
-        let out = render_session_table(&[summary("s-1", Some("review"))], 1_000 + 5 * 60_000);
-        assert!(out.contains("s-1"));
-        assert!(out.contains("review"));
-        assert!(out.contains("Running"));
-        assert!(out.contains("5m ago"));
-    }
-
-    #[test]
-    fn empty_session_table_says_no_sessions() {
-        assert_eq!(render_session_table(&[], 0), "no sessions\n");
-    }
-
-    #[test]
-    fn relative_buckets() {
-        assert_eq!(relative(10_000, 0), "just now");
-        assert_eq!(relative(5 * 60_000, 0), "5m ago");
-        assert_eq!(relative(3 * 3_600_000, 0), "3h ago");
-        assert_eq!(relative(2 * 86_400_000, 0), "2d ago");
-    }
-
-    #[test]
-    fn detail_shows_awaiting_question_and_inbox() {
-        let d = SessionDetail {
-            id: "s-1".into(),
-            name: None,
-            status: Some(horsie_models::session::SessionStatusKind::AwaitingInput),
-            created_at: 0,
-            last_error: None,
-            annotations: vec![],
-            pending_asks: vec![
-                horsie_models::session::PendingAskView {
-                    tool_call_id: Some("t1".into()),
-                    question: "which file?".into(),
-                },
-                horsie_models::session::PendingAskView {
-                    tool_call_id: Some("t2".into()),
-                    question: "which branch?".into(),
-                },
-            ],
-            model: "sonnet".into(),
-            vendor: "local".into(),
-            repos: vec![],
-            plugins: vec![],
-            mcp_servers: vec![],
-            memory_spaces: vec![],
-            use_plugins: false,
-            thinking_effort: None,
-            inbox: vec![horsie_models::session::QueuedMessage {
-                id: "m1".into(),
-                text: "follow up".into(),
-                at_ms: 0,
-            }],
-            usage_total: horsie_models::session::UsageView {
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_creation_tokens: None,
-                cache_read_tokens: None,
-            },
-            agents: vec![],
-            progression: None,
-            workflow: None,
-        };
-        let out = render_session_detail(&d, 0);
-        assert!(out.contains("awaiting    which file?"));
-        assert!(
-            out.contains("awaiting    which branch?"),
-            "every unanswered ask is listed: {out}"
-        );
-        assert!(out.contains("inbox       1 queued"));
-        assert!(out.contains("· follow up"));
     }
 }

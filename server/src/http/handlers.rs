@@ -10,30 +10,24 @@ use crate::sessions::spec::{PendingAsk, SessionOrigin, SessionStatus, status_kin
 use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
-use axum::extract::{Path, Query};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::now_ms;
 use horsie_models::session::{
     AnnotationEntry, AnswerAsksRequest, PendingAskView, QueuedMessage, SessionDetail,
-    SessionStatusKind, SessionSummary, SubAgentView, UsageView,
+    SessionSummary, SubAgentView, UsageView,
 };
 use horsie_models::session_api::{
     Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, GetAgentResponse,
-    GetSessionResponse, HistoryPage, ListSessionsResponse, SendMessageRequest, SessionAck,
+    GetSessionResponse, ListSessionsResponse, SendMessageRequest, SessionAck,
 };
-use horsie_workflow::{AgentHistoryPage, HistoryQuery};
-use serde::Deserialize;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// The path segment naming a session's primary agent, as opposed to a
 /// subagent's uuid. One spelling, shared by every agent-scoped route.
 pub const MAIN_AGENT: &str = "main";
-
-/// Default and maximum messages returned by one `/history` page.
-const HISTORY_DEFAULT_LIMIT: usize = 50;
-const HISTORY_MAX_LIMIT: usize = 200;
 
 /// The wire shape of one queued message. Shared with the SSE layer so the
 /// detail endpoint and `InboxChanged` can never disagree about the queue.
@@ -258,33 +252,6 @@ pub async fn answer_asks(
     Ok((StatusCode::ACCEPTED, Json(Ack {})))
 }
 
-/// Query params for `GET /api/sessions/:id/agents/:agent_id/history`.
-///
-/// `before` and `after` are the same cursor space — a message id — read in
-/// opposite directions; `after` wins if both are given.
-#[derive(Deserialize)]
-pub struct HistoryParams {
-    /// Return the page of messages immediately before this message id; absent
-    /// requests the latest (tail) page.
-    before: Option<String>,
-    /// Return the page of messages immediately after this message id — the
-    /// forward page a reconnecting stream backfills with.
-    after: Option<String>,
-    /// Max messages; defaults to [`HISTORY_DEFAULT_LIMIT`], capped at
-    /// [`HISTORY_MAX_LIMIT`].
-    limit: Option<usize>,
-}
-
-fn to_wire_history(page: AgentHistoryPage) -> HistoryPage {
-    let mut entries = page.entries;
-    crate::wire_redact::strip_entry_signatures(&mut entries);
-    HistoryPage {
-        entries,
-        has_more_before: page.has_more_before,
-        has_more_after: page.has_more_after,
-    }
-}
-
 /// The session's agent roster: the main agent first, then its subagent tree.
 /// The main agent is listed so every agent — not just spawned ones — is
 /// reachable at the same `/agents/:agent_id` shape.
@@ -311,34 +278,6 @@ fn to_wire_usage(u: horsie_workflow::UsageTotal) -> UsageView {
         cache_creation_tokens: u.cache_creation_tokens,
         cache_read_tokens: u.cache_read_tokens,
     }
-}
-
-/// A window of one agent's transcript, from its in-memory state — no journal
-/// replay anywhere in the server. Messages only: current values live on the
-/// agent document, so a page means the same thing whichever cursor produced it.
-pub async fn get_history(
-    Scope(state): Scope,
-    Path((id, agent_id)): Path<(String, String)>,
-    Query(params): Query<HistoryParams>,
-) -> Result<impl IntoResponse, Api> {
-    let limit = params
-        .limit
-        .unwrap_or(HISTORY_DEFAULT_LIMIT)
-        .clamp(1, HISTORY_MAX_LIMIT);
-    let query = HistoryQuery {
-        before: params.before,
-        after: params.after,
-        limit,
-    };
-    let page = ask(&state, |reply| SessionSupervisorCommand::History {
-        id: id.clone(),
-        agent_id: Some(agent_id),
-        query,
-        reply,
-    })
-    .await?
-    .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
-    Ok(Json(to_wire_history(page)))
 }
 
 /// One agent's current values: its task list, its usage, and — for a subagent —
@@ -418,6 +357,7 @@ pub async fn get_agent(
         last_turn_usage: view.last_turn_usage,
         context_tokens: view.context_tokens,
         context_window,
+        as_of_seq: view.as_of_seq,
     };
     Ok(Json(GetAgentResponse { agent }))
 }
@@ -467,11 +407,6 @@ pub async fn delete_session(
         Ok(()) => Ok(Json(Ack {})),
         Err(msg) => Err(Api::not_found(msg)),
     }
-}
-
-/// Map a storage status to its wire kind (re-exported for the SSE layer).
-pub(crate) fn wire_status_kind(s: &SessionStatus) -> SessionStatusKind {
-    status_kind(s)
 }
 
 /// Map one pending ask onto the wire.

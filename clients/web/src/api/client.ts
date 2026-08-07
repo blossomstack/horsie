@@ -15,7 +15,7 @@ import type {
   CreateSessionResponse,
   GetSessionResponse,
   GetAgentResponse,
-  HistoryPage,
+  MessagesPage,
   GitHubAppConfigInput,
   GitHubAppConfigView,
   GitHubBranchList,
@@ -191,21 +191,21 @@ export const api = {
     get: (id: string): Promise<GetSessionResponse> =>
       request(`/sessions/${encodeURIComponent(id)}`),
 
-    /** A window of one agent's transcript, from its in-memory state.
-     * `before` pages backwards (scroll-back), `after` pages forwards (the
-     * backfill a reconnecting stream needs); neither requests the tail. */
-    history: (
+    /** A window of one agent's log, ending just before `before`.
+     *
+     * Scroll-back only. Forward reading is the stream — the same endpoint
+     * without `before` — so there is no second way to page forwards and no
+     * backfill loop to keep in step with a subscription. */
+    messages: (
       id: string,
       agentId: string,
-      opts: { before?: string; after?: string; limit?: number } = {},
-    ): Promise<HistoryPage> => {
-      const q = new URLSearchParams();
-      if (opts.before) q.set("before", opts.before);
-      if (opts.after) q.set("after", opts.after);
-      if (opts.limit) q.set("limit", String(opts.limit));
-      const qs = q.toString();
+      opts: { before?: number; max?: number } = {},
+    ): Promise<MessagesPage> => {
+      const q = new URLSearchParams({ aid: agentId });
+      if (opts.before !== undefined) q.set("before", String(opts.before));
+      if (opts.max) q.set("max", String(opts.max));
       return request(
-        `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/history${qs ? `?${qs}` : ""}`,
+        `/sessions/${encodeURIComponent(id)}/messages?${q.toString()}`,
       );
     },
 
@@ -601,17 +601,14 @@ export const api = {
       }),
   },
 
-  /** SSE URL for a session's own stream: status, inbox, progression, errors,
-   * and agent-roster changes. Session-scoped current values only — no
-   * transcript, no cursor. */
-  sessionEventsUrl: (id: string): string =>
-    `${BASE}/sessions/${encodeURIComponent(id)}/events`,
-
-  /** SSE URL for one agent's stream: transcript appends (id-stamped with the
-   * message id, so the browser resumes from them automatically), plus that
-   * agent's task list, usage, and live run frames. */
-  agentEventsUrl: (id: string, agentId: string): string =>
-    `${BASE}/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/events`,
+  /** SSE URL for one agent's log: every entry from the start, then live.
+   *
+   * One stream where there were two. Session-scoped facts — status, the queue,
+   * provisioning progress, turn boundaries — are entries in this log, so
+   * nothing has to be ordered against a second source. Every frame carries an
+   * SSE id, so the browser's own `Last-Event-ID` is the resume cursor. */
+  messagesUrl: (id: string, agentId: string): string =>
+    `${BASE}/sessions/${encodeURIComponent(id)}/messages?aid=${encodeURIComponent(agentId)}`,
 
   /** SSE URL for the global session-status feed. */
   globalEventsUrl: (): string => `${BASE}/events`,
