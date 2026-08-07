@@ -7,7 +7,7 @@
 
 use crate::sessions::session_actor::{AgentKey, SessionState};
 use crate::sessions::spec::SessionStatus;
-use crate::sessions::subagents::{OwedResult, SubAgentParent, TreeOwner};
+use crate::sessions::subagents::{OwedResult, SubAgentParent};
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde_json::Value;
 use uuid::Uuid;
@@ -226,6 +226,7 @@ mod tests {
     use super::*;
     use crate::sessions::session_actor::InboxMessage;
     use crate::sessions::spec::PendingAsk;
+    use crate::sessions::subagents::TreeOwner;
 
     fn with_inbox(texts: &[&str]) -> SessionState {
         let mut s = SessionState::default();

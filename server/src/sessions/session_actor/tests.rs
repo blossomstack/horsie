@@ -3883,3 +3883,156 @@ async fn prepare_offload_refuses_with_an_active_subagent() {
     );
     gate.release();
 }
+
+// -- subagents inside a workflow run -------------------------------------
+//
+// Before the forest, `SessionModeState` owned the tree and every read went
+// through an accessor that answered `empty_tree()` for a run. Spawns were
+// journaled into the right place and then never seen again: the outcome was
+// dropped with a warning, the concurrency cap read zero, and an offload could
+// unload a session with a step's subagent mid-run.
+
+/// Answers a step by never returning, and everything else with plain text.
+///
+/// A step must stay in flight for the length of these tests: it is the tree a
+/// spawn belongs in, and a concluded step takes its tree out of play. Told
+/// apart by the step's own prompt, which no subagent conversation carries.
+struct StepStallsProvider;
+
+#[async_trait]
+impl LlmProvider for StepStallsProvider {
+    fn model_id(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        request: horsie_agentcore::CompletionRequest<'_>,
+        _message_id: &str,
+        _events: &dyn horsie_agentcore::EventSink,
+    ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+        let is_step = request.messages.iter().any(|m| {
+            m.parts.iter().any(|p| {
+                matches!(p, horsie_agentcore::ContentPart::Text(t) if t.text.contains("Triage it."))
+            })
+        });
+        if is_step {
+            // Never returns. The step stays `Running` and its tree stays live.
+            std::future::pending::<()>().await;
+        }
+        Ok(horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::Text(
+                horsie_agentcore::TextPart {
+                    text: "sub answer".to_string(),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::EndTurn,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        })
+    }
+}
+
+/// A run whose first step is in flight and stays there, so it has a tree that
+/// spawns belong in.
+async fn a_run_with_a_step_in_flight() -> (
+    ActorFixture,
+    ActorRef<SessionCommand>,
+    Uuid,
+    Arc<dyn horsie_actor::Journal>,
+) {
+    let (f, session, id, journal) = spawn_run_with_provider(Arc::new(StepStallsProvider)).await;
+    wait_for_run(&journal, id, |r| r.current().is_some()).await;
+    (f, session, id, journal)
+}
+
+/// The defect this change exists to close. A subagent spawned by a workflow
+/// step used to have its completion dropped — `on_sub_agent_outcome` looked the
+/// node up in the conversation's tree, which a run does not have.
+#[tokio::test]
+async fn a_workflow_steps_subagent_completion_is_recorded() {
+    let (_f, session, id, journal) = a_run_with_a_step_in_flight().await;
+    let sub = spawn_sub(&session, "helper", "dig").await;
+
+    // The spawn lands in the step's tree, not the conversation's.
+    let state = crate::sessions::events::fold_session_state(&journal, id).await;
+    let step_agent = state.run.as_ref().unwrap().steps[0].agent;
+    assert_eq!(
+        state.subagents.owner_of(sub),
+        Some(TreeOwner::Step(step_agent)),
+        "a step's spawn belongs to that step's tree"
+    );
+
+    // And its completion is journaled rather than dropped.
+    wait_for_tree(&journal, id, |forest| {
+        forest
+            .node(sub)
+            .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Completed)
+    })
+    .await;
+    let state = crate::sessions::events::fold_session_state(&journal, id).await;
+    assert_eq!(
+        state.subagents.node(sub).unwrap().output.as_deref(),
+        Some("sub answer")
+    );
+}
+
+/// The aggregates a run used to answer as though it had no subagents at all.
+#[tokio::test]
+async fn a_runs_subagents_count_toward_the_session_wide_aggregates() {
+    // Blocks every call, so both the step and its subagent stay `Running` for
+    // as long as this test looks at them.
+    let provider = BlockingProvider::new();
+    let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
+    wait_for_run(&journal, id, |r| r.current().is_some()).await;
+    let sub = spawn_sub(&session, "slow", "work").await;
+    wait_for_tree(&journal, id, |f| f.node(sub).is_some()).await;
+
+    // While it runs, the session is busy. This is what stops the supervisor
+    // unloading a run out from under a step's subagent — `has_active` answered
+    // false for every run before the forest.
+    let state = crate::sessions::events::fold_session_state(&journal, id).await;
+    assert!(
+        state.subagents.has_active(),
+        "a run's subagent is active work"
+    );
+    assert_eq!(state.subagents.active_count(), 1);
+    assert_eq!(state.subagents.interrupted(), vec![sub]);
+
+    // And the API reports it: `SubAgentTree` spans every tree.
+    let tree = session
+        .ask(|reply| SessionCommand::SubAgentTree { reply })
+        .await
+        .unwrap();
+    assert_eq!(tree.len(), 1, "a run's subagents must reach the API");
+    assert_eq!(tree[0].0, sub);
+}
+
+/// A nested subagent's result reaches its parent inside a run. Delivery used to
+/// live only in `InteractiveOrchestrator`, so it never ran for a workflow;
+/// `wake_owed_parents` now reads the forest and the run driver calls it.
+#[tokio::test]
+async fn a_nested_subagents_result_wakes_its_parent_inside_a_run() {
+    let (_f, session, id, journal) = a_run_with_a_step_in_flight().await;
+    let parent = spawn_sub(&session, "lead", "delegate").await;
+    wait_for_tree(&journal, id, |f| {
+        f.node(parent)
+            .is_some_and(|r| r.status != crate::sessions::subagents::SubAgentStatus::Running)
+    })
+    .await;
+
+    let child = session
+        .ask(|reply| SessionCommand::SpawnSubAgent {
+            caller: crate::sessions::subagents::SubAgentParent::SubAgent(parent),
+            label: "helper".into(),
+            task: "dig".into(),
+            agent_type: None,
+            reply,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The child's result is delivered to its parent — `notified` flips only
+    // when the parent has actually been resumed with it.
+    wait_for_tree(&journal, id, |f| f.node(child).is_some_and(|r| r.notified)).await;
+}

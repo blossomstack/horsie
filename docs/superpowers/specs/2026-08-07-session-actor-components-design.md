@@ -46,6 +46,8 @@ The consequences in a workflow run, all from reading the code rather than execut
 
 Workflow support is not finished, so these are accepted for now. They are recorded here because they are not a workflow bug — they are what happens when a capability is written against one kind's shape and the other kind silently inherits a no-op. Preventing that class of defect is the point of this design.
 
+**One gap the forest does not close.** Owed results reach a parent through `wake_owed_parents`, which handles parents that are *subagents*. A conversation's main agent is served instead by `main_turn`, which merges owed results into its next turn. A workflow step has no equivalent: nothing resumes a step with its own subagent's result, because `perform` deliberately refuses to resume an `AgentKey::Step` — steps are started by `perform_run_action` and nothing else. So after this change a step's *nested* subagents work (sub wakes sub), and a step's *direct* subagent is recorded, reported and counted but not delivered back to the step. Closing that is a separate piece of work: it means teaching the run driver to resume a step in flight, which is a change to how a step's turn is defined rather than to where the tree lives.
+
 ## Goals
 
 - A new capability lands as a new module plus roughly a dozen lines of shared wiring, instead of ~1,200 lines threaded through shared matches.
