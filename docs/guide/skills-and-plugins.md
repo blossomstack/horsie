@@ -1,8 +1,8 @@
 # Skills & plugins
 
-A **skill/plugin bundle** is a package of skills (and optional hooks) that an
-agent can use during a session. You install bundles from git repositories once,
-then select which ones a session loads.
+A **skill/plugin bundle** is a package of skills, agents, slash commands, hooks
+and MCP servers that an agent can use during a session. You install bundles from
+git repositories once, then select which ones a session loads.
 
 Every runtime loads bundles the same way, whichever vendor it runs on: it
 fetches the ones its session selected over its own outbound connection at
@@ -189,6 +189,38 @@ fails the turn, fails a subagent for its parent, or fails a workflow step. On
 `Stop` and `SubagentStop` the turn is already ending, so a halt there simply
 lets it end — overriding a sibling hook's `decision: "block"`, which is where
 `continue`'s precedence over `decision` is visible.
+
+## What horsie supports, next to the Claude Code plugin spec
+
+So you can tell before installing, rather than after.
+
+| Component | horsie | Notes |
+| --- | --- | --- |
+| **Skills** (`skills/`) | ✅ | Manifest `skills` field honoured (string or array). |
+| **Agents** (`agents/`) | ✅ | `name`, `description`, `tools`, `model`. `color`, `effort` and `initialPrompt` are not read. |
+| **Commands** (`commands/`) | ✅ | `description`, `argument-hint`; `$ARGUMENTS` and `$1..$9`. Not `allowed-tools`, `@path`, `disable-model-invocation` or `hide-from-slash-command-tool`. `` !`cmd` `` is left as written rather than run — ask the agent to run it instead. |
+| **Hooks** (`hooks/hooks.json`) | ⚠️ 8 of 31 events | See below. Both `command` and `http` transports. |
+| **MCP** (`.mcp.json`) | ✅ | stdio and http, run in the sandbox. No OAuth — use a Settings server for that. |
+| `${CLAUDE_PLUGIN_ROOT}` | ⚠️ | Resolved in skill and agent bodies, hook commands and URLs, and MCP declarations. Not in a command body: commands are catalogued by the server, which does not know where the runtime mounted the plugin. |
+| **Marketplaces** | ✅ | Add a source, browse it, install by name. |
+
+Hook events, of the 31 the spec documents:
+
+| | Events |
+| --- | --- |
+| **Run** (8) | `SessionStart`, `SubagentStart`, `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop` |
+| **Understood, not yet fired** (8) | `PostToolUseFailure`, `PostToolBatch`, `SessionEnd`, `StopFailure`, `TaskCreated`, `TaskCompleted`, `Notification`, `CwdChanged` |
+| **No horsie equivalent** (15) | Permission prompts, context compaction, worktrees, file watching, agent teams, MCP elicitation and the display layer — each would need a subsystem, not a hook. |
+
+A bundle declaring an event in the last two rows still installs, and the events
+it cannot run are named rather than silently ignored.
+
+Hook reply fields are honoured per event: `systemMessage`, `decision: "block"`,
+`hookSpecificOutput.additionalContext` / `updatedInput` / `updatedToolOutput` /
+`permissionDecision`, and `continue` / `stopReason`. A field an event does not
+offer is reported as ignored rather than quietly applied. horsie has no
+permission prompt, so `permissionDecision: "ask"` is recorded and treated as
+allow.
 
 ### Where horsie looks for skills
 

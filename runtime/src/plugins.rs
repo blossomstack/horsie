@@ -63,7 +63,10 @@ pub fn discover_skills(plugins_dir: &Path) -> Vec<PluginSkill> {
                 out.push(PluginSkill {
                     plugin: name.clone(),
                     rel_dir: rel.to_string_lossy().into_owned(),
-                    content,
+                    // Resolved here because here is the only place that knows
+                    // where the plugin actually is. A skill pointing at its own
+                    // resources is the common reason to write it.
+                    content: horsie_support::plugin::expand_plugin_root(&content, &plugin_root),
                 });
             }
         }
@@ -98,7 +101,7 @@ pub fn discover_agents(plugins_dir: &Path) -> Vec<PluginAgent> {
                 out.push(PluginAgent {
                     plugin: name.clone(),
                     rel_path: rel.to_string_lossy().into_owned(),
-                    content,
+                    content: horsie_support::plugin::expand_plugin_root(&content, &plugin_root),
                 });
             }
         }
@@ -311,6 +314,100 @@ mod tests {
     fn write(path: &Path, content: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
+    }
+
+    /// One plugin exercising every manifest field and component directory
+    /// horsie reads, so "what does a fully-loaded plugin look like" has a single
+    /// answer that fails when a phase forgets one.
+    ///
+    /// Deliberately uses the *relocated* form of every field: the conventional
+    /// layout is covered elsewhere, and a plugin that moves everything is the
+    /// case each phase's manifest handling exists for.
+    fn conformance_plugin(plugins: &Path) {
+        let root = plugins.join("everything");
+        write(
+            &root.join(".claude-plugin/plugin.json"),
+            r#"{
+                 "name": "everything",
+                 "version": "1.2.3",
+                 "description": "one of each",
+                 "skills": "./custom/skills",
+                 "agents": ["./custom/agents"],
+                 "commands": "./custom/commands"
+               }"#,
+        );
+        write(
+            &root.join("custom/skills/reviewing/SKILL.md"),
+            "---\nname: reviewing\ndescription: how to review\n---\nSee ${CLAUDE_PLUGIN_ROOT}/ref.md",
+        );
+        write(
+            &root.join("custom/agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: reviews diffs\ntools: Read, Grep\nmodel: sonnet\n---\nBe thorough.",
+        );
+        write(
+            &root.join("custom/commands/review.md"),
+            "---\ndescription: review a file\nargument-hint: <path>\nallowed-tools: Read\n---\nReview $1.",
+        );
+        write(
+            &root.join("hooks/hooks.json"),
+            r#"{"hooks":{
+                 "PreToolUse":[{"matcher":"Edit|Write","hooks":[
+                   {"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/guard.sh","timeout":5}]}],
+                 "Stop":[{"hooks":[{"type":"http","url":"https://example.test/stop"}]}]}}"#,
+        );
+        write(
+            &root.join(".mcp.json"),
+            r#"{"mcpServers":{"docs":{"command":"node",
+                 "args":["${CLAUDE_PLUGIN_ROOT}/mcp.js"]}}}"#,
+        );
+    }
+
+    /// Every component horsie loads, from one plugin, in one assertion — the
+    /// fixture #105 asked for.
+    #[test]
+    fn the_conformance_plugin_is_read_whole() {
+        let dir = TempDir::new().unwrap();
+        conformance_plugin(dir.path());
+        let root = dir.path().join("everything");
+
+        let skills = discover_skills(dir.path());
+        assert_eq!(skills.len(), 1, "skills");
+        assert_eq!(skills[0].plugin, "everything", "the manifest name wins");
+        assert!(
+            skills[0]
+                .content
+                .contains(&format!("{}/ref.md", root.display())),
+            "the plugin root must be resolved in a skill body: {}",
+            skills[0].content
+        );
+
+        let agents = discover_agents(dir.path());
+        assert_eq!(agents.len(), 1, "agents");
+        assert_eq!(agents[0].rel_path, "everything/custom/agents/reviewer.md");
+
+        let hooks = horsie_support::plugin::hooks::read(&root).unwrap();
+        assert_eq!(hooks.decls.len(), 2, "both hook transports");
+        assert!(hooks.unsupported.is_empty(), "{:?}", hooks.unsupported);
+
+        let servers = horsie_support::plugin::mcp::read(&root).unwrap();
+        assert_eq!(servers.len(), 1, "mcp servers");
+
+        // And the whole thing is installable, which it would not have been
+        // before agents, commands and hooks counted.
+        let inspected = horsie_support::plugin::PluginRoot::inspect(&root).unwrap();
+        assert!(inspected.is_installable());
+        assert_eq!(inspected.version(), Some("1.2.3"));
+        assert_eq!(inspected.description(), Some("one of each"));
+
+        // Commands are read here rather than by `discover_*`: the server
+        // catalogues them at install time, so the runtime never sees one.
+        let catalog = horsie_support::plugin::catalog::build(&inspected);
+        let command = catalog
+            .iter()
+            .find(|e| e.kind == horsie_support::plugin::catalog::CatalogKind::Command)
+            .expect("the relocated commands dir is catalogued");
+        assert_eq!(command.name, "review");
+        assert_eq!(command.argument_hint.as_deref(), Some("<path>"));
     }
 
     #[test]

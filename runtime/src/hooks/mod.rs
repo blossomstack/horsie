@@ -63,8 +63,7 @@ pub(crate) async fn run_one(
     hook_path: &[PathBuf],
     invocation: HookInvocation<'_>,
 ) -> (HookOutput, HookRecord) {
-    let root = plugin_root.to_string_lossy();
-    let expand = |s: &str| s.replace("${CLAUDE_PLUGIN_ROOT}", &root);
+    let expand = |s: &str| horsie_support::plugin::expand_plugin_root(s, plugin_root);
     let timeout = decl.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_secs);
     let payload = invocation.payload();
 
