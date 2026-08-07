@@ -242,6 +242,9 @@ export function PopoverMenu({
             maxWidth: box.maxWidth || undefined,
           }}
         >
+          {variant === "icon" && legend && (
+            <p className="legend px-1 pb-1.5">{legend}</p>
+          )}
           {children(() => setOpen(false))}
         </div>
       )}
