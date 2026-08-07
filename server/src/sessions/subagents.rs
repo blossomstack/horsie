@@ -327,6 +327,14 @@ impl SubAgentTree {
         out
     }
 
+    /// Every distinct parent in this tree, for a caller walking owed results.
+    pub fn parents(&self) -> Vec<SubAgentParent> {
+        let mut seen: Vec<SubAgentParent> = self.nodes.values().map(|r| r.parent).collect();
+        seen.sort();
+        seen.dedup();
+        seen
+    }
+
     fn descends_from(&self, id: &Uuid, root: Uuid) -> bool {
         let mut cur = *id;
         loop {
@@ -338,6 +346,124 @@ impl SubAgentTree {
                 _ => return false,
             }
         }
+    }
+}
+
+/// Which agent roots a subagent tree. A conversation has exactly one; a
+/// workflow run has one per step execution, keyed by that step's agent id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum TreeOwner {
+    Main,
+    Step(Uuid),
+}
+
+/// One finished subagent's result that its parent has not been sent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwedResult {
+    pub child: Uuid,
+    pub parent: SubAgentParent,
+    pub owner: TreeOwner,
+    pub part: SubAgentResultPart,
+}
+
+/// Every subagent this session holds, whatever kind of session it is.
+///
+/// Keyed by owner rather than nested inside the session's mode, which is the
+/// whole point. The previous shape put the tree *inside* `SessionModeState`, so
+/// it needed two accessors: one that returned the conversation's tree and one
+/// that spanned a run's per-step trees. Every write used the second and every
+/// read used the first, which returned an empty tree for a run — so in a
+/// workflow a subagent's outcome was dropped, the concurrency cap was
+/// unenforced, and an offload could unload a session with a step's subagent
+/// mid-run.
+///
+/// Here there is no accessor that can see one kind's subagents and miss
+/// another's. The aggregates below span every tree by construction, so they are
+/// right for a run the day they are written.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubAgentForest {
+    trees: BTreeMap<TreeOwner, SubAgentTree>,
+}
+
+impl SubAgentForest {
+    pub fn tree(&self, owner: TreeOwner) -> Option<&SubAgentTree> {
+        self.trees.get(&owner)
+    }
+
+    /// The owner's tree, created on first spawn.
+    pub fn tree_mut(&mut self, owner: TreeOwner) -> &mut SubAgentTree {
+        self.trees.entry(owner).or_default()
+    }
+
+    /// Which tree holds this node.
+    pub fn owner_of(&self, node: Uuid) -> Option<TreeOwner> {
+        self.trees
+            .iter()
+            .find(|(_, t)| t.get(&node).is_some())
+            .map(|(owner, _)| *owner)
+    }
+
+    /// The tree a spawn by `caller` belongs in. `root` is what this session's
+    /// own "Main" means right now — [`TreeOwner::Main`] for a conversation, the
+    /// step in flight for a run. It is the only kind-shaped fact the forest is
+    /// ever told, and it arrives as a value rather than as a branch.
+    pub fn owner_for(&self, caller: SubAgentParent, root: TreeOwner) -> Option<TreeOwner> {
+        match caller {
+            SubAgentParent::Main => Some(root),
+            SubAgentParent::SubAgent(id) => self.owner_of(id),
+        }
+    }
+
+    pub fn node(&self, id: Uuid) -> Option<&SubAgentRecord> {
+        self.trees.values().find_map(|t| t.get(&id))
+    }
+
+    /// Every node id in the session, for re-spawning resident actors.
+    pub fn ids(&self) -> Vec<Uuid> {
+        self.trees.values().flat_map(SubAgentTree::ids).collect()
+    }
+
+    pub fn is_running(&self, id: Uuid) -> bool {
+        self.node(id)
+            .is_some_and(|rec| rec.status == SubAgentStatus::Running)
+    }
+
+    // --- whole-forest aggregates ---
+
+    /// Nodes mid-run anywhere in the session — the concurrency limit's measure.
+    pub fn active_count(&self) -> u32 {
+        self.trees.values().map(SubAgentTree::active_count).sum()
+    }
+
+    /// Whether anything is mid-run. What decides an offload is unsafe.
+    pub fn has_active(&self) -> bool {
+        self.trees.values().any(SubAgentTree::has_active)
+    }
+
+    /// Nodes still `Running` — at recovery, ones the process died under.
+    pub fn interrupted(&self) -> Vec<Uuid> {
+        self.trees
+            .values()
+            .flat_map(SubAgentTree::interrupted)
+            .collect()
+    }
+
+    /// Every terminal result no parent has been sent, across every tree.
+    pub fn owed(&self) -> Vec<OwedResult> {
+        let mut out = Vec::new();
+        for (owner, tree) in &self.trees {
+            for parent in tree.parents() {
+                for (child, part) in tree.owed_for(parent) {
+                    out.push(OwedResult {
+                        child,
+                        parent,
+                        owner: *owner,
+                        part,
+                    });
+                }
+            }
+        }
+        out
     }
 }
 
@@ -582,6 +708,99 @@ mod tests {
         assert!(text.len() < huge.len());
         // No mid-character split: the kept prefix is valid and bounded.
         assert!(text.len() <= MAX_RESULT_BYTES + 100);
+    }
+
+    fn forest_with_two_trees() -> (SubAgentForest, Uuid, Uuid, Uuid) {
+        let mut f = SubAgentForest::default();
+        let step = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        f.tree_mut(TreeOwner::Main).apply_spawned(
+            a,
+            SubAgentParent::Main,
+            "a".into(),
+            "t".into(),
+            1,
+            100,
+            None,
+        );
+        f.tree_mut(TreeOwner::Step(step)).apply_spawned(
+            b,
+            SubAgentParent::Main,
+            "b".into(),
+            "t".into(),
+            1,
+            100,
+            None,
+        );
+        (f, step, a, b)
+    }
+
+    /// The five queries that were wrong before the forest: each has to span
+    /// every tree, or a workflow run answers as though it had no subagents.
+    #[test]
+    fn aggregates_span_every_tree() {
+        let (f, _step, a, b) = forest_with_two_trees();
+        assert_eq!(f.active_count(), 2);
+        assert!(f.has_active());
+        let mut interrupted = f.interrupted();
+        interrupted.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(interrupted, expected);
+    }
+
+    #[test]
+    fn a_node_is_found_whichever_tree_holds_it() {
+        let (f, step, a, b) = forest_with_two_trees();
+        assert_eq!(f.node(a).unwrap().label, "a");
+        assert_eq!(f.node(b).unwrap().label, "b");
+        assert_eq!(f.owner_of(a), Some(TreeOwner::Main));
+        assert_eq!(f.owner_of(b), Some(TreeOwner::Step(step)));
+        assert_eq!(f.owner_of(Uuid::new_v4()), None);
+    }
+
+    #[test]
+    fn owed_results_carry_the_tree_that_owes_them() {
+        let (mut f, step, _a, b) = forest_with_two_trees();
+        f.tree_mut(TreeOwner::Step(step))
+            .apply_completed(b, "done".into(), 400);
+        let owed = f.owed();
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].child, b);
+        assert_eq!(owed[0].parent, SubAgentParent::Main);
+        assert_eq!(owed[0].owner, TreeOwner::Step(step));
+        assert_eq!(owed[0].part.text, "done");
+    }
+
+    /// A step's spawn belongs in that step's tree; a subagent's belongs in
+    /// whichever tree already holds the subagent. This is the whole of what the
+    /// session has to tell the forest about kinds.
+    #[test]
+    fn owner_for_resolves_a_caller_against_the_root_in_play() {
+        let (f, step, a, _b) = forest_with_two_trees();
+        assert_eq!(
+            f.owner_for(SubAgentParent::Main, TreeOwner::Step(step)),
+            Some(TreeOwner::Step(step))
+        );
+        assert_eq!(
+            f.owner_for(SubAgentParent::SubAgent(a), TreeOwner::Step(step)),
+            Some(TreeOwner::Main)
+        );
+        assert_eq!(
+            f.owner_for(SubAgentParent::SubAgent(Uuid::new_v4()), TreeOwner::Main),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_forest_answers_every_aggregate() {
+        let f = SubAgentForest::default();
+        assert_eq!(f.active_count(), 0);
+        assert!(!f.has_active());
+        assert!(f.interrupted().is_empty());
+        assert!(f.owed().is_empty());
+        assert!(f.ids().is_empty());
     }
 
     #[test]
