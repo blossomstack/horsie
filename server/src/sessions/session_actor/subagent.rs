@@ -13,8 +13,8 @@
 use super::component::{ActionCx, Component};
 use super::context::SessionAgentKind;
 use super::{
-    AgentAction, AgentKey, AgentPlan, CommandEffect, SessionActor, SessionCommand,
-    SessionDomainEvent, SessionState, SubAgentCommand, TurnEnd,
+    AgentAction, AgentPlan, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent,
+    SessionState, SubAgentCommand, TurnEnd,
 };
 use crate::sessions::subagents::{
     INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent, TreeOwner,
@@ -92,7 +92,6 @@ impl SubAgents {
                     let _ = self_ref
                         .tell(SessionCommand::SubAgent(SubAgentCommand::FinishSpawn {
                             id,
-                            label,
                             task,
                             agent_type,
                             reply,
@@ -104,7 +103,6 @@ impl SubAgents {
             }
             SubAgentCommand::FinishSpawn {
                 id,
-                label,
                 task,
                 agent_type,
                 reply,
@@ -121,17 +119,6 @@ impl SubAgents {
                         message: Some(task),
                         subagent_results: Vec::new(),
                     })
-                    .await;
-                actor
-                    .record_on(
-                        AgentKey::Main,
-                        horsie_agentcore::LifecycleEvent::Provisioning(
-                            horsie_agentcore::ProvisioningLifecycle {
-                                stage: "subagent_spawned".into(),
-                                detail: Some(format!("\"{label}\" ({id})")),
-                            },
-                        ),
-                    )
                     .await;
                 let _ = reply.send(Ok(id));
                 CommandEffect::none()

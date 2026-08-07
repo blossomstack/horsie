@@ -742,8 +742,8 @@ impl EventSourcedActor for SessionActor {
     /// Write what just became durable into the agents' own transcripts, so a
     /// reader sees a lifecycle entry where it happened rather than having to
     /// infer it from the session's status.
-    async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], _state: &SessionState) {
-        self.record_lifecycle(events).await;
+    async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], state: &SessionState) {
+        self.record_lifecycle(events, state).await;
     }
 
     async fn handle_command(

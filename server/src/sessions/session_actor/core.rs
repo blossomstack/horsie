@@ -7,9 +7,7 @@
 
 use super::CoreCommand;
 use super::component::Component;
-use super::{
-    AgentKey, CommandEffect, SessionActor, SessionAgents, SessionDomainEvent, SessionState,
-};
+use super::{AgentKey, CommandEffect, SessionActor, SessionDomainEvent, SessionState};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::normalize_session_title;
 use horsie_actor::ActorContext;
@@ -125,39 +123,29 @@ impl SessionActor {
     /// subagent-targeted event happens while that subagent is running. A miss
     /// is therefore a bug worth hearing about rather than a case to handle,
     /// which is what the warning is for.
-    pub(super) async fn record_lifecycle(&mut self, events: &[SessionDomainEvent]) {
+    pub(super) async fn record_lifecycle(
+        &mut self,
+        events: &[SessionDomainEvent],
+        state: &SessionState,
+    ) {
         for event in events {
-            let (target, Some(payload)) = crate::sessions::lifecycle_routing::route(event) else {
-                continue;
-            };
-            let agent = match &target {
-                crate::sessions::lifecycle_routing::LifecycleTarget::None => continue,
-                crate::sessions::lifecycle_routing::LifecycleTarget::Main => {
-                    self.agents.as_ref().and_then(SessionAgents::main).cloned()
-                }
-                crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Main) => {
-                    self.agents.as_ref().and_then(SessionAgents::main).cloned()
-                }
-                crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Sub(id))
-                | crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Step(id)) => {
-                    self.agents.as_ref().and_then(|a| a.sub(*id)).cloned()
-                }
-            };
-            let Some(agent) = agent else {
-                tracing::warn!(
-                    session = %self.id,
-                    ?target,
-                    "no resident agent to record a session event on; it will be missing from the log"
-                );
-                continue;
-            };
-            let _ = agent
-                .actor
-                .tell(AgentCommand::RecordLifecycle {
-                    event: payload,
-                    at_ms: now_ms(),
-                })
-                .await;
+            for (key, payload) in crate::sessions::lifecycle_routing::route(event, state) {
+                let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)).cloned() else {
+                    tracing::warn!(
+                        session = %self.id,
+                        ?key,
+                        "no resident agent to record a session event on; it will be missing from the log"
+                    );
+                    continue;
+                };
+                let _ = agent
+                    .actor
+                    .tell(AgentCommand::RecordLifecycle {
+                        event: payload,
+                        at_ms: now_ms(),
+                    })
+                    .await;
+            }
         }
     }
     /// Record one lifecycle entry on a named agent, when it is resident.
@@ -166,12 +154,7 @@ impl SessionActor {
         key: AgentKey,
         event: horsie_agentcore::LifecycleEvent,
     ) {
-        let agent = match key {
-            AgentKey::Main => self.agents.as_ref().and_then(SessionAgents::main).cloned(),
-            AgentKey::Sub(id) | AgentKey::Step(id) => {
-                self.agents.as_ref().and_then(|a| a.sub(id)).cloned()
-            }
-        };
+        let agent = self.agents.as_ref().and_then(|a| a.get(key)).cloned();
         if let Some(agent) = agent {
             let _ = agent
                 .actor

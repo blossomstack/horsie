@@ -320,6 +320,24 @@ export function fold(entries: AgentLogEntry[]): Folded {
         out.tasks = ev.value.tasks;
         out.tasksSeq = entry.seq;
         break;
+      // A subagent appearing or finishing, and a step starting or ending, are
+      // both progress worth showing while a turn is in flight. They used to
+      // arrive twice — once as these typed entries, which nothing read, and
+      // once as a free-text `Provisioning` entry the server wrote by hand. The
+      // server now writes only these, so the progress line is derived from the
+      // typed fact rather than from a string built to be displayed.
+      case "SubAgent":
+        out.progression = {
+          stage: `subagent_${ev.value.status}`,
+          detail: `"${ev.value.label}" (${ev.value.id})`,
+        };
+        break;
+      case "Step":
+        out.progression = {
+          stage: `step_${ev.value.status}`,
+          detail: ev.value.name,
+        };
+        break;
       case "SessionFailed":
         out.status = SessionStatusKind.Unrecoverable;
         out.reason = ev.value.reason;

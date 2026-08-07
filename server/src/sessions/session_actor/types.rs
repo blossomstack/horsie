@@ -127,7 +127,6 @@ pub enum SubAgentCommand {
     /// nothing and the tool gets the error.
     FinishSpawn {
         id: Uuid,
-        label: String,
         task: String,
         agent_type: Option<String>,
         reply: oneshot::Sender<Result<Uuid, String>>,
