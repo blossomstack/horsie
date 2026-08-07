@@ -355,7 +355,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                         <button
                           key={d}
                           type="button"
-                          className={`chip ${weekdays.has(d) ? "bg-raised text-legend" : ""}`}
+                          className={`chip ${weekdays.has(d) ? "border-transparent bg-orange text-orange-ink" : ""}`}
                           aria-pressed={weekdays.has(d)}
                           onClick={() =>
                             setWeekdays((prev) => {
