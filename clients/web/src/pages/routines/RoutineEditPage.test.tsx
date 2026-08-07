@@ -70,10 +70,10 @@ describe("RoutineEditPage", () => {
 
     expect(queryByTestId("routine-timezone-select")).toBeNull();
     const timezoneToggle = getByTestId("routine-timezone-toggle");
-    expect(timezoneToggle).toHaveAttribute("aria-expanded", "false");
-    expect(timezoneToggle).toHaveTextContent("Change");
+    expect(timezoneToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(timezoneToggle.textContent).toContain("Change");
     fireEvent.click(timezoneToggle);
-    expect(timezoneToggle).toHaveAttribute("aria-expanded", "true");
+    expect(timezoneToggle.getAttribute("aria-expanded")).toBe("true");
     expect(getByTestId("routine-timezone-select")).not.toBeNull();
 
     const expectedZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -112,24 +112,23 @@ describe("RoutineEditPage", () => {
 
     const mon = getByTestId("weekday-mon") as HTMLButtonElement;
     const tue = getByTestId("weekday-tue") as HTMLButtonElement;
-    expect(getByTestId("routine-weekdays")).toHaveAttribute(
-      "aria-label",
+    expect(getByTestId("routine-weekdays").getAttribute("aria-label")).toBe(
       "Days of week",
     );
-    expect(mon).toHaveAttribute("aria-label", "Monday");
-    expect(mon).toHaveAttribute("aria-pressed", "false");
-    expect(tue).toHaveAttribute("aria-pressed", "false");
+    expect(mon.getAttribute("aria-label")).toBe("Monday");
+    expect(mon.getAttribute("aria-pressed")).toBe("false");
+    expect(tue.getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(mon);
-    expect(mon).toHaveAttribute("aria-pressed", "true");
+    expect(mon.getAttribute("aria-pressed")).toBe("true");
     expect(mon.className).toContain("border-amber");
     expect(mon.className).toContain("bg-amber/15");
-    expect(tue).toHaveAttribute("aria-pressed", "false");
+    expect(tue.getAttribute("aria-pressed")).toBe("false");
     expect(save.disabled).toBe(false);
 
     // Toggling off returns the chip to the unselected look.
     fireEvent.click(mon);
-    expect(mon).toHaveAttribute("aria-pressed", "false");
+    expect(mon.getAttribute("aria-pressed")).toBe("false");
     expect(mon.className).not.toContain("border-amber");
     expect(save.disabled).toBe(true);
 
@@ -156,16 +155,14 @@ describe("RoutineEditPage", () => {
     fireEvent.click(getByTestId("routine-weekdays-weekdays"));
 
     for (const day of ["mon", "tue", "wed", "thu", "fri"]) {
-      expect(getByTestId(`weekday-${day}`)).toHaveAttribute(
-        "aria-pressed",
-        "true",
-      );
+      expect(
+        getByTestId(`weekday-${day}`).getAttribute("aria-pressed"),
+      ).toBe("true");
     }
     for (const day of ["sat", "sun"]) {
-      expect(getByTestId(`weekday-${day}`)).toHaveAttribute(
-        "aria-pressed",
-        "false",
-      );
+      expect(
+        getByTestId(`weekday-${day}`).getAttribute("aria-pressed"),
+      ).toBe("false");
     }
   });
 });
