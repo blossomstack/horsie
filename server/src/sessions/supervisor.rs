@@ -16,6 +16,9 @@ use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::session_actor::{
     AnswerError, AskAnswer, SessionActor, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
+use crate::sessions::session_actor::{
+    LifecycleCommand, ReadCommand, RunCommand, SubAgentCommand, TurnCommand,
+};
 use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
 };
@@ -498,7 +501,7 @@ impl SessionSupervisor {
                 continue;
             };
             match child
-                .ask(|reply| SessionCommand::PrepareOffload { reply })
+                .ask(|reply| SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload { reply }))
                 .await
             {
                 Ok(true) => {
@@ -620,7 +623,9 @@ impl EventSourcedActor for SessionSupervisor {
                 // to finish it, which no in-memory gate could.
                 let child = self.spawn_session(ctx, &id, &spec);
                 if let Some(child) = &child {
-                    let _ = child.tell(SessionCommand::Provision).await;
+                    let _ = child
+                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+                        .await;
                 }
                 let _ = reply.send(id.clone());
                 // Not a guess: a fresh session is provisioning, and says so
@@ -650,7 +655,9 @@ impl EventSourcedActor for SessionSupervisor {
                 match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child.tell(SessionCommand::Snapshot { reply: tx }).await;
+                        let _ = child
+                            .tell(SessionCommand::Read(ReadCommand::Snapshot { reply: tx }))
+                            .await;
                         tokio::spawn(async move {
                             let _ = reply.send(Some((record, rx.await.ok())));
                         });
@@ -668,7 +675,10 @@ impl EventSourcedActor for SessionSupervisor {
                     }
                     Some(child) => {
                         let _ = child
-                            .tell(SessionCommand::UserMessage { text, reply })
+                            .tell(SessionCommand::Turn(TurnCommand::UserMessage {
+                                text,
+                                reply,
+                            }))
                             .await;
                     }
                 }
@@ -682,7 +692,7 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         if child
-                            .tell(SessionCommand::Stop { reply: tx })
+                            .tell(SessionCommand::Turn(TurnCommand::Stop { reply: tx }))
                             .await
                             .is_err()
                         {
@@ -707,7 +717,9 @@ impl EventSourcedActor for SessionSupervisor {
                 if let Some(child) = self.ensure_loaded(ctx, state, &id) {
                     let (tx, rx) = oneshot::channel();
                     if child
-                        .tell(SessionCommand::Delete { reply: tx })
+                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Delete {
+                            reply: tx,
+                        }))
                         .await
                         .is_ok()
                     {
@@ -728,11 +740,11 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::ReadLog {
+                            .tell(SessionCommand::Read(ReadCommand::ReadLog {
                                 agent_id,
                                 after,
                                 reply: tx,
-                            })
+                            }))
                             .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok().flatten());
@@ -755,12 +767,12 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::PageLog {
+                            .tell(SessionCommand::Read(ReadCommand::PageLog {
                                 agent_id,
                                 before,
                                 max,
                                 reply: tx,
-                            })
+                            }))
                             .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok().flatten());
@@ -776,7 +788,9 @@ impl EventSourcedActor for SessionSupervisor {
                 match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child.tell(SessionCommand::UsageStats { reply: tx }).await;
+                        let _ = child
+                            .tell(SessionCommand::Read(ReadCommand::UsageStats { reply: tx }))
+                            .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
                         });
@@ -791,7 +805,9 @@ impl EventSourcedActor for SessionSupervisor {
                 match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child.tell(SessionCommand::RunState { reply: tx }).await;
+                        let _ = child
+                            .tell(SessionCommand::Run(RunCommand::State { reply: tx }))
+                            .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok().flatten());
                         });
@@ -807,7 +823,10 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::RetryStep { index, reply: tx })
+                            .tell(SessionCommand::Run(RunCommand::RetryStep {
+                                index,
+                                reply: tx,
+                            }))
                             .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
@@ -823,7 +842,11 @@ impl EventSourcedActor for SessionSupervisor {
                 match self.ensure_loaded(ctx, state, &id) {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child.tell(SessionCommand::SubAgentTree { reply: tx }).await;
+                        let _ = child
+                            .tell(SessionCommand::SubAgent(SubAgentCommand::Tree {
+                                reply: tx,
+                            }))
+                            .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
                         });
@@ -840,7 +863,9 @@ impl EventSourcedActor for SessionSupervisor {
                         let _ = reply.send(Err(AnswerError::NothingPending));
                     }
                     Some(child) => {
-                        let _ = child.tell(SessionCommand::Answer { answers, reply }).await;
+                        let _ = child
+                            .tell(SessionCommand::Turn(TurnCommand::Answer { answers, reply }))
+                            .await;
                     }
                 }
                 CommandEffect::none()
@@ -873,10 +898,10 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::AgentState {
+                            .tell(SessionCommand::Read(ReadCommand::AgentState {
                                 agent_id,
                                 reply: tx,
-                            })
+                            }))
                             .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok().flatten());
@@ -897,7 +922,11 @@ impl EventSourcedActor for SessionSupervisor {
                 for id in ids {
                     if let Some(child) = self.children.get(&id) {
                         let _ = child
-                            .ask(|reply| SessionCommand::PrepareOffload { reply })
+                            .ask(|reply| {
+                                SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload {
+                                    reply,
+                                })
+                            })
                             .await;
                     }
                     self.forget(&id);

@@ -4,7 +4,7 @@
 //! the run's snapshot (fixed at creation) or the folded [`SessionState`], which
 //! is why the same function serves live operation and recovery.
 
-use crate::sessions::orchestrator::{AgentAction, Orchestrator, SessionCommandKind};
+use crate::sessions::orchestrator::AgentAction;
 use crate::sessions::session_actor::SessionState;
 use crate::sessions::workflow::spec::{WorkflowRunSpec, compose_step_input, output_as_input};
 use crate::sessions::workflow::{StepStatus, WorkflowRunState};
@@ -56,42 +56,10 @@ impl WorkflowOrchestrator {
     }
 }
 
-impl Orchestrator for WorkflowOrchestrator {
-    fn next_actions(&self, state: &SessionState) -> Vec<AgentAction> {
-        // A run has no first message to hold it back — `AdvanceRun` fires at
-        // load and starts step one by itself — so it needs the same wait a
-        // conversation gets, and for the same reason.
-        if !crate::sessions::orchestrator::has_runtime(state) {
-            return Vec::new();
-        }
-        // Owed subagent results are delivered in a run exactly as in a
-        // conversation. First, because a parent waiting on its children is work
-        // already in flight — the run's next step can wait a boundary.
-        //
-        // This is the whole of the subagent capability's presence in a run: it
-        // reads the forest, so it needs no workflow-specific branch and the run
-        // needs no subagent-specific knowledge.
-        let mut actions = crate::sessions::orchestrator::wake_owed_parents(state);
-        actions.extend(self.step_actions(state));
-        actions
-    }
-
-    fn accepts(&self, cmd: SessionCommandKind) -> Result<(), &'static str> {
-        match cmd {
-            // A run works from its definition. Its steps can be answered and
-            // retried, but there is no one to send a message to.
-            SessionCommandKind::UserMessage => {
-                Err("this session is a workflow run; it takes no messages")
-            }
-            SessionCommandKind::Answer => Ok(()),
-        }
-    }
-}
-
 impl WorkflowOrchestrator {
     /// What the graph wants started: the next step, the run's end, or its
     /// failure. Knows nothing about subagents.
-    fn step_actions(&self, state: &SessionState) -> Vec<AgentAction> {
+    pub fn step_actions(&self, state: &SessionState) -> Vec<AgentAction> {
         // A run that has not folded a `StepStarted` yet holds no run state:
         // `initial_state` is static and cannot see the spec. This driver is
         // only ever installed on a run, so an absent one means "nothing has
@@ -291,7 +259,7 @@ mod tests {
     /// Drive the run forward by performing whatever the driver asks, so a test
     /// reads as the sequence of steps rather than as a fold.
     fn advance(d: &WorkflowOrchestrator, run: &mut WorkflowRunState, output: Value) -> AgentAction {
-        let action = d.next_actions(&state(run.clone())).remove(0);
+        let action = d.step_actions(&state(run.clone())).remove(0);
         match &action {
             AgentAction::StartStep {
                 step,
@@ -324,7 +292,7 @@ mod tests {
     #[test]
     fn a_fresh_run_starts_at_the_start_step_with_the_run_input() {
         let (d, session) = driver();
-        let actions = d.next_actions(&state(WorkflowRunState::default()));
+        let actions = d.step_actions(&state(WorkflowRunState::default()));
         assert_eq!(actions.len(), 1);
         let AgentAction::StartStep {
             index,
@@ -458,7 +426,7 @@ mod tests {
             "in".into(),
             0,
         );
-        assert!(d.next_actions(&state(run)).is_empty());
+        assert!(d.step_actions(&state(run)).is_empty());
     }
 
     /// A suspended run waits for a person: an interrupted step's effect on the
@@ -477,7 +445,7 @@ mod tests {
                 ..WorkflowRunState::default()
             };
             assert!(
-                d.next_actions(&state(run)).is_empty(),
+                d.step_actions(&state(run)).is_empty(),
                 "{status:?} must start nothing"
             );
         }
@@ -497,7 +465,7 @@ mod tests {
             0,
         );
         run.apply_step_failed(0, "provider 500".into(), 1);
-        assert!(d.next_actions(&state(run)).is_empty());
+        assert!(d.step_actions(&state(run)).is_empty());
     }
 
     /// The definition is snapshotted, so this can only happen to a run whose
@@ -543,20 +511,13 @@ mod tests {
         assert!(!eval_condition("output.ok == true", &serde_json::json!({"ok": false})).unwrap());
     }
 
-    #[test]
-    fn a_run_refuses_a_message_but_takes_an_answer() {
-        let (d, _) = driver();
-        assert!(d.accepts(SessionCommandKind::UserMessage).is_err());
-        assert!(d.accepts(SessionCommandKind::Answer).is_ok());
-    }
-
     /// The driver is installed only on a run, so a state that has folded no
     /// step yet means the run is about to begin — not that it is a
     /// conversation.
     #[test]
     fn a_state_with_no_run_folded_yet_starts_the_first_step() {
         let (d, _) = driver();
-        let actions = d.next_actions(&SessionState::default());
+        let actions = d.step_actions(&SessionState::default());
         assert_eq!(actions.len(), 1);
         let AgentAction::StartStep { step, index, .. } = &actions[0] else {
             panic!("expected the start step, got {:?}", actions[0]);

@@ -4,6 +4,7 @@
 //! are three times the actor they cover, and inline they buried it. Privacy is
 //! unchanged — a child module still sees everything its parent can.
 
+use super::{HookCommand, LifecycleCommand, ReadCommand, RunCommand, SubAgentCommand, TurnCommand};
 use super::{
     context::{SessionAgentKind, SessionContextProvider, scoped_client},
     hooks::MAX_STOP_CONTINUATIONS,
@@ -123,7 +124,7 @@ fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
 /// method here; the decision moved to the orchestrator and the actor only
 /// performs it, so these tests assert on the decision.
 fn decisions(actor: &SessionActor, state: &SessionState) -> Vec<AgentAction> {
-    actor.orchestrator.next_actions(state)
+    actor.next_actions(state)
 }
 
 /// A session is `Provisioning` from the moment its create is journaled
@@ -202,7 +203,7 @@ fn a_failed_create_starts_no_turn() {
         queued("m1", "try again"),
     ]);
     assert!(
-        InteractiveOrchestrator.next_actions(&s).is_empty(),
+        !RuntimeLifecycle::ready(&s),
         "a session with no runtime must build one before it runs anything"
     );
     assert_eq!(s.inbox.len(), 1, "and the message is still owed an answer");
@@ -743,7 +744,7 @@ async fn a_failed_turn_does_not_drain() {
     );
     // Asked of the actor, which is the only thing that reads this journal.
     let snapshot = session
-        .ask(|reply| SessionCommand::Snapshot { reply })
+        .ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
         .await
         .unwrap();
     assert!(matches!(
@@ -1066,16 +1067,18 @@ async fn prepare_offload_refuses_while_a_run_is_in_flight() {
     );
 
     session
-        .ask(|reply| SessionCommand::UserMessage {
-            text: "go".into(),
-            reply,
+        .ask(|reply| {
+            SessionCommand::Turn(TurnCommand::UserMessage {
+                text: "go".into(),
+                reply,
+            })
         })
         .await
         .unwrap()
         .unwrap();
 
     let offloadable = session
-        .ask(|reply| SessionCommand::PrepareOffload { reply })
+        .ask(|reply| SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload { reply }))
         .await
         .unwrap();
     assert!(
@@ -1096,7 +1099,7 @@ async fn prepare_offload_refuses_while_a_run_is_in_flight() {
     provider.release();
     let (tx, rx) = oneshot::channel();
     session
-        .tell(SessionCommand::UsageStats { reply: tx })
+        .tell(SessionCommand::Read(ReadCommand::UsageStats { reply: tx }))
         .await
         .unwrap();
     rx.await.unwrap();
@@ -1401,9 +1404,11 @@ async fn a_run_refuses_a_user_message() {
     ))]));
     let (_f, session, _id, _journal) = spawn_run_with_provider(provider).await;
     let err = session
-        .ask(|reply| SessionCommand::UserMessage {
-            text: "hello".into(),
-            reply,
+        .ask(|reply| {
+            SessionCommand::Turn(TurnCommand::UserMessage {
+                text: "hello".into(),
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -1438,7 +1443,7 @@ async fn retrying_a_step_appends_an_attempt_on_the_same_edge() {
     .await;
 
     session
-        .ask(|reply| SessionCommand::RetryStep { index: 1, reply })
+        .ask(|reply| SessionCommand::Run(RunCommand::RetryStep { index: 1, reply }))
         .await
         .unwrap()
         .unwrap();
@@ -1510,13 +1515,16 @@ async fn a_message_arriving_mid_create_waits_for_the_runtime() {
     let id = Uuid::new_v4();
     let (session, journal) = spawn_unprovisioned(&f, id);
 
-    session.tell(SessionCommand::Provision).await.unwrap();
+    session
+        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+        .await
+        .unwrap();
     let (tx, _rx) = oneshot::channel();
     session
-        .tell(SessionCommand::UserMessage {
+        .tell(SessionCommand::Turn(TurnCommand::UserMessage {
             text: "hello".into(),
             reply: tx,
-        })
+        }))
         .await
         .unwrap();
 
@@ -1617,7 +1625,10 @@ async fn a_runs_first_step_waits_for_the_create_too() {
         ),
         journal.clone(),
     );
-    session.tell(SessionCommand::Provision).await.unwrap();
+    session
+        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+        .await
+        .unwrap();
 
     wait_for_state(&journal, id, "a run holding at its create", |s| {
         s.status == SessionStatus::Provisioning
@@ -1656,7 +1667,10 @@ async fn a_message_after_a_failed_create_provisions_instead_of_dying() {
 
     let id = Uuid::new_v4();
     let (session, journal) = spawn_unprovisioned(&f, id);
-    session.tell(SessionCommand::Provision).await.unwrap();
+    session
+        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+        .await
+        .unwrap();
     let failed = wait_for_state(
         &journal,
         id,
@@ -1681,10 +1695,10 @@ async fn a_message_after_a_failed_create_provisions_instead_of_dying() {
         .insert("mock".to_string(), link);
     let (tx, _rx) = oneshot::channel();
     session
-        .tell(SessionCommand::UserMessage {
+        .tell(SessionCommand::Turn(TurnCommand::UserMessage {
             text: "try again".into(),
             reply: tx,
-        })
+        }))
         .await
         .unwrap();
 
@@ -1900,9 +1914,11 @@ impl horsie_actor::Journal for CountingJournal {
 async fn reading_forward_and_paging_back_agree_on_the_log() {
     let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
     session
-        .ask(|reply| SessionCommand::UserMessage {
-            text: "go".into(),
-            reply,
+        .ask(|reply| {
+            SessionCommand::Turn(TurnCommand::UserMessage {
+                text: "go".into(),
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -1911,10 +1927,12 @@ async fn reading_forward_and_paging_back_agree_on_the_log() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let streamed: Vec<u64> = session
-        .ask(|reply| SessionCommand::ReadLog {
-            agent_id: None,
-            after: None,
-            reply,
+        .ask(|reply| {
+            SessionCommand::Read(ReadCommand::ReadLog {
+                agent_id: None,
+                after: None,
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -1968,9 +1986,11 @@ async fn serving_reads_never_touches_the_journal() {
 
     // Drive one turn so both actors are loaded and have history.
     session
-        .ask(|reply| SessionCommand::UserMessage {
-            text: "go".into(),
-            reply,
+        .ask(|reply| {
+            SessionCommand::Turn(TurnCommand::UserMessage {
+                text: "go".into(),
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -1987,20 +2007,24 @@ async fn serving_reads_never_touches_the_journal() {
 
     let _ = main_history(&session).await;
     let _ = session
-        .ask(|reply| SessionCommand::ReadLog {
-            agent_id: None,
-            after: Some(horsie_workflow::Cursor {
-                entry_seq: 0,
-                delta_seq: 0,
-            }),
-            reply,
+        .ask(|reply| {
+            SessionCommand::Read(ReadCommand::ReadLog {
+                agent_id: None,
+                after: Some(horsie_workflow::Cursor {
+                    entry_seq: 0,
+                    delta_seq: 0,
+                }),
+                reply,
+            })
         })
         .await
         .unwrap();
     let _ = session
-        .ask(|reply| SessionCommand::AgentState {
-            agent_id: None,
-            reply,
+        .ask(|reply| {
+            SessionCommand::Read(ReadCommand::AgentState {
+                agent_id: None,
+                reply,
+            })
         })
         .await
         .unwrap();
@@ -2014,12 +2038,14 @@ async fn serving_reads_never_touches_the_journal() {
 
 async fn spawn_sub(session: &ActorRef<SessionCommand>, label: &str, task: &str) -> Uuid {
     session
-        .ask(|reply| SessionCommand::SpawnSubAgent {
-            caller: crate::sessions::subagents::SubAgentParent::Main,
-            label: label.into(),
-            task: task.into(),
-            agent_type: None,
-            reply,
+        .ask(|reply| {
+            SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                caller: crate::sessions::subagents::SubAgentParent::Main,
+                label: label.into(),
+                task: task.into(),
+                agent_type: None,
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -2056,12 +2082,14 @@ async fn spawn_beyond_depth_four_is_rejected() {
     let mut parent = crate::sessions::subagents::SubAgentParent::Main;
     for _ in 0..4 {
         let id_child = session
-            .ask(|reply| SessionCommand::SpawnSubAgent {
-                caller: parent,
-                label: "w".into(),
-                task: "t".into(),
-                agent_type: None,
-                reply,
+            .ask(|reply| {
+                SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                    caller: parent,
+                    label: "w".into(),
+                    task: "t".into(),
+                    agent_type: None,
+                    reply,
+                })
             })
             .await
             .unwrap()
@@ -2070,12 +2098,14 @@ async fn spawn_beyond_depth_four_is_rejected() {
         parent = crate::sessions::subagents::SubAgentParent::SubAgent(id_child);
     }
     let res = session
-        .ask(|reply| SessionCommand::SpawnSubAgent {
-            caller: parent,
-            label: "x".into(),
-            task: "y".into(),
-            agent_type: None,
-            reply,
+        .ask(|reply| {
+            SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                caller: parent,
+                label: "x".into(),
+                task: "y".into(),
+                agent_type: None,
+                reply,
+            })
         })
         .await
         .unwrap();
@@ -2091,12 +2121,14 @@ async fn spawn_beyond_the_concurrency_cap_is_rejected() {
     }
     wait_for_tree(&journal, id, |t| t.active_count() == 8).await;
     let res = session
-        .ask(|reply| SessionCommand::SpawnSubAgent {
-            caller: crate::sessions::subagents::SubAgentParent::Main,
-            label: "x".into(),
-            task: "y".into(),
-            agent_type: None,
-            reply,
+        .ask(|reply| {
+            SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                caller: crate::sessions::subagents::SubAgentParent::Main,
+                label: "x".into(),
+                task: "y".into(),
+                agent_type: None,
+                reply,
+            })
         })
         .await
         .unwrap();
@@ -2107,12 +2139,14 @@ async fn spawn_beyond_the_concurrency_cap_is_rejected() {
 async fn spawn_from_an_unknown_caller_is_rejected() {
     let (_f, session, _id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
     let res = session
-        .ask(|reply| SessionCommand::SpawnSubAgent {
-            caller: crate::sessions::subagents::SubAgentParent::SubAgent(Uuid::new_v4()),
-            label: "x".into(),
-            task: "y".into(),
-            agent_type: None,
-            reply,
+        .ask(|reply| {
+            SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                caller: crate::sessions::subagents::SubAgentParent::SubAgent(Uuid::new_v4()),
+                label: "x".into(),
+                task: "y".into(),
+                agent_type: None,
+                reply,
+            })
         })
         .await
         .unwrap();
@@ -2321,11 +2355,13 @@ async fn agent_history(
     agent_id: Option<String>,
 ) -> horsie_workflow::LogPage {
     session
-        .ask(|reply| SessionCommand::PageLog {
-            agent_id,
-            before: None,
-            max: 50,
-            reply,
+        .ask(|reply| {
+            SessionCommand::Read(ReadCommand::PageLog {
+                agent_id,
+                before: None,
+                max: 50,
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -2564,9 +2600,11 @@ async fn settled_inputs(session: &ActorRef<SessionCommand>) -> Vec<String> {
 
 async fn send(session: &ActorRef<SessionCommand>, text: &str) {
     session
-        .ask(|reply| SessionCommand::UserMessage {
-            text: text.into(),
-            reply,
+        .ask(|reply| {
+            SessionCommand::Turn(TurnCommand::UserMessage {
+                text: text.into(),
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -3089,12 +3127,14 @@ async fn spawn_typed(
     agent_type: Option<&str>,
 ) -> Result<Uuid, String> {
     session
-        .ask(|reply| SessionCommand::SpawnSubAgent {
-            caller: crate::sessions::subagents::SubAgentParent::Main,
-            label: "review".into(),
-            task: "look at the diff".into(),
-            agent_type: agent_type.map(str::to_string),
-            reply,
+        .ask(|reply| {
+            SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                caller: crate::sessions::subagents::SubAgentParent::Main,
+                label: "review".into(),
+                task: "look at the diff".into(),
+                agent_type: agent_type.map(str::to_string),
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -3281,7 +3321,7 @@ async fn halting_the_main_agent_fails_the_turn_with_the_hooks_reason() {
     let gate = BlockingProvider::new();
     let (_f, session, _id, _journal) = spawn_session_with_provider(gate.clone()).await;
     let status = |s: ActorRef<SessionCommand>| async move {
-        s.ask(|reply| SessionCommand::Snapshot { reply })
+        s.ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
             .await
             .unwrap()
             .status
@@ -3296,10 +3336,10 @@ async fn halting_the_main_agent_fails_the_turn_with_the_hooks_reason() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     session
-        .tell(SessionCommand::HaltAgent {
+        .tell(SessionCommand::Hooks(HookCommand::Halt {
             key: AgentKey::Main,
             reason: "the repo is locked".into(),
-        })
+        }))
         .await
         .unwrap();
     gate.release();
@@ -3456,10 +3496,10 @@ async fn a_subagents_hooks_land_on_its_own_transcript() {
     .await;
 
     session
-        .tell(SessionCommand::HooksRan {
+        .tell(SessionCommand::Hooks(HookCommand::Ran {
             key: AgentKey::Sub(sub),
             records: vec![hook_record("guard", "tc1")],
-        })
+        }))
         .await
         .unwrap();
 
@@ -3486,11 +3526,13 @@ async fn a_subagents_hooks_land_on_its_own_transcript() {
 
 async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::LogPage {
     session
-        .ask(|reply| SessionCommand::PageLog {
-            agent_id: None,
-            before: None,
-            max: 50,
-            reply,
+        .ask(|reply| {
+            SessionCommand::Read(ReadCommand::PageLog {
+                agent_id: None,
+                before: None,
+                max: 50,
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -3623,9 +3665,11 @@ async fn a_notification_waits_out_an_awaiting_input_session() {
 
     // Park the session on the ask.
     session
-        .ask(|reply| SessionCommand::UserMessage {
-            text: "start".into(),
-            reply,
+        .ask(|reply| {
+            SessionCommand::Turn(TurnCommand::UserMessage {
+                text: "start".into(),
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -3658,9 +3702,11 @@ async fn a_notification_waits_out_an_awaiting_input_session() {
 
     // The user's reply carries the notification along in the same input.
     session
-        .ask(|reply| SessionCommand::UserMessage {
-            text: "the first one".into(),
-            reply,
+        .ask(|reply| {
+            SessionCommand::Turn(TurnCommand::UserMessage {
+                text: "the first one".into(),
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -3774,9 +3820,11 @@ async fn a_stranded_grandchild_result_flushes_at_the_next_turn_boundary() {
     // The next turn boundary wakes P with C's failure; P concludes again
     // and its new output is owed to the main agent.
     session2
-        .ask(|reply| SessionCommand::UserMessage {
-            text: "hi".into(),
-            reply,
+        .ask(|reply| {
+            SessionCommand::Turn(TurnCommand::UserMessage {
+                text: "hi".into(),
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -3792,11 +3840,13 @@ async fn a_stranded_grandchild_result_flushes_at_the_next_turn_boundary() {
     })
     .await;
     let page = session2
-        .ask(|reply| SessionCommand::PageLog {
-            agent_id: Some(p.to_string()),
-            before: None,
-            max: 20,
-            reply,
+        .ask(|reply| {
+            SessionCommand::Read(ReadCommand::PageLog {
+                agent_id: Some(p.to_string()),
+                before: None,
+                max: 20,
+                reply,
+            })
         })
         .await
         .unwrap()
@@ -3850,11 +3900,13 @@ async fn recovery_respawns_subagents_and_fails_interrupted_ones() {
     );
     // The transcript stays pageable: the resident actor answers history.
     let page = session2
-        .ask(|reply| SessionCommand::PageLog {
-            agent_id: Some(sub.to_string()),
-            before: None,
-            max: 10,
-            reply,
+        .ask(|reply| {
+            SessionCommand::Read(ReadCommand::PageLog {
+                agent_id: Some(sub.to_string()),
+                before: None,
+                max: 10,
+                reply,
+            })
         })
         .await
         .unwrap();
@@ -3870,7 +3922,7 @@ async fn prepare_offload_refuses_with_an_active_subagent() {
     wait_for_tree(&journal, id, |t| t.has_active()).await;
 
     let offloadable = session
-        .ask(|reply| SessionCommand::PrepareOffload { reply })
+        .ask(|reply| SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload { reply }))
         .await
         .unwrap();
     assert!(!offloadable, "an active subagent must block offload");
@@ -4000,7 +4052,7 @@ async fn a_runs_subagents_count_toward_the_session_wide_aggregates() {
 
     // And the API reports it: `SubAgentTree` spans every tree.
     let tree = session
-        .ask(|reply| SessionCommand::SubAgentTree { reply })
+        .ask(|reply| SessionCommand::SubAgent(SubAgentCommand::Tree { reply }))
         .await
         .unwrap();
     assert_eq!(tree.len(), 1, "a run's subagents must reach the API");
@@ -4021,12 +4073,14 @@ async fn a_nested_subagents_result_wakes_its_parent_inside_a_run() {
     .await;
 
     let child = session
-        .ask(|reply| SessionCommand::SpawnSubAgent {
-            caller: crate::sessions::subagents::SubAgentParent::SubAgent(parent),
-            label: "helper".into(),
-            task: "dig".into(),
-            agent_type: None,
-            reply,
+        .ask(|reply| {
+            SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                caller: crate::sessions::subagents::SubAgentParent::SubAgent(parent),
+                label: "helper".into(),
+                task: "dig".into(),
+                agent_type: None,
+                reply,
+            })
         })
         .await
         .unwrap()
