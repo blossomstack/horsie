@@ -3,6 +3,7 @@
 //! The sandboxed runtime must not own session metadata, so this tool is layered
 //! on by the session server and routed through the owning SessionActor.
 
+use crate::sessions::session_actor::CoreCommand;
 use crate::sessions::session_actor::SessionCommand;
 use async_trait::async_trait;
 use horsie_actor::ActorRef;
@@ -111,9 +112,11 @@ impl Toolbox for SessionTitleToolbox {
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'title'".to_string()))?;
         let title = self
             .session
-            .ask(|reply| SessionCommand::SetSessionTitle {
-                title: title.to_string(),
-                reply,
+            .ask(|reply| {
+                SessionCommand::Core(CoreCommand::SetTitle {
+                    title: title.to_string(),
+                    reply,
+                })
             })
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
@@ -242,7 +245,7 @@ mod tests {
             cmd: SessionCommand,
             _ctx: &mut ActorContext<Self>,
         ) -> CommandEffect<()> {
-            if let SessionCommand::SetSessionTitle { title, reply } = cmd {
+            if let SessionCommand::Core(CoreCommand::SetTitle { title, reply }) = cmd {
                 let _ =
                     reply.send(normalize_session_title(&title).map_err(|error| error.to_string()));
             }

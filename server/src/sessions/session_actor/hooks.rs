@@ -12,20 +12,25 @@
 //! on purpose, because a server event misfiled as a tool one is halted twice.
 
 use super::{
-    AgentKey, SessionCommand,
+    AgentKey, CANCEL_TIMEOUT, CommandEffect, HookCommand, SessionActor, SessionCommand,
+    SessionDomainEvent, SessionState,
     context::{SessionAgentKind, SessionContextProvider},
 };
+use crate::sessions::spec::SessionStatus;
 use async_trait::async_trait;
+use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_models::{
     hooks::{HookAction, HookRecord, StopOutcome, SubagentStopOutcome},
     runtime::{ServerHookEvent, StopInput, SubagentStopInput},
 };
+use horsie_workflow::AgentCommand;
 use horsie_workflow::{AgentOutcome, AgentOutcomeSink};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use tokio::sync::oneshot;
 
 /// Adapts the session's mailbox to the [`AgentOutcomeSink`] its agents report
 /// to. No generation tag: the agent is resident and fences its own stale runs
@@ -85,20 +90,20 @@ impl horsie_runtime_client::HookSink for SessionHookSink {
         let halt = tool_halt_reason(&hooks);
         let _ = self
             .target
-            .tell(SessionCommand::HooksRan {
+            .tell(SessionCommand::Hooks(HookCommand::Ran {
                 key: self.key,
                 records: hooks,
-            })
+            }))
             .await;
         // After the records, so the transcript shows what halted the turn
         // above the turn's own failure.
         if let Some(reason) = halt {
             let _ = self
                 .target
-                .tell(SessionCommand::HaltAgent {
+                .tell(SessionCommand::Hooks(HookCommand::Halt {
                     key: self.key,
                     reason,
-                })
+                }))
                 .await;
         }
     }
@@ -218,10 +223,10 @@ impl AgentOutcomeSink for StopHookParent {
                 self.continuations.fetch_add(1, Ordering::Relaxed);
                 let _ = self
                     .session
-                    .tell(SessionCommand::ContinueAfterStop {
+                    .tell(SessionCommand::Hooks(HookCommand::ContinueAfterStop {
                         key: self.key,
                         reason,
-                    })
+                    }))
                     .await;
             }
             // Blocked, but out of budget. The turn ends, and a second record
@@ -230,10 +235,10 @@ impl AgentOutcomeSink for StopHookParent {
                 self.continuations.store(0, Ordering::Relaxed);
                 let _ = self
                     .session
-                    .tell(SessionCommand::HooksRan {
+                    .tell(SessionCommand::Hooks(HookCommand::Ran {
                         key: self.key,
                         records: cap_reached(records),
-                    })
+                    }))
                     .await;
                 self.inner.deliver(outcome).await;
             }
@@ -379,4 +384,98 @@ fn cap_reached(mut records: Vec<HookRecord>) -> Vec<HookRecord> {
         }
     }
     records
+}
+
+/// Routing what plugin hooks did into the session.
+///
+/// No events and no state: a hook record belongs in the transcript of the agent
+/// whose call it guarded, so this component only ever forwards. The one thing it
+/// decides is what a halt *means*, and it decides it by not deciding — a halt
+/// re-enters through the ordinary outcome path, so "what a failure means" stays
+/// answered in one place per agent kind rather than branching here.
+pub(super) struct HookRouting;
+
+impl HookRouting {
+    pub(super) async fn handle(
+        actor: &mut SessionActor,
+        state: &SessionState,
+        cmd: HookCommand,
+        ctx: &ActorContext<SessionActor>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        match cmd {
+            HookCommand::Ran { key, records } => {
+                // The agent owns its own transcript, so the records go to it
+                // rather than into the session's log. An agent that has already
+                // gone is not an error: the records describe a call it made
+                // before it left, and there is nothing left to tell.
+                if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
+                    let _ = agent.tell(AgentCommand::HooksRan { records }).await;
+                }
+                CommandEffect::none()
+            }
+            HookCommand::Halt { key, reason } => {
+                // A halt races the turn it is halting: the records reach the
+                // session on the sink while the tool call that produced them is
+                // still returning, so the turn can finish first. Failing it then
+                // would rewrite a turn that already ended — which is why
+                // `ContinueAfterStop` below no-ops on the same condition.
+                let live = actor
+                    .agents
+                    .as_ref()
+                    .and_then(|a| a.get(key))
+                    .filter(|_| state.status == SessionStatus::Running)
+                    .cloned();
+                let Some(agent) = live else {
+                    tracing::warn!(
+                        session = %actor.id,
+                        "a hook halted an agent whose turn had already ended; ignored"
+                    );
+                    return CommandEffect::none();
+                };
+                // Cancel first, so the agent is not still appending to its own
+                // journal when the outcome below is folded.
+                let (tx, rx) = oneshot::channel();
+                let _ = agent.tell(AgentCommand::Cancel { ack: Some(tx) }).await;
+                if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
+                    tracing::warn!(session = %actor.id, "halted agent did not finish in time");
+                }
+                // Routed through the ordinary outcome path rather than given its
+                // own per-key branching: a halt is a failure with a reason, and
+                // what a failure means for a main agent, a subagent and a step is
+                // already decided in one place.
+                actor
+                    .on_agent_outcome(
+                        state,
+                        AgentOutcome::Failed {
+                            session_id: match key {
+                                AgentKey::Main => actor.id,
+                                AgentKey::Sub(id) | AgentKey::Step(id) => id,
+                            },
+                            error: reason,
+                            // Not recoverable and not terminal: re-running the same
+                            // turn would meet the same hook, but the session is
+                            // perfectly able to run the next thing the user sends.
+                            recoverable: false,
+                            terminal: false,
+                        },
+                        ctx,
+                    )
+                    .await
+            }
+            HookCommand::ContinueAfterStop { key, reason } => {
+                // The same path recovery uses to continue an interrupted task:
+                // a plain user-message turn whose input is the hook's reason.
+                if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
+                    let _ = agent
+                        .tell(AgentCommand::Resume {
+                            results: Vec::new(),
+                            message: Some(reason),
+                            subagent_results: Vec::new(),
+                        })
+                        .await;
+                }
+                CommandEffect::none()
+            }
+        }
+    }
 }

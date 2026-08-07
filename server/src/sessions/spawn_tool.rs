@@ -8,6 +8,7 @@
 //! spawns are attributed to the right parent.
 
 use crate::sessions::session_actor::SessionCommand;
+use crate::sessions::session_actor::SubAgentCommand;
 use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;
 use horsie_actor::ActorRef;
@@ -184,12 +185,14 @@ impl Toolbox for SubAgentToolbox {
             let agent_type = self.resolve_type(&input)?;
             let id = self
                 .session
-                .ask(|reply| SessionCommand::SpawnSubAgent {
-                    caller: self.caller,
-                    label: label.to_string(),
-                    task: task.to_string(),
-                    agent_type,
-                    reply,
+                .ask(|reply| {
+                    SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                        caller: self.caller,
+                        label: label.to_string(),
+                        task: task.to_string(),
+                        agent_type,
+                        reply,
+                    })
                 })
                 .await
                 .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
@@ -208,10 +211,12 @@ impl Toolbox for SubAgentToolbox {
                 .transpose()?;
             let rendered = self
                 .session
-                .ask(|reply| SessionCommand::SubAgentStatus {
-                    caller: self.caller,
-                    id,
-                    reply,
+                .ask(|reply| {
+                    SessionCommand::SubAgent(SubAgentCommand::Status {
+                        caller: self.caller,
+                        id,
+                        reply,
+                    })
                 })
                 .await
                 .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
@@ -268,10 +273,10 @@ mod tests {
             _ctx: &mut ActorContext<Self>,
         ) -> CommandEffect<()> {
             match cmd {
-                SessionCommand::SpawnSubAgent { reply, .. } => {
+                SessionCommand::SubAgent(SubAgentCommand::Spawn { reply, .. }) => {
                     let _ = reply.send(self.spawn_result.clone());
                 }
-                SessionCommand::SubAgentStatus { id, reply, .. } => {
+                SessionCommand::SubAgent(SubAgentCommand::Status { id, reply, .. }) => {
                     let _ = reply.send(Ok(match id {
                         Some(id) => format!("subagent \"w\" ({id}) — completed, depth 1"),
                         None => "- \"w\" [running]\n".to_string(),

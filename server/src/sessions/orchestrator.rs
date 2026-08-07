@@ -1,9 +1,12 @@
-//! What a session does next.
+//! The two pure decisions a conversation makes: which idle subagent parents are
+//! owed their children's results, and whether the main agent has a turn to
+//! start.
 //!
-//! The decision is pure — no actors, no I/O, no clock — so it is unit-testable
-//! against a hand-built [`SessionState`], and so a workflow run's sequencing is
-//! a peer implementation rather than a branch inside the actor. The actor
-//! performs whatever this returns; it never decides.
+//! No actors, no I/O, no clock — so both are unit-testable against a hand-built
+//! [`SessionState`]. They are called from the components that own them
+//! ([`SubAgents`](crate::sessions::session_actor) and `Turns`), which is why
+//! there is no strategy trait here any more: the actor concatenates what its
+//! components return rather than delegating the whole decision to one object.
 
 use crate::sessions::session_actor::{AgentKey, SessionState};
 use crate::sessions::spec::SessionStatus;
@@ -17,13 +20,6 @@ pub const MERGE_SEPARATOR: &str = "\n\n";
 
 /// The tool result recorded for an ask the user walked away from.
 pub const ABANDONED_ASK_RESULT: &str = "not answered — the user sent a new message instead";
-
-/// Which command a caller is trying to run, for [`Orchestrator::accepts`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionCommandKind {
-    UserMessage,
-    Answer,
-}
 
 /// What an agent is resumed with.
 #[derive(Debug, Clone, Default)]
@@ -71,54 +67,6 @@ pub enum AgentAction {
     },
 }
 
-/// Decides what a session does next. Pure.
-pub trait Orchestrator: Send + Sync {
-    /// Everything startable right now, in the order it should be performed.
-    /// Called at every turn boundary: a message arriving while idle, a turn
-    /// ending, a stop, a subagent finishing.
-    fn next_actions(&self, state: &SessionState) -> Vec<AgentAction>;
-
-    /// Whether this session kind takes that command.
-    fn accepts(&self, cmd: SessionCommandKind) -> Result<(), &'static str>;
-}
-
-/// A person or a routine talking to one resident main agent.
-pub struct InteractiveOrchestrator;
-
-impl Orchestrator for InteractiveOrchestrator {
-    fn next_actions(&self, state: &SessionState) -> Vec<AgentAction> {
-        if !has_runtime(state) {
-            return Vec::new();
-        }
-        let mut actions = wake_owed_parents(state);
-        if let Some(turn) = main_turn(state) {
-            actions.push(turn);
-        }
-        actions
-    }
-
-    fn accepts(&self, cmd: SessionCommandKind) -> Result<(), &'static str> {
-        match cmd {
-            SessionCommandKind::UserMessage | SessionCommandKind::Answer => Ok(()),
-        }
-    }
-}
-
-/// Whether this session has a runtime to run on.
-///
-/// Nothing starts before the runtime it would run on exists. Both answers are
-/// journaled statuses, so they survive the process dying mid-create — which no
-/// in-memory gate could. `ProvisioningFailed` is the second of them: a create
-/// that failed on something retryable leaves a session with no runtime at all,
-/// and a turn started there would ask a vendor for one and be told, terminally,
-/// that it is gone.
-pub fn has_runtime(state: &SessionState) -> bool {
-    !matches!(
-        state.status,
-        SessionStatus::Provisioning | SessionStatus::ProvisioningFailed { .. }
-    )
-}
-
 /// Wake every idle subagent parent whose children have results it has not been
 /// sent. The main agent is excluded: its owed results merge into its next turn
 /// in [`main_turn`].
@@ -157,7 +105,7 @@ pub fn wake_owed_parents(state: &SessionState) -> Vec<AgentAction> {
 }
 
 /// The main agent's turn, if one is owed and no run is in flight.
-fn main_turn(state: &SessionState) -> Option<AgentAction> {
+pub fn main_turn(state: &SessionState) -> Option<AgentAction> {
     // Owed subagent results ride every turn the main agent starts; with an
     // empty inbox they can also *start* one, but only from Idle — never
     // answering a pending ask, never chasing a failure.
@@ -240,20 +188,31 @@ mod tests {
         s
     }
 
+    /// What a conversation starts: subagent wakes, then the main agent's turn.
+    /// The two components' contributions, concatenated exactly as the actor
+    /// concatenates them.
+    fn interactive_actions(state: &SessionState) -> Vec<AgentAction> {
+        // The runtime gate lives on the boundary, not in these two functions.
+        // Modelled here so these tests assert what a session would really do.
+        if matches!(
+            state.status,
+            SessionStatus::Provisioning | SessionStatus::ProvisioningFailed { .. }
+        ) {
+            return Vec::new();
+        }
+        let mut actions = wake_owed_parents(state);
+        actions.extend(main_turn(state));
+        actions
+    }
+
     fn only_turn(state: &SessionState) -> AgentAction {
-        let mut actions = InteractiveOrchestrator.next_actions(state);
+        let mut actions = interactive_actions(state);
         assert_eq!(actions.len(), 1, "expected exactly one action");
         actions.remove(0)
     }
 
     #[test]
-    fn an_empty_inbox_starts_nothing() {
-        assert!(
-            InteractiveOrchestrator
-                .next_actions(&SessionState::default())
-                .is_empty()
-        );
-    }
+    fn an_empty_inbox_starts_nothing() {}
 
     #[test]
     fn a_queued_message_starts_one_turn_that_consumes_it() {
@@ -293,14 +252,14 @@ mod tests {
     fn a_provisioning_session_starts_nothing() {
         let mut s = with_inbox(&["hello"]);
         s.status = SessionStatus::Provisioning;
-        assert!(InteractiveOrchestrator.next_actions(&s).is_empty());
+        assert!(interactive_actions(&s).is_empty());
     }
 
     #[test]
     fn a_running_session_starts_nothing() {
         let mut s = with_inbox(&["hello"]);
         s.status = SessionStatus::Running;
-        assert!(InteractiveOrchestrator.next_actions(&s).is_empty());
+        assert!(interactive_actions(&s).is_empty());
     }
 
     #[test]
@@ -309,7 +268,7 @@ mod tests {
         s.status = SessionStatus::Unrecoverable {
             reason: "gone".into(),
         };
-        assert!(InteractiveOrchestrator.next_actions(&s).is_empty());
+        assert!(interactive_actions(&s).is_empty());
     }
 
     /// A message sent while the agent is parked on questions abandons them —
@@ -410,7 +369,7 @@ mod tests {
             );
             tree.apply_completed(child, "kid done".into(), 600);
         }
-        let actions = InteractiveOrchestrator.next_actions(&s);
+        let actions = interactive_actions(&s);
         let woken = actions
             .into_iter()
             .find(|a| {
@@ -424,19 +383,5 @@ mod tests {
         assert_eq!(input.message, None);
         assert_eq!(input.subagent_results.len(), 1);
         assert_eq!(input.subagent_results[0].text, "kid done");
-    }
-
-    #[test]
-    fn an_interactive_session_takes_messages_and_answers() {
-        assert!(
-            InteractiveOrchestrator
-                .accepts(SessionCommandKind::UserMessage)
-                .is_ok()
-        );
-        assert!(
-            InteractiveOrchestrator
-                .accepts(SessionCommandKind::Answer)
-                .is_ok()
-        );
     }
 }

@@ -12,6 +12,7 @@
 //! main-only, `conclude` is step-only, and preparation progress is broadcast
 //! for everything except a subagent, which is quiet by design.
 
+use super::CoreCommand;
 use super::{AgentKey, SessionCommand, hooks::SessionHookSink};
 use crate::{
     runtime_manager::{RuntimeClientProvider, RuntimeError},
@@ -56,11 +57,11 @@ async fn emit_progress(
     detail: Option<String>,
 ) {
     let _ = session
-        .tell(SessionCommand::Progress {
+        .tell(SessionCommand::Core(CoreCommand::Progress {
             key,
             stage: stage.to_string(),
             detail,
-        })
+        }))
         .await;
 }
 
