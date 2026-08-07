@@ -22,12 +22,15 @@ use crate::{
     sessions::{
         UserMessageError,
         ask_tool::ASK_USER_TOOL,
-        mode::SessionModeState,
         orchestrator::{AgentAction, InteractiveOrchestrator, Orchestrator, SessionCommandKind},
         spec::{PendingAsk, ServerDeps, SessionSpec, SessionStatus},
-        subagents::{INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent},
+        subagents::{
+            INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentForest, SubAgentParent, SubAgentTree,
+            TreeOwner,
+        },
         supervisor::SessionSupervisorCommand,
         title_tool::normalize_session_title,
+        workflow::WorkflowRunState,
     },
 };
 use async_trait::async_trait;
@@ -425,7 +428,7 @@ pub struct InboxMessage {
 /// durability contract, and a container default fills anything a future version
 /// adds. Add optional fields; never rename or repurpose one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, from = "SessionStateWire")]
 pub struct SessionState {
     pub status: SessionStatus,
     /// Every ask awaiting an answer (status `AwaitingInput`), oldest first. A
@@ -440,11 +443,157 @@ pub struct SessionState {
     pub last_error: Option<String>,
     #[serde(default)]
     pub agent_usage: HashMap<String, UsageTotal>,
-    /// What drives this session's agents, and the subagent tree beneath it.
-    /// Was a bare `subagents` field; [`SessionModeState`] still reads that
-    /// shape, so snapshots written before the move load unchanged.
+    /// The workflow run this session is, if it is one. `None` for every
+    /// conversation, which is what makes the field additive.
     #[serde(default)]
-    pub mode: SessionModeState,
+    pub run: Option<WorkflowRunState>,
+    /// Every subagent this session holds, in one forest keyed by the agent that
+    /// roots each tree. Beside the run rather than inside it: a capability that
+    /// lives inside one kind is a capability the other kind silently loses.
+    #[serde(default)]
+    pub subagents: SubAgentForest,
+}
+
+impl SessionState {
+    /// What this session's own "Main" means right now: the step in flight for a
+    /// run, the main agent otherwise. The single kind-shaped fact the subagent
+    /// code is ever told, and it arrives as a value rather than a branch.
+    pub fn root_owner(&self) -> TreeOwner {
+        match self.run.as_ref().and_then(WorkflowRunState::current_agent) {
+            Some(agent) => TreeOwner::Step(agent),
+            None => TreeOwner::Main,
+        }
+    }
+}
+
+/// Every snapshot shape `SessionState` has ever been written in.
+///
+/// Three, because the subagent tree has moved twice: it was a bare field, then
+/// nested under `mode`, and is now a forest beside the run. A snapshot that
+/// fails to deserialize is a session that cannot be opened at all, so each
+/// older shape is read rather than rejected. Only the newest is ever written.
+#[derive(Deserialize)]
+#[serde(default)]
+struct SessionStateWire {
+    status: SessionStatus,
+    pending_asks: Vec<PendingAsk>,
+    inbox: Vec<InboxMessage>,
+    last_error: Option<String>,
+    agent_usage: HashMap<String, UsageTotal>,
+    run: Option<WorkflowRunState>,
+    /// A forest (current) or a bare tree (pre-`mode`). One key has held both
+    /// shapes, so it is read through an untagged enum rather than two fields.
+    subagents: Option<LegacySubagents>,
+    mode: Option<LegacyMode>,
+}
+
+impl Default for SessionStateWire {
+    fn default() -> Self {
+        Self {
+            status: SessionStatus::Idle,
+            pending_asks: Vec::new(),
+            inbox: Vec::new(),
+            last_error: None,
+            agent_usage: HashMap::new(),
+            run: None,
+            subagents: None,
+            mode: None,
+        }
+    }
+}
+
+/// The `subagents` key has meant two things. Forest first: a current snapshot
+/// must never be misread as a tree, and `SubAgentTree`'s `nodes` map would
+/// otherwise happily accept an empty object.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LegacySubagents {
+    Forest(SubAgentForest),
+    Tree(SubAgentTree),
+}
+
+/// The `mode`-tagged shape: a conversation carried `subagents`, a run carried
+/// `run` with one tree per step.
+#[derive(Deserialize)]
+struct LegacyMode {
+    #[serde(default)]
+    subagents: SubAgentTree,
+    #[serde(default)]
+    run: Option<LegacyRun>,
+}
+
+/// The run as it was written, spelled out rather than flattened. A
+/// `#[serde(flatten)]` of `WorkflowRunState` beside an explicit `steps` loses
+/// the steps: serde fills the named field and the flattened struct never sees
+/// the key.
+#[derive(Deserialize)]
+struct LegacyRun {
+    #[serde(default)]
+    status: crate::sessions::workflow::WorkflowRunStatus,
+    #[serde(default)]
+    steps: Vec<LegacyStepRun>,
+    #[serde(default)]
+    output: Option<Value>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// One step execution plus the tree it used to carry. `subagents` is no longer
+/// a field of `StepRun`, so the flatten leaves it here.
+#[derive(Deserialize)]
+struct LegacyStepRun {
+    #[serde(flatten)]
+    step: crate::sessions::workflow::StepRun,
+    #[serde(default)]
+    subagents: SubAgentTree,
+}
+
+impl From<SessionStateWire> for SessionState {
+    fn from(w: SessionStateWire) -> Self {
+        // Newest first, so a current snapshot never pays for the legacy paths.
+        let (run, subagents) = match (w.subagents, w.mode) {
+            (Some(LegacySubagents::Forest(forest)), _) => (w.run, forest),
+            (legacy_tree, mode) => {
+                let mut forest = SubAgentForest::default();
+                let mut run = w.run;
+                if let Some(mode) = mode {
+                    if let Some(legacy) = mode.run {
+                        // One tree per step, keyed by that step's agent id.
+                        let mut steps = Vec::with_capacity(legacy.steps.len());
+                        for entry in legacy.steps {
+                            if !entry.subagents.is_empty() {
+                                *forest.tree_mut(TreeOwner::Step(entry.step.agent)) =
+                                    entry.subagents;
+                            }
+                            steps.push(entry.step);
+                        }
+                        run = Some(WorkflowRunState {
+                            status: legacy.status,
+                            steps,
+                            output: legacy.output,
+                            error: legacy.error,
+                        });
+                    } else if !mode.subagents.is_empty() {
+                        *forest.tree_mut(TreeOwner::Main) = mode.subagents;
+                    }
+                } else if let Some(LegacySubagents::Tree(tree)) = legacy_tree
+                    && !tree.is_empty()
+                {
+                    *forest.tree_mut(TreeOwner::Main) = tree;
+                }
+                (run, forest)
+            }
+        };
+        Self {
+            status: w.status,
+            pending_asks: w.pending_asks,
+            inbox: w.inbox,
+            last_error: w.last_error,
+            agent_usage: w.agent_usage,
+            run,
+            subagents,
+        }
+    }
 }
 
 /// One agent's own usage/context-size snapshot, labeled with the model it ran.
@@ -985,7 +1134,7 @@ impl SessionActor {
                 }
                 // The type comes off the record, not from the caller: a cold
                 // node woken to answer a read must run as what it was spawned as.
-                let agent_type = state.mode.subagents().get(&id)?.agent_type.clone();
+                let agent_type = state.subagents.node(id)?.agent_type.clone();
                 Some((
                     AgentKey::Sub(id),
                     self.spawn_sub_agent_actor(ctx, id, agent_type),
@@ -1124,7 +1273,7 @@ impl SessionActor {
                     Some(agent) => agent.clone(),
                     // A cold node woken for the first time since load: spawn
                     // its resident actor on demand (see `on_recovery_complete`).
-                    None => match state.mode.subagents().get(&id) {
+                    None => match state.subagents.node(id) {
                         Some(rec) => {
                             let agent_type = rec.agent_type.clone();
                             self.spawn_sub_agent_actor(ctx, id, agent_type)
@@ -1336,7 +1485,7 @@ impl SessionActor {
             | AgentOutcome::UsageRecorded { session_id, .. } => *session_id,
         };
         // In a run, an outcome is a step's or one of a step's subagents'.
-        if let Some(run) = state.mode.run() {
+        if let Some(run) = state.run.as_ref() {
             if let Some(index) = run.index_of_agent(outcome_session) {
                 return self.on_step_outcome(state, index, outcome, ctx).await;
             }
@@ -1470,7 +1619,7 @@ impl SessionActor {
         reply: oneshot::Sender<Result<(), String>>,
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
-        let Some(run) = state.mode.run() else {
+        let Some(run) = state.run.as_ref() else {
             let _ = reply.send(Err("this session is not a workflow run".into()));
             return CommandEffect::none();
         };
@@ -1505,13 +1654,13 @@ impl SessionActor {
             next = Self::apply_event(next, e.clone());
         }
         let new_index = next
-            .mode
-            .run()
+            .run
+            .as_ref()
             .map(|r| r.steps.len() as u32)
             .unwrap_or_default();
         let attempt = next
-            .mode
-            .run()
+            .run
+            .as_ref()
             .map(|r| r.attempts_of(&target.step) + 1)
             .unwrap_or(1);
         let action = AgentAction::StartStep {
@@ -1555,8 +1704,8 @@ impl SessionActor {
             }]);
         }
         let step_name = state
-            .mode
-            .run()
+            .run
+            .as_ref()
             .and_then(|r| r.get(index))
             .map(|s| s.step.clone())
             .unwrap_or_default();
@@ -1667,7 +1816,7 @@ impl SessionActor {
                 usage_total,
             }]);
         }
-        let Some(rec) = state.mode.subagents().get(&id).cloned() else {
+        let Some(rec) = state.subagents.node(id).cloned() else {
             tracing::warn!(subagent = %id, "outcome from an unknown subagent; ignored");
             return CommandEffect::none();
         };
@@ -1842,7 +1991,7 @@ impl EventSourcedActor for SessionActor {
                 state.status = SessionStatus::AwaitingInput {
                     asks: state.pending_asks.clone(),
                 };
-                if let Some(run) = state.mode.run_mut() {
+                if let Some(run) = state.run.as_mut() {
                     run.apply_awaiting();
                 }
             }
@@ -1879,28 +2028,41 @@ impl EventSourcedActor for SessionActor {
                 at_ms,
                 agent_type,
             } => {
-                if let Some(tree) = state.mode.tree_of_parent_mut(parent) {
-                    tree.apply_spawned(id, parent, label, task, depth, at_ms, agent_type);
-                }
+                // The owner is resolved against the state as it stands *before*
+                // this event: the step in flight for a run, Main otherwise.
+                let owner = state
+                    .subagents
+                    .owner_for(parent, state.root_owner())
+                    .unwrap_or(TreeOwner::Main);
+                state
+                    .subagents
+                    .tree_mut(owner)
+                    .apply_spawned(id, parent, label, task, depth, at_ms, agent_type);
             }
             SessionDomainEvent::SubAgentRunning { id, at_ms } => {
-                if let Some(tree) = state.mode.tree_of_node_mut(id) {
-                    tree.apply_running(id, at_ms);
+                if let Some(owner) = state.subagents.owner_of(id) {
+                    state.subagents.tree_mut(owner).apply_running(id, at_ms);
                 }
             }
             SessionDomainEvent::SubAgentCompleted { id, output, at_ms } => {
-                if let Some(tree) = state.mode.tree_of_node_mut(id) {
-                    tree.apply_completed(id, output, at_ms);
+                if let Some(owner) = state.subagents.owner_of(id) {
+                    state
+                        .subagents
+                        .tree_mut(owner)
+                        .apply_completed(id, output, at_ms);
                 }
             }
             SessionDomainEvent::SubAgentFailed { id, error, at_ms } => {
-                if let Some(tree) = state.mode.tree_of_node_mut(id) {
-                    tree.apply_failed(id, error, at_ms);
+                if let Some(owner) = state.subagents.owner_of(id) {
+                    state
+                        .subagents
+                        .tree_mut(owner)
+                        .apply_failed(id, error, at_ms);
                 }
             }
             SessionDomainEvent::SubAgentNotified { id, .. } => {
-                if let Some(tree) = state.mode.tree_of_node_mut(id) {
-                    tree.apply_notified(id);
+                if let Some(owner) = state.subagents.owner_of(id) {
+                    state.subagents.tree_mut(owner).apply_notified(id);
                 }
             }
             SessionDomainEvent::StepStarted {
@@ -1916,10 +2078,11 @@ impl EventSourcedActor for SessionActor {
                 // The first step is what turns the state into a run:
                 // `initial_state` is static and cannot see the spec, so the mode
                 // is established by the log rather than at construction.
-                if !state.mode.is_workflow() {
-                    state.mode = SessionModeState::Workflow(Default::default());
-                }
-                if let Some(run) = state.mode.run_mut() {
+                // The first step is what turns this state into a run:
+                // `initial_state` is static and cannot see the spec, so the run
+                // is established by the log rather than at construction.
+                let run = state.run.get_or_insert_with(WorkflowRunState::default);
+                {
                     run.apply_started(step, agent, attempt, from, via, input, at_ms);
                 }
                 state.status = SessionStatus::Running;
@@ -1930,7 +2093,7 @@ impl EventSourcedActor for SessionActor {
                 index,
                 output,
             } => {
-                if let Some(run) = state.mode.run_mut() {
+                if let Some(run) = state.run.as_mut() {
                     run.apply_concluded(index, output, at_ms);
                 }
             }
@@ -1939,7 +2102,7 @@ impl EventSourcedActor for SessionActor {
                 index,
                 error,
             } => {
-                if let Some(run) = state.mode.run_mut() {
+                if let Some(run) = state.run.as_mut() {
                     run.apply_step_failed(index, error.clone(), at_ms);
                     run.apply_failed(error.clone());
                 }
@@ -1949,19 +2112,19 @@ impl EventSourcedActor for SessionActor {
                 state.last_error = Some(error);
             }
             SessionDomainEvent::StepCancelled { at_ms, index } => {
-                if let Some(run) = state.mode.run_mut() {
+                if let Some(run) = state.run.as_mut() {
                     run.apply_cancelled(index, at_ms);
                 }
                 state.status = SessionStatus::Idle;
             }
             SessionDomainEvent::RunFinished { output, .. } => {
-                if let Some(run) = state.mode.run_mut() {
+                if let Some(run) = state.run.as_mut() {
                     run.apply_finished(output);
                 }
                 state.status = SessionStatus::Idle;
             }
             SessionDomainEvent::RunFailed { error, .. } => {
-                if let Some(run) = state.mode.run_mut() {
+                if let Some(run) = state.run.as_mut() {
                     run.apply_failed(error.clone());
                 }
                 state.status = SessionStatus::Failed {
@@ -2172,7 +2335,7 @@ impl EventSourcedActor for SessionActor {
                 if matches!(
                     state.status,
                     SessionStatus::Running | SessionStatus::Provisioning
-                ) || state.mode.subagents().has_active()
+                ) || state.subagents.has_active()
                 {
                     let _ = reply.send(false);
                     return CommandEffect::none();
@@ -2192,7 +2355,7 @@ impl EventSourcedActor for SessionActor {
                 self.on_agent_outcome(state, outcome, ctx).await
             }
             SessionCommand::RunState { reply } => {
-                let _ = reply.send(state.mode.run().cloned());
+                let _ = reply.send(state.run.clone());
                 CommandEffect::none()
             }
             SessionCommand::AdvanceRun => {
@@ -2274,18 +2437,19 @@ impl EventSourcedActor for SessionActor {
                 CommandEffect::none()
             }
             SessionCommand::SubAgentTree { reply } => {
+                // Every tree, not one: the API reports a run's step subagents
+                // alongside a conversation's.
                 let tree = state
-                    .mode
-                    .subagents()
+                    .subagents
                     .ids()
                     .into_iter()
-                    .filter_map(|id| state.mode.subagents().get(&id).map(|rec| (id, rec.clone())))
+                    .filter_map(|id| state.subagents.node(id).map(|rec| (id, rec.clone())))
                     .collect();
                 let _ = reply.send(tree);
                 CommandEffect::none()
             }
             SessionCommand::ReconcileSubAgents => {
-                let interrupted = state.mode.subagents().interrupted();
+                let interrupted = state.subagents.interrupted();
                 if interrupted.is_empty() {
                     return CommandEffect::none();
                 }
@@ -2325,7 +2489,16 @@ impl EventSourcedActor for SessionActor {
                 agent_type,
                 reply,
             } => {
-                let Some(parent_depth) = state.mode.subagents().depth_of(caller) else {
+                let owner = state.subagents.owner_for(caller, state.root_owner());
+                let Some(parent_depth) = owner
+                    .and_then(|owner| state.subagents.tree(owner))
+                    .map_or_else(
+                        // An empty forest still has a Main at depth 0: the very
+                        // first spawn of a session has no tree to look in yet.
+                        || matches!(caller, SubAgentParent::Main).then_some(0),
+                        |tree| tree.depth_of(caller),
+                    )
+                else {
                     let _ = reply.send(Err("caller is not a known agent".to_string()));
                     return CommandEffect::none();
                 };
@@ -2336,7 +2509,7 @@ impl EventSourcedActor for SessionActor {
                     return CommandEffect::none();
                 }
                 let max = self.spec.agent.max_subagents();
-                if state.mode.subagents().active_count() >= max {
+                if state.subagents.active_count() >= max {
                     let _ = reply.send(Err(format!("{max} subagents already active")));
                     return CommandEffect::none();
                 }
@@ -2408,16 +2581,23 @@ impl EventSourcedActor for SessionActor {
                 CommandEffect::none()
             }
             SessionCommand::SubAgentStatus { caller, id, reply } => {
+                // Visibility is answered within the caller's own tree: a step
+                // and a conversation each see their own, and neither learns the
+                // other exists.
+                let tree = state
+                    .subagents
+                    .owner_for(caller, state.root_owner())
+                    .and_then(|owner| state.subagents.tree(owner));
                 let rendered = match id {
-                    Some(id) if state.mode.subagents().visible_to(caller, &id) => state
-                        .mode
-                        .subagents()
-                        .render_node(&id)
+                    Some(id) if tree.is_some_and(|t| t.visible_to(caller, &id)) => tree
+                        .and_then(|t| t.render_node(&id))
                         .ok_or_else(|| format!("no such subagent: {id}")),
                     // Out-of-subtree and unknown ids are indistinguishable —
                     // neither confirms the node exists.
                     Some(id) => Err(format!("no such subagent: {id}")),
-                    None => Ok(state.mode.subagents().render_subtree(caller)),
+                    None => Ok(tree
+                        .map(|t| t.render_subtree(caller))
+                        .unwrap_or_else(|| "No subagents.\n".to_string())),
                 };
                 let _ = reply.send(rendered);
                 CommandEffect::none()
@@ -2442,7 +2622,7 @@ impl EventSourcedActor for SessionActor {
             // mode is established by the first `StepStarted` — so an absent run
             // means "never started", exactly like `Pending`. A run that is
             // Running, Suspended or terminal is left alone.
-            let unstarted = match state.mode.run() {
+            let unstarted = match state.run.as_ref() {
                 None => true,
                 Some(run) => run.status == crate::sessions::workflow::WorkflowRunStatus::Pending,
             };
@@ -2456,7 +2636,7 @@ impl EventSourcedActor for SessionActor {
         // must not replay hundreds of journals on open. They spawn lazily —
         // on a history read or an owed-result flush — and recovery starts no
         // runs either way.
-        if !state.mode.subagents().interrupted().is_empty() {
+        if !state.subagents.interrupted().is_empty() {
             let _ = ctx
                 .self_ref()
                 .tell(SessionCommand::ReconcileSubAgents)

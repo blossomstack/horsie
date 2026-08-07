@@ -21,7 +21,6 @@ pub use spec::{
 };
 pub use toolbox::StepConcludeToolbox;
 
-use crate::sessions::subagents::SubAgentTree;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -81,10 +80,6 @@ pub struct StepRun {
     pub input: String,
     pub output: Option<Value>,
     pub error: Option<String>,
-    /// This step's own subagent tree. A step agent may spawn subagents exactly
-    /// as a main agent may, and they belong to the step, not to the run.
-    #[serde(default)]
-    pub subagents: SubAgentTree,
     pub started_at_ms: u64,
     pub ended_at_ms: Option<u64>,
 }
@@ -121,13 +116,10 @@ impl WorkflowRunState {
             .map(|i| i as u32)
     }
 
-    /// The subagent tree of the execution owning `agent`, whether `agent` is
-    /// the step itself or one of its descendants.
-    pub fn tree_of(&self, agent: Uuid) -> Option<(u32, &SubAgentTree)> {
-        self.steps.iter().enumerate().find_map(|(i, s)| {
-            (s.agent == agent || s.subagents.get(&agent).is_some())
-                .then_some((i as u32, &s.subagents))
-        })
+    /// The agent id of the execution in flight, which is the tree a spawn by
+    /// that step belongs in.
+    pub fn current_agent(&self) -> Option<Uuid> {
+        self.current().and_then(|i| self.get(i)).map(|s| s.agent)
     }
 
     /// The last execution, which is the one a decision is made from.
@@ -166,7 +158,6 @@ impl WorkflowRunState {
             input,
             output: None,
             error: None,
-            subagents: SubAgentTree::default(),
             started_at_ms: at_ms,
             ended_at_ms: None,
         });
@@ -291,29 +282,22 @@ mod tests {
         assert!(s.index_of_agent(Uuid::from_u128(99)).is_none());
     }
 
-    /// A subagent of a step resolves to that step's tree, which is what lets a
-    /// step agent spawn subagents of its own.
+    /// The step in flight is the tree a spawn by that step belongs in. Subagent
+    /// trees no longer hang off `StepRun` — they live in the session's forest,
+    /// keyed by this id — so this is the whole of what a run tells the subagent
+    /// code, and the only run-shaped fact that code ever learns.
     #[test]
-    fn a_subagent_resolves_to_its_own_steps_tree() {
-        use crate::sessions::subagents::SubAgentParent;
+    fn the_step_in_flight_names_the_tree_a_spawn_belongs_in() {
         let mut s = WorkflowRunState::default();
         started(&mut s, "a", 0, None);
+        assert_eq!(s.current_agent(), Some(Uuid::from_u128(0)));
+        s.apply_concluded(0, Value::Null, 200);
+        // Between steps nothing is in flight, so a spawn would belong to the
+        // conversation's tree — which is exactly why a run must never be
+        // between steps while one of its agents can spawn.
+        assert_eq!(s.current_agent(), None);
         started(&mut s, "b", 1, Some(0));
-        let child = Uuid::from_u128(500);
-        s.steps[1].subagents.apply_spawned(
-            child,
-            SubAgentParent::Main,
-            "reader".into(),
-            "read".into(),
-            1,
-            100,
-            None,
-        );
-        let (index, tree) = s.tree_of(child).unwrap();
-        assert_eq!(index, 1);
-        assert_eq!(tree.get(&child).unwrap().label, "reader");
-        // The other step's tree is untouched.
-        assert!(s.steps[0].subagents.is_empty());
+        assert_eq!(s.current_agent(), Some(Uuid::from_u128(1)));
     }
 
     #[test]

@@ -15,6 +15,94 @@ use horsie_models::hooks::{HookAction, StopOutcome};
 use horsie_workflow::{ContextProvider, Contexts, StartTurn};
 use std::sync::PoisonError;
 
+/// A snapshot written before `mode` existed carries `subagents` at the top
+/// level, flat. It must load with its tree intact — anything else silently
+/// drops every subagent of every deployed session.
+#[test]
+fn a_pre_mode_snapshot_keeps_its_subagents() {
+    let legacy = serde_json::json!({
+        "status": "Idle",
+        "inbox": [],
+        "subagents": { "nodes": { "3f1a2b4c-0000-4000-8000-000000000001": {
+            "parent": "Main", "label": "reader", "task": "read the file", "depth": 1,
+            "status": "Completed", "output": "done", "error": null, "notified": true
+        }}}
+    });
+    let state: SessionState = serde_json::from_value(legacy).unwrap();
+    let id = Uuid::parse_str("3f1a2b4c-0000-4000-8000-000000000001").unwrap();
+    assert_eq!(state.subagents.node(id).unwrap().label, "reader");
+    assert_eq!(state.subagents.owner_of(id), Some(TreeOwner::Main));
+}
+
+/// A snapshot written after `mode` existed nests the tree under
+/// `mode.subagents` for a conversation.
+#[test]
+fn a_mode_tagged_conversation_snapshot_keeps_its_subagents() {
+    let legacy = serde_json::json!({
+        "status": "Idle",
+        "mode": { "kind": "Interactive", "subagents": { "nodes": {
+            "3f1a2b4c-0000-4000-8000-000000000002": {
+                "parent": "Main", "label": "auditor", "task": "t", "depth": 1,
+                "status": "Running", "output": null, "error": null, "notified": false
+            }}}}
+    });
+    let state: SessionState = serde_json::from_value(legacy).unwrap();
+    let id = Uuid::parse_str("3f1a2b4c-0000-4000-8000-000000000002").unwrap();
+    assert_eq!(state.subagents.node(id).unwrap().label, "auditor");
+    assert_eq!(state.subagents.active_count(), 1);
+}
+
+/// A run's snapshot nested one tree per step. Each must land under that step's
+/// agent id, and the run itself must survive.
+#[test]
+fn a_workflow_snapshot_lands_each_steps_tree_under_that_step() {
+    let step_agent = "3f1a2b4c-0000-4000-8000-0000000000aa";
+    let child_id = "3f1a2b4c-0000-4000-8000-0000000000bb";
+    let legacy = serde_json::json!({
+        "status": "Running",
+        "mode": { "kind": "Workflow", "run": {
+            "status": "Running",
+            "steps": [{
+                "step": "review", "agent": step_agent, "attempt": 1, "from": null,
+                "via": null, "input": "go", "status": "Running", "output": null,
+                "error": null, "started_at_ms": 1, "ended_at_ms": null,
+                "subagents": { "nodes": { child_id: {
+                    "parent": "Main", "label": "helper", "task": "t", "depth": 1,
+                    "status": "Completed", "output": "kid done", "error": null,
+                    "notified": false
+                }}}
+            }],
+            "output": null, "error": null
+        }}
+    });
+    let state: SessionState = serde_json::from_value(legacy).unwrap();
+    let owner = TreeOwner::Step(Uuid::parse_str(step_agent).unwrap());
+    let child = Uuid::parse_str(child_id).unwrap();
+    assert_eq!(state.subagents.owner_of(child), Some(owner));
+    assert_eq!(state.run.as_ref().unwrap().steps.len(), 1);
+    // The aggregate that answered 0 before this change.
+    assert_eq!(state.subagents.owed().len(), 1);
+}
+
+/// The new shape round-trips.
+#[test]
+fn the_new_state_shape_round_trips() {
+    let mut state = SessionState::default();
+    let id = Uuid::new_v4();
+    state.subagents.tree_mut(TreeOwner::Main).apply_spawned(
+        id,
+        SubAgentParent::Main,
+        "x".into(),
+        "t".into(),
+        1,
+        100,
+        None,
+    );
+    let json = serde_json::to_value(&state).unwrap();
+    let back: SessionState = serde_json::from_value(json).unwrap();
+    assert_eq!(back.subagents.node(id).unwrap().label, "x");
+}
+
 fn queued(id: &str, text: &str) -> SessionDomainEvent {
     SessionDomainEvent::MessageQueued {
         id: id.to_string(),
@@ -345,7 +433,7 @@ fn subagent_events_fold_into_the_tree() {
         depth: 1,
         agent_type: None,
     }]);
-    assert_eq!(s.mode.subagents().active_count(), 1);
+    assert_eq!(s.subagents.active_count(), 1);
 
     let s = SessionActor::apply_event(
         s,
@@ -355,12 +443,12 @@ fn subagent_events_fold_into_the_tree() {
             output: "answer".into(),
         },
     );
-    let rec = s.mode.subagents().get(&id).unwrap();
+    let rec = s.subagents.node(id).unwrap();
     assert_eq!(rec.status, SubAgentStatus::Completed);
     assert!(!rec.notified);
 
     let s = SessionActor::apply_event(s, SessionDomainEvent::SubAgentNotified { at_ms: 0, id });
-    assert!(s.mode.subagents().get(&id).unwrap().notified);
+    assert!(s.subagents.node(id).unwrap().notified);
 }
 
 #[test]
@@ -376,7 +464,7 @@ fn a_running_then_failed_subagent_reads_as_interrupted_then_terminal() {
         depth: 1,
         agent_type: None,
     }]);
-    assert_eq!(s.mode.subagents().interrupted(), vec![id]);
+    assert_eq!(s.subagents.interrupted(), vec![id]);
     let s = SessionActor::apply_event(
         s,
         SessionDomainEvent::SubAgentFailed {
@@ -385,7 +473,7 @@ fn a_running_then_failed_subagent_reads_as_interrupted_then_terminal() {
             error: "interrupted by restart".into(),
         },
     );
-    assert!(s.mode.subagents().interrupted().is_empty());
+    assert!(s.subagents.interrupted().is_empty());
 }
 
 #[test]
@@ -1185,7 +1273,7 @@ async fn wait_for_run(
 ) -> crate::sessions::workflow::WorkflowRunState {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if let Some(run) = state.mode.run()
+        if let Some(run) = state.run.as_ref()
             && pred(run)
         {
             return run.clone();
@@ -1193,7 +1281,10 @@ async fn wait_for_run(
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-    panic!("run never satisfied the predicate: {:?}", state.mode.run());
+    panic!(
+        "run never satisfied the predicate: {:?}",
+        state.run.as_ref()
+    );
 }
 
 /// A scripted `conclude` call carrying this output.
@@ -1370,11 +1461,11 @@ async fn retrying_a_step_appends_an_attempt_on_the_same_edge() {
 async fn wait_for_tree(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
-    pred: impl Fn(&crate::sessions::subagents::SubAgentTree) -> bool,
+    pred: impl Fn(&crate::sessions::subagents::SubAgentForest) -> bool,
 ) {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if pred(state.mode.subagents()) {
+        if pred(&state.subagents) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1534,7 +1625,7 @@ async fn a_runs_first_step_waits_for_the_create_too() {
     .await;
     let held = crate::sessions::events::fold_session_state(&journal, id).await;
     assert!(
-        held.mode.run().is_none_or(|r| r.steps.is_empty()),
+        held.run.as_ref().is_none_or(|r| r.steps.is_empty()),
         "no step may start before the runtime it would run on"
     );
 
@@ -1943,12 +2034,12 @@ async fn spawn_records_a_running_subagent_in_the_tree() {
     let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
     let sub = spawn_sub(&session, "research", "dig into it").await;
     wait_for_tree(&journal, id, |t| {
-        t.get(&sub)
+        t.node(sub)
             .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
     })
     .await;
     let state = crate::sessions::events::fold_session_state(&journal, id).await;
-    let rec = state.mode.subagents().get(&sub).unwrap();
+    let rec = &state.subagents.node(sub).unwrap();
     assert_eq!(rec.depth, 1);
     assert_eq!(rec.parent, crate::sessions::subagents::SubAgentParent::Main);
     assert_eq!(rec.label, "research");
@@ -3359,7 +3450,7 @@ async fn a_subagents_hooks_land_on_its_own_transcript() {
     let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
     let sub = spawn_sub(&session, "research", "dig into it").await;
     wait_for_tree(&journal, id, |t| {
-        t.get(&sub)
+        t.node(sub)
             .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
     })
     .await;
@@ -3411,7 +3502,7 @@ async fn a_completed_subagent_notifies_an_idle_main_agent() {
     let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
     let sub = spawn_sub(&session, "research", "dig").await;
     // Owed, then delivered: the tree's notified flag flips exactly once.
-    wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
+    wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
     let texts = subagent_texts(&main_history(&session).await);
     assert!(
         texts
@@ -3479,9 +3570,9 @@ async fn a_failed_subagent_reports_the_error_to_its_parent() {
     };
     let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(provider)).await;
     let sub = spawn_sub(&session, "risky", "doomed task").await;
-    wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
+    wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
     let state = crate::sessions::events::fold_session_state(&journal, id).await;
-    let rec = state.mode.subagents().get(&sub).unwrap();
+    let rec = &state.subagents.node(sub).unwrap();
     assert_eq!(
         rec.status,
         crate::sessions::subagents::SubAgentStatus::Failed
@@ -3553,7 +3644,7 @@ async fn a_notification_waits_out_an_awaiting_input_session() {
     // A subagent completes while the session is AwaitingInput.
     let sub = spawn_sub(&session, "research", "dig").await;
     wait_for_tree(&journal, id, |t| {
-        t.get(&sub).is_some_and(|r| {
+        t.node(sub).is_some_and(|r| {
             r.status == crate::sessions::subagents::SubAgentStatus::Completed && !r.notified
         })
     })
@@ -3574,7 +3665,7 @@ async fn a_notification_waits_out_an_awaiting_input_session() {
         .await
         .unwrap()
         .unwrap();
-    wait_for_tree(&journal, id, |t| t.get(&sub).is_some_and(|r| r.notified)).await;
+    wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
     // A plain message does not answer the question — it abandons it and
     // starts a fresh turn — so the reply and the notification ride in the
     // *user message*, while the abandoned ask gets a result of its own.
@@ -3674,9 +3765,9 @@ async fn a_stranded_grandchild_result_flushes_at_the_next_turn_boundary() {
     );
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let state = crate::sessions::events::fold_session_state(&journal, id).await;
-    assert!(!state.mode.subagents().get(&c).unwrap().notified);
+    assert!(!&state.subagents.node(c).unwrap().notified);
     assert_eq!(
-        state.mode.subagents().get(&p).unwrap().status,
+        state.subagents.node(p).unwrap().status,
         SubAgentStatus::Completed
     );
 
@@ -3694,8 +3785,8 @@ async fn a_stranded_grandchild_result_flushes_at_the_next_turn_boundary() {
     // one effect, so don't wait on a `!notified` window — C delivered and
     // P re-concluded are the durable facts.
     wait_for_tree(&journal, id, |t| {
-        t.get(&c).is_some_and(|r| r.notified)
-            && t.get(&p).is_some_and(|r| {
+        t.node(c).is_some_and(|r| r.notified)
+            && t.node(p).is_some_and(|r| {
                 r.status == SubAgentStatus::Completed && r.output.as_deref() == Some("sub answer")
             })
     })
@@ -3728,7 +3819,7 @@ async fn recovery_respawns_subagents_and_fails_interrupted_ones() {
     let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
     let sub = spawn_sub(&session, "w", "t").await;
     wait_for_tree(&journal, id, |t| {
-        t.get(&sub)
+        t.node(sub)
             .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
     })
     .await;
@@ -3748,13 +3839,13 @@ async fn recovery_respawns_subagents_and_fails_interrupted_ones() {
         journal.clone(),
     );
     wait_for_tree(&journal, id, |t| {
-        t.get(&sub)
+        t.node(sub)
             .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Failed)
     })
     .await;
     let state = crate::sessions::events::fold_session_state(&journal, id).await;
     assert_eq!(
-        state.mode.subagents().get(&sub).unwrap().error.as_deref(),
+        state.subagents.node(sub).unwrap().error.as_deref(),
         Some(crate::sessions::subagents::INTERRUPTED_ERROR)
     );
     // The transcript stays pageable: the resident actor answers history.
@@ -3791,4 +3882,157 @@ async fn prepare_offload_refuses_with_an_active_subagent() {
         "refusing must not touch the runtime"
     );
     gate.release();
+}
+
+// -- subagents inside a workflow run -------------------------------------
+//
+// Before the forest, `SessionModeState` owned the tree and every read went
+// through an accessor that answered `empty_tree()` for a run. Spawns were
+// journaled into the right place and then never seen again: the outcome was
+// dropped with a warning, the concurrency cap read zero, and an offload could
+// unload a session with a step's subagent mid-run.
+
+/// Answers a step by never returning, and everything else with plain text.
+///
+/// A step must stay in flight for the length of these tests: it is the tree a
+/// spawn belongs in, and a concluded step takes its tree out of play. Told
+/// apart by the step's own prompt, which no subagent conversation carries.
+struct StepStallsProvider;
+
+#[async_trait]
+impl LlmProvider for StepStallsProvider {
+    fn model_id(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        request: horsie_agentcore::CompletionRequest<'_>,
+        _message_id: &str,
+        _events: &dyn horsie_agentcore::EventSink,
+    ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+        let is_step = request.messages.iter().any(|m| {
+            m.parts.iter().any(|p| {
+                matches!(p, horsie_agentcore::ContentPart::Text(t) if t.text.contains("Triage it."))
+            })
+        });
+        if is_step {
+            // Never returns. The step stays `Running` and its tree stays live.
+            std::future::pending::<()>().await;
+        }
+        Ok(horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::Text(
+                horsie_agentcore::TextPart {
+                    text: "sub answer".to_string(),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::EndTurn,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        })
+    }
+}
+
+/// A run whose first step is in flight and stays there, so it has a tree that
+/// spawns belong in.
+async fn a_run_with_a_step_in_flight() -> (
+    ActorFixture,
+    ActorRef<SessionCommand>,
+    Uuid,
+    Arc<dyn horsie_actor::Journal>,
+) {
+    let (f, session, id, journal) = spawn_run_with_provider(Arc::new(StepStallsProvider)).await;
+    wait_for_run(&journal, id, |r| r.current().is_some()).await;
+    (f, session, id, journal)
+}
+
+/// The defect this change exists to close. A subagent spawned by a workflow
+/// step used to have its completion dropped — `on_sub_agent_outcome` looked the
+/// node up in the conversation's tree, which a run does not have.
+#[tokio::test]
+async fn a_workflow_steps_subagent_completion_is_recorded() {
+    let (_f, session, id, journal) = a_run_with_a_step_in_flight().await;
+    let sub = spawn_sub(&session, "helper", "dig").await;
+
+    // The spawn lands in the step's tree, not the conversation's.
+    let state = crate::sessions::events::fold_session_state(&journal, id).await;
+    let step_agent = state.run.as_ref().unwrap().steps[0].agent;
+    assert_eq!(
+        state.subagents.owner_of(sub),
+        Some(TreeOwner::Step(step_agent)),
+        "a step's spawn belongs to that step's tree"
+    );
+
+    // And its completion is journaled rather than dropped.
+    wait_for_tree(&journal, id, |forest| {
+        forest
+            .node(sub)
+            .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Completed)
+    })
+    .await;
+    let state = crate::sessions::events::fold_session_state(&journal, id).await;
+    assert_eq!(
+        state.subagents.node(sub).unwrap().output.as_deref(),
+        Some("sub answer")
+    );
+}
+
+/// The aggregates a run used to answer as though it had no subagents at all.
+#[tokio::test]
+async fn a_runs_subagents_count_toward_the_session_wide_aggregates() {
+    // Blocks every call, so both the step and its subagent stay `Running` for
+    // as long as this test looks at them.
+    let provider = BlockingProvider::new();
+    let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
+    wait_for_run(&journal, id, |r| r.current().is_some()).await;
+    let sub = spawn_sub(&session, "slow", "work").await;
+    wait_for_tree(&journal, id, |f| f.node(sub).is_some()).await;
+
+    // While it runs, the session is busy. This is what stops the supervisor
+    // unloading a run out from under a step's subagent — `has_active` answered
+    // false for every run before the forest.
+    let state = crate::sessions::events::fold_session_state(&journal, id).await;
+    assert!(
+        state.subagents.has_active(),
+        "a run's subagent is active work"
+    );
+    assert_eq!(state.subagents.active_count(), 1);
+    assert_eq!(state.subagents.interrupted(), vec![sub]);
+
+    // And the API reports it: `SubAgentTree` spans every tree.
+    let tree = session
+        .ask(|reply| SessionCommand::SubAgentTree { reply })
+        .await
+        .unwrap();
+    assert_eq!(tree.len(), 1, "a run's subagents must reach the API");
+    assert_eq!(tree[0].0, sub);
+}
+
+/// A nested subagent's result reaches its parent inside a run. Delivery used to
+/// live only in `InteractiveOrchestrator`, so it never ran for a workflow;
+/// `wake_owed_parents` now reads the forest and the run driver calls it.
+#[tokio::test]
+async fn a_nested_subagents_result_wakes_its_parent_inside_a_run() {
+    let (_f, session, id, journal) = a_run_with_a_step_in_flight().await;
+    let parent = spawn_sub(&session, "lead", "delegate").await;
+    wait_for_tree(&journal, id, |f| {
+        f.node(parent)
+            .is_some_and(|r| r.status != crate::sessions::subagents::SubAgentStatus::Running)
+    })
+    .await;
+
+    let child = session
+        .ask(|reply| SessionCommand::SpawnSubAgent {
+            caller: crate::sessions::subagents::SubAgentParent::SubAgent(parent),
+            label: "helper".into(),
+            task: "dig".into(),
+            agent_type: None,
+            reply,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The child's result is delivered to its parent — `notified` flips only
+    // when the parent has actually been resumed with it.
+    wait_for_tree(&journal, id, |f| f.node(child).is_some_and(|r| r.notified)).await;
 }
