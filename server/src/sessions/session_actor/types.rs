@@ -396,6 +396,14 @@ pub enum SessionDomainEvent {
 /// what lets the three components that handle an outcome match exhaustively on
 /// the four real cases, instead of each carrying an `unreachable!` for a variant
 /// it can never be handed.
+///
+/// It is a second vocabulary for something `horsie_workflow` already names, and
+/// that is the deliberate cost. `AgentOutcome` is the *protocol* between an
+/// agent and whatever owns it, and horsie has owners that are not sessions; a
+/// session's components want the smaller thing. [`TurnEnd::split`] is the only
+/// conversion, and its match is exhaustive, so a variant added to `AgentOutcome`
+/// fails to compile there — which is the right place to decide whether it is a
+/// way a turn ends or another thing to bank.
 pub(super) enum TurnEnd {
     /// The agent produced its output — structured, or its final text.
     Concluded { output: Value },

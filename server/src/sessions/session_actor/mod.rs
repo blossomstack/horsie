@@ -9,10 +9,18 @@
 //! an interrupted assistant turn is over, while accepted user input is a
 //! promise kept at the next turn boundary.
 //!
-//! Two of its neighbours live alongside it rather than inside it: [`context`]
-//! assembles one turn (runtime handle, toolbox, system prompt) on the agent's
-//! own task, and [`hooks`] is the pair of sinks a plugin's hooks report
-//! themselves through.
+//! What is left here is the actor itself: the roster of agents it hosts, the
+//! spawner that builds one, the dispatch that hands each command to the
+//! component that owns it, and the turn boundary where the components' decisions
+//! are performed in order. Everything else lives beside it.
+//!
+//! One component per slice of the session — [`lifecycle`] the sandbox,
+//! [`turns`] the conversation, [`run`] the workflow graph, [`subagent`] the tree
+//! of delegated work, [`reads`] the questions that wake nothing, [`hooks`] what
+//! plugins did, [`core`] the session's own bookkeeping — over the vocabulary in
+//! [`types`], to the shape in [`component`]. [`context`] is not one of them: it
+//! assembles a turn on the *agent's* task rather than on this mailbox, which is
+//! what keeps a thirty-second toolbox build from blocking a cancel.
 
 mod component;
 mod context;
@@ -38,7 +46,7 @@ use turns::Turns;
 
 use crate::sessions::{
     ask_tool::ASK_USER_TOOL,
-    orchestrator::AgentAction,
+    orchestrator::{AgentAction, TurnStart},
     spec::{ServerDeps, SessionSpec, SessionStatus},
     supervisor::SessionSupervisorCommand,
 };
@@ -422,38 +430,8 @@ impl SessionActor {
         ctx: &ActorContext<Self>,
     ) -> Vec<SessionDomainEvent> {
         match action {
-            AgentAction::StartTurn {
-                who,
-                input,
-                consumed,
-                answered,
-                notified,
-                mark_running,
-            } => {
-                self.start_turn(
-                    who,
-                    input,
-                    consumed,
-                    answered,
-                    notified,
-                    mark_running,
-                    state,
-                    ctx,
-                )
-                .await
-            }
-            AgentAction::StartStep {
-                index,
-                step,
-                agent,
-                attempt,
-                from,
-                via,
-                input,
-            } => {
-                self.start_step(ctx, index, step, agent, attempt, from, via, input)
-                    .await
-            }
+            AgentAction::StartTurn(turn) => self.start_turn(turn, state, ctx).await,
+            AgentAction::StartStep(step) => self.start_step(step, ctx).await,
             AgentAction::Finish { output } => self.finish_run(output).await,
             AgentAction::Fail { error } => self.fail_run(error).await,
         }
@@ -462,18 +440,20 @@ impl SessionActor {
     /// Resume the agent a `StartTurn` names, and return the events that record
     /// it. Split from [`Self::perform`] so neither half needs an `unreachable!`
     /// for the variants the other owns.
-    #[allow(clippy::too_many_arguments)]
     async fn start_turn(
         &mut self,
-        who: AgentKey,
-        input: crate::sessions::orchestrator::TurnInput,
-        consumed: Vec<String>,
-        answered: Vec<String>,
-        notified: Vec<Uuid>,
-        mark_running: Option<Uuid>,
+        turn: TurnStart,
         state: &SessionState,
         ctx: &ActorContext<Self>,
     ) -> Vec<SessionDomainEvent> {
+        let TurnStart {
+            who,
+            input,
+            consumed,
+            answered,
+            notified,
+            mark_running,
+        } = turn;
         match who {
             // A subagent parent waking to consume its children's results. It
             // is skipped, not failed, when its actor cannot be reached: the

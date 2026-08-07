@@ -217,9 +217,13 @@ fn last_step_entry(status: &str, state: &SessionState) -> Vec<Entry> {
     let Some(run) = state.run.as_ref() else {
         return Vec::new();
     };
-    let last = run.steps.len().checked_sub(1);
+    let last = run
+        .steps
+        .len()
+        .checked_sub(1)
+        .and_then(|i| u32::try_from(i).ok());
     match last {
-        Some(index) => step_entry(index as u32, status, state),
+        Some(index) => step_entry(index, status, state),
         None => Vec::new(),
     }
 }

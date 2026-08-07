@@ -118,11 +118,18 @@ impl SessionActor {
     /// only — an agent never tells the session anything back through here.
     ///
     /// **Resident agents only**, because this hook has no `ActorContext` to
-    /// spawn with. That is not the limitation it looks like: `main` is spawned
-    /// at recovery and stays for the session's loaded life, and every
-    /// subagent-targeted event happens while that subagent is running. A miss
-    /// is therefore a bug worth hearing about rather than a case to handle,
-    /// which is what the warning is for.
+    /// spawn with. That is not the limitation it looks like: a conversation's
+    /// `main` is spawned at recovery and stays for the session's loaded life, a
+    /// run's step agent is live for as long as its step is, and every
+    /// subagent-targeted event happens while that subagent is running. A miss is
+    /// therefore a bug worth hearing about rather than a case to handle, which
+    /// is what the warning is for — an event with genuinely nowhere to go routes
+    /// to nothing at all, and never reaches this loop.
+    ///
+    /// Note the state it routes against: `on_events_persisted` is called once
+    /// per batch, with the state the *whole* batch folded to. Two of the
+    /// routings read that state, so an event is placed by where the batch ended
+    /// rather than by where it itself sat.
     pub(super) async fn record_lifecycle(
         &mut self,
         events: &[SessionDomainEvent],

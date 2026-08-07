@@ -15,6 +15,7 @@ use super::{
     AgentAction, AgentKey, AgentPlan, CommandEffect, RunCommand, SessionActor, SessionCommand,
     SessionDomainEvent, SessionState, TurnEnd,
 };
+use crate::sessions::orchestrator::StepStart;
 use crate::sessions::spec::{PendingAsk, SessionStatus};
 use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
@@ -54,18 +55,20 @@ impl WorkflowRun {
 /// `impl` in a child module sees them, so moving the code needed no plumbing.
 impl SessionActor {
     /// Begin one execution of one step: spawn its agent and hand it the input.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn start_step(
         &mut self,
+        start: StepStart,
         ctx: &ActorContext<Self>,
-        index: u32,
-        step: String,
-        agent: Uuid,
-        attempt: u32,
-        from: Option<u32>,
-        via: Option<String>,
-        input: String,
     ) -> Vec<SessionDomainEvent> {
+        let StepStart {
+            index,
+            step,
+            agent,
+            attempt,
+            from,
+            via,
+            input,
+        } = start;
         // The name is not in the log yet — this event is what puts it there —
         // so it is handed to the spawner rather than looked up.
         let Some(actor) = self.spawn_step_agent(ctx, agent, &step) else {
@@ -174,16 +177,20 @@ impl SessionActor {
         let _ = reply.send(Ok(()));
         events.extend(
             self.start_step(
+                StepStart {
+                    index: new_index,
+                    step: target.step.clone(),
+                    agent: crate::sessions::workflow::WorkflowRunSpec::step_agent_id(
+                        self.id, new_index,
+                    ),
+                    attempt,
+                    // The retry sits where the original sat, so the graph draws
+                    // it on the same edge rather than inventing a new one.
+                    from: target.from,
+                    via: target.via.clone(),
+                    input: target.input.clone(),
+                },
                 ctx,
-                new_index,
-                target.step.clone(),
-                crate::sessions::workflow::WorkflowRunSpec::step_agent_id(self.id, new_index),
-                attempt,
-                // The retry sits where the original sat, so the graph draws it
-                // on the same edge rather than inventing a new one.
-                target.from,
-                target.via.clone(),
-                target.input.clone(),
             )
             .await,
         );

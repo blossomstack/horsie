@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(stopped.status, SessionStatus::Idle);
         let actions = decisions(&actor, &stopped);
         assert_eq!(actions.len(), 1, "{actions:?}");
-        let AgentAction::StartTurn { consumed, .. } = &actions[0] else {
+        let AgentAction::StartTurn(TurnStart { consumed, .. }) = &actions[0] else {
             panic!("an interactive session starts turns, not steps");
         };
         assert_eq!(consumed, &vec!["m2".to_string()]);
@@ -782,7 +782,7 @@ mod tests {
         let state = fold(vec![queued("m1", "one"), queued("m2", "two")]);
         let actions = decisions(&actor, &state);
         assert_eq!(actions.len(), 1);
-        let AgentAction::StartTurn { consumed, .. } = &actions[0] else {
+        let AgentAction::StartTurn(TurnStart { consumed, .. }) = &actions[0] else {
             panic!("an interactive session starts turns, not steps");
         };
         assert_eq!(consumed, &vec!["m1".to_string(), "m2".to_string()]);
@@ -809,12 +809,12 @@ mod tests {
         ]);
         let actions = decisions(&actor, &state);
         assert_eq!(actions.len(), 1);
-        let AgentAction::StartTurn {
+        let AgentAction::StartTurn(TurnStart {
             consumed,
             answered,
             input,
             ..
-        } = &actions[0]
+        }) = &actions[0]
         else {
             panic!("an interactive session starts turns, not steps");
         };
