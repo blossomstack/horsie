@@ -119,7 +119,7 @@ pub(super) enum SessionAgentKind {
 impl SessionAgentKind {
     /// The key this agent is registered under on the session. One vocabulary:
     /// what the provider knows itself as is what the session looks it up by.
-    fn agent_key(&self) -> AgentKey {
+    pub(super) fn agent_key(&self) -> AgentKey {
         match self {
             Self::Main => AgentKey::Main,
             Self::Sub(id) => AgentKey::Sub(*id),

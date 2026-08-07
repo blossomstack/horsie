@@ -34,37 +34,52 @@ pub struct TurnInput {
 
 /// Something the actor should do. Every field is what the actor needs to
 /// journal the action, so the actor never re-derives a decision.
+///
+/// The two large variants carry a named payload rather than inline fields: the
+/// actor hands each straight to the method that performs it, and a struct keeps
+/// that a one-argument call instead of seven positional ones.
 #[derive(Debug, Clone)]
 pub enum AgentAction {
-    /// Begin one execution of one workflow step. Carries everything needed to
-    /// both spawn the agent and journal the log entry, so the actor never
-    /// re-derives a decision.
-    StartStep {
-        index: u32,
-        step: String,
-        agent: Uuid,
-        attempt: u32,
-        from: Option<u32>,
-        via: Option<String>,
-        input: String,
-    },
+    /// Begin one execution of one workflow step.
+    StartStep(StepStart),
     /// The run is over and succeeded, carrying the last step's output.
     Finish { output: Value },
     /// The run is over and failed.
     Fail { error: String },
-    StartTurn {
-        who: AgentKey,
-        input: TurnInput,
-        /// Inbox message ids this turn consumes.
-        consumed: Vec<String>,
-        /// Ask tool-call ids this turn answers.
-        answered: Vec<String>,
-        /// Subagents whose results this turn delivers.
-        notified: Vec<Uuid>,
-        /// A subagent parent this turn puts back into `Running`. `None` marks
-        /// the session's own turn, which reports `Running` instead.
-        mark_running: Option<Uuid>,
-    },
+    /// Resume one agent, beginning a turn.
+    StartTurn(TurnStart),
+}
+
+/// One execution of one workflow step. Carries everything needed to both spawn
+/// the agent and journal the log entry, so the actor never re-derives a
+/// decision.
+#[derive(Debug, Clone)]
+pub struct StepStart {
+    pub index: u32,
+    pub step: String,
+    pub agent: Uuid,
+    pub attempt: u32,
+    /// The entry this came out of; `None` for the start step.
+    pub from: Option<u32>,
+    /// The transition condition that matched, if any.
+    pub via: Option<String>,
+    pub input: String,
+}
+
+/// One agent, resumed.
+#[derive(Debug, Clone)]
+pub struct TurnStart {
+    pub who: AgentKey,
+    pub input: TurnInput,
+    /// Inbox message ids this turn consumes.
+    pub consumed: Vec<String>,
+    /// Ask tool-call ids this turn answers.
+    pub answered: Vec<String>,
+    /// Subagents whose results this turn delivers.
+    pub notified: Vec<Uuid>,
+    /// A subagent parent this turn puts back into `Running`. `None` marks
+    /// the session's own turn, which reports `Running` instead.
+    pub mark_running: Option<Uuid>,
 }
 
 /// Wake every idle subagent parent whose children have results it has not been
@@ -87,19 +102,21 @@ pub fn wake_owed_parents(state: &SessionState) -> Vec<AgentAction> {
         // A parent mid-run is consuming already; it hears these when it next
         // goes idle.
         .filter(|(parent, _)| !state.subagents.is_running(*parent))
-        .map(|(parent, owed)| AgentAction::StartTurn {
-            who: AgentKey::Sub(parent),
-            input: TurnInput {
-                // A woken parent is resumed by its children and nothing else —
-                // there is no person in this loop to have typed anything.
-                message: None,
-                results: Vec::new(),
-                subagent_results: owed.iter().map(|o| o.part.clone()).collect(),
-            },
-            consumed: Vec::new(),
-            answered: Vec::new(),
-            notified: owed.iter().map(|o| o.child).collect(),
-            mark_running: Some(parent),
+        .map(|(parent, owed)| {
+            AgentAction::StartTurn(TurnStart {
+                who: AgentKey::Sub(parent),
+                input: TurnInput {
+                    // A woken parent is resumed by its children and nothing else —
+                    // there is no person in this loop to have typed anything.
+                    message: None,
+                    results: Vec::new(),
+                    subagent_results: owed.iter().map(|o| o.part.clone()).collect(),
+                },
+                consumed: Vec::new(),
+                answered: Vec::new(),
+                notified: owed.iter().map(|o| o.child).collect(),
+                mark_running: Some(parent),
+            })
         })
         .collect()
 }
@@ -141,7 +158,7 @@ pub fn main_turn(state: &SessionState) -> Option<AgentAction> {
             .collect::<Vec<_>>()
             .join(MERGE_SEPARATOR)
     });
-    Some(AgentAction::StartTurn {
+    Some(AgentAction::StartTurn(TurnStart {
         who: AgentKey::Main,
         input: TurnInput {
             message,
@@ -165,7 +182,7 @@ pub fn main_turn(state: &SessionState) -> Option<AgentAction> {
         answered: Vec::new(),
         notified: owed.iter().map(|o| o.child).collect(),
         mark_running: None,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -216,12 +233,12 @@ mod tests {
 
     #[test]
     fn a_queued_message_starts_one_turn_that_consumes_it() {
-        let AgentAction::StartTurn {
+        let AgentAction::StartTurn(TurnStart {
             who,
             input,
             consumed,
             ..
-        } = only_turn(&with_inbox(&["hello"]))
+        }) = only_turn(&with_inbox(&["hello"]))
         else {
             panic!("an interactive session starts turns, not steps");
         };
@@ -234,9 +251,9 @@ mod tests {
     /// into one user turn rather than becoming consecutive user messages.
     #[test]
     fn several_queued_messages_merge_into_one_turn() {
-        let AgentAction::StartTurn {
+        let AgentAction::StartTurn(TurnStart {
             input, consumed, ..
-        } = only_turn(&with_inbox(&["a", "b"]))
+        }) = only_turn(&with_inbox(&["a", "b"]))
         else {
             panic!("an interactive session starts turns, not steps");
         };
@@ -283,7 +300,7 @@ mod tests {
         s.status = SessionStatus::AwaitingInput {
             asks: s.pending_asks.clone(),
         };
-        let AgentAction::StartTurn { input, .. } = only_turn(&s) else {
+        let AgentAction::StartTurn(TurnStart { input, .. }) = only_turn(&s) else {
             panic!("an interactive session starts turns, not steps");
         };
         assert_eq!(input.results.len(), 1);
@@ -315,9 +332,9 @@ mod tests {
     #[test]
     fn owed_results_ride_a_turn_without_joining_its_text() {
         let s = owing_main(&["check the lockfile too"], "audit", "three stale crates");
-        let AgentAction::StartTurn {
+        let AgentAction::StartTurn(TurnStart {
             input, notified, ..
-        } = only_turn(&s)
+        }) = only_turn(&s)
         else {
             panic!("an interactive session starts turns, not steps");
         };
@@ -333,7 +350,7 @@ mod tests {
     #[test]
     fn an_owed_only_turn_has_no_message() {
         let s = owing_main(&[], "audit", "three stale crates");
-        let AgentAction::StartTurn { input, .. } = only_turn(&s) else {
+        let AgentAction::StartTurn(TurnStart { input, .. }) = only_turn(&s) else {
             panic!("an interactive session starts turns, not steps");
         };
         assert_eq!(input.message, None);
@@ -373,10 +390,10 @@ mod tests {
         let woken = actions
             .into_iter()
             .find(|a| {
-                matches!(a, AgentAction::StartTurn { who, .. } if matches!(who, AgentKey::Sub(_)))
+                matches!(a, AgentAction::StartTurn(TurnStart { who, .. }) if matches!(who, AgentKey::Sub(_)))
             })
             .expect("the woken parent's turn");
-        let AgentAction::StartTurn { who, input, .. } = woken else {
+        let AgentAction::StartTurn(TurnStart { who, input, .. }) = woken else {
             panic!("an interactive session starts turns, not steps");
         };
         assert_eq!(who, AgentKey::Sub(parent));

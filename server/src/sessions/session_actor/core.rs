@@ -7,14 +7,28 @@
 
 use super::CoreCommand;
 use super::component::Component;
-use super::{
-    AgentKey, CommandEffect, SessionActor, SessionAgents, SessionDomainEvent, SessionState,
-};
+use super::{AgentKey, CommandEffect, SessionActor, SessionDomainEvent, SessionState};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::normalize_session_title;
 use horsie_actor::ActorContext;
 use horsie_models::now_ms;
 use horsie_workflow::AgentCommand;
+
+/// Longest auto-derived session title, in characters.
+const TITLE_MAX_CHARS: usize = crate::sessions::title_tool::SESSION_TITLE_MAX_CHARS;
+
+/// A short title derived from a user's first message.
+fn derive_title(text: &str) -> Option<String> {
+    let first_line = text.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return None;
+    }
+    if first_line.chars().count() <= TITLE_MAX_CHARS {
+        return Some(first_line.to_string());
+    }
+    let truncated: String = first_line.chars().take(TITLE_MAX_CHARS).collect();
+    Some(format!("{}…", truncated.trim_end()))
+}
 
 /// SessionCore.
 pub(super) struct SessionCore;
@@ -54,6 +68,24 @@ impl SessionCore {
 /// fields — the roster, the supervisor link, the spawn helpers. An inherent
 /// `impl` in a child module sees them, so moving the code needed no plumbing.
 impl SessionActor {
+    /// Title an as-yet-unnamed session from the first thing the user says.
+    ///
+    /// Best-effort and fire-and-forget: a session that could not be titled is
+    /// still a session, so a failure is logged and the message goes on to start
+    /// its turn. The built-in title tool overwrites this later if the agent
+    /// picks something better.
+    pub(super) async fn title_from_first_message(&mut self, text: &str) {
+        if self.spec.name.is_some() {
+            return;
+        }
+        let Some(title) = derive_title(text) else {
+            return;
+        };
+        if let Err(error) = self.rename_session(title).await {
+            tracing::warn!(session = %self.id, error, "failed to persist fallback session title");
+        }
+    }
+
     /// Persist a session title through the supervisor, then publish it.
     pub(super) async fn rename_session(&mut self, title: String) -> Result<String, String> {
         let id = self.id.to_string();
@@ -86,43 +118,41 @@ impl SessionActor {
     /// only — an agent never tells the session anything back through here.
     ///
     /// **Resident agents only**, because this hook has no `ActorContext` to
-    /// spawn with. That is not the limitation it looks like: `main` is spawned
-    /// at recovery and stays for the session's loaded life, and every
-    /// subagent-targeted event happens while that subagent is running. A miss
-    /// is therefore a bug worth hearing about rather than a case to handle,
-    /// which is what the warning is for.
-    pub(super) async fn record_lifecycle(&mut self, events: &[SessionDomainEvent]) {
+    /// spawn with. That is not the limitation it looks like: a conversation's
+    /// `main` is spawned at recovery and stays for the session's loaded life, a
+    /// run's step agent is live for as long as its step is, and every
+    /// subagent-targeted event happens while that subagent is running. A miss is
+    /// therefore a bug worth hearing about rather than a case to handle, which
+    /// is what the warning is for — an event with genuinely nowhere to go routes
+    /// to nothing at all, and never reaches this loop.
+    ///
+    /// Note the state it routes against: `on_events_persisted` is called once
+    /// per batch, with the state the *whole* batch folded to. Two of the
+    /// routings read that state, so an event is placed by where the batch ended
+    /// rather than by where it itself sat.
+    pub(super) async fn record_lifecycle(
+        &mut self,
+        events: &[SessionDomainEvent],
+        state: &SessionState,
+    ) {
         for event in events {
-            let (target, Some(payload)) = crate::sessions::lifecycle_routing::route(event) else {
-                continue;
-            };
-            let agent = match &target {
-                crate::sessions::lifecycle_routing::LifecycleTarget::None => continue,
-                crate::sessions::lifecycle_routing::LifecycleTarget::Main => {
-                    self.agents.as_ref().and_then(SessionAgents::main).cloned()
-                }
-                crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Main) => {
-                    self.agents.as_ref().and_then(SessionAgents::main).cloned()
-                }
-                crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Sub(id))
-                | crate::sessions::lifecycle_routing::LifecycleTarget::Agent(AgentKey::Step(id)) => {
-                    self.agents.as_ref().and_then(|a| a.sub(*id)).cloned()
-                }
-            };
-            let Some(agent) = agent else {
-                tracing::warn!(
-                    session = %self.id,
-                    ?target,
-                    "no resident agent to record a session event on; it will be missing from the log"
-                );
-                continue;
-            };
-            let _ = agent
-                .tell(AgentCommand::RecordLifecycle {
-                    event: payload,
-                    at_ms: now_ms(),
-                })
-                .await;
+            for (key, payload) in crate::sessions::lifecycle_routing::route(event, state) {
+                let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)).cloned() else {
+                    tracing::warn!(
+                        session = %self.id,
+                        ?key,
+                        "no resident agent to record a session event on; it will be missing from the log"
+                    );
+                    continue;
+                };
+                let _ = agent
+                    .actor
+                    .tell(AgentCommand::RecordLifecycle {
+                        event: payload,
+                        at_ms: now_ms(),
+                    })
+                    .await;
+            }
         }
     }
     /// Record one lifecycle entry on a named agent, when it is resident.
@@ -131,14 +161,10 @@ impl SessionActor {
         key: AgentKey,
         event: horsie_agentcore::LifecycleEvent,
     ) {
-        let agent = match key {
-            AgentKey::Main => self.agents.as_ref().and_then(SessionAgents::main).cloned(),
-            AgentKey::Sub(id) | AgentKey::Step(id) => {
-                self.agents.as_ref().and_then(|a| a.sub(id)).cloned()
-            }
-        };
+        let agent = self.agents.as_ref().and_then(|a| a.get(key)).cloned();
         if let Some(agent) = agent {
             let _ = agent
+                .actor
                 .tell(AgentCommand::RecordLifecycle {
                     event,
                     at_ms: now_ms(),
@@ -171,5 +197,24 @@ impl Component for SessionCore {
             }
             other => unreachable!("SessionCore was handed {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// The fallback title: the first line, elided to fit. It exists so a
+    /// session is never nameless in the list while the agent is still working
+    /// out what to call it.
+    #[test]
+    fn a_title_is_derived_from_the_first_line_only() {
+        assert_eq!(derive_title("hello\nworld").as_deref(), Some("hello"));
+        assert!(derive_title("   \n").is_none());
+        let long = "x".repeat(TITLE_MAX_CHARS + 10);
+        let title = derive_title(&long).unwrap();
+        assert!(title.ends_with('…'));
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1);
     }
 }

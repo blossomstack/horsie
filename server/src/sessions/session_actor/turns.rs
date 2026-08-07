@@ -13,13 +13,13 @@ use super::LifecycleCommand;
 use super::component::{ActionCx, Component};
 use super::{
     AgentAction, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent, SessionState,
-    TurnCommand,
+    TurnCommand, TurnEnd,
 };
-use super::{AnswerError, AskAnswer, derive_title};
+use super::{AnswerError, AskAnswer};
 use crate::sessions::UserMessageError;
 use crate::sessions::spec::PendingAsk;
 use crate::sessions::spec::SessionStatus;
-use horsie_actor::{ActorContext, EventSourcedActor};
+use horsie_actor::ActorContext;
 use horsie_models::agent::ToolResultInput;
 use horsie_models::now_ms;
 use horsie_workflow::AgentCommand;
@@ -56,18 +56,13 @@ impl Turns {
                     let _ = reply.send(());
                     return CommandEffect::none();
                 }
-                actor.cancel_run().await;
+                actor.cancel_in_flight(state).await;
                 let _ = reply.send(());
                 actor.report(SessionStatus::Idle).await;
-                let mut events = vec![SessionDomainEvent::TurnStopped { at_ms: now_ms() }];
                 // Stop is a turn boundary like any other, so anything the user
                 // queued while the cancelled turn ran starts the next one.
-                let next = SessionActor::apply_event(
-                    state.clone(),
-                    SessionDomainEvent::TurnStopped { at_ms: now_ms() },
-                );
-                events.extend(actor.flush_then_drain(&next, ctx).await);
-                CommandEffect::persist(events)
+                let stopped = vec![SessionDomainEvent::TurnStopped { at_ms: now_ms() }];
+                actor.persist_and_advance(state, stopped, ctx).await
             }
             TurnCommand::Answer { answers, reply } => actor.on_answer(state, answers, reply).await,
             TurnCommand::ReconcileInterrupted => {
@@ -146,6 +141,111 @@ impl SessionActor {
             answered: answers.into_iter().map(|a| a.tool_call_id).collect(),
         }])
     }
+    /// What the main agent's turn ending means for the session.
+    ///
+    /// Three of the four are turn boundaries that let the inbox drain; a failure
+    /// deliberately is not. Lives here rather than in the actor's routing
+    /// because "the turn is over" is this component's fact — the same outcome
+    /// means something else entirely to a step or a subagent.
+    pub(super) async fn on_main_outcome(
+        &mut self,
+        state: &SessionState,
+        end: TurnEnd,
+        ctx: &ActorContext<Self>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        let (events, drains) = match end {
+            TurnEnd::Concluded { .. } => {
+                self.report(SessionStatus::Idle).await;
+                (
+                    vec![SessionDomainEvent::TurnEnded { at_ms: now_ms() }],
+                    true,
+                )
+            }
+            TurnEnd::Asked { asks } => {
+                self.report(SessionStatus::AwaitingInput {
+                    asks: asks
+                        .iter()
+                        .map(|a| PendingAsk {
+                            tool_call_id: a.tool_call_id.clone(),
+                            question: a.question.clone(),
+                        })
+                        .collect(),
+                })
+                .await;
+                (
+                    asks.into_iter()
+                        .map(|a| SessionDomainEvent::AskRecorded {
+                            at_ms: now_ms(),
+                            tool_call_id: a.tool_call_id,
+                            question: a.question,
+                        })
+                        .collect::<Vec<_>>(),
+                    // An ask is a turn boundary too: a message queued while the
+                    // agent was working becomes the answer.
+                    true,
+                )
+            }
+            // A runtime that a live vendor cannot produce is the one terminal
+            // failure: re-provisioning would silently rebuild a workspace the
+            // user believes they still have. Everything else — provider errors,
+            // tool errors, a vendor that is merely offline — is a failed turn
+            // they can retry.
+            TurnEnd::Failed {
+                error,
+                terminal: true,
+            } => {
+                self.report(SessionStatus::Unrecoverable {
+                    reason: error.clone(),
+                })
+                .await;
+                (
+                    vec![SessionDomainEvent::SessionFailed {
+                        at_ms: now_ms(),
+                        reason: error,
+                    }],
+                    false,
+                )
+            }
+            // Deliberately no drain: a stuck cause (expired key, dead vendor)
+            // would otherwise turn three queued messages into three back-to-back
+            // failures. The next message drains them.
+            TurnEnd::Failed {
+                error,
+                terminal: false,
+            } => {
+                self.report(SessionStatus::Failed {
+                    reason: error.clone(),
+                })
+                .await;
+                (
+                    vec![SessionDomainEvent::TurnFailed {
+                        at_ms: now_ms(),
+                        error,
+                    }],
+                    false,
+                )
+            }
+            TurnEnd::Parked => {
+                let error = "agent parked; timers are not supported in sessions".to_string();
+                self.report(SessionStatus::Failed {
+                    reason: error.clone(),
+                })
+                .await;
+                (
+                    vec![SessionDomainEvent::TurnFailed {
+                        at_ms: now_ms(),
+                        error,
+                    }],
+                    false,
+                )
+            }
+        };
+        match drains {
+            true => self.persist_and_advance(state, events, ctx).await,
+            false => CommandEffect::persist(events),
+        }
+    }
+
     pub(super) async fn on_user_message(
         &mut self,
         state: &SessionState,
@@ -157,13 +257,10 @@ impl SessionActor {
             let _ = reply.send(Err(UserMessageError::Unrecoverable(reason.clone())));
             return CommandEffect::none();
         }
-        // An unnamed session is titled from its first message, once.
-        if self.spec.name.is_none()
-            && let Some(title) = derive_title(&text)
-            && let Err(error) = self.rename_session(title).await
-        {
-            tracing::warn!(session = %self.id, error, "failed to persist fallback session title");
-        }
+        // An unnamed session is titled from its first message, once. The rule is
+        // `SessionCore`'s — a session's name is its own bookkeeping, not the
+        // turn's — so this only says when to apply it.
+        self.title_from_first_message(&text).await;
 
         let queued = SessionDomainEvent::MessageQueued {
             id: Uuid::new_v4().to_string(),
@@ -176,23 +273,18 @@ impl SessionActor {
         let message_id = id.clone();
         let _ = reply.send(Ok(message_id));
 
-        // Fold the queue locally so the drain sees the message it is about to
-        // persist — same fold the runtime will apply, just one step early.
-        let next = SessionActor::apply_event(state.clone(), queued.clone());
-        let mut events = vec![queued];
         // A session whose create failed has no runtime, so the message that the
         // UI invited ("send a message to try again") has to build one rather
         // than start a turn that would ask for it. The message stays queued and
         // the create's own completion drains it, exactly as at session creation.
-        if matches!(next.status, SessionStatus::ProvisioningFailed { .. }) {
+        if matches!(state.status, SessionStatus::ProvisioningFailed { .. }) {
             let _ = ctx
                 .self_ref()
                 .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
                 .await;
-        } else {
-            events.extend(self.flush_then_drain(&next, ctx).await);
+            return CommandEffect::persist(vec![queued]);
         }
-        CommandEffect::persist(events)
+        self.persist_and_advance(state, vec![queued], ctx).await
     }
 }
 
@@ -496,16 +588,6 @@ mod tests {
         assert_eq!(merged, "one\n\ntwo");
     }
 
-    #[test]
-    fn a_title_is_derived_from_the_first_line_only() {
-        assert_eq!(derive_title("hello\nworld").as_deref(), Some("hello"));
-        assert!(derive_title("   \n").is_none());
-        let long = "x".repeat(TITLE_MAX_CHARS + 10);
-        let title = derive_title(&long).unwrap();
-        assert!(title.ends_with('…'));
-        assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1);
-    }
-
     #[tokio::test]
     async fn drain_does_nothing_when_the_inbox_is_empty() {
         let f = actor_fixture().await;
@@ -680,7 +762,7 @@ mod tests {
         assert_eq!(stopped.status, SessionStatus::Idle);
         let actions = decisions(&actor, &stopped);
         assert_eq!(actions.len(), 1, "{actions:?}");
-        let AgentAction::StartTurn { consumed, .. } = &actions[0] else {
+        let AgentAction::StartTurn(TurnStart { consumed, .. }) = &actions[0] else {
             panic!("an interactive session starts turns, not steps");
         };
         assert_eq!(consumed, &vec!["m2".to_string()]);
@@ -700,7 +782,7 @@ mod tests {
         let state = fold(vec![queued("m1", "one"), queued("m2", "two")]);
         let actions = decisions(&actor, &state);
         assert_eq!(actions.len(), 1);
-        let AgentAction::StartTurn { consumed, .. } = &actions[0] else {
+        let AgentAction::StartTurn(TurnStart { consumed, .. }) = &actions[0] else {
             panic!("an interactive session starts turns, not steps");
         };
         assert_eq!(consumed, &vec!["m1".to_string(), "m2".to_string()]);
@@ -727,12 +809,12 @@ mod tests {
         ]);
         let actions = decisions(&actor, &state);
         assert_eq!(actions.len(), 1);
-        let AgentAction::StartTurn {
+        let AgentAction::StartTurn(TurnStart {
             consumed,
             answered,
             input,
             ..
-        } = &actions[0]
+        }) = &actions[0]
         else {
             panic!("an interactive session starts turns, not steps");
         };

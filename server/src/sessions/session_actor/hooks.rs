@@ -409,7 +409,7 @@ impl HookRouting {
                 // gone is not an error: the records describe a call it made
                 // before it left, and there is nothing left to tell.
                 if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
-                    let _ = agent.tell(AgentCommand::HooksRan { records }).await;
+                    let _ = agent.actor.tell(AgentCommand::HooksRan { records }).await;
                 }
                 CommandEffect::none()
             }
@@ -435,7 +435,10 @@ impl HookRouting {
                 // Cancel first, so the agent is not still appending to its own
                 // journal when the outcome below is folded.
                 let (tx, rx) = oneshot::channel();
-                let _ = agent.tell(AgentCommand::Cancel { ack: Some(tx) }).await;
+                let _ = agent
+                    .actor
+                    .tell(AgentCommand::Cancel { ack: Some(tx) })
+                    .await;
                 if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
                     tracing::warn!(session = %actor.id, "halted agent did not finish in time");
                 }
@@ -467,6 +470,7 @@ impl HookRouting {
                 // a plain user-message turn whose input is the hook's reason.
                 if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
                     let _ = agent
+                        .actor
                         .tell(AgentCommand::Resume {
                             results: Vec::new(),
                             message: Some(reason),

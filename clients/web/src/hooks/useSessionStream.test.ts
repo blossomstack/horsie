@@ -128,6 +128,41 @@ describe("fold", () => {
     expect(done.progression).toBeNull();
   });
 
+  // The server used to send these facts twice: once as a typed entry nothing
+  // read, and once as a free-text `Provisioning` entry built for display. It now
+  // sends only the typed one, so the progress line is derived here.
+  it("shows a subagent's progress from its own entry", () => {
+    reset();
+    const f = fold([
+      lifecycle("TurnBegan", { consumed: [], answered: [] }),
+      lifecycle("SubAgent", { id: "abc", label: "audit", status: "running" }),
+    ]);
+    expect(f.progression).toEqual({
+      stage: "subagent_running",
+      detail: '"audit" (abc)',
+    });
+  });
+
+  it("shows a workflow step's progress from its own entry", () => {
+    reset();
+    const f = fold([
+      lifecycle("TurnBegan", { consumed: [], answered: [] }),
+      lifecycle("Step", { index: 0, name: "review", status: "started" }),
+    ]);
+    // The name, not the index: an index identifies the execution, the name is
+    // what a person reading the run recognises.
+    expect(f.progression).toEqual({ stage: "step_started", detail: "review" });
+  });
+
+  it("drops a subagent's progress once the turn ends", () => {
+    reset();
+    const f = fold([
+      lifecycle("SubAgent", { id: "abc", label: "audit", status: "completed" }),
+      lifecycle("TurnEnded", { outcome: { kind: "Ended", value: {} } }),
+    ]);
+    expect(f.progression).toBeNull();
+  });
+
   it("treats a terminal session failure as unrecoverable", () => {
     reset();
     const f = fold([lifecycle("SessionFailed", { reason: "vendor refused" })]);

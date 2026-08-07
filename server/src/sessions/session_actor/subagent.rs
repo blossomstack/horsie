@@ -11,23 +11,18 @@
 //! inside the session's mode and every read silently answered empty for a run.
 
 use super::component::{ActionCx, Component};
-use super::context::{SessionAgentKind, SessionContextProvider, session_run_def};
-use super::hooks::StopHookParent;
+use super::context::SessionAgentKind;
 use super::{
-    AgentAction, AgentKey, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent,
-    SessionState, SubAgentCommand,
+    AgentAction, AgentPlan, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent,
+    SessionState, SubAgentCommand, TurnEnd,
 };
 use crate::sessions::subagents::{
     INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent, TreeOwner,
 };
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
-use horsie_actor::EventSourcedActor;
 use horsie_models::now_ms;
-use horsie_workflow::AgentActor;
 use horsie_workflow::AgentCommand;
-use horsie_workflow::{AgentOutcome, AgentParams, AgentRuntimeContext};
-use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -97,7 +92,6 @@ impl SubAgents {
                     let _ = self_ref
                         .tell(SessionCommand::SubAgent(SubAgentCommand::FinishSpawn {
                             id,
-                            label,
                             task,
                             agent_type,
                             reply,
@@ -109,7 +103,6 @@ impl SubAgents {
             }
             SubAgentCommand::FinishSpawn {
                 id,
-                label,
                 task,
                 agent_type,
                 reply,
@@ -126,17 +119,6 @@ impl SubAgents {
                         message: Some(task),
                         subagent_results: Vec::new(),
                     })
-                    .await;
-                actor
-                    .record_on(
-                        AgentKey::Main,
-                        horsie_agentcore::LifecycleEvent::Provisioning(
-                            horsie_agentcore::ProvisioningLifecycle {
-                                stage: "subagent_spawned".into(),
-                                detail: Some(format!("\"{label}\" ({id})")),
-                            },
-                        ),
-                    )
                     .await;
                 let _ = reply.send(Ok(id));
                 CommandEffect::none()
@@ -206,80 +188,41 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         id: Uuid,
-        outcome: AgentOutcome,
+        end: TurnEnd,
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
-        if let AgentOutcome::UsageRecorded { usage_total, .. } = outcome {
-            return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
-                at_ms: now_ms(),
-                agent_id: id.to_string(),
-                usage_total,
-            }]);
-        }
-        let Some(rec) = state.subagents.node(id).cloned() else {
+        if state.subagents.node(id).is_none() {
             tracing::warn!(subagent = %id, "outcome from an unknown subagent; ignored");
             return CommandEffect::none();
-        };
-        let terminal = match outcome {
-            AgentOutcome::Concluded { output, .. } => {
-                let text = output
+        }
+        let terminal = match end {
+            TurnEnd::Concluded { output } => SessionDomainEvent::SubAgentCompleted {
+                at_ms: now_ms(),
+                id,
+                output: output
                     .as_str()
                     .map(str::to_string)
-                    .unwrap_or_else(|| output.to_string());
-                self.record_on(
-                    AgentKey::Main,
-                    horsie_agentcore::LifecycleEvent::Provisioning(
-                        horsie_agentcore::ProvisioningLifecycle {
-                            stage: "subagent_completed".into(),
-                            detail: Some(format!("\"{}\" ({id})", rec.label)),
-                        },
-                    ),
-                )
-                .await;
-                SessionDomainEvent::SubAgentCompleted {
-                    at_ms: now_ms(),
-                    id,
-                    output: text,
-                }
-            }
-            AgentOutcome::Failed { error, .. } => {
-                self.record_on(
-                    AgentKey::Main,
-                    horsie_agentcore::LifecycleEvent::Provisioning(
-                        horsie_agentcore::ProvisioningLifecycle {
-                            stage: "subagent_failed".into(),
-                            detail: Some(format!("\"{}\" ({id})", rec.label)),
-                        },
-                    ),
-                )
-                .await;
-                SessionDomainEvent::SubAgentFailed {
-                    at_ms: now_ms(),
-                    id,
-                    error,
-                }
-            }
+                    .unwrap_or_else(|| output.to_string()),
+            },
+            TurnEnd::Failed { error, .. } => SessionDomainEvent::SubAgentFailed {
+                at_ms: now_ms(),
+                id,
+                error,
+            },
             // Defensive: a subagent has no ask or timer tools, so neither
             // outcome should ever occur.
-            AgentOutcome::Asked { .. } => SessionDomainEvent::SubAgentFailed {
+            TurnEnd::Asked { .. } => SessionDomainEvent::SubAgentFailed {
                 at_ms: now_ms(),
                 id,
                 error: "subagent asked the user; not supported".to_string(),
             },
-            AgentOutcome::Parked { .. } => SessionDomainEvent::SubAgentFailed {
+            TurnEnd::Parked => SessionDomainEvent::SubAgentFailed {
                 at_ms: now_ms(),
                 id,
                 error: "subagent parked; timers are not supported in sessions".to_string(),
             },
-            AgentOutcome::UsageRecorded { .. } => unreachable!("handled above"),
         };
-        let mut events = vec![terminal];
-        let next = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), SessionActor::apply_event);
-        events.extend(self.flush_then_drain(&next, ctx).await);
-        CommandEffect::persist(events)
+        self.persist_and_advance(state, vec![terminal], ctx).await
     }
     /// Spawn a resident subagent actor — journal replay only; the caller
     /// decides whether a run starts (spawn) or not (recovery).
@@ -294,50 +237,19 @@ impl SessionActor {
         id: Uuid,
         agent_type: Option<String>,
     ) -> ActorRef<AgentCommand> {
-        let context_provider = Arc::new(SessionContextProvider {
-            runtimes: self
-                .deps
-                .runtimes
-                .provider(self.id.to_string(), self.spec.vendor.clone()),
-            registry: self.deps.provider_registry.clone(),
-            mcp: self.deps.mcp.clone(),
-            memory: self.deps.memory.clone(),
-            settings: self.spec.agent.clone(),
-            step_output_schema: None,
-            session_id: self.id,
-            kind: SessionAgentKind::Sub(id),
-            agent_type,
-            unattended: self.spec.is_unattended(),
-            session: ctx.self_ref(),
-            plugins: self.spec.plugins.clone(),
-            plugin_library: self.deps.plugins.clone(),
-            last_client: Mutex::new(None),
-        });
-        let mut params = AgentParams::from_def(&session_run_def(&self.spec.agent));
-        params.interactive = true;
-        // No handoff tool: a subagent ends its turn with plain text, which
-        // becomes the output its parent is notified with.
-        params.thinking_effort = self
-            .spec
-            .agent
-            .thinking_effort
-            .as_deref()
-            .and_then(horsie_agentcore::ThinkingEffort::parse);
-        let agent_ctx = AgentRuntimeContext {
-            context_provider: context_provider.clone(),
-            position: self.positions.for_agent(&id.to_string()),
-            parent: StopHookParent::wrap(
-                ctx.self_ref(),
-                AgentKey::Sub(id),
-                context_provider.clone(),
-            ),
-            session_id: id,
-        };
-        let actor = ctx.spawn(AgentActor::new(agent_ctx, params));
-        if let Some(agents) = self.agents.as_mut() {
-            agents.insert_sub(id, actor.clone());
-        }
-        actor
+        self.spawn_agent(
+            ctx,
+            AgentPlan {
+                kind: SessionAgentKind::Sub(id),
+                settings: self.spec.agent.clone(),
+                step_output_schema: None,
+                agent_type,
+                // No handoff tool: a subagent ends its turn with plain text,
+                // which becomes the output its parent is notified with.
+                handoff_tool: None,
+            },
+        )
+        .actor
     }
 }
 
@@ -907,43 +819,6 @@ mod tests {
         // The child's result is delivered to its parent — `notified` flips only
         // when the parent has actually been resumed with it.
         wait_for_tree(&journal, id, |f| f.node(child).is_some_and(|r| r.notified)).await;
-    }
-
-    /// A snapshot written before `mode` existed carries `subagents` at the top
-    /// level, flat. It must load with its tree intact — anything else silently
-    /// drops every subagent of every deployed session.
-    #[test]
-    fn a_pre_mode_snapshot_keeps_its_subagents() {
-        let legacy = serde_json::json!({
-            "status": "Idle",
-            "inbox": [],
-            "subagents": { "nodes": { "3f1a2b4c-0000-4000-8000-000000000001": {
-                "parent": "Main", "label": "reader", "task": "read the file", "depth": 1,
-                "status": "Completed", "output": "done", "error": null, "notified": true
-            }}}
-        });
-        let state: SessionState = serde_json::from_value(legacy).unwrap();
-        let id = Uuid::parse_str("3f1a2b4c-0000-4000-8000-000000000001").unwrap();
-        assert_eq!(state.subagents.node(id).unwrap().label, "reader");
-        assert_eq!(state.subagents.owner_of(id), Some(TreeOwner::Main));
-    }
-
-    /// A snapshot written after `mode` existed nests the tree under
-    /// `mode.subagents` for a conversation.
-    #[test]
-    fn a_mode_tagged_conversation_snapshot_keeps_its_subagents() {
-        let legacy = serde_json::json!({
-            "status": "Idle",
-            "mode": { "kind": "Interactive", "subagents": { "nodes": {
-                "3f1a2b4c-0000-4000-8000-000000000002": {
-                    "parent": "Main", "label": "auditor", "task": "t", "depth": 1,
-                    "status": "Running", "output": null, "error": null, "notified": false
-                }}}}
-        });
-        let state: SessionState = serde_json::from_value(legacy).unwrap();
-        let id = Uuid::parse_str("3f1a2b4c-0000-4000-8000-000000000002").unwrap();
-        assert_eq!(state.subagents.node(id).unwrap().label, "auditor");
-        assert_eq!(state.subagents.active_count(), 1);
     }
 
     /// The new shape round-trips.

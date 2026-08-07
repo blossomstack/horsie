@@ -4,7 +4,7 @@
 //! the run's snapshot (fixed at creation) or the folded [`SessionState`], which
 //! is why the same function serves live operation and recovery.
 
-use crate::sessions::orchestrator::AgentAction;
+use crate::sessions::orchestrator::{AgentAction, StepStart};
 use crate::sessions::session_actor::SessionState;
 use crate::sessions::workflow::spec::{WorkflowRunSpec, compose_step_input, output_as_input};
 use crate::sessions::workflow::{StepStatus, WorkflowRunState};
@@ -44,7 +44,7 @@ impl WorkflowOrchestrator {
             .step(step_name)
             .map(|s| s.prompt.as_str())
             .unwrap_or_default();
-        AgentAction::StartStep {
+        AgentAction::StartStep(StepStart {
             index,
             step: step_name.to_string(),
             agent: WorkflowRunSpec::step_agent_id(self.session_id, index),
@@ -52,7 +52,7 @@ impl WorkflowOrchestrator {
             from,
             via,
             input: compose_step_input(prompt, from_step, incoming),
-        }
+        })
     }
 }
 
@@ -261,7 +261,7 @@ mod tests {
     fn advance(d: &WorkflowOrchestrator, run: &mut WorkflowRunState, output: Value) -> AgentAction {
         let action = d.step_actions(&state(run.clone())).remove(0);
         match &action {
-            AgentAction::StartStep {
+            AgentAction::StartStep(StepStart {
                 step,
                 agent,
                 attempt,
@@ -269,7 +269,7 @@ mod tests {
                 via,
                 input,
                 ..
-            } => {
+            }) => {
                 run.apply_started(
                     step.clone(),
                     *agent,
@@ -284,7 +284,7 @@ mod tests {
             }
             AgentAction::Finish { output } => run.apply_finished(output.clone()),
             AgentAction::Fail { error } => run.apply_failed(error.clone()),
-            AgentAction::StartTurn { .. } => panic!("a run never starts a plain turn"),
+            AgentAction::StartTurn(_) => panic!("a run never starts a plain turn"),
         }
         action
     }
@@ -294,7 +294,7 @@ mod tests {
         let (d, session) = driver();
         let actions = d.step_actions(&state(WorkflowRunState::default()));
         assert_eq!(actions.len(), 1);
-        let AgentAction::StartStep {
+        let AgentAction::StartStep(StepStart {
             index,
             step,
             agent,
@@ -302,7 +302,7 @@ mod tests {
             from,
             input,
             ..
-        } = &actions[0]
+        }) = &actions[0]
         else {
             panic!("expected a step, got {:?}", actions[0]);
         };
@@ -320,9 +320,9 @@ mod tests {
         let mut run = WorkflowRunState::default();
         advance(&d, &mut run, serde_json::json!({"severity": "p0"}));
         let action = advance(&d, &mut run, serde_json::json!({}));
-        let AgentAction::StartStep {
+        let AgentAction::StartStep(StepStart {
             step, via, from, ..
-        } = &action
+        }) = &action
         else {
             panic!("expected a step, got {action:?}");
         };
@@ -337,7 +337,7 @@ mod tests {
         let mut run = WorkflowRunState::default();
         advance(&d, &mut run, serde_json::json!({"severity": "p2"}));
         let action = advance(&d, &mut run, serde_json::json!({}));
-        let AgentAction::StartStep { step, via, .. } = &action else {
+        let AgentAction::StartStep(StepStart { step, via, .. }) = &action else {
             panic!("expected a step, got {action:?}");
         };
         assert_eq!(step, "file");
@@ -519,7 +519,7 @@ mod tests {
         let (d, _) = driver();
         let actions = d.step_actions(&SessionState::default());
         assert_eq!(actions.len(), 1);
-        let AgentAction::StartStep { step, index, .. } = &actions[0] else {
+        let AgentAction::StartStep(StepStart { step, index, .. }) = &actions[0] else {
             panic!("expected the start step, got {:?}", actions[0]);
         };
         assert_eq!(step, "triage");
