@@ -102,9 +102,24 @@ describe("RoutineEditPage", () => {
     const save = getByTestId("save-routine-button") as HTMLButtonElement;
     expect(save.disabled).toBe(true);
 
-    fireEvent.click(getByTestId("weekday-mon"));
+    const mon = getByTestId("weekday-mon") as HTMLButtonElement;
+    const tue = getByTestId("weekday-tue") as HTMLButtonElement;
+    expect(mon.className).not.toContain("bg-orange");
+    expect(tue.className).not.toContain("bg-orange");
+
+    fireEvent.click(mon);
+    expect(mon.className).toContain("bg-orange");
+    expect(tue.className).not.toContain("bg-orange");
     expect(save.disabled).toBe(false);
 
+    // Toggling off returns the chip to the unselected look.
+    fireEvent.click(mon);
+    expect(mon.className).not.toContain("bg-orange");
+    expect(save.disabled).toBe(true);
+
+    // Re-select so the weekly schedule is valid again before saving.
+    fireEvent.click(mon);
+    expect(save.disabled).toBe(false);
     fireEvent.click(save);
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
     const payload = create.mock.calls[0]?.[0].schedule as {
