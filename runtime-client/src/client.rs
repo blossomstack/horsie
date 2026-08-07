@@ -257,6 +257,37 @@ impl RuntimeClient {
         }
         Ok(records)
     }
+
+    /// List the tools the loaded plugins' MCP servers offer, and name the
+    /// servers that could not be reached.
+    pub async fn mcp_discover(
+        &self,
+    ) -> Result<horsie_models::runtime::McpDiscoverResponse, RuntimeCallError> {
+        let call_id = Uuid::new_v4().to_string();
+        self.inner
+            .mcp_discover(&call_id)
+            .await
+            .map_err(RuntimeCallError::Transport)
+    }
+
+    /// Call one namespaced plugin MCP tool.
+    ///
+    /// Tracked like an ordinary tool call, so a cancel reaches it: an MCP server
+    /// that goes silent must not be un-stoppable.
+    pub async fn mcp_invoke(
+        &self,
+        call_id: &str,
+        tool: &str,
+        arguments: String,
+    ) -> Result<String, RuntimeCallError> {
+        self.track(call_id);
+        let outcome = self.inner.mcp_invoke(call_id, tool, arguments).await;
+        self.untrack(call_id);
+        match outcome.map_err(RuntimeCallError::Transport)? {
+            ToolResult::Ok(output) => Ok(output.stdout),
+            ToolResult::Err(ToolError { reason }) => Err(RuntimeCallError::ToolFailed(reason)),
+        }
+    }
 }
 
 #[cfg(test)]

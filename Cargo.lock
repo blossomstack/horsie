@@ -1707,12 +1707,14 @@ dependencies = [
 name = "horsie-runtime"
 version = "0.1.6"
 dependencies = [
+ "async-trait",
  "base64 0.23.0",
  "clap",
  "futures-util",
  "glob",
  "hackamore-agent",
  "hex",
+ "horsie-mcp-client",
  "horsie-models",
  "horsie-runtime-vendor",
  "horsie-support",

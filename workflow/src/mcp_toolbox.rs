@@ -12,7 +12,8 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// Composes several toolboxes into one, routing `execute` to the first box that
-/// advertises the tool. `specs` is the concatenation of all boxes' specs.
+/// advertises the tool. `specs` is every box's specs, first spelling of a name
+/// winning.
 pub struct CompositeToolbox {
     boxes: Vec<Arc<dyn Toolbox>>,
 }
@@ -26,7 +27,16 @@ impl CompositeToolbox {
 #[async_trait]
 impl Toolbox for CompositeToolbox {
     fn specs(&self) -> Vec<ToolSpec> {
-        self.boxes.iter().flat_map(|b| b.specs()).collect()
+        // Deduplicated by name, keeping the first — which is the box `execute`
+        // would route to, so the schema the model is shown is the one that will
+        // actually run. Advertising both would also be a provider error: every
+        // one of them rejects a tool list with a repeated name.
+        let mut seen = std::collections::HashSet::new();
+        self.boxes
+            .iter()
+            .flat_map(|b| b.specs())
+            .filter(|s| seen.insert(s.name.clone()))
+            .collect()
     }
 
     async fn execute(
@@ -43,6 +53,67 @@ impl Toolbox for CompositeToolbox {
         Err(ToolCallError::InvalidInput(format!(
             "no tool named '{name}'"
         )))
+    }
+}
+
+/// Plugin-declared MCP tools, called through the runtime.
+///
+/// The counterpart to [`McpToolbox`], and the difference is *where the client
+/// lives*: an admin-configured server is reached from the server process, while
+/// a plugin's is reached from the sandbox — because a plugin's `npx …` server is
+/// a process that belongs next to the workspace. The tool names are namespaced
+/// identically, so an agent, an `allowed_tools` allowlist and a hook matcher all
+/// see one vocabulary whichever path a tool came from.
+pub struct PluginMcpToolbox {
+    client: horsie_runtime_client::RuntimeClient,
+    tools: Vec<horsie_models::runtime::PluginMcpTool>,
+}
+
+impl PluginMcpToolbox {
+    /// Build from an already-discovered tool list. Discovery happens once per
+    /// `provide()`, alongside the workspace scan.
+    #[must_use]
+    pub fn new(
+        client: horsie_runtime_client::RuntimeClient,
+        tools: Vec<horsie_models::runtime::PluginMcpTool>,
+    ) -> Self {
+        Self { client, tools }
+    }
+}
+
+#[async_trait]
+impl Toolbox for PluginMcpToolbox {
+    fn specs(&self) -> Vec<ToolSpec> {
+        self.tools
+            .iter()
+            .map(|t| ToolSpec {
+                name: t.name.clone(),
+                description: t.description.clone().unwrap_or_default(),
+                // The schema arrives as the JSON text the server published. A
+                // server that publishes something unparseable gets an empty
+                // object rather than sinking the whole tool list.
+                input_schema: serde_json::from_str(&t.input_schema)
+                    .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
+            })
+            .collect()
+    }
+
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<Value, ToolCallError> {
+        if !self.tools.iter().any(|t| t.name == name) {
+            return Err(ToolCallError::InvalidInput(format!(
+                "no plugin MCP tool named '{name}'"
+            )));
+        }
+        self.client
+            .mcp_invoke(tool_call_id, name, input.to_string())
+            .await
+            .map(Value::String)
+            .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
     }
 }
 
@@ -124,6 +195,55 @@ mod tests {
     use horsie_mcp_client::McpTransport;
     use serde_json::json;
     use std::collections::HashMap;
+
+    /// A discovered tool list becomes specs the agent can call, with the
+    /// server's own JSON Schema carried through.
+    #[test]
+    fn plugin_mcp_tools_become_specs() {
+        let client = horsie_runtime_client::RuntimeClient::new(
+            horsie_runtime_client::testkit::MockTransport::ok(""),
+            "agent",
+        );
+        let tb = PluginMcpToolbox::new(
+            client,
+            vec![
+                horsie_models::runtime::PluginMcpTool {
+                    name: "mcp__docs__search".into(),
+                    description: Some("finds things".into()),
+                    input_schema: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#
+                        .into(),
+                },
+                // A server that publishes an unparseable schema still gets a
+                // usable tool rather than sinking the whole list.
+                horsie_models::runtime::PluginMcpTool {
+                    name: "mcp__docs__broken".into(),
+                    description: None,
+                    input_schema: "not json".into(),
+                },
+            ],
+        );
+        let specs = tb.specs();
+        assert_eq!(specs[0].name, "mcp__docs__search");
+        assert_eq!(specs[0].description, "finds things");
+        assert_eq!(specs[0].input_schema["properties"]["q"]["type"], "string");
+        assert_eq!(specs[1].input_schema, json!({"type": "object"}));
+    }
+
+    /// A name the discovery never advertised is refused here rather than sent
+    /// to a runtime that would have to refuse it anyway.
+    #[tokio::test]
+    async fn an_unknown_plugin_mcp_tool_is_refused_locally() {
+        let client = horsie_runtime_client::RuntimeClient::new(
+            horsie_runtime_client::testkit::MockTransport::ok(""),
+            "agent",
+        );
+        let tb = PluginMcpToolbox::new(client, Vec::new());
+        let err = tb
+            .execute("mcp__docs__search", json!({}), "tc1")
+            .await
+            .expect_err("no such tool");
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
 
     /// A one-tool toolbox for exercising `CompositeToolbox` routing.
     struct OneTool {
@@ -232,6 +352,62 @@ mod tests {
             tb.execute("bash", json!({}), "tc1").await,
             Err(ToolCallError::InvalidInput(_))
         ));
+    }
+
+    /// An admin-configured server outranks a plugin that declares its name.
+    /// `provide()` composes them in this order for exactly this reason: a
+    /// plugin must not be able to capture calls — arguments and all — meant for
+    /// a server the user configured.
+    #[tokio::test]
+    async fn an_admin_server_outranks_a_plugin_of_the_same_name() {
+        let plugin: Arc<dyn Toolbox> = Arc::new(PluginMcpToolbox::new(
+            horsie_runtime_client::RuntimeClient::new(
+                horsie_runtime_client::testkit::MockTransport::ok(""),
+                "agent",
+            ),
+            vec![horsie_models::runtime::PluginMcpTool {
+                name: "mcp__github__open_pr".into(),
+                description: Some("the plugin's".into()),
+                input_schema: r#"{"type":"object"}"#.into(),
+            }],
+        ));
+        let admin: Arc<dyn Toolbox> = Arc::new(
+            McpToolbox::connect(
+                "github".into(),
+                mock_client(vec![
+                    ("initialize", json!({})),
+                    (
+                        "tools/list",
+                        json!({ "tools": [ { "name": "open_pr", "description": "the admin's",
+                                             "inputSchema": { "type": "object" } } ] }),
+                    ),
+                    (
+                        "tools/call",
+                        json!({ "content": [ { "type": "text", "text": "from the admin server" } ],
+                                "isError": false }),
+                    ),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+        // The order `provide()` builds: admin boxes first, plugin box appended.
+        let tb = CompositeToolbox::new(vec![admin, plugin]);
+        // Advertised once — a repeated tool name is a provider error — and it
+        // is the admin server's schema, which is the one that will run.
+        let specs: Vec<_> = tb
+            .specs()
+            .into_iter()
+            .filter(|s| s.name == "mcp__github__open_pr")
+            .collect();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].description, "the admin's");
+        assert_eq!(
+            tb.execute("mcp__github__open_pr", json!({}), "tc1")
+                .await
+                .unwrap(),
+            json!("from the admin server")
+        );
     }
 
     #[tokio::test]

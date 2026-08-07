@@ -113,6 +113,55 @@ struct ScanResponse {
     shared_root: Option<String>,
 }
 
+// --- Plugin MCP servers ---
+
+/// One tool a plugin-declared MCP server offers. `name` is already namespaced
+/// `mcp__<server>__<tool>`, the spelling admin-configured servers use — so
+/// `allowed_tools` and hook matchers see one vocabulary whichever path a tool
+/// came from.
+struct PluginMcpTool {
+    name: String,
+    description: Option<String>,
+    /// JSON Schema, verbatim from the server.
+    input_schema: String,
+}
+
+/// Connect to every MCP server the loaded plugins declare and list their tools.
+///
+/// One request rather than one per server: a session wants the whole tool list
+/// or none of it, and a server that cannot start contributes nothing rather than
+/// failing the scan.
+struct McpDiscoverRequest  { call_id: String }
+struct McpDiscoverResponse {
+    call_id: String,
+    tools: Vec<PluginMcpTool>,
+    /// Servers that contributed no tools. Reported rather than dropped, so a
+    /// broken declaration is visible without being fatal.
+    failures: Vec<McpServerFailure>,
+}
+
+/// It could not be reached at all: no such binary, a refused connection, a
+/// declaration that would not parse.
+struct McpServerUnreachable { server: String, reason: String }
+
+/// It answered `401`. `resource_metadata` is the RFC 9728 URL its
+/// `WWW-Authenticate` named, when it named one.
+struct McpServerNeedsAuth { server: String, resource_metadata: Option<String> }
+
+/// Why a declared server contributed no tools this pass. Typed rather than a
+/// string because the two cases call for different answers: one is a broken
+/// plugin to report, the other is a consent flow to offer.
+#[type_tag = "failure"]
+union McpServerFailure {
+    Unreachable(McpServerUnreachable),
+    NeedsAuth(McpServerNeedsAuth),
+}
+
+/// Call one tool on a plugin-declared MCP server. `tool` is the namespaced name
+/// from discovery; the runtime splits it back into server and tool.
+struct McpInvokeRequest  { call_id: String, tool: String, arguments: String }
+struct McpInvokeResponse { call_id: String, result: ToolResult }
+
 // --- Server-initiated hooks ---
 
 /// How the session that is starting came to start.
@@ -196,6 +245,8 @@ union RuntimeInboundMessage {
     CancelCall(CancelCallRequest),
     ScanWorkspace(ScanRequest),
     RunHooks(RunHooksRequest),
+    McpDiscover(McpDiscoverRequest),
+    McpInvoke(McpInvokeRequest),
 }
 
 // --- Outbound (runtime → executor) ---
@@ -235,4 +286,6 @@ union RuntimeOutboundMessage {
     ToolCallResponse(ToolCallResponse),
     ScanResult(ScanResponse),
     HookRecords(RunHooksResponse),
+    McpTools(McpDiscoverResponse),
+    McpResult(McpInvokeResponse),
 }

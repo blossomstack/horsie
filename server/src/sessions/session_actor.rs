@@ -29,8 +29,8 @@ use horsie_models::hooks::HookRecord;
 use horsie_models::hooks::{HookAction, StopOutcome, SubagentStopOutcome};
 use horsie_models::now_ms;
 use horsie_models::runtime::{
-    ServerHookEvent, SessionStartInput, StopInput, SubagentStartInput, SubagentStopInput,
-    UserPromptExpansionInput, UserPromptSubmitInput,
+    McpServerFailure, ServerHookEvent, SessionStartInput, StopInput, SubagentStartInput,
+    SubagentStopInput, UserPromptExpansionInput, UserPromptSubmitInput,
 };
 use horsie_runtime_client::RuntimeClient;
 use horsie_workflow::{
@@ -2629,7 +2629,10 @@ impl ContextProvider for SessionContextProvider {
             },
             None => self.llm_provider()?,
         };
-        let mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
+        // Plugin-declared MCP servers, hosted by the runtime. Discovered on the
+        // same pass as the workspace scan and only when this agent loads the
+        // library at all — a session with no plugins asks for nothing.
+        let mut mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
             Vec::new()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
             if broadcast {
@@ -2652,6 +2655,48 @@ impl ContextProvider for SessionContextProvider {
             );
             Vec::new()
         };
+        // Plugin-declared MCP servers, hosted by the runtime. Discovered on the
+        // same pass as the workspace scan and only when this agent loads the
+        // library at all — a session with no plugins asks for nothing.
+        //
+        // Appended *after* the admin boxes: `CompositeToolbox` routes to the
+        // first box advertising a name, and a plugin declaring a server the
+        // user already configured must not capture those calls, arguments and
+        // all.
+        if use_plugins {
+            match runtime_client.mcp_discover().await {
+                Ok(discovery) => {
+                    for failure in &discovery.failures {
+                        match failure {
+                            McpServerFailure::Unreachable(f) => tracing::warn!(
+                                session = %self.session_id,
+                                server = %f.server,
+                                reason = %f.reason,
+                                "a plugin MCP server is unavailable; its tools are absent"
+                            ),
+                            McpServerFailure::NeedsAuth(f) => tracing::info!(
+                                session = %self.session_id,
+                                server = %f.server,
+                                "a plugin MCP server needs authorisation; its tools are absent"
+                            ),
+                        }
+                    }
+                    if !discovery.tools.is_empty() {
+                        mcp.push(Arc::new(horsie_workflow::PluginMcpToolbox::new(
+                            runtime_client.clone(),
+                            discovery.tools,
+                        )));
+                    }
+                }
+                // Never fatal: a plugin bringing a broken server must not stop a
+                // session that merely happens to load it.
+                Err(e) => tracing::warn!(
+                    session = %self.session_id,
+                    error = %e,
+                    "plugin MCP discovery failed; continuing without those tools"
+                ),
+            }
+        }
         let base: Arc<dyn Toolbox> = DefaultToolboxFactory.for_agent(
             &def,
             runtime_client.clone(),

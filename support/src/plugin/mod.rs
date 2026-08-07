@@ -14,6 +14,7 @@ pub mod hooks;
 pub mod layout;
 pub mod manifest;
 pub mod marketplace;
+pub mod mcp;
 pub mod skills;
 
 #[cfg(feature = "git")]

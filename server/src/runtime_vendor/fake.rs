@@ -789,6 +789,28 @@ async fn run_agent<S>(
                             shared_root: None,
                         }))
                     }
+                    // A fake vendor materialises no plugin library, so it
+                    // hosts no MCP servers. A test needing them drives the real
+                    // runtime, which is where the servers are.
+                    RuntimeInboundMessage::McpDiscover(req) => {
+                        Some(RuntimeOutboundMessage::McpTools(
+                            horsie_models::runtime::McpDiscoverResponse {
+                                call_id: req.call_id,
+                                tools: vec![],
+                                failures: vec![],
+                            },
+                        ))
+                    }
+                    RuntimeInboundMessage::McpInvoke(req) => {
+                        Some(RuntimeOutboundMessage::McpResult(
+                            horsie_models::runtime::McpInvokeResponse {
+                                call_id: req.call_id,
+                                result: ToolResult::Err(horsie_models::runtime::ToolError {
+                                    reason: "the fake vendor hosts no MCP servers".to_string(),
+                                }),
+                            },
+                        ))
+                    }
                     RuntimeInboundMessage::RunHooks(req) => {
                         recorder
                             .server_hook_events
