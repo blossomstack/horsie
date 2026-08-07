@@ -1,8 +1,9 @@
 import { SessionStatusKind } from "../api/types";
 
 /** Panel lamp colours. `live` is a value in motion, `attention` is a control
- * waiting on the operator, `fault` is a stopped machine, `off` is an
- * unlit lamp — a channel the server has nothing to report for. */
+ * waiting on the operator, `fault` is a stopped machine, `idle` is a subdued
+ * ready session, and `off` is an unlit lamp — a channel the server has
+ * nothing to report for. */
 export type StatusTone =
   | "live"
   | "ready"

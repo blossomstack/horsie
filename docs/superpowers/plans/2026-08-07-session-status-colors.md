@@ -1,6 +1,6 @@
 # Session Status Color Hierarchy Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make running sessions visibly active in the existing amber live color while rendering idle sessions with a subdued neutral color.
 
@@ -28,7 +28,7 @@
 - Consumes: `statusMeta(status)`, `TONE_TEXT`, `SessionStatusKind`, and the returned metadata fields `tone` and `busy`.
 - Produces: Regression tests that constrain the semantic tone mapping before the implementation changes.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `clients/web/src/lib/status.test.ts` with Vitest tests for the requested mapping:
 
@@ -61,7 +61,7 @@ describe("status presentation metadata", () => {
 });
 ```
 
-- [ ] **Step 2: Run the focused test and verify it fails**
+- [x] **Step 2: Run the focused test and verify it fails**
 
 Run from the worktree root:
 
@@ -71,7 +71,7 @@ cd clients/web && npm run test:unit -- src/lib/status.test.ts
 
 Expected: FAIL because `StatusTone` does not yet include `idle` and Idle currently resolves to `ready`.
 
-- [ ] **Step 3: Commit the failing test**
+- [x] **Step 3: Commit the failing test**
 
 ```bash
 git add clients/web/src/lib/status.test.ts
@@ -87,7 +87,7 @@ git commit -m "test: specify session status color hierarchy"
 - Consumes: Existing `StatusTone`, `META`, and `TONE_TEXT` definitions.
 - Produces: `statusMeta(SessionStatusKind.Idle)` with `tone: "idle"` and `TONE_TEXT.idle` equal to `"text-dim"`; Running remains `tone: "live"`, `busy: true`.
 
-- [ ] **Step 1: Add the `idle` tone to the `StatusTone` union**
+- [x] **Step 1: Add the `idle` tone to the `StatusTone` union**
 
 Change the union from:
 
@@ -101,7 +101,7 @@ to:
 type StatusTone = "live" | "ready" | "idle" | "attention" | "fault" | "off";
 ```
 
-- [ ] **Step 2: Map Idle to the new tone**
+- [x] **Step 2: Map Idle to the new tone**
 
 In `META`, change only the Idle entry’s `tone`:
 
@@ -111,7 +111,7 @@ tone: "idle",
 
 Keep `busy: false`, `canSend: true`, the `Idle` label, and its existing hint.
 
-- [ ] **Step 3: Map the new tone to the existing subdued utility**
+- [x] **Step 3: Map the new tone to the existing subdued utility**
 
 Add the entry to `TONE_TEXT`:
 
@@ -121,7 +121,7 @@ idle: "text-dim",
 
 Do not modify the `live` mapping; it must remain `text-amber-ink` so the running lamp animation and running label use the same color.
 
-- [ ] **Step 4: Run the focused tests and verify they pass**
+- [x] **Step 4: Run the focused tests and verify they pass**
 
 ```bash
 cd clients/web && npm run test:unit -- src/lib/status.test.ts
@@ -129,7 +129,7 @@ cd clients/web && npm run test:unit -- src/lib/status.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Run web typecheck and build**
+- [x] **Step 5: Run web typecheck and build**
 
 ```bash
 cd clients/web && npm run typecheck && npm run build
@@ -137,7 +137,7 @@ cd clients/web && npm run typecheck && npm run build
 
 Expected: both commands exit successfully.
 
-- [ ] **Step 6: Commit the implementation**
+- [x] **Step 6: Commit the implementation**
 
 ```bash
 git add clients/web/src/lib/status.ts
@@ -155,7 +155,7 @@ git commit -m "fix: quiet idle session status color"
 - Consumes: The completed status metadata implementation and its focused tests.
 - Produces: Verified, clean branch ready for PR preparation.
 
-- [ ] **Step 1: Run all web unit tests**
+- [x] **Step 1: Run all web unit tests**
 
 ```bash
 cd clients/web && npm run test:unit
@@ -163,7 +163,7 @@ cd clients/web && npm run test:unit
 
 Expected: PASS with zero failures.
 
-- [ ] **Step 2: Check formatting and diff integrity**
+- [x] **Step 2: Check formatting and diff integrity**
 
 ```bash
 cargo fmt --check
@@ -173,7 +173,7 @@ git status --short
 
 Expected: formatting passes, diff check reports no whitespace errors, and only the intended spec, test, and status mapping files are committed with no untracked working-tree changes.
 
-- [ ] **Step 3: Review the final diff**
+- [x] **Step 3: Review the final diff**
 
 ```bash
 git diff --stat origin/main...HEAD
