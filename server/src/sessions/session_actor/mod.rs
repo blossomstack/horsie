@@ -1393,4 +1393,4 @@ impl EventSourcedActor for SessionActor {
     clippy::panic,
     clippy::wildcard_enum_match_arm
 )]
-mod tests;
+mod testing;

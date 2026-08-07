@@ -719,3 +719,567 @@ impl ContextProvider for SessionContextProvider {
         })
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    //! What a turn is assembled from: which tools each kind of agent gets, and
+    //! what a slash command expands into.
+    use super::super::testing::*;
+    use super::super::*;
+    use super::*;
+
+    use horsie_models::hooks::HookAction;
+    use horsie_workflow::{ContextProvider, Contexts, StartTurn};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn subagent_toolbox_strips_session_metadata_tools() {
+        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+
+        let build = |kind: SessionAgentKind| SessionContextProvider {
+            agent_type: None,
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings: actor_spec_fixture().agent,
+            step_output_schema: None,
+            session_id: id,
+            kind,
+            unattended: false,
+            session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: None,
+            last_client: Mutex::new(None),
+        };
+
+        let main = build(SessionAgentKind::Main).provide().await.unwrap();
+        let main_tools: Vec<String> = main.toolbox.specs().into_iter().map(|s| s.name).collect();
+        for t in [
+            "spawn_agent",
+            "subagent_status",
+            "set_session_title",
+            "ask_user",
+        ] {
+            assert!(main_tools.contains(&t.to_string()), "main lacks {t}");
+        }
+
+        let sub_id = Uuid::new_v4();
+        let sub = build(SessionAgentKind::Sub(sub_id))
+            .provide()
+            .await
+            .unwrap();
+        let sub_tools: Vec<String> = sub.toolbox.specs().into_iter().map(|s| s.name).collect();
+        for t in ["spawn_agent", "subagent_status"] {
+            assert!(sub_tools.contains(&t.to_string()), "sub lacks {t}");
+        }
+        for t in ["set_session_title", "ask_user"] {
+            assert!(!sub_tools.contains(&t.to_string()), "sub must not have {t}");
+        }
+        assert!(
+            sub.system_prompt.unwrap().contains("# Subagent role"),
+            "the subagent prompt must explain its role"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_subagent_cap_hides_the_spawn_tools() {
+        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let mut settings = actor_spec_fixture().agent;
+        settings.max_concurrent_subagents = Some(0);
+        let provider = SessionContextProvider {
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings,
+            step_output_schema: None,
+            session_id: id,
+            kind: SessionAgentKind::Main,
+            agent_type: None,
+            unattended: false,
+            session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: None,
+            last_client: Mutex::new(None),
+        };
+        let tools: Vec<String> = provider
+            .provide()
+            .await
+            .unwrap()
+            .toolbox
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        // Disabled, not merely unusable: an advertised tool that always
+        // rejects reads as a bug to the model.
+        for t in ["spawn_agent", "subagent_status"] {
+            assert!(!tools.contains(&t.to_string()), "disabled session has {t}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unattended_session_is_offered_no_ask_user_tool() {
+        // A routine run has nobody to answer a question: offering `ask_user`
+        // would let the agent park the run forever. The prompt has to say so
+        // too -- the base prompt tells the model the tool exists.
+        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let build = |unattended: bool| SessionContextProvider {
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings: actor_spec_fixture().agent,
+            step_output_schema: None,
+            session_id: id,
+            kind: SessionAgentKind::Main,
+            agent_type: None,
+            unattended,
+            session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: None,
+            last_client: Mutex::new(None),
+        };
+        let names = |c: &Contexts| -> Vec<String> {
+            c.toolbox.specs().into_iter().map(|s| s.name).collect()
+        };
+
+        let unattended = build(true).provide().await.unwrap();
+        let tools = names(&unattended);
+        assert!(!tools.contains(&ASK_USER_TOOL.to_string()));
+        // Everything else the main agent has is untouched.
+        assert!(tools.contains(&"set_session_title".to_string()));
+        assert!(tools.contains(&"spawn_agent".to_string()));
+        assert!(
+            unattended
+                .system_prompt
+                .unwrap()
+                .contains("# Unattended run"),
+            "an unattended run must be told there is no user"
+        );
+
+        let attended = build(false).provide().await.unwrap();
+        assert!(names(&attended).contains(&ASK_USER_TOOL.to_string()));
+        assert!(!attended.system_prompt.unwrap().contains("# Unattended run"));
+    }
+
+    #[test]
+    fn a_subagent_gets_its_own_runtime_identity() {
+        let client = horsie_runtime_client::RuntimeClient::new(
+            horsie_runtime_client::MockTransport::ok(""),
+            "session-id",
+        );
+        let main = scoped_client(&SessionAgentKind::Main, client.clone());
+        assert_eq!(main.agent_id(), "session-id");
+
+        let sub_id = Uuid::new_v4();
+        let sub = scoped_client(&SessionAgentKind::Sub(sub_id), client);
+        assert_eq!(sub.agent_id(), sub_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn a_slash_command_expands_into_its_framed_template() {
+        let (f, session, id) = catalog_harness(vec![catalog_entry(
+            horsie_support::plugin::catalog::CatalogKind::Command,
+            "review",
+            Some("Review $1 for bugs. Full args: $ARGUMENTS"),
+        )])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        let message = prepared_message(&provider, "/review src/a.rs carefully")
+            .await
+            .expect("a command expands");
+        assert!(
+            message.starts_with("<command name=\"review\" args=\"src/a.rs carefully\">"),
+            "framed so a client can tell an invocation from typed text: {message}"
+        );
+        assert!(message.contains("Review src/a.rs for bugs."), "{message}");
+        assert!(
+            message.contains("Full args: src/a.rs carefully"),
+            "{message}"
+        );
+    }
+
+    /// A skill and an agent have no template, so expansion names the thing and
+    /// lets the agent reach for the tool it already has.
+    #[tokio::test]
+    async fn a_skill_and_an_agent_expand_under_their_own_sigils() {
+        use horsie_support::plugin::catalog::CatalogKind;
+        let (f, session, id) = catalog_harness(vec![
+            catalog_entry(CatalogKind::Skill, "tdd", None),
+            catalog_entry(CatalogKind::Agent, "reviewer", None),
+        ])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+
+        let skill = prepared_message(&provider, "/tdd on the parser")
+            .await
+            .unwrap();
+        assert!(skill.starts_with("<skill name=\"tdd\""), "{skill}");
+        assert!(skill.contains("Use the `tdd` skill."), "{skill}");
+        assert!(skill.contains("on the parser"), "{skill}");
+
+        let agent = prepared_message(&provider, "@reviewer this diff")
+            .await
+            .unwrap();
+        assert!(agent.starts_with("<agent name=\"reviewer\""), "{agent}");
+        assert!(agent.contains("spawn_agent"), "{agent}");
+
+        // The sigil is part of the identity: `@` must not become a second `/`.
+        assert_eq!(
+            prepared_message(&provider, "@tdd").await.as_deref(),
+            Some("@tdd"),
+            "a skill is not reachable as an agent"
+        );
+    }
+
+    /// An unknown name is left exactly as written: a message may legitimately
+    /// begin with a slash, and refusing it would make `/etc/hosts` unsendable.
+    #[tokio::test]
+    async fn an_unknown_name_leaves_the_prompt_alone() {
+        let (f, session, id) = catalog_harness(vec![catalog_entry(
+            horsie_support::plugin::catalog::CatalogKind::Command,
+            "review",
+            Some("body"),
+        )])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        for prompt in [
+            "/nosuch thing",
+            "/etc/hosts is a file",
+            "hello",
+            "mail me at a@b.com",
+        ] {
+            assert_eq!(
+                prepared_message(&provider, prompt).await.as_deref(),
+                Some(prompt),
+                "{prompt} must reach the model unchanged"
+            );
+        }
+    }
+
+    /// Expanding costs no runtime call — which is the whole reason the
+    /// catalogue moved to the server.
+    #[tokio::test]
+    async fn expansion_makes_no_workspace_scan() {
+        let (f, session, id) = catalog_harness(vec![catalog_entry(
+            horsie_support::plugin::catalog::CatalogKind::Command,
+            "review",
+            Some("body"),
+        )])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        prepared_message(&provider, "/review a.rs").await;
+        assert_eq!(
+            f.agent.scan_count(),
+            0,
+            "the seam answers from the database, not the sandbox"
+        );
+    }
+
+    /// `UserPromptExpansion` fires for the entry being expanded, carrying its
+    /// name as the matcher domain and its kind alongside — and before
+    /// `UserPromptSubmit` sees the result, which is the order the spec gives
+    /// them.
+    #[tokio::test]
+    async fn expansion_is_hooked_before_submission() {
+        let (f, session, id) = catalog_harness(vec![catalog_entry(
+            horsie_support::plugin::catalog::CatalogKind::Command,
+            "review",
+            Some("body"),
+        )])
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        prepared_message(&provider, "/review a.rs").await;
+
+        let events = f.agent.hook_events();
+        let expansion = events.iter().position(|e| *e == "UserPromptExpansion");
+        let submit = events.iter().position(|e| *e == "UserPromptSubmit");
+        assert!(
+            expansion.is_some(),
+            "the expansion must be hooked: {events:?}"
+        );
+        assert!(
+            expansion < submit,
+            "expansion runs first, so a submit guard reads what the model will: {events:?}"
+        );
+        let named: Vec<(String, String)> = f
+            .agent
+            .server_hook_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                horsie_models::runtime::ServerHookEvent::UserPromptExpansion(i) => {
+                    Some((i.command, i.kind))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named, vec![("review".to_string(), "command".to_string())]);
+    }
+
+    /// A hook answering `{"decision":"block"}` must stop the expansion itself,
+    /// not merely be noticed a layer later with the work already done. The
+    /// block is not a halt, and reading only the halt is how this regressed.
+    #[tokio::test]
+    async fn a_blocking_expansion_hook_stops_the_expansion() {
+        let blocked = HookRecord {
+            plugin: "guard".into(),
+            duration_ms: 0,
+            halt: None,
+            action: HookAction::UserPromptExpansion(
+                horsie_models::hooks::UserPromptExpansionRecord {
+                    command: "review".into(),
+                    system_message: None,
+                    outcome: horsie_models::hooks::UserPromptExpansionOutcome::Blocked(
+                        horsie_models::hooks::HookBlocked {
+                            reason: Some("not this one".into()),
+                        },
+                    ),
+                },
+            ),
+        };
+        let (f, session, id) = catalog_harness_with(
+            vec![catalog_entry(
+                horsie_support::plugin::catalog::CatalogKind::Command,
+                "review",
+                Some("the template"),
+            )],
+            vec![vec![blocked]],
+        )
+        .await;
+        let provider = catalog_provider(&f, &session, id);
+        let prep = provider
+            .start_hooks(StartTurn {
+                start_source: None,
+                prompt: Some("/review a.rs".to_string()),
+            })
+            .await
+            .expect("prepare");
+        assert_eq!(
+            prep.message.as_deref(),
+            Some("/review a.rs"),
+            "a refused expansion leaves the prompt as typed"
+        );
+        assert_eq!(
+            horsie_workflow::start_blocked(&prep.records).as_deref(),
+            Some("not this one"),
+            "and the refusal still abandons the turn"
+        );
+        assert!(
+            !f.agent.hook_events().contains(&"UserPromptSubmit"),
+            "a refused prompt never becomes a submission: {:?}",
+            f.agent.hook_events()
+        );
+    }
+
+    /// The agent's body is added to the generic subagent role, and its `tools`
+    /// allowlist reaches the toolbox through the same alias table hook matchers
+    /// use.
+    #[tokio::test]
+    async fn a_typed_subagent_runs_with_its_plugins_prompt() {
+        let (f, session, id) = agent_harness().await;
+        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
+
+        let provider = typed_provider(&f, &session, id, sub, None);
+        let contexts = provider.provide().await.expect("contexts");
+        let prompt = contexts.system_prompt.unwrap_or_default();
+        assert!(
+            prompt.contains("# Agent type: code-reviewer"),
+            "the plugin's agent names its own section: {prompt}"
+        );
+        // The generic framing is the only place a subagent is told where its
+        // output goes; a plugin's prompt never says it, so it must survive.
+        assert!(
+            prompt.contains("Your final message is your report"),
+            "a typed subagent must still know it reports to its parent: {prompt}"
+        );
+        assert!(
+            prompt.contains("Report only high-confidence bugs."),
+            "the plugin's body is the role: {prompt}"
+        );
+        // `Read, Grep` in Claude's vocabulary is `read_file, grep` in horsie's.
+        let tools: Vec<String> = contexts
+            .toolbox
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(tools.contains(&"read_file".to_string()), "{tools:?}");
+        assert!(tools.contains(&"grep".to_string()), "{tools:?}");
+        assert!(
+            !tools.contains(&"bash".to_string()),
+            "the allowlist must exclude what it did not name: {tools:?}"
+        );
+    }
+
+    /// An agent definition is a file inside a plugin. It may narrow the tools
+    /// the session already grants it and must not be able to widen them —
+    /// otherwise installing a plugin would hand back what an operator withheld.
+    #[tokio::test]
+    async fn an_agents_tools_cannot_widen_the_sessions_own_allowlist() {
+        let (f, session, id) = agent_harness().await;
+        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
+
+        // The session grants `grep` only; the agent asks for `Read, Grep`.
+        let provider = typed_provider(&f, &session, id, sub, Some(vec!["grep".to_string()]));
+        let contexts = provider.provide().await.expect("contexts");
+        let tools: Vec<String> = contexts
+            .toolbox
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(tools.contains(&"grep".to_string()), "{tools:?}");
+        assert!(
+            !tools.contains(&"read_file".to_string()),
+            "an agent must not grant itself a tool the session withheld: {tools:?}"
+        );
+    }
+
+    /// The definition is resolved when the subagent runs, not carried from the
+    /// spawn — so an agent whose plugin has gone fails loudly rather than
+    /// running a prompt nobody can point at.
+    #[tokio::test]
+    async fn a_subagent_whose_agent_type_is_gone_fails_rather_than_running_generic() {
+        let (f, session, id) = agent_harness().await;
+        let provider = SessionContextProvider {
+            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            settings: actor_spec_fixture().agent,
+            step_output_schema: None,
+            session_id: id,
+            kind: SessionAgentKind::Sub(Uuid::new_v4()),
+            agent_type: Some("uninstalled-agent".to_string()),
+            unattended: false,
+            session: session.clone(),
+            plugins: Vec::new(),
+            plugin_library: None,
+            last_client: Mutex::new(None),
+        };
+        let Err(err) = provider.provide().await else {
+            panic!("a subagent whose agent type is gone must not run generic");
+        };
+        assert!(err.message.contains("uninstalled-agent"), "{}", err.message);
+        assert!(
+            !err.terminal,
+            "a missing plugin is not the end of a session"
+        );
+    }
+
+    /// The type is what `SubagentStart` / `SubagentStop` matchers select on. It
+    /// was the constant `"subagent"` for every subagent before agent types
+    /// existed, so a matcher could only select all or none.
+    #[tokio::test]
+    async fn the_agent_type_reaches_the_subagent_hook_matcher() {
+        let (f, session, _id) = agent_harness().await;
+        spawn_typed(&session, Some("code-reviewer")).await.unwrap();
+        for _ in 0..200 {
+            if f.agent.hook_events().contains(&"SubagentStart") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let types: Vec<String> = f
+            .agent
+            .server_hook_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                horsie_models::runtime::ServerHookEvent::SubagentStart(i) => Some(i.agent_type),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(types, vec!["code-reviewer".to_string()]);
+    }
+
+    /// An untyped spawn is the general-purpose subagent, unchanged.
+    #[tokio::test]
+    async fn an_untyped_spawn_still_reports_the_generic_type() {
+        let (f, session, _id) = agent_harness().await;
+        spawn_typed(&session, None).await.unwrap();
+        for _ in 0..200 {
+            if f.agent.hook_events().contains(&"SubagentStart") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let types: Vec<String> = f
+            .agent
+            .server_hook_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                horsie_models::runtime::ServerHookEvent::SubagentStart(i) => Some(i.agent_type),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(types, vec!["subagent".to_string()]);
+    }
+
+    /// `SessionStart` used to fire from `provide()`, which is per-run — so every
+    /// turn re-ran every start hook, always reporting `source: "startup"`. It
+    /// fires once per agent load now; `UserPromptSubmit` is the one that belongs
+    /// to every turn.
+    #[tokio::test]
+    async fn a_session_starts_once_but_every_prompt_is_hooked() {
+        let (f, session) = stop_harness(vec![]).await;
+        send(&session, "first").await;
+        settled_inputs(&session).await;
+        send(&session, "second").await;
+        settled_inputs(&session).await;
+
+        let starts = f
+            .agent
+            .hook_events()
+            .into_iter()
+            .filter(|e| *e == "SessionStart")
+            .count();
+        let prompts = f
+            .agent
+            .hook_events()
+            .into_iter()
+            .filter(|e| *e == "UserPromptSubmit")
+            .count();
+        assert_eq!(starts, 1, "the start hook is due once per agent load");
+        assert_eq!(prompts, 2, "the prompt hook is due every turn");
+    }
+
+    /// A subagent is not a session. The call fired `SessionStart` for one before
+    /// this, because it was not gated on the agent's kind at all — so a hook
+    /// matching `startup` fired again for every subagent spawned.
+    #[tokio::test]
+    async fn a_subagent_fires_subagent_start_never_session_start() {
+        let (f, session) = stop_harness(vec![]).await;
+        spawn_sub(&session, "research", "dig into it").await;
+        for _ in 0..200 {
+            if f.agent.hook_events().contains(&"SubagentStart") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The main agent runs a turn of its own once the subagent reports back,
+        // so one `SessionStart` is correct here. What must never happen is the
+        // subagent contributing a second one — which is what it did before,
+        // because the call was not gated on the agent's kind.
+        let events = f.agent.hook_events();
+        assert_eq!(
+            events.iter().filter(|e| **e == "SubagentStart").count(),
+            1,
+            "the subagent starts as a subagent, got {events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|e| **e == "SessionStart").count(),
+            1,
+            "only the session's own agent may claim a session start, got {events:?}"
+        );
+    }
+}
