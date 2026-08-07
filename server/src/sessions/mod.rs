@@ -10,7 +10,6 @@ pub mod builder;
 pub mod clock;
 pub mod events;
 pub mod lifecycle_routing;
-pub mod mode;
 pub mod orchestrator;
 pub mod session_actor;
 pub mod spawn_tool;

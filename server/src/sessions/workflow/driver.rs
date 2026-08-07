@@ -4,7 +4,6 @@
 //! the run's snapshot (fixed at creation) or the folded [`SessionState`], which
 //! is why the same function serves live operation and recovery.
 
-use crate::sessions::mode::SessionModeState;
 use crate::sessions::orchestrator::{AgentAction, Orchestrator, SessionCommandKind};
 use crate::sessions::session_actor::SessionState;
 use crate::sessions::workflow::spec::{WorkflowRunSpec, compose_step_input, output_as_input};
@@ -26,10 +25,7 @@ impl WorkflowOrchestrator {
     }
 
     fn run<'a>(&self, state: &'a SessionState) -> Option<&'a WorkflowRunState> {
-        match &state.mode {
-            SessionModeState::Workflow(run) => Some(run),
-            SessionModeState::Interactive { .. } => None,
-        }
+        state.run.as_ref()
     }
 
     /// The action that starts `step`, coming out of `from`.
@@ -68,10 +64,38 @@ impl Orchestrator for WorkflowOrchestrator {
         if !crate::sessions::orchestrator::has_runtime(state) {
             return Vec::new();
         }
-        // A run that has not folded a `StepStarted` yet still reads as
-        // `Interactive` — `initial_state` is static and cannot see the spec.
-        // This driver is only ever installed on a run, so an absent run means
-        // "nothing has happened yet", not "this is a conversation".
+        // Owed subagent results are delivered in a run exactly as in a
+        // conversation. First, because a parent waiting on its children is work
+        // already in flight — the run's next step can wait a boundary.
+        //
+        // This is the whole of the subagent capability's presence in a run: it
+        // reads the forest, so it needs no workflow-specific branch and the run
+        // needs no subagent-specific knowledge.
+        let mut actions = crate::sessions::orchestrator::wake_owed_parents(state);
+        actions.extend(self.step_actions(state));
+        actions
+    }
+
+    fn accepts(&self, cmd: SessionCommandKind) -> Result<(), &'static str> {
+        match cmd {
+            // A run works from its definition. Its steps can be answered and
+            // retried, but there is no one to send a message to.
+            SessionCommandKind::UserMessage => {
+                Err("this session is a workflow run; it takes no messages")
+            }
+            SessionCommandKind::Answer => Ok(()),
+        }
+    }
+}
+
+impl WorkflowOrchestrator {
+    /// What the graph wants started: the next step, the run's end, or its
+    /// failure. Knows nothing about subagents.
+    fn step_actions(&self, state: &SessionState) -> Vec<AgentAction> {
+        // A run that has not folded a `StepStarted` yet holds no run state:
+        // `initial_state` is static and cannot see the spec. This driver is
+        // only ever installed on a run, so an absent one means "nothing has
+        // happened yet", not "this is a conversation".
         let empty = WorkflowRunState::default();
         let run = self.run(state).unwrap_or(&empty);
         // A step in flight, a park, a suspension and a terminal run all mean
@@ -142,17 +166,6 @@ impl Orchestrator for WorkflowOrchestrator {
                     Some(&last.step),
                 )]
             }
-        }
-    }
-
-    fn accepts(&self, cmd: SessionCommandKind) -> Result<(), &'static str> {
-        match cmd {
-            // A run works from its definition. Its steps can be answered and
-            // retried, but there is no one to send a message to.
-            SessionCommandKind::UserMessage => {
-                Err("this session is a workflow run; it takes no messages")
-            }
-            SessionCommandKind::Answer => Ok(()),
         }
     }
 }
@@ -270,7 +283,7 @@ mod tests {
 
     fn state(run: WorkflowRunState) -> SessionState {
         SessionState {
-            mode: SessionModeState::Workflow(run),
+            run: Some(run),
             ..SessionState::default()
         }
     }

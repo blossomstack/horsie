@@ -7,7 +7,7 @@
 
 use crate::sessions::session_actor::{AgentKey, SessionState};
 use crate::sessions::spec::SessionStatus;
-use crate::sessions::subagents::SubAgentParent;
+use crate::sessions::subagents::{OwedResult, SubAgentParent, TreeOwner};
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde_json::Value;
 use uuid::Uuid;
@@ -122,11 +122,23 @@ pub fn has_runtime(state: &SessionState) -> bool {
 /// Wake every idle subagent parent whose children have results it has not been
 /// sent. The main agent is excluded: its owed results merge into its next turn
 /// in [`main_turn`].
-fn wake_owed_parents(state: &SessionState) -> Vec<AgentAction> {
-    let tree = state.mode.subagents();
-    tree.owed_by_sub_parent()
+///
+/// Reads the forest rather than one kind's tree, so it wakes a workflow step's
+/// subagent parents as readily as a conversation's. It used to live only in
+/// [`InteractiveOrchestrator`] and read an accessor that answered empty for a
+/// run, which is why a step's subagent could finish and never be heard from.
+pub fn wake_owed_parents(state: &SessionState) -> Vec<AgentAction> {
+    let mut by_parent: std::collections::BTreeMap<Uuid, Vec<OwedResult>> = Default::default();
+    for owed in state.subagents.owed() {
+        if let SubAgentParent::SubAgent(parent) = owed.parent {
+            by_parent.entry(parent).or_default().push(owed);
+        }
+    }
+    by_parent
         .into_iter()
-        .filter(|(parent, _)| !tree.is_running(parent))
+        // A parent mid-run is consuming already; it hears these when it next
+        // goes idle.
+        .filter(|(parent, _)| !state.subagents.is_running(*parent))
         .map(|(parent, owed)| AgentAction::StartTurn {
             who: AgentKey::Sub(parent),
             input: TurnInput {
@@ -134,11 +146,11 @@ fn wake_owed_parents(state: &SessionState) -> Vec<AgentAction> {
                 // there is no person in this loop to have typed anything.
                 message: None,
                 results: Vec::new(),
-                subagent_results: owed.iter().map(|(_, part)| part.clone()).collect(),
+                subagent_results: owed.iter().map(|o| o.part.clone()).collect(),
             },
             consumed: Vec::new(),
             answered: Vec::new(),
-            notified: owed.iter().map(|(child, _)| *child).collect(),
+            notified: owed.iter().map(|o| o.child).collect(),
             mark_running: Some(parent),
         })
         .collect()
@@ -149,7 +161,13 @@ fn main_turn(state: &SessionState) -> Option<AgentAction> {
     // Owed subagent results ride every turn the main agent starts; with an
     // empty inbox they can also *start* one, but only from Idle — never
     // answering a pending ask, never chasing a failure.
-    let owed = state.mode.subagents().owed_for(SubAgentParent::Main);
+    let root = state.root_owner();
+    let owed: Vec<OwedResult> = state
+        .subagents
+        .owed()
+        .into_iter()
+        .filter(|o| o.parent == SubAgentParent::Main && o.owner == root)
+        .collect();
     if state.inbox.is_empty() && (owed.is_empty() || state.status != SessionStatus::Idle) {
         return None;
     }
@@ -179,7 +197,7 @@ fn main_turn(state: &SessionState) -> Option<AgentAction> {
         who: AgentKey::Main,
         input: TurnInput {
             message,
-            subagent_results: owed.iter().map(|(_, part)| part.clone()).collect(),
+            subagent_results: owed.iter().map(|o| o.part.clone()).collect(),
             // A message sent while the agent is waiting on questions abandons
             // them: "never mind, do this instead". Every parked call still gets
             // a result, so nothing dangles on the wire — answering them for
@@ -197,7 +215,7 @@ fn main_turn(state: &SessionState) -> Option<AgentAction> {
         },
         consumed: state.inbox.iter().map(|m| m.id.clone()).collect(),
         answered: Vec::new(),
-        notified: owed.iter().map(|(child, _)| *child).collect(),
+        notified: owed.iter().map(|o| o.child).collect(),
         mark_running: None,
     })
 }
@@ -317,10 +335,7 @@ mod tests {
     fn owing_main(inbox: &[&str], label: &str, output: &str) -> SessionState {
         let mut s = with_inbox(inbox);
         let id = Uuid::new_v4();
-        let tree = s
-            .mode
-            .subagents_mut()
-            .expect("an interactive session has a tree");
+        let tree = s.subagents.tree_mut(TreeOwner::Main);
         tree.apply_spawned(
             id,
             SubAgentParent::Main,
@@ -371,10 +386,7 @@ mod tests {
         let parent = Uuid::new_v4();
         let child = Uuid::new_v4();
         {
-            let tree = s
-                .mode
-                .subagents_mut()
-                .expect("an interactive session has a tree");
+            let tree = s.subagents.tree_mut(TreeOwner::Main);
             tree.apply_spawned(
                 parent,
                 SubAgentParent::Main,
