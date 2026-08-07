@@ -186,7 +186,7 @@ impl RoutineRunner {
 pub(crate) mod tests {
     use super::*;
     use crate::routines::service::tests::{Fixture, fixture, input};
-        use crate::runtime_vendor::RuntimeVendorLink;
+    use crate::runtime_vendor::RuntimeVendorLink;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::spec::{ServerDeps, SessionSpec};
     use crate::sessions::supervisor::SessionSupervisor;

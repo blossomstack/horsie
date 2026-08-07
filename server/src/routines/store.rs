@@ -360,19 +360,21 @@ mod tests {
         s.insert(&row("a", RoutineSchedule::Manual(ManualSchedule {})))
             .await
             .unwrap();
-        assert!(s
-            .insert(&row("a", RoutineSchedule::Manual(ManualSchedule {})))
-            .await
-            .is_err());
+        assert!(
+            s.insert(&row("a", RoutineSchedule::Manual(ManualSchedule {})))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn replace_swaps_the_definition_and_keeps_run_history() {
         let (s, _db) = store().await;
-        assert!(!s
-            .replace(&row("ghost", RoutineSchedule::Manual(ManualSchedule {})))
-            .await
-            .unwrap());
+        assert!(
+            !s.replace(&row("ghost", RoutineSchedule::Manual(ManualSchedule {})))
+                .await
+                .unwrap()
+        );
         s.insert(&row("a", RoutineSchedule::Manual(ManualSchedule {})))
             .await
             .unwrap();
@@ -380,7 +382,10 @@ mod tests {
             .await
             .unwrap();
 
-        let mut edited = row("a", RoutineSchedule::Every(EverySchedule { interval_secs: 60 }));
+        let mut edited = row(
+            "a",
+            RoutineSchedule::Every(EverySchedule { interval_secs: 60 }),
+        );
         edited.prompt = "new prompt".into();
         edited.updated_at = "2".into();
         edited.next_run_at_ms = Some(2_000);
@@ -411,11 +416,20 @@ mod tests {
     #[tokio::test]
     async fn due_respects_the_timestamp_and_the_enabled_flag() {
         let (s, db) = store().await;
-        let mut soon = row("soon", RoutineSchedule::Every(EverySchedule { interval_secs: 60 }));
+        let mut soon = row(
+            "soon",
+            RoutineSchedule::Every(EverySchedule { interval_secs: 60 }),
+        );
         soon.next_run_at_ms = Some(1_000);
-        let mut later = row("later", RoutineSchedule::Every(EverySchedule { interval_secs: 60 }));
+        let mut later = row(
+            "later",
+            RoutineSchedule::Every(EverySchedule { interval_secs: 60 }),
+        );
         later.next_run_at_ms = Some(5_000);
-        let mut paused = row("paused", RoutineSchedule::Every(EverySchedule { interval_secs: 60 }));
+        let mut paused = row(
+            "paused",
+            RoutineSchedule::Every(EverySchedule { interval_secs: 60 }),
+        );
         paused.next_run_at_ms = Some(1_000);
         paused.enabled = false;
         let mut manual = row("manual", RoutineSchedule::Manual(ManualSchedule {}));
@@ -436,9 +450,12 @@ mod tests {
     #[tokio::test]
     async fn record_run_replaces_the_previous_outcome_and_leaves_the_timer_alone() {
         let (s, _db) = store().await;
-        s.insert(&row("a", RoutineSchedule::Every(EverySchedule { interval_secs: 60 })))
-            .await
-            .unwrap();
+        s.insert(&row(
+            "a",
+            RoutineSchedule::Every(EverySchedule { interval_secs: 60 }),
+        ))
+        .await
+        .unwrap();
 
         s.record_run("a", 100, &RunOutcome::Failed("vendor offline".into()))
             .await
@@ -464,9 +481,12 @@ mod tests {
     #[tokio::test]
     async fn arm_moves_the_timer_and_disarming_takes_it_out_of_due() {
         let (s, db) = store().await;
-        s.insert(&row("a", RoutineSchedule::Every(EverySchedule { interval_secs: 60 })))
-            .await
-            .unwrap();
+        s.insert(&row(
+            "a",
+            RoutineSchedule::Every(EverySchedule { interval_secs: 60 }),
+        ))
+        .await
+        .unwrap();
         s.arm("a", Some(61_000)).await.unwrap();
         assert_eq!(
             s.get("a").await.unwrap().unwrap().next_run_at_ms,
@@ -606,7 +626,10 @@ mod tests {
             .map(|r| r.try_get::<String, _>("name").unwrap())
             .collect();
         for dropped in ["schedule_kind", "interval_secs", "at_ms"] {
-            assert!(!cols.iter().any(|c| c == dropped), "{dropped} still present");
+            assert!(
+                !cols.iter().any(|c| c == dropped),
+                "{dropped} still present"
+            );
         }
     }
 }

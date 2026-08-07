@@ -212,7 +212,12 @@ mod tests {
 
     #[test]
     fn weekly_fires_on_the_next_matching_weekday_and_wraps() {
-        let mwf = weekly("Asia/Shanghai", 9, 0, &[Weekday::Mon, Weekday::Wed, Weekday::Fri]);
+        let mwf = weekly(
+            "Asia/Shanghai",
+            9,
+            0,
+            &[Weekday::Mon, Weekday::Wed, Weekday::Fri],
+        );
         // 2026-08-07 is Friday; 04:00 CST is still before 09:00.
         assert_eq!(
             next_occurrence(&mwf, at("Asia/Shanghai", "2026-08-07T04:00")),

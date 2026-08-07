@@ -108,8 +108,9 @@ mod tests {
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::users::{Shared, UserServices};
     use horsie_models::agents::AgentPresetInput;
-    use horsie_models::routines::{EverySchedule, OnceSchedule, RoutineInput, RoutineSchedule,
-    Weekday, WeeklySchedule};
+    use horsie_models::routines::{
+        EverySchedule, OnceSchedule, RoutineInput, RoutineSchedule, Weekday, WeeklySchedule,
+    };
     use horsie_models::settings::{ModelInput, ProviderInput, SettingsUpdate};
 
     /// One account, configured far enough that a routine can actually start a
@@ -388,7 +389,11 @@ mod tests {
         );
 
         scheduler.tick(first.unwrap()).await;
-        assert_eq!(sessions(&a.services.supervisor).await.len(), 1, "no double fire");
+        assert_eq!(
+            sessions(&a.services.supervisor).await.len(),
+            1,
+            "no double fire"
+        );
     }
 
     /// One timer, two accounts: each routine fires in its owner's scope, on its

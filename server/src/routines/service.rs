@@ -197,7 +197,10 @@ impl RoutineService {
     }
 
     /// Save-time validation, returning the resolved schedule and enabled flag.
-    async fn validate(&self, input: &RoutineInput) -> Result<(RoutineSchedule, bool), RoutineError> {
+    async fn validate(
+        &self,
+        input: &RoutineInput,
+    ) -> Result<(RoutineSchedule, bool), RoutineError> {
         crate::memory::validate_slug(&input.name).map_err(RoutineError::Invalid)?;
         if input.prompt.trim().is_empty() {
             return Err(RoutineError::Invalid(
@@ -224,11 +227,11 @@ impl RoutineService {
 /// runner at every trigger.
 fn validate_schedule(schedule: &RoutineSchedule) -> Result<(), RoutineError> {
     match schedule {
-        RoutineSchedule::Every(e) if e.interval_secs < MIN_INTERVAL_SECS => Err(
-            RoutineError::Invalid(format!(
+        RoutineSchedule::Every(e) if e.interval_secs < MIN_INTERVAL_SECS => {
+            Err(RoutineError::Invalid(format!(
                 "interval must be at least {MIN_INTERVAL_SECS} seconds"
-            )),
-        ),
+            )))
+        }
         RoutineSchedule::Daily(d) => validate_clock(&d.timezone, d.hour, d.minute),
         RoutineSchedule::Weekly(w) => {
             validate_clock(&w.timezone, w.hour, w.minute)?;
@@ -358,11 +361,11 @@ pub(crate) mod tests {
     use super::*;
     use crate::agents::AgentStore;
     use crate::config::ConfigStore;
+    use horsie_models::agents::AgentPresetInput;
     use horsie_models::routines::{
         DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
         WeeklySchedule, YearlySchedule,
     };
-    use horsie_models::agents::AgentPresetInput;
     use horsie_models::settings::{ModelInput, ProviderInput, SettingsUpdate};
 
     /// Everything a routine test needs, over one temp DB: a config store with

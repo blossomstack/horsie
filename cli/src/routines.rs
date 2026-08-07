@@ -148,9 +148,9 @@ fn render_invoke(base: &str, session_id: &str) -> String {
 mod tests {
     use super::*;
     use horsie_models::routines::{
-    DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
-    WeeklySchedule, YearlySchedule,
-};
+        DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
+        WeeklySchedule, YearlySchedule,
+    };
 
     fn routine(name: &str) -> RoutineView {
         RoutineView {
