@@ -9,7 +9,7 @@ use horsie_models::workflow::WorkflowStepDef;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
-const COLS: &str = "name, description, start, steps, created_at, updated_at";
+const COLS: &str = "name, description, start, steps, max_steps, created_at, updated_at";
 
 /// One row of the `workflows` table.
 #[derive(Clone, Debug, PartialEq)]
@@ -18,6 +18,10 @@ pub struct WorkflowRow {
     pub description: String,
     pub start: String,
     pub steps: Vec<WorkflowStepDef>,
+    /// Most step executions one run may perform. `None` means "the server's
+    /// default", so the constant stays in one place instead of being baked into
+    /// every row.
+    pub max_steps: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -60,13 +64,14 @@ impl WorkflowStore {
     /// would discard the existing graph).
     pub async fn insert(&self, row: &WorkflowRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO workflows (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO workflows (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(self.user.as_str())
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.start)
         .bind(to_json(&row.steps)?)
+        .bind(row.max_steps.map(i64::from))
         .bind(&row.created_at)
         .bind(&row.updated_at)
         .execute(self.db.pool())
@@ -78,12 +83,13 @@ impl WorkflowStore {
     /// Full replace. Returns false when no workflow has that name.
     pub async fn replace(&self, row: &WorkflowRow) -> Result<bool, String> {
         let res = sqlx::query(&self.db.q(
-            "UPDATE workflows SET description = ?, start = ?, steps = ?, updated_at = ? \
-             WHERE user_id = ? AND name = ?",
+            "UPDATE workflows SET description = ?, start = ?, steps = ?, max_steps = ?, \
+             updated_at = ? WHERE user_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.start)
         .bind(to_json(&row.steps)?)
+        .bind(row.max_steps.map(i64::from))
         .bind(&row.updated_at)
         .bind(self.user.as_str())
         .bind(&row.name)
@@ -120,6 +126,12 @@ fn row_to_workflow(row: &AnyRow) -> Result<WorkflowRow, String> {
         description: get("description")?,
         start: get("start")?,
         steps: serde_json::from_str(&steps_json).map_err(|e| format!("workflows.steps: {e}"))?,
+        // Nullable, and read as i64 because that is the one integer width the
+        // `Any` driver hands back for both dialects.
+        max_steps: row
+            .try_get::<Option<i64>, _>("max_steps")
+            .map_err(|e| e.to_string())?
+            .and_then(|n| u32::try_from(n).ok()),
         created_at: get("created_at")?,
         updated_at: get("updated_at")?,
     })
@@ -184,9 +196,21 @@ mod tests {
                     max_retries: None,
                 },
             ],
+            max_steps: Some(40),
             created_at: "1".into(),
             updated_at: "1".into(),
         }
+    }
+
+    /// A definition with no budget of its own reads back as absent rather than
+    /// as some baked-in number, which is what keeps the default in one place.
+    #[tokio::test]
+    async fn an_absent_step_budget_round_trips_as_absent() {
+        let s = store().await;
+        let mut r = row("no-budget");
+        r.max_steps = None;
+        s.insert(&r).await.unwrap();
+        assert_eq!(s.get("no-budget").await.unwrap().unwrap().max_steps, None);
     }
 
     #[tokio::test]

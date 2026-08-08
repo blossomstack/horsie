@@ -1,0 +1,15 @@
+-- PostgreSQL mirror of migrations/sqlite/0027_workflow_max_steps.sql.
+--
+-- Workflows: the run-wide step budget moves onto the definition.
+--
+-- The budget is the only thing bounding a graph whose loop condition never
+-- flips, and it was fixed at a constant (100) that no API could set. It belongs
+-- on the definition rather than on the run request: the budget is a property of
+-- the graph's shape, and a workflow that legitimately loops twenty times knows
+-- that about itself.
+--
+-- Nullable with no default rather than `NOT NULL DEFAULT 100`: absent means "use
+-- the server's default", which keeps the constant in one place instead of
+-- baking today's value into every existing row. Every workflow saved before this
+-- reads NULL and behaves exactly as it did.
+ALTER TABLE workflows ADD COLUMN max_steps INTEGER;

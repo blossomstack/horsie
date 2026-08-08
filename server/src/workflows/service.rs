@@ -92,6 +92,7 @@ impl WorkflowService {
             description: input.description.unwrap_or_default(),
             start: input.start,
             steps: input.steps,
+            max_steps: input.max_steps,
             created_at: now_secs.to_string(),
             updated_at: now_secs.to_string(),
         };
@@ -120,6 +121,7 @@ impl WorkflowService {
             description: input.description.unwrap_or_default(),
             start: input.start,
             steps: input.steps,
+            max_steps: input.max_steps,
             created_at: existing.created_at,
             updated_at: now_secs.to_string(),
         };
@@ -158,6 +160,13 @@ impl WorkflowService {
         if input.steps.is_empty() {
             return Err(WorkflowError::Invalid(
                 "a workflow needs at least one step".to_string(),
+            ));
+        }
+        // A budget of zero would fail every run before its first step, which is
+        // never what anyone means. Absent is how you ask for the default.
+        if input.max_steps == Some(0) {
+            return Err(WorkflowError::Invalid(
+                "max_steps must be at least 1, or absent for the default".to_string(),
             ));
         }
         let mut seen: HashSet<&str> = HashSet::new();
@@ -235,6 +244,7 @@ fn to_view(row: WorkflowRow) -> WorkflowView {
         description: row.description,
         start: row.start,
         steps: row.steps,
+        max_steps: row.max_steps,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
@@ -343,6 +353,7 @@ mod tests {
             description: None,
             start: "triage".into(),
             steps: vec![step("triage", "bug-triager"), step("fix", "coder")],
+            max_steps: None,
         }
     }
 
@@ -446,6 +457,31 @@ mod tests {
             condition: Some("output.severity == \"p0\"".into()),
         }]);
         assert!(s.create(i, 1).await.is_ok());
+    }
+
+    /// The budget is what stops a loop whose condition never flips, and it is a
+    /// property of the graph — so a workflow that legitimately loops far can say
+    /// so, and a run snapshots whatever it said.
+    #[tokio::test]
+    async fn a_definition_carries_its_own_step_budget() {
+        let s = service().await;
+        let mut i = input("a");
+        i.max_steps = Some(12);
+        assert_eq!(s.create(i, 1).await.unwrap().max_steps, Some(12));
+        assert_eq!(s.get("a").await.unwrap().max_steps, Some(12));
+    }
+
+    /// Zero would fail every run before its first step. Absent is how you ask
+    /// for the default.
+    #[tokio::test]
+    async fn a_step_budget_of_zero_is_refused() {
+        let s = service().await;
+        let mut i = input("a");
+        i.max_steps = Some(0);
+        assert!(matches!(
+            s.create(i, 1).await,
+            Err(WorkflowError::Invalid(m)) if m.contains("at least 1")
+        ));
     }
 
     #[tokio::test]

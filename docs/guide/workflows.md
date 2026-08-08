@@ -24,6 +24,10 @@ per step — and shows whichever you select on the right. Each step needs:
   fields you declare here.
 - **Goes to** — where to hand off, and on what condition.
 
+**Limits** are optional, at the bottom of the step: how many turns the step may
+take before it fails, and how many times a transient provider error is retried
+within it. Leave them blank unless a step has earned an opinion.
+
 Press **Visualize** to swap the panel for the graph, which redraws as you
 type; choosing a node there opens that step. Steps can be dragged into another
 order, which changes how the list reads and nothing about how the run
@@ -50,8 +54,14 @@ its output. That is fine for a final step, but nothing can branch on it.
 ### Loops
 
 A transition may point back to an earlier step. The graph draws it as a dashed
-curve. Loops are bounded by a run-wide budget of 100 steps; a run that hits it
-fails rather than spinning forever.
+curve.
+
+Loops are bounded by the workflow's **step budget** — the most steps one run may
+execute, set on the definition and 100 if you leave it blank. It is the only
+thing stopping a loop whose condition never flips: a run that hits the budget
+fails with `step budget exhausted` rather than spinning forever. Raise it for a
+graph that legitimately loops far. A run snapshots the budget when it starts, so
+changing it never affects a run already under way.
 
 ## Running one
 

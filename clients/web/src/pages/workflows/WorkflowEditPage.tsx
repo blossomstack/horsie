@@ -40,6 +40,9 @@ export function WorkflowEditPage() {
 
   const [slug, setSlug] = useState("");
   const [description, setDescription] = useState("");
+  // Held as text, not a number: an empty field has to mean "use the server's
+  // default", and a number input cannot express that without a sentinel.
+  const [maxSteps, setMaxSteps] = useState("");
   const [steps, setSteps] = useState<StepDraft[]>([emptyStep(0)]);
   const [start, setStart] = useState("start");
   const [selected, setSelected] = useState<Selection>(DEFINITION);
@@ -52,6 +55,7 @@ export function WorkflowEditPage() {
   if (editing && existing && !loaded) {
     setSlug(existing.name);
     setDescription(existing.description);
+    setMaxSteps(existing.maxSteps === undefined ? "" : String(existing.maxSteps));
     setSteps(existing.steps.map(toDraft));
     setStart(existing.start);
     setLoaded(true);
@@ -101,6 +105,7 @@ export function WorkflowEditPage() {
       description: description.trim() || undefined,
       start: start.trim(),
       steps: steps.map(fromDraft),
+      maxSteps: maxSteps.trim() === "" ? undefined : Number(maxSteps),
     };
     const done = () => navigate(`/workflows/${encodeURIComponent(body.name)}`);
     const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
@@ -314,6 +319,23 @@ export function WorkflowEditPage() {
                   onChange={(e) => setDescription(e.target.value)}
                   data-testid="workflow-description"
                 />
+              </label>
+              <label className="block">
+                <span className="section-title">Step budget</span>
+                <input
+                  className="field mt-1 w-full"
+                  type="number"
+                  min={1}
+                  value={maxSteps}
+                  placeholder="100 (default)"
+                  onChange={(e) => setMaxSteps(e.target.value)}
+                  data-testid="workflow-max-steps"
+                />
+                <span className="mt-1 block text-xs text-faint">
+                  Most steps one run may execute. This is what stops a loop whose
+                  condition never flips; raise it for a graph that legitimately
+                  loops far.
+                </span>
               </label>
               <label className="block">
                 <span className="section-title">Starts at</span>
