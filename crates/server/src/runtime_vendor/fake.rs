@@ -278,10 +278,21 @@ impl FakeRuntimeVendor {
     ///
     /// # Panics
     /// If called on an agent built with `connect`, where the server owns the link.
+    /// The same publication as [`Self::published_as`], but typed, for whatever
+    /// needs the websocket vendor itself rather than the trait.
     #[must_use]
-    pub fn published_as(&self, name: &str) -> crate::sessions::spec::SharedVendors {
+    pub fn links_as(&self, name: &str) -> crate::runtime_vendor::WebsocketVendorTable {
         let mut map = std::collections::HashMap::new();
         map.insert(name.to_string(), self.link());
+        Arc::new(std::sync::Mutex::new(map))
+    }
+
+    pub fn published_as(&self, name: &str) -> crate::sessions::spec::RuntimeVendorMap {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            name.to_string(),
+            self.link() as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+        );
         Arc::new(std::sync::RwLock::new(map))
     }
 
@@ -547,7 +558,15 @@ impl FakeRuntimeVendorBuilder {
             create_gate.clone(),
             recorder.clone(),
         ));
-        let link = WebsocketRuntimeVendor::start(server, owner).await?;
+        // Its own table: a fake vendor stands alone, and a handle it mints
+        // resolves the link back out of this.
+        let links: crate::runtime_vendor::WebsocketVendorTable =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let link = WebsocketRuntimeVendor::start(server, owner, links.clone()).await?;
+        links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(link.vendor_name().to_string(), link.clone());
         Ok(FakeRuntimeVendor {
             recorder,
             instance_id,
@@ -917,6 +936,7 @@ pub fn runtime_spec_fixture(workspace: &str) -> RuntimeSpec {
 )]
 mod tests {
     use super::*;
+    use crate::runtime_vendor::RuntimeVendor as _;
 
     use horsie_runtime_client::RuntimeTransport;
 
@@ -928,7 +948,7 @@ mod tests {
             .await
             .expect("agent");
         let transport = crate::runtime_vendor::RuntimeVendorTransport::new(
-            agent.published_as("test-agent"),
+            agent.links_as("test-agent"),
             "test-agent".to_string(),
             "rt-1".to_string(),
         );
@@ -965,7 +985,7 @@ mod tests {
             .await
             .expect("agent");
         let transport = crate::runtime_vendor::RuntimeVendorTransport::new(
-            agent.published_as("test-agent"),
+            agent.links_as("test-agent"),
             "test-agent".to_string(),
             "rt-1".to_string(),
         );
@@ -1009,7 +1029,7 @@ mod tests {
             .await
             .expect("agent");
         let transport = crate::runtime_vendor::RuntimeVendorTransport::new(
-            agent.published_as("test-agent"),
+            agent.links_as("test-agent"),
             "test-agent".to_string(),
             "rt-1".to_string(),
         );
@@ -1036,9 +1056,12 @@ mod tests {
             .expect("agent");
         let link = agent.link();
         let spec = runtime_spec_fixture("main");
-        link.create("rt-1", &spec).await.expect("create");
+        let (progress, _rx) = tokio::sync::mpsc::channel(8);
+        link.create("rt-1", &spec.to_wire(), progress.clone())
+            .await
+            .expect("create");
         assert_eq!(agent.live_runtimes(), vec!["rt-1".to_string()]);
-        link.hibernate("rt-1").await;
+        link.hibernate("rt-1", progress).await.expect("hibernate");
         assert_eq!(
             agent.signals(),
             vec!["create:rt-1".to_string(), "hibernate:rt-1".to_string()]
@@ -1052,10 +1075,17 @@ mod tests {
             .await
             .expect("agent");
         let link = agent.link();
-        link.create("rt-1", &runtime_spec_fixture("main"))
+        let (progress, _rx) = tokio::sync::mpsc::channel(8);
+        link.create(
+            "rt-1",
+            &runtime_spec_fixture("main").to_wire(),
+            progress.clone(),
+        )
+        .await
+        .expect("create");
+        link.get("rt-1", &runtime_spec_fixture("main").to_wire(), progress)
             .await
-            .expect("create");
-        link.get("rt-1").await.expect("get must find the runtime");
+            .expect("get must find the runtime");
         assert_eq!(
             agent.signals(),
             vec!["create:rt-1".to_string(), "get:rt-1".to_string()]
@@ -1068,9 +1098,10 @@ mod tests {
             .serve_in_process()
             .await
             .expect("agent");
+        let (progress, _rx) = tokio::sync::mpsc::channel(8);
         let err = agent
             .link()
-            .get("rt-1")
+            .get("rt-1", &runtime_spec_fixture("main").to_wire(), progress)
             .await
             .expect_err("a get must never provision");
         assert!(
@@ -1086,13 +1117,22 @@ mod tests {
             .await
             .expect("agent");
         let link = agent.link();
-        link.create("rt-1", &runtime_spec_fixture("main"))
+        let (progress, _rx) = tokio::sync::mpsc::channel(8);
+        link.create(
+            "rt-1",
+            &runtime_spec_fixture("main").to_wire(),
+            progress.clone(),
+        )
+        .await
+        .expect("create");
+        link.hibernate("rt-1", progress.clone())
             .await
-            .expect("create");
-        link.hibernate("rt-1").await;
-        // Hibernate is advisory; this agent keeps the runtime, so the session
+            .expect("hibernate");
+        // Hibernate is advisory; this vendor keeps the runtime, so the session
         // it belongs to is still resumable.
-        link.get("rt-1").await.expect("get after hibernate");
+        link.get("rt-1", &runtime_spec_fixture("main").to_wire(), progress)
+            .await
+            .expect("get after hibernate");
     }
 
     #[tokio::test]
@@ -1106,13 +1146,21 @@ mod tests {
 
         let creating = {
             let link = link.clone();
-            tokio::spawn(async move { link.create("rt-1", &runtime_spec_fixture("main")).await })
+            tokio::spawn(async move {
+                let (progress, _rx) = tokio::sync::mpsc::channel(8);
+                link.create("rt-1", &runtime_spec_fixture("main").to_wire(), progress)
+                    .await
+            })
         };
         // The create is parked in the agent. A get issued now must not resolve
         // to Gone just because the runtime is not there *yet*.
         let getting = {
             let link = link.clone();
-            tokio::spawn(async move { link.get("rt-1").await })
+            tokio::spawn(async move {
+                let (progress, _rx) = tokio::sync::mpsc::channel(8);
+                link.get("rt-1", &runtime_spec_fixture("main").to_wire(), progress)
+                    .await
+            })
         };
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(200), async {})

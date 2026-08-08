@@ -16,7 +16,7 @@ use crate::db::Db;
 use crate::db::journal::SqlJournal;
 use crate::plugins::ArtifactStore;
 use crate::sessions::spec::ServerDeps;
-use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
+use crate::sessions::spec::{RuntimeVendorMap, SharedProviderRegistry};
 use crate::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand, SupervisorConfig};
 use horsie_actor::{ActorRef, Journal, spawn_root};
 use horsie_models::model_cards::ModelCardInput;
@@ -70,7 +70,7 @@ pub struct UserServices {
     /// so a caller that needs to look at one does not have to reach through a
     /// service that happens to own it.
     pub provider_registry: SharedProviderRegistry,
-    pub vendors: SharedVendors,
+    pub vendors: RuntimeVendorMap,
     pub model_cards: Arc<model_cards::ModelCardStore>,
     pub chatgpt: Arc<crate::config::chatgpt_login::ChatGptLoginService>,
     pub github: Arc<crate::github::GithubService>,

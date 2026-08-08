@@ -259,10 +259,11 @@ impl SessionActor {
         };
         let key = plan.kind.agent_key();
         let provider = Arc::new(SessionContextProvider {
-            runtimes: self
-                .deps
-                .runtimes
-                .provider(self.id.to_string(), self.spec.vendor.clone()),
+            runtimes: self.deps.runtimes.provider(
+                self.id.to_string(),
+                self.spec.vendor.clone(),
+                self.spec.clone(),
+            ),
             registry: self.deps.provider_registry.clone(),
             mcp: self.deps.mcp.clone(),
             memory: self.deps.memory.clone(),

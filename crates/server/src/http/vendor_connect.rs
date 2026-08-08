@@ -138,7 +138,13 @@ pub async fn vendor_connect(
                 let ws =
                     WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None)
                         .await;
-                match crate::runtime_vendor::WebsocketRuntimeVendor::start(ws, owner).await {
+                match crate::runtime_vendor::WebsocketRuntimeVendor::start(
+                    ws,
+                    owner,
+                    agents.links(),
+                )
+                .await
+                {
                     Ok(link) => {
                         let name = link.vendor_name().to_string();
                         match agents.publish(link.clone()) {

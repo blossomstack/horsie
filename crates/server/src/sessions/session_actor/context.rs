@@ -748,7 +748,11 @@ mod tests {
 
         let build = |kind: SessionAgentKind| SessionContextProvider {
             agent_type: None,
-            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
+            runtimes: f.deps.runtimes.provider(
+                id.to_string(),
+                "mock".into(),
+                crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            ),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
@@ -805,7 +809,11 @@ mod tests {
         let mut settings = actor_spec_fixture().agent;
         settings.max_concurrent_subagents = Some(0);
         let provider = SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
+            runtimes: f.deps.runtimes.provider(
+                id.to_string(),
+                "mock".into(),
+                crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            ),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
@@ -843,7 +851,11 @@ mod tests {
         // too -- the base prompt tells the model the tool exists.
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let build = |unattended: bool| SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".into()),
+            runtimes: f.deps.runtimes.provider(
+                id.to_string(),
+                "mock".into(),
+                crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            ),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
@@ -1161,7 +1173,11 @@ mod tests {
     async fn a_subagent_whose_agent_type_is_gone_fails_rather_than_running_generic() {
         let (f, session, id) = agent_harness().await;
         let provider = SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
+            runtimes: f.deps.runtimes.provider(
+                id.to_string(),
+                "mock".to_string(),
+                crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            ),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,

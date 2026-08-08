@@ -93,7 +93,10 @@ pub(super) async fn actor_fixture_from(
     let tmp = tempfile::tempdir().unwrap();
     let agent = builder.serve_in_process().await.expect("fake agent");
     let mut vendors = HashMap::new();
-    vendors.insert("mock".to_string(), agent.link());
+    vendors.insert(
+        "mock".to_string(),
+        agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+    );
     let vendors = Arc::new(std::sync::RwLock::new(vendors));
     let deps = ServerDeps {
         runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
@@ -832,7 +835,10 @@ pub(super) async fn stop_harness_full(
         .await
         .expect("fake agent");
     let mut vendors = HashMap::new();
-    vendors.insert("mock".to_string(), agent.link());
+    vendors.insert(
+        "mock".to_string(),
+        agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+    );
     let vendors = Arc::new(std::sync::RwLock::new(vendors));
     let deps = ServerDeps {
         runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
@@ -1034,7 +1040,10 @@ pub(super) async fn catalog_harness_with(
         .await
         .expect("fake agent");
     let mut vendors = HashMap::new();
-    vendors.insert("mock".to_string(), agent.link());
+    vendors.insert(
+        "mock".to_string(),
+        agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+    );
     let vendors = Arc::new(std::sync::RwLock::new(vendors));
     let deps = ServerDeps {
         runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
@@ -1079,7 +1088,11 @@ pub(super) fn catalog_provider(
     id: Uuid,
 ) -> SessionContextProvider {
     SessionContextProvider {
-        runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
+        runtimes: f.deps.runtimes.provider(
+            id.to_string(),
+            "mock".to_string(),
+            crate::sessions::spec::SessionSpec::for_vendor("mock"),
+        ),
         registry: f.deps.provider_registry.clone(),
         mcp: None,
         memory: None,
@@ -1129,7 +1142,10 @@ pub(super) async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, 
         .await
         .expect("fake agent");
     let mut vendors = HashMap::new();
-    vendors.insert("mock".to_string(), agent.link());
+    vendors.insert(
+        "mock".to_string(),
+        agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+    );
     let vendors = Arc::new(std::sync::RwLock::new(vendors));
     let deps = ServerDeps {
         runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
@@ -1200,7 +1216,11 @@ pub(super) fn typed_provider(
     let mut settings = actor_spec_fixture().agent;
     settings.allowed_tools = allowed_tools;
     SessionContextProvider {
-        runtimes: f.deps.runtimes.provider(id.to_string(), "mock".to_string()),
+        runtimes: f.deps.runtimes.provider(
+            id.to_string(),
+            "mock".to_string(),
+            crate::sessions::spec::SessionSpec::for_vendor("mock"),
+        ),
         registry: f.deps.provider_registry.clone(),
         mcp: None,
         memory: None,

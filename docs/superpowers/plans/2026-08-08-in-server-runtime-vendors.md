@@ -45,86 +45,36 @@ a real ambiguity. The old one dies as each vendor is ported.
 
 ---
 
-### Task 1b: `WebsocketRuntimeVendor` implements the traits
+### Task 1b: `WebsocketRuntimeVendor` implements the traits — **done**
 
-**Files:**
-- Modify: `crates/server/src/runtime_vendor/proxy.rs`
-- Modify: `crates/server/src/runtime_manager.rs`, `crates/server/src/http/vendor_connect.rs`
-- Modify: `crates/server/src/sessions/spec.rs`
+`WebsocketRuntimeVendor` now implements `RuntimeVendor`. `create`/`get` return
+`RuntimeProgress::Ready(handle)` and never touch the sink, which is honest
+rather than lazy: a `horsie connect` process answers `CreateRuntime` only once
+its runtime is up and has dialled back to it, so nothing is left to report.
 
-**Interfaces:**
-- Consumes: `RuntimeVendor`, `RuntimeHandle`, `RuntimeProgress`, `RuntimeProgressSink`
-- Produces: `RuntimeHandleImpl`; `RuntimeVendorMap = Arc<RwLock<HashMap<String, Arc<dyn RuntimeVendor>>>>`
+`RuntimeVendorMap` is now `HashMap<String, Arc<dyn RuntimeVendor>>`.
+`RuntimeManager` drives the trait and builds its `RuntimeClient` from the handle
+the vendor returned, via `RuntimeHandleTransport`.
 
-- [ ] **Step 1: Write the failing tests**
+Two things had to stay websocket-specific rather than climb into the trait, and
+naming them is the point of this task:
 
-```rust
-#[tokio::test]
-async fn create_returns_ready_because_a_vendor_process_replies_only_when_its_runtime_is_up() {
-    let (vendor, mut script) = proxy_vendor().await;
-    script.answer_create("s1").await;
-    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    let progress = vendor.create("s1", &spec(), tx).await.unwrap();
-    assert!(matches!(progress, RuntimeProgress::Ready(_)));
-    assert!(rx.try_recv().is_err(), "a vendor with nothing to wait for emits nothing");
-}
+- **`WebsocketVendorTable`** — `Arc<Mutex<HashMap<String, Arc<WebsocketRuntimeVendor>>>>`,
+  owned by `RuntimeVendorRegistry` alongside the shared map. Name ownership
+  turns on `owner`/`instance_id`, which describe a dialled-in *process* and mean
+  nothing to a vendor configured in settings; and a handle relays by calling the
+  link's `request`, which is this vendor's own protocol. A handle resolves
+  through this table on every call, which is what keeps a mid-turn reconnect
+  invisible (#187).
+- **`is_reachable`** — added to the trait with a default of `true`, the
+  additive-method pattern in action. A REST-backed vendor is always reachable
+  and surfaces a bad token as a failed operation; only a socket-backed one has a
+  state worth waiting out.
 
-#[tokio::test]
-async fn a_handle_resolves_the_live_link_per_call_so_a_reconnect_is_invisible() {
-    // #187: a client is acquired once per run and baked into the toolbox, so a
-    // handle that captured its link failed every remaining tool call in the
-    // turn after a vendor reconnected. Resolving through the map per call is
-    // what makes a reconnect mid-turn survivable.
-    let (vendor, mut script) = proxy_vendor().await;
-    script.answer_create("s1").await;
-    let (tx, _rx) = tokio::sync::mpsc::channel(4);
-    let RuntimeProgress::Ready(handle) = vendor.create("s1", &spec(), tx).await.unwrap()
-    else { panic!("expected Ready") };
-
-    let reconnected = script.reconnect_under_the_same_name().await;
-    reconnected.answer_relay("s1").await;
-    assert!(handle.relay(ping()).await.is_ok());
-}
-
-#[tokio::test]
-async fn a_relay_to_an_absent_vendor_is_retryable_not_terminal() {
-    let (vendor, script) = proxy_vendor().await;
-    script.answer_create("s1").await;
-    let (tx, _rx) = tokio::sync::mpsc::channel(4);
-    let RuntimeProgress::Ready(handle) = vendor.create("s1", &spec(), tx).await.unwrap()
-    else { panic!("expected Ready") };
-
-    script.disconnect().await;
-    // Never `Disconnected`: that means "can never work again", and the vendor
-    // may well be back before the model asks for its next tool.
-    assert!(matches!(handle.relay(ping()).await, Err(TransportError::SendFailed(_))));
-}
-```
-
-- [ ] **Step 2: Run and watch them fail**
-
-Run: `cargo test -p horsie-server --lib runtime_vendor::proxy`
-Expected: FAIL — `WebsocketRuntimeVendor` has inherent methods, not the trait.
-
-- [ ] **Step 3: Implement**
-
-`RuntimeHandleImpl` wraps a `runtime_id`, an `Arc<dyn RuntimeTransport>` and a
-closed-signal. `WebsocketRuntimeVendor` supplies the existing
-`RuntimeVendorTransport`, which resolves the live link through the vendor map on
-every call; `WebsocketRuntimeVendor::start` gains the map so it can build one.
-
-`create`/`get` return `Ready(handle)` and never touch the sink: a `horsie
-connect` process replies only once its runtime is up, so there is no
-intermediate state to report. `hibernate` returns `Stopped`, `delete` returns
-`Gone`.
-
-- [ ] **Step 4: Full gate, then commit**
-
-Run: `cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings && cargo test --workspace`
-
-```bash
-git add -A && git commit -m "feat: the proxy vendor implements the runtime vendor traits"
-```
+`RuntimeManager::get` and `provider` now carry a `SessionSpec`, so an
+acquisition can pass the spec a vendor needs to rebuild. The wire
+`GetRuntimeRequest` does not carry it yet — that lands with the schema change
+that lets a vendor stop keeping its own copy on disk.
 
 ---
 

@@ -26,7 +26,7 @@ mod websocket;
 pub use horsie_models::runtime_vendor::RuntimeVendorCapabilities;
 pub use horsie_runtime_vendor::runtime_vendor::{RuntimeHandle, RuntimeVendor};
 pub use horsie_runtime_vendor::{RuntimeProgress, RuntimeVendorError};
-pub use registry::{RegisterError, RuntimeVendorRegistry};
+pub use registry::{RegisterError, RuntimeVendorRegistry, WebsocketVendorTable};
 pub use transport::RuntimeVendorTransport;
 pub use websocket::WebsocketRuntimeVendor;
 

@@ -18,7 +18,6 @@
 //! sandbox, and makes a reconnect invisible to a turn already in flight.
 
 use crate::runtime_vendor::WebsocketRuntimeVendor;
-use crate::sessions::spec::SharedVendors;
 use async_trait::async_trait;
 use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
 use horsie_models::runtime_vendor::{
@@ -40,14 +39,18 @@ const RELINK_WAIT: Duration = Duration::from_secs(5);
 const RELINK_POLL: Duration = Duration::from_millis(100);
 
 pub struct RuntimeVendorTransport {
-    vendors: SharedVendors,
+    vendors: crate::runtime_vendor::WebsocketVendorTable,
     vendor_name: String,
     runtime_id: String,
 }
 
 impl RuntimeVendorTransport {
     #[must_use]
-    pub fn new(vendors: SharedVendors, vendor_name: String, runtime_id: String) -> Self {
+    pub fn new(
+        vendors: crate::runtime_vendor::WebsocketVendorTable,
+        vendor_name: String,
+        runtime_id: String,
+    ) -> Self {
         Self {
             vendors,
             vendor_name,
@@ -57,10 +60,10 @@ impl RuntimeVendorTransport {
 
     /// The vendor's live link, or `None` while it is away.
     fn current_link(&self) -> Option<Arc<WebsocketRuntimeVendor>> {
-        let vendors = self.vendors.read().unwrap_or_else(PoisonError::into_inner);
+        let vendors = self.vendors.lock().unwrap_or_else(PoisonError::into_inner);
         vendors
             .get(&self.vendor_name)
-            .filter(|link| link.is_connected())
+            .filter(|link| link.is_reachable())
             .cloned()
     }
 
@@ -141,6 +144,13 @@ impl RuntimeTransport for RuntimeVendorTransport {
 )]
 mod tests {
     use super::*;
+
+    /// A vendor table of its own. Handles minted against it resolve back to
+    /// whatever the test publishes.
+    fn test_links() -> crate::runtime_vendor::WebsocketVendorTable {
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
     use crate::auth::Principal;
     use futures_util::{SinkExt, StreamExt};
     use horsie_models::runtime::{
@@ -151,7 +161,6 @@ mod tests {
         RuntimeVendorOutboundMessage, RuntimeVendorReady,
     };
     use std::collections::HashMap;
-    use std::sync::RwLock;
     use tokio_tungstenite::WebSocketStream;
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::protocol::Role;
@@ -209,19 +218,22 @@ mod tests {
                     .unwrap();
             }
         });
-        WebsocketRuntimeVendor::start(server, Principal::Anonymous)
+        WebsocketRuntimeVendor::start(server, Principal::Anonymous, test_links())
             .await
             .unwrap()
     }
 
-    /// The registry the transport reads, holding one vendor.
-    fn published(name: &str, link: Arc<WebsocketRuntimeVendor>) -> SharedVendors {
+    /// The table the transport reads, holding one vendor.
+    fn published(
+        name: &str,
+        link: Arc<WebsocketRuntimeVendor>,
+    ) -> crate::runtime_vendor::WebsocketVendorTable {
         let mut map = HashMap::new();
         map.insert(name.to_string(), link);
-        Arc::new(RwLock::new(map))
+        Arc::new(std::sync::Mutex::new(map))
     }
 
-    fn transport(vendors: &SharedVendors) -> RuntimeVendorTransport {
+    fn transport(vendors: &crate::runtime_vendor::WebsocketVendorTable) -> RuntimeVendorTransport {
         RuntimeVendorTransport::new(vendors.clone(), "v".to_string(), "rt-1".to_string())
     }
 
@@ -263,7 +275,7 @@ mod tests {
         let live = boot_agent(true, "back-again").await;
         assert!(!Arc::ptr_eq(&dead, &live));
         vendors
-            .write()
+            .lock()
             .unwrap()
             .insert("v".to_string(), live.clone());
 
@@ -282,7 +294,8 @@ mod tests {
     /// and that variant is what latches a `RuntimeClient` off for good.
     #[tokio::test]
     async fn an_absent_vendor_is_never_reported_as_disconnected() {
-        let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
+        let vendors: crate::runtime_vendor::WebsocketVendorTable =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
         let err = transport(&vendors)
             .invoke("call-1", "agent-1", bash())
             .await
@@ -297,12 +310,13 @@ mod tests {
     /// invisible to the model — the call takes a moment longer and succeeds.
     #[tokio::test]
     async fn a_call_waits_for_a_vendor_that_is_still_re_dialling() {
-        let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
+        let vendors: crate::runtime_vendor::WebsocketVendorTable =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
         let arriving = vendors.clone();
         tokio::spawn(async move {
             let link = boot_agent(true, "late-arrival").await;
             tokio::time::sleep(Duration::from_millis(300)).await;
-            arriving.write().unwrap().insert("v".to_string(), link);
+            arriving.lock().unwrap().insert("v".to_string(), link);
         });
 
         let result = transport(&vendors)

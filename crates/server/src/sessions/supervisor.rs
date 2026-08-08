@@ -1130,7 +1130,10 @@ mod tests {
             .await
             .expect("fake agent");
         let mut vendors = HashMap::new();
-        vendors.insert("mock".to_string(), agent.link());
+        vendors.insert(
+            "mock".to_string(),
+            agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+        );
         let vendors = Arc::new(std::sync::RwLock::new(vendors));
         let deps = ServerDeps {
             runtimes: crate::runtime_manager::test_runtime_manager(&vendors),

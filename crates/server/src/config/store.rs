@@ -14,7 +14,7 @@
 use crate::auth::UserId;
 use crate::config::ConfigStore;
 use crate::db::Db;
-use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
+use crate::sessions::spec::{RuntimeVendorMap, SharedProviderRegistry};
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret, ThinkingDialect, ThinkingEffort};
 use horsie_llm_providers::anthropic::AnthropicProvider;
@@ -44,7 +44,7 @@ pub struct StoreDeps {
 pub struct OpenedConfig {
     pub store: Arc<DbConfigStore>,
     pub registry: SharedProviderRegistry,
-    pub vendors: SharedVendors,
+    pub vendors: RuntimeVendorMap,
     /// The migrated connection pool, shared with feature stores (e.g. GitHub)
     /// that persist into the same settings DB.
     pub db: Db,
@@ -87,7 +87,7 @@ pub struct DbConfigStore {
     default_vendor: RwLock<String>,
     /// The live vendor roster, written by connected agents rather than by this
     /// store. Read here only to render the settings view.
-    vendors: SharedVendors,
+    vendors: RuntimeVendorMap,
     info: ServerInfo,
 }
 
@@ -132,7 +132,7 @@ impl DbConfigStore {
         // The server builds no vendors: every vendor is an agent that dials in
         // and publishes itself into this map. It starts empty at boot and is
         // never repopulated from the database.
-        let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
+        let vendors: RuntimeVendorMap = Arc::new(RwLock::new(HashMap::new()));
 
         // Kept as a preference even when no agent has connected yet — an agent
         // announcing this name later makes it take effect, so validating it

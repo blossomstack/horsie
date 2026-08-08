@@ -118,6 +118,20 @@ pub trait RuntimeVendor: Send + Sync {
     /// than inferred, so nothing above has to branch on a vendor's kind.
     fn capabilities(&self) -> RuntimeVendorCapabilities;
 
+    /// Whether this vendor can be used right now.
+    ///
+    /// Default `true`, because for most vendors it always is: a Fly vendor is
+    /// a REST client, and a bad token surfaces as a failed operation rather
+    /// than a state. A vendor reached over a socket overrides it, so a caller
+    /// can wait out a reconnect instead of failing a turn.
+    ///
+    /// Defaulted rather than required, which is the additive-method pattern
+    /// this contract is built around: implementations that do not care are
+    /// unaffected.
+    fn is_reachable(&self) -> bool {
+        true
+    }
+
     /// Build a runtime. Called exactly once per session; every later
     /// acquisition is [`Self::get`].
     async fn create(
@@ -254,6 +268,30 @@ impl RuntimeHandle for RuntimeHandleImpl {
             return;
         }
         let _ = rx.wait_for(|closed| *closed).await;
+    }
+}
+
+/// Lets a handle be used wherever a [`RuntimeTransport`] is expected.
+///
+/// `RuntimeClient` is built over a transport and a handle is built over one, so
+/// this is the one-line adapter between them rather than a second abstraction:
+/// it keeps `RuntimeHandle` free to be about a *runtime* while `RuntimeTransport`
+/// stays about *bytes*.
+///
+/// [`RuntimeTransport`]: horsie_runtime_client::RuntimeTransport
+pub struct RuntimeHandleTransport(pub Arc<dyn RuntimeHandle>);
+
+#[async_trait]
+impl horsie_runtime_client::RuntimeTransport for RuntimeHandleTransport {
+    async fn relay(
+        &self,
+        message: RuntimeInboundMessage,
+    ) -> Result<RuntimeOutboundMessage, TransportError> {
+        self.0.relay(message).await
+    }
+
+    async fn send_oneway(&self, message: RuntimeInboundMessage) -> Result<(), TransportError> {
+        self.0.relay_oneway(message).await
     }
 }
 

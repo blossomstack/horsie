@@ -264,14 +264,28 @@ async fn the_same_vendor_name_in_two_accounts_is_two_runtimes() {
     assert_eq!(sa.vendor_agents.connected_names(), vec!["main".to_string()]);
     assert_eq!(sb.vendor_agents.connected_names(), vec!["main".to_string()]);
 
+    // Identity is a websocket-vendor property, so it is read from the typed
+    // table the registry publishes rather than from the trait.
     let (a_link, b_link) = (
-        sa.vendors.read().unwrap().get("main").cloned().unwrap(),
-        sb.vendors.read().unwrap().get("main").cloned().unwrap(),
+        sa.vendor_agents
+            .links()
+            .lock()
+            .unwrap()
+            .get("main")
+            .cloned()
+            .unwrap(),
+        sb.vendor_agents
+            .links()
+            .lock()
+            .unwrap()
+            .get("main")
+            .cloned()
+            .unwrap(),
     );
     assert_ne!(
         a_link.instance_id(),
         b_link.instance_id(),
-        "`main` must resolve to each account's own agent process"
+        "`main` must resolve to each account's own vendor process"
     );
 
     // Both accounts can create on it, which is the denial-of-service the flat

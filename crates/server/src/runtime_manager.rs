@@ -17,10 +17,11 @@
 //! turn until it has an answer: a wait that survives the process dying
 //! mid-create, which one held in a map beside this manager could not.
 
+use crate::runtime_vendor::RuntimeVendor;
 use crate::runtime_vendor::{
-    RuntimeSpec, RuntimeVendorError, RuntimeVendorTransport, WebsocketRuntimeVendor, WorkspaceSpec,
+    RuntimeSpec, RuntimeVendorError, WorkspaceSpec,
 };
-use crate::sessions::spec::{SessionSpec, SharedVendors};
+use crate::sessions::spec::{RuntimeVendorMap, SessionSpec};
 use horsie_runtime_client::RuntimeClient;
 use std::sync::Arc;
 
@@ -45,10 +46,16 @@ pub enum RuntimeError {
 /// What the manager needs from the server to assemble a runtime spec.
 #[derive(Clone)]
 pub struct RuntimeDeps {
-    pub vendors: SharedVendors,
+    pub vendors: RuntimeVendorMap,
     pub github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,
     pub plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
 }
+
+/// How many progress reports may queue before the oldest are dropped.
+///
+/// Dropping is correct: progress is advisory and the call's return value is the
+/// outcome, so a consumer falling behind must never stall a provision.
+const PROGRESS_BUFFER: usize = 32;
 
 pub struct RuntimeManager {
     deps: RuntimeDeps,
@@ -60,7 +67,7 @@ impl RuntimeManager {
         Self { deps }
     }
 
-    fn vendor(&self, vendor: &str) -> Result<Arc<WebsocketRuntimeVendor>, RuntimeError> {
+    fn vendor(&self, vendor: &str) -> Result<Arc<dyn RuntimeVendor>, RuntimeError> {
         let links =
             self.deps.vendors.read().map_err(|_| {
                 RuntimeError::Unavailable("vendor registry lock poisoned".to_string())
@@ -68,7 +75,7 @@ impl RuntimeManager {
         let link = links.get(vendor).cloned().ok_or_else(|| {
             RuntimeError::Unavailable(format!("unknown runtime vendor '{vendor}'"))
         })?;
-        if !link.is_connected() {
+        if !link.is_reachable() {
             return Err(RuntimeError::Unavailable(format!(
                 "vendor '{vendor}' is not connected"
             )));
@@ -203,13 +210,15 @@ impl RuntimeManager {
     ) -> Result<(), RuntimeError> {
         let link = self.vendor(vendor)?;
         let rt_spec = self.runtime_spec(session, spec).await?;
-        link.create(session, &rt_spec)
+        let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
+        link.create(session, &rt_spec.to_wire(), progress)
             .await
             .map_err(|e: RuntimeVendorError| match e {
                 RuntimeVendorError::Gone(m) => RuntimeError::Gone(m),
                 RuntimeVendorError::Unavailable(m) => RuntimeError::Unavailable(m),
                 RuntimeVendorError::Provision(m) => RuntimeError::Provision(m),
-            })
+            })?;
+        Ok(())
     }
 
     /// Hand back a client for this session's runtime, resuming it if the
@@ -221,53 +230,92 @@ impl RuntimeManager {
     /// reconnects mid-run comes back on a different link. Binding to the name
     /// means the next tool call finds it; binding to the link meant every tool
     /// call for the rest of that turn failed on a dead socket.
-    pub async fn get(&self, session: &str, vendor: &str) -> Result<RuntimeClient, RuntimeError> {
+    pub async fn get(
+        &self,
+        session: &str,
+        vendor: &str,
+        spec: &SessionSpec,
+    ) -> Result<RuntimeClient, RuntimeError> {
         let link = self.vendor(vendor)?;
-        link.get(session).await.map_err(|e| match e {
-            RuntimeVendorError::Gone(m) => RuntimeError::Gone(m),
-            RuntimeVendorError::Unavailable(m) => RuntimeError::Unavailable(m),
-            RuntimeVendorError::Provision(m) => RuntimeError::Provision(m),
-        })?;
-        Ok(self.client(session, vendor))
+        // Re-assembled rather than cached, exactly as `create` does: the GitHub
+        // and plugin tokens in it are short-lived, and a stale one is worse
+        // than none.
+        let rt_spec = self.runtime_spec(session, spec).await?;
+        let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
+        let progress_now = link
+            .get(session, &rt_spec.to_wire(), progress)
+            .await
+            .map_err(|e| match e {
+                RuntimeVendorError::Gone(m) => RuntimeError::Gone(m),
+                RuntimeVendorError::Unavailable(m) => RuntimeError::Unavailable(m),
+                RuntimeVendorError::Provision(m) => RuntimeError::Provision(m),
+            })?;
+        // Every vendor that exists today answers `get` with a runtime already
+        // reachable. A vendor that needs to boot one reports `Pending` and is
+        // driven to `Ready` over the sink — wiring that up is the next change,
+        // so refusing here is honest rather than silently handing back a client
+        // to a runtime that is not up.
+        let horsie_runtime_vendor::RuntimeProgress::Ready(handle) = progress_now else {
+            return Err(RuntimeError::Unavailable(
+                "the runtime is not reachable yet".to_string(),
+            ));
+        };
+        Ok(Self::client(session, handle))
     }
 
-    /// A client for a runtime the vendor has just confirmed.
+    /// A client over the handle the vendor just returned.
+    ///
+    /// The handle is bound to the vendor's *name*, not to the link that
+    /// answered this call: a caller holds the client for a whole run — the
+    /// toolbox an agent loop executes against is built once — and a vendor
+    /// process that reconnects mid-run comes back on a different link. Binding
+    /// to the name means the next tool call finds it; binding to the link meant
+    /// every call for the rest of that turn failed on a dead socket (#187).
     ///
     /// The runtime's own id doubles as its main agent's identity: the server
     /// passes the session id as `runtime_id`, and that is also what the agent
     /// journal is keyed by (`agent/<session-uuid>`). A subagent sharing this
     /// runtime derives its own handle with `RuntimeClient::with_agent_id`.
-    fn client(&self, session: &str, vendor: &str) -> RuntimeClient {
-        let transport = RuntimeVendorTransport::new(
-            self.deps.vendors.clone(),
-            vendor.to_string(),
-            session.to_string(),
-        );
-        RuntimeClient::from_arc(Arc::new(transport), session)
+    fn client(
+        session: &str,
+        handle: Arc<dyn crate::runtime_vendor::RuntimeHandle>,
+    ) -> RuntimeClient {
+        RuntimeClient::from_arc(
+            Arc::new(horsie_runtime_vendor::RuntimeHandleTransport(handle)),
+            session,
+        )
     }
 
     /// Advisory: the session is going cold. Best effort — a vendor that is not
     /// there simply misses the hint, and nothing about the session changes.
     pub async fn hibernate(&self, session: &str, vendor: &str) {
         if let Ok(link) = self.vendor(vendor) {
-            link.hibernate(session).await;
+            let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
+            let _ = link.hibernate(session, progress).await;
         }
     }
 
     /// The session was deleted; the vendor decides the runtime's fate.
     pub async fn delete(&self, session: &str, vendor: &str) {
         if let Ok(link) = self.vendor(vendor) {
-            link.delete(session).await;
+            let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
+            let _ = link.delete(session, progress).await;
         }
     }
 
     /// A cheap handle bound to one session, for whoever needs to execute.
     #[must_use]
-    pub fn provider(self: &Arc<Self>, session: String, vendor: String) -> RuntimeClientProvider {
+    pub fn provider(
+        self: &Arc<Self>,
+        session: String,
+        vendor: String,
+        spec: SessionSpec,
+    ) -> RuntimeClientProvider {
         RuntimeClientProvider {
             manager: self.clone(),
             session,
             vendor,
+            spec,
         }
     }
 }
@@ -278,12 +326,17 @@ pub struct RuntimeClientProvider {
     manager: Arc<RuntimeManager>,
     session: String,
     vendor: String,
+    /// Held so an acquisition can carry the spec: the server is the only
+    /// durable holder of it, and a vendor keeps no copy on disk.
+    spec: SessionSpec,
 }
 
 impl RuntimeClientProvider {
     /// A working client for this session's runtime, resumed if need be.
     pub async fn get(&self) -> Result<RuntimeClient, RuntimeError> {
-        self.manager.get(&self.session, &self.vendor).await
+        self.manager
+            .get(&self.session, &self.vendor, &self.spec)
+            .await
     }
 }
 
@@ -291,7 +344,7 @@ impl RuntimeClientProvider {
 /// Test-only: production builds it once in `main`.
 #[cfg(test)]
 pub(crate) fn test_runtime_manager(
-    vendors: &crate::sessions::spec::SharedVendors,
+    vendors: &crate::sessions::spec::RuntimeVendorMap,
 ) -> std::sync::Arc<crate::runtime_manager::RuntimeManager> {
     std::sync::Arc::new(crate::runtime_manager::RuntimeManager::new(
         crate::runtime_manager::RuntimeDeps {
@@ -343,7 +396,7 @@ mod tests {
         }
     }
 
-    fn manager(vendors: SharedVendors) -> Arc<RuntimeManager> {
+    fn manager(vendors: RuntimeVendorMap) -> Arc<RuntimeManager> {
         Arc::new(RuntimeManager::new(RuntimeDeps {
             vendors,
             github_tokens: None,
@@ -351,16 +404,19 @@ mod tests {
         }))
     }
 
-    fn published(agent: &FakeRuntimeVendor, name: &str) -> SharedVendors {
+    fn published(agent: &FakeRuntimeVendor, name: &str) -> RuntimeVendorMap {
         let mut map = HashMap::new();
-        map.insert(name.to_string(), agent.link());
+        map.insert(
+            name.to_string(),
+            agent.link() as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+        );
         Arc::new(RwLock::new(map))
     }
 
     #[tokio::test]
     async fn unavailable_when_the_vendor_name_is_not_registered() {
         let m = manager(Arc::new(RwLock::new(HashMap::new())));
-        let Err(err) = m.get("s1", "nope").await else {
+        let Err(err) = m.get("s1", "nope", &SessionSpec::for_vendor("v")).await else {
             panic!("an unregistered vendor must not yield a client")
         };
         assert!(
@@ -380,7 +436,7 @@ mod tests {
         // The link notices asynchronously; poll briefly rather than sleep-and-hope.
         let mut err = None;
         for _ in 0..50 {
-            match m.get("s1", "v").await {
+            match m.get("s1", "v", &SessionSpec::for_vendor("v")).await {
                 Err(RuntimeError::Unavailable(e)) => {
                     err = Some(e);
                     break;
@@ -398,7 +454,7 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        let Err(err) = m.get("s1", "v").await else {
+        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v")).await else {
             panic!("a get must never provision")
         };
         assert!(
@@ -417,7 +473,9 @@ mod tests {
         m.create("s1", "v", &session_spec("v"))
             .await
             .expect("create");
-        m.get("s1", "v").await.expect("get after create");
+        m.get("s1", "v", &SessionSpec::for_vendor("v"))
+            .await
+            .expect("get after create");
         assert_eq!(
             agent.signals(),
             vec!["create:s1".to_string(), "get:s1".to_string()]
@@ -616,7 +674,11 @@ mod tests {
         m.create("s1", "v", &session_spec("v"))
             .await
             .expect("create");
-        let provider = m.provider("s1".to_string(), "v".to_string());
+        let provider = m.provider(
+            "s1".to_string(),
+            "v".to_string(),
+            SessionSpec::for_vendor("v"),
+        );
         provider.get().await.expect("provider get");
         assert_eq!(
             agent.signals(),
