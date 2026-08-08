@@ -1,6 +1,6 @@
-use crate::error::McpError;
-use crate::transport::McpTransport;
-use crate::types::{McpCallOutcome, McpToolDef};
+use crate::mcp::error::McpError;
+use crate::mcp::transport::McpTransport;
+use crate::mcp::types::{McpCallOutcome, McpToolDef};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -110,7 +110,7 @@ fn extract_text(result: &Value) -> String {
 )]
 mod tests {
     use super::*;
-    use crate::transport::McpTransport;
+    use crate::mcp::transport::McpTransport;
     use async_trait::async_trait;
     use std::collections::HashMap;
 

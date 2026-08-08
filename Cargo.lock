@@ -1682,19 +1682,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "horsie-mcp-client"
-version = "0.1.6"
-dependencies = [
- "async-trait",
- "axum",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
 name = "horsie-models"
 version = "0.1.6"
 dependencies = [
@@ -1718,7 +1705,6 @@ dependencies = [
  "glob",
  "hackamore-agent",
  "hex",
- "horsie-mcp-client",
  "horsie-models",
  "horsie-runtime-vendor",
  "horsie-support",
@@ -1786,7 +1772,6 @@ dependencies = [
  "horsie-actor",
  "horsie-agentcore",
  "horsie-llm-providers",
- "horsie-mcp-client",
  "horsie-models",
  "horsie-runtime-client",
  "horsie-runtime-vendor",
@@ -1820,14 +1805,19 @@ dependencies = [
 name = "horsie-support"
 version = "0.1.6"
 dependencies = [
+ "async-trait",
+ "axum",
  "hex",
  "horsie-models",
  "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.11.0",
  "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]
@@ -1861,7 +1851,6 @@ dependencies = [
  "futures-util",
  "horsie-actor",
  "horsie-agentcore",
- "horsie-mcp-client",
  "horsie-models",
  "horsie-runtime-client",
  "horsie-support",

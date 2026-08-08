@@ -2,7 +2,7 @@
 name = "horsie-support"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
-description = "Shared host-side helpers for horsie: plugin manifests, skills, marketplaces"
+description = "Shared host-side helpers for horsie: plugin manifests, skills, marketplaces, MCP client"
 version = "0.1.6"
 edition = "2024"
 
@@ -14,14 +14,19 @@ git = []
 
 [dependencies]
 horsie-models = { version = "0.1.6", path = "../models" }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-serde_yaml = "0.9"
-sha2       = { workspace = true }
-hex               = { workspace = true }
-regex      = "1"
+async-trait = { workspace = true }
+thiserror   = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = "0.9"
+sha2        = { workspace = true }
+hex         = { workspace = true }
+regex       = "1"
+reqwest     = { workspace = true }
+tokio       = { workspace = true, features = ["process", "io-util"] }
 
 [dev-dependencies]
+axum     = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

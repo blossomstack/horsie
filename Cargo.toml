@@ -10,7 +10,6 @@ members = [
     "support",
     "llm-providers",
     "runtime-client",
-    "mcp-client",
     "cli",
     "velos-runtime",
     "tests",

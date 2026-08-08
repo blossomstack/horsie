@@ -1,4 +1,4 @@
-use crate::error::McpError;
+use crate::mcp::error::McpError;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ const CONNECT_TIMEOUT_SECS: u64 = 10;
 /// server is stalled rather than slow.
 const READ_TIMEOUT_SECS: u64 = 30;
 
-/// The wire seam under [`McpClient`](crate::McpClient): issues JSON-RPC requests
+/// The wire seam under [`McpClient`](crate::mcp::McpClient): issues JSON-RPC requests
 /// and notifications. Mockable for tests; [`HttpTransport`] is the live impl.
 #[async_trait]
 pub trait McpTransport: Send + Sync {

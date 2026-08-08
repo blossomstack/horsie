@@ -1,13 +1,13 @@
 //! Server-side MCP tools as a [`Toolbox`].
 //!
-//! [`McpToolbox`] adapts a remote MCP server ([`horsie_mcp_client::McpClient`])
+//! [`McpToolbox`] adapts a remote MCP server ([`horsie_support::mcp::McpClient`])
 //! to the agent's [`Toolbox`] trait; [`CompositeToolbox`] fans several toolboxes
 //! into one. Composed into the agent's toolbox next to the runtime tools, MCP
 //! calls execute in the server process and never reach the sandbox.
 
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
-use horsie_mcp_client::{McpClient, McpError, McpToolDef};
+use horsie_support::mcp::{McpClient, McpError, McpToolDef};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -192,7 +192,7 @@ impl Toolbox for McpToolbox {
 )]
 mod tests {
     use super::*;
-    use horsie_mcp_client::McpTransport;
+    use horsie_support::mcp::McpTransport;
     use serde_json::json;
     use std::collections::HashMap;
 

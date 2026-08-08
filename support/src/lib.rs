@@ -8,4 +8,5 @@
 pub mod frontmatter;
 #[cfg(feature = "git")]
 pub mod git;
+pub mod mcp;
 pub mod plugin;
