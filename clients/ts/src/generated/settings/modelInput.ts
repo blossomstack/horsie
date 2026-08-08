@@ -13,6 +13,7 @@ export interface ModelInput {
   thinkingDialect?: string;
   /**
    * This backend rejects a pinned `tool_choice` while thinking is enabled,
+   * so thinking is disabled for those requests. Absent means false.
    */
   forcedToolsDisableThinking?: boolean;
 }

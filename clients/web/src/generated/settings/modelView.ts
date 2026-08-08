@@ -4,7 +4,7 @@
  */
 export interface ModelView {
   /**
-   * The alias sessions select (e.g. &#34;sonnet&#34;).
+   * The alias sessions select (e.g. "sonnet").
    */
   alias: string;
   /**
@@ -12,16 +12,18 @@ export interface ModelView {
    */
   provider: string;
   /**
-   * The provider&#39;s model identifier (e.g. &#34;claude-sonnet-4-6&#34;).
+   * The provider's model identifier (e.g. "claude-sonnet-4-6").
    */
   modelId: string;
   maxTokens?: number;
   /**
-   * The model&#39;s total context window, in tokens. A built-in default is
+   * The model's total context window, in tokens. A built-in default is
+   * applied for known model ids when a model is added with this omitted.
    */
   contextWindow?: number;
   /**
    * Canonical thinking-effort values this model offers, in ascending order.
+   * Absent → the model exposes no thinking control.
    */
   thinkingEfforts?: string[];
   /**
@@ -30,10 +32,11 @@ export interface ModelView {
   thinkingEffort?: string;
   /**
    * This backend rejects a pinned `tool_choice` while thinking is enabled,
+   * so thinking is disabled for those requests. Absent means false.
    */
   forcedToolsDisableThinking?: boolean;
   /**
-   * Wire encoding for this model&#39;s thinking control.
+   * Wire encoding for this model's thinking control.
    */
   thinkingDialect?: string;
 }

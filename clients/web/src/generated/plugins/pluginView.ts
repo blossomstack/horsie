@@ -5,7 +5,8 @@ import { CatalogEntryView } from './catalogEntryView';
  */
 export interface PluginView {
   /**
-   * Canonical bundle name (from plugin.json, else the marketplace entry&#39;s
+   * Canonical bundle name (from plugin.json, else the marketplace entry's
+   * name, else the repo basename).
    */
   name: string;
   description?: string;
@@ -30,6 +31,7 @@ export interface PluginView {
   artifactSize: number;
   /**
    * The marketplace this bundle came from, when it came from one. A bundle
+   * installed from a plain git URL has none.
    */
   marketplace?: string;
 }

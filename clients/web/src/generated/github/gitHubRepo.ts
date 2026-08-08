@@ -4,7 +4,7 @@
  */
 export interface GitHubRepo {
   /**
-   * &#34;owner/name&#34;.
+   * "owner/name".
    */
   fullName: string;
   private: boolean;

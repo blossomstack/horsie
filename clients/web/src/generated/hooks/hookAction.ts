@@ -17,6 +17,10 @@ import { UserPromptExpansionRecord } from './userPromptExpansionRecord';
 import { UserPromptSubmitRecord } from './userPromptSubmitRecord';
 /**
  * What one hook did, tagged by the event it ran for.
+ *
+ * Named `HookAction` rather than `HookEvent` because
+ * `horsie_support::plugin::hooks::HookEvent` already exists as the name
+ * classifier that powers install-time refusal. Two jobs, two names.
  */
 export type HookAction =
   | { event: "PreToolUse"; value: PreToolUseRecord }

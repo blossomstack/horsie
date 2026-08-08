@@ -2,6 +2,7 @@
 import { StepRunStatus } from './stepRunStatus';
 /**
  * One execution of one step. A step visited twice — by a loop or by a retry —
+ * has two of these.
  */
 export interface StepRunView {
   /**
@@ -14,6 +15,7 @@ export interface StepRunView {
   step: string;
   /**
    * The agent this execution is, addressable at
+   * `/sessions/:id/agents/:agent_id`.
    */
   agentId: string;
   /**

@@ -10,18 +10,22 @@ export interface AgentSettings {
   maxRetries?: number;
   /**
    * Names of enabled MCP servers this session may call, namespaced
+   * `mcp__<name>__<tool>`; absent → none.
    */
   mcpServers?: string[];
   /**
    * Memory spaces this session may read and write; absent → none, and the
+   * memory_* tools are not offered.
    */
   memorySpaces?: string[];
   /**
-   * Canonical thinking effort for this session, chosen from the model&#39;s
+   * Canonical thinking effort for this session, chosen from the model's
+   * offered list. Absent → the model's configured default.
    */
   thinkingEffort?: string;
   /**
    * Cap on concurrently-active subagents in this session; absent → the
+   * server's built-in default (8).
    */
   maxConcurrentSubagents?: number;
 }

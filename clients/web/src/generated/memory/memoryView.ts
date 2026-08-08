@@ -1,13 +1,13 @@
 
 /**
- * One memory, body included. Addressed by the agent as `&#60;space&#62;/&#60;name&#62;`.
+ * One memory, body included. Addressed by the agent as `<space>/<name>`.
  */
 export interface MemoryView {
   id: number;
   space: string;
   name: string;
   /**
-   * One line, shown in the agent&#39;s prompt index.
+   * One line, shown in the agent's prompt index.
    */
   description: string;
   /**

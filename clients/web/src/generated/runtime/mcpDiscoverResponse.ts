@@ -6,6 +6,7 @@ export interface McpDiscoverResponse {
   tools: PluginMcpTool[];
   /**
    * Servers that contributed no tools. Reported rather than dropped, so a
+   * broken declaration is visible without being fatal.
    */
   failures: McpServerFailure[];
 }

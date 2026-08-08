@@ -3,12 +3,13 @@ import { TaskItem } from '../agent';
 import { Usage } from '../agent';
 import { UsageView } from '../session';
 /**
- * One agent&#39;s current values. The subagent-only fields (`parent`, `label`,
+ * One agent's current values. The subagent-only fields (`parent`, `label`,
+ * `task`, `output`, `error`) are absent for a session's main agent.
  */
 export interface AgentDocument {
   id: string;
   /**
-   * Parent agent id; absent → the session&#39;s main agent.
+   * Parent agent id; absent → the session's main agent.
    */
   parent?: string;
   label?: string;
@@ -18,33 +19,41 @@ export interface AgentDocument {
   task?: string;
   depth: number;
   /**
-   * &#34;running&#34; | &#34;completed&#34; | &#34;failed&#34;.
+   * "running" | "completed" | "failed".
    */
   status: string;
   output?: string;
   error?: string;
   /**
-   * The agent&#39;s `task_list` tool state.
+   * The agent's `task_list` tool state.
    */
   tasks: TaskItem[];
   /**
-   * Cumulative usage across this agent&#39;s completed turns.
+   * Cumulative usage across this agent's completed turns.
    */
   usage: UsageView;
   /**
-   * The most recently completed turn&#39;s own usage. Absent before the first.
+   * The most recently completed turn's own usage. Absent before the first.
    */
   lastTurnUsage?: Usage;
   /**
-   * The last provider call&#39;s prompt size — what is loaded in context now.
+   * The last provider call's prompt size — what is loaded in context now.
+   * Never summed across turns.
    */
   contextTokens: number;
   /**
-   * The model&#39;s configured context window, when known. Attached by the HTTP
+   * The model's configured context window, when known. Attached by the HTTP
+   * layer from model config — this one field is not agent state.
    */
   contextWindow?: number;
   /**
    * The log position this document reflects.
+   *
+   * What makes reading this alongside the log safe rather than a race: a
+   * consumer records the seq each value was last set from and applies an
+   * update only if its seq is greater — whichever source it came from. A
+   * boolean "a live frame has arrived" latch cannot express that, because it
+   * cannot tell a document that is *ahead* of the fold from one behind it.
    */
   asOfSeq: number;
 }

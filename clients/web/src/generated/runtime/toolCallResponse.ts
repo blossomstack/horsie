@@ -6,6 +6,7 @@ export interface ToolCallResponse {
   result: ToolResult;
   /**
    * Every hook that ran for this call, in execution order. Empty for the
+   * overwhelmingly common case of a session with no matching hooks.
    */
   hooks: HookRecord[];
 }

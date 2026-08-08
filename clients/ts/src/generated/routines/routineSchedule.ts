@@ -8,6 +8,7 @@ import { WeeklySchedule } from './weeklySchedule';
 import { YearlySchedule } from './yearlySchedule';
 /**
  * When a routine fires by itself. A union rather than a kind + optional
+ * fields, so "every, with no interval" cannot be expressed.
  */
 export type RoutineSchedule =
   | { type: "Manual"; value: ManualSchedule }

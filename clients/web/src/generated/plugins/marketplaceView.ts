@@ -5,7 +5,7 @@ import { MarketplacePluginView } from './marketplacePluginView';
  */
 export interface MarketplaceView {
   /**
-   * The index&#39;s declared name, else the repo basename. Primary key.
+   * The index's declared name, else the repo basename. Primary key.
    */
   name: string;
   sourceUrl: string;
@@ -18,6 +18,8 @@ export interface MarketplaceView {
   plugins: MarketplacePluginView[];
   /**
    * Entries the index declared that could not be parsed. Shown rather than
+   * dropped: a catalogue that quietly lost three plugins is a bug report
+   * nobody files.
    */
   skipped: string[];
 }
