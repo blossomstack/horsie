@@ -153,10 +153,11 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
     namedName === undefined
       ? undefined
       : d.environments.find((e) => e.name === namedName);
-  const repos =
-    d.environment.kind === "runtime"
-      ? new Map(Object.entries(d.environment.repos))
-      : new Map<string, string>();
+  // The ad-hoc half, bound once: the repo checklist below only renders for it,
+  // and reading `d.environment` again inside those callbacks loses the
+  // narrowing and invites a fallback that can never fire.
+  const adhoc = d.environment.kind === "runtime" ? d.environment : undefined;
+  const repos = new Map(Object.entries(adhoc?.repos ?? {}));
   return {
     key: "environment",
     legend: "Environment",
@@ -236,8 +237,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
                     // Keep the repos already ticked when swapping between
                     // two provisioning vendors: the selection is about
                     // where, not about what.
-                    repos:
-                      d.environment.kind === "runtime" ? d.environment.repos : {},
+                    repos: adhoc?.repos ?? {},
                   })
                 }
               >
@@ -279,7 +279,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
             )}
           </div>
         )}
-        {d.environment.kind === "runtime" && d.provisions && (
+        {adhoc && d.provisions && (
           <div className="border-t pt-1.5" data-testid="environment-repos">
             <p className="px-2 pb-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
               Repos
@@ -298,8 +298,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
                   else next.set(name, "");
                   d.setEnvironment({
                     kind: "runtime",
-                    vendor:
-                      d.environment.kind === "runtime" ? d.environment.vendor : "",
+                    vendor: adhoc.vendor,
                     repos: Object.fromEntries(next),
                   });
                 },
