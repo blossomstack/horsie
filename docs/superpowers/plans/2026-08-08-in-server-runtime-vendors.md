@@ -286,7 +286,7 @@ git add -A && git commit -m "feat: acquisition carries its spec, so vendors keep
 
 ---
 
-### Task 7: `runtime_vendors` table, JIT publication, settings UI
+### Task 7: `runtime_vendors` table, JIT publication, settings UI — **done** (`83af7bf`, `ba9e7ae`)
 
 - [ ] **Step 1: Migration + config store**
 
@@ -306,4 +306,9 @@ git add -A && git commit -m "feat: runtime vendors configured per account"
 
 ## Follow-up plan
 
-Spec steps 6–9 — `FlyRuntimeVendor` with volumes, the runtime reconnect loop, the velos port and `crates/velos-runtime` deletion, and the orphan sweep — get their own plan once this one has landed and the seam has run.
+Spec steps 6–9. `FlyRuntimeVendor` with volumes landed early (`3b8a19c`, `eceb84e`) because Task 7's settings UI has nothing to configure without it. Still open:
+
+- **The runtime reconnect loop.** Until a runtime can re-dial, `FlyRuntimeVendor::get` has to bounce a started-but-unconnected machine, and Fly `suspend`/`resume` cannot be used at all — status: todo.
+- **The velos port and `crates/velos-runtime` deletion** — status: todo.
+- **The orphan sweep** (closes #243) — status: todo.
+- **An identity-class edit warning.** Saving a changed credential or Fly app over a vendor that sessions already reference should report how many. Deliberately not built into Task 7: with one vendor kind there is no kind edit, and a credential naming a different Fly account is indistinguishable from a rotated one without calling Fly — status: todo.
