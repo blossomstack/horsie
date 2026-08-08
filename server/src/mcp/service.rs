@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use horsie_agentcore::Toolbox;
-use horsie_support::mcp::{BearerProvider, HttpTransport, McpClient, McpError};
 use horsie_models::mcp::{
     McpAuthView, McpBearerView, McpConnectResult, McpGithubAppAuth, McpNoAuth, McpServerInput,
     McpServerView,
 };
+use horsie_support::mcp::{BearerProvider, HttpTransport, McpClient, McpError};
 use horsie_workflow::McpToolbox;
 
 use super::oauth::{AsMetadata, McpOAuthClient, build_authorize_url, gen_pkce, gen_state};

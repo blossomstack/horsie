@@ -11,10 +11,10 @@
 //! Connections live as long as the runtime connection and are started on first
 //! use. A stdio child respawned per tool call would cost more than the call.
 
-use horsie_support::mcp::{HttpTransport, McpClient, McpError, StdioTransport};
 use horsie_models::runtime::{
     McpServerFailure, McpServerNeedsAuth, McpServerUnreachable, PluginMcpTool,
 };
+use horsie_support::mcp::{HttpTransport, McpClient, McpError, StdioTransport};
 use horsie_support::plugin::mcp::{McpTransportSpec, PluginMcpServer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
