@@ -14,7 +14,8 @@ import {
   RUNTIME_FILE,
   freePort,
   waitFor,
-  putConfig,
+  seedConfig,
+  setDefaultVendor,
   type RuntimeInfo,
 } from "./harness";
 
@@ -218,7 +219,7 @@ export default async function globalSetup(): Promise<void> {
     });
 
     log("seeding providers 'mock' (anthropic) + 'mock-openai' (openai) and their models");
-    await putConfig(baseURL, {
+    await seedConfig(baseURL, {
       providers: [
         { name: "mock", kind: "anthropic", baseUrl: mockUrl, apiKey: "test-key" },
         // Same mock server, OpenAI wire — the provider appends /v1/chat/completions.
@@ -299,7 +300,7 @@ export default async function globalSetup(): Promise<void> {
     );
 
     log("setting defaultVendor=e2e");
-    await putConfig(baseURL, { defaultVendor: "e2e" });
+    await setDefaultVendor(baseURL, "e2e");
 
     const info: RuntimeInfo = {
       baseURL,

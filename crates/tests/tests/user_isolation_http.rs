@@ -321,17 +321,26 @@ async fn the_global_event_stream_carries_only_its_own_accounts_frames() {
 #[tokio::test]
 async fn configuration_and_presets_do_not_cross_accounts() {
     let f = fixture().await;
-    let settings = |key: &str| {
-        serde_json::json!({
-            "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://127.0.0.1:1", "apiKey": key}],
-            "models": [{"alias": "shared-alias", "provider": "p", "modelId": "m"}],
-        })
-    };
+    // Two writes now, one per resource, and both must be scoped to the caller.
     let put_config = async |account: &Account, key: &str| {
-        f.client
-            .put(f.url("/api/config"))
+        let res = f
+            .client
+            .put(f.url("/api/config/model-providers/p"))
             .bearer_auth(&account.token)
-            .json(&settings(key))
+            .json(&serde_json::json!({
+                "name": "p", "kind": "anthropic",
+                "baseUrl": "http://127.0.0.1:1", "apiKey": key
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 200, "provider write");
+        f.client
+            .put(f.url("/api/config/models/shared-alias"))
+            .bearer_auth(&account.token)
+            .json(&serde_json::json!({
+                "alias": "shared-alias", "provider": "p", "modelId": "m"
+            }))
             .send()
             .await
             .unwrap()

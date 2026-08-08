@@ -63,14 +63,45 @@ export async function waitFor(
   throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
 }
 
-/** PUT /api/config with a partial SettingsUpdate; throws on non-2xx. */
-export async function putConfig(baseURL: string, body: unknown): Promise<void> {
-  const res = await fetch(`${baseURL}/api/config`, {
+async function putJson(url: string, body: unknown): Promise<void> {
+  const res = await fetch(url, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(`PUT /api/config → ${res.status}: ${await res.text()}`);
+    throw new Error(`PUT ${url} → ${res.status}: ${await res.text()}`);
   }
+}
+
+/**
+ * Seed providers and then models, one request each; throws on non-2xx.
+ *
+ * Providers first, because a model is validated against the providers that are
+ * actually stored.
+ */
+export async function seedConfig(
+  baseURL: string,
+  cfg: { providers?: { name: string }[]; models?: { alias: string }[] },
+): Promise<void> {
+  for (const p of cfg.providers ?? []) {
+    await putJson(
+      `${baseURL}/api/config/model-providers/${encodeURIComponent(p.name)}`,
+      p,
+    );
+  }
+  for (const m of cfg.models ?? []) {
+    await putJson(
+      `${baseURL}/api/config/models/${encodeURIComponent(m.alias)}`,
+      m,
+    );
+  }
+}
+
+/** Set the vendor new sessions default to; throws on non-2xx. */
+export async function setDefaultVendor(
+  baseURL: string,
+  vendor: string,
+): Promise<void> {
+  await putJson(`${baseURL}/api/config/default-vendor`, { vendor });
 }
