@@ -2,14 +2,35 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentView, RoutineInput } from "../../api/types";
+import type { AgentView, RoutineInput, RoutineView } from "../../api/types";
 import { RoutineEditPage } from "./RoutineEditPage";
 
 afterEach(cleanup);
 
 const create = vi.fn(async (body: RoutineInput) => body);
+const update = vi.fn(async (_name: string, body: RoutineInput) => body);
+const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+const storedTimezone =
+  browserZone === "America/New_York" ? "America/Los_Angeles" : "America/New_York";
+const changedTimezone = "Asia/Tokyo";
+const storedRoutine: RoutineView = {
+  name: "stored",
+  description: "",
+  agent: "reviewer",
+  prompt: "triage the queue",
+  schedule: {
+    type: "Daily",
+    value: { timezone: storedTimezone, hour: 8, minute: 30 },
+  },
+  enabled: true,
+  createdAt: "1",
+  updatedAt: "1",
+};
 
-beforeEach(() => create.mockReset());
+beforeEach(() => {
+  create.mockReset();
+  update.mockReset();
+});
 
 vi.mock("../../api/client", () => ({
   api: {
@@ -29,8 +50,9 @@ vi.mock("../../api/client", () => ({
       ],
     },
     routines: {
-      get: async () => undefined,
+      get: async (name: string) => (name === storedRoutine.name ? storedRoutine : undefined),
       create: (body: RoutineInput) => create(body),
+      update: (name: string, body: RoutineInput) => update(name, body),
     },
   },
   ApiRequestError: class extends Error {},
@@ -45,6 +67,22 @@ function renderNew() {
       <MemoryRouter initialEntries={["/routines/new"]}>
         <Routes>
           <Route path="/routines/new" element={<RoutineEditPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  return utils;
+}
+
+function renderStored() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const utils = render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/routines/stored/edit"]}>
+        <Routes>
+          <Route path="/routines/:name/edit" element={<RoutineEditPage />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -79,6 +117,9 @@ describe("RoutineEditPage", () => {
     const expectedZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     const zone = getByTestId("routine-timezone-select") as HTMLSelectElement;
     expect(zone.value).toBe(expectedZone);
+    expect(zone.className).toContain("min-w-0");
+    expect(zone.className).toContain("w-full");
+    expect(zone.parentElement?.className).toContain("flex-col");
 
     fireEvent.change(getByTestId("routine-time-input"), {
       target: { value: "09:00" },
@@ -146,6 +187,28 @@ describe("RoutineEditPage", () => {
     expect(payload.value.hour).toBe(9);
   });
 
+  it("preserves a changed timezone when editing a stored custom timezone", async () => {
+    const { findByTestId, getByTestId, getByText, queryByTestId } = renderStored();
+    await findByTestId("routine-edit-page");
+
+    expect(queryByTestId("routine-timezone-select")).toBeNull();
+    expect(getByText("Custom timezone")).not.toBeNull();
+
+    fireEvent.click(getByTestId("routine-timezone-toggle"));
+    const timezone = getByTestId("routine-timezone-select") as HTMLSelectElement;
+    expect(timezone.value).toBe(storedTimezone);
+
+    fireEvent.change(timezone, { target: { value: changedTimezone } });
+    fireEvent.click(getByTestId("save-routine-button"));
+
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0]?.[0]).toBe("stored");
+    expect(update.mock.calls[0]?.[1].schedule).toEqual({
+      type: "Daily",
+      value: { timezone: changedTimezone, hour: 8, minute: 30 },
+    });
+  });
+
   it("selects weekdays with the Weekdays preset", async () => {
     const { findByTestId, getByTestId } = renderNew();
     fireEvent.change(await findByTestId("routine-schedule-kind"), {
@@ -153,6 +216,10 @@ describe("RoutineEditPage", () => {
     });
 
     fireEvent.click(getByTestId("routine-weekdays-weekdays"));
+
+    const weekdays = getByTestId("routine-weekdays");
+    const preset = getByTestId("routine-weekdays-weekdays");
+    expect(weekdays.contains(preset)).toBe(false);
 
     for (const day of ["mon", "tue", "wed", "thu", "fri"]) {
       expect(

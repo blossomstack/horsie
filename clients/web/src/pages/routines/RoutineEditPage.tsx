@@ -373,12 +373,12 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                   {timezoneEditorOpen && (
                     <div
                       id="routine-timezone-editor"
-                      className="mt-2 w-full"
+                      className="mt-2 w-full min-w-0"
                     >
-                      <label className="flex items-center gap-2 text-xs text-dim">
+                      <label className="flex min-w-0 flex-col items-start gap-1 text-xs text-dim">
                         <span>Timezone</span>
                         <select
-                          className="field field-mono"
+                          className="field field-mono min-w-0 w-full"
                           value={timezone}
                           onChange={(e) => setTimezone(e.target.value)}
                           data-testid="routine-timezone-select"
@@ -394,36 +394,38 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                   )}
 
                   {kind === "Weekly" && (
-                    <div
-                      className="flex flex-wrap items-center gap-1.5"
-                      role="group"
-                      aria-label="Days of week"
-                      data-testid="routine-weekdays"
-                    >
-                      {WEEKDAY_ORDER.map((d) => (
-                        <button
-                          key={d}
-                          type="button"
-                          className={`chip min-h-10 min-w-10 justify-center transition-colors ${
-                            weekdays.has(d)
-                              ? "border-amber bg-amber/15 text-amber-ink shadow-[inset_0_0_0_1px_var(--amber)]"
-                              : "hover:bg-raised hover:text-legend"
-                          }`}
-                          aria-label={FULL_WEEKDAY_NAMES[d]}
-                          aria-pressed={weekdays.has(d)}
-                          onClick={() =>
-                            setWeekdays((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(d)) next.delete(d);
-                              else next.add(d);
-                              return next;
-                            })
-                          }
-                          data-testid={`weekday-${d.toLowerCase()}`}
-                        >
-                          {d}
-                        </button>
-                      ))}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <div
+                        className="flex flex-wrap items-center gap-1.5"
+                        role="group"
+                        aria-label="Days of week"
+                        data-testid="routine-weekdays"
+                      >
+                        {WEEKDAY_ORDER.map((d) => (
+                          <button
+                            key={d}
+                            type="button"
+                            className={`chip min-h-10 min-w-10 justify-center transition-colors ${
+                              weekdays.has(d)
+                                ? "border-amber bg-amber/15 text-amber-ink shadow-[inset_0_0_0_1px_var(--amber)]"
+                                : "hover:bg-raised hover:text-legend"
+                            }`}
+                            aria-label={FULL_WEEKDAY_NAMES[d]}
+                            aria-pressed={weekdays.has(d)}
+                            onClick={() =>
+                              setWeekdays((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(d)) next.delete(d);
+                                else next.add(d);
+                                return next;
+                              })
+                            }
+                            data-testid={`weekday-${d.toLowerCase()}`}
+                          >
+                            {d}
+                          </button>
+                        ))}
+                      </div>
                       <button
                         type="button"
                         className="key-flat !px-2 !py-1.5 text-xs"
