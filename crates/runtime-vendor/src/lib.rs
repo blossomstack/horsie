@@ -20,6 +20,6 @@ pub use reconnect::Backoff;
 pub use runtime_listener::{AcceptedStream, RuntimeEndpoint, RuntimeListenerServer};
 pub use socket_transport::{SocketRuntimeTransport, UnixSocketRuntimeTransport};
 pub use vendor::{
-    AgentExit, BundleDelivery, CredentialProvider, FixedWorkspaces, ProviderFactory, RuntimeVendor,
+    AgentExit, BundleDelivery, CredentialProvider, FixedWorkspaces, ProviderFactory, RuntimeVendorClient,
     WorkspaceResolver, no_credential,
 };

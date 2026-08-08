@@ -13,7 +13,7 @@ mod velos;
 
 use clap::Parser;
 use horsie_runtime_vendor::{
-    ConnectedRuntimeRegistry, RuntimeEndpoint, RuntimeListenerServer, RuntimeVendor,
+    ConnectedRuntimeRegistry, RuntimeEndpoint, RuntimeListenerServer, RuntimeVendorClient,
     serve_runtime_connections,
 };
 use provider::{ManagedWorkspaces, VelosContainerProvider, VelosProviderSettings};
@@ -155,7 +155,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         Arc::new(move |_runtime_id: &str, _caps: Option<PathBuf>| shared.clone())
     };
 
-    let agent = RuntimeVendor::new(
+    let agent = RuntimeVendorClient::new(
         cli.name.clone(),
         // velos allocates a fresh workspace per runtime: repos and bundles can
         // be provisioned into it.

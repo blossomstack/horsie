@@ -1,9 +1,13 @@
-//! The reusable half of a runtime vendor agent.
+//! The client half of a runtime vendor: the process that dials a server.
 //!
-//! An agent owns runtime lifecycle for one vendor: it dials the server's
-//! `/api/vendor/connect`, announces itself, and thereafter serves
+//! A [`RuntimeVendorClient`] owns runtime lifecycle for one vendor: it dials the
+//! server's `/api/vendor/connect`, announces itself, and thereafter serves
 //! [`RuntimeVendorCommand`]s by driving a [`RuntimeProvider`] and relaying the
 //! runtime protocol, verbatim, to the runtimes that dialed its own listener.
+//!
+//! Named for the direction it faces. The server has a `RuntimeVendor` trait of
+//! its own, and this type is what sits on the far end of one of that trait's
+//! implementations — never an implementation of it.
 //!
 //! Only lifecycle is decoded here. Anything addressed to a runtime is forwarded
 //! untouched in both directions, so a new runtime capability needs no change in
@@ -189,7 +193,7 @@ struct LiveRuntime {
     transport: Arc<dyn RuntimeTransport>,
 }
 
-pub struct RuntimeVendor {
+pub struct RuntimeVendorClient {
     vendor_name: String,
     /// This process's identity, minted once and presented on every dial.
     ///
@@ -221,7 +225,7 @@ pub struct RuntimeVendor {
     /// constant so tests can run the reconnect path on a millisecond scale.
     backoff: Backoff,
     /// Whether a get for a runtime that is not live may rebuild it from its
-    /// persisted spec. See [`RuntimeVendor::with_respawnable_runtimes`].
+    /// persisted spec. See [`RuntimeVendorClient::with_respawnable_runtimes`].
     respawnable: bool,
     runtimes: Arc<Mutex<HashMap<String, LiveRuntime>>>,
     /// One lock per runtime id, held for the whole of a lifecycle command.
@@ -255,7 +259,7 @@ fn client_request(
     Ok(request)
 }
 
-impl RuntimeVendor {
+impl RuntimeVendorClient {
     #[must_use]
     pub fn new(
         vendor_name: String,
@@ -1115,8 +1119,8 @@ mod tests {
         }
     }
 
-    fn agent() -> RuntimeVendor {
-        RuntimeVendor::new(
+    fn agent() -> RuntimeVendorClient {
+        RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
@@ -1183,8 +1187,8 @@ mod tests {
     }
 
     /// Build an agent rooted at `state`, serving bundles out of `state/plugins`.
-    fn agent_with_bundles(state: &Path) -> RuntimeVendor {
-        RuntimeVendor::new(
+    fn agent_with_bundles(state: &Path) -> RuntimeVendorClient {
+        RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
@@ -1247,7 +1251,7 @@ mod tests {
     fn sweeping_without_bundles_is_a_noop() {
         let state = tempfile::tempdir().expect("tempdir");
         std::fs::write(state.path().join("keep-me"), b"x").expect("write");
-        let agent = RuntimeVendor::new(
+        let agent = RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
@@ -1266,7 +1270,7 @@ mod tests {
     #[test]
     fn the_written_caps_file_grants_the_runtimes_own_plugins_dir_and_hook_path() {
         let state = tempfile::tempdir().expect("tempdir");
-        let agent = RuntimeVendor::new(
+        let agent = RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
@@ -1313,7 +1317,7 @@ mod tests {
     #[test]
     fn the_written_caps_file_is_the_baseline_without_a_host_library() {
         let state = tempfile::tempdir().expect("tempdir");
-        let agent = RuntimeVendor::new(
+        let agent = RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),

@@ -6,6 +6,8 @@ Closes the implementation half of #191. Folds in #234 (naming) and #243
 Diagrams:
 [components](https://excalidraw.com/#json=S2_1fgFxP6pcm1U46qdAv,CgiZki3IyWApAFD1aiqrhw),
 [create / relay / hibernate / resume](https://excalidraw.com/#json=LNJF4g1GQEMuqZu4meioe,cm13NsRuFID-MCFF3v4N-A).
+Both predate the `RuntimeProgress` model below; the component boxes still hold,
+the sequence's single-await create does not.
 
 ## The problem
 
@@ -23,143 +25,194 @@ operator to run a second process whose only purpose is to hold those three
 values and forward JSON is friction with nothing behind it. The operator should
 paste the token into settings and get sandboxes.
 
-## Naming
+## Design intent
 
-Nothing in this area is called just "vendor". Every type carries `Runtime` or
-`RuntimeVendor`, and the existing `Runtime`-prefixed names are already correct
-and stay.
+**`RuntimeVendor` and `RuntimeHandle` stay small and substrate-agnostic, so
+vendor number four costs no API change.** This is the governing constraint, and
+it outranks local convenience everywhere below.
 
-| Now | After |
-| --- | --- |
-| `RuntimeVendorLink` (server) | `RemoteRuntimeVendor` |
-| `RuntimeVendor` (runtime-vendor crate — the process that dials a server) | `RuntimeVendorClient`, freeing the name for the server trait |
-| `SharedVendors` | `RuntimeVendorMap` |
-| `VendorError` | `RuntimeVendorError` |
-| `VendorCapabilities` (server) | deleted — use the wire `RuntimeVendorCapabilities` |
-| `vendor_agents` field (#234) | `runtime_vendors` |
-| — | `InProcessRuntimeVendor<P: RuntimeProvider>` |
-| — | `FlyRuntimeProvider`, `VelosRuntimeProvider` |
+Two rules follow from it:
 
-`RuntimeProvider` keeps its name: it provisions *runtimes*, not vendors, and is
-the thing a vendor drives. `RuntimeManager` keeps its name and its job.
+- **A capability difference between substrates belongs inside an
+  implementation, never in the trait.** Fly can only be polled; E2B pushes
+  lifecycle webhooks. Modelling that as an optional `events()` stream on the
+  trait would bake today's two substrates into the contract and break on the
+  first one that streams over SSE or gRPC. A vendor that can push consumes its
+  own webhooks and answers `poll` from cache, instantly. The trait never learns
+  that push exists.
+- **Adding a default-implemented method later is non-breaking; changing a
+  signature is.** So ship the minimum that serves the three known vendors and
+  let the fourth be additive.
 
-The two are not the same layer, and the boundary is load-bearing. A
-`RuntimeVendor` is the server's noun: it has a *name* a session selects, it is
-addressed per call by `runtime_id`, and it owns relay routing and the live
-runtime map. A `RuntimeProvider` is the substrate's: `create(id, config)` →
-a handle that can `stop` and `health_check`, and nothing else. The split earns
-itself because `ProcessRuntimeProvider` is used by `horsie connect`, which the
-server only ever sees as a `RemoteRuntimeVendor` — the provider trait spans two
-host processes while `RuntimeVendor` exists only in the server. Collapsing them
-would duplicate wait-for-dial-back, the handle map and relay routing in every
-provider, which is exactly what `InProcessRuntimeVendor<P>` exists to avoid.
+Applying this deleted two members that an earlier draft had: `events()`, and
+`RuntimeHandle::health_check` — which was derivable from `closed()`, since
+today's implementation is literally "is the transport still registered".
 
-"Shared" is dropped from the map alias deliberately — since #233 there is one
-per account, so a name saying "Shared" reads as "the deployment-wide one",
-which is the opposite of what it is, on the type where being wrong means running
-tool calls on someone else's machine.
-
-## One trait, several runtime vendors
+## The two traits
 
 ```rust
+/// Where a runtime is, as its vendor currently understands it.
+pub enum RuntimeProgress {
+    /// The substrate is still working. `detail` is what the UI shows.
+    Pending { detail: String },
+    /// Reachable now.
+    Ready(Arc<dyn RuntimeHandle>),
+}
+
+/// A named source of runtimes. One implementation per substrate.
 #[async_trait]
 pub trait RuntimeVendor: Send + Sync {
+    fn name(&self) -> &str;
     fn capabilities(&self) -> RuntimeVendorCapabilities;
-    fn is_connected(&self) -> bool;
-    async fn create(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), RuntimeVendorError>;
-    async fn get(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), RuntimeVendorError>;
-    async fn hibernate(&self, runtime_id: &str);
-    async fn delete(&self, runtime_id: &str);
-    async fn relay(&self, runtime_id: &str, msg: RuntimeInboundMessage)
+
+    /// Ask the substrate to build a runtime. Returns when the *request* is
+    /// accepted, not when the runtime is usable.
+    async fn create(&self, id: &str, spec: &RuntimeSpec)
+        -> Result<RuntimeProgress, RuntimeVendorError>;
+
+    /// Where are these runtimes now? Idempotent and cheap. Resuming a
+    /// hibernated runtime happens here.
+    ///
+    /// Takes a slice, not one id, because poll granularity is per vendor and
+    /// never per runtime — see the rate-limit note below.
+    async fn poll(&self, ids: &[&str])
+        -> Result<Vec<(String, RuntimeProgress)>, RuntimeVendorError>;
+
+    async fn hibernate(&self, id: &str) -> Result<(), RuntimeVendorError>;
+    async fn delete(&self, id: &str) -> Result<(), RuntimeVendorError>;
+}
+
+/// A live runtime. Every member is the runtime protocol, which is why a handle
+/// looks the same whatever substrate is underneath.
+#[async_trait]
+pub trait RuntimeHandle: Send + Sync {
+    fn id(&self) -> &str;
+    async fn relay(&self, msg: RuntimeInboundMessage)
         -> Result<RuntimeOutboundMessage, TransportError>;
-    async fn relay_oneway(&self, runtime_id: &str, msg: RuntimeInboundMessage)
-        -> Result<(), TransportError>;
+    async fn relay_oneway(&self, msg: RuntimeInboundMessage) -> Result<(), TransportError>;
+    /// Resolves when this runtime can no longer be reached.
+    async fn closed(&self);
 }
 ```
 
-Implementations:
+Implementations: `RemoteRuntimeVendor` (relays to a `horsie connect` process),
+`FlyRuntimeVendor`, `VelosRuntimeVendor`, and `LocalProcessRuntimeVendor` inside
+`horsie connect` itself. Both traits live in `crates/runtime-vendor`, which the
+server already depends on, so one contract serves both sides of the wire.
 
-- **`RemoteRuntimeVendor`** — the WebSocket link to a `horsie connect` process.
-  Today's `RuntimeVendorLink`, renamed and given the trait.
-- **`InProcessRuntimeVendor<P: RuntimeProvider>`** — one generic type, not a
-  layer. `FlyRuntimeVendor` and `VelosRuntimeVendor` are aliases over
-  `FlyRuntimeProvider` and `VelosRuntimeProvider`.
+**Deleted by this design:** `RuntimeProvider` and `RuntimeHandle::stop` (merged
+into `RuntimeVendor`; stopping is a vendor operation keyed by id, and `stop` was
+ambiguous against `hibernate`/`delete`), `RuntimeVendorTransport` (a handle *is*
+a transport plus an id), the `VendorCore`/`InProcessRuntimeVendor<P>` layer, and
+the server's duplicate `VendorCapabilities`.
 
-`RuntimeVendorMap` becomes `Arc<RwLock<HashMap<String, Arc<dyn RuntimeVendor>>>>`.
-That is exactly the surface `RuntimeManager` and `RuntimeVendorTransport`
-already use, so neither changes: the transport keeps resolving through the map
-on every call, which is what makes a reconnect invisible to a turn already in
-flight (#187).
+## Why create returns progress rather than a handle
 
-`crates/server/src/runtime_vendor/mod.rs` records that in-process vendors were
-deleted once as "pure indirection". They were, when every vendor was a socket.
-A second implementation that is not a socket is what makes the seam earn its
-keep.
+A single awaitable `create() -> Handle` hides four phases, only the last two of
+which are ours:
 
-## What this deletes, and why
+1. the substrate accepts the request,
+2. the substrate's object reaches a running state,
+3. `horsie-runtime` boots and dials back,
+4. it finishes provision steps and announces Ready.
 
-The vendor process today keeps two pieces of bookkeeping that exist **only
-because it runs in a different process from the server**. In-server, both are
-duplicates of state the server already has.
+The substrates disagree about phase 2 in a way the trait must not encode.
+**Fly**: `POST /machines` returns while the machine is still `created`/
+`starting`; `GET /v1/apps/{app}/machines/{id}/wait?state=started` is a long poll
+that can itself time out; there are **no webhooks** outside a partner
+programme, and Fly staff explicitly advise polling machine *events* at long
+intervals rather than machine state, because per-machine polling hits rate
+limits at scale. **E2B**: has real lifecycle webhooks
+(`sandbox.lifecycle.created/updated/paused/resumed/killed`) plus a REST events
+API.
 
-**`lifecycle_locks` (`vendor.rs:234`) is deleted.** It exists so a `GetRuntime`
-arriving mid-`CreateRuntime` waits instead of answering "gone". But
-`runtime_id` **is** the session id, and since #232/#235 `SessionActor` owns
-provisioning and journals it — `session_actor/types.rs:61` notes that
-provisioning stays exactly-once "without any bookkeeping beyond the status the
-journal already carries". A per-runtime actor and the session actor are the same
-actor. The vendor's locks re-derive an ordering the session actor already
-guarantees.
+Hence `RuntimeProgress`, and hence `poll` taking a **slice**: one call answers
+for a whole vendor (`GET /machines?metadata.…`), which is the only shape that
+survives Fly's rate limits. A vendor backed by webhooks satisfies the same call
+from its own cache.
 
-**`<state_dir>/<runtime_id>/spec.json` is deleted.** It is the only durable
-thing a vendor keeps, written before spawning so a runtime that dies during
-provisioning is still rebuildable. But `SessionSpec` already persists `vendor`,
-`workspaces` and `provision` (`spec.rs:109`), and `SessionStatus` carries
-`Provisioning` / `ProvisioningFailed` / `Unrecoverable` in the session journal.
-The file duplicates data the server already holds durably; it exists only
-because a separate process cannot read the server's database.
+## RuntimeManager becomes an actor — for concurrency, not durability
 
-So **`get` takes the spec** rather than the vendor recalling it. `respawnable`
-stops being a reason to write a file and becomes purely a capability: can this
-vendor rebuild a runtime that is not live. This also removes the local-disk
-record whose leak is #243.
+`RuntimeManager` is already per-account (`users.rs:163`). It absorbs
+`ConnectedRuntimeRegistry` and becomes an actor on `horsie-actor` owning:
 
-**No new actor, and no second journal.** The desired state is already
-event-sourced, in the session journal, keyed by the same id. A runtime actor
-would be a second writer for one fact, and drift between two journals is worse
-than either alone. What such an actor would genuinely have bought —
-reconciling machines whose session no longer exists — is a periodic sweep, not
-durable state; see Orphans below.
+- the vendor map,
+- `HashMap<runtime_id, RuntimeState>` where state is `Pending | Live(handle) | Hibernated`,
+- **one poll loop per vendor**, with backoff — never one per runtime,
+- the dial-back landing point for `/api/runtime/connect`.
+
+It emits `RuntimeCreated` / `RuntimeReady` / `RuntimeGone` onto the account's
+existing broadcast channel, and hands `SessionActor` its terminal outcome
+through the `FinishProvisioning` path that already exists.
+
+**It journals nothing.** The durable record of intent is already the session
+journal: `SessionSpec` persists `vendor`, `workspaces` and `provision`
+(`spec.rs:109`), `SessionStatus` carries `Provisioning`/`ProvisioningFailed`/
+`Unrecoverable`, and `SessionActor` re-sends `Provision` on load to recover a
+create the process died inside (`session_actor/types.rs:57-63`). Because
+`create` is idempotent against the deterministic name `horsie-{runtime_id}`, the
+manager can hold zero durable state and still recover by re-entering
+`create`/`poll`. Two journals for one fact is the thing to avoid.
+
+This also retires `lifecycle_locks` (`vendor.rs:234`): `runtime_id` **is** the
+session id, so `SessionActor` already serialises per runtime, and the actor
+serialises the rest.
+
+## Lifecycle events, which nothing handles today
+
+`RuntimeStateChanged` currently arrives on the vendor link, gets a
+`tracing::debug!`, and is dropped — it matches no waiter, so it falls off the
+end of the read loop (`link.rs:170`). This design closes that hole rather than
+inheriting it.
+
+Three sources converge on one signal. A remote vendor's `RuntimeStateChanged`
+closes its handle; an in-process runtime's WebSocket closing closes its handle;
+a substrate that reports a dead machine closes it on the next `poll`. All three
+resolve `RuntimeHandle::closed()`, the manager drops the map entry, and
+discovery of *what to do next* stays lazy — the next acquisition re-enters
+`poll`. What `closed()` buys is that a dead handle is never handed to a turn.
+
+## Acquiring a runtime after a failure
+
+After a horsie restart every runtime is dead but its machine still exists,
+because the runtime has no reconnect loop and its socket died with the server.
+So acquisition always ends in the same place — waiting for a dial-back — and
+differs only in what the substrate had to do first.
+
+| situation | what happens | outcome |
+| --- | --- | --- |
+| handle live in the map | return it | — |
+| server restarted, machine exists | start it, await dial-back | — |
+| hibernated (stopped or suspended) | start/resume, await dial-back | — |
+| substrate API unreachable | — | `Unavailable`, retryable |
+| machine destroyed | — | `Gone` → session `Unrecoverable` |
+
+`create` stays distinct from `poll` because "no runtime exists and I must not
+build one" is a real safety property: an acquisition that silently provisions
+rebuilds a workspace the user believes still holds their work.
 
 ## Who holds a runtime's connection
 
 An in-server vendor has no listener of its own, so `/api/runtime/connect` comes
 back as a server route: one port, TLS and reverse proxies for free.
 
-`ConnectedRuntimeRegistry` keeps its name and its behaviour, and moves from the
-vendor process into `UserServices` beside the vendor map — **one per account**,
-not one per vendor and not one per server.
-
-1. `create` registers a waiter for `runtime_id` *before* launching. The race
-   this closes is the one velos's provider already documents.
+1. `create` registers the manager's expectation for `runtime_id` *before* asking
+   the substrate. The race this closes is the one velos's provider documents.
 2. The machine boots and dials `GET /api/runtime/connect`.
 3. The route authenticates the bearer, which is **self-describing**:
    `{user_id, runtime_id}` plus an HMAC tag over both. No database read is
-   needed to know where the socket belongs. A sandbox learning its own user id
-   is not a disclosure — it is that user's own sandbox.
-4. The route resolves `UserServices` through `UserRegistry::get(user_id)`,
-   upgrades the socket, and registers the transport in that account's registry.
-5. The waiting vendor wakes and `create` returns.
+   needed to know where the socket belongs. A sandbox learning its own account
+   id is not a disclosure — it is that account's own sandbox.
+4. The route resolves the account through `UserRegistry::get(user_id)`, upgrades
+   the socket, and hands it to that account's manager, which builds the handle
+   and moves the runtime to `Live`.
 
 Per-account rather than server-wide keeps this inside the scoping discipline of
-#217/#233, and costs nothing because the token already carries the user.
+#217/#233, and costs nothing because the token already carries the account.
 
-**`LiveRuntime` stops caching the transport.** It holds `handle + transport`
-today. Once the runtime can reconnect (step 6), a re-dial replaces the transport
-in the registry and a vendor still holding the old `Arc` would send into a dead
-socket for the rest of the turn — #187 exactly, one layer down. `LiveRuntime`
-keeps only the `handle`; the transport is resolved from the registry per call,
-mirroring what `RuntimeVendorTransport` already does with the vendor link.
+**A handle is never cached anywhere but the manager's map.** A reconnect
+replaces it; anything holding the old `Arc` would write into a dead socket for
+the rest of the turn — #187, one layer down.
 
 ## Authenticating the dial-back
 
@@ -178,48 +231,79 @@ token   = payload || HMAC-SHA256(dial_secret, payload)
 `dial_secret` is generated once and kept in settings. Deriving rather than
 storing means no per-runtime row to migrate, nothing to expire, a server restart
 changes nothing, and rotating one secret invalidates every outstanding token.
-The same check is added to the standalone listener, so external vendors stop
-being open too.
+The same check goes on the standalone listener, so `horsie connect` stops being
+open too.
 
-A token authorizes exactly one `runtime_id` and does not expire. That is
+A token authorises exactly one `runtime_id` and does not expire. That is
 acceptable because holding it is already equivalent to being that runtime; the
 property being bought is that a *stranger* cannot become one.
 
+## Naming
+
+Nothing here is called bare "Vendor". Every type carries `Runtime` or
+`RuntimeVendor`.
+
+| Now | After |
+| --- | --- |
+| `RuntimeVendorLink` (server) | `RemoteRuntimeVendor` |
+| `RuntimeVendor` (runtime-vendor crate — the process that dials a server) | `RuntimeVendorClient` |
+| `SharedVendors` | `RuntimeVendorMap` |
+| `VendorError` | `RuntimeVendorError` |
+| `VendorCapabilities` (server) | deleted — use the wire `RuntimeVendorCapabilities` |
+| `RuntimeProvider` | deleted — merged into `RuntimeVendor` |
+| `vendor_agents` field (#234) | `runtime_vendors` |
+| — | `FlyRuntimeVendor`, `VelosRuntimeVendor`, `LocalProcessRuntimeVendor` |
+
+"Shared" is dropped from the map alias deliberately: since #233 there is one per
+account, so a name saying "Shared" reads as deployment-wide — the opposite of
+what it is, on the type where being wrong means running tool calls on someone
+else's machine.
+
 ## Runtime vendors are built just-in-time from configuration
 
-A `runtime_vendors` table, per user, in the shape `providers` already uses:
-name, kind, credential, and kind-specific settings. When an account's services
-open, each row becomes an `InProcessRuntimeVendor` published into the vendor
-map; saving settings rebuilds the affected entry. Remote vendors keep
-publishing themselves on connect, and both populate the same map.
+A `runtime_vendors` table, per account, in the shape `providers` already uses:
+name, kind, credential, kind-specific settings. When an account's services open,
+each row becomes a vendor published into the map; saving settings rebuilds the
+affected entry. Remote vendors keep publishing themselves on connect, and both
+populate the same map.
+
+**Reconfiguration replaces the object rather than mutating it** — the same
+semantics a `horsie connect` reconnect already has, where the returning process
+arrives as a brand-new link. Consequences: live handles survive (they are the
+manager's, not the vendor's); the vendor's own caches are lost, which is
+identical to a restart; and edits that change *substrate identity* (kind, or a
+credential pointing at a different Fly org) make `horsie-{runtime_id}`
+unfindable, so those runtimes answer `Gone`. Identity-class edits are allowed
+but warn at save time, naming how many sessions reference that vendor —
+blocking would only push an operator rotating a leaked token into
+delete-and-re-add, which orphans the same runtimes with less warning.
 
 One setting has a failure mode worth surfacing early: the vendor must be told
 the server's **externally reachable** URL, because that string ends up in the
 machine's argv. A deployment reachable only on localhost cannot use a cloud
-provider at all, and should be told so when the setting is saved rather than at
+substrate at all, and should be told so when the setting is saved rather than at
 first session.
 
-## The Fly runtime vendor
+## The Fly vendor
 
-`FlyRuntimeProvider` implements the existing `RuntimeProvider` trait: a
-`reqwest` client and nothing more.
+`FlyRuntimeVendor` is a `reqwest` client and a `RuntimeVendor` impl.
 
-- **Create.** `POST /v1/apps/{app}/volumes`, then
-  `POST /v1/apps/{app}/machines` with `name = horsie-{runtime_id}`,
-  `config.init.exec` set to the `/bin/sh -c "mkdir -p … && exec horsie-runtime …"`
-  line `build_container_command` already emits, `config.env` for the provision
+- **create.** `POST /v1/apps/{app}/volumes`, then `POST /v1/apps/{app}/machines`
+  with `name = horsie-{runtime_id}`, `config.init.exec` set to the
+  `/bin/sh -c "mkdir -p … && exec horsie-runtime …"` line
+  `build_container_command` already emits, `config.env` for the provision
   environment, and `config.mounts` binding the volume at the workspace root.
-- **Get.** Look the machine up by name; `start` it if stopped, `resume` if
-  suspended.
-- **Hibernate.** `stop`, or `suspend` once the runtime can reconnect.
-- **Delete.** Destroy the machine, then the volume.
-- **Health.** Is the transport still registered.
+  Returns `Pending`.
+- **poll.** `GET /v1/apps/{app}/machines?metadata.horsie=1` in one call for the
+  whole vendor; map each machine's state to `Pending`, or to `Ready` once the
+  manager also holds its dial-back.
+- **hibernate.** `stop`, or `suspend` once the runtime can reconnect.
+- **delete.** Destroy the machine, then the volume.
 
-`ManagedWorkspaces` is reused verbatim. Auth is one bearer header.
-
-Volumes must be attached at machine-create — Fly rejects adding one afterwards —
-and are pinned to a host, so create is two calls in a fixed order and delete has
-to clean up both.
+`ManagedWorkspaces` is reused verbatim. Auth is one bearer header. Volumes must
+be attached at machine-create — Fly rejects adding one afterwards — and are
+pinned to a host, so create is two calls in a fixed order and delete cleans up
+both.
 
 ## Hibernate, and why the runtime needs a reconnect loop
 
@@ -234,64 +318,59 @@ survives, which is what the volume is for. `persist_rootfs` is not a substitute:
 Fly documents it as restart/update persistence and explicitly not a place for
 data that matters.
 
-So the work is both:
-
-1. **Volume + `stop`/`start`**, needing no runtime change, which makes
-   `with_respawnable_runtimes(true)` honest for the first time.
-2. **A reconnect loop in the runtime**, which then makes `suspend`/`resume`
-   available as the faster path.
-
-The reconnect loop must handle a resume landing mid-turn: the runtime re-dials
-under the same `runtime_id`, the registry replaces the transport rather than
-refusing a duplicate, and a tool call in flight when the machine froze fails
-cleanly instead of hanging the turn.
+So the work is both: volume plus `stop`/`start`, which needs no runtime change
+and makes `supports_provisioning`-driven revival honest; then a reconnect loop
+in the runtime, which makes `suspend`/`resume` available as the faster path. The
+reconnect loop must handle a resume landing mid-turn — the runtime re-dials
+under the same `runtime_id`, the manager replaces the handle rather than
+refusing a duplicate, and a call in flight when the machine froze fails cleanly
+instead of hanging the turn.
 
 ## Orphans (#243)
 
 A machine whose session no longer exists is found by listing `horsie-*` on the
-provider and comparing against the sessions table — a periodic sweep per
-configured vendor. Deleting a session already tells its vendor; the sweep exists
-for the case where the vendor was unreachable at the time.
+substrate and comparing against the sessions table — one sweep per configured
+vendor, reusing the same batch call `poll` uses. Deleting a session already
+tells its vendor; the sweep covers the case where the vendor was unreachable at
+the time.
 
 ## Phasing
 
-Each step is a PR, in order.
-
-1. **`RuntimeVendor` trait**, `RuntimeVendorMap`, `RemoteRuntimeVendor`, and the
-   rename pass. Pure refactor; closes #234.
-2. **Authenticated dial-back.** `--connect-token` on the runtime, HMAC verify on
-   the standalone listener. Closes #191's blocker on its own.
-3. **`get` carries the spec**; delete `spec.json` and `lifecycle_locks`. Wire
-   change to `GetRuntimeRequest`.
-4. **`/api/runtime/connect`, `ConnectedRuntimeRegistry` into `UserServices`,
-   `InProcessRuntimeVendor`, `runtime_vendors` table, settings UI.**
-5. **`FlyRuntimeProvider`**, with volumes and `stop`/`start` hibernate.
-6. **Runtime reconnect loop**, enabling `suspend`/`resume`.
-7. **`VelosRuntimeProvider` in-server**; `crates/velos-runtime` deleted.
-8. **Orphan sweep**; closes #243.
-
-The implementation plan covers steps 1–4. Steps 5–8 get their own plan once the
-seam has actually run.
+1. **The two traits**, in `crates/runtime-vendor`. `RemoteRuntimeVendor`
+   implements them over today's link; `RuntimeProvider` and
+   `RuntimeVendorTransport` are deleted. Naming pass (#234) rides along.
+2. **`RuntimeManager` becomes an actor**, absorbing `ConnectedRuntimeRegistry`,
+   owning `RuntimeState` and the per-vendor poll loop, emitting lifecycle
+   events. `lifecycle_locks` deleted.
+3. **Authenticated dial-back.** `--connect-token`, HMAC verify on both the
+   standalone listener and the new `/api/runtime/connect` route.
+4. **Acquisition carries its spec**; `spec.json` deleted. Wire change to
+   `GetRuntimeRequest`.
+5. **`runtime_vendors` table, JIT publication, settings UI.**
+6. **`FlyRuntimeVendor`**, with volumes and `stop`/`start` hibernate.
+7. **Runtime reconnect loop**, enabling `suspend`/`resume`.
+8. **`VelosRuntimeVendor` in-server**; `crates/velos-runtime` deleted.
+9. **Orphan sweep**; closes #243.
 
 ## Testing
 
 `crates/runtime-vendor/tests/vendor_conformance.rs` is the real contract and
 currently runs against a vendor *process*. Re-pointing it at the `RuntimeVendor`
 trait so every implementation runs the identical suite is the main test-side
-work, and it is what makes step 7 safe: velos moving in-process becomes
+work, and it is what makes step 8 safe: velos moving in-process becomes
 pass/fail against a suite it already passes.
 
 Beyond that:
 
-- `FlyRuntimeProvider` against a faked `ContainerApi`-shaped trait, the way
-  velos's client is already structured.
+- `FlyRuntimeVendor` against a faked HTTP layer, the way velos's client is
+  already structured.
 - The dial-back check: a correct token registers; a token for another
   `runtime_id` or another `user_id` is refused; a missing token is refused.
-- Reconnect: a re-dial replaces the transport; an in-flight call at freeze time
+- Progress: a vendor stuck in `Pending` past the provision window fails the
+  acquisition rather than hanging it.
+- Reconnect: a re-dial replaces the handle; an in-flight call at freeze time
   fails rather than hangs.
-- Settings: saving a vendor publishes it into the map with no restart; deleting
-  one removes it.
-- Scope: two accounts with same-named vendors do not see each other's runtimes
+- Scope: two accounts with same-named vendors never see each other's runtimes
   (the isolation harness, per #223).
 
 ## Risks and open questions
@@ -299,14 +378,13 @@ Beyond that:
 - **Volume naming.** Fly volume names are more constrained than machine names.
   If a UUID-derived name does not fit, the volume is still reachable through the
   machine's `mounts`, so this costs a lookup rather than a stored mapping — but
-  it needs confirming against the API before step 5.
+  it needs confirming against the API before step 6.
+- **Poll cadence.** Fly rate-limits; the interval must be per-vendor
+  configurable with backoff, and the batch call is what keeps it affordable.
 - **Host affinity.** A volume pins its machine to a host. A regional capacity
   failure must surface as `RuntimeVendorError::Provision`, not a hang.
 - **Cost.** Stopped machines are billed for rootfs, volumes at $0.15/GB-mo. A
   stopped or suspended runtime is cheaper than a running one, not free.
-- **Step 3 changes the wire.** `GetRuntimeRequest` gains the spec, so a
-  `horsie connect` older than the server cannot respawn. Acceptable: version
-  skew between the two is already not supported.
-- **Step 4 is large.** If it needs splitting, the natural cut is the route and
-  `InProcessRuntimeVendor` first against a test provider, then configuration and
-  UI.
+- **Step 4 changes the wire.** `GetRuntimeRequest` gains the spec, so a
+  `horsie connect` older than the server cannot revive a runtime. Acceptable:
+  version skew between the two is already unsupported.

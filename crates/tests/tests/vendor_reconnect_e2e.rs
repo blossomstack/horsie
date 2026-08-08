@@ -1,6 +1,6 @@
 //! A vendor agent survives losing its link to the server.
 //!
-//! Everything here is real: a real `RuntimeVendor` dialing a real
+//! Everything here is real: a real `RuntimeVendorClient` dialing a real
 //! `RuntimeVendorLink` over a real TCP WebSocket, published through the real
 //! `RuntimeVendorRegistry`. The only fixture is the runtime itself, because a
 //! test that spawned `horsie-runtime` children would be measuring process
@@ -22,7 +22,7 @@ use horsie_models::runtime_vendor::{
 use horsie_runtime_client::{MockTransport, RuntimeClient};
 use horsie_runtime_vendor::{
     AgentExit, Backoff, ConnectedRuntimeRegistry, FixedWorkspaces, HealthStatus, ProviderFactory,
-    RuntimeError, RuntimeHandle, RuntimeProvider, RuntimeVendor, no_credential,
+    RuntimeError, RuntimeHandle, RuntimeProvider, RuntimeVendorClient, no_credential,
 };
 use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::fake::runtime_spec_fixture;
@@ -192,7 +192,7 @@ async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes()
         })
     };
     let workspaces = HashMap::from([("main".to_string(), tmp.path().to_path_buf())]);
-    let agent = RuntimeVendor::new(
+    let agent = RuntimeVendorClient::new(
         "test-vendor".to_string(),
         false,
         provider,
@@ -276,7 +276,7 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
         })
     };
     let workspaces = HashMap::from([("main".to_string(), tmp.path().to_path_buf())]);
-    let agent = RuntimeVendor::new(
+    let agent = RuntimeVendorClient::new(
         "test-vendor".to_string(),
         false,
         provider,
@@ -346,7 +346,7 @@ async fn a_second_agent_claiming_a_live_name_is_refused_and_stops() {
     let tmp = tempfile::tempdir().unwrap();
     let endpoint = format!("ws://{server}/api/vendor/connect");
     let root = tmp.path().to_path_buf();
-    let build = move |dir: &str| -> RuntimeVendor {
+    let build = move |dir: &str| -> RuntimeVendorClient {
         let root = root.clone();
         let connected = Arc::new(ConnectedRuntimeRegistry::new());
         let provider: ProviderFactory = {
@@ -358,7 +358,7 @@ async fn a_second_agent_claiming_a_live_name_is_refused_and_stops() {
             })
         };
         let workspaces = HashMap::from([("main".to_string(), root.clone())]);
-        RuntimeVendor::new(
+        RuntimeVendorClient::new(
             "horsie-local".to_string(),
             false,
             provider,

@@ -16,7 +16,7 @@ use horsie_models::capabilities::{
 };
 use horsie_runtime_vendor::{
     AgentExit, ConnectedRuntimeRegistry, FixedWorkspaces, ProcessRuntimeProvider, RuntimeEndpoint,
-    RuntimeListenerServer, RuntimeVendor, SandboxPolicy, serve_runtime_connections,
+    RuntimeListenerServer, RuntimeVendorClient, SandboxPolicy, serve_runtime_connections,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -324,7 +324,7 @@ pub async fn run(
             Arc::new(p)
         });
 
-    let agent = RuntimeVendor::new(
+    let agent = RuntimeVendorClient::new(
         vendor_name.to_string(),
         // A fixed, user-owned directory: no repo checkout, no bundle install.
         false,
