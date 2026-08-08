@@ -10,7 +10,7 @@ import {
   type Message,
   type MessageFrame,
   type MessagesPage,
-  type PendingAskView,
+  type AskLifecycle,
   type TaskItem,
 } from "../api/types";
 import { toolScope } from "../lib/hookSummary";
@@ -74,7 +74,7 @@ export interface SessionStream {
    * a field because the transcript's segment builder takes one. */
   orphanTools: RenderedToolCall[];
   liveStatus: SessionStatusKind | null;
-  livePendingAsks: PendingAskView[] | null;
+  livePendingAsks: AskLifecycle[] | null;
   statusSeq: number;
   statusReason: string | null;
   streamError: string | null;
@@ -235,7 +235,7 @@ interface Folded {
   statusSeq: number;
   reason: string | null;
   error: string | null;
-  pendingAsks: PendingAskView[];
+  pendingAsks: AskLifecycle[];
   queued: { id: string; text: string }[];
   tasks: TaskItem[] | null;
   /** Seq of the entry the task list came from, for comparing against a
@@ -267,10 +267,16 @@ export function fold(entries: AgentLogEntry[]): Folded {
     if (entry.body.type !== "Lifecycle") continue;
     const ev = entry.body.value;
     switch (ev.kind) {
-      case "Provisioning": {
-        const stage = ev.value.stage;
-        out.progression = { stage, detail: ev.value.detail ?? null };
-        if (stage === "failed") {
+      // The session's sandbox, as opposed to a turn's setup below. Two
+      // variants rather than one stage string because they are two different
+      // facts that happened to share the label "ready".
+      case "Runtime": {
+        const status = ev.value.status.kind;
+        out.progression = {
+          stage: `runtime_${status.toLowerCase()}`,
+          detail: ev.value.detail ?? null,
+        };
+        if (status === "Failed") {
           out.status = SessionStatusKind.Failed;
           out.reason = ev.value.detail ?? null;
         } else if (out.status === null) {
@@ -279,16 +285,24 @@ export function fold(entries: AgentLogEntry[]): Folded {
         out.statusSeq += 1;
         break;
       }
+      // This turn's setup: narration only, and never a status.
+      case "Preparing":
+        out.progression = {
+          stage: ev.value.stage,
+          detail: ev.value.detail ?? null,
+        };
+        break;
       case "MessageQueued":
         out.queued.push({ id: ev.value.id, text: ev.value.text });
         break;
       case "TurnBegan": {
         const consumed = new Set(ev.value.consumed);
         out.queued = out.queued.filter((q) => !consumed.has(q.id));
-        const answered = new Set(ev.value.answered);
-        out.pendingAsks = out.pendingAsks.filter(
-          (a) => !a.toolCallId || !answered.has(a.toolCallId),
-        );
+        // A turn beginning ends the park either way: the questions were
+        // answered, or the person moved on and they were abandoned. `answered`
+        // says which of the two happened; it does not decide what is still
+        // pending, because after either one nothing is.
+        out.pendingAsks = [];
         out.status = SessionStatusKind.Running;
         out.statusSeq += 1;
         // A turn that starts supersedes the previous turn's failure.
@@ -309,10 +323,7 @@ export function fold(entries: AgentLogEntry[]): Folded {
         break;
       }
       case "AskRecorded":
-        out.pendingAsks.push({
-          toolCallId: ev.value.toolCallId ?? undefined,
-          question: ev.value.question,
-        });
+        out.pendingAsks.push(ev.value);
         out.status = SessionStatusKind.AwaitingInput;
         out.statusSeq += 1;
         break;

@@ -15,14 +15,21 @@ export interface AuthStatus {
   mustChangePassword: boolean;
   /**
    * True when a layer in front of the server owns identity. horsie itself
+   * never sets this — it serves no credential routes in that mode, so this
+   * endpoint is answered by that layer. The field exists because the UI is
+   * horsie's and has to render for such a deployment: it hides every
+   * credential control it cannot honour.
    */
   external: boolean;
   /**
    * Where to send someone who is not signed in. Only meaningful when
+   * `external`; the UI navigates here instead of rendering a login form.
    */
   loginUrl?: string;
   /**
    * Where to finish signing out. Only meaningful when `external`. Clearing
+   * the local session is not enough on its own — the provider holds one
+   * too, and leaving it alive signs nobody out of a shared machine.
    */
   logoutUrl?: string;
 }

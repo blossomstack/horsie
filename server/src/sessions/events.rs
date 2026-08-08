@@ -50,6 +50,35 @@ pub(in crate::sessions) async fn fold_session_state(
     state
 }
 
+/// A session's own journal, decoded — **tests only**.
+///
+/// The fold answers "where is this session now"; this answers "what happened to
+/// it", which is what a test asserting on a *transition* needs. Status alone
+/// cannot distinguish a turn that never began from one that began and finished
+/// between two polls.
+#[cfg(test)]
+pub(in crate::sessions) async fn session_events(
+    journal: &std::sync::Arc<dyn horsie_actor::Journal>,
+    session_id: uuid::Uuid,
+) -> Vec<crate::sessions::session_actor::SessionDomainEvent> {
+    use futures_util::StreamExt;
+
+    let pid = crate::sessions::session_actor::SessionActor::persistence_id_for(session_id);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only inspection of a journal, with no actor running to ask"
+    )]
+    let mut stream = journal.replay(&pid, 0).await;
+    let mut out = Vec::new();
+    while let Some(item) = stream.next().await {
+        let Ok((_seq, bytes)) = item else { break };
+        if let Ok(event) = serde_json::from_slice(&bytes) {
+            out.push(event);
+        }
+    }
+    out
+}
+
 fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
     match status {
         AgentTaskStatus::Pending => WireTaskStatus::Pending,

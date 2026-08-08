@@ -1,0 +1,445 @@
+//! What is addressed to an agent, and when it becomes a turn.
+//!
+//! An agent has one queue, and everything that arrives for it goes in the same
+//! one: a person's message, a subagent's report, a timer firing, a `Stop` hook
+//! saying to keep going. They differ in what they contribute to the turn, not in
+//! how they are held — which is the whole reason this is one enum rather than
+//! four fields.
+//!
+//! No actors and no I/O, so the decision is unit-testable against a hand-built
+//! queue. [`AgentActor`](crate::AgentActor) owns the queue; this owns the rule.
+
+use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
+use serde::{Deserialize, Serialize};
+
+/// Separator between messages merged into one turn.
+///
+/// Anthropic requires alternating roles, so several queued messages become one
+/// user turn rather than consecutive user ones. Provenance survives in the
+/// `Received` events.
+pub const MERGE_SEPARATOR: &str = "\n\n";
+
+/// The tool result recorded for a question the user walked away from.
+pub const ABANDONED_ASK_RESULT: &str = "not answered — the user sent a new message instead";
+
+/// One accepted-but-undelivered thing addressed to an agent.
+///
+/// Every variant carries an `id` so a turn can name exactly what it consumed,
+/// which is what makes the fold replayable and lets a client cross off the
+/// message it is watching.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Incoming {
+    /// A person typed something.
+    User { id: String, text: String },
+    /// A subagent this agent spawned finished, and owes it the report.
+    SubAgent {
+        id: String,
+        part: Box<SubAgentResultPart>,
+    },
+    /// A timer this agent armed fired.
+    Timer { id: String, message: String },
+    /// A `Stop` hook blocked the end of a turn, so the turn continues with the
+    /// hook's reason as its input.
+    Continue { id: String, reason: String },
+}
+
+impl Incoming {
+    /// This item's identity, for `consumed`.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::User { id, .. }
+            | Self::SubAgent { id, .. }
+            | Self::Timer { id, .. }
+            | Self::Continue { id, .. } => id,
+        }
+    }
+
+    /// Whether this is a person speaking.
+    ///
+    /// The one distinction the drain rule needs, and it decides a single thing:
+    /// whether this item may override a park. A person who types while the agent
+    /// is waiting on them has changed their mind — "never mind, do this instead"
+    /// — and that is the only thing entitled to abandon the questions. News that
+    /// merely *arrived* (a subagent finishing, a timer firing) has no opinion
+    /// about the questions and waits its turn.
+    #[must_use]
+    pub fn is_user(&self) -> bool {
+        matches!(self, Self::User { .. })
+    }
+
+    /// What this item contributes to the turn's user message, if anything.
+    #[must_use]
+    fn text(&self) -> Option<&str> {
+        match self {
+            Self::User { text, .. } | Self::Timer { message: text, .. } => Some(text),
+            Self::Continue { reason, .. } => Some(reason),
+            // A report is its own content part, never merged into the text:
+            // joined in, a reader could not tell a subagent's words from the
+            // person's, and both would render as one user bubble.
+            Self::SubAgent { .. } => None,
+        }
+    }
+}
+
+/// Everything an agent is about to be resumed with, and what that consumes.
+///
+/// Every field is what the actor needs to journal the turn, so nothing below
+/// this re-derives a decision made here.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Turn {
+    /// Ids of the queue items this turn carries.
+    pub consumed: Vec<String>,
+    /// Tool-call ids of the questions this turn *answered*. Empty when the turn
+    /// abandoned them instead — the two are deliberately not the same thing.
+    pub answered: Vec<String>,
+    pub message: Option<String>,
+    pub subagent_results: Vec<SubAgentResultPart>,
+    pub results: Vec<ToolResultInput>,
+}
+
+/// One answer to one pending question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskAnswer {
+    pub tool_call_id: String,
+    pub text: String,
+}
+
+/// Why a set of answers was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerError {
+    /// This agent is not parked on anything answerable.
+    NothingPending,
+    /// The answers did not cover the pending questions exactly.
+    Incomplete {
+        missing: Vec<String>,
+        unexpected: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for AnswerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NothingPending => write!(f, "this agent is not waiting on an answer"),
+            Self::Incomplete {
+                missing,
+                unexpected,
+            } => write!(
+                f,
+                "every pending question must be answered together (missing: [{}]; not pending: [{}])",
+                missing.join(", "),
+                unexpected.join(", ")
+            ),
+        }
+    }
+}
+
+/// Whether the queue may start a turn now, and what that turn carries.
+///
+/// `None` means "not yet", and there are exactly two reasons for it: nothing is
+/// queued, or the agent is parked on questions and nothing queued is entitled to
+/// abandon them. Being *busy* is not one of them — that is the actor's own
+/// business, checked before this is ever asked, because a run in flight is not a
+/// fact about the queue.
+#[must_use]
+pub fn queued_turn(inbox: &[Incoming], asks: &[crate::AskedQuestion]) -> Option<Turn> {
+    if inbox.is_empty() {
+        return None;
+    }
+    if !asks.is_empty() && !inbox.iter().any(Incoming::is_user) {
+        return None;
+    }
+    let mut turn = drain(inbox);
+    // Abandoned, not answered: every parked call still gets a result, so nothing
+    // dangles on the wire, but the result says the question went unanswered.
+    // Answering for real goes through `answered_turn`, which requires all of
+    // them at once.
+    turn.results = asks
+        .iter()
+        .filter_map(|ask| ask.tool_call_id.clone())
+        .map(|tool_call_id| ToolResultInput {
+            tool_call_id,
+            output: ABANDONED_ASK_RESULT.to_string(),
+            is_error: true,
+        })
+        .collect();
+    Some(turn)
+}
+
+/// The turn an answered park starts: the answers, plus whatever queued behind
+/// them.
+///
+/// Refused unless the answers cover the pending questions exactly. A
+/// half-answered park could not resume anyway — the run would go back to the
+/// provider with a `tool_use` that has no result — and refusing costs nothing,
+/// because nothing has been journaled yet.
+pub fn answered_turn(
+    inbox: &[Incoming],
+    asks: &[crate::AskedQuestion],
+    answers: Vec<AskAnswer>,
+) -> Result<Turn, AnswerError> {
+    let pending: std::collections::HashSet<String> =
+        asks.iter().filter_map(|a| a.tool_call_id.clone()).collect();
+    if pending.is_empty() {
+        return Err(AnswerError::NothingPending);
+    }
+    let answered: std::collections::HashSet<String> =
+        answers.iter().map(|a| a.tool_call_id.clone()).collect();
+    if answered != pending {
+        let mut missing: Vec<String> = pending.difference(&answered).cloned().collect();
+        let mut unexpected: Vec<String> = answered.difference(&pending).cloned().collect();
+        missing.sort();
+        unexpected.sort();
+        return Err(AnswerError::Incomplete {
+            missing,
+            unexpected,
+        });
+    }
+    // The queue rides along rather than waiting for another boundary: a subagent
+    // that finished while the person was typing their answer is news the same
+    // turn wants, and holding it back would strand it until something else
+    // happened to start a turn.
+    let mut turn = drain(inbox);
+    turn.answered = answers.iter().map(|a| a.tool_call_id.clone()).collect();
+    turn.results = answers
+        .into_iter()
+        .map(|a| ToolResultInput {
+            tool_call_id: a.tool_call_id,
+            output: a.text,
+            is_error: false,
+        })
+        .collect();
+    Ok(turn)
+}
+
+/// Fold the whole queue into one turn's input. Never partial: an agent that is
+/// starting a turn at all is starting it on everything it has been told.
+fn drain(inbox: &[Incoming]) -> Turn {
+    let texts: Vec<&str> = inbox.iter().filter_map(Incoming::text).collect();
+    Turn {
+        consumed: inbox.iter().map(|i| i.id().to_string()).collect(),
+        answered: Vec::new(),
+        // `None`, not an empty string, when nothing contributed text: Anthropic
+        // rejects an empty content block, so a report-only turn must have no
+        // user message at all rather than a blank one.
+        message: (!texts.is_empty()).then(|| texts.join(MERGE_SEPARATOR)),
+        subagent_results: inbox
+            .iter()
+            .filter_map(|i| match i {
+                Incoming::SubAgent { part, .. } => Some((**part).clone()),
+                Incoming::User { .. } | Incoming::Timer { .. } | Incoming::Continue { .. } => None,
+            })
+            .collect(),
+        results: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    //! The queue rule: what merges, what waits, and what a park does and does
+    //! not survive.
+    use super::*;
+    use crate::AskedQuestion;
+
+    fn user(id: &str, text: &str) -> Incoming {
+        Incoming::User {
+            id: id.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    fn report(id: &str, label: &str, text: &str) -> Incoming {
+        Incoming::SubAgent {
+            id: id.to_string(),
+            part: Box::new(SubAgentResultPart {
+                subagent_id: id.to_string(),
+                label: label.to_string(),
+                status: "completed".to_string(),
+                text: text.to_string(),
+                spawned_at_ms: 0,
+                ended_at_ms: 0,
+            }),
+        }
+    }
+
+    fn timer(id: &str, message: &str) -> Incoming {
+        Incoming::Timer {
+            id: id.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    fn asking(id: &str, question: &str) -> AskedQuestion {
+        AskedQuestion {
+            tool_call_id: Some(id.to_string()),
+            question: question.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_empty_queue_starts_nothing() {
+        assert_eq!(queued_turn(&[], &[]), None);
+    }
+
+    #[test]
+    fn one_message_becomes_a_turn_that_consumes_it() {
+        let turn = queued_turn(&[user("m1", "hello")], &[]).unwrap();
+        assert_eq!(turn.message.as_deref(), Some("hello"));
+        assert_eq!(turn.consumed, vec!["m1".to_string()]);
+    }
+
+    #[test]
+    fn several_messages_merge_into_one_turn() {
+        let turn = queued_turn(&[user("m1", "a"), user("m2", "b")], &[]).unwrap();
+        assert_eq!(turn.message.as_deref(), Some("a\n\nb"));
+        assert_eq!(turn.consumed.len(), 2);
+    }
+
+    /// Merged into the text, a client could not tell a subagent's report from
+    /// what the person actually typed — both would render as a user bubble.
+    #[test]
+    fn a_report_rides_a_turn_without_joining_its_text() {
+        let turn = queued_turn(
+            &[
+                user("m1", "and the lockfile"),
+                report("s1", "audit", "3 stale"),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(turn.message.as_deref(), Some("and the lockfile"));
+        assert_eq!(turn.subagent_results.len(), 1);
+        assert_eq!(turn.subagent_results[0].text, "3 stale");
+    }
+
+    /// Nothing was typed, so there is no user message at all — not an empty
+    /// one, which Anthropic rejects as a content block.
+    #[test]
+    fn a_report_only_turn_has_no_message() {
+        let turn = queued_turn(&[report("s1", "audit", "3 stale")], &[]).unwrap();
+        assert_eq!(turn.message, None);
+        assert_eq!(turn.subagent_results.len(), 1);
+    }
+
+    /// "Never mind, do this instead." Every parked call still gets a result, so
+    /// nothing dangles on the wire.
+    #[test]
+    fn a_message_overrides_a_park_and_abandons_its_questions() {
+        let turn = queued_turn(&[user("m1", "never mind")], &[asking("call-1", "which?")]).unwrap();
+        assert_eq!(turn.message.as_deref(), Some("never mind"));
+        assert_eq!(turn.results.len(), 1);
+        assert_eq!(turn.results[0].tool_call_id, "call-1");
+        assert!(turn.results[0].is_error);
+        assert!(
+            turn.answered.is_empty(),
+            "abandoning is not answering — answers come through `answered_turn`"
+        );
+    }
+
+    /// News that merely arrived has no opinion about the questions. It waits,
+    /// and the answer (or a message) is what releases it.
+    #[test]
+    fn a_report_waits_out_a_park_instead_of_overriding_it() {
+        let asks = [asking("call-1", "which?")];
+        assert_eq!(queued_turn(&[report("s1", "audit", "done")], &asks), None);
+        assert_eq!(queued_turn(&[timer("t1", "check now")], &asks), None);
+    }
+
+    /// One user message in the queue releases everything queued with it,
+    /// reports included — the whole queue goes in, never part of it.
+    #[test]
+    fn a_message_releases_the_reports_queued_beside_it() {
+        let turn = queued_turn(
+            &[report("s1", "audit", "done"), user("m1", "never mind")],
+            &[asking("call-1", "which?")],
+        )
+        .unwrap();
+        assert_eq!(turn.consumed, vec!["s1".to_string(), "m1".to_string()]);
+        assert_eq!(turn.subagent_results.len(), 1);
+    }
+
+    #[test]
+    fn a_timer_wake_is_the_turns_text() {
+        let turn = queued_turn(&[timer("t1", "re-check the build")], &[]).unwrap();
+        assert_eq!(turn.message.as_deref(), Some("re-check the build"));
+    }
+
+    #[test]
+    fn answering_nothing_pending_is_refused() {
+        let err = answered_turn(&[], &[], vec![]).unwrap_err();
+        assert_eq!(err, AnswerError::NothingPending);
+    }
+
+    /// Resuming on half the answers would send the provider a `tool_use` with no
+    /// result, which is the 400 the all-or-nothing rule exists to stop.
+    #[test]
+    fn a_partial_answer_set_is_refused() {
+        let asks = [asking("call-1", "which?"), asking("call-2", "which model?")];
+        let err = answered_turn(
+            &[],
+            &asks,
+            vec![AskAnswer {
+                tool_call_id: "call-1".into(),
+                text: "main".into(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            AnswerError::Incomplete {
+                missing: vec!["call-2".to_string()],
+                unexpected: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn an_answer_for_a_call_that_is_not_pending_is_refused() {
+        let asks = [asking("call-1", "which?")];
+        let err = answered_turn(
+            &[],
+            &asks,
+            vec![
+                AskAnswer {
+                    tool_call_id: "call-1".into(),
+                    text: "main".into(),
+                },
+                AskAnswer {
+                    tool_call_id: "call-9".into(),
+                    text: "who asked?".into(),
+                },
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            AnswerError::Incomplete {
+                missing: vec![],
+                unexpected: vec!["call-9".to_string()],
+            }
+        );
+    }
+
+    /// A report that landed while the person was typing their answer rides the
+    /// same turn rather than waiting for another boundary that may never come.
+    #[test]
+    fn a_complete_answer_set_carries_the_queue_with_it() {
+        let asks = [asking("call-1", "which?")];
+        let turn = answered_turn(
+            &[report("s1", "audit", "3 stale")],
+            &asks,
+            vec![AskAnswer {
+                tool_call_id: "call-1".into(),
+                text: "main".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(turn.answered, vec!["call-1".to_string()]);
+        assert_eq!(turn.results.len(), 1);
+        assert!(!turn.results[0].is_error);
+        assert_eq!(turn.results[0].output, "main");
+        assert_eq!(turn.consumed, vec!["s1".to_string()]);
+        assert_eq!(turn.subagent_results.len(), 1);
+    }
+}

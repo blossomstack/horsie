@@ -84,9 +84,15 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: oneshot::Sender<Option<(SessionRecord, Option<SessionSnapshot>)>>,
     },
-    /// Route a user message to the session, loading it if necessary.
+    /// Route a user message to one of the session's agents, loading the session
+    /// if necessary. `agent_id` absent or `"main"` for the primary agent, else a
+    /// subagent or workflow-step agent id.
+    ///
+    /// The reply lands once the *agent's* write is durable, so a caller holding
+    /// an `Ok` holds a message that survives a crash.
     UserMessage {
         id: SessionId,
+        agent_id: Option<String>,
         text: String,
         reply: oneshot::Sender<Result<String, UserMessageError>>,
     },
@@ -140,9 +146,10 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: oneshot::Sender<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
     },
-    /// Answer every pending ask of a session at once.
+    /// Answer every question one agent is parked on, at once.
     Answer {
         id: SessionId,
+        agent_id: Option<String>,
         answers: Vec<AskAnswer>,
         reply: oneshot::Sender<Result<(), AnswerError>>,
     },
@@ -668,7 +675,12 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::UserMessage { id, text, reply } => {
+            SessionSupervisorCommand::UserMessage {
+                id,
+                agent_id,
+                text,
+                reply,
+            } => {
                 match self.ensure_loaded(ctx, state, &id) {
                     None => {
                         let _ = reply.send(Err(UserMessageError::NotFound));
@@ -676,6 +688,7 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let _ = child
                             .tell(SessionCommand::Turn(TurnCommand::UserMessage {
+                                agent_id,
                                 text,
                                 reply,
                             }))
@@ -857,14 +870,23 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::Answer { id, answers, reply } => {
+            SessionSupervisorCommand::Answer {
+                id,
+                agent_id,
+                answers,
+                reply,
+            } => {
                 match self.ensure_loaded(ctx, state, &id) {
                     None => {
                         let _ = reply.send(Err(AnswerError::NothingPending));
                     }
                     Some(child) => {
                         let _ = child
-                            .tell(SessionCommand::Turn(TurnCommand::Answer { answers, reply }))
+                            .tell(SessionCommand::Turn(TurnCommand::Answer {
+                                agent_id,
+                                answers,
+                                reply,
+                            }))
                             .await;
                     }
                 }
@@ -1440,12 +1462,7 @@ mod tests {
         journal
             .persist(
                 &pid,
-                &[serde_json::to_vec(&SessionDomainEvent::AskRecorded {
-                    at_ms: 0,
-                    tool_call_id: Some("call-1".into()),
-                    question: "which shape?".into(),
-                })
-                .unwrap()],
+                &[serde_json::to_vec(&SessionDomainEvent::AskRecorded { at_ms: 0 }).unwrap()],
             )
             .await
             .unwrap();
@@ -1459,14 +1476,11 @@ mod tests {
             .unwrap();
         let (_, snapshot) = row.expect("the session still exists");
         let snapshot = snapshot.expect("a known session answers with its state");
-        match snapshot.status {
-            SessionStatus::AwaitingInput { asks } => {
-                assert_eq!(asks.len(), 1);
-                assert_eq!(asks[0].tool_call_id.as_deref(), Some("call-1"));
-                assert_eq!(asks[0].question, "which shape?");
-            }
-            other => panic!("expected AwaitingInput, got {other:?}"),
-        }
+        assert_eq!(
+            snapshot.status,
+            SessionStatus::AwaitingInput,
+            "a session parked on a question reports it, whatever the questions were"
+        );
     }
 
     /// A reader parked on an agent's position must survive an idle offload.
@@ -1530,6 +1544,7 @@ mod tests {
         let _ = sup
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: id.clone(),
+                agent_id: None,
                 text: "hello".into(),
                 reply,
             })
@@ -1651,6 +1666,7 @@ mod tests {
         let res = sup
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: "missing".into(),
+                agent_id: None,
                 text: "hi".into(),
                 reply,
             })

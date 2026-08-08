@@ -5,18 +5,17 @@ use crate::http::Scope;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
 use crate::sessions::builder::build_session_spec;
-use crate::sessions::session_actor::{AskAnswer, InboxMessage};
-use crate::sessions::spec::{PendingAsk, SessionOrigin, SessionStatus, status_kind, status_reason};
+use crate::sessions::session_actor::AskAnswer;
+use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::now_ms;
 use horsie_models::session::{
-    AnnotationEntry, AnswerAsksRequest, PendingAskView, QueuedMessage, SessionDetail,
-    SessionSummary, SubAgentView, UsageView,
+    AnnotationEntry, AnswerAsksRequest, SessionDetail, SessionSummary, SubAgentView, UsageView,
 };
 use horsie_models::session_api::{
     Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, GetAgentResponse,
@@ -28,16 +27,6 @@ use uuid::Uuid;
 /// The path segment naming a session's primary agent, as opposed to a
 /// subagent's uuid. One spelling, shared by every agent-scoped route.
 pub const MAIN_AGENT: &str = "main";
-
-/// The wire shape of one queued message. Shared with the SSE layer so the
-/// detail endpoint and `InboxChanged` can never disagree about the queue.
-pub fn wire_queued_message(m: InboxMessage) -> QueuedMessage {
-    QueuedMessage {
-        id: m.id,
-        text: m.text,
-        at_ms: m.at_ms,
-    }
-}
 
 /// The wire shape of a session's annotations: sorted key-value pairs.
 pub(crate) fn wire_annotations(annotations: &BTreeMap<String, String>) -> Vec<AnnotationEntry> {
@@ -117,10 +106,12 @@ pub async fn create_session(
     })
     .await?;
     // Queued, not run: the runtime is still provisioning behind this call, and
-    // the inbox is what holds a message until it is there. A client that reads
-    // the session back sees its own message in `inbox` before any turn starts.
+    // the agent's own queue is what holds the message until it is there. The
+    // agent is not ready yet, so this returns once the message is durable and
+    // the create's completion is what releases it.
     ask(&state, |reply| SessionSupervisorCommand::UserMessage {
         id: id.clone(),
+        agent_id: None,
         text: req.message,
         reply,
     })
@@ -169,9 +160,8 @@ pub async fn get_session(
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
     let status = snapshot.as_ref().map(|s| s.status.clone());
-    let pending_asks = status.as_ref().map(wire_pending_asks).unwrap_or_default();
-    // Both are session-scoped current values, so they belong on this document
-    // rather than on a history page or a separate endpoint.
+    // Session-scoped current values, so they belong on this document rather
+    // than on a history page or a separate endpoint.
     let usage_total = ask(&state, |reply| SessionSupervisorCommand::UsageStats {
         id: id.clone(),
         reply,
@@ -193,7 +183,6 @@ pub async fn get_session(
         created_at: rec.created_at,
         last_error: status.as_ref().and_then(status_reason),
         annotations: wire_annotations(&rec.annotations),
-        pending_asks,
         model: rec.spec.agent.model.clone(),
         vendor: rec.spec.vendor.clone(),
         repos: rec
@@ -213,9 +202,6 @@ pub async fn get_session(
         memory_spaces: rec.spec.agent.memory_spaces.clone(),
         use_plugins: rec.spec.agent.use_plugins.unwrap_or(false),
         thinking_effort: rec.spec.agent.thinking_effort.clone(),
-        inbox: snapshot
-            .map(|s| s.inbox.into_iter().map(wire_queued_message).collect())
-            .unwrap_or_default(),
         usage_total: to_wire_usage(usage_total),
         agents,
         progression: None,
@@ -224,14 +210,24 @@ pub async fn get_session(
     Ok(Json(GetSessionResponse { session: detail }))
 }
 
-/// `POST /api/sessions/:id/answers` — answer every pending ask at once.
+/// Which agent a write is addressed to. Absent or `"main"` for the session's
+/// primary agent, else a subagent or workflow-step agent id — the same
+/// vocabulary the read path uses.
+#[derive(serde::Deserialize)]
+pub struct AgentParam {
+    aid: Option<String>,
+}
+
+/// `POST /api/sessions/:id/answers?aid=` — answer every question one agent is
+/// parked on, at once.
 ///
-/// All or nothing: a set that does not cover the pending asks exactly is a 400
-/// and changes nothing. A partially answered park could not resume anyway, and
-/// would leave a `tool_use` on the wire with no result.
+/// All or nothing: a set that does not cover that agent's questions exactly is
+/// a 400 and changes nothing. A partially answered park could not resume
+/// anyway, and would leave a `tool_use` on the wire with no result.
 pub async fn answer_asks(
     Scope(state): Scope,
     Path(id): Path<String>,
+    Query(agent): Query<AgentParam>,
     Json(req): Json<AnswerAsksRequest>,
 ) -> Result<impl IntoResponse, Api> {
     let answers: Vec<AskAnswer> = req
@@ -244,6 +240,7 @@ pub async fn answer_asks(
         .collect();
     ask(&state, |reply| SessionSupervisorCommand::Answer {
         id: id.clone(),
+        agent_id: agent.aid,
         answers,
         reply,
     })
@@ -362,20 +359,26 @@ pub async fn get_agent(
     Ok(Json(GetAgentResponse { agent }))
 }
 
+/// `POST /api/sessions/:id/messages?aid=` — send a message to one agent.
+///
+/// Returns only once the message is durably in that agent's queue, so a client
+/// holding a `202` holds a promise that survives a crash.
 pub async fn send_message(
     Scope(state): Scope,
     Path(id): Path<String>,
+    Query(agent): Query<AgentParam>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<impl IntoResponse, Api> {
     let result = ask(&state, |reply| SessionSupervisorCommand::UserMessage {
         id,
+        agent_id: agent.aid,
         text: req.text,
         reply,
     })
     .await?;
     match result {
         // Always accepted, never 409: a turn in flight queues the message and
-        // answers it at the next turn boundary.
+        // the agent answers it at its next turn boundary.
         Ok(message_id) => Ok((StatusCode::ACCEPTED, Json(SessionAck { message_id }))),
         Err(UserMessageError::NotFound) => Err(Api::not_found("no such session")),
         Err(UserMessageError::Unrecoverable(reason)) => Err(Api::conflict("unrecoverable", reason)),
@@ -406,27 +409,6 @@ pub async fn delete_session(
     match result {
         Ok(()) => Ok(Json(Ack {})),
         Err(msg) => Err(Api::not_found(msg)),
-    }
-}
-
-/// Map one pending ask onto the wire.
-pub(crate) fn wire_pending_ask(ask: &PendingAsk) -> PendingAskView {
-    PendingAskView {
-        tool_call_id: ask.tool_call_id.clone(),
-        question: ask.question.clone(),
-    }
-}
-
-/// The pending asks a status carries, or empty when it is not a park.
-pub(crate) fn wire_pending_asks(status: &SessionStatus) -> Vec<PendingAskView> {
-    match status {
-        SessionStatus::AwaitingInput { asks } => asks.iter().map(wire_pending_ask).collect(),
-        SessionStatus::Provisioning
-        | SessionStatus::ProvisioningFailed { .. }
-        | SessionStatus::Idle
-        | SessionStatus::Running
-        | SessionStatus::Failed { .. }
-        | SessionStatus::Unrecoverable { .. } => Vec::new(),
     }
 }
 

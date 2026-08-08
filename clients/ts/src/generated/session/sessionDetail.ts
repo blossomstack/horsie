@@ -1,8 +1,6 @@
 
 import { AnnotationEntry } from './annotationEntry';
-import { PendingAskView } from './pendingAskView';
 import { ProgressionEvent } from './progressionEvent';
-import { QueuedMessage } from './queuedMessage';
 import { SessionStatusKind } from './sessionStatusKind';
 import { SubAgentView } from './subAgentView';
 import { UsageView } from './usageView';
@@ -16,11 +14,6 @@ export interface SessionDetail {
    * User-set key-value metadata (e.g. `group=<name>`). Empty when none.
    */
   annotations: AnnotationEntry[];
-  /**
-   * Every question the agent is awaiting an answer to, oldest first. All of
-   * them must be answered in one request before the turn can resume.
-   */
-  pendingAsks: PendingAskView[];
   model: string;
   vendor: string;
   /**
@@ -49,11 +42,6 @@ export interface SessionDetail {
    * control.
    */
   thinkingEffort?: string;
-  /**
-   * Messages accepted but not yet carried into a turn, oldest first (empty
-   * when nothing is owed).
-   */
-  inbox: QueuedMessage[];
   /**
    * Token usage summed across every agent this session hosts. Per-agent
    * numbers (and context size, which is never summed) are on the agent

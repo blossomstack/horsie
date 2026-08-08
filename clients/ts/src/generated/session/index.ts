@@ -3,8 +3,6 @@ export * from './sessionStatusKind';
 export * from './annotationEntry';
 export * from './agentSettings';
 export * from './sessionSummary';
-export * from './queuedMessage';
-export * from './pendingAskView';
 export * from './answerAsksRequest';
 export * from './askAnswerInput';
 export * from './sessionDetail';

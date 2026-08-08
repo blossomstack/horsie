@@ -16,13 +16,13 @@ use super::{
     SessionDomainEvent, SessionState, TurnEnd,
 };
 use crate::sessions::orchestrator::StepStart;
-use crate::sessions::spec::{PendingAsk, SessionStatus};
+use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_actor::EventSourcedActor;
 use horsie_models::now_ms;
-use horsie_workflow::AgentCommand;
+use horsie_workflow::{AgentCommand, Incoming};
 use serde_json::Value;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -58,6 +58,7 @@ impl SessionActor {
     pub(super) async fn start_step(
         &mut self,
         start: StepStart,
+        state: &SessionState,
         ctx: &ActorContext<Self>,
     ) -> Vec<SessionDomainEvent> {
         let StepStart {
@@ -71,17 +72,23 @@ impl SessionActor {
         } = start;
         // The name is not in the log yet — this event is what puts it there —
         // so it is handed to the spawner rather than looked up.
-        let Some(actor) = self.spawn_step_agent(ctx, agent, &step) else {
+        let Some(actor) = self.spawn_step_agent(ctx, state, agent, &step) else {
             return vec![SessionDomainEvent::RunFailed {
                 at_ms: now_ms(),
                 error: format!("step '{step}' is no longer in this workflow"),
             }];
         };
+        // Queued like anything else addressed to an agent. A step agent is
+        // freshly spawned and ready, so it drains this immediately — but it
+        // goes through the one door, so a step that is asked something and
+        // answered later resumes down the same path.
         if actor
-            .tell(AgentCommand::Resume {
-                results: Vec::new(),
-                message: Some(input.clone()),
-                subagent_results: Vec::new(),
+            .tell(AgentCommand::Enqueue {
+                item: Incoming::User {
+                    id: format!("step:{index}:{attempt}"),
+                    text: input.clone(),
+                },
+                ack: None,
             })
             .await
             .is_err()
@@ -190,6 +197,7 @@ impl SessionActor {
                     via: target.via.clone(),
                     input: target.input.clone(),
                 },
+                &next,
                 ctx,
             )
             .await,
@@ -216,27 +224,13 @@ impl SessionActor {
                 }],
                 true,
             ),
-            TurnEnd::Asked { asks } => {
-                self.report(SessionStatus::AwaitingInput {
-                    asks: asks
-                        .iter()
-                        .map(|a| PendingAsk {
-                            tool_call_id: a.tool_call_id.clone(),
-                            question: a.question.clone(),
-                        })
-                        .collect(),
-                })
-                .await;
+            TurnEnd::Asked => {
+                self.report(SessionStatus::AwaitingInput).await;
                 (
-                    asks.into_iter()
-                        .map(|a| SessionDomainEvent::AskRecorded {
-                            at_ms: now_ms(),
-                            tool_call_id: a.tool_call_id,
-                            question: a.question,
-                        })
-                        .collect::<Vec<_>>(),
+                    vec![SessionDomainEvent::AskRecorded { at_ms: now_ms() }],
                     // The step is still running, parked on its question. The
-                    // answer resumes it; nothing else starts meanwhile.
+                    // answer — sent to the step agent, which owns it — resumes
+                    // it; nothing else starts meanwhile.
                     false,
                 )
             }
@@ -288,6 +282,7 @@ impl SessionActor {
     pub(super) fn spawn_step_agent(
         &mut self,
         ctx: &ActorContext<Self>,
+        state: &SessionState,
         agent_id: Uuid,
         step_name: &str,
     ) -> Option<ActorRef<AgentCommand>> {
@@ -296,6 +291,7 @@ impl SessionActor {
         Some(
             self.spawn_agent(
                 ctx,
+                state,
                 AgentPlan {
                     kind: SessionAgentKind::Step(agent_id),
                     // A step runs under its own preset, not the session's.

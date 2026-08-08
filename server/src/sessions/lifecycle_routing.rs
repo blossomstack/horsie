@@ -12,9 +12,8 @@
 use crate::sessions::session_actor::{AgentKey, SessionDomainEvent, SessionState};
 use crate::sessions::subagents::SubAgentParent;
 use horsie_agentcore::{
-    AskLifecycle, EmptyOutcome, FailedOutcome, LifecycleEvent, ProvisioningLifecycle,
-    QueuedLifecycle, SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, TurnBeganLifecycle,
-    TurnEndedLifecycle, TurnOutcome,
+    EmptyOutcome, FailedOutcome, LifecycleEvent, RuntimeLifecycle, RuntimeStatus,
+    SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, TurnEndedLifecycle, TurnOutcome,
 };
 
 /// One entry: whose log it belongs in, and what it says there.
@@ -53,39 +52,23 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
     match event {
         E::ProvisioningStarted { .. } => on_session(
             state,
-            LifecycleEvent::Provisioning(ProvisioningLifecycle {
-                stage: "acquiring_runtime".into(),
+            LifecycleEvent::Runtime(RuntimeLifecycle {
+                status: RuntimeStatus::Acquiring(EmptyOutcome {}),
                 detail: None,
             }),
         ),
         E::ProvisioningSucceeded { .. } => on_session(
             state,
-            LifecycleEvent::Provisioning(ProvisioningLifecycle {
-                stage: "ready".into(),
+            LifecycleEvent::Runtime(RuntimeLifecycle {
+                status: RuntimeStatus::Ready(EmptyOutcome {}),
                 detail: None,
             }),
         ),
         E::ProvisioningFailed { error, .. } => on_session(
             state,
-            LifecycleEvent::Provisioning(ProvisioningLifecycle {
-                stage: "failed".into(),
+            LifecycleEvent::Runtime(RuntimeLifecycle {
+                status: RuntimeStatus::Failed(EmptyOutcome {}),
                 detail: Some(error.clone()),
-            }),
-        ),
-        E::MessageQueued { id, text, .. } => on_session(
-            state,
-            LifecycleEvent::MessageQueued(QueuedLifecycle {
-                id: id.clone(),
-                text: text.clone(),
-            }),
-        ),
-        E::TurnBegan {
-            consumed, answered, ..
-        } => on_session(
-            state,
-            LifecycleEvent::TurnBegan(TurnBeganLifecycle {
-                consumed: consumed.clone(),
-                answered: answered.clone(),
             }),
         ),
         E::TurnEnded { .. } => on_session(
@@ -114,18 +97,10 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
                 outcome: TurnOutcome::Interrupted(EmptyOutcome {}),
             }),
         ),
-        E::AskRecorded {
-            tool_call_id,
-            question,
-            ..
-        } => on_session(
-            state,
-            LifecycleEvent::AskRecorded(AskLifecycle {
-                tool_call_id: tool_call_id.clone(),
-                question: question.clone(),
-            }),
-        ),
-        E::SessionFailed { reason, .. } => on_session(
+        // Every agent, not just the one a person is looking at: this takes the
+        // runtime away for good, and a resident subagent that never heard would
+        // go on believing it may still start a turn.
+        E::SessionFailed { reason, .. } => every_agent(
             state,
             LifecycleEvent::SessionFailed(SessionFailedLifecycle {
                 reason: reason.clone(),
@@ -176,7 +151,27 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
         E::UsageRecorded { .. } | E::SubAgentRunning { .. } | E::SubAgentNotified { .. } => {
             Vec::new()
         }
+        // Recorded by the agent itself, in its own log, because the agent is
+        // what decided them. Routing them from here as well would render the
+        // same fact twice. The session keeps its own copy only to move
+        // `status`, which is not something a viewer reads off the log.
+        E::TurnBegan { .. } | E::AskRecorded { .. } => Vec::new(),
     }
+}
+
+/// One entry on every agent this session hosts — the session-wide one plus
+/// every node in the forest. For a fact that changes what an agent may *do*,
+/// as opposed to one it merely renders.
+fn every_agent(state: &SessionState, ev: LifecycleEvent) -> Vec<Entry> {
+    let session_wide = match state.run.as_ref() {
+        None => Some(AgentKey::Main),
+        Some(run) => run.current_agent().map(AgentKey::Step),
+    };
+    session_wide
+        .into_iter()
+        .chain(state.subagents.ids().into_iter().map(AgentKey::Sub))
+        .map(|key| (key, ev.clone()))
+        .collect()
 }
 
 /// A finished subagent, on its parent. The label comes off the forest — the
@@ -275,22 +270,8 @@ mod tests {
                 error: "no".into(),
                 terminal: false,
             },
-            E::MessageQueued {
-                id: "m1".into(),
-                text: "hi".into(),
-                at_ms: 1,
-            },
-            E::TurnBegan {
-                at_ms: 1,
-                consumed: vec!["m1".into()],
-                answering: None,
-                answered: vec![],
-            },
-            E::AskRecorded {
-                at_ms: 1,
-                tool_call_id: Some("tc".into()),
-                question: "which?".into(),
-            },
+            E::TurnBegan { at_ms: 1 },
+            E::AskRecorded { at_ms: 1 },
             E::TurnEnded { at_ms: 1 },
             E::TurnFailed {
                 at_ms: 1,
@@ -377,6 +358,10 @@ mod tests {
 
     /// Bookkeeping routes nowhere; everything else routes somewhere.
     ///
+    /// "Bookkeeping" now covers two more: `TurnBegan` and `AskRecorded` are
+    /// recorded by the agent that decided them, in its own log, so routing them
+    /// from here as well would render the same fact twice.
+    ///
     /// Each event is asked against the state it would really occur in — a run's
     /// step events against a run mid-step, everything else against a
     /// conversation — because two of the routings resolve their agent from
@@ -401,6 +386,8 @@ mod tests {
                 SessionDomainEvent::UsageRecorded { .. }
                     | SessionDomainEvent::SubAgentRunning { .. }
                     | SessionDomainEvent::SubAgentNotified { .. }
+                    | SessionDomainEvent::TurnBegan { .. }
+                    | SessionDomainEvent::AskRecorded { .. }
             );
             let state = match is_run_event(&event) {
                 true => &run,

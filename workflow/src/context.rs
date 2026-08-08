@@ -3,6 +3,7 @@ use crate::mcp_toolbox::CompositeToolbox;
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
 use horsie_runtime_client::{RuntimeClient, add_runtime_tools};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -38,7 +39,10 @@ pub const SKILL_TOOL: &str = "skill";
 pub const INSPECT_WORKSPACE_TOOL: &str = "inspect_workspace";
 
 /// One question an agent parked on, and the call that asked it.
-#[derive(Debug, Clone)]
+///
+/// Serializable because an agent folds its own pending questions into state:
+/// what it is waiting on is durable agent state, exactly like its timers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskedQuestion {
     /// `None` only for a pre-#62 journal, where the call id was not recorded.
     pub tool_call_id: Option<String>,
@@ -49,6 +53,13 @@ pub struct AskedQuestion {
 /// spawned it — the workflow that orchestrates it, or an interactive session.
 #[derive(Debug, Clone)]
 pub enum AgentOutcome {
+    /// The agent started a turn off its own queue.
+    ///
+    /// Not a terminal outcome, and the one report that flows *before* the work
+    /// rather than after it. It exists because the agent, not its owner, decides
+    /// when its queue becomes a turn — so the owner can no longer learn that a
+    /// turn began by being the thing that began it.
+    Started { session_id: Uuid },
     /// The agent produced its output (structured, or its final text).
     Concluded { session_id: Uuid, output: Value },
     /// The agent paused to ask the user. A turn may ask more than once — each
@@ -256,6 +267,22 @@ pub struct AgentRuntimeContext {
     /// Whoever spawned this agent; receives its terminal outcome.
     pub parent: Arc<dyn AgentOutcomeSink>,
     pub session_id: Uuid,
+    /// Whether the session this agent belongs to has a runtime to run on, as of
+    /// this spawn.
+    ///
+    /// The one input the agent's drain gate cannot derive: it can see that it is
+    /// running and that it is parked, but a sandbox still being built is its
+    /// owner's business entirely. Starting a turn without one asks a vendor for
+    /// a runtime it has never heard of, and the vendor's answer is terminal.
+    ///
+    /// Only the *starting* value. Changes arrive as
+    /// [`LifecycleEvent::Runtime`](horsie_agentcore::LifecycleEvent::Runtime)
+    /// records, which this agent is sent anyway so a reader can see them — so
+    /// there is no second channel carrying the same fact, and an agent spawned
+    /// after a change is simply built with the new answer.
+    ///
+    /// An agent whose owner has no sandbox to wait on passes `true`.
+    pub ready: bool,
 }
 
 /// Builds the toolbox an agent runs with: its permitted runtime tools plus the

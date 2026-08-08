@@ -153,6 +153,7 @@ pub async fn invoke_agent(
     })
     .await?;
     handlers::ask(&state, |reply| SessionSupervisorCommand::UserMessage {
+        agent_id: None,
         id: id.clone(),
         text: req.message,
         reply,

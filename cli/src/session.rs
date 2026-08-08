@@ -364,22 +364,8 @@ fn render_session_detail(d: &SessionDetail, now: u64) -> String {
     if let Some(err) = d.last_error.as_deref() {
         out.push_str(&format!("error       {err}\n"));
     }
-    // Every unanswered ask, not just the first: a turn resumes only once all
-    // of them are answered.
-    {
-        for a in &d.pending_asks {
-            out.push_str(&format!(
-                "awaiting    {}\n",
-                crate::agent::truncate(&a.question, 70)
-            ));
-        }
-    }
-    if !d.inbox.is_empty() {
-        out.push_str(&format!("inbox       {} queued\n", d.inbox.len()));
-        for m in &d.inbox {
-            out.push_str(&format!("  · {}\n", crate::agent::truncate(&m.text, 70)));
-        }
-    }
+    // The queue and the questions both belong to the agent now, and are read
+    // from its log — `status` is what this document still says about either.
     out
 }
 

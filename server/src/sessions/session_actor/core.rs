@@ -53,8 +53,8 @@ impl SessionCore {
                 actor
                     .record_on(
                         key,
-                        horsie_agentcore::LifecycleEvent::Provisioning(
-                            horsie_agentcore::ProvisioningLifecycle { stage, detail },
+                        horsie_agentcore::LifecycleEvent::Preparing(
+                            horsie_agentcore::PreparingLifecycle { stage, detail },
                         ),
                     )
                     .await;

@@ -13,6 +13,7 @@ mod agent_actor;
 mod agent_log;
 mod context;
 mod hook_translation;
+mod inbox;
 mod mcp_toolbox;
 mod task_list;
 mod timers;
@@ -31,6 +32,10 @@ pub use context::{
     conclude_tool_spec,
 };
 pub use hook_translation::{start_blocked, translate};
+pub use inbox::{
+    ABANDONED_ASK_RESULT, AnswerError, AskAnswer, Incoming, MERGE_SEPARATOR, Turn, answered_turn,
+    queued_turn,
+};
 pub use mcp_toolbox::{CompositeToolbox, McpToolbox, PluginMcpToolbox};
 pub use task_list::{
     TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, TaskStatus, task_list_tool_spec,

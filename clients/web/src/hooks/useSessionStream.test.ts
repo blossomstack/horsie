@@ -96,6 +96,22 @@ describe("fold", () => {
     expect(answered.pendingAsks).toEqual([]);
   });
 
+  // A plain message during a park *abandons* the questions rather than
+  // answering them, so `answered` is empty — and the park is over all the same.
+  // Filtering the pending set by `answered` left the answer cards on screen
+  // with nothing behind them to answer.
+  it("ends the park when a turn abandons the questions", () => {
+    reset();
+    const f = fold([
+      lifecycle("AskRecorded", { toolCallId: "tc1", question: "which?" }),
+      lifecycle("MessageQueued", { id: "m1", text: "never mind" }),
+      lifecycle("TurnBegan", { consumed: ["m1"], answered: [] }),
+    ]);
+    expect(f.pendingAsks).toEqual([]);
+    expect(f.status).toBe(SessionStatusKind.Running);
+    expect(f.queued).toEqual([]);
+  });
+
   it("takes the last task list and remembers which entry it came from", () => {
     reset();
     const f = fold([
@@ -113,7 +129,7 @@ describe("fold", () => {
     reset();
     const running = fold([
       lifecycle("TurnBegan", { consumed: [], answered: [] }),
-      lifecycle("Provisioning", { stage: "scanning_workspace", detail: null }),
+      lifecycle("Preparing", { stage: "scanning_workspace", detail: null }),
     ]);
     expect(running.progression).toEqual({
       stage: "scanning_workspace",
@@ -122,10 +138,37 @@ describe("fold", () => {
 
     reset();
     const done = fold([
-      lifecycle("Provisioning", { stage: "scanning_workspace", detail: null }),
+      lifecycle("Preparing", { stage: "scanning_workspace", detail: null }),
       lifecycle("TurnEnded", { outcome: { kind: "Ended", value: {} } }),
     ]);
     expect(done.progression).toBeNull();
+  });
+
+  // A turn's setup and the session's sandbox both used to arrive as
+  // `Provisioning` with a `stage` string, and both used the label "ready".
+  // They are separate variants now, and only the sandbox moves the status.
+  it("separates the session's runtime from a turn's preparation", () => {
+    reset();
+    const prep = fold([
+      lifecycle("Preparing", { stage: "ready", detail: null }),
+    ]);
+    expect(prep.status).toBeNull();
+
+    reset();
+    const acquiring = fold([
+      lifecycle("Runtime", { status: { kind: "Acquiring", value: {} }, detail: null }),
+    ]);
+    expect(acquiring.status).toBe(SessionStatusKind.Provisioning);
+
+    reset();
+    const failed = fold([
+      lifecycle("Runtime", {
+        status: { kind: "Failed", value: {} },
+        detail: "vendor offline",
+      }),
+    ]);
+    expect(failed.status).toBe(SessionStatusKind.Failed);
+    expect(failed.reason).toBe("vendor offline");
   });
 
   // The server used to send these facts twice: once as a typed entry nothing
