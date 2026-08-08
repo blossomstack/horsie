@@ -1185,6 +1185,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluorite"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fa1a708aa357ab6988d028a36fcd254f16eed5a79e3363b49a2999fdce7c8bc"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "fluorite_codegen"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1196,7 +1205,24 @@ dependencies = [
  "chumsky",
  "clap",
  "derive-new 0.7.0",
- "fluorite",
+ "fluorite 0.6.2",
+ "logos",
+ "serde",
+]
+
+[[package]]
+name = "fluorite_codegen"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba8c71a72f55aab3c3bfdf09eaf448af91ce075d9f707f386cc5c307ec5add95"
+dependencies = [
+ "anyhow",
+ "ariadne",
+ "askama",
+ "chumsky",
+ "clap",
+ "derive-new 0.7.0",
+ "fluorite 0.7.0",
  "logos",
  "serde",
 ]
@@ -1471,8 +1497,8 @@ version = "0.1.0"
 source = "git+https://github.com/blossomstack/hackamore?rev=df526a5474e5a9e6296660365bc24f409ce3e66a#df526a5474e5a9e6296660365bc24f409ce3e66a"
 dependencies = [
  "derive-new 0.5.9",
- "fluorite",
- "fluorite_codegen",
+ "fluorite 0.6.2",
+ "fluorite_codegen 0.6.2",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -1659,8 +1685,8 @@ name = "horsie-models"
 version = "0.1.6"
 dependencies = [
  "derive-new 0.7.0",
- "fluorite",
- "fluorite_codegen",
+ "fluorite 0.7.0",
+ "fluorite_codegen 0.7.0",
  "schemars 1.2.2",
  "serde",
  "serde_json",

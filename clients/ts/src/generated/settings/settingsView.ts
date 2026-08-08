@@ -14,6 +14,7 @@ export interface SettingsView {
   info: ServerInfo;
   /**
    * Always false: every provider/model edit applies live. Retained for wire
+   * compatibility.
    */
   restartRequired: boolean;
 }

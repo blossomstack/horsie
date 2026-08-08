@@ -12,7 +12,8 @@ export interface EnvironmentView {
   name: string;
   description: string;
   /**
-   * Runtime vendor name. Required, and never &#34;local&#34;: environments only
+   * Runtime vendor name. Required, and never "local": environments only
+   * target vendor-managed, provisionable runtimes.
    */
   vendor: string;
   /**
@@ -21,10 +22,12 @@ export interface EnvironmentView {
   repos: RepoConfig[];
   /**
    * Plain-text, non-sensitive env vars for the runtime. Secrets are a
+   * future, separate concept.
    */
   envVars: EnvVar[];
   /**
    * Setup steps the runtime executes before its message loop. Inert today:
+   * nothing provisions from an environment yet.
    */
   provision: ProvisionStep[];
   /**

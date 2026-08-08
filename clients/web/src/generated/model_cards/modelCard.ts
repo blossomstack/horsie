@@ -4,11 +4,11 @@
  */
 export interface ModelCard {
   /**
-   * Official provider model id — the card&#39;s identity (e.g. &#34;claude-sonnet-4-6&#34;).
+   * Official provider model id — the card's identity (e.g. "claude-sonnet-4-6").
    */
   modelId: string;
   /**
-   * Display label (e.g. &#34;Claude Sonnet 4.6&#34;).
+   * Display label (e.g. "Claude Sonnet 4.6").
    */
   name: string;
   /**
@@ -24,19 +24,22 @@ export interface ModelCard {
    */
   thinkingEfforts?: string[];
   /**
-   * The provider&#39;s default effort, when documented.
+   * The provider's default effort, when documented.
    */
   defaultThinkingEffort?: string;
   /**
-   * Wire encoding for this model&#39;s thinking control.
+   * Wire encoding for this model's thinking control.
    */
   thinkingDialect?: string;
   /**
-   * Where this model is officially served (e.g. &#34;https://api.deepseek.com&#34;).
+   * Where this model is officially served (e.g. "https://api.deepseek.com").
+   * Reference data only — nothing reads it, and an operator's configured
+   * provider base URL always wins.
    */
   baseUrl?: string;
   /**
    * This backend rejects a pinned `tool_choice` while thinking is enabled,
+   * so thinking is disabled for those requests. Absent means false.
    */
   forcedToolsDisableThinking?: boolean;
   createdAt: string;

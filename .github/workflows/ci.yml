@@ -131,13 +131,23 @@ jobs:
       # — bump this in lockstep with the `fluorite_codegen` workspace dep. Node is
       # preinstalled on the GitHub-hosted runner.
       - name: Install fluorite CLI
-        run: cargo install fluorite_codegen --version =0.6.2
+        run: cargo install fluorite_codegen --version =0.7.0
 
       - name: Regenerate and typecheck
         run: make ts-types
 
+      # `git diff` alone misses a generated file that is new and untracked, and
+      # before `generate-types` cleaned first it also missed orphans — a file
+      # left behind by a renamed type never changes, so it never drifts.
+      # `git status --porcelain` covers modified, deleted and untracked alike.
       - name: Fail on uncommitted drift
-        run: git diff --exit-code clients/ts/src/generated
+        run: |
+          drift="$(git status --porcelain clients/ts/src/generated)"
+          if [ -n "$drift" ]; then
+            echo "generated types are out of sync with models/fluorite:"
+            echo "$drift"
+            exit 1
+          fi
 
   web-unit:
     name: Web unit tests (Vitest)

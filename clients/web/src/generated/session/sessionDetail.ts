@@ -13,17 +13,18 @@ export interface SessionDetail {
   createdAt: number;
   lastError?: string;
   /**
-   * User-set key-value metadata (e.g. `group=&#60;name&#62;`). Empty when none.
+   * User-set key-value metadata (e.g. `group=<name>`). Empty when none.
    */
   annotations: AnnotationEntry[];
   /**
    * Every question the agent is awaiting an answer to, oldest first. All of
+   * them must be answered in one request before the turn can resume.
    */
   pendingAsks: PendingAskView[];
   model: string;
   vendor: string;
   /**
-   * Clone URLs of the session&#39;s provisioned repos (empty when none).
+   * Clone URLs of the session's provisioned repos (empty when none).
    */
   repos: string[];
   /**
@@ -39,31 +40,39 @@ export interface SessionDetail {
    */
   memorySpaces: string[];
   /**
-   * Whether the runtime&#39;s plugin/skill machinery is enabled for this session.
+   * Whether the runtime's plugin/skill machinery is enabled for this session.
    */
   usePlugins: boolean;
   /**
-   * The session&#39;s frozen thinking effort, chosen at creation or inherited
+   * The session's frozen thinking effort, chosen at creation or inherited
+   * from the model's default. Absent → the model exposes no thinking
+   * control.
    */
   thinkingEffort?: string;
   /**
    * Messages accepted but not yet carried into a turn, oldest first (empty
+   * when nothing is owed).
    */
   inbox: QueuedMessage[];
   /**
    * Token usage summed across every agent this session hosts. Per-agent
+   * numbers (and context size, which is never summed) are on the agent
+   * document instead.
    */
   usageTotal: UsageView;
   /**
    * Every agent this session hosts: the main agent first, then its subagent
+   * tree. Each is addressable at `/sessions/:id/agents/:agent_id`.
    */
   agents: SubAgentView[];
   /**
    * The resource-preparation stage a turn is currently at, when one is
+   * spinning up. Live-only history: past stages are not replayable.
    */
   progression?: ProgressionEvent;
   /**
    * The workflow this session is a run of, if it is one. Decides which view
+   * the page renders: a run has a graph rather than a conversation.
    */
   workflow?: string;
 }

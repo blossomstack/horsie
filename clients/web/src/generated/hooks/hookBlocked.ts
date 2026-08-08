@@ -1,6 +1,7 @@
 
 /**
- * Every other event&#39;s refusal, via top-level `decision: &#34;block&#34;` or exit 2.
+ * Every other event's refusal, via top-level `decision: "block"` or exit 2.
+ * For `Stop` this means *blocked from stopping*, which continues the turn.
  */
 export interface HookBlocked {
   reason?: string;

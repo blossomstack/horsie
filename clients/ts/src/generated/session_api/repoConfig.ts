@@ -4,7 +4,7 @@
  */
 export interface RepoConfig {
   /**
-   * HTTPS clone URL, e.g. &#34;https://github.com/org/repo&#34;.
+   * HTTPS clone URL, e.g. "https://github.com/org/repo".
    */
   url: string;
   /**

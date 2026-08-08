@@ -1,7 +1,7 @@
 
 import { McpAuthInput } from './mcpAuthInput';
 /**
- * Upsert input for a server. Secrets follow omit=keep, &#34;&#34;=clear semantics.
+ * Upsert input for a server. Secrets follow omit=keep, ""=clear semantics.
  */
 export interface McpServerInput {
   name: string;

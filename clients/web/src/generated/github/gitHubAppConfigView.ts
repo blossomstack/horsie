@@ -1,6 +1,7 @@
 
 /**
  * The GitHub App config, redacted for display. Secrets are reported only as
+ * `has_*` booleans.
  */
 export interface GitHubAppConfigView {
   clientId: string;

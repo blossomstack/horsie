@@ -10,15 +10,20 @@ export interface WorkflowStepDef {
    */
   agent: string;
   /**
-   * The step&#39;s instruction. Whatever the step is handed — the run&#39;s input
+   * The step's instruction. Whatever the step is handed — the run's input
+   * for the start step, the previous step's output for every other — is
+   * appended below it under a header.
    */
   prompt: string;
   /**
-   * JSON Schema for the step&#39;s structured output. When present, the step
+   * JSON Schema for the step's structured output. When present, the step
+   * finishes by calling the builtin terminal tool with output conforming to
+   * it. Required when the step has any conditional transition, since there
+   * would otherwise be nothing for the condition to read.
    */
   outputSchema?: unknown;
   /**
-   * Outgoing transitions, evaluated against this step&#39;s output.
+   * Outgoing transitions, evaluated against this step's output.
    */
   transitions?: WorkflowTransition[];
   /**

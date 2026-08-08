@@ -7,10 +7,11 @@ export interface UserMessageInput {
   id: string;
   /**
    * May be empty: a turn started purely by owed subagent results carries
+   * nothing the person typed.
    */
   text: string;
   /**
-   * Finished subagents&#39; results delivered with this turn.
+   * Finished subagents' results delivered with this turn.
    */
   subagentResults: SubAgentResultPart[];
 }

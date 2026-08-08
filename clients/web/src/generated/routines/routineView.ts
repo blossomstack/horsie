@@ -2,6 +2,7 @@
 import { RoutineSchedule } from './routineSchedule';
 /**
  * A routine as shown to clients: its definition, plus what the schedule and
+ * the last trigger did.
  */
 export interface RoutineView {
   /**
@@ -14,7 +15,7 @@ export interface RoutineView {
    */
   agent: string;
   /**
-   * The message queued as each run&#39;s first user message.
+   * The message queued as each run's first user message.
    */
   prompt: string;
   schedule: RoutineSchedule;
@@ -24,6 +25,7 @@ export interface RoutineView {
   enabled: boolean;
   /**
    * When the timer fires next; absent when nothing is scheduled (a manual
+   * routine, a paused one, or a spent `Once`).
    */
   nextRunAtMs?: number;
   /**
@@ -36,6 +38,7 @@ export interface RoutineView {
   lastSessionId?: string;
   /**
    * Why the last trigger failed to create a session. A run that started and
+   * then failed reports through its session, not here.
    */
   lastError?: string;
   /**

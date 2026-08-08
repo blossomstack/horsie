@@ -3,11 +3,12 @@ import { RunEdge } from './runEdge';
 import { RunNode } from './runNode';
 import { WorkflowStatus } from './workflowStatus';
 /**
- * A run, projected onto the definition&#39;s graph.
+ * A run, projected onto the definition's graph.
  */
 export interface WorkflowRunGraph {
   /**
    * The workflow this run was started from. The definition is snapshotted
+   * at run creation, so editing or deleting it does not change this run.
    */
   workflow: string;
   status: WorkflowStatus;
@@ -19,12 +20,12 @@ export interface WorkflowRunGraph {
   nodes: RunNode[];
   edges: RunEdge[];
   /**
-   * The last step&#39;s output, once the run has finished.
+   * The last step's output, once the run has finished.
    */
   output?: unknown;
   error?: string;
   /**
-   * Every step&#39;s tokens, summed.
+   * Every step's tokens, summed.
    */
   inputTokens: number;
   outputTokens: number;

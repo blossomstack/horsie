@@ -4,6 +4,7 @@ import { FileGrant } from './fileGrant';
 import { WorkingDirGrant } from './workingDirGrant';
 /**
  * A single capability grant. The kind is explicit so directory-vs-file intent is
+ * unambiguous; `nono`'s `allow_path` is directory-only and `allow_file` single-file.
  */
 export type Grant =
   | { type: "Dir"; value: DirGrant }

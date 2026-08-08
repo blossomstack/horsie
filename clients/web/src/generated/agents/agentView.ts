@@ -30,7 +30,7 @@ export interface AgentView {
    */
   memorySpaces: string[];
   /**
-   * Canonical thinking effort; absent → the model&#39;s configured default.
+   * Canonical thinking effort; absent → the model's configured default.
    */
   thinkingEffort?: string;
   /**

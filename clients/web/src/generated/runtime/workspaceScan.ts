@@ -7,7 +7,8 @@ export interface WorkspaceScan {
   instructions?: ScannedFile;
   skills: ScannedFile[];
   /**
-   * Runtime OS/arch (`&#60;os&#62;-&#60;arch&#62;`, e.g. &#34;macos-aarch64&#34;); optional so an
+   * Runtime OS/arch (`<os>-<arch>`, e.g. "macos-aarch64"); optional so an
+   * older runtime binary still deserializes against a newer server.
    */
   platform?: string;
 }
