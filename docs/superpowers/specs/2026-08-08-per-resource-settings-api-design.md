@@ -26,27 +26,43 @@ web UI either: two browser tabs on the Settings page reproduce it exactly.
 | Migration | None | `providers` and `models` are already per-row tables keyed by name/alias |
 | `PUT /api/config` | Deleted outright | Keeping it would preserve the clobbering path we are removing; no backward compatibility is owed |
 | `GET /api/config` | Retained | It aggregates vendors, `default_vendor` and `info`, which have no per-resource home and which the Settings page reads in one shot |
-| Upsert verb | `PUT /api/providers/{name}` | The name is the identity and comes from the caller, so `PUT` to a caller-chosen URL is the honest verb; there is no server-assigned id to `POST` for |
-| `default_vendor` | `PUT /api/config/default-vendor` | The last scalar left in `SettingsUpdate`; it belongs to the deployment, not to any provider or model |
+| Everything under `/api/config/` | `models` and `model-providers` | "Vendor" already means the *runtime* sandbox in horsie (`RuntimeVendor`, `/api/vendor/connect`, `default_vendor`), so a bare `/api/providers` beside it reads as if it configured runtimes |
+| Providers are a sibling, not a child | `/api/config/model-providers`, not `/api/config/models/providers` | Nesting collides: a static `providers` segment under a dynamic `/{alias}` shadows any model alias literally named `providers`. Two sibling static segments cannot collide at all |
+| Upsert verb | `PUT /api/config/model-providers/{name}` | The name is the identity and comes from the caller, so `PUT` to a caller-chosen URL is the honest verb; there is no server-assigned id to `POST` for |
+| `default_vendor` | `PUT /api/config/default-vendor` | Genuinely a runtime concept, so it stays out of the model section. The last scalar left in `SettingsUpdate` |
 | Deleting a provider models reference | `409 Conflict`, naming the models | Silent cascade would delete a session's model out from under it; the alternative — a dangling `models.provider` — is what `update` already rejects |
 | Secret semantics | Unchanged: omitted `api_key` keeps the stored key, `""` clears it | Already the contract in `ProviderInput`, and the only way a client that never sees the key can round-trip a provider |
 | Live registry swap | After every mutation, as today | The registry is what sessions resolve models through; a persisted-but-unapplied change is the bug this avoids |
 
 ## API
 
-Replacing one route with eight. Every route is user-scoped through the existing `Scope`
-extractor, so none of them can read or write another account's rows.
+Replacing one mutating route with seven. Every route is user-scoped through the existing
+`Scope` extractor, so none of them can read or write another account's rows.
 
 | Method | Path | Body → Response |
 |---|---|---|
-| `GET` | `/api/providers` | → `Vec<ProviderView>` |
-| `PUT` | `/api/providers/{name}` | `ProviderInput` → `ProviderView` |
-| `DELETE` | `/api/providers/{name}` | → `204` |
-| `GET` | `/api/models` | → `Vec<ModelView>` |
-| `PUT` | `/api/models/{alias}` | `ModelInput` → `ModelView` |
-| `DELETE` | `/api/models/{alias}` | → `204` |
+| `GET` | `/api/config/models` | → `Vec<ModelView>` |
+| `PUT` | `/api/config/models/{alias}` | `ModelInput` → `ModelView` |
+| `DELETE` | `/api/config/models/{alias}` | → `204` |
+| `GET` | `/api/config/model-providers` | → `Vec<ProviderView>` |
+| `PUT` | `/api/config/model-providers/{name}` | `ProviderInput` → `ProviderView` |
+| `DELETE` | `/api/config/model-providers/{name}` | → `204` |
 | `PUT` | `/api/config/default-vendor` | `{ "vendor": "..." }` → `SettingsView` |
 | `GET` | `/api/config` | → `SettingsView` *(unchanged)* |
+
+Plural throughout, matching `/api/model-cards`, `/api/agents` and `/api/routines`.
+
+The same vocabulary fix applies to the three existing ChatGPT sign-in routes, which are
+bare `provider` today and about model providers specifically. They move with the rest:
+
+| Before | After |
+|---|---|
+| `GET /api/admin/providers/{name}/chatgpt` | `GET /api/config/model-providers/{name}/chatgpt` |
+| `POST\|DELETE /api/admin/providers/{name}/chatgpt/login` | `…/model-providers/{name}/chatgpt/login` |
+| `POST /api/admin/providers/{name}/chatgpt/poll` | `…/model-providers/{name}/chatgpt/poll` |
+
+Leaving them under `/api/admin/providers/` would reintroduce the exact ambiguity this
+change removes.
 
 `SettingsUpdate` is deleted. `ProviderInput`, `ModelInput`, `ProviderView` and
 `ModelView` are unchanged, so the fluorite schema churn is limited to removing one
@@ -85,8 +101,9 @@ saving settings while one is working is exactly that race.
 
 ## Web UI
 
-`clients/web/src/api/client.ts` loses `config.update` and gains `providers.*` and
-`models.*`. The Settings page currently edits a local copy of the whole settings
+`clients/web/src/api/client.ts` loses `config.update` and gains `config.models.*` and
+`config.modelProviders.*`, plus the moved ChatGPT sign-in calls. The Settings page
+currently edits a local copy of the whole settings
 document and saves it in one shot; it changes to saving each added, edited or removed
 row through its own request.
 
