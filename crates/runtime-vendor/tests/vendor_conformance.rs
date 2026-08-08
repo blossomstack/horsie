@@ -3,7 +3,7 @@
 //! The server-side conformance tests drive `FakeRuntimeVendor`, whose command
 //! loop is sequential — a blocked create genuinely blocks its socket read, so
 //! those tests pass without any locking at all and say nothing about the agent
-//! that ships. This one dials a real `RuntimeVendor::run` over a real
+//! that ships. This one dials a real `RuntimeVendorClient::run` over a real
 //! WebSocket, where every command dispatches on its own task, and holds it to
 //! the same promises:
 //!
@@ -27,7 +27,7 @@ use horsie_models::executor::RuntimeConfig;
 use horsie_runtime_client::{MockTransport, RuntimeTransport};
 use horsie_runtime_vendor::{
     AgentExit, ConnectedRuntimeRegistry, CredentialProvider, FixedWorkspaces, HealthStatus,
-    RuntimeHandle, RuntimeProvider, RuntimeVendor,
+    RuntimeHandle, RuntimeProvider, RuntimeVendorClient,
 };
 use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, VendorError, WorkspaceSpec};
@@ -147,7 +147,7 @@ impl Machine {
         self.dir.path().join("state")
     }
 
-    /// Bring up a real `RuntimeVendor` dialing a one-shot WebSocket endpoint,
+    /// Bring up a real `RuntimeVendorClient` dialing a one-shot WebSocket endpoint,
     /// and hand back the server-side link the session server would hold.
     async fn start(
         &self,
@@ -179,7 +179,7 @@ impl Machine {
         let mut workspaces = HashMap::new();
         workspaces.insert("main".to_string(), self.dir.path().to_path_buf());
 
-        let agent = RuntimeVendor::new(
+        let agent = RuntimeVendorClient::new(
             "conformance".to_string(),
             true,
             Arc::new(move |_id: &str, _caps: Option<PathBuf>| {
@@ -277,9 +277,9 @@ async fn hibernate_is_advisory_and_this_agent_declines_it() {
 
 /// A vendor with nothing configured, for the credential tests: they never get
 /// as far as needing a provider or a workspace.
-fn bare_vendor() -> RuntimeVendor {
+fn bare_vendor() -> RuntimeVendorClient {
     let connected = Arc::new(ConnectedRuntimeRegistry::new());
-    RuntimeVendor::new(
+    RuntimeVendorClient::new(
         "creds".to_string(),
         false,
         Arc::new(move |_id: &str, _caps: Option<PathBuf>| {
