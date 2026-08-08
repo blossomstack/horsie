@@ -15,6 +15,11 @@ export interface WorkflowView {
   start: string;
   steps: WorkflowStepDef[];
   /**
+   * Most step executions one run may perform before it is failed. Absent →
+   * the server's default.
+   */
+  maxSteps?: number;
+  /**
    * Unix epoch seconds.
    */
   createdAt: string;

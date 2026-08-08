@@ -177,6 +177,7 @@ async fn workflows_are_isolated() {
         description: String::new(),
         start: start.into(),
         steps: vec![],
+        max_steps: None,
         created_at: T.into(),
         updated_at: T.into(),
     };

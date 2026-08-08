@@ -193,7 +193,9 @@ pub async fn start_run(
         start: row.start.clone(),
         steps,
         input: req.input.clone(),
-        max_steps: DEFAULT_MAX_STEPS,
+        // Snapshotted with the rest: raising a definition's budget must not
+        // change a run already under way.
+        max_steps: row.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
     });
     // The session's own `agent` settings are the first step's: they are what a
     // session-shaped reader (usage, the detail document) reports. Each step

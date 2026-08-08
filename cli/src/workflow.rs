@@ -264,6 +264,7 @@ mod tests {
                 step("triage", Some(("fix", Some("output.severity == \"p0\"")))),
                 step("fix", None),
             ],
+            max_steps: None,
             created_at: "1".into(),
             updated_at: "1".into(),
         };
