@@ -5,7 +5,7 @@
 //! the same `SharedVendors` map, the same publish-on-connect shape. The one
 //! difference is what a reconnect means — see [`RuntimeVendorRegistry::register`].
 
-use crate::runtime_vendor::RemoteRuntimeVendor;
+use crate::runtime_vendor::WebsocketRuntimeVendor;
 use crate::sessions::spec::SharedVendors;
 use std::sync::{Arc, PoisonError};
 
@@ -77,7 +77,7 @@ impl RuntimeVendorRegistry {
     ///
     /// With authentication disabled every principal is `Anonymous`, so gate 2
     /// never fires and 3–5 carry the whole policy.
-    pub fn register(&self, link: Arc<RemoteRuntimeVendor>) -> Result<(), RegisterError> {
+    pub fn register(&self, link: Arc<WebsocketRuntimeVendor>) -> Result<(), RegisterError> {
         let name = link.vendor_name().to_string();
         let mut vendors = self.vendors.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(existing) = vendors.get(&name) {
@@ -102,7 +102,10 @@ impl RuntimeVendorRegistry {
     /// the instance id: a reconnecting process replaces its own entry while
     /// carrying the same name and the same instance id, so anything coarser
     /// would let the dead socket's eviction take the live link down with it.
-    pub fn publish(self: &Arc<Self>, link: Arc<RemoteRuntimeVendor>) -> Result<(), RegisterError> {
+    pub fn publish(
+        self: &Arc<Self>,
+        link: Arc<WebsocketRuntimeVendor>,
+    ) -> Result<(), RegisterError> {
         self.register(link.clone())?;
         let registry = self.clone();
         tokio::spawn(async move {
@@ -119,7 +122,7 @@ impl RuntimeVendorRegistry {
 
     /// Remove this link's name if this exact link still holds it. Returns
     /// whether it did.
-    fn evict(&self, link: &Arc<RemoteRuntimeVendor>) -> bool {
+    fn evict(&self, link: &Arc<WebsocketRuntimeVendor>) -> bool {
         let mut vendors = self.vendors.write().unwrap_or_else(PoisonError::into_inner);
         match vendors.get(link.vendor_name()) {
             Some(held) if Arc::ptr_eq(held, link) => {

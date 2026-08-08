@@ -18,7 +18,7 @@
 //! mid-create, which one held in a map beside this manager could not.
 
 use crate::runtime_vendor::{
-    RemoteRuntimeVendor, RuntimeSpec, RuntimeVendorError, RuntimeVendorTransport, WorkspaceSpec,
+    RuntimeSpec, RuntimeVendorError, RuntimeVendorTransport, WebsocketRuntimeVendor, WorkspaceSpec,
 };
 use crate::sessions::spec::{SessionSpec, SharedVendors};
 use horsie_runtime_client::RuntimeClient;
@@ -60,7 +60,7 @@ impl RuntimeManager {
         Self { deps }
     }
 
-    fn vendor(&self, vendor: &str) -> Result<Arc<RemoteRuntimeVendor>, RuntimeError> {
+    fn vendor(&self, vendor: &str) -> Result<Arc<WebsocketRuntimeVendor>, RuntimeError> {
         let links =
             self.deps.vendors.read().map_err(|_| {
                 RuntimeError::Unavailable("vendor registry lock poisoned".to_string())

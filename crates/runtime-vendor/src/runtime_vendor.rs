@@ -16,7 +16,7 @@
 //!   serves the vendors we have.
 //!
 //! Both traits live here rather than in the server because the same contract
-//! describes both sides of the wire: the server drives a `RemoteRuntimeVendor`
+//! describes both sides of the wire: the server drives a `WebsocketRuntimeVendor`
 //! that relays to a `horsie connect` process, and that process drives a vendor
 //! of its own.
 

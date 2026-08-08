@@ -43,13 +43,13 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900)
 
 type Waiters = Arc<Mutex<HashMap<String, oneshot::Sender<RuntimeVendorEvent>>>>;
 
-/// A sink that erases the socket type, so `RemoteRuntimeVendor` is not generic over the
+/// A sink that erases the socket type, so `WebsocketRuntimeVendor` is not generic over the
 /// transport once constructed.
 type BoxedSink = Box<
     dyn futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Send + Unpin,
 >;
 
-pub struct RemoteRuntimeVendor {
+pub struct WebsocketRuntimeVendor {
     vendor_name: String,
     /// The announcing *process*. Two links carrying the same id are the same
     /// agent before and after a dropped socket; two carrying different ids are
@@ -74,10 +74,10 @@ pub struct RemoteRuntimeVendor {
     /// The `Arc` this link lives in, held weakly so the link never keeps
     /// itself alive. Needed because `create`/`attach` hand an owned `Arc` to
     /// the transport and lifecycle handle they build.
-    this: std::sync::Weak<RemoteRuntimeVendor>,
+    this: std::sync::Weak<WebsocketRuntimeVendor>,
 }
 
-impl RemoteRuntimeVendor {
+impl WebsocketRuntimeVendor {
     /// Handshake on an accepted agent connection and start its read loop.
     ///
     /// The first message must be `RuntimeVendorEvent::Ready`; anything else (or
@@ -330,7 +330,7 @@ impl RemoteRuntimeVendor {
 ///
 /// [`RuntimeVendor`]: crate::runtime_vendor::RuntimeVendor
 /// [`RuntimeHandle`]: crate::runtime_vendor::RuntimeHandle
-impl RemoteRuntimeVendor {
+impl WebsocketRuntimeVendor {
     /// What the vendor announced it can do with a session workspace.
     #[must_use]
     pub fn capabilities(&self) -> horsie_models::runtime_vendor::RuntimeVendorCapabilities {
@@ -473,7 +473,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         assert_eq!(link.vendor_name(), "my-laptop");
@@ -492,7 +492,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         assert!(link.is_connected());
@@ -522,7 +522,7 @@ mod tests {
             }
         });
 
-        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         // Well short of the idle timeout, but the point is the pings are seen
@@ -543,7 +543,7 @@ mod tests {
             .await;
             std::future::pending::<()>().await;
         });
-        let outcome = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous).await;
+        let outcome = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous).await;
         let Err(err) = outcome else {
             panic!("a non-Ready first message must be rejected");
         };
@@ -577,7 +577,7 @@ mod tests {
             }
         });
 
-        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let event = link
@@ -608,7 +608,7 @@ mod tests {
             }
         });
 
-        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let Err(err) = link.create("rt-1", &spec_fixture()).await else {
@@ -626,7 +626,7 @@ mod tests {
             drop(agent_ws);
         });
 
-        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let err = link
@@ -679,7 +679,7 @@ mod tests {
             }
         });
 
-        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         link.create("rt-1", &spec_fixture()).await.expect("create");
@@ -704,7 +704,7 @@ mod tests {
             send_event(&mut agent_ws, "boot", boot("fixed-dir", false)).await;
             std::future::pending::<()>().await;
         });
-        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         assert!(

@@ -31,7 +31,7 @@ use horsie_runtime_vendor::{
 };
 use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::{
-    RemoteRuntimeVendor, RuntimeSpec, RuntimeVendorError, WorkspaceSpec,
+    RuntimeSpec, RuntimeVendorError, WebsocketRuntimeVendor, WorkspaceSpec,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -99,7 +99,7 @@ impl RuntimeProvider for GatedProvider {
 // ── harness ──────────────────────────────────────────────────────────────────
 
 struct Agent {
-    link: Arc<RemoteRuntimeVendor>,
+    link: Arc<WebsocketRuntimeVendor>,
     cancel: CancellationToken,
     /// The transports this incarnation's runtimes dialed back on, so a test can
     /// tell a live runtime from a stopped one.
@@ -165,7 +165,7 @@ impl Machine {
                 .await
                 .expect("websocket upgrade");
             // Auth-disabled shape: every principal is anonymous.
-            let link = RemoteRuntimeVendor::start(ws, Principal::Anonymous)
+            let link = WebsocketRuntimeVendor::start(ws, Principal::Anonymous)
                 .await
                 .expect("handshake");
             // The agent waits to be told it is published before it serves, so a

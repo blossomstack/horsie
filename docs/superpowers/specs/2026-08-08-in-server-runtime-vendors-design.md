@@ -96,16 +96,28 @@ pub trait RuntimeHandle: Send + Sync + Debug {
 }
 ```
 
-Implementations: `RemoteRuntimeVendor` (relays to a `horsie connect` process),
-`FlyRuntimeVendor`, `VelosRuntimeVendor`, and `LocalProcessRuntimeVendor` inside
-`horsie connect` itself. Both traits live in `crates/runtime-vendor`, which the
-server already depends on, so one contract serves both sides of the wire.
+Both traits live in `crates/runtime-vendor`, which the server already depends
+on, so one contract serves both sides of the wire.
+
+Implementations are named for what they talk to, so a fourth slots in without
+a naming argument: `WebsocketRuntimeVendor` (a `horsie connect` process),
+`FlyRuntimeVendor`, later `E2bRuntimeVendor`.
+
+**There is one handle implementation**, `RuntimeHandleImpl`, holding a
+`runtime_id`, an `Arc<dyn RuntimeTransport>` and a closed-signal. The
+polymorphism lives in the transport, which already exists: the websocket vendor
+supplies `RuntimeVendorTransport` (relays through the vendor link, resolving it
+per call — the #187 fix), and every in-server vendor supplies the
+`SocketRuntimeTransport` registered when its runtime dialled
+`/api/runtime/connect`. Two handle types would have re-derived a split
+`RuntimeTransport` already makes.
 
 **Deleted by this design:** `RuntimeProvider` and `RuntimeHandle::stop` (merged
 into `RuntimeVendor`; stopping is a vendor operation keyed by id, and `stop` was
-ambiguous against `hibernate`/`delete`), `RuntimeVendorTransport` (a handle *is*
-a transport plus an id), the `VendorCore`/`InProcessRuntimeVendor<P>` layer, and
-the server's duplicate `VendorCapabilities`.
+ambiguous against `hibernate`/`delete`), the `VendorCore`/`InProcessRuntimeVendor<P>` layer, and
+the server's duplicate `VendorCapabilities`. `RuntimeVendorTransport` survives —
+it stops being a server-wide seam and becomes one vendor's transport adapter,
+which is what it always was.
 
 ## Every operation returns its first observation
 
@@ -254,7 +266,7 @@ Nothing here is called bare "Vendor". Every type carries `Runtime` or
 
 | Now | After |
 | --- | --- |
-| `RuntimeVendorLink` (server) | `RemoteRuntimeVendor` |
+| `RuntimeVendorLink` (server) | `WebsocketRuntimeVendor` |
 | `RuntimeVendor` (runtime-vendor crate — the process that dials a server) | `RuntimeVendorClient` |
 | `SharedVendors` | `RuntimeVendorMap` |
 | `VendorError` | `RuntimeVendorError` |
@@ -346,9 +358,10 @@ the time.
 
 ## Phasing
 
-1. **The two traits**, in `crates/runtime-vendor`. `RemoteRuntimeVendor`
-   implements them over today's link; `RuntimeProvider` and
-   `RuntimeVendorTransport` are deleted. Naming pass (#234) rides along.
+1. **The two traits**, in `crates/runtime-vendor`. `WebsocketRuntimeVendor`
+   implements them over today's link, via one `RuntimeHandleImpl` over the
+   existing `RuntimeVendorTransport`. `RuntimeProvider` is deleted. Naming pass
+   (#234) rides along.
 2. **`RuntimeManager` absorbs `ConnectedRuntimeRegistry`**, owns the live
    handles, and drains the progress sink into session status and the account's
    broadcast. `lifecycle_locks` deleted.

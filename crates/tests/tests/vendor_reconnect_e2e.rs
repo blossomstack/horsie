@@ -1,7 +1,7 @@
 //! A vendor agent survives losing its link to the server.
 //!
 //! Everything here is real: a real `RuntimeVendorClient` dialing a real
-//! `RemoteRuntimeVendor` over a real TCP WebSocket, published through the real
+//! `WebsocketRuntimeVendor` over a real TCP WebSocket, published through the real
 //! `RuntimeVendorRegistry`. The only fixture is the runtime itself, because a
 //! test that spawned `horsie-runtime` children would be measuring process
 //! startup rather than reconnection.
@@ -27,7 +27,7 @@ use horsie_runtime_vendor::{
 use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::fake::runtime_spec_fixture;
 use horsie_server::runtime_vendor::{
-    RemoteRuntimeVendor, RuntimeVendorRegistry, RuntimeVendorTransport,
+    RuntimeVendorRegistry, RuntimeVendorTransport, WebsocketRuntimeVendor,
 };
 use horsie_server::sessions::spec::SharedVendors;
 use std::collections::HashMap;
@@ -84,7 +84,7 @@ async fn serve_vendor_connections(registry: Arc<RuntimeVendorRegistry>) -> Socke
                 let Ok(ws) = tokio_tungstenite::accept_async(socket).await else {
                     return;
                 };
-                if let Ok(link) = RemoteRuntimeVendor::start(ws, Principal::Anonymous).await {
+                if let Ok(link) = WebsocketRuntimeVendor::start(ws, Principal::Anonymous).await {
                     // Auth-disabled shape: one anonymous principal owns every
                     // name, so a reconnecting *process* still replaces its own
                     // entry — and, as of the name-collision gates, a second
@@ -158,8 +158,8 @@ async fn await_vendor(
     vendors: &SharedVendors,
     name: &str,
     what: &str,
-    predicate: impl Fn(&Arc<RemoteRuntimeVendor>) -> bool,
-) -> Arc<RemoteRuntimeVendor> {
+    predicate: impl Fn(&Arc<WebsocketRuntimeVendor>) -> bool,
+) -> Arc<WebsocketRuntimeVendor> {
     for _ in 0..200 {
         let published = vendors.read().unwrap().get(name).cloned();
         if let Some(link) = published

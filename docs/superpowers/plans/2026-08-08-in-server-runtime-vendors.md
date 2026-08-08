@@ -4,9 +4,9 @@
 
 **Goal:** Let horsie-server provision sandboxes itself — configured in the web UI — instead of requiring a separate `horsie connect` process for every vendor.
 
-**Architecture:** Two small traits in `crates/runtime-vendor`, used on both sides of the wire: `RuntimeVendor` (create / poll / hibernate / delete) and `RuntimeHandle` (id / relay / relay_oneway / closed). `create` returns `RuntimeProgress::{Pending, Ready}` rather than a handle, because no substrate reports readiness in one round trip. A per-account `RuntimeManager` actor drives progress, owns live handles, and lands runtime dial-backs from `/api/runtime/connect`.
+**Architecture:** Two small traits in `crates/runtime-vendor`, used on both sides of the wire: `RuntimeVendor` (create / get / hibernate / delete) and `RuntimeHandle` (id / relay / relay_oneway / closed). Every operation takes a `RuntimeProgressSink` and returns its *first observation* as a `RuntimeProgress`; anything later arrives on the sink, never before the call returns. `RuntimeProgress::Ready` carries the handle. A per-account `RuntimeManager` — a plain struct, not an actor — drains the sink, owns live handles, and lands runtime dial-backs from `/api/runtime/connect`.
 
-**Tech Stack:** Rust 2024, tokio, axum 0.8, tokio-tungstenite 0.30, `horsie-actor`, sqlx, fluorite schemas → generated Rust + two TypeScript trees.
+**Tech Stack:** Rust 2024, tokio, axum 0.8, tokio-tungstenite 0.30, sqlx, fluorite schemas → generated Rust + two TypeScript trees.
 
 **Spec:** `docs/superpowers/specs/2026-08-08-in-server-runtime-vendors-design.md`
 
@@ -24,109 +24,106 @@
 
 ---
 
-### Task 1: The two traits, with `RemoteRuntimeVendor` as the first implementation
+### Task 1: The two traits — **done** (`e66d514`, `7f54e06`)
+
+Landed in `crates/runtime-vendor/src/runtime_vendor.rs`: `RuntimeVendor`,
+`RuntimeHandle`, `RuntimeProgress`, `RuntimeEvent`, `RuntimeProgressSink`,
+`RuntimeVendorError`. Four behavioural tests cover the contract — an immediate
+vendor returning `Ready` without touching the sink, a slow vendor returning
+`Starting` then finishing on the sink, one sink serving two runtimes, and
+trait-object usability.
+
+Also landed: `RuntimeVendor` (the vendor-crate struct) → `RuntimeVendorClient`,
+freeing the name; `RuntimeVendorLink` → `WebsocketRuntimeVendor` in
+`crates/server/src/runtime_vendor/proxy.rs`; `VendorError` →
+`RuntimeVendorError`; the server's duplicate `VendorCapabilities` deleted in
+favour of the wire type.
+
+Exposed as `pub mod runtime_vendor` rather than a root re-export, because the
+old `provider::RuntimeHandle` still exists and two traits of that name would be
+a real ambiguity. The old one dies as each vendor is ported.
+
+---
+
+### Task 1b: `WebsocketRuntimeVendor` implements the traits
 
 **Files:**
-- Create: `crates/runtime-vendor/src/runtime_vendor.rs` — both traits + `RuntimeProgress` + `RuntimeVendorError`
-- Modify: `crates/runtime-vendor/src/lib.rs`, `crates/runtime-vendor/src/provider.rs` (deleted)
-- Modify: `crates/server/src/runtime_vendor/{mod.rs,link.rs→remote.rs,transport.rs (deleted)}`
-- Modify: `crates/server/src/sessions/spec.rs:16-21`, `crates/server/src/runtime_manager.rs`
+- Modify: `crates/server/src/runtime_vendor/proxy.rs`
+- Modify: `crates/server/src/runtime_manager.rs`, `crates/server/src/http/vendor_connect.rs`
+- Modify: `crates/server/src/sessions/spec.rs`
 
 **Interfaces:**
-- Produces: `horsie_runtime_vendor::{RuntimeVendor, RuntimeHandle, RuntimeProgress, RuntimeVendorError}`; `horsie_server::sessions::spec::RuntimeVendorMap`
-- Consumes: nothing
+- Consumes: `RuntimeVendor`, `RuntimeHandle`, `RuntimeProgress`, `RuntimeProgressSink`
+- Produces: `RuntimeHandleImpl`; `RuntimeVendorMap = Arc<RwLock<HashMap<String, Arc<dyn RuntimeVendor>>>>`
 
-- [ ] **Step 1: Write the failing trait test**
-
-In `crates/runtime-vendor/src/runtime_vendor.rs`:
+- [ ] **Step 1: Write the failing tests**
 
 ```rust
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use super::*;
+#[tokio::test]
+async fn create_returns_ready_because_a_vendor_process_replies_only_when_its_runtime_is_up() {
+    let (vendor, mut script) = proxy_vendor().await;
+    script.answer_create("s1").await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let progress = vendor.create("s1", &spec(), tx).await.unwrap();
+    assert!(matches!(progress, RuntimeProgress::Ready(_)));
+    assert!(rx.try_recv().is_err(), "a vendor with nothing to wait for emits nothing");
+}
 
-    /// A vendor with no socket behind it. The point of the trait: a map of
-    /// `dyn RuntimeVendor` holds substrate-backed and process-backed vendors
-    /// identically, and nothing above branches on which it has.
-    struct InstantVendor;
+#[tokio::test]
+async fn a_handle_resolves_the_live_link_per_call_so_a_reconnect_is_invisible() {
+    // #187: a client is acquired once per run and baked into the toolbox, so a
+    // handle that captured its link failed every remaining tool call in the
+    // turn after a vendor reconnected. Resolving through the map per call is
+    // what makes a reconnect mid-turn survivable.
+    let (vendor, mut script) = proxy_vendor().await;
+    script.answer_create("s1").await;
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let RuntimeProgress::Ready(handle) = vendor.create("s1", &spec(), tx).await.unwrap()
+    else { panic!("expected Ready") };
 
-    #[async_trait::async_trait]
-    impl RuntimeVendor for InstantVendor {
-        fn name(&self) -> &str { "instant" }
-        fn capabilities(&self) -> RuntimeVendorCapabilities {
-            RuntimeVendorCapabilities { supports_provisioning: true }
-        }
-        async fn create(&self, id: &str, _: &RuntimeSpec)
-            -> Result<RuntimeProgress, RuntimeVendorError> {
-            Ok(RuntimeProgress::Pending { detail: format!("creating {id}") })
-        }
-        async fn poll(&self, ids: &[&str])
-            -> Result<Vec<(String, RuntimeProgress)>, RuntimeVendorError> {
-            Ok(ids.iter().map(|id| {
-                ((*id).to_string(), RuntimeProgress::Pending { detail: "starting".into() })
-            }).collect())
-        }
-        async fn hibernate(&self, _: &str) -> Result<(), RuntimeVendorError> { Ok(()) }
-        async fn delete(&self, _: &str) -> Result<(), RuntimeVendorError> { Ok(()) }
-    }
+    let reconnected = script.reconnect_under_the_same_name().await;
+    reconnected.answer_relay("s1").await;
+    assert!(handle.relay(ping()).await.is_ok());
+}
 
-    #[tokio::test]
-    async fn create_reports_progress_rather_than_a_handle() {
-        // No substrate reports readiness in one round trip, so the contract
-        // must not promise one. This is the whole reason for RuntimeProgress.
-        let v = InstantVendor;
-        assert!(matches!(
-            v.create("s1", &spec()).await.unwrap(),
-            RuntimeProgress::Pending { .. }
-        ));
-    }
+#[tokio::test]
+async fn a_relay_to_an_absent_vendor_is_retryable_not_terminal() {
+    let (vendor, script) = proxy_vendor().await;
+    script.answer_create("s1").await;
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let RuntimeProgress::Ready(handle) = vendor.create("s1", &spec(), tx).await.unwrap()
+    else { panic!("expected Ready") };
 
-    #[tokio::test]
-    async fn poll_answers_for_many_runtimes_in_one_call() {
-        // Fly rate-limits per-machine polling, so poll granularity is per
-        // vendor. A slice-taking signature is what makes that possible.
-        let v = InstantVendor;
-        let out = v.poll(&["s1", "s2", "s3"]).await.unwrap();
-        assert_eq!(out.len(), 3);
-    }
-
-    fn spec() -> RuntimeSpec {
-        RuntimeSpec { workspaces: vec![], env: vec![], provision: vec![] }
-    }
+    script.disconnect().await;
+    // Never `Disconnected`: that means "can never work again", and the vendor
+    // may well be back before the model asks for its next tool.
+    assert!(matches!(handle.relay(ping()).await, Err(TransportError::SendFailed(_))));
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [ ] **Step 2: Run and watch them fail**
 
-Run: `cargo test -p horsie-runtime-vendor --lib runtime_vendor`
-Expected: FAIL — module does not exist.
+Run: `cargo test -p horsie-server --lib runtime_vendor::proxy`
+Expected: FAIL — `WebsocketRuntimeVendor` has inherent methods, not the trait.
 
-- [ ] **Step 3: Define the traits**
+- [ ] **Step 3: Implement**
 
-Above the tests, with `RuntimeProgress`, `RuntimeVendorError { Provision, Gone, Unavailable }`, and both traits exactly as the spec's "The two traits" section gives them. Delete `crates/runtime-vendor/src/provider.rs` and its `pub use` of `RuntimeProvider`/`HealthStatus`.
+`RuntimeHandleImpl` wraps a `runtime_id`, an `Arc<dyn RuntimeTransport>` and a
+closed-signal. `WebsocketRuntimeVendor` supplies the existing
+`RuntimeVendorTransport`, which resolves the live link through the vendor map on
+every call; `WebsocketRuntimeVendor::start` gains the map so it can build one.
 
-- [ ] **Step 4: Run and watch it pass**
+`create`/`get` return `Ready(handle)` and never touch the sink: a `horsie
+connect` process replies only once its runtime is up, so there is no
+intermediate state to report. `hibernate` returns `Stopped`, `delete` returns
+`Gone`.
 
-Run: `cargo test -p horsie-runtime-vendor --lib runtime_vendor`
-Expected: PASS, 2 tests.
-
-- [ ] **Step 5: Implement the traits for the existing link**
-
-`git mv crates/server/src/runtime_vendor/link.rs crates/server/src/runtime_vendor/remote.rs`, rename the type to `RemoteRuntimeVendor`, and implement `RuntimeVendor` for it: `create` sends `CreateRuntimeRequest` and returns `Ready(handle)` (a `horsie connect` process only answers once its runtime is up, so it never reports `Pending`); `poll` sends `QueryRuntimes`; relaying moves onto a `RemoteRuntimeHandle` that holds the vendor name plus `runtime_id` and resolves the live link per call. Delete `transport.rs` — the handle replaces it.
-
-Retype the alias in `sessions/spec.rs`:
-
-```rust
-pub type RuntimeVendorMap = Arc<RwLock<HashMap<String, Arc<dyn RuntimeVendor>>>>;
-```
-
-- [ ] **Step 6: Full gate, then commit**
+- [ ] **Step 4: Full gate, then commit**
 
 Run: `cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings && cargo test --workspace`
 
 ```bash
-git add -A && git commit -m "feat: RuntimeVendor and RuntimeHandle, with the remote vendor first"
+git add -A && git commit -m "feat: the proxy vendor implements the runtime vendor traits"
 ```
 
 ---

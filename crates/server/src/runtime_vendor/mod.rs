@@ -7,10 +7,10 @@
 //!
 //! The contract itself — [`RuntimeVendor`] and [`RuntimeHandle`] — lives in
 //! `horsie-runtime-vendor`, because the same two traits describe both sides of
-//! the wire: this server drives a [`RemoteRuntimeVendor`] that relays to a
+//! the wire: this server drives a [`WebsocketRuntimeVendor`] that relays to a
 //! `horsie connect` process, and that process drives a vendor of its own.
 //!
-//! [`RemoteRuntimeVendor`] is one implementation, not the only shape a vendor
+//! [`WebsocketRuntimeVendor`] is one implementation, not the only shape a vendor
 //! can have. An earlier revision deleted the trait as "pure indirection" when
 //! every vendor was a socket; it stops being indirection the moment one is not.
 
@@ -20,15 +20,15 @@
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
 mod registry;
-mod remote;
 mod transport;
+mod websocket;
 
 pub use horsie_models::runtime_vendor::RuntimeVendorCapabilities;
 pub use horsie_runtime_vendor::runtime_vendor::{RuntimeHandle, RuntimeVendor};
 pub use horsie_runtime_vendor::{RuntimeProgress, RuntimeVendorError};
 pub use registry::{RegisterError, RuntimeVendorRegistry};
-pub use remote::RemoteRuntimeVendor;
 pub use transport::RuntimeVendorTransport;
+pub use websocket::WebsocketRuntimeVendor;
 
 /// A session workspace request. The directory is always vendor-allocated
 /// (velos: inside the container; local: the connected daemon's own dir), so a
