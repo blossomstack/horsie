@@ -11,7 +11,7 @@
 // is inside `#[cfg(test)]` modules.
 #![allow(clippy::panic)]
 
-use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, WorkspaceSpec};
+use crate::runtime_vendor::{RemoteRuntimeVendor, RuntimeSpec, WorkspaceSpec};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
     RunHooksResponse, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse,
@@ -163,7 +163,7 @@ pub struct FakeRuntimeVendor {
     create_gate: Gate,
     /// Present only for the in-process shape, where the test drives the link
     /// directly instead of going through a server.
-    link: Option<Arc<RuntimeVendorLink>>,
+    link: Option<Arc<RemoteRuntimeVendor>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -263,7 +263,7 @@ impl FakeRuntimeVendor {
     /// # Panics
     /// If called on an agent built with `connect`, where the server owns the link.
     #[must_use]
-    pub fn link(&self) -> Arc<RuntimeVendorLink> {
+    pub fn link(&self) -> Arc<RemoteRuntimeVendor> {
         match &self.link {
             Some(link) => link.clone(),
             None => panic!("link() is only available on an in-process fake agent"),
@@ -547,7 +547,7 @@ impl FakeRuntimeVendorBuilder {
             create_gate.clone(),
             recorder.clone(),
         ));
-        let link = RuntimeVendorLink::start(server, owner).await?;
+        let link = RemoteRuntimeVendor::start(server, owner).await?;
         Ok(FakeRuntimeVendor {
             recorder,
             instance_id,
@@ -1074,7 +1074,7 @@ mod tests {
             .await
             .expect_err("a get must never provision");
         assert!(
-            matches!(err, crate::runtime_vendor::VendorError::Gone(_)),
+            matches!(err, crate::runtime_vendor::RuntimeVendorError::Gone(_)),
             "an absent runtime is Gone, not Unavailable: {err:?}"
         );
     }

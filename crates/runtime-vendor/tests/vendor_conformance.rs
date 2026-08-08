@@ -30,7 +30,9 @@ use horsie_runtime_vendor::{
     RuntimeHandle, RuntimeProvider, RuntimeVendorClient,
 };
 use horsie_server::auth::Principal;
-use horsie_server::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, VendorError, WorkspaceSpec};
+use horsie_server::runtime_vendor::{
+    RemoteRuntimeVendor, RuntimeSpec, RuntimeVendorError, WorkspaceSpec,
+};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -97,7 +99,7 @@ impl RuntimeProvider for GatedProvider {
 // ── harness ──────────────────────────────────────────────────────────────────
 
 struct Agent {
-    link: Arc<RuntimeVendorLink>,
+    link: Arc<RemoteRuntimeVendor>,
     cancel: CancellationToken,
     /// The transports this incarnation's runtimes dialed back on, so a test can
     /// tell a live runtime from a stopped one.
@@ -163,7 +165,7 @@ impl Machine {
                 .await
                 .expect("websocket upgrade");
             // Auth-disabled shape: every principal is anonymous.
-            let link = RuntimeVendorLink::start(ws, Principal::Anonymous)
+            let link = RemoteRuntimeVendor::start(ws, Principal::Anonymous)
                 .await
                 .expect("handshake");
             // The agent waits to be told it is published before it serves, so a
@@ -244,14 +246,14 @@ async fn get_without_create_is_gone_and_provisions_nothing() {
         .await
         .expect_err("a get must never provision");
     assert!(
-        matches!(err, VendorError::Gone(_)),
+        matches!(err, RuntimeVendorError::Gone(_)),
         "an absent runtime is Gone, not Unavailable: {err:?}"
     );
     // And having said so, it still holds nothing: a second get repeats it
     // rather than finding something the first one created.
     assert!(matches!(
         agent.link.get("rt-unknown").await,
-        Err(VendorError::Gone(_))
+        Err(RuntimeVendorError::Gone(_))
     ));
 }
 
@@ -435,7 +437,7 @@ async fn a_non_respawnable_agent_still_reports_it_gone_after_a_restart() {
         .get("rt-1")
         .await
         .expect_err("a provisioning vendor must not silently rebuild a workspace");
-    assert!(matches!(err, VendorError::Gone(_)), "{err:?}");
+    assert!(matches!(err, RuntimeVendorError::Gone(_)), "{err:?}");
 }
 
 /// Hibernate is where the respawn path earns its keep in normal operation: the

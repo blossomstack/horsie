@@ -18,7 +18,7 @@
 //! mid-create, which one held in a map beside this manager could not.
 
 use crate::runtime_vendor::{
-    RuntimeSpec, RuntimeVendorLink, RuntimeVendorTransport, VendorError, WorkspaceSpec,
+    RemoteRuntimeVendor, RuntimeSpec, RuntimeVendorError, RuntimeVendorTransport, WorkspaceSpec,
 };
 use crate::sessions::spec::{SessionSpec, SharedVendors};
 use horsie_runtime_client::RuntimeClient;
@@ -60,7 +60,7 @@ impl RuntimeManager {
         Self { deps }
     }
 
-    fn vendor(&self, vendor: &str) -> Result<Arc<RuntimeVendorLink>, RuntimeError> {
+    fn vendor(&self, vendor: &str) -> Result<Arc<RemoteRuntimeVendor>, RuntimeError> {
         let links =
             self.deps.vendors.read().map_err(|_| {
                 RuntimeError::Unavailable("vendor registry lock poisoned".to_string())
@@ -205,10 +205,10 @@ impl RuntimeManager {
         let rt_spec = self.runtime_spec(session, spec).await?;
         link.create(session, &rt_spec)
             .await
-            .map_err(|e: VendorError| match e {
-                VendorError::Gone(m) => RuntimeError::Gone(m),
-                VendorError::Unavailable(m) => RuntimeError::Unavailable(m),
-                VendorError::Provision(m) => RuntimeError::Provision(m),
+            .map_err(|e: RuntimeVendorError| match e {
+                RuntimeVendorError::Gone(m) => RuntimeError::Gone(m),
+                RuntimeVendorError::Unavailable(m) => RuntimeError::Unavailable(m),
+                RuntimeVendorError::Provision(m) => RuntimeError::Provision(m),
             })
     }
 
@@ -224,9 +224,9 @@ impl RuntimeManager {
     pub async fn get(&self, session: &str, vendor: &str) -> Result<RuntimeClient, RuntimeError> {
         let link = self.vendor(vendor)?;
         link.get(session).await.map_err(|e| match e {
-            VendorError::Gone(m) => RuntimeError::Gone(m),
-            VendorError::Unavailable(m) => RuntimeError::Unavailable(m),
-            VendorError::Provision(m) => RuntimeError::Provision(m),
+            RuntimeVendorError::Gone(m) => RuntimeError::Gone(m),
+            RuntimeVendorError::Unavailable(m) => RuntimeError::Unavailable(m),
+            RuntimeVendorError::Provision(m) => RuntimeError::Provision(m),
         })?;
         Ok(self.client(session, vendor))
     }

@@ -35,17 +35,16 @@ Two rules follow from it:
 
 - **A capability difference between substrates belongs inside an
   implementation, never in the trait.** Fly can only be polled; E2B pushes
-  lifecycle webhooks. Modelling that as an optional `events()` stream on the
-  trait would bake today's two substrates into the contract and break on the
-  first one that streams over SSE or gRPC. A vendor that can push consumes its
-  own webhooks and answers `poll` from cache, instantly. The trait never learns
-  that push exists.
+  lifecycle webhooks. Modelling that as an optional `events()` stream — or as a
+  `poll` method — bakes today's two substrates into the contract and breaks on
+  the first one that streams over SSE or gRPC. A vendor reports progress on the
+  sink however it learned of it, and the trait never learns which.
 - **Adding a default-implemented method later is non-breaking; changing a
   signature is.** So ship the minimum that serves the three known vendors and
   let the fourth be additive.
 
-Applying this deleted two members that an earlier draft had: `events()`, and
-`RuntimeHandle::health_check` — which was derivable from `closed()`, since
+Applying this deleted three members earlier drafts had: `events()`, `poll`,
+and `RuntimeHandle::health_check` — the last derivable from `closed()`, since
 today's implementation is literally "is the transport still registered".
 
 ## The two traits
@@ -53,44 +52,46 @@ today's implementation is literally "is the transport still registered".
 ```rust
 /// Where a runtime is, as its vendor currently understands it.
 pub enum RuntimeProgress {
-    /// The substrate is still working. `detail` is what the UI shows.
-    Pending { detail: String },
-    /// Reachable now.
+    Requested,
+    Starting { detail: String },
+    Provisioning { detail: String },
     Ready(Arc<dyn RuntimeHandle>),
+    Stopping,
+    Stopped,
+    Gone { reason: String },
 }
 
-/// A named source of runtimes. One implementation per substrate.
+/// One report, stamped with the runtime it concerns, so an account needs one
+/// sink rather than a channel per call.
+pub struct RuntimeEvent { pub runtime_id: String, pub progress: RuntimeProgress }
+
+/// A plain channel, not another trait. `try_send`, and dropping on a full
+/// channel is correct: a lagging consumer is not a failed runtime.
+pub type RuntimeProgressSink = tokio::sync::mpsc::Sender<RuntimeEvent>;
+
 #[async_trait]
 pub trait RuntimeVendor: Send + Sync {
     fn name(&self) -> &str;
     fn capabilities(&self) -> RuntimeVendorCapabilities;
 
-    /// Ask the substrate to build a runtime. Returns when the *request* is
-    /// accepted, not when the runtime is usable.
-    async fn create(&self, id: &str, spec: &RuntimeSpec)
+    async fn create(&self, id: &str, spec: &RuntimeSpec, progress: RuntimeProgressSink)
         -> Result<RuntimeProgress, RuntimeVendorError>;
-
-    /// Where are these runtimes now? Idempotent and cheap. Resuming a
-    /// hibernated runtime happens here.
-    ///
-    /// Takes a slice, not one id, because poll granularity is per vendor and
-    /// never per runtime — see the rate-limit note below.
-    async fn poll(&self, ids: &[&str])
-        -> Result<Vec<(String, RuntimeProgress)>, RuntimeVendorError>;
-
-    async fn hibernate(&self, id: &str) -> Result<(), RuntimeVendorError>;
-    async fn delete(&self, id: &str) -> Result<(), RuntimeVendorError>;
+    async fn get(&self, id: &str, spec: &RuntimeSpec, progress: RuntimeProgressSink)
+        -> Result<RuntimeProgress, RuntimeVendorError>;
+    async fn hibernate(&self, id: &str, progress: RuntimeProgressSink)
+        -> Result<RuntimeProgress, RuntimeVendorError>;
+    async fn delete(&self, id: &str, progress: RuntimeProgressSink)
+        -> Result<RuntimeProgress, RuntimeVendorError>;
 }
 
 /// A live runtime. Every member is the runtime protocol, which is why a handle
 /// looks the same whatever substrate is underneath.
 #[async_trait]
-pub trait RuntimeHandle: Send + Sync {
+pub trait RuntimeHandle: Send + Sync + Debug {
     fn id(&self) -> &str;
     async fn relay(&self, msg: RuntimeInboundMessage)
         -> Result<RuntimeOutboundMessage, TransportError>;
     async fn relay_oneway(&self, msg: RuntimeInboundMessage) -> Result<(), TransportError>;
-    /// Resolves when this runtime can no longer be reached.
     async fn closed(&self);
 }
 ```
@@ -106,44 +107,52 @@ ambiguous against `hibernate`/`delete`), `RuntimeVendorTransport` (a handle *is*
 a transport plus an id), the `VendorCore`/`InProcessRuntimeVendor<P>` layer, and
 the server's duplicate `VendorCapabilities`.
 
-## Why create returns progress rather than a handle
+## Every operation returns its first observation
 
 A single awaitable `create() -> Handle` hides four phases, only the last two of
-which are ours:
-
-1. the substrate accepts the request,
-2. the substrate's object reaches a running state,
-3. `horsie-runtime` boots and dials back,
-4. it finishes provision steps and announces Ready.
+which are ours: the substrate accepts the request, the substrate's object
+reaches a running state, `horsie-runtime` boots and dials back, and it finishes
+provision steps.
 
 The substrates disagree about phase 2 in a way the trait must not encode.
 **Fly**: `POST /machines` returns while the machine is still `created`/
 `starting`; `GET /v1/apps/{app}/machines/{id}/wait?state=started` is a long poll
 that can itself time out; there are **no webhooks** outside a partner
-programme, and Fly staff explicitly advise polling machine *events* at long
-intervals rather than machine state, because per-machine polling hits rate
-limits at scale. **E2B**: has real lifecycle webhooks
-(`sandbox.lifecycle.created/updated/paused/resumed/killed`) plus a REST events
-API.
+programme. **E2B**: has real lifecycle webhooks
+(`sandbox.lifecycle.created/updated/paused/resumed/killed`).
 
-Hence `RuntimeProgress`, and hence `poll` taking a **slice**: one call answers
-for a whole vendor (`GET /machines?metadata.…`), which is the only shape that
-survives Fly's rate limits. A vendor backed by webhooks satisfies the same call
-from its own cache.
+So progress reporting is the vendor's own business. An earlier draft put a
+`poll` method on the trait, which forced *polling* into the contract — the exact
+mistake the design intent exists to prevent. Instead every operation returns the
+**first observation** and anything later arrives on the sink. A vendor that
+already knows the answer — a `horsie connect` process only replies once its
+runtime is up — returns `Ready` and never touches the sink. A vendor whose
+substrate needs minutes returns `Starting` and finishes in the background.
+Neither is forced to hold a long await, so an interrupted operation leaves no
+orphaned future.
 
-## RuntimeManager becomes an actor — for concurrency, not durability
+**The ordering rule that makes this safe: an implementation must not emit on the
+sink for an operation before that operation has returned.** Build the return
+value, then start the background work. Without it a caller could observe `Ready`
+before the `Starting` it was handed, and would need reconciliation logic; with
+it the return value is simply the first event, one reducer handles both, and
+"latest event wins per runtime" is well defined.
+
+## RuntimeManager stays a plain struct — no new actor
 
 `RuntimeManager` is already per-account (`users.rs:163`). It absorbs
-`ConnectedRuntimeRegistry` and becomes an actor on `horsie-actor` owning:
+`ConnectedRuntimeRegistry` and owns:
 
 - the vendor map,
-- `HashMap<runtime_id, RuntimeState>` where state is `Pending | Live(handle) | Hibernated`,
-- **one poll loop per vendor**, with backoff — never one per runtime,
+- `HashMap<runtime_id, Arc<dyn RuntimeHandle>>`, fed by one reducer draining the
+  sink,
 - the dial-back landing point for `/api/runtime/connect`.
 
-It emits `RuntimeCreated` / `RuntimeReady` / `RuntimeGone` onto the account's
-existing broadcast channel, and hands `SessionActor` its terminal outcome
-through the `FinishProvisioning` path that already exists.
+An earlier draft made it an actor. That actor existed to own per-vendor poll
+loops; the sink removed the loops, so it is a plain struct with a lock and a
+broadcast sender. `SessionActor` already serialises per runtime, and progress
+events reach the UI on the account's existing broadcast channel while
+`SessionActor` still learns its terminal outcome through `FinishProvisioning`.
 
 **It journals nothing.** The durable record of intent is already the session
 journal: `SessionSpec` persists `vendor`, `workspaces` and `provision`
@@ -152,7 +161,7 @@ journal: `SessionSpec` persists `vendor`, `workspaces` and `provision`
 create the process died inside (`session_actor/types.rs:57-63`). Because
 `create` is idempotent against the deterministic name `horsie-{runtime_id}`, the
 manager can hold zero durable state and still recover by re-entering
-`create`/`poll`. Two journals for one fact is the thing to avoid.
+`create`/`get`. Two journals for one fact is the thing to avoid.
 
 This also retires `lifecycle_locks` (`vendor.rs:234`): `runtime_id` **is** the
 session id, so `SessionActor` already serialises per runtime, and the actor
@@ -167,10 +176,10 @@ inheriting it.
 
 Three sources converge on one signal. A remote vendor's `RuntimeStateChanged`
 closes its handle; an in-process runtime's WebSocket closing closes its handle;
-a substrate that reports a dead machine closes it on the next `poll`. All three
+a substrate that reports a dead machine closes it on its next report. All three
 resolve `RuntimeHandle::closed()`, the manager drops the map entry, and
 discovery of *what to do next* stays lazy — the next acquisition re-enters
-`poll`. What `closed()` buys is that a dead handle is never handed to a turn.
+`get`. What `closed()` buys is that a dead handle is never handed to a turn.
 
 ## Acquiring a runtime after a failure
 
@@ -187,7 +196,7 @@ differs only in what the substrate had to do first.
 | substrate API unreachable | — | `Unavailable`, retryable |
 | machine destroyed | — | `Gone` → session `Unrecoverable` |
 
-`create` stays distinct from `poll` because "no runtime exists and I must not
+`create` stays distinct from `get` because "no runtime exists and I must not
 build one" is a real safety property: an acquisition that silently provisions
 rebuilds a workspace the user believes still holds their work.
 
@@ -294,9 +303,10 @@ first session.
   `build_container_command` already emits, `config.env` for the provision
   environment, and `config.mounts` binding the volume at the workspace root.
   Returns `Pending`.
-- **poll.** `GET /v1/apps/{app}/machines?metadata.horsie=1` in one call for the
-  whole vendor; map each machine's state to `Pending`, or to `Ready` once the
-  manager also holds its dial-back.
+- **progress.** A spawned task long-polls
+  `GET /v1/apps/{app}/machines/{id}/wait?state=started`, then waits for the
+  dial-back, emitting `Starting` → `Provisioning` → `Ready` on the sink. All of
+  it inside the vendor; none of it in the trait.
 - **hibernate.** `stop`, or `suspend` once the runtime can reconnect.
 - **delete.** Destroy the machine, then the volume.
 
@@ -330,7 +340,7 @@ instead of hanging the turn.
 
 A machine whose session no longer exists is found by listing `horsie-*` on the
 substrate and comparing against the sessions table — one sweep per configured
-vendor, reusing the same batch call `poll` uses. Deleting a session already
+vendor, in a single list call. Deleting a session already
 tells its vendor; the sweep covers the case where the vendor was unreachable at
 the time.
 
@@ -339,9 +349,9 @@ the time.
 1. **The two traits**, in `crates/runtime-vendor`. `RemoteRuntimeVendor`
    implements them over today's link; `RuntimeProvider` and
    `RuntimeVendorTransport` are deleted. Naming pass (#234) rides along.
-2. **`RuntimeManager` becomes an actor**, absorbing `ConnectedRuntimeRegistry`,
-   owning `RuntimeState` and the per-vendor poll loop, emitting lifecycle
-   events. `lifecycle_locks` deleted.
+2. **`RuntimeManager` absorbs `ConnectedRuntimeRegistry`**, owns the live
+   handles, and drains the progress sink into session status and the account's
+   broadcast. `lifecycle_locks` deleted.
 3. **Authenticated dial-back.** `--connect-token`, HMAC verify on both the
    standalone listener and the new `/api/runtime/connect` route.
 4. **Acquisition carries its spec**; `spec.json` deleted. Wire change to
@@ -379,8 +389,9 @@ Beyond that:
   If a UUID-derived name does not fit, the volume is still reachable through the
   machine's `mounts`, so this costs a lookup rather than a stored mapping — but
   it needs confirming against the API before step 6.
-- **Poll cadence.** Fly rate-limits; the interval must be per-vendor
-  configurable with backoff, and the batch call is what keeps it affordable.
+- **Poll cadence.** Fly rate-limits per-machine polling. That bites when
+  monitoring *every* runtime continuously, not on the handful of creates in
+  flight at once — so it constrains the orphan sweep's list call, not `create`.
 - **Host affinity.** A volume pins its machine to a host. A regional capacity
   failure must surface as `RuntimeVendorError::Provision`, not a hang.
 - **Cost.** Stopped machines are billed for rootfs, volumes at $0.15/GB-mo. A

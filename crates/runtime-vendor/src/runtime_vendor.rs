@@ -2,16 +2,15 @@
 //!
 //! Two traits, deliberately small, and small is the point: a fourth vendor
 //! should cost an implementation and no API change. Two rules keep them that
-//! way, and both have already earned their keep by deleting members an earlier
-//! draft had:
+//! way, and both have already earned their keep by deleting members earlier
+//! drafts had:
 //!
 //! - **A capability difference between substrates lives inside an
 //!   implementation, never in a trait.** Fly Machines can only be polled; E2B
-//!   pushes lifecycle webhooks. Modelling that as an optional event stream here
-//!   would bake today's two substrates into the contract and break on the first
-//!   one that streams over something else. A vendor that can push consumes its
-//!   own webhooks and answers [`RuntimeVendor::poll`] from cache, instantly.
-//!   This trait never learns that push exists.
+//!   pushes lifecycle webhooks. An earlier draft had a `poll` method, which
+//!   forced *polling* into the contract — the very mistake this rule exists to
+//!   prevent. A vendor now reports progress however it likes: Fly polls
+//!   `/wait` internally, E2B consumes its own webhooks, and neither leaks here.
 //! - **Adding a default-implemented method later is not a breaking change;
 //!   altering a signature is.** So the surface starts at the minimum that
 //!   serves the vendors we have.
@@ -29,34 +28,43 @@ use horsie_runtime_client::TransportError;
 use std::sync::Arc;
 
 /// Where a runtime is, as its vendor currently understands it.
-///
-/// A vendor reports progress rather than handing back a runtime because no
-/// substrate can report readiness in one round trip. Four phases sit between
-/// "please build this" and "you can send it a tool call" — the substrate
-/// accepts the request, the substrate's object starts, `horsie-runtime` boots
-/// and dials back, and it finishes its provision steps — and only the last two
-/// are ours to observe. A `create` that returned a handle would have to hide
-/// all four behind one await, which is what makes a slow provision
-/// indistinguishable from a hang.
 #[derive(Debug, Clone)]
 pub enum RuntimeProgress {
-    /// The substrate is still working. `detail` is written for the person
-    /// watching a session start, not for a log.
-    Pending { detail: String },
+    /// The substrate accepted the request and nothing more is known yet.
+    Requested,
+    /// The substrate's object is coming up.
+    Starting { detail: String },
+    /// The runtime is up and running its provision steps.
+    Provisioning { detail: String },
     /// Reachable now.
     Ready(Arc<dyn RuntimeHandle>),
+    /// On its way down.
+    Stopping,
+    /// Down, and revivable.
+    Stopped,
+    /// Down, and not coming back.
+    Gone { reason: String },
 }
 
-impl RuntimeProgress {
-    /// The handle, if this runtime is reachable.
-    #[must_use]
-    pub fn ready(&self) -> Option<&Arc<dyn RuntimeHandle>> {
-        match self {
-            Self::Ready(handle) => Some(handle),
-            Self::Pending { .. } => None,
-        }
-    }
+/// One progress report, stamped with the runtime it concerns.
+///
+/// Carrying the id means an account needs **one** sink rather than a channel
+/// per call, and costs the vendor nothing — every method already receives the
+/// id it would stamp.
+#[derive(Debug, Clone)]
+pub struct RuntimeEvent {
+    pub runtime_id: String,
+    pub progress: RuntimeProgress,
 }
+
+/// Where a vendor reports progress.
+///
+/// A plain channel rather than another trait, and `try_send` rather than
+/// `send`: dropping a report because the consumer is behind is correct
+/// behaviour, since progress is advisory and the operation's return value is
+/// the outcome. A vendor that blocked here would let a slow UI stall a
+/// provision.
+pub type RuntimeProgressSink = tokio::sync::mpsc::Sender<RuntimeEvent>;
 
 /// Why a vendor could not do what was asked.
 ///
@@ -87,6 +95,20 @@ impl From<RuntimeError> for RuntimeVendorError {
 }
 
 /// A named source of runtimes. One implementation per substrate.
+///
+/// Every operation follows one shape: it returns the **first observation**, and
+/// anything later arrives on the sink. A vendor that already knows the answer —
+/// a `horsie connect` process only answers once its runtime is up — returns
+/// `Ready` and never touches the sink at all. A vendor whose substrate needs
+/// minutes returns `Starting` and finishes in the background. Neither is forced
+/// to hold a long await, so an interrupted operation leaves no orphaned future.
+///
+/// **The ordering rule that makes this safe: an implementation must not emit on
+/// the sink for an operation before that operation has returned.** Build the
+/// return value, *then* start the background work. Without it a caller could
+/// observe `Ready` before the `Starting` it was returned, and would need
+/// reconciliation logic; with it, the return value is simply the first event,
+/// and one reducer handles both.
 #[async_trait]
 pub trait RuntimeVendor: Send + Sync {
     /// The name sessions select this vendor by.
@@ -96,40 +118,43 @@ pub trait RuntimeVendor: Send + Sync {
     /// than inferred, so nothing above has to branch on a vendor's kind.
     fn capabilities(&self) -> RuntimeVendorCapabilities;
 
-    /// Ask the substrate to build a runtime.
-    ///
-    /// Returns once the *request* is accepted, not once the runtime is usable.
-    /// Called exactly once per session; every later acquisition is a
-    /// [`Self::poll`].
+    /// Build a runtime. Called exactly once per session; every later
+    /// acquisition is [`Self::get`].
     async fn create(
         &self,
         runtime_id: &str,
         spec: &RuntimeSpec,
+        progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError>;
 
-    /// Where are these runtimes now? Idempotent and cheap. Resuming one the
-    /// vendor hibernated happens here, and so does noticing one that died.
+    /// Acquire a runtime that already exists, reviving it if this vendor
+    /// hibernated it.
     ///
-    /// Takes a slice rather than an id because poll granularity is per vendor
-    /// and never per runtime: Fly rate-limits per-machine polling and answers
-    /// for a whole app in a single list call, so a one-id-at-a-time signature
-    /// would make the only affordable implementation impossible to write.
-    ///
-    /// An id this vendor knows nothing about is simply absent from the result.
-    /// That is not an error — the caller asked a question, and "no such
-    /// runtime" is an answer.
-    async fn poll(
+    /// Never provisions from nothing: an acquisition that silently built a
+    /// fresh workspace would destroy work the user believes is still there.
+    /// Carries the spec because the server is its only durable holder.
+    async fn get(
         &self,
-        runtime_ids: &[&str],
-    ) -> Result<Vec<(String, RuntimeProgress)>, RuntimeVendorError>;
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+        progress: RuntimeProgressSink,
+    ) -> Result<RuntimeProgress, RuntimeVendorError>;
 
     /// Advisory suspend. A vendor that cannot suspend keeps the runtime
     /// running, which is a correct implementation and far better than
     /// destroying a workspace to save a little compute.
-    async fn hibernate(&self, runtime_id: &str) -> Result<(), RuntimeVendorError>;
+    async fn hibernate(
+        &self,
+        runtime_id: &str,
+        progress: RuntimeProgressSink,
+    ) -> Result<RuntimeProgress, RuntimeVendorError>;
 
     /// The owning session was deleted; the vendor decides the runtime's fate.
-    async fn delete(&self, runtime_id: &str) -> Result<(), RuntimeVendorError>;
+    async fn delete(
+        &self,
+        runtime_id: &str,
+        progress: RuntimeProgressSink,
+    ) -> Result<RuntimeProgress, RuntimeVendorError>;
 }
 
 /// A live runtime.
@@ -160,8 +185,8 @@ pub trait RuntimeHandle: Send + Sync + std::fmt::Debug {
     ///
     /// The unifying signal for a runtime going away, whatever noticed first:
     /// a vendor link reporting a state change, a WebSocket closing, or a
-    /// substrate that answered a poll with a dead machine. Whoever holds the
-    /// handle drops it, so a dead runtime is never handed to a turn.
+    /// substrate that reported a dead machine. Whoever holds the handle drops
+    /// it, so a dead runtime is never handed to a turn.
     async fn closed(&self);
 }
 
@@ -174,6 +199,7 @@ pub trait RuntimeHandle: Send + Sync + std::fmt::Debug {
 )]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn spec() -> RuntimeSpec {
         RuntimeSpec {
@@ -183,96 +209,220 @@ mod tests {
         }
     }
 
-    /// A vendor with no socket behind it. The point of the trait: a map of
-    /// `dyn RuntimeVendor` holds substrate-backed and process-backed vendors
-    /// identically, and nothing above it branches on which one it has.
-    struct CountingVendor {
-        polls: std::sync::atomic::AtomicUsize,
-    }
-
-    impl CountingVendor {
-        fn new() -> Self {
-            Self {
-                polls: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
-        fn polls(&self) -> usize {
-            self.polls.load(std::sync::atomic::Ordering::Relaxed)
-        }
-    }
+    #[derive(Debug)]
+    struct StubHandle(String);
 
     #[async_trait]
-    impl RuntimeVendor for CountingVendor {
+    impl RuntimeHandle for StubHandle {
+        fn id(&self) -> &str {
+            &self.0
+        }
+        async fn relay(
+            &self,
+            _: RuntimeInboundMessage,
+        ) -> Result<RuntimeOutboundMessage, TransportError> {
+            Err(TransportError::SendFailed("stub".to_string()))
+        }
+        async fn relay_oneway(&self, _: RuntimeInboundMessage) -> Result<(), TransportError> {
+            Ok(())
+        }
+        async fn closed(&self) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    fn caps() -> RuntimeVendorCapabilities {
+        RuntimeVendorCapabilities {
+            supports_provisioning: true,
+        }
+    }
+
+    /// Answers everything immediately, the way a `horsie connect` process does:
+    /// it only replies once its runtime is already up.
+    struct ImmediateVendor;
+
+    #[async_trait]
+    impl RuntimeVendor for ImmediateVendor {
         fn name(&self) -> &str {
-            "counting"
+            "immediate"
         }
         fn capabilities(&self) -> RuntimeVendorCapabilities {
-            RuntimeVendorCapabilities {
-                supports_provisioning: true,
-            }
+            caps()
         }
         async fn create(
             &self,
             runtime_id: &str,
             _: &RuntimeSpec,
+            _: RuntimeProgressSink,
         ) -> Result<RuntimeProgress, RuntimeVendorError> {
-            Ok(RuntimeProgress::Pending {
-                detail: format!("creating {runtime_id}"),
+            Ok(RuntimeProgress::Ready(Arc::new(StubHandle(
+                runtime_id.to_string(),
+            ))))
+        }
+        async fn get(
+            &self,
+            runtime_id: &str,
+            _: &RuntimeSpec,
+            _: RuntimeProgressSink,
+        ) -> Result<RuntimeProgress, RuntimeVendorError> {
+            Ok(RuntimeProgress::Ready(Arc::new(StubHandle(
+                runtime_id.to_string(),
+            ))))
+        }
+        async fn hibernate(
+            &self,
+            _: &str,
+            _: RuntimeProgressSink,
+        ) -> Result<RuntimeProgress, RuntimeVendorError> {
+            Ok(RuntimeProgress::Stopped)
+        }
+        async fn delete(
+            &self,
+            _: &str,
+            _: RuntimeProgressSink,
+        ) -> Result<RuntimeProgress, RuntimeVendorError> {
+            Ok(RuntimeProgress::Gone {
+                reason: "deleted".to_string(),
             })
         }
-        async fn poll(
+    }
+
+    /// Returns `Starting` and finishes on the sink, the way a substrate that
+    /// boots a machine does. Honours the ordering rule by spawning only after
+    /// the return value has been built.
+    struct SlowVendor;
+
+    #[async_trait]
+    impl RuntimeVendor for SlowVendor {
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn capabilities(&self) -> RuntimeVendorCapabilities {
+            caps()
+        }
+        async fn create(
             &self,
-            runtime_ids: &[&str],
-        ) -> Result<Vec<(String, RuntimeProgress)>, RuntimeVendorError> {
-            self.polls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(runtime_ids
-                .iter()
-                .map(|id| {
-                    (
-                        (*id).to_string(),
-                        RuntimeProgress::Pending {
-                            detail: "starting".to_string(),
-                        },
-                    )
-                })
-                .collect())
+            runtime_id: &str,
+            _: &RuntimeSpec,
+            progress: RuntimeProgressSink,
+        ) -> Result<RuntimeProgress, RuntimeVendorError> {
+            let first = RuntimeProgress::Starting {
+                detail: "booting".to_string(),
+            };
+            let id = runtime_id.to_string();
+            tokio::spawn(async move {
+                for progress_step in [
+                    RuntimeProgress::Provisioning {
+                        detail: "cloning".to_string(),
+                    },
+                    RuntimeProgress::Ready(Arc::new(StubHandle(id.clone()))),
+                ] {
+                    let _ = progress
+                        .send(RuntimeEvent {
+                            runtime_id: id.clone(),
+                            progress: progress_step,
+                        })
+                        .await;
+                }
+            });
+            Ok(first)
         }
-        async fn hibernate(&self, _: &str) -> Result<(), RuntimeVendorError> {
-            Ok(())
+        async fn get(
+            &self,
+            runtime_id: &str,
+            spec: &RuntimeSpec,
+            progress: RuntimeProgressSink,
+        ) -> Result<RuntimeProgress, RuntimeVendorError> {
+            self.create(runtime_id, spec, progress).await
         }
-        async fn delete(&self, _: &str) -> Result<(), RuntimeVendorError> {
-            Ok(())
+        async fn hibernate(
+            &self,
+            _: &str,
+            _: RuntimeProgressSink,
+        ) -> Result<RuntimeProgress, RuntimeVendorError> {
+            Ok(RuntimeProgress::Stopping)
+        }
+        async fn delete(
+            &self,
+            _: &str,
+            _: RuntimeProgressSink,
+        ) -> Result<RuntimeProgress, RuntimeVendorError> {
+            Ok(RuntimeProgress::Stopping)
         }
     }
 
-    #[tokio::test]
-    async fn create_reports_progress_rather_than_handing_back_a_runtime() {
-        // No substrate reports readiness in one round trip, so the contract
-        // must not promise one. This is the whole reason for RuntimeProgress.
-        let vendor = CountingVendor::new();
-        let progress = vendor.create("s1", &spec()).await.unwrap();
-        assert!(progress.ready().is_none());
-        assert!(matches!(progress, RuntimeProgress::Pending { .. }));
+    fn sink(
+        capacity: usize,
+    ) -> (
+        RuntimeProgressSink,
+        tokio::sync::mpsc::Receiver<RuntimeEvent>,
+    ) {
+        tokio::sync::mpsc::channel(capacity)
     }
 
     #[tokio::test]
-    async fn one_poll_answers_for_every_runtime_on_the_vendor() {
-        // Fly rate-limits per-machine polling and answers for a whole app in a
-        // single list call. A slice-taking signature is what lets a vendor be
-        // implemented that way at all.
-        let vendor = CountingVendor::new();
-        let answered = vendor.poll(&["s1", "s2", "s3"]).await.unwrap();
-        assert_eq!(answered.len(), 3);
-        assert_eq!(vendor.polls(), 1);
+    async fn a_vendor_that_knows_the_answer_returns_ready_without_touching_the_sink() {
+        // The reason create returns progress rather than a handle: a vendor
+        // with nothing to wait for should not be forced through a sink.
+        let (tx, mut rx) = sink(8);
+        let progress = ImmediateVendor.create("s1", &spec(), tx).await.unwrap();
+        match progress {
+            RuntimeProgress::Ready(handle) => assert_eq!(handle.id(), "s1"),
+            other => panic!("expected Ready, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "nothing should have been emitted");
+    }
+
+    #[tokio::test]
+    async fn a_slow_vendor_returns_its_first_observation_then_finishes_on_the_sink() {
+        let (tx, mut rx) = sink(8);
+        let first = SlowVendor.create("s1", &spec(), tx).await.unwrap();
+        assert!(matches!(first, RuntimeProgress::Starting { .. }));
+
+        let mut seen = Vec::new();
+        while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            let ready = matches!(event.progress, RuntimeProgress::Ready(_));
+            assert_eq!(event.runtime_id, "s1");
+            seen.push(event.progress);
+            if ready {
+                break;
+            }
+        }
+        assert!(matches!(
+            seen.first(),
+            Some(RuntimeProgress::Provisioning { .. })
+        ));
+        assert!(matches!(seen.last(), Some(RuntimeProgress::Ready(_))));
+    }
+
+    #[tokio::test]
+    async fn one_sink_serves_every_runtime_because_events_carry_the_id() {
+        let (tx, mut rx) = sink(16);
+        SlowVendor.create("s1", &spec(), tx.clone()).await.unwrap();
+        SlowVendor.create("s2", &spec(), tx).await.unwrap();
+
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..4 {
+            if let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+                ids.insert(event.runtime_id);
+            }
+        }
+        assert_eq!(ids.len(), 2, "both runtimes reported on the one channel");
     }
 
     #[tokio::test]
     async fn a_vendor_is_usable_behind_a_trait_object() {
-        let vendor: Arc<dyn RuntimeVendor> = Arc::new(CountingVendor::new());
-        assert_eq!(vendor.name(), "counting");
+        let vendor: Arc<dyn RuntimeVendor> = Arc::new(ImmediateVendor);
+        let (tx, _rx) = sink(4);
+        assert_eq!(vendor.name(), "immediate");
         assert!(vendor.capabilities().supports_provisioning);
-        vendor.hibernate("s1").await.unwrap();
-        vendor.delete("s1").await.unwrap();
+        assert!(matches!(
+            vendor.hibernate("s1", tx.clone()).await.unwrap(),
+            RuntimeProgress::Stopped
+        ));
+        assert!(matches!(
+            vendor.delete("s1", tx).await.unwrap(),
+            RuntimeProgress::Gone { .. }
+        ));
     }
 }

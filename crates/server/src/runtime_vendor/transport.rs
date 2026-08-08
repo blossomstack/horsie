@@ -9,7 +9,7 @@
 //! in the link, or in the vendor agent on the other end.
 //!
 //! **The link is resolved per call, never held.** A vendor agent that reconnects
-//! comes back on a brand-new [`RuntimeVendorLink`]; the one it was reached on
+//! comes back on a brand-new [`RemoteRuntimeVendor`]; the one it was reached on
 //! before is a corpse forever. A transport that captured that `Arc` would fail
 //! every later call, and since a client is acquired once per *run* and baked
 //! into the toolbox, a reconnect mid-turn left the agent loop retrying against a
@@ -17,7 +17,7 @@
 //! registry on each call costs one `RwLock` read against a round trip to a
 //! sandbox, and makes a reconnect invisible to a turn already in flight.
 
-use crate::runtime_vendor::RuntimeVendorLink;
+use crate::runtime_vendor::RemoteRuntimeVendor;
 use crate::sessions::spec::SharedVendors;
 use async_trait::async_trait;
 use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
@@ -56,7 +56,7 @@ impl RuntimeVendorTransport {
     }
 
     /// The vendor's live link, or `None` while it is away.
-    fn current_link(&self) -> Option<Arc<RuntimeVendorLink>> {
+    fn current_link(&self) -> Option<Arc<RemoteRuntimeVendor>> {
         let vendors = self.vendors.read().unwrap_or_else(PoisonError::into_inner);
         vendors
             .get(&self.vendor_name)
@@ -65,7 +65,7 @@ impl RuntimeVendorTransport {
     }
 
     /// The link to send this call over, waiting out a brief absence.
-    async fn link(&self) -> Result<Arc<RuntimeVendorLink>, TransportError> {
+    async fn link(&self) -> Result<Arc<RemoteRuntimeVendor>, TransportError> {
         if let Some(link) = self.current_link() {
             return Ok(link);
         }
@@ -156,7 +156,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::protocol::Role;
 
-    async fn boot_agent(answer_calls: bool, stdout: &'static str) -> Arc<RuntimeVendorLink> {
+    async fn boot_agent(answer_calls: bool, stdout: &'static str) -> Arc<RemoteRuntimeVendor> {
         let (a, b) = tokio::io::duplex(64 * 1024);
         let server = WebSocketStream::from_raw_socket(a, Role::Server, None).await;
         let mut agent = WebSocketStream::from_raw_socket(b, Role::Client, None).await;
@@ -209,13 +209,13 @@ mod tests {
                     .unwrap();
             }
         });
-        RuntimeVendorLink::start(server, Principal::Anonymous)
+        RemoteRuntimeVendor::start(server, Principal::Anonymous)
             .await
             .unwrap()
     }
 
     /// The registry the transport reads, holding one vendor.
-    fn published(name: &str, link: Arc<RuntimeVendorLink>) -> SharedVendors {
+    fn published(name: &str, link: Arc<RemoteRuntimeVendor>) -> SharedVendors {
         let mut map = HashMap::new();
         map.insert(name.to_string(), link);
         Arc::new(RwLock::new(map))

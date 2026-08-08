@@ -945,8 +945,15 @@ fn trimmed(v: &Option<String>) -> Option<String> {
 
 // ── projections ──────────────────────────────────────────────────────────────
 
-/// Map a vendor's announced (domain) capabilities to the settings-wire view.
-fn vendor_caps_view(caps: crate::runtime_vendor::VendorCapabilities) -> VendorCapabilities {
+/// Map a vendor's announced capabilities to the settings-wire view.
+///
+/// Two wire types rather than one because they answer to different contracts:
+/// the vendor protocol's is what a vendor announces about itself, and the
+/// settings view's is what the UI renders. They agree today and are free to
+/// diverge.
+fn vendor_caps_view(
+    caps: horsie_models::runtime_vendor::RuntimeVendorCapabilities,
+) -> VendorCapabilities {
     VendorCapabilities {
         supports_provisioning: caps.supports_provisioning,
     }

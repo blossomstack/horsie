@@ -7,7 +7,7 @@
 //! unmatched id as a protocol error.
 
 use crate::auth::Principal;
-use crate::runtime_vendor::{RuntimeSpec, VendorError};
+use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorError};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime_vendor::{
     CreateRuntimeRequest, DeleteRuntimeRequest, GetRuntimeRequest, HibernateRuntimeRequest,
@@ -43,13 +43,13 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900)
 
 type Waiters = Arc<Mutex<HashMap<String, oneshot::Sender<RuntimeVendorEvent>>>>;
 
-/// A sink that erases the socket type, so `RuntimeVendorLink` is not generic over the
+/// A sink that erases the socket type, so `RemoteRuntimeVendor` is not generic over the
 /// transport once constructed.
 type BoxedSink = Box<
     dyn futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Send + Unpin,
 >;
 
-pub struct RuntimeVendorLink {
+pub struct RemoteRuntimeVendor {
     vendor_name: String,
     /// The announcing *process*. Two links carrying the same id are the same
     /// agent before and after a dropped socket; two carrying different ids are
@@ -74,10 +74,10 @@ pub struct RuntimeVendorLink {
     /// The `Arc` this link lives in, held weakly so the link never keeps
     /// itself alive. Needed because `create`/`attach` hand an owned `Arc` to
     /// the transport and lifecycle handle they build.
-    this: std::sync::Weak<RuntimeVendorLink>,
+    this: std::sync::Weak<RemoteRuntimeVendor>,
 }
 
-impl RuntimeVendorLink {
+impl RemoteRuntimeVendor {
     /// Handshake on an accepted agent connection and start its read loop.
     ///
     /// The first message must be `RuntimeVendorEvent::Ready`; anything else (or
@@ -321,17 +321,20 @@ impl RuntimeVendorLink {
     }
 }
 
-/// The vendor surface the session layer drives. These were a `RuntimeVendor`
-/// trait while the server had several vendor implementations of its own; every
-/// vendor is a connected agent now, so there is exactly one implementor and the
-/// trait was pure indirection.
-impl RuntimeVendorLink {
-    /// What the agent announced it can do with a session workspace.
+/// The vendor surface the session layer drives.
+///
+/// Still inherent methods rather than the [`RuntimeVendor`] trait: the trait
+/// hands back a [`RuntimeHandle`] and this type cannot mint one until its
+/// handle resolves the live link per call, which is the next change. The
+/// signatures below are deliberately the trait's minus that return value.
+///
+/// [`RuntimeVendor`]: crate::runtime_vendor::RuntimeVendor
+/// [`RuntimeHandle`]: crate::runtime_vendor::RuntimeHandle
+impl RemoteRuntimeVendor {
+    /// What the vendor announced it can do with a session workspace.
     #[must_use]
-    pub fn capabilities(&self) -> crate::runtime_vendor::VendorCapabilities {
-        crate::runtime_vendor::VendorCapabilities {
-            supports_provisioning: self.capabilities.supports_provisioning,
-        }
+    pub fn capabilities(&self) -> horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+        self.capabilities.clone()
     }
 
     /// Provision a brand-new runtime. Called exactly once per session, at
@@ -341,34 +344,38 @@ impl RuntimeVendorLink {
     /// is minted by [`RuntimeManager`](crate::runtime_manager::RuntimeManager),
     /// over the vendor's *name* rather than this link, so it keeps working when
     /// the agent reconnects on a new one.
-    pub async fn create(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), VendorError> {
+    pub async fn create(
+        &self,
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+    ) -> Result<(), RuntimeVendorError> {
         let Some(me) = self.arc_self() else {
-            return Err(VendorError::Unavailable(
+            return Err(RuntimeVendorError::Unavailable(
                 "vendor link was dropped".to_string(),
             ));
         };
-        let wire_spec = Self::runtime_spec(spec).map_err(VendorError::Provision)?;
+        let wire_spec = Self::runtime_spec(spec).map_err(RuntimeVendorError::Provision)?;
         me.request(RuntimeVendorCommand::CreateRuntime(CreateRuntimeRequest {
             runtime_id: runtime_id.to_string(),
             spec: wire_spec,
         }))
         .await
-        .map_err(VendorError::Provision)?;
+        .map_err(RuntimeVendorError::Provision)?;
         Ok(())
     }
 
     /// Confirm an existing runtime, resuming it if the agent hibernated it.
     ///
     /// Never provisions. A failure here means the agent has nothing under this
-    /// id, which is terminal for the owning session — see [`VendorError::Gone`].
-    pub async fn get(&self, runtime_id: &str) -> Result<(), VendorError> {
+    /// id, which is terminal for the owning session — see [`RuntimeVendorError::Gone`].
+    pub async fn get(&self, runtime_id: &str) -> Result<(), RuntimeVendorError> {
         let Some(me) = self.arc_self() else {
-            return Err(VendorError::Unavailable(
+            return Err(RuntimeVendorError::Unavailable(
                 "vendor link was dropped".to_string(),
             ));
         };
         if !me.is_connected() {
-            return Err(VendorError::Unavailable(
+            return Err(RuntimeVendorError::Unavailable(
                 "vendor agent disconnected".to_string(),
             ));
         }
@@ -376,7 +383,7 @@ impl RuntimeVendorLink {
             runtime_id: runtime_id.to_string(),
         }))
         .await
-        .map_err(VendorError::Gone)?;
+        .map_err(RuntimeVendorError::Gone)?;
         Ok(())
     }
 
@@ -466,7 +473,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         assert_eq!(link.vendor_name(), "my-laptop");
@@ -485,7 +492,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         assert!(link.is_connected());
@@ -515,7 +522,7 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         // Well short of the idle timeout, but the point is the pings are seen
@@ -536,7 +543,7 @@ mod tests {
             .await;
             std::future::pending::<()>().await;
         });
-        let outcome = RuntimeVendorLink::start(server_ws, Principal::Anonymous).await;
+        let outcome = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous).await;
         let Err(err) = outcome else {
             panic!("a non-Ready first message must be rejected");
         };
@@ -570,7 +577,7 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let event = link
@@ -601,7 +608,7 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let Err(err) = link.create("rt-1", &spec_fixture()).await else {
@@ -619,7 +626,7 @@ mod tests {
             drop(agent_ws);
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         let err = link
@@ -672,7 +679,7 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         link.create("rt-1", &spec_fixture()).await.expect("create");
@@ -697,7 +704,7 @@ mod tests {
             send_event(&mut agent_ws, "boot", boot("fixed-dir", false)).await;
             std::future::pending::<()>().await;
         });
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = RemoteRuntimeVendor::start(server_ws, Principal::Anonymous)
             .await
             .expect("handshake");
         assert!(
