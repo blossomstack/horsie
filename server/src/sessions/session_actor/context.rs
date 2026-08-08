@@ -147,9 +147,12 @@ pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> R
 /// result travels. Deliberately short — the tools carry their own docs.
 const SUBAGENT_PROMPT_SUFFIX: &str = "\n\n# Subagent role\n\
 You are a subagent, spawned to work on one task. Your final message is your report: \
-it is delivered to the agent that spawned you — make it self-contained. You may spawn \
-your own subagents with spawn_agent and check on them with subagent_status. You cannot \
-ask the user or rename the session; if you are blocked, report that instead.";
+it is automatically delivered to the agent that spawned you — make it self-contained. You \
+may spawn your own subagents with spawn_agent. Continue with independent work, or wait if \
+none remains; do not poll subagent_status or call it repeatedly. Use subagent_status only \
+when the user requests a progress update or to diagnose a suspected runtime or \
+result-delivery problem. You cannot ask the user or rename the session; if you are blocked, \
+report that instead.";
 
 /// Appended to a workflow step's system prompt: what a step is, and that its
 /// structured output is what decides where the run goes next. Deliberately
@@ -783,9 +786,16 @@ mod tests {
         for t in ["set_session_title", "ask_user"] {
             assert!(!sub_tools.contains(&t.to_string()), "sub must not have {t}");
         }
+        let prompt = sub.system_prompt.unwrap();
         assert!(
-            sub.system_prompt.unwrap().contains("# Subagent role"),
+            prompt.contains("# Subagent role"),
             "the subagent prompt must explain its role"
+        );
+        assert!(prompt.contains("automatically delivered"), "{prompt}");
+        assert!(prompt.contains("do not poll"), "{prompt}");
+        assert!(
+            prompt.contains("user requests a progress update"),
+            "{prompt}"
         );
     }
 
