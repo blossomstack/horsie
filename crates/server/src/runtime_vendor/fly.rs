@@ -61,6 +61,17 @@ pub fn volume_name(runtime_id: &str) -> String {
     name
 }
 
+/// The runtime id a machine name was built from, or `None` when the machine is
+/// not one of ours. The inverse of [`machine_name`], and the reason the sweep
+/// can be sure it is only ever looking at horsie's own machines: an app shared
+/// with anything else keeps its other machines.
+#[must_use]
+pub fn runtime_id_of(machine_name: &str) -> Option<&str> {
+    machine_name
+        .strip_prefix("horsie-")
+        .filter(|s| !s.is_empty())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FlyError {
     /// The API answered, and the answer was no.
@@ -123,6 +134,10 @@ pub trait FlyApi: Send + Sync {
     async fn create_machine(&self, spec: &MachineSpec) -> Result<String, FlyError>;
     /// The machine with this name, or `None` if there is none.
     async fn machine_by_name(&self, name: &str) -> Result<Option<Machine>, FlyError>;
+    /// Every machine in the app, with its name. One call, not one per machine:
+    /// Fly rate-limits per-machine polling, and the orphan sweep is the only
+    /// caller that needs the whole inventory.
+    async fn machines(&self) -> Result<Vec<(String, Machine)>, FlyError>;
     async fn start(&self, machine_id: &str) -> Result<(), FlyError>;
     async fn stop(&self, machine_id: &str) -> Result<(), FlyError>;
     /// Destroy the machine and any volume it mounted. Idempotent: a machine
@@ -437,6 +452,30 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         })
     }
 
+    async fn sweep_orphans(
+        &self,
+        live: &std::collections::HashSet<String>,
+    ) -> Result<Vec<String>, RuntimeVendorError> {
+        let mut swept = Vec::new();
+        for (name, machine) in self.api.machines().await? {
+            // Two filters, and both matter. The prefix means a shared app keeps
+            // its other machines; the `live` check means a machine whose
+            // session still exists is never touched, however long it has been
+            // stopped — a hibernated runtime looks exactly like an orphan from
+            // the substrate alone.
+            let Some(runtime_id) = runtime_id_of(&name) else {
+                continue;
+            };
+            if live.contains(runtime_id) {
+                continue;
+            }
+            self.api.destroy(&machine.id).await?;
+            self.connected.remove(runtime_id).await;
+            swept.push(runtime_id.to_string());
+        }
+        Ok(swept)
+    }
+
     async fn hibernate(
         &self,
         runtime_id: &str,
@@ -537,6 +576,9 @@ mod tests {
                 .find(|(n, _)| n == name)
                 .map(|(_, m)| m.clone()))
         }
+        async fn machines(&self) -> Result<Vec<(String, Machine)>, FlyError> {
+            Ok(self.machines.lock().unwrap().clone())
+        }
         async fn start(&self, id: &str) -> Result<(), FlyError> {
             self.calls.lock().unwrap().push(format!("start:{id}"));
             Ok(())
@@ -618,6 +660,61 @@ mod tests {
                 "machine:horsie-s1".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_destroys_only_machines_whose_session_is_gone() {
+        let (v, _reg) = vendor(
+            FakeFly::default()
+                .with_machine("s1", MachineState::Started)
+                .with_machine("s2", MachineState::Stopped),
+            false,
+        );
+        let live = std::collections::HashSet::from(["s1".to_string()]);
+        assert_eq!(
+            v.sweep_orphans(&live).await.unwrap(),
+            vec!["s2".to_string()]
+        );
+        assert_eq!(v.api.calls(), vec!["destroy:m-s2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_never_touches_a_machine_that_is_not_ours() {
+        // The app may be shared. A prefix is the only thing separating horsie's
+        // machines from someone else's, and destroying is not recoverable.
+        let fake = FakeFly::default();
+        fake.machines.lock().unwrap().push((
+            "postgres".to_string(),
+            Machine {
+                id: "m-pg".to_string(),
+                state: MachineState::Started,
+            },
+        ));
+        let (v, _reg) = vendor(fake, false);
+        let live = std::collections::HashSet::new();
+        assert!(v.sweep_orphans(&live).await.unwrap().is_empty());
+        assert!(v.api.calls().is_empty(), "got {:?}", v.api.calls());
+    }
+
+    #[tokio::test]
+    async fn a_sweep_keeps_a_hibernated_runtime() {
+        // The case that makes a naive sweep destructive: a stopped machine and
+        // an orphan are indistinguishable on the substrate. Only the server's
+        // own list of sessions tells them apart.
+        let (v, _reg) = vendor(
+            FakeFly::default().with_machine("s1", MachineState::Stopped),
+            false,
+        );
+        let live = std::collections::HashSet::from(["s1".to_string()]);
+        assert!(v.sweep_orphans(&live).await.unwrap().is_empty());
+        assert!(v.api.calls().is_empty(), "got {:?}", v.api.calls());
+    }
+
+    #[test]
+    fn a_machine_name_round_trips_to_its_runtime_id() {
+        assert_eq!(runtime_id_of(&machine_name("s1")), Some("s1"));
+        assert_eq!(runtime_id_of("postgres"), None);
+        assert_eq!(runtime_id_of("horsie-"), None);
     }
 
     #[test]

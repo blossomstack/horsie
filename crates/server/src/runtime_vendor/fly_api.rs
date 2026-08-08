@@ -193,6 +193,32 @@ pub fn machine_named(list: &Value, name: &str) -> Option<Machine> {
     })
 }
 
+/// Every machine in a list response, paired with its name.
+///
+/// An entry with no id or no name is skipped rather than surfaced: the only
+/// caller is the orphan sweep, and a machine it cannot name is one it must not
+/// reason about — least of all destroy.
+#[must_use]
+pub fn all_machines(list: &Value) -> Vec<(String, Machine)> {
+    let Some(items) = list.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|m| {
+            let name = m.get("name").and_then(Value::as_str)?;
+            let id = m.get("id").and_then(Value::as_str)?;
+            Some((
+                name.to_string(),
+                Machine {
+                    id: id.to_string(),
+                    state: parse_state(m.get("state").and_then(Value::as_str).unwrap_or_default()),
+                },
+            ))
+        })
+        .collect()
+}
+
 fn id_of(value: &Value) -> Result<String, FlyError> {
     value
         .get("id")
@@ -228,6 +254,11 @@ impl FlyApi for FlyHttpApi {
     async fn machine_by_name(&self, name: &str) -> Result<Option<Machine>, FlyError> {
         let body = self.send(self.client.get(self.url("/machines"))).await?;
         Ok(machine_named(&body, name))
+    }
+
+    async fn machines(&self) -> Result<Vec<(String, Machine)>, FlyError> {
+        let body = self.send(self.client.get(self.url("/machines"))).await?;
+        Ok(all_machines(&body))
     }
 
     async fn start(&self, machine_id: &str) -> Result<(), FlyError> {

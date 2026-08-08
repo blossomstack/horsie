@@ -218,6 +218,31 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         journal,
     );
 
+    // Destroy substrate left over from sessions that no longer exist. Deleting a
+    // session already tells its vendor; this covers the case where the vendor
+    // was unreachable at the time, and the machine has been billing ever since.
+    //
+    // Detached, because it makes network calls and an account's first request
+    // must not wait on a cloud API. Skipped entirely if the session list cannot
+    // be read: a partial list would mark live runtimes as orphans and destroy
+    // their workspaces.
+    {
+        let supervisor = supervisor.clone();
+        let runtime_vendors = runtime_vendors.clone();
+        let user = user.clone();
+        tokio::spawn(async move {
+            let Ok(sessions) = supervisor
+                .ask(|reply| SessionSupervisorCommand::List { reply })
+                .await
+            else {
+                tracing::warn!(user = %user, "orphan sweep skipped: the session list is unreadable");
+                return;
+            };
+            let live = sessions.into_iter().map(|(id, _, _)| id).collect();
+            runtime_vendors.sweep_orphans(&live).await;
+        });
+    }
+
     let routine_runner = Arc::new(crate::routines::RoutineRunner::new(
         routines.clone(),
         agents.clone(),

@@ -442,6 +442,42 @@ impl RuntimeVendorConfigService {
         })
     }
 
+    /// Ask every vendor to destroy what it still holds for sessions that are
+    /// gone, and log what went.
+    ///
+    /// Sweeps the whole vendor map, not just the configured rows: the trait
+    /// method defaults to doing nothing, so a vendor that cannot inventory
+    /// itself opts out by saying nothing rather than by being excluded here.
+    ///
+    /// `live` must be *every* session the server knows, loaded or not. A short
+    /// list here is a destroyed workspace, so a caller that cannot produce the
+    /// full set must not call this at all.
+    pub async fn sweep_orphans(&self, live: &std::collections::HashSet<String>) {
+        // Cloned out of the lock: a sweep makes network calls, and holding a
+        // std::sync lock across an await is not an option.
+        let vendors: Vec<(String, Arc<dyn RuntimeVendor>)> = self
+            .vendors
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(name, v)| (name.clone(), v.clone()))
+            .collect();
+        for (name, vendor) in vendors {
+            match vendor.sweep_orphans(live).await {
+                Ok(swept) if swept.is_empty() => {}
+                Ok(swept) => tracing::info!(
+                    vendor = %name,
+                    count = swept.len(),
+                    runtimes = ?swept,
+                    "swept runtimes whose sessions are gone"
+                ),
+                // Never fatal: an unreachable vendor is swept on the next boot,
+                // and the cost of skipping is a machine that bills for longer.
+                Err(e) => tracing::warn!(vendor = %name, error = %e, "orphan sweep failed"),
+            }
+        }
+    }
+
     pub async fn delete_named(&self, name: &str) -> Result<(), VendorConfigError> {
         match self.delete(name).await {
             Ok(true) => Ok(()),

@@ -148,6 +148,29 @@ pub trait RuntimeVendor: Send + Sync {
         true
     }
 
+    /// Destroy anything this vendor still holds for a runtime that no longer
+    /// exists, and report what was destroyed.
+    ///
+    /// `live` is every runtime id the server still knows about. Deleting a
+    /// session already tells its vendor; this covers the case where the vendor
+    /// was unreachable at the time, and the machine has been billing ever since.
+    ///
+    /// Default: nothing. A vendor that cannot enumerate what it owns — a
+    /// websocket vendor answers for a process the server cannot inventory —
+    /// simply does not participate, which is why this is defaulted rather than
+    /// required. How to enumerate, and how a name maps back to a runtime id,
+    /// are substrate details that stay inside the implementation.
+    ///
+    /// **Only ever deletes.** An implementation must never create or start
+    /// anything here: a sweep that mistook a live runtime for an orphan would
+    /// otherwise be able to resurrect it as well as destroy it.
+    async fn sweep_orphans(
+        &self,
+        live: &std::collections::HashSet<String>,
+    ) -> Result<Vec<String>, RuntimeVendorError> {
+        let _ = live;
+        Ok(Vec::new())
+    }
     /// Build a runtime. Called exactly once per session; every later
     /// acquisition is [`Self::get`].
     async fn create(
