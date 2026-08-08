@@ -3,20 +3,11 @@ name = "horsie-mock-llm"
 license = "MIT OR Apache-2.0"
 version = "0.1.6"
 edition = "2024"
-publish = false # internal application crate, never published to crates.io
+publish = false # a test harness entrypoint, never published
 
 [dependencies]
-axum        = { workspace = true }
-tokio       = { workspace = true }
-serde       = { workspace = true }
-serde_json  = { workspace = true }
-futures     = "0.3"
-parking_lot = { workspace = true }
-uuid        = { workspace = true }
-
-[dev-dependencies]
-reqwest = { workspace = true }
-tokio   = { workspace = true, features = ["rt-multi-thread", "macros"] }
+async-llm = { workspace = true, features = ["mock"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

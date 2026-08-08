@@ -12,13 +12,13 @@
     clippy::wildcard_enum_match_arm
 )]
 
+use async_llm::mock::MockLlmServer;
 use async_trait::async_trait;
 use horsie_actor::{InMemoryJournal, Journal, spawn_root};
 use horsie_agentcore::{
     ContentPart, LlmProvider, Message, Role, ToolCallError, ToolCallPart, ToolSpec, Toolbox,
 };
 use horsie_anthropic::AnthropicProvider;
-use horsie_mock_llm::MockLlmServer;
 use horsie_models::agent::TextPart;
 use horsie_workflow::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentOutcome, AgentOutcomeSink, AgentParams,

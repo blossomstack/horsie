@@ -5,7 +5,7 @@ features through the real web UI, against a realistic-but-deterministic system:
 
 - **Real `horsie-server`** — the production binary, serving the built UI
   same-origin (`--web dist`) plus the HTTP + SSE API.
-- **Mock LLM** — `horsie-mock-llm` run as a process, with responses programmed
+- **Mock LLM** — `horsie-mock-llm` (a thin wrapper over `async-llm`'s mock server) run as a process, with responses programmed
   per test via its control plane (`/queue`, `/reset`).
 - **Real local runtime vendor** — a real `horsie-runtime` daemon dialing back
   via `horsie connect`, which dials `/api/vendor/connect` and spawns one runtime per session, and

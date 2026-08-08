@@ -44,8 +44,9 @@ const KIND_LABELS: Record<ProviderKind, string> = {
 const KIND_PLACEHOLDERS: Record<ProviderKind, string> = {
   anthropic: "https://api.anthropic.com",
   openai: "http://127.0.0.1:11434",
-  "openai-responses": "https://api.openai.com/v1",
-  chatgpt: "https://chatgpt.com/backend-api/codex",
+  // Bare hosts: the client appends the protocol's own path.
+  "openai-responses": "https://api.openai.com",
+  chatgpt: "https://chatgpt.com",
 };
 
 /** A ChatGPT provider is authorised by signing in, not by a stored key. */

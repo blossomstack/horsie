@@ -18,13 +18,12 @@ use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret, ThinkingDialect, ThinkingEffort};
 use horsie_anthropic::AnthropicProvider;
+use horsie_llm_adapters::chatgpt::{ChatGptTokens, ResponsesError, StoredTokens, TokenStore};
+use horsie_llm_adapters::{OpenAiProvider, ResponsesProvider};
 use horsie_models::settings::{
     ModelView, ProviderView, ServerInfo, SettingsUpdate, SettingsView, VendorCapabilities,
     VendorView,
 };
-use horsie_openai::OpenAiProvider;
-use horsie_openai_responses::ResponsesProvider;
-use horsie_openai_responses::chatgpt::{ChatGptTokens, DEFAULT_ISSUER, StoredTokens, TokenStore};
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -572,7 +571,7 @@ fn build_openai(
         .with_max_tokens(max_tokens)
         .with_thinking_dialect(thinking_dialect)
         .with_forced_tools_disable_thinking(forced_tools_disable_thinking)
-        .with_base_url(base_url.unwrap_or(horsie_openai::DEFAULT_BASE_URL));
+        .with_base_url(base_url.unwrap_or(horsie_llm_adapters::DEFAULT_BASE_URL));
     Ok(Arc::new(p))
 }
 
@@ -590,7 +589,9 @@ fn build_responses(
         .with_model(model_id)
         .with_max_tokens(max_tokens)
         .with_thinking_dialect(thinking_dialect)
-        .with_base_url(base_url.unwrap_or(horsie_openai_responses::DEFAULT_BASE_URL));
+        // Both OpenAI dialects now take a bare host: the client appends
+        // `/v1/chat/completions` or `/v1/responses` itself.
+        .with_base_url(base_url.unwrap_or(horsie_llm_adapters::DEFAULT_BASE_URL));
     Ok(Arc::new(p))
 }
 
@@ -632,24 +633,28 @@ struct DbTokenStore {
     provider: String,
 }
 
-// `Db` is not `Debug`, and the trait needs one. Naming the provider is all a
-// log line wants anyway — the pool is not interesting and the tokens must never
-// be printed.
-impl std::fmt::Debug for DbTokenStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DbTokenStore")
-            .field("provider", &self.provider)
-            .finish()
+#[async_trait]
+impl TokenStore for DbTokenStore {
+    async fn load(&self) -> Result<Option<StoredTokens>, ResponsesError> {
+        read_one_provider_oauth(&self.db, &self.user, &self.provider)
+            .await
+            .map_err(|e| ResponsesError::Authentication(e.to_string()))
+    }
+
+    async fn save(&self, tokens: StoredTokens) -> Result<(), ResponsesError> {
+        write_provider_oauth(&self.db, &self.user, &self.provider, &tokens)
+            .await
+            .map_err(|e| ResponsesError::Authentication(e.to_string()))
     }
 }
 
-#[async_trait]
-impl TokenStore for DbTokenStore {
-    async fn save(&self, tokens: &StoredTokens) -> Result<(), String> {
-        write_provider_oauth(&self.db, &self.user, &self.provider, tokens)
-            .await
-            .map_err(|e| e.to_string())
-    }
+/// The credential store one ChatGPT provider refreshes through.
+pub(crate) fn token_store(db: &Db, user: &UserId, provider: &str) -> Arc<dyn TokenStore> {
+    Arc::new(DbTokenStore {
+        db: db.clone(),
+        user: user.clone(),
+        provider: provider.to_string(),
+    })
 }
 
 /// Upsert one provider's credential.
@@ -675,14 +680,63 @@ pub(crate) async fn write_provider_oauth(
     ))
     .bind(user.as_str())
     .bind(provider)
-    .bind(&tokens.access)
-    .bind(&tokens.refresh)
-    .bind(tokens.expires_at)
-    .bind(&tokens.account_id)
+    .bind(&tokens.access_token)
+    .bind(&tokens.refresh_token)
+    .bind(expires_at_column(tokens))
+    .bind(tokens.account_id.clone().unwrap_or_default())
     .bind(now)
     .execute(db.pool())
     .await
     .map(|_| ())
+}
+
+// ── provider_oauth column mapping ────────────────────────────────────────────
+//
+// The table predates `async_llm::responses::chatgpt::StoredTokens`: it keeps its
+// own column names, and its `expires_at`/`account_id` are `NOT NULL` where the
+// struct has them optional. The `id_token` is deliberately not stored — the only
+// thing ever read out of it is the account id, which has its own column, so
+// persisting the raw JWT would be keeping a credential no one reads.
+
+/// An absent expiry is stored as `0`, which reads back as "expired" and so
+/// refreshes on first use — the safe direction for a `NOT NULL` column.
+fn expires_at_column(tokens: &StoredTokens) -> i64 {
+    tokens
+        .expires_at
+        .and_then(|expires_at| i64::try_from(expires_at).ok())
+        .unwrap_or(0)
+}
+
+fn stored_tokens_from_row(row: &sqlx::any::AnyRow) -> Result<StoredTokens, sqlx::Error> {
+    let account_id: String = row.try_get("account_id")?;
+    let expires_at: i64 = row.try_get("expires_at")?;
+    Ok(StoredTokens {
+        access_token: row.try_get("access")?,
+        refresh_token: row.try_get("refresh")?,
+        id_token: None,
+        account_id: Some(account_id).filter(|id| !id.is_empty()),
+        expires_at: u64::try_from(expires_at).ok(),
+    })
+}
+
+/// One provider's credential, as the refresh path re-reads it.
+async fn read_one_provider_oauth(
+    db: &Db,
+    user: &UserId,
+    provider: &str,
+) -> Result<Option<StoredTokens>, sqlx::Error> {
+    let sql = db.q(
+        "SELECT access, refresh, expires_at, account_id FROM provider_oauth \
+         WHERE user_id = ? AND provider = ?",
+    );
+    sqlx::query(&sql)
+        .bind(user.as_str())
+        .bind(provider)
+        .fetch_optional(db.pool())
+        .await?
+        .as_ref()
+        .map(stored_tokens_from_row)
+        .transpose()
 }
 
 /// Build the live `ChatGptTokens` for every stored credential.
@@ -694,14 +748,14 @@ fn live_chatgpt_tokens(
     stored
         .into_iter()
         .map(|(provider, tokens)| {
-            let store = Arc::new(DbTokenStore {
-                db: db.clone(),
-                user: user.clone(),
-                provider: provider.clone(),
-            });
+            let store = token_store(db, user, &provider);
             (
                 provider,
-                Arc::new(ChatGptTokens::new(tokens, store, DEFAULT_ISSUER)),
+                Arc::new(ChatGptTokens::new(
+                    tokens,
+                    store,
+                    horsie_llm_adapters::chatgpt_auth(),
+                )),
             )
         })
         .collect()
@@ -807,12 +861,7 @@ where
     for r in &rows {
         out.insert(
             r.try_get::<String, _>("provider")?,
-            StoredTokens {
-                access: r.try_get("access")?,
-                refresh: r.try_get("refresh")?,
-                expires_at: r.try_get("expires_at")?,
-                account_id: r.try_get("account_id")?,
-            },
+            stored_tokens_from_row(r)?,
         );
     }
     Ok(out)
@@ -1073,10 +1122,11 @@ mod tests {
             &UserId::new("1"),
             "p",
             &StoredTokens {
-                access: "a".into(),
-                refresh: "r".into(),
-                expires_at: 9_999_999_999,
-                account_id: "acct_1".into(),
+                access_token: "a".into(),
+                refresh_token: "r".into(),
+                id_token: None,
+                account_id: Some("acct_1".into()),
+                expires_at: Some(9_999_999_999),
             },
         )
         .await
@@ -1155,10 +1205,11 @@ mod tests {
             &UserId::new("1"),
             "p",
             &StoredTokens {
-                access: "a".into(),
-                refresh: "r".into(),
-                expires_at: 9_999_999_999,
-                account_id: "acct_1".into(),
+                access_token: "a".into(),
+                refresh_token: "r".into(),
+                id_token: None,
+                account_id: Some("acct_1".into()),
+                expires_at: Some(9_999_999_999),
             },
         )
         .await
@@ -1205,10 +1256,11 @@ mod tests {
             &UserId::new("1"),
             "p",
             &StoredTokens {
-                access: "a".into(),
-                refresh: "r".into(),
-                expires_at: 9_999_999_999,
-                account_id: "acct_1".into(),
+                access_token: "a".into(),
+                refresh_token: "r".into(),
+                id_token: None,
+                account_id: Some("acct_1".into()),
+                expires_at: Some(9_999_999_999),
             },
         )
         .await

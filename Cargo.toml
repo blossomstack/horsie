@@ -9,8 +9,7 @@ members = [
     "models",
     "support",
     "providers/anthropic",
-    "providers/openai",
-    "providers/openai-responses",
+    "providers/llm-adapters",
     "providers/mock-llm",
     "runtime-client",
     "mcp-client",
@@ -43,7 +42,9 @@ futures-util      = "0.3"
 uuid              = { version = "1", features = ["v4", "v5", "serde"] }
 rand              = "0.10"
 argon2            = "0.5"
-async-llm         = "0.8.0"
+# Protocol modules are opt-in per crate: `anthropic`, `openai`, `responses`,
+# `mock`. TLS is picked here so every member links the same reqwest backend.
+async-llm         = { version = "0.10.0", default-features = false, features = ["rustls"] }
 axum              = { version = "0.8", features = ["macros"] }
 tower-http        = { version = "0.7", features = ["fs"] }
 parking_lot       = "0.12"

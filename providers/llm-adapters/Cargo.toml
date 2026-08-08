@@ -1,0 +1,24 @@
+[package]
+name = "horsie-llm-adapters"
+license = "MIT OR Apache-2.0"
+# Tracks the workspace version: the release tag guard requires every crate to
+# match, published or not.
+version = "0.1.6"
+edition = "2024"
+publish = false
+
+[dependencies]
+horsie-agentcore = { path = "../../agentcore" }
+horsie-models = { path = "../../models" }
+async-llm = { workspace = true, features = ["openai", "responses"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio-stream = { workspace = true }
+
+[dev-dependencies]
+async-llm = { workspace = true, features = ["mock"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

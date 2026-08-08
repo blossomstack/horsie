@@ -11,10 +11,10 @@
 use crate::auth::UserId;
 use crate::config::ConfigStore;
 use crate::db::Db;
-use horsie_models::settings::SettingsUpdate;
-use horsie_openai_responses::chatgpt::{
-    DEFAULT_ISSUER, DeviceLogin, StoredTokens, poll_device_login, start_device_login,
+use horsie_llm_adapters::chatgpt::{
+    ChatGptAuth, DeviceLogin, DeviceLoginPoll, poll_device_login, start_device_login,
 };
+use horsie_models::settings::SettingsUpdate;
 use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -51,7 +51,7 @@ pub struct ChatGptLoginService {
     user: UserId,
     config: Arc<dyn ConfigStore>,
     http: reqwest::Client,
-    issuer: String,
+    auth: ChatGptAuth,
     /// In-flight logins, keyed by provider name. Deliberately in memory: a
     /// device code is valid for minutes, so a restart mid-login is a restart of
     /// the login, not a state-recovery problem.
@@ -66,7 +66,7 @@ impl ChatGptLoginService {
             user,
             config,
             http: reqwest::Client::new(),
-            issuer: DEFAULT_ISSUER.to_string(),
+            auth: horsie_llm_adapters::chatgpt_auth(),
             pending: RwLock::new(HashMap::new()),
         }
     }
@@ -75,7 +75,7 @@ impl ChatGptLoginService {
     /// OpenAI's, and there is no second deployment of it.
     #[must_use]
     pub fn with_issuer(mut self, issuer: impl Into<String>) -> Self {
-        self.issuer = issuer.into();
+        self.auth = self.auth.with_issuer(issuer);
         self
     }
 
@@ -110,14 +110,14 @@ impl ChatGptLoginService {
     pub async fn start(&self, provider: &str) -> Result<StartedLogin, LoginError> {
         self.require_chatgpt_provider(provider).await?;
 
-        let login = start_device_login(&self.http, &self.issuer)
+        let login = start_device_login(&self.http, &self.auth)
             .await
             .map_err(|e| LoginError::Upstream(e.to_string()))?;
 
         let started = StartedLogin {
             user_code: login.user_code.clone(),
-            verification_url: DeviceLogin::verification_url(&self.issuer),
-            interval_secs: login.interval_secs,
+            verification_url: login.verification_uri.clone(),
+            interval_secs: login.interval,
         };
         self.pending
             .write()
@@ -139,35 +139,33 @@ impl ChatGptLoginService {
             .cloned()
             .ok_or(LoginError::NotStarted)?;
 
-        let now = now_secs();
-        let tokens = poll_device_login(&self.http, &self.issuer, &login, now)
+        // An approval writes the credential through this store before it comes
+        // back, so the row is already there by the time the registry rebuilds.
+        let store = crate::config::store::token_store(&self.db, &self.user, provider);
+        let poll = poll_device_login(&self.http, &self.auth, &login, store)
             .await
             .map_err(|e| LoginError::Upstream(e.to_string()))?;
 
-        let Some(tokens) = tokens else {
+        let DeviceLoginPoll::Approved(tokens) = poll else {
             return Ok(PollOutcome::Pending);
         };
 
-        self.persist_and_apply(provider, &tokens).await?;
+        self.rebuild_registry().await?;
         self.pending
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(provider);
 
         Ok(PollOutcome::Complete {
-            account_id: tokens.account_id,
+            account_id: tokens
+                .account_id()
+                .await
+                .map_err(|e| LoginError::Upstream(e.to_string()))?
+                .unwrap_or_default(),
         })
     }
 
-    async fn persist_and_apply(
-        &self,
-        provider: &str,
-        tokens: &StoredTokens,
-    ) -> Result<(), LoginError> {
-        crate::config::store::write_provider_oauth(&self.db, &self.user, provider, tokens)
-            .await
-            .map_err(|e| LoginError::Upstream(e.to_string()))?;
-
+    async fn rebuild_registry(&self) -> Result<(), LoginError> {
         // An empty update changes nothing but rebuilds and swaps the registry,
         // which is exactly what a fresh credential needs: the provider was
         // unbuildable a moment ago.
@@ -221,16 +219,6 @@ impl ChatGptLoginService {
             .transpose()
             .map_err(|e: sqlx::Error| LoginError::Upstream(e.to_string()))
     }
-}
-
-fn now_secs() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    )
-    .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
