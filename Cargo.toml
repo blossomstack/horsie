@@ -1,19 +1,5 @@
 [workspace]
-members = [
-    "actor",
-    "agentcore",
-    "workflow",
-    "server",
-    "runtime-vendor",
-    "runtime",
-    "models",
-    "support",
-    "llm-providers",
-    "runtime-client",
-    "cli",
-    "velos-runtime",
-    "tests",
-]
+members = ["crates/*"]
 resolver = "2"
 
 [workspace.dependencies]

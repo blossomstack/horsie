@@ -147,7 +147,7 @@ jobs:
         run: |
           drift="$(git status --porcelain clients/ts/src/generated)"
           if [ -n "$drift" ]; then
-            echo "generated types are out of sync with models/fluorite:"
+            echo "generated types are out of sync with crates/models/fluorite:"
             echo "$drift"
             exit 1
           fi
