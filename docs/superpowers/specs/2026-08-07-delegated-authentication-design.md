@@ -117,13 +117,26 @@ The SPA offers a login page and a change-password form. Both are meaningless
 when identity lives elsewhere, and the password form is worse than meaningless:
 it points at an account horsie is no longer the authority for.
 
-`AuthStatus` gains two fields — that identity is managed externally, and where to
-send someone who is not signed in. In delegated mode the front layer serves
-`/api/auth/status`, so it fills them. The SPA hides the password form and
-redirects instead of rendering its own login page.
+`AuthStatus` gains three fields — that identity is managed externally, where to
+send someone who is not signed in, and where to finish signing out. In delegated
+mode the front layer serves `/api/auth/status`, so it fills them. The SPA hides
+the password form and redirects instead of rendering its own login page.
 
-This is the only wire change in the design, and the only reason the web client
-needs touching at all.
+The third field is what makes logging out mean one thing. A deployment behind an
+external identity provider has two sessions — the one horsie's front layer
+issued and the one the provider holds — and clearing only the first leaves
+someone signed in on a shared machine while the UI says otherwise. So logout
+clears the local session and then navigates to where the provider ends its own.
+OIDC calls this RP-initiated logout; horsie's part is one field and one line in
+the SPA's logout handler, which today only refreshes cached status
+(`clients/web/src/pages/settings/AccountSettings.tsx:139`).
+
+The reverse direction — the provider ending a session horsie's front layer
+issued — is deliberately not modelled here. It belongs to whoever issued the
+credential, and a deployment that needs it revokes through its own store.
+
+These fields are the only wire change in the design, and the only reason the web
+client needs touching at all.
 
 ## Composition
 
@@ -217,7 +230,8 @@ behind it.
 3. Mount the `/api/auth/*` group only outside delegated mode.
 4. `vendor_connect` reads the injected identity in delegated mode.
 5. `AuthStatus` fields, regenerated into both client trees; SPA hides the
-   password form and redirects when unauthenticated.
+   password form, redirects when unauthenticated, and continues to the
+   provider's logout after clearing the local session.
 6. `boot()` into the library as a builder; the binary keeps CLI parsing and
    `serve`.
 7. An operator guide: what the mode guarantees, what the front layer owes it
