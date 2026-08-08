@@ -110,6 +110,10 @@ export function SessionView() {
     try {
       await answerAsks.mutateAsync({
         id,
+        // Whoever asked is whoever this page is scoped to — a workflow step as
+        // readily as the main agent. A run has no main agent, so leaving this
+        // out is what made answering a parked step a no-op.
+        agentId: agentId ?? MAIN_AGENT,
         answers: pendingAsks
           .filter((a) => a.toolCallId)
           .map((a) => ({ toolCallId: a.toolCallId as string, text: answers[a.toolCallId as string] ?? "" })),

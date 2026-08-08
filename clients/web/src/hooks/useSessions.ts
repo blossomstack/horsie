@@ -200,11 +200,13 @@ export function useAnswerAsks() {
   return useMutation({
     mutationFn: ({
       id,
+      agentId,
       answers,
     }: {
       id: string;
+      agentId: string;
       answers: { toolCallId: string; text: string }[];
-    }) => api.sessions.answerAsks(id, answers),
+    }) => api.sessions.answerAsks(id, agentId, answers),
   });
 }
 

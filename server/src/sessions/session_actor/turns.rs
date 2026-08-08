@@ -23,6 +23,7 @@ use super::{
 };
 use crate::sessions::UserMessageError;
 use crate::sessions::spec::SessionStatus;
+use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
 use horsie_models::now_ms;
 use horsie_workflow::{AgentCommand, Incoming};
@@ -50,17 +51,34 @@ impl Turns {
                     .await
             }
             TurnCommand::Stop { reply } => {
-                if state.status != SessionStatus::Running {
+                // A run's step in flight is what a stop cancels there, and a
+                // step can be *parked* on a question rather than running — the
+                // run page offers Interrupt for that too — so the gate is "is
+                // there a step to stop", not the session's status.
+                let step = state.run.as_ref().and_then(WorkflowRunState::current);
+                if step.is_none() && state.status != SessionStatus::Running {
                     let _ = reply.send(());
                     return CommandEffect::none();
                 }
                 actor.cancel_in_flight(state).await;
                 let _ = reply.send(());
                 actor.report(SessionStatus::Idle).await;
-                // Stop is a turn boundary like any other: the agent drains
-                // whatever arrived while the cancelled turn ran, because a stop
-                // cancels the turn, not the promise.
-                let stopped = vec![SessionDomainEvent::TurnStopped { at_ms: now_ms() }];
+                let stopped = match step {
+                    // Cancelling the agent is not enough on a run: without this
+                    // the step's log entry stays `Running` for ever, so
+                    // `current()` never clears and the driver starts nothing
+                    // again — the run wedged while its page read "Running".
+                    // `StepCancelled` suspends it, which is the state a retry
+                    // can move.
+                    Some(index) => vec![SessionDomainEvent::StepCancelled {
+                        at_ms: now_ms(),
+                        index,
+                    }],
+                    // Stop is a turn boundary like any other: the agent drains
+                    // whatever arrived while the cancelled turn ran, because a
+                    // stop cancels the turn, not the promise.
+                    None => vec![SessionDomainEvent::TurnStopped { at_ms: now_ms() }],
+                };
                 actor.persist_and_advance(state, stopped, ctx).await
             }
             TurnCommand::Answer {
@@ -276,8 +294,13 @@ impl Component for Turns {
     }
 
     /// A turn the process died inside is over; recovery records that.
-    fn on_load(_cx: &ActionCx<'_>, state: &SessionState) -> Option<SessionCommand> {
-        (state.status == SessionStatus::Running)
+    ///
+    /// Not for a run: `TurnInterrupted` says only that the *session* stopped
+    /// running, and a run needs its step marked too. `WorkflowRun` repairs that
+    /// one, so leaving this to fire as well would record a turn boundary the run
+    /// never had and report `Idle` over the `Suspended` the repair lands on.
+    fn on_load(cx: &ActionCx<'_>, state: &SessionState) -> Option<SessionCommand> {
+        (cx.spec.workflow.is_none() && state.status == SessionStatus::Running)
             .then_some(SessionCommand::Turn(TurnCommand::ReconcileInterrupted))
     }
 

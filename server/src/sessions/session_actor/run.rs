@@ -46,6 +46,16 @@ impl WorkflowRun {
             RunCommand::RetryStep { index, reply } => {
                 actor.on_retry_step(state, index, reply, ctx).await
             }
+            RunCommand::ReconcileInterrupted => {
+                let Some(index) = state.run.as_ref().and_then(WorkflowRunState::current) else {
+                    return CommandEffect::none();
+                };
+                actor.report(SessionStatus::Idle).await;
+                CommandEffect::persist(vec![SessionDomainEvent::StepCancelled {
+                    at_ms: now_ms(),
+                    index,
+                }])
+            }
         }
     }
 }
@@ -329,13 +339,24 @@ impl Component for WorkflowRun {
     /// Gated on the *spec*: a conversation also has no run state, and reading
     /// only the state would advance one — which, for a session holding a
     /// subagent result nobody has collected, silently starts a turn at load.
+    ///
+    /// A step left in flight is the other thing recovery finds, and it is not
+    /// resumed: how far it got is unknowable, and its effect on the shared
+    /// workspace with it. It is suspended instead, which is what makes a retry
+    /// the person's decision. Without this the entry stayed `Running`, so
+    /// `current()` never cleared and the run started nothing ever again.
     fn on_load(cx: &ActionCx<'_>, state: &SessionState) -> Option<SessionCommand> {
         cx.spec.workflow.as_ref()?;
-        let unstarted = match &state.run {
-            None => true,
-            Some(run) => run.status == crate::sessions::workflow::WorkflowRunStatus::Pending,
-        };
-        unstarted.then_some(SessionCommand::Run(RunCommand::Advance))
+        match &state.run {
+            None => Some(SessionCommand::Run(RunCommand::Advance)),
+            Some(run) if run.current().is_some() => {
+                Some(SessionCommand::Run(RunCommand::ReconcileInterrupted))
+            }
+            Some(run) if run.status == crate::sessions::workflow::WorkflowRunStatus::Pending => {
+                Some(SessionCommand::Run(RunCommand::Advance))
+            }
+            Some(_) => None,
+        }
     }
 
     fn busy(state: &SessionState) -> bool {
@@ -621,5 +642,228 @@ mod tests {
 
         f.agent.release_creates();
         wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
+    }
+
+    /// A step asks, is answered *without* the caller naming it, and the run
+    /// carries on.
+    ///
+    /// Three separate defects met here. A run has no main agent, so an
+    /// unaddressed answer resolved nothing and silently did nothing; the web
+    /// client sent exactly that. And nothing ever cleared `AwaitingInput`, so
+    /// even a delivered answer resumed the step and then stalled the run at the
+    /// step it had just finished.
+    #[tokio::test]
+    async fn a_parked_step_is_answered_unaddressed_and_the_run_carries_on() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([
+                Ok(asks("p0 or p2?")),
+                Ok(concludes(serde_json::json!({"severity": "p0"}))),
+            ])
+            .then_repeating_with(|| {
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::Text(
+                        horsie_agentcore::TextPart {
+                            text: "fixed".to_string(),
+                        },
+                    )],
+                    stop_reason: horsie_agentcore::StopReason::EndTurn,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                })
+            }),
+        );
+        let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
+
+        let parked = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::AwaitingInput
+        })
+        .await;
+        assert_eq!(
+            parked.steps[0].status,
+            crate::sessions::workflow::StepStatus::Running,
+            "the step is still running, parked on its question"
+        );
+
+        // Unaddressed, which is the case that used to resolve nothing: a run has
+        // no main agent, so the step in flight is the only thing this can mean.
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::Answer {
+                    agent_id: None,
+                    answers: vec![answer(ASK_CALL_ID, "p0")],
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("an unaddressed answer must reach the step in flight");
+
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+        let visited: Vec<&str> = run.steps.iter().map(|s| s.step.as_str()).collect();
+        assert_eq!(
+            visited,
+            vec!["triage", "fix"],
+            "the answer decided the branch"
+        );
+    }
+
+    /// Interrupting a run suspends it. Cancelling the agent was never enough:
+    /// the step's entry stayed `Running`, so `current()` never cleared and the
+    /// driver started nothing ever again — the run wedged while its page read
+    /// "Running".
+    #[tokio::test]
+    async fn interrupting_a_run_cancels_its_step_and_suspends_it() {
+        let provider = BlockingProvider::new();
+        let (_f, session, id, journal) =
+            spawn_run_with_provider(provider.clone() as Arc<dyn LlmProvider>).await;
+
+        wait_for_run(&journal, id, |r| r.current() == Some(0)).await;
+        session
+            .ask(|reply| SessionCommand::Turn(TurnCommand::Stop { reply }))
+            .await
+            .unwrap();
+
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Suspended
+        })
+        .await;
+        assert_eq!(
+            run.steps[0].status,
+            crate::sessions::workflow::StepStatus::Cancelled
+        );
+        assert!(
+            run.current().is_none(),
+            "nothing is in flight, so a retry can move the run"
+        );
+        provider.release();
+    }
+
+    /// A step the process died inside is suspended at load, not resumed: how far
+    /// it got is unknowable and its effect on the shared workspace with it. The
+    /// guide has always promised this; nothing implemented it, so the entry
+    /// stayed `Running` and the run was unrecoverable except through a retry
+    /// nobody was told to make.
+    #[tokio::test]
+    async fn recovery_suspends_a_run_whose_step_was_interrupted() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let mut spec = actor_spec_fixture();
+        spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
+            workflow: "fix-bug".into(),
+        };
+        spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "mock", &spec)
+            .await
+            .expect("create");
+
+        // A journal that stops mid-step, which is exactly what a crash leaves.
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let pid = SessionActor::persistence_id_for(id);
+        let events: Vec<Vec<u8>> = [SessionDomainEvent::StepStarted {
+            at_ms: 0,
+            index: 0,
+            step: "triage".into(),
+            agent: crate::sessions::workflow::WorkflowRunSpec::step_agent_id(id, 0),
+            attempt: 1,
+            from: None,
+            via: None,
+            input: "Triage it.".into(),
+        }]
+        .iter()
+        .map(|e| serde_json::to_vec(e).unwrap())
+        .collect();
+        journal.persist(&pid, &events).await.unwrap();
+
+        let _session = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                spec,
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
+            ),
+            journal.clone(),
+        );
+
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Suspended
+        })
+        .await;
+        assert_eq!(
+            run.steps[0].status,
+            crate::sessions::workflow::StepStatus::Cancelled
+        );
+        assert_eq!(run.steps.len(), 1, "recovery starts nothing by itself");
+    }
+
+    /// A finished run's step transcript survives the session unloading.
+    ///
+    /// Every agent-scoped read resolves through `resolve_agent`, and a reloaded
+    /// run holds an empty roster — so before a step could be spawned on demand,
+    /// the step page went permanently blank the moment the session went idle.
+    #[tokio::test]
+    async fn a_cold_steps_transcript_is_still_readable_after_a_reload() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+                || {
+                    Ok(horsie_agentcore::CompletionResponse {
+                        parts: vec![horsie_agentcore::ContentPart::Text(
+                            horsie_agentcore::TextPart {
+                                text: "fixed".to_string(),
+                            },
+                        )],
+                        stop_reason: horsie_agentcore::StopReason::EndTurn,
+                        usage: horsie_agentcore::Usage::without_cache(1, 1),
+                    })
+                },
+            ),
+        );
+        let (f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+        let step_agent = run.steps[0].agent;
+
+        // A second actor over the same journal: nothing is resident, which is
+        // every read after an idle offload or a restart.
+        let mut spec = actor_spec_fixture();
+        spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
+            workflow: "fix-bug".into(),
+        };
+        spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
+        let reloaded = horsie_actor::spawn_root(
+            SessionActor::new(
+                id,
+                spec,
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
+            ),
+            journal.clone(),
+        );
+
+        let log = reloaded
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::ReadLog {
+                    agent_id: Some(step_agent.to_string()),
+                    after: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("a cold step must resolve to its own agent");
+        assert!(
+            !log.entries.is_empty(),
+            "the step's transcript is what the step page shows"
+        );
     }
 }

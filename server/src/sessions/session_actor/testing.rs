@@ -402,6 +402,29 @@ pub(super) fn concludes(output: serde_json::Value) -> horsie_agentcore::Completi
     }
 }
 
+/// A scripted `conclude` call that asks rather than submitting.
+///
+/// A step asks through `conclude`, not `ask_user`: naming `ask_user` beside it
+/// would stop the loop treating `conclude` as terminal. With an output schema
+/// and asking allowed, the payload is kind-tagged, so the question rides under
+/// `kind: "ask"`.
+pub(super) fn asks(question: &str) -> horsie_agentcore::CompletionResponse {
+    horsie_agentcore::CompletionResponse {
+        parts: vec![horsie_agentcore::ContentPart::ToolCall(
+            horsie_agentcore::ToolCallPart {
+                id: ASK_CALL_ID.into(),
+                name: "conclude".into(),
+                input: serde_json::json!({"kind": "ask", "question": question}),
+            },
+        )],
+        stop_reason: horsie_agentcore::StopReason::ToolUse,
+        usage: horsie_agentcore::Usage::without_cache(1, 1),
+    }
+}
+
+/// The tool-call id [`asks`] parks on, which is what an answer has to name.
+pub(super) const ASK_CALL_ID: &str = "a-1";
+
 /// Poll the session's folded state until the tree satisfies `pred` (2s
 /// cap). Subagent progress is journal-first, so the fold is the honest
 /// thing to wait on.

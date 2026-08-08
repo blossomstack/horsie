@@ -164,12 +164,21 @@ impl WorkflowRunState {
         self.status = WorkflowRunStatus::Running;
     }
 
+    /// A step concluded, so the run is between steps — which is `Running` until
+    /// the driver decides the next one, finishes it or fails it in this same
+    /// batch.
+    ///
+    /// The status has to be *reasserted* because of the one path that leaves it
+    /// something else: a step parked on a question sets `AwaitingInput`, and
+    /// nothing else ever cleared it. Answering therefore resumed the step and
+    /// then stalled the run at the very step it had just finished.
     pub fn apply_concluded(&mut self, index: u32, output: Value, at_ms: u64) {
         if let Some(s) = self.steps.get_mut(index as usize) {
             s.status = StepStatus::Concluded;
             s.output = Some(output);
             s.ended_at_ms = Some(at_ms);
         }
+        self.status = WorkflowRunStatus::Running;
     }
 
     pub fn apply_step_failed(&mut self, index: u32, error: String, at_ms: u64) {
