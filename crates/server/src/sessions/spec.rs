@@ -170,6 +170,8 @@ impl SessionSpec {
             plugins: vec![],
             origin: SessionOrigin::User,
             workflow: None,
+            environment: None,
+            env_vars: vec![],
         }
     }
 

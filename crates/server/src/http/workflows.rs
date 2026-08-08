@@ -218,7 +218,11 @@ pub async fn start_run(
     .await?;
     // Checked on the *resolved* vendor: a named environment carries its own,
     // so there is nothing to check until the environment has been read.
-    if !state.connected_vendors.connected_names().contains(&spec.vendor) {
+    if !state
+        .connected_vendors
+        .connected_names()
+        .contains(&spec.vendor)
+    {
         return Err(Api::unprocessable(format!(
             "runtime vendor '{}' is not connected",
             spec.vendor
