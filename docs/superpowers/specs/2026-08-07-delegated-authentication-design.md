@@ -72,30 +72,44 @@ test, not a comment.
 
 ### 3. In this mode horsie mounts no credential routes at all
 
-The whole `/api/auth/*` family — login, logout, password, refresh, the
-device-code flow, machine tokens — belongs to the front layer.
+Two prefixes belong entirely to the front layer, and nothing else does.
+
+The credential surface is also **regrouped** by this change, because it was
+never grouped by anything: `/api/auth/device/*` and `/api/auth/tokens` are about
+a machine's credential, `/api/auth/login` and `/password` are about a person's
+browser session, and they sat under one prefix because they were all written by
+the same feature. The split is by *whose* credential it is:
+
+| Path | Default | Delegated | Was |
+| --- | --- | --- | --- |
+| `/api/auth/status` | horsie | front layer | — |
+| `/api/auth/login`, `/logout`, `/password` | horsie | front layer | — |
+| `/api/device/auth/code` | horsie | front layer | `/api/auth/device/code` |
+| `/api/device/auth/token` | horsie | front layer | `/api/auth/device/token` |
+| `/api/device/auth/refresh` | horsie | front layer | `/api/auth/refresh` |
+| `/api/device/approve`, `/deny` | horsie | front layer | `/api/auth/device/{approve,deny}` |
+| `/api/device/tokens`, `/tokens/{id}` | horsie | front layer | `/api/auth/tokens` |
+| everything else | horsie | horsie | |
+
+So `/api/auth/*` is the person in the browser, `/api/device/*` is every
+credential a machine holds — obtaining one, rotating it, approving one, and
+listing or revoking the ones that exist. `auth` appears a second level down only
+where the endpoint is the device *obtaining* a credential rather than being
+managed.
 
 Not mounted, rather than mounted-and-404. axum panics when two merged routers
 claim the same path, so leaving these unmounted is precisely what lets the front
-layer serve those paths itself, under its own identity model. That is what keeps
-the rest of the product working unchanged:
+layer serve them itself, under its own identity model.
 
-| Path | Default | Delegated |
-| --- | --- | --- |
-| `/api/auth/login`, `/logout`, `/password` | horsie | front layer |
-| `/api/auth/device/code`, `/token`, `/approve`, `/deny` | horsie | front layer |
-| `/api/auth/refresh`, `/api/auth/tokens` | horsie | front layer |
-| `/api/auth/status` | horsie | front layer |
-| everything else | horsie | horsie |
+**This breaks older clients, deliberately.** `horsie auth login` posts to the
+device endpoints on whatever server URL it was given (`cli/src/auth.rs:301`),
+and the approval page posts from the web UI (`clients/web/src/api/client.ts:164`),
+so both move with the routes and a CLI from before this change cannot log in to
+a server after it. No aliases are kept: two spellings of an authentication
+endpoint is how one of them quietly stops being maintained.
 
-`horsie auth login` posts to `/api/auth/device/code` and `/api/auth/device/token`
-on whatever server URL it was given (`cli/src/auth.rs:301`), and the approval
-page is the web UI's own `/auth/device` route. Neither cares who implements
-those paths. So a front layer that serves them gets an unmodified CLI and an
-unmodified browser flow.
-
-A front layer that does so must match one contract exactly: the poll error codes
-`authorization_pending`, `slow_down`, `access_denied` and `expired_token`
+A front layer serving these must match one contract exactly: the poll error
+codes `authorization_pending`, `slow_down`, `access_denied` and `expired_token`
 (`cli/src/auth.rs:220`). Anything else is read as "keep polling", so a
 misspelled denial becomes an infinite loop rather than an error.
 
@@ -171,7 +185,9 @@ the binary keeps argument parsing and `serve`.
 - **Deleting an account.** Still out of scope, for the reasons the scoping
   design gives: no `purge_user`, no cascades, and `PRAGMA foreign_keys` is never
   enabled, so a declared one would be silently ignored on SQLite.
-- **The wire protocol**, apart from the two `AuthStatus` fields.
+- **The wire protocol**, apart from the three `AuthStatus` fields. The bodies
+  and error codes of the moved credential endpoints are untouched; only their
+  paths change.
 
 ## Risks
 
@@ -187,6 +203,12 @@ the binary keeps argument parsing and `serve`.
   it would break exactly here, where nobody is looking.
 - **Two generated client trees.** An `AuthStatus` change has to be regenerated
   into both `clients/web` and `clients/ts`; CI drift-checks only the latter.
+- **A path move has no compile-time backstop.** Route strings, the CLI's URLs
+  and the SPA's fetches are string literals in three places that no type
+  connects. What covers it is e2e: `o-device-approval.spec.ts` drives a real
+  device login end to end and `p-machine-tokens.spec.ts` the token list, both
+  against a real auth-enabled server. Those two are the reason this rename is
+  safe to make; a moved path they did not cover would ship broken.
 
 ## Rejected alternatives
 
@@ -227,7 +249,9 @@ behind it.
    boolean cannot express three states, and no compatibility shim: the config
    shape changes.
 2. The third branch in `require_auth`, plus the `401`-not-anonymous test.
-3. Mount the `/api/auth/*` group only outside delegated mode.
+3. Regroup the credential surface into `/api/auth/*` and `/api/device/*`, moving
+   the CLI, the SPA and both generated type trees with it, and mount neither
+   group in delegated mode.
 4. `vendor_connect` reads the injected identity in delegated mode.
 5. `AuthStatus` fields, regenerated into both client trees; SPA hides the
    password form, redirects when unauthenticated, and continues to the
