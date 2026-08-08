@@ -47,10 +47,13 @@ already says it, and a vendor that cannot provision already rejects a non-empty
 `repos` at create; a `Local {}` variant would be a second way to say the same
 thing, and would hardcode a vendor name into the protocol.
 
-The types live in `environments.fl`, which means `RepoConfig` moves there from
-`session_api.fl`. The traffic is about to reverse — `session_api`, `workflow`
-and `routines` all need `EnvironmentSpec` — and leaving `RepoConfig` where it is
-would make `environments` and `session_api` import each other.
+The types live in `environments.fl`, beside the environment they describe.
+`RepoConfig` stays in `session_api.fl`, so the two packages end up importing
+each other — `environments` takes `RepoConfig`, `session_api` takes
+`EnvironmentSpec`. Both fluorite backends accept that: the Rust and TypeScript
+generators were each run against the cycle before this was written down, and
+neither cares. Moving `RepoConfig` to break a cycle nothing objects to would be
+churn across every file that names a repo.
 
 ### Every creation path takes one, and it is required
 
