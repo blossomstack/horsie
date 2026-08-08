@@ -1,5 +1,4 @@
 
-import { RepoConfig } from '../session_api';
 /**
  * An agent preset as shown to clients.
  */
@@ -13,10 +12,6 @@ export interface AgentView {
    * Configured model alias.
    */
   model: string;
-  /**
-   * Repositories cloned into the session workspace at provision time.
-   */
-  repos: RepoConfig[];
   /**
    * Selected plugin-bundle (skill) names.
    */

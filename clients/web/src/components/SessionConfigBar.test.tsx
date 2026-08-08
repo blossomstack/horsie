@@ -50,13 +50,22 @@ describe("SessionConfigBar locked mode", () => {
     expect(queryByTestId("config-thinking")).toBeNull();
   });
 
-  it("always names the runtime and the model", () => {
+  it("always names the environment and the model", () => {
     const { getByTestId } = renderLocked(detail());
-    expect(getByTestId("config-runtime").getAttribute("aria-label")).toBe(
-      "Runtime — local",
+    // An ad-hoc environment has no name of its own, so the key reads the
+    // vendor it resolved to.
+    expect(getByTestId("config-environment").getAttribute("aria-label")).toBe(
+      "Environment — local",
     );
     expect(getByTestId("config-model").getAttribute("aria-label")).toBe(
       "Model — sonnet",
+    );
+  });
+
+  it("leads with the predefined environment when the session named one", () => {
+    const { getByTestId } = renderLocked(detail({ environment: "staging" }));
+    expect(getByTestId("config-environment").getAttribute("aria-label")).toBe(
+      "Environment — staging",
     );
   });
 
@@ -67,19 +76,27 @@ describe("SessionConfigBar locked mode", () => {
   });
 
   it("omits a workspace channel the session does not have", () => {
-    // A non-provisioning vendor has no repos, and five keys all reading
+    // Skills, MCP and memory drop out when empty: five keys all reading
     // "None" is a row that says nothing.
-    const { queryByTestId } = renderLocked(detail({ repos: [] }));
-    expect(queryByTestId("config-repos")).toBeNull();
+    const { queryByTestId } = renderLocked(detail({ plugins: [] }));
+    expect(queryByTestId("config-skills")).toBeNull();
+    const withOne = renderLocked(detail({ plugins: ["superpowers"] }));
+    expect(withOne.queryByTestId("config-skills")).not.toBeNull();
   });
 
-  it("shows a workspace channel the session does have", () => {
-    const { getByTestId } = renderLocked(
-      detail({ repos: ["https://github.com/acme/widgets.git"] }),
+  // Repos are no longer a key of their own — they are what the environment
+  // resolved to, so they read inside it, exactly as they are picked.
+  it("reads the environment's vendor and repos inside its own key", () => {
+    const { getByTestId, getByText } = renderLocked(
+      detail({
+        environment: "staging",
+        repos: ["https://github.com/acme/widgets.git"],
+      }),
     );
-    expect(getByTestId("config-repos").getAttribute("aria-label")).toBe(
-      // `basename` keeps the .git suffix, as it always has.
-      "Repos — widgets.git",
-    );
+    fireEvent.click(getByTestId("config-environment"));
+    expect(getByText("staging")).toBeTruthy();
+    expect(getByText("local")).toBeTruthy();
+    // `basename` keeps the .git suffix, as it always has.
+    expect(getByText("widgets.git")).toBeTruthy();
   });
 });

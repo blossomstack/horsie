@@ -3,7 +3,10 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError } from "../../api/client";
 import type { RoutineInput, RoutineSchedule, RoutineView } from "../../api/types";
 import { Weekday } from "../../api/types";
+import { PopoverMenu } from "../../components/PopoverMenu";
+import { useEnvironmentPicker } from "../../components/configPickers";
 import { useAgents } from "../../hooks/useAgents";
+import { useEnvironmentChannel } from "../../hooks/useEnvironmentChannel";
 import {
   useCreateRoutine,
   useRoutine,
@@ -76,6 +79,9 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
   const [routineName, setRoutineName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
   const [agent, setAgent] = useState(initial?.agent ?? "");
+  // The same channel the new-session bar uses, rendered as a field below.
+  const environment = useEnvironmentChannel(initial?.environment);
+  const environmentPicker = useEnvironmentPicker(environment);
   const [prompt, setPrompt] = useState(initial?.prompt ?? "");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [kind, setKind] = useState<ScheduleKind>(
@@ -145,6 +151,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
     !busy &&
     routineName.trim() !== "" &&
     agent !== "" &&
+    environment.chosen &&
     prompt.trim() !== "" &&
     scheduleValid;
 
@@ -201,6 +208,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
       name: routineName.trim(),
       description: description.trim() || undefined,
       agent,
+      environment: environment.spec,
       prompt: prompt.trim(),
       schedule: buildSchedule(),
       enabled,
@@ -270,10 +278,28 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
               ))}
             </select>
             <span className="mt-1 block text-[0.6875rem] text-faint">
-              The routine runs with this agent’s runtime, model, repos, skills
-              and memory. Edit those on the Agents page.
+              The routine runs with this agent’s model, skills and memory. Edit
+              those on the Agents page.
             </span>
           </label>
+
+          <div>
+            <PopoverMenu
+              variant="field"
+              placement="down"
+              testId={environmentPicker.testId}
+              legend={environmentPicker.legend}
+              icon={environmentPicker.icon}
+              label={environmentPicker.label}
+              width={environmentPicker.width}
+            >
+              {environmentPicker.body}
+            </PopoverMenu>
+            <span className="mt-1 block text-[0.6875rem] text-faint">
+              Where every run happens. A run whose environment has gone — an
+              offline runtime, a deleted environment — fails and says so here.
+            </span>
+          </div>
 
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-dim">

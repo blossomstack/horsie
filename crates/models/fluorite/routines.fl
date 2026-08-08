@@ -3,6 +3,7 @@
 /// sessions are listed under the routine, never in the session list.
 package routines;
 
+use environments.EnvironmentSpec;
 use session.SessionSummary;
 
 /// Triggered only by hand: the web UI's run button, or the run endpoint.
@@ -69,6 +70,10 @@ struct RoutineView {
     description: String,
     /// Name of the agent preset every run is configured from.
     agent: String,
+    /// Where every run happens. Required: a routine that cannot say where it
+    /// runs is worse than one that says something which later breaks, and a
+    /// break is already visible — it lands in `last_error`.
+    environment: EnvironmentSpec,
     /// The message queued as each run's first user message.
     prompt: String,
     schedule: RoutineSchedule,
@@ -95,6 +100,7 @@ struct RoutineInput {
     name: String,
     description: Option<String>,
     agent: String,
+    environment: EnvironmentSpec,
     prompt: String,
     schedule: Option<RoutineSchedule>,
     enabled: Option<bool>,

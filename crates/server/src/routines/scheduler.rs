@@ -183,7 +183,6 @@ mod tests {
                 name: "reviewer".into(),
                 description: None,
                 model: "sonnet".into(),
-                repos: None,
                 plugins: None,
                 mcp_servers: None,
                 memory_spaces: None,
@@ -209,6 +208,12 @@ mod tests {
 
     fn routine(name: &str, schedule: RoutineSchedule) -> RoutineInput {
         RoutineInput {
+            environment: horsie_models::environments::EnvironmentSpec::Runtime(
+                horsie_models::environments::RuntimeEnvironment {
+                    vendor: "mock".into(),
+                    repos: None,
+                },
+            ),
             name: name.into(),
             description: Some("d".into()),
             agent: "reviewer".into(),

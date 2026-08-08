@@ -60,6 +60,11 @@ test("Q2: a routine is created, run, and its run is listed only under it", async
     .getByTestId("routine-agent-select")
     .selectOption("e2e-routine-agent");
   await page.getByTestId("routine-prompt-input").fill("say hello");
+  // A routine must say where it runs; save stays blocked until it does.
+  await expect(page.getByTestId("save-routine-button")).toBeDisabled();
+  await page.getByTestId("config-environment").click();
+  await page.locator('[data-testid="environment-option"][data-value="e2e"]').click();
+  await page.keyboard.press("Escape");
   await page.getByTestId("save-routine-button").click();
 
   // Lands on the detail page, showing the definition.
@@ -94,6 +99,7 @@ test("Q3: deleting a routine takes its runs with it", async ({
     data: {
       name: "e2e-doomed",
       agent: "e2e-doomed-agent",
+      environment: { type: "Runtime", value: { vendor: "e2e" } },
       prompt: "say hello",
     },
   });

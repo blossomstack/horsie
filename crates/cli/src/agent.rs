@@ -4,6 +4,7 @@
 use crate::error::CliError;
 use crate::server_client::ServerClient;
 use horsie_models::agents::{AgentInvokeRequest, AgentView};
+use horsie_models::environments::EnvironmentSpec;
 
 /// Clip `s` to `max` display columns, marking elision with an ellipsis. Used
 /// for table cells (agent descriptions, marketplace descriptions) that
@@ -35,6 +36,7 @@ pub async fn invoke(
     server: &str,
     name: &str,
     message: String,
+    environment: EnvironmentSpec,
     session_name: Option<String>,
 ) -> Result<(), CliError> {
     let client = ServerClient::new(server).await?;
@@ -43,6 +45,7 @@ pub async fn invoke(
             name,
             &AgentInvokeRequest {
                 message,
+                environment,
                 name: session_name,
             },
         )
@@ -81,14 +84,6 @@ fn render_agent_detail(a: &AgentView) -> String {
     if let Some(e) = a.thinking_effort.as_deref() {
         out.push_str(&format!("thinking    {e}\n"));
     }
-    for r in &a.repos {
-        let git_ref = r
-            .git_ref
-            .as_deref()
-            .map(|g| format!(" @ {g}"))
-            .unwrap_or_default();
-        out.push_str(&format!("repo        {}{git_ref}\n", r.url));
-    }
     if !a.plugins.is_empty() {
         out.push_str(&format!("skills      {}\n", a.plugins.join(", ")));
     }
@@ -116,7 +111,6 @@ mod tests {
             name: name.into(),
             description: "reviews PRs".into(),
             model: "sonnet".into(),
-            repos: vec![],
             plugins: vec!["superpowers".into()],
             mcp_servers: vec![],
             memory_spaces: vec!["default".into()],

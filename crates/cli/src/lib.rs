@@ -2,6 +2,7 @@ pub mod agent;
 pub mod auth;
 pub mod config;
 pub mod connect;
+pub mod environment;
 pub mod error;
 pub mod routines;
 pub mod server_client;

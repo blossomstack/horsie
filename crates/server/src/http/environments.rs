@@ -1,5 +1,6 @@
 //! HTTP surface for environments: CRUD for the web UI. There is no invoke or
-//! run endpoint — nothing consumes an environment yet.
+//! run endpoint — an environment is named by whoever creates a session, not
+//! started by itself.
 
 use super::Scope;
 use super::error::Api;
@@ -66,8 +67,10 @@ pub async fn replace_environment(
 
 /// DELETE /api/environments/:name
 ///
-/// Unconditional: nothing references an environment yet, so there is no
-/// in-use guard like the agents one. When wiring arrives, revisit this.
+/// Unconditional. A session snapshotted everything it needed at creation, so it
+/// is unaffected; a routine holds the only durable reference, and its next run
+/// records `unknown environment '<name>'` in `last_error` — the same way it
+/// already reports an agent preset that was deleted under it.
 pub async fn delete_environment(
     Scope(state): Scope,
     Path(name): Path<String>,

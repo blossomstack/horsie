@@ -15,6 +15,12 @@ export interface SessionDetail {
    */
   annotations: AnnotationEntry[];
   model: string;
+  /**
+   * The predefined environment this session was created from; absent when it
+   * was created from an ad-hoc runtime. `vendor` and `repos` are what it
+   * resolved to, and stay the answer to what the session actually got.
+   */
+  environment?: string;
   vendor: string;
   /**
    * Clone URLs of the session's provisioned repos (empty when none).

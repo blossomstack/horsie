@@ -1,24 +1,13 @@
 //! Storage for agent presets, sharing the config store's database.
-//! List-typed columns are JSON; `AgentRepo` is the storage twin of the wire
-//! `session_api::RepoConfig` (protocol types are not storage types).
+//! List-typed columns are JSON.
 
 use crate::auth::UserId;
 use crate::db::Db;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
-const COLS: &str = "name, description, model, repos, plugins, \
+const COLS: &str = "name, description, model, plugins, \
                     mcp_servers, memory_spaces, thinking_effort, created_at, updated_at";
-
-/// One repo to clone at provision time (storage twin of wire `RepoConfig`).
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct AgentRepo {
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
-}
 
 /// One row of the `agents` table.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,7 +15,6 @@ pub struct AgentRow {
     pub name: String,
     pub description: String,
     pub model: String,
-    pub repos: Vec<AgentRepo>,
     pub plugins: Vec<String>,
     pub mcp_servers: Vec<String>,
     pub memory_spaces: Vec<String>,
@@ -73,13 +61,12 @@ impl AgentStore {
     /// would discard the existing preset).
     pub async fn insert(&self, row: &AgentRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO agents (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO agents (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(self.user.as_str())
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.model)
-        .bind(to_json(&row.repos)?)
         .bind(to_json(&row.plugins)?)
         .bind(to_json(&row.mcp_servers)?)
         .bind(to_json(&row.memory_spaces)?)
@@ -94,14 +81,11 @@ impl AgentStore {
 
     /// Full replace. Returns false when no agent has that name.
     pub async fn replace(&self, row: &AgentRow) -> Result<bool, String> {
-        let res = sqlx::query(&self.db.q(
-            "UPDATE agents SET description = ?, model = ?, repos = ?, \
+        let res = sqlx::query(&self.db.q("UPDATE agents SET description = ?, model = ?, \
              plugins = ?, mcp_servers = ?, memory_spaces = ?, thinking_effort = ?, \
-             updated_at = ? WHERE user_id = ? AND name = ?",
-        ))
+             updated_at = ? WHERE user_id = ? AND name = ?"))
         .bind(&row.description)
         .bind(&row.model)
-        .bind(to_json(&row.repos)?)
         .bind(to_json(&row.plugins)?)
         .bind(to_json(&row.mcp_servers)?)
         .bind(to_json(&row.memory_spaces)?)
@@ -148,7 +132,6 @@ fn row_to_agent(row: &AnyRow) -> Result<AgentRow, String> {
         name: get("name")?,
         description: get("description")?,
         model: get("model")?,
-        repos: from_json("repos", get("repos")?)?,
         plugins: from_json("plugins", get("plugins")?)?,
         mcp_servers: from_json("mcp_servers", get("mcp_servers")?)?,
         memory_spaces: from_json("memory_spaces", get("memory_spaces")?)?,
@@ -174,11 +157,6 @@ mod tests {
             name: name.into(),
             description: "d".into(),
             model: "sonnet".into(),
-            repos: vec![AgentRepo {
-                url: "https://github.com/o/api".into(),
-                git_ref: Some("dev".into()),
-                dir: None,
-            }],
             plugins: vec!["superpowers".into()],
             mcp_servers: vec![],
             memory_spaces: vec!["default".into()],
@@ -194,7 +172,6 @@ mod tests {
         s.insert(&row("a")).await.unwrap();
         let got = s.get("a").await.unwrap().unwrap();
         assert_eq!(got, row("a"));
-        assert_eq!(got.repos[0].git_ref.as_deref(), Some("dev"));
         assert_eq!(s.list().await.unwrap().len(), 1);
         assert!(s.get("ghost").await.unwrap().is_none());
     }

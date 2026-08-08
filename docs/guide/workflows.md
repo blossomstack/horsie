@@ -66,8 +66,8 @@ changing it never affects a run already under way.
 ## Running one
 
 Press **Run** on the workflow's page. That opens the new-session page with the
-workflow selected, where you choose the runtime and the repos and type the
-input the first step is handed. The same page starts an ordinary session when
+workflow selected, where you choose the environment and type the input the
+first step is handed. The same page starts an ordinary session when
 no workflow is selected — the **Workflow** key is the leftmost control on the
 row.
 
@@ -77,14 +77,14 @@ agent preset, so those controls are not offered while a workflow is selected.
 From the CLI:
 
 ```console
-$ horsie workflow run fix-bug --input "the build is red on main"
+$ horsie workflow run fix-bug --input "the build is red on main" --vendor velos
 Started run 3f1a2b4c-…
 ```
 
-A run needs two things the definition deliberately does not hold: which runtime
-hosts it, and which repos are cloned into its workspace. Those belong to the
-invocation, so a workflow can be run against different machines and checkouts
-without editing it.
+A run needs one thing the definition deliberately does not hold: the
+environment — which runtime hosts it, and what is cloned into its workspace.
+That belongs to the invocation, so a workflow can be run against different
+machines and checkouts without editing it.
 
 A run **is a session**. It appears in the sidebar alongside your other
 sessions, annotated with the workflow it came from, and every session command
@@ -184,7 +184,7 @@ horsie workflow list
 horsie workflow get <name> [--json]
 horsie workflow apply -f <file>
 horsie workflow delete <name>
-horsie workflow run <name> --input <text> [--vendor <v>] [--repo <url>]
+horsie workflow run <name> --input <text> (--environment <name> | --vendor <v> [--repo <url>])
 horsie workflow status <session-id>
 horsie workflow retry <session-id> <step-index>
 horsie session status <session-id>

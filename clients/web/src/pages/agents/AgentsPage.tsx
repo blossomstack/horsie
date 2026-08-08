@@ -97,9 +97,6 @@ export function AgentsPage() {
                     {a.mcpServers.length > 0 && (
                       <span className="legend">{a.mcpServers.length} MCP</span>
                     )}
-                    {a.repos.length > 0 && (
-                      <span className="legend">{a.repos.length} repos</span>
-                    )}
                   </div>
                 </Link>
                 <button

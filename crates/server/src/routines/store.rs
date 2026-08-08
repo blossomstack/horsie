@@ -1,16 +1,17 @@
 //! Storage for routines, sharing the config store's database.
 //!
-//! The schedule is stored verbatim as the serialized wire `RoutineSchedule`
-//! in one JSON column. A row whose JSON cannot be read back as a legal
-//! schedule is an error, never a silently-defaulted value.
+//! The schedule and the environment are stored verbatim as their serialized
+//! wire unions, one JSON column each. A row whose JSON cannot be read back as a
+//! legal value is an error, never a silently-defaulted one.
 
 use crate::auth::UserId;
 use crate::db::Db;
+use horsie_models::environments::EnvironmentSpec;
 use horsie_models::routines::RoutineSchedule;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
-const COLS: &str = "name, description, agent, prompt, schedule, enabled, next_run_at_ms, \
+const COLS: &str = "name, description, agent, environment, prompt, schedule, enabled, next_run_at_ms, \
                     last_run_at_ms, last_session_id, last_error, created_at, updated_at";
 
 /// What one trigger did. One value rather than two nullable fields, so a run
@@ -29,6 +30,7 @@ pub struct RoutineRow {
     pub name: String,
     pub description: String,
     pub agent: String,
+    pub environment: EnvironmentSpec,
     pub prompt: String,
     pub schedule: RoutineSchedule,
     pub enabled: bool,
@@ -130,12 +132,13 @@ impl RoutineStore {
     /// would discard the existing routine).
     pub async fn insert(&self, row: &RoutineRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO routines (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO routines (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(self.user.as_str())
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.agent)
+        .bind(serde_json::to_string(&row.environment).map_err(|e| e.to_string())?)
         .bind(&row.prompt)
         .bind(serde_json::to_string(&row.schedule).map_err(|e| e.to_string())?)
         .bind(i64::from(row.enabled))
@@ -156,12 +159,13 @@ impl RoutineStore {
     /// routine does not un-run it.
     pub async fn replace(&self, row: &RoutineRow) -> Result<bool, String> {
         let res = sqlx::query(&self.db.q(
-            "UPDATE routines SET description = ?, agent = ?, prompt = ?, schedule = ?, \
+            "UPDATE routines SET description = ?, agent = ?, environment = ?, prompt = ?, schedule = ?, \
              enabled = ?, next_run_at_ms = ?, updated_at = ? \
              WHERE user_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.agent)
+        .bind(serde_json::to_string(&row.environment).map_err(|e| e.to_string())?)
         .bind(&row.prompt)
         .bind(serde_json::to_string(&row.schedule).map_err(|e| e.to_string())?)
         .bind(i64::from(row.enabled))
@@ -247,6 +251,8 @@ fn row_to_routine(row: &AnyRow) -> Result<RoutineRow, String> {
         name: get("name")?,
         description: get("description")?,
         agent: get("agent")?,
+        environment: serde_json::from_str(&get("environment")?)
+            .map_err(|e| format!("routines.environment: {e}"))?,
         prompt: get("prompt")?,
         schedule: serde_json::from_str(&get("schedule")?)
             .map_err(|e| format!("routines.schedule: {e}"))?,
@@ -264,10 +270,12 @@ fn row_to_routine(row: &AnyRow) -> Result<RoutineRow, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use horsie_models::environments::{NamedEnvironment, RuntimeEnvironment};
     use horsie_models::routines::{
         DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
         WeeklySchedule, YearlySchedule,
     };
+    use horsie_models::session_api::RepoConfig;
     use std::collections::HashMap;
 
     async fn store() -> (RoutineStore, Db) {
@@ -283,6 +291,10 @@ mod tests {
             name: name.into(),
             description: "d".into(),
             agent: "reviewer".into(),
+            environment: EnvironmentSpec::Runtime(RuntimeEnvironment {
+                vendor: "local".into(),
+                repos: None,
+            }),
             prompt: "check the queue".into(),
             schedule,
             enabled: true,
@@ -352,6 +364,50 @@ mod tests {
         }
         assert_eq!(s.list().await.unwrap().len(), 7);
         assert!(s.get("ghost").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn every_environment_shape_round_trips() {
+        let (s, _db) = store().await;
+        for (name, environment) in [
+            (
+                "adhoc",
+                EnvironmentSpec::Runtime(RuntimeEnvironment {
+                    vendor: "fly".into(),
+                    repos: Some(vec![RepoConfig {
+                        url: "https://github.com/o/api".into(),
+                        git_ref: Some("dev".into()),
+                        dir: None,
+                    }]),
+                }),
+            ),
+            (
+                "named",
+                EnvironmentSpec::Named(NamedEnvironment {
+                    name: "staging".into(),
+                }),
+            ),
+        ] {
+            let mut r = row(name, RoutineSchedule::Manual(ManualSchedule {}));
+            r.environment = environment.clone();
+            s.insert(&r).await.unwrap();
+            assert_eq!(s.get(name).await.unwrap().unwrap().environment, environment);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replace_swaps_the_environment() {
+        let (s, _db) = store().await;
+        let mut r = row("nightly", RoutineSchedule::Manual(ManualSchedule {}));
+        s.insert(&r).await.unwrap();
+        r.environment = EnvironmentSpec::Named(NamedEnvironment {
+            name: "staging".into(),
+        });
+        assert!(s.replace(&r).await.unwrap());
+        assert_eq!(
+            s.get("nightly").await.unwrap().unwrap().environment,
+            r.environment
+        );
     }
 
     #[tokio::test]

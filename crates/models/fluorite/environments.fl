@@ -1,14 +1,42 @@
-/// Named environments (experimental): a reusable runtime + repos bundle. An
-/// environment names its runtime vendor — the opposite pole from agent
-/// presets, which deliberately name no vendor. Nothing consumes an
-/// environment yet: sessions, presets, and routines do not reference one.
+/// Where a session runs and what it runs against.
+///
+/// `EnvironmentSpec` is the answer every creation path takes — the sessions
+/// API, an agent-preset invoke, a routine trigger, a workflow run — and none of
+/// them defaults it. A predefined `EnvironmentView` is the reusable half of
+/// that: a runtime vendor plus the repos, variables and setup steps to build it
+/// with, saved under a name.
 package environments;
 
 use session_api.RepoConfig;
 use executor.EnvVar;
 use executor.ProvisionStep;
 
-/// An environment as shown to clients.
+/// Where a session runs and what it runs against. Required by every path that
+/// creates one: an optional environment would be a second, invisible way to
+/// answer the question, settled by a server default nobody asked for.
+#[type_tag = "type"]
+union EnvironmentSpec {
+    Runtime(RuntimeEnvironment),
+    Named(NamedEnvironment),
+}
+
+/// The ad-hoc environment: a runtime vendor, plus the repos to check out into
+/// it when it can provision a workspace.
+///
+/// There is no separate variant for the local runtime. `vendor: "local"`
+/// already says it, and a vendor that cannot provision rejects a non-empty
+/// `repos` at create — a `Local` variant would be a second way to say the same
+/// thing, with a vendor name baked into the protocol.
+struct RuntimeEnvironment {
+    vendor: String,
+    repos: Option<Vec<RepoConfig>>,
+}
+
+/// A predefined environment, by name. Resolved and snapshotted when the session
+/// is created, so editing or deleting it never re-points one that exists.
+struct NamedEnvironment { name: String }
+
+/// A predefined environment as shown to clients.
 struct EnvironmentView {
     /// Slug; the id of record, used in API paths.
     name: String,
@@ -19,10 +47,11 @@ struct EnvironmentView {
     /// Repositories cloned into the runtime workspace at provision time.
     repos: Vec<RepoConfig>,
     /// Plain-text, non-sensitive env vars for the runtime. Secrets are a
-    /// future, separate concept.
+    /// future, separate concept. Names in the server's reserved `HORSIE_*`
+    /// namespace are refused at save.
     env_vars: Vec<EnvVar>,
-    /// Setup steps the runtime executes before its message loop. Inert today:
-    /// nothing provisions from an environment yet.
+    /// Setup steps the runtime executes before its message loop, after the
+    /// repo checkouts — a step like `make setup` needs its repo on disk.
     provision: Vec<ProvisionStep>,
     /// Unix epoch seconds.
     created_at: String,

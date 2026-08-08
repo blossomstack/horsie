@@ -88,6 +88,10 @@ struct SessionDetail {
     /// User-set key-value metadata (e.g. `group=<name>`). Empty when none.
     annotations: Vec<AnnotationEntry>,
     model: String,
+    /// The predefined environment this session was created from; absent when it
+    /// was created from an ad-hoc runtime. `vendor` and `repos` are what it
+    /// resolved to, and stay the answer to what the session actually got.
+    environment: Option<String>,
     vendor: String,
     /// Clone URLs of the session's provisioned repos (empty when none).
     repos: Vec<String>,

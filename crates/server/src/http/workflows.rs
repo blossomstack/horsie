@@ -107,10 +107,9 @@ pub async fn delete_workflow(
 /// POST /api/workflows/:name/runs — start a run.
 ///
 /// A run is a session, so this takes the configuration creating a session
-/// takes: the vendor that will host its one shared runtime, and the repos
-/// cloned into its one shared workspace. Everything the graph decides is
-/// snapshotted here, so editing the definition or a preset afterwards leaves
-/// this run alone.
+/// takes: the environment its one shared runtime is built from. Everything the
+/// graph decides is snapshotted here, so editing the definition, a preset or
+/// the environment afterwards leaves this run alone.
 pub async fn start_run(
     Scope(state): Scope,
     Path(name): Path<String>,
@@ -122,15 +121,6 @@ pub async fn start_run(
         ));
     }
     let row = state.workflows.row(&name).await.map_err(api_err)?;
-    let vendor = req
-        .vendor
-        .clone()
-        .unwrap_or_else(|| state.config_store.default_vendor());
-    if !state.vendor_agents.connected_names().contains(&vendor) {
-        return Err(Api::unprocessable(format!(
-            "runtime vendor '{vendor}' is not connected"
-        )));
-    }
     let view = state.config_store.view().await.map_err(Api::internal)?;
 
     // Resolve every step's preset once, here. After this the run is
@@ -216,16 +206,24 @@ pub async fn start_run(
     };
     let mut spec = build_session_spec(
         &state.config_store,
+        &state.environments,
         req.name.or_else(|| Some(name.clone())),
         wire,
-        Some(vendor),
-        req.repos.unwrap_or_default(),
+        req.environment,
         Some(plugins),
         SessionOrigin::Workflow {
             workflow: name.clone(),
         },
     )
     .await?;
+    // Checked on the *resolved* vendor: a named environment carries its own,
+    // so there is nothing to check until the environment has been read.
+    if !state.vendor_agents.connected_names().contains(&spec.vendor) {
+        return Err(Api::unprocessable(format!(
+            "runtime vendor '{}' is not connected",
+            spec.vendor
+        )));
+    }
     spec.workflow = Some(run);
 
     let created_at = now_ms();

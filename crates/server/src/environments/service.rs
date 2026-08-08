@@ -148,6 +148,23 @@ fn validate(input: &EnvironmentInput) -> Result<String, EnvironmentError> {
                 .to_string(),
         ));
     }
+    for v in input.env_vars.iter().flatten() {
+        let name = v.name.trim();
+        if name.is_empty() {
+            return Err(EnvironmentError::Invalid(
+                "env var name must not be empty".to_string(),
+            ));
+        }
+        // The server injects its own values into the same map — the plugin
+        // capability token, the synthetic HOME, the minted GitHub token. A user
+        // value that shadowed one would break provisioning in a way that reads
+        // as a broken runtime rather than a bad environment.
+        if name.starts_with("HORSIE_") || name == horsie_models::ENV_GITHUB_TOKEN {
+            return Err(EnvironmentError::Invalid(format!(
+                "env var name '{name}' is reserved by the server"
+            )));
+        }
+    }
     Ok(vendor.to_string())
 }
 
@@ -301,6 +318,37 @@ mod tests {
                 "{bad_vendor:?}: {err}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_reserved_env_var_name_is_rejected() {
+        let s = service().await;
+        for reserved in ["HORSIE_PROVISION", "HORSIE_ANYTHING", "GITHUB_TOKEN"] {
+            let mut i = input("a", "fly");
+            i.env_vars = Some(vec![EnvVar {
+                name: reserved.into(),
+                value: "x".into(),
+            }]);
+            let err = s.create(i).await.unwrap_err();
+            assert!(
+                matches!(err, EnvironmentError::Invalid(ref m) if m.contains(reserved)),
+                "{reserved}: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_env_var_needs_a_name() {
+        let s = service().await;
+        let mut i = input("a", "fly");
+        i.env_vars = Some(vec![EnvVar {
+            name: "  ".into(),
+            value: "x".into(),
+        }]);
+        assert!(matches!(
+            s.create(i).await.unwrap_err(),
+            EnvironmentError::Invalid(_)
+        ));
     }
 
     #[tokio::test]

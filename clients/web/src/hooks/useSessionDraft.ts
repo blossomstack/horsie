@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
   CreateSessionRequest,
-  RepoConfig,
+  EnvironmentSpec,
+  EnvironmentView,
   WorkflowRunRequest,
 } from "../api/types";
 import {
@@ -12,9 +13,12 @@ import {
   filterSkills,
   loadDraftPayload,
   parseDraftPayload,
-  reconcileModelVendor,
+  reconcileModelEnvironment,
+  toEnvironmentSpec,
   type DraftPayload,
+  type EnvironmentDraft,
 } from "./draftPersistence";
+import { useEnvironments } from "./useEnvironments";
 import { useGithubStatus } from "./useGithub";
 import { useMemorySpaces } from "./useMemory";
 import { useMcpServers } from "./useMcp";
@@ -23,22 +27,22 @@ import { usePlugins } from "./usePlugins";
 import { useSettings } from "./useSettings";
 import { useWorkflows } from "./useWorkflows";
 
+export type { EnvironmentDraft };
+
 /** The picker state every session-config surface shares: the new-session
  * draft and the agent-preset form. `SessionDraft` adds what only sending a
  * first message needs. */
 /**
  * The channels a session and an agent preset both configure.
  *
- * Deliberately no runtime vendor. A preset does not name one — where the work
- * runs belongs to the invocation, not to the saved configuration — so the
- * runtime channel lives in `RuntimeChannel`, which only a session draft has.
+ * Deliberately no environment. A preset does not name one — where the work
+ * runs and what it runs against belong to the invocation, not to the saved
+ * configuration — so the environment channel lives in `EnvironmentChannel`,
+ * which only a session draft has.
  */
 export interface ConfigDraft {
   model: string;
   setModel: (m: string) => void;
-  /** fullName → gitRef ("" = default branch). */
-  repos: Map<string, string>;
-  setRepos: (m: Map<string, string>) => void;
   skills: Set<string>;
   setSkills: (s: Set<string>) => void;
   mcp: Set<string>;
@@ -53,15 +57,24 @@ export interface ConfigDraft {
   thinkingEfforts: string[];
   /** The selected model's default effort, for labelling the fallback option. */
   modelDefaultThinkingEffort: string;
-  provisions: boolean;
-  githubConnected: boolean;
 }
 
-/** The runtime channel, which a session has and an agent preset does not. Its
- * presence is what tells `useConfigPickers` to offer a Runtime picker. */
-export interface RuntimeChannel {
-  vendor: string;
-  setVendor: (v: string) => void;
+/**
+ * The environment channel, which a session has and an agent preset does not.
+ * Its presence is what tells `useConfigPickers` to offer an Environment picker.
+ *
+ * `provisions` and `githubConnected` ride here rather than on `ConfigDraft`
+ * because both exist to answer one question — can this selection hold repos —
+ * and that question only has meaning once something has been selected.
+ */
+export interface EnvironmentChannel {
+  environment: EnvironmentDraft;
+  setEnvironment: (e: EnvironmentDraft) => void;
+  /** Predefined environments, for the picker's first section. */
+  environments: EnvironmentView[];
+  /** The resolved vendor can build a workspace, so repos mean something. */
+  provisions: boolean;
+  githubConnected: boolean;
 }
 
 /**
@@ -80,7 +93,10 @@ export interface WorkflowChannel {
   workflows: string[];
 }
 
-export interface SessionDraft extends ConfigDraft, RuntimeChannel, WorkflowChannel {
+export interface SessionDraft
+  extends ConfigDraft,
+    EnvironmentChannel,
+    WorkflowChannel {
   canSend: boolean;
   blockedReason: string | null;
   /** A session is created with its first message; there is no create-only call. */
@@ -100,11 +116,9 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const { data: mcpServers } = useMcpServers();
   const { data: memorySpaces } = useMemorySpaces();
   const { data: workflows } = useWorkflows();
+  const { data: environments } = useEnvironments();
   const models = settings?.models ?? [];
-  const activeVendors = useMemo(
-    () => (settings?.vendors ?? []),
-    [settings],
-  );
+  const activeVendors = useMemo(() => settings?.vendors ?? [], [settings]);
 
   // Load-once snapshot: `undefined` means this browser has no usable stored
   // draft (first visit, corrupt payload, unknown version) — the signal that
@@ -130,17 +144,23 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const selectedWorkflow =
     workflows === undefined || workflowNames.includes(workflow) ? workflow : "";
 
-  // Keep model/vendor on still-existing choices as server config changes.
+  const environmentNames = useMemo(
+    () => (environments === undefined ? undefined : environments.map((e) => e.name)),
+    [environments],
+  );
+
+  // Keep model/environment on still-existing choices as server config changes.
   useEffect(() => {
     if (!settings) return;
-    const next = reconcileModelVendor(
+    const next = reconcileModelEnvironment(
       draft,
       models.map((m) => m.alias),
       activeVendors.map((v) => v.name),
       settings.defaultVendor,
+      environmentNames,
     );
     if (next !== draft) setDraft(next);
-  }, [settings, models, activeVendors, draft]);
+  }, [settings, models, activeVendors, environmentNames, draft]);
 
   // First visit only: pre-select the server's default-enabled bundles. A
   // stored draft (even one equal to the defaults, even with empty skills)
@@ -171,21 +191,36 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     setStaleFiltered(true);
   }, [staleFiltered, bundles, mcpServers, memorySpaces, draft]);
 
-  const selectedVendor = activeVendors.find(
-    (v) => v.name === (draft.vendor || settings?.defaultVendor),
-  );
-  const provisions = !!selectedVendor?.capabilities?.supportsProvisioning;
+  const environment = draft.environment;
+  // Which vendor this selection resolves to — its own, or the predefined
+  // environment's. One lookup, so every downstream answer agrees.
+  const resolvedVendor =
+    environment.kind === "named"
+      ? (environments ?? []).find((e) => e.name === environment.name)?.vendor
+      : environment.vendor;
+  const provisions = !!activeVendors.find((v) => v.name === resolvedVendor)
+    ?.capabilities?.supportsProvisioning;
   const githubConnected = !!ghStatus?.connected;
+
+  const chosen =
+    environment.kind === "named"
+      ? !!environment.name
+      : !!environment.vendor.trim();
+  // Only an ad-hoc selection with repos needs GitHub: a predefined
+  // environment's repos were resolved when it was saved.
+  const needsGithub =
+    environment.kind === "runtime" &&
+    provisions &&
+    Object.keys(environment.repos).length > 0;
 
   const blockedReason = useMemo(() => {
     // A run takes its model from each step's preset, so the model channel is
     // neither shown nor required while a workflow is selected.
     if (!selectedWorkflow && !draft.model.trim()) return "Select a model to start.";
-    if (!draft.vendor.trim()) return "Select a runtime to start.";
-    if (provisions && !githubConnected)
-      return "Connect GitHub to use this runtime.";
+    if (!chosen) return "Select an environment to start.";
+    if (needsGithub && !githubConnected) return "Connect GitHub to use these repos.";
     return null;
-  }, [draft.model, draft.vendor, provisions, githubConnected, selectedWorkflow]);
+  }, [draft.model, chosen, needsGithub, githubConnected, selectedWorkflow]);
 
   // The menu belongs to the model, so a persisted draft can name an effort the
   // currently-selected model no longer offers. Treat that as "use the default"
@@ -196,70 +231,56 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     ? draft.thinkingEffort
     : "";
 
-  const repoList = (): RepoConfig[] =>
-    provisions
-      ? Object.entries(draft.repos).map(([fullName, ref]) => ({
-          url: `https://github.com/${fullName}`,
-          gitRef: ref.trim() || undefined,
-        }))
-      : [];
+  const environmentSpec = (): EnvironmentSpec =>
+    toEnvironmentSpec(environment, provisions);
 
-  const buildRequest = (message: string): CreateSessionRequest => {
-    const repos = repoList();
-    return {
-      message,
-      agent: {
-        model: draft.model.trim(),
-        // Not gated on `provisions` — see `plugins` below.
-        usePlugins: true,
-        // Nor is MCP: a toolbox is composed server-side and never reaches the
-        // runtime at all.
-        mcpServers: draft.mcp.length ? draft.mcp : undefined,
-        // Not gated on `provisions`: memories are served by the server itself,
-        // so they work on every vendor, including ones that can't provision.
-        memorySpaces: draft.memorySpaces.length ? draft.memorySpaces : undefined,
-        thinkingEffort: effectiveThinkingEffort || undefined,
-      },
-      vendor: draft.vendor.trim() || undefined,
-      // Only repos genuinely need a vendor that can build a workspace.
-      repos: repos.length ? repos : undefined,
-      // Bundles are not a workspace: the runtime fetches them over its own
-      // outbound connection into a directory of its own, which it can do
-      // whether or not it provisioned anything. Gating this on `provisions`
-      // meant the picker took a selection on `horsie connect` — the most
-      // common self-hosted vendor — and silently dropped it. The same
-      // one-bit-three-jobs mistake #178 fixed on agent presets.
-      plugins: draft.skills.length ? draft.skills : undefined,
-    };
-  };
+  const buildRequest = (message: string): CreateSessionRequest => ({
+    message,
+    agent: {
+      model: draft.model.trim(),
+      // Not gated on the environment — see `plugins` below.
+      usePlugins: true,
+      // Nor is MCP: a toolbox is composed server-side and never reaches the
+      // runtime at all.
+      mcpServers: draft.mcp.length ? draft.mcp : undefined,
+      // Memories are served by the server itself, so they work on every
+      // vendor, including ones that can't provision.
+      memorySpaces: draft.memorySpaces.length ? draft.memorySpaces : undefined,
+      thinkingEffort: effectiveThinkingEffort || undefined,
+    },
+    environment: environmentSpec(),
+    // Bundles are not a workspace: the runtime fetches them over its own
+    // outbound connection into a directory of its own, which it can do
+    // whether or not it provisioned anything. Gating this on provisioning
+    // meant the picker took a selection on `horsie connect` — the most
+    // common self-hosted vendor — and silently dropped it. The same
+    // one-bit-three-jobs mistake #178 fixed on agent presets.
+    plugins: draft.skills.length ? draft.skills : undefined,
+  });
 
   // A run carries no agent configuration: the graph names a preset per step,
   // and the snapshot taken at creation resolves each one server-side.
-  const buildRunRequest = (input: string): WorkflowRunRequest => {
-    const repos = repoList();
-    return {
-      input,
-      vendor: draft.vendor.trim() || undefined,
-      repos: repos.length ? repos : undefined,
-    };
-  };
+  const buildRunRequest = (input: string): WorkflowRunRequest => ({
+    input,
+    environment: environmentSpec(),
+  });
 
   return {
     workflow: selectedWorkflow,
     setWorkflow,
     workflows: workflowNames,
-    vendor: draft.vendor,
-    setVendor: (vendor) => setDraft({ ...draft, vendor }),
+    environment,
+    setEnvironment: (next) => setDraft({ ...draft, environment: next }),
+    environments: environments ?? [],
     model: draft.model,
     setModel: (model) => setDraft({ ...draft, model }),
-    repos: new Map(Object.entries(draft.repos)),
-    setRepos: (repos) => setDraft({ ...draft, repos: Object.fromEntries(repos) }),
     skills: new Set(draft.skills),
     setSkills: (skills) => setDraft({ ...draft, skills: [...skills] }),
     mcp: new Set(draft.mcp),
     setMcp: (mcp) => setDraft({ ...draft, mcp: [...mcp] }),
     memorySpaces: new Set(draft.memorySpaces),
-    setMemorySpaces: (memorySpaces) => setDraft({ ...draft, memorySpaces: [...memorySpaces] }),
+    setMemorySpaces: (memorySpaces) =>
+      setDraft({ ...draft, memorySpaces: [...memorySpaces] }),
     thinkingEffort: effectiveThinkingEffort,
     setThinkingEffort: (thinkingEffort) => setDraft({ ...draft, thinkingEffort }),
     thinkingEfforts,

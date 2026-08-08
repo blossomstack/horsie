@@ -1,17 +1,16 @@
 /// Workflows: a named graph of steps, each step an agent preset with a fixed
 /// prompt, wired together by conditions over the step's structured output.
 ///
-/// A definition is only the graph. Where it runs (runtime vendor) and what it
-/// runs against (repos) are properties of the invocation, not of the saved
-/// configuration — a pinned vendor is invisible once it disconnects and fatal
-/// at invoke, and a hardcoded checkout can only ever be run one way. A step's
-/// preset supplies the model, MCP servers, memory spaces and thinking effort;
-/// its `repos` are ignored, because the workflow owns one runtime shared by
-/// every step.
+/// A definition is only the graph. The environment it runs in is a property of
+/// the invocation, not of the saved configuration — a pinned vendor is
+/// invisible once it disconnects and fatal at invoke, and a hardcoded checkout
+/// can only ever be run one way. A step's preset supplies the model, MCP
+/// servers, memory spaces and thinking effort, and nothing about where the work
+/// happens: the workflow owns one runtime shared by every step.
 package workflow;
 
+use environments.EnvironmentSpec;
 use session.SessionSummary;
-use session_api.RepoConfig;
 
 /// A directed edge out of a step, optionally gated by a condition.
 ///
@@ -83,11 +82,9 @@ struct WorkflowInput {
 /// start step is handed.
 struct WorkflowRunRequest {
     input: String,
-    /// Runtime vendor for the run's single shared runtime; absent → the
-    /// server's default vendor at invoke.
-    vendor: Option<String>,
-    /// Repositories cloned into the run's shared workspace.
-    repos: Option<Vec<RepoConfig>>,
+    /// Where the run's single shared runtime is built, and what it runs
+    /// against. Required.
+    environment: EnvironmentSpec,
     /// Optional run title.
     name: Option<String>,
 }

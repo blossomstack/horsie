@@ -66,7 +66,6 @@ const preset: AgentView = {
   name: "reviewer",
   description: "reviews PRs",
   model: "sonnet",
-  repos: [{ url: "https://github.com/org/api", gitRef: "dev" }],
   plugins: ["superpowers"],
   mcpServers: ["mcp-x"],
   memorySpaces: ["horsie"],
@@ -79,13 +78,11 @@ describe("useAgentDraft", () => {
   it("starts blank without an initial preset", () => {
     const { result } = render();
     expect(result.current.model).toBe("");
-    expect(result.current.repos.size).toBe(0);
     const input = result.current.buildAgentInput("a", "");
     expect(input).toEqual({
       name: "a",
       description: undefined,
       model: "",
-      repos: undefined,
       plugins: undefined,
       mcpServers: undefined,
       memorySpaces: undefined,
@@ -93,17 +90,21 @@ describe("useAgentDraft", () => {
     });
   });
 
-  it("populates every picker from the preset, mapping repo urls back to full names", () => {
+  it("populates every picker from the preset", () => {
     const { result } = render(preset);
     expect(result.current.model).toBe("sonnet");
-    expect(result.current.repos.get("org/api")).toBe("dev");
     expect([...result.current.skills]).toEqual(["superpowers"]);
     expect([...result.current.mcp]).toEqual(["mcp-x"]);
     expect([...result.current.memorySpaces]).toEqual(["horsie"]);
     expect(result.current.thinkingEffort).toBe("high");
-    // The default vendor is `local`, which cannot provision. That hides the
-    // Repos picker and nothing else — skills and mcp populate regardless.
-    expect(result.current.provisions).toBe(false);
+  });
+
+  // A preset is agent configuration. Where the work runs and what it runs
+  // against are the invocation's, so nothing here carries either.
+  it("has no environment channel at all", () => {
+    const { result } = render(preset);
+    expect("environment" in result.current).toBe(false);
+    expect("setEnvironment" in result.current).toBe(false);
   });
 
   it("round-trips the preset through buildAgentInput", () => {
@@ -112,7 +113,6 @@ describe("useAgentDraft", () => {
       name: "reviewer",
       description: "reviews PRs",
       model: "sonnet",
-      repos: [{ url: "https://github.com/org/api", gitRef: "dev" }],
       plugins: ["superpowers"],
       mcpServers: ["mcp-x"],
       memorySpaces: ["horsie"],
@@ -121,14 +121,10 @@ describe("useAgentDraft", () => {
   });
 
   // A preset is saved with `PUT`, which is a full replace: anything the form
-  // omits is deleted. The default vendor here cannot provision, so the Repos
-  // picker is hidden — and hiding a control must not delete what it edits.
-  it("keeps skills and mcp on a non-provisioning default vendor, and preserves repos it cannot show", () => {
+  // omits is deleted.
+  it("keeps every channel it does carry", () => {
     const { result } = render(preset);
     const input = result.current.buildAgentInput("reviewer", "");
-    expect(input.repos).toEqual([
-      { url: "https://github.com/org/api", gitRef: "dev" },
-    ]);
     expect(input.plugins).toEqual(["superpowers"]);
     expect(input.mcpServers).toEqual(["mcp-x"]);
     expect(input.memorySpaces).toEqual(["horsie"]);

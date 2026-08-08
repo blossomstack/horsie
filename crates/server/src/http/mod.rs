@@ -526,7 +526,7 @@ mod tests {
         // create — with the first message, which is the only shape there is
         let body = serde_json::json!({
             "agent": {"model": "mock"},
-            "vendor": "mock",
+            "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
             "message": "first"
         });
         let res = app
@@ -696,7 +696,7 @@ mod tests {
         let app = app(test_state(&tmp).await);
         let body = serde_json::json!({
             "agent": {"model": "mock"},
-            "vendor": "mock",
+            "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
             "message": "hi"
         });
         let res = app
@@ -714,8 +714,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let app = app(test_state(&tmp).await);
         for body in [
-            serde_json::json!({"agent": {"model": "mock"}, "vendor": "mock"}),
-            serde_json::json!({"agent": {"model": "mock"}, "vendor": "mock", "message": "  "}),
+            serde_json::json!({
+                "agent": {"model": "mock"},
+                "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
+            }),
+            serde_json::json!({
+                "agent": {"model": "mock"},
+                "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
+                "message": "  "
+            }),
         ] {
             let res = app
                 .clone()
@@ -737,12 +744,11 @@ mod tests {
         let app = app(test_state(&tmp).await);
         let body = serde_json::json!({
             "agent": {"model": "mock"},
-            "vendor": "mock",
-            "message": "hi",
-            "repos": [
+            "environment": {"type": "Runtime", "value": {"vendor": "mock", "repos": [
                 {"url": "https://github.com/o/api.git"},
                 {"url": "https://github.com/o/web", "gitRef": "dev"}
-            ]
+            ]}},
+            "message": "hi"
         });
         let res = app
             .clone()
@@ -769,7 +775,9 @@ mod tests {
             .oneshot(post_json(
                 "/api/sessions",
                 &serde_json::json!({
-                    "agent": { "model": "mock" }, "vendor": "mock", "message": "hi"
+                    "agent": { "model": "mock" },
+                    "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
+                    "message": "hi"
                 }),
             ))
             .await
@@ -2010,7 +2018,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/agents",
-                &serde_json::json!({"name": "reviewer", "model": "mock", "vendor": "mock"}),
+                &serde_json::json!({"name": "reviewer", "model": "mock"}),
             ))
             .await
             .unwrap();
@@ -2142,6 +2150,7 @@ mod tests {
     fn routine_body() -> serde_json::Value {
         serde_json::json!({
             "name": "nightly", "description": "triage", "agent": "reviewer",
+            "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
             "prompt": "triage the inbox",
             "schedule": {"type": "Every", "value": {"intervalSecs": 3600}}
         })
@@ -2207,7 +2216,8 @@ mod tests {
 
         // Replace -> 200 and a full replace of the schedule; rename -> 422.
         let upd = serde_json::json!({
-            "name": "nightly", "agent": "reviewer", "prompt": "new prompt", "enabled": false
+            "name": "nightly", "agent": "reviewer", "prompt": "new prompt", "enabled": false,
+            "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
         });
         let res = app
             .clone()
@@ -2462,7 +2472,10 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/agents/reviewer/invoke",
-                &serde_json::json!({"message": "review the diff"}),
+                &serde_json::json!({
+                    "message": "review the diff",
+                    "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
+                }),
             ))
             .await
             .unwrap();
@@ -2489,7 +2502,10 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/agents/ghost/invoke",
-                &serde_json::json!({"message": "hi"}),
+                &serde_json::json!({
+                    "message": "hi",
+                    "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
+                }),
             ))
             .await
             .unwrap();
@@ -2498,7 +2514,10 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/agents/reviewer/invoke",
-                &serde_json::json!({"message": "   "}),
+                &serde_json::json!({
+                    "message": "   ",
+                    "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
+                }),
             ))
             .await
             .unwrap();

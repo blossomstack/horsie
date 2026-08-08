@@ -151,6 +151,12 @@ mod tests {
 
     fn routine(name: &str) -> RoutineView {
         RoutineView {
+            environment: horsie_models::environments::EnvironmentSpec::Runtime(
+                horsie_models::environments::RuntimeEnvironment {
+                    vendor: "local".into(),
+                    repos: None,
+                },
+            ),
             name: name.into(),
             description: "nightly review".into(),
             agent: "reviewer".into(),

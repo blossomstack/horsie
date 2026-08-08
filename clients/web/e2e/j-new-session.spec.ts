@@ -12,18 +12,22 @@ test("J1: the New button opens an editable draft at /", async ({ page, appBase }
   await page.getByTestId("new-session-button").click();
   await page.waitForURL((url) => url.pathname === "/");
   await expect(page.getByTestId("session-config-bar")).toHaveAttribute("data-mode", "draft");
-  await expect(page.getByTestId("config-runtime")).toBeVisible();
+  await expect(page.getByTestId("config-environment")).toBeVisible();
   await expect(page.getByTestId("config-model")).toBeVisible();
-  // The local (e2e) vendor does not provision, so there is nowhere to check a
-  // repo out — but skills and MCP are not workspace channels and stay offered.
+  // Repos live inside the environment popover now, so there is no key of their
+  // own; skills and MCP are not workspace channels and stay offered.
   await expect(page.getByTestId("config-repos")).toHaveCount(0);
+  await expect(page.getByTestId("config-runtime")).toHaveCount(0);
   await expect(page.getByTestId("config-skills")).toBeVisible();
   await expect(page.getByTestId("config-mcp")).toBeVisible();
 
-  await page.getByTestId("config-runtime").click();
-  await expect(page.locator('[data-testid="runtime-option"][data-selected="true"]')).toContainText(
-    "e2e",
-  );
+  await page.getByTestId("config-environment").click();
+  await expect(
+    page.locator('[data-testid="environment-option"][data-selected="true"]'),
+  ).toContainText("e2e");
+  // The e2e vendor does not provision, so there is nowhere to check a repo
+  // out and the checklist stays away.
+  await expect(page.getByTestId("environment-repos")).toHaveCount(0);
   await page.keyboard.press("Escape");
 
   await page.getByTestId("config-model").click();
@@ -49,9 +53,9 @@ test("J2: a created session keeps the same row, now read-only", async ({
 
   // Icon-only, so the value is in the accessible name; pressing a key opens
   // the readout rather than a picker.
-  await expect(page.getByTestId("config-runtime")).toHaveAttribute(
+  await expect(page.getByTestId("config-environment")).toHaveAttribute(
     "aria-label",
-    /Runtime — e2e/,
+    /Environment — e2e/,
   );
   await page.getByTestId("config-model").click();
   await expect(page.getByTestId("session-config-bar")).toContainText("mock");
@@ -78,7 +82,7 @@ test("J3: every config menu opens inside the pane, not under the rail", async ({
     .evaluate((el) => el.getBoundingClientRect())
     .then((r) => r as DOMRect);
 
-  for (const id of ["config-runtime", "config-model"]) {
+  for (const id of ["config-environment", "config-model"]) {
     await page.getByTestId(id).click();
     const menu = page.locator(`[data-testid="${id}"] + div`);
     await expect(menu).toBeVisible();

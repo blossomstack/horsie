@@ -200,7 +200,7 @@ async fn create_session(
 ) -> String {
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
-        "vendor": "mock",
+        "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
         "message": message
     });
     let res = client
@@ -227,7 +227,7 @@ async fn create_session_for_vendor(
 ) -> String {
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
-        "vendor": vendor,
+        "environment": {"type": "Runtime", "value": {"vendor": vendor}},
         "message": message
     });
     let res = client
@@ -572,7 +572,7 @@ async fn a_first_turn_waits_for_the_create_it_rides_on() {
 
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
-        "vendor": "mock",
+        "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
         "message": "hello"
     });
     let res = client
@@ -1356,9 +1356,11 @@ async fn repos_session_creates_and_reports_repos() {
 
     let body = serde_json::json!({
         "agent": {"model": "mock"},
-        "vendor": "mock",
-        "message": "hi",
-        "repos": [{"url": "https://github.com/o/api", "gitRef": "main"}]
+        "environment": {"type": "Runtime", "value": {
+            "vendor": "mock",
+            "repos": [{"url": "https://github.com/o/api", "gitRef": "main"}]
+        }},
+        "message": "hi"
     });
     let res = client
         .post(format!("http://{}/api/sessions", server.addr))
@@ -1391,6 +1393,108 @@ async fn repos_session_creates_and_reports_repos() {
     server.shutdown().await;
 }
 
+/// A predefined environment is resolved and *snapshotted* at creation: the
+/// session reports the name it came from alongside the vendor and repos it
+/// actually got, and editing the environment afterwards leaves it alone.
+#[tokio::test]
+async fn a_named_environment_is_resolved_and_recorded_on_the_session() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let res = client
+        .post(format!("http://{}/api/environments", server.addr))
+        .json(&serde_json::json!({
+            "name": "staging",
+            "vendor": "mock",
+            "repos": [{"url": "https://github.com/o/api", "gitRef": "main"}],
+            "envVars": [{"name": "RUST_LOG", "value": "debug"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201);
+
+    let res = client
+        .post(format!("http://{}/api/sessions", server.addr))
+        .json(&serde_json::json!({
+            "agent": {"model": "mock"},
+            "environment": {"type": "Named", "value": {"name": "staging"}},
+            "message": "hi"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201);
+    let id = res.json::<serde_json::Value>().await.unwrap()["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_status(&client, &server.addr, &id, "Idle").await;
+
+    let detail = |id: String| {
+        let client = client.clone();
+        let addr = server.addr;
+        async move {
+            client
+                .get(format!("http://{addr}/api/sessions/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let d = detail(id.clone()).await;
+    assert_eq!(d["session"]["environment"], "staging");
+    assert_eq!(d["session"]["vendor"], "mock");
+    assert_eq!(
+        d["session"]["repos"],
+        serde_json::json!(["https://github.com/o/api"])
+    );
+
+    // Re-point the environment at a repo this session never had. The session
+    // snapshotted, so nothing about it moves.
+    let res = client
+        .put(format!("http://{}/api/environments/staging", server.addr))
+        .json(&serde_json::json!({
+            "name": "staging",
+            "vendor": "mock",
+            "repos": [{"url": "https://github.com/o/other"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    let d = detail(id).await;
+    assert_eq!(
+        d["session"]["repos"],
+        serde_json::json!(["https://github.com/o/api"]),
+        "an edit must not re-point a session that already exists"
+    );
+
+    // An environment nobody defined is the caller's mistake, not a 500.
+    let res = client
+        .post(format!("http://{}/api/sessions", server.addr))
+        .json(&serde_json::json!({
+            "agent": {"model": "mock"},
+            "environment": {"type": "Named", "value": {"name": "ghost"}},
+            "message": "hi"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 422);
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn session_detail_echoes_full_config() {
     let mock = MockLlmServer::builder().build().await;
@@ -1404,7 +1508,7 @@ async fn session_detail_echoes_full_config() {
 
     let body = serde_json::json!({
         "agent": {"model": "mock", "usePlugins": true, "mcpServers": ["gh"]},
-        "vendor": "mock",
+        "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
         "message": "hi"
     });
     let res = client
@@ -1473,7 +1577,7 @@ async fn session_detail_echoes_thinking_effort() {
     // An explicit choice rides through to the detail endpoint...
     let body = serde_json::json!({
         "agent": {"model": "mock", "thinkingEffort": "low"},
-        "vendor": "mock",
+        "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
         "message": "hi"
     });
     let res = client
@@ -1505,7 +1609,7 @@ async fn session_detail_echoes_thinking_effort() {
     // ...and an omitted choice freezes the model's configured default.
     let body = serde_json::json!({
         "agent": {"model": "mock"},
-        "vendor": "mock",
+        "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
         "message": "hi"
     });
     let res = client
@@ -2486,7 +2590,10 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
     // Creating the run is what starts it: there is no message to send.
     let res = client
         .post(format!("{base}/api/workflows/e2e-flow/runs"))
-        .json(&serde_json::json!({"input": "the build is red", "vendor": "mock"}))
+        .json(&serde_json::json!({
+            "input": "the build is red",
+            "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
+        }))
         .send()
         .await
         .unwrap();

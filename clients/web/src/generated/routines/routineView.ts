@@ -1,4 +1,5 @@
 
+import { EnvironmentSpec } from '../environments';
 import { RoutineSchedule } from './routineSchedule';
 /**
  * A routine as shown to clients: its definition, plus what the schedule and
@@ -14,6 +15,12 @@ export interface RoutineView {
    * Name of the agent preset every run is configured from.
    */
   agent: string;
+  /**
+   * Where every run happens. Required: a routine that cannot say where it
+   * runs is worse than one that says something which later breaks, and a
+   * break is already visible — it lands in `last_error`.
+   */
+  environment: EnvironmentSpec;
   /**
    * The message queued as each run's first user message.
    */

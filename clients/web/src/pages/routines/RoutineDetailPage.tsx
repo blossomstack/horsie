@@ -82,6 +82,28 @@ export function RoutineDetailPage() {
                 {routine.agent}
               </Link>
             </dd>
+            <dt className="text-faint">Environment</dt>
+            <dd className="text-legend">
+              {routine.environment.type === "Named" ? (
+                <Link
+                  className="hover:underline"
+                  to={`/environments/${encodeURIComponent(routine.environment.value.name)}/edit`}
+                >
+                  {routine.environment.value.name}
+                </Link>
+              ) : (
+                <>
+                  <span className="font-mono">{routine.environment.value.vendor}</span>
+                  {(routine.environment.value.repos?.length ?? 0) > 0 && (
+                    <span className="text-faint">
+                      {" · "}
+                      {routine.environment.value.repos?.length} repo
+                      {routine.environment.value.repos?.length === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </>
+              )}
+            </dd>
             <dt className="text-faint">Runs</dt>
             <dd className="text-legend">{describeSchedule(routine.schedule)}</dd>
             <dt className="text-faint">Next</dt>

@@ -3,13 +3,19 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 import type {
+  EnvironmentView,
   GitHubStatus,
   MemorySpaceView,
   McpServerView,
   PluginView,
   SettingsView,
 } from "../api/types";
-import { DRAFT_STORAGE_KEY, type DraftPayload } from "./draftPersistence";
+import {
+  DRAFT_STORAGE_KEY,
+  type DraftPayload,
+  type EnvironmentDraft,
+} from "./draftPersistence";
+import { environmentKeys } from "./useEnvironments";
 import { githubKeys } from "./useGithub";
 import { memorySpacesKey } from "./useMemory";
 import { mcpKeys } from "./useMcp";
@@ -75,6 +81,26 @@ const memorySpaces: MemorySpaceView[] = [{ name: "horsie", description: "", memo
 
 const ghStatus: GitHubStatus = { connected: false, appConfigured: false, repoCount: 0 };
 
+const environments: EnvironmentView[] = [
+  {
+    name: "staging",
+    description: "",
+    vendor: "velos",
+    repos: [],
+    envVars: [],
+    provision: [],
+    createdAt: "1",
+    updatedAt: "1",
+  },
+];
+
+/** The ad-hoc environment shape, which most of these assertions are about. */
+const runtime = (vendor: string): EnvironmentDraft => ({
+  kind: "runtime",
+  vendor,
+  repos: {},
+});
+
 function makeClient(): QueryClient {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
@@ -84,6 +110,7 @@ function makeClient(): QueryClient {
   client.setQueryData(mcpKeys.servers, mcpServers);
   client.setQueryData(memorySpacesKey, memorySpaces);
   client.setQueryData(githubKeys.status, ghStatus);
+  client.setQueryData(environmentKeys.all, environments);
   client.setQueryData(workflowKeys.all, [
     { name: "triage", description: "", start: "a", steps: [], createdAt: "0", updatedAt: "0" },
   ]);
@@ -100,10 +127,9 @@ function render(client: QueryClient, workflow?: string) {
 
 function storeDraft(draft: Partial<DraftPayload>) {
   const full: DraftPayload = {
-    v: 1,
-    vendor: "",
+    v: 2,
+    environment: { kind: "runtime", vendor: "", repos: {} },
     model: "",
-    repos: {},
     skills: [],
     mcp: [],
     memorySpaces: [],
@@ -119,32 +145,42 @@ describe("useSessionDraft persistence", () => {
   it("first visit seeds server defaults and default-enabled bundles", async () => {
     const { result } = render(makeClient());
     await waitFor(() => expect(result.current.model).toBe("sonnet"));
-    expect(result.current.vendor).toBe("local");
+    expect(result.current.environment).toEqual({
+      kind: "runtime",
+      vendor: "local",
+      repos: {},
+    });
     await waitFor(() => expect([...result.current.skills]).toEqual(["bundle-a"]));
   });
 
   it("restores a stored draft and suppresses bundle seeding", async () => {
-    storeDraft({ vendor: "velos", model: "opus", skills: [], mcp: ["mcp-x"] });
+    storeDraft({ environment: runtime("velos"), model: "opus", skills: [], mcp: ["mcp-x"] });
     const { result } = render(makeClient());
     await waitFor(() => expect(result.current.mcp.has("mcp-x")).toBe(true));
     expect(result.current.model).toBe("opus");
-    expect(result.current.vendor).toBe("velos");
+    expect(result.current.environment).toEqual(runtime("velos"));
     // Stored (deliberately empty) skills selection must NOT be re-seeded.
     expect(result.current.skills.size).toBe(0);
   });
 
   it("a stored draft equal to the defaults still suppresses seeding", async () => {
-    storeDraft({ vendor: "local", model: "sonnet", skills: [] });
+    storeDraft({ environment: runtime("local"), model: "sonnet", skills: [] });
     const { result } = render(makeClient());
     await waitFor(() => expect(result.current.model).toBe("sonnet"));
     expect(result.current.skills.size).toBe(0);
   });
 
-  it("falls back to defaults when the stored model/vendor are gone", async () => {
-    storeDraft({ vendor: "gone", model: "gone" });
+  it("falls back to defaults when the stored model/environment are gone", async () => {
+    storeDraft({ environment: runtime("gone"), model: "gone" });
     const { result } = render(makeClient());
     await waitFor(() => expect(result.current.model).toBe("sonnet"));
-    expect(result.current.vendor).toBe("local");
+    expect(result.current.environment).toEqual(runtime("local"));
+  });
+
+  it("falls back to the default runtime when the named environment is gone", async () => {
+    storeDraft({ environment: { kind: "named", name: "gone" }, model: "sonnet" });
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.environment).toEqual(runtime("local")));
   });
 
   it("filters stored selections that no longer exist", async () => {
@@ -198,7 +234,7 @@ describe("useSessionDraft workflow channel", () => {
   // A run's model comes from each step's preset, so the model channel is
   // neither shown nor required.
   it("does not require a model to start a run", async () => {
-    storeDraft({ vendor: "local", model: "" });
+    storeDraft({ environment: runtime("local"), model: "" });
     const { result } = render(makeClient(), "triage");
     await waitFor(() => expect(result.current.workflow).toBe("triage"));
     expect(result.current.blockedReason).toBeNull();
@@ -209,31 +245,54 @@ describe("useSessionDraft workflow channel", () => {
   // somewhere to run exactly as much as a session does. Reconciliation puts the
   // server default back on any draft, so the only way to have no runtime is for
   // the server to have none connected.
-  it("still requires a runtime to start a run", async () => {
+  it("still requires an environment to start a run", async () => {
     const client = makeClient();
     client.setQueryData(settingsKey, { ...settings, vendors: [], defaultVendor: "" });
     const { result } = render(client, "triage");
     await waitFor(() => expect(result.current.workflow).toBe("triage"));
-    expect(result.current.blockedReason).toBe("Select a runtime to start.");
+    expect(result.current.blockedReason).toBe("Select an environment to start.");
   });
 
-  it("builds a run request carrying the input and the runtime", async () => {
-    storeDraft({ vendor: "velos", model: "opus" });
+  it("builds a run request carrying the input and the environment", async () => {
+    storeDraft({ environment: runtime("velos"), model: "opus" });
     const { result } = render(makeClient(), "triage");
-    await waitFor(() => expect(result.current.vendor).toBe("velos"));
+    await waitFor(() => expect(result.current.environment).toEqual(runtime("velos")));
     expect(result.current.buildRunRequest("ship it")).toEqual({
       input: "ship it",
-      vendor: "velos",
-      repos: undefined,
+      environment: { type: "Runtime", value: { vendor: "velos", repos: undefined } },
     });
   });
 
   it("sends the picked repos with a run on a provisioning runtime", async () => {
-    storeDraft({ vendor: "velos", model: "opus", repos: { "o/r": "" } });
+    storeDraft({
+      environment: { kind: "runtime", vendor: "velos", repos: { "o/r": "" } },
+      model: "opus",
+    });
     const { result } = render(makeClient(), "triage");
     await waitFor(() => expect(result.current.provisions).toBe(true));
-    expect(result.current.buildRunRequest("ship it").repos).toEqual([
-      { url: "https://github.com/o/r", gitRef: undefined },
-    ]);
+    const spec = result.current.buildRunRequest("ship it").environment;
+    expect(spec).toEqual({
+      type: "Runtime",
+      value: {
+        vendor: "velos",
+        repos: [{ url: "https://github.com/o/r", gitRef: undefined }],
+      },
+    });
+  });
+
+  // A predefined environment travels as its name; its vendor and repos were
+  // resolved when it was saved.
+  it("sends a named environment as its name alone", async () => {
+    storeDraft({ environment: { kind: "named", name: "staging" }, model: "opus" });
+    const { result } = render(makeClient(), "triage");
+    await waitFor(() =>
+      expect(result.current.environment).toEqual({ kind: "named", name: "staging" }),
+    );
+    expect(result.current.buildRunRequest("ship it").environment).toEqual({
+      type: "Named",
+      value: { name: "staging" },
+    });
+    // The environment's vendor decides whether repos mean anything.
+    expect(result.current.provisions).toBe(true);
   });
 });
