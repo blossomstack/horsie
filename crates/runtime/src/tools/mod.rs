@@ -3,6 +3,7 @@ pub mod find_and_replace;
 pub mod glob;
 pub mod grep;
 pub mod list_files;
+pub(crate) mod path_lock;
 pub mod read_file;
 pub mod replace_lines;
 pub mod set_env;
@@ -55,16 +56,31 @@ pub async fn dispatch(
             Ok(d) => read_file::exec(&d, i).await,
             Err(reason) => return ToolResult::Err(ToolError { reason }),
         },
+        // The three writers are read-modify-write, so each holds the file's lock
+        // for the whole call — see `path_lock`. The guard is taken here rather
+        // than inside each tool so the key is computed the same way every time.
         ToolCall::WriteFile(i) => match dir {
-            Ok(d) => write_file::exec(&d, i).await,
+            Ok(d) => {
+                let lock = path_lock::for_path(&d.join(&i.path));
+                let _guard = lock.lock().await;
+                write_file::exec(&d, i).await
+            }
             Err(reason) => return ToolResult::Err(ToolError { reason }),
         },
         ToolCall::FindAndReplace(i) => match dir {
-            Ok(d) => find_and_replace::exec(&d, i).await,
+            Ok(d) => {
+                let lock = path_lock::for_path(&d.join(&i.path));
+                let _guard = lock.lock().await;
+                find_and_replace::exec(&d, i).await
+            }
             Err(reason) => return ToolResult::Err(ToolError { reason }),
         },
         ToolCall::ReplaceLines(i) => match dir {
-            Ok(d) => replace_lines::exec(&d, i).await,
+            Ok(d) => {
+                let lock = path_lock::for_path(&d.join(&i.path));
+                let _guard = lock.lock().await;
+                replace_lines::exec(&d, i).await
+            }
             Err(reason) => return ToolResult::Err(ToolError { reason }),
         },
         ToolCall::ListFiles(i) => match dir {
@@ -171,6 +187,41 @@ mod tests {
             }
             ToolResult::Err(e) => panic!("{}", e.reason),
         }
+    }
+
+    /// Two edits to one file in one batch — the shape that silently lost work
+    /// before `path_lock`. Both calls succeed either way; what distinguishes a
+    /// fixed runtime from a broken one is whether both edits are still in the
+    /// file afterwards.
+    #[tokio::test]
+    async fn concurrent_edits_to_one_file_all_land() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.rs"), "use a::One;\nuse b::Two;\n").unwrap();
+        let registry = WorkspaceRegistry::new(vec![Workspace {
+            name: "ws".into(),
+            path: dir.path().to_path_buf(),
+        }]);
+        let state = RuntimeState::new();
+        let edit = |find: &str, replace: &str| {
+            ToolCall::FindAndReplace(horsie_models::runtime::FindAndReplaceInput {
+                path: "f.rs".into(),
+                find: find.into(),
+                replace: replace.into(),
+                regex: None,
+                replace_all: None,
+            })
+        };
+        let (first, second) = tokio::join!(
+            dispatch(&registry, &state, "a", edit("a::One", "x::One")),
+            dispatch(&registry, &state, "a", edit("b::Two", "y::Two")),
+        );
+        for r in [first, second] {
+            if let ToolResult::Err(e) = r {
+                panic!("{}", e.reason);
+            }
+        }
+        let after = std::fs::read_to_string(dir.path().join("f.rs")).unwrap();
+        assert_eq!(after, "use x::One;\nuse y::Two;\n", "an edit was clobbered");
     }
 
     /// Several workspaces is no longer ambiguous: the call lands in the first,
