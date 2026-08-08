@@ -26,7 +26,6 @@ futures-util   = { workspace = true }
 [dev-dependencies]
 horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
 horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
-horsie-anthropic = { path = "../providers/anthropic" }
 async-trait  = { workspace = true }
 
 [lints]

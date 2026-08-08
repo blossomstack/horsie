@@ -5,12 +5,15 @@ version = "0.1.6"
 edition = "2024"
 publish = false # internal application crate, never published to crates.io
 
+[dependencies]
+# Not a dev-dependency: this is what turns on `mock` for a plain `cargo build`,
+# so `cargo build -p async-llm --bin async-llm-mock` can produce the e2e server.
+async-llm = { workspace = true, features = ["mock"] }
+
 [dev-dependencies]
 horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
 horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
-horsie-anthropic = { path = "../providers/anthropic" }
-horsie-llm-adapters = { path = "../providers/llm-adapters" }
-async-llm = { workspace = true, features = ["mock"] }
+horsie-llm-providers = { path = "../llm-providers" }
 horsie-server = { path = "../server", features = ["test-util"] }
 horsie-runtime-vendor = { path = "../runtime-vendor" }
 horsie-actor = { path = "../actor" }

@@ -1666,7 +1666,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "horsie-anthropic"
+name = "horsie-llm-providers"
 version = "0.1.6"
 dependencies = [
  "async-llm",
@@ -1674,24 +1674,11 @@ dependencies = [
  "horsie-agentcore",
  "horsie-models",
  "reqwest 0.12.28",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "horsie-llm-adapters"
-version = "0.1.6"
-dependencies = [
- "async-llm",
- "async-trait",
- "horsie-agentcore",
- "horsie-models",
  "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
+ "tracing",
 ]
 
 [[package]]
@@ -1704,14 +1691,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
-name = "horsie-mock-llm"
-version = "0.1.6"
-dependencies = [
- "async-llm",
  "tokio",
 ]
 
@@ -1806,8 +1785,7 @@ dependencies = [
  "hex",
  "horsie-actor",
  "horsie-agentcore",
- "horsie-anthropic",
- "horsie-llm-adapters",
+ "horsie-llm-providers",
  "horsie-mcp-client",
  "horsie-models",
  "horsie-runtime-client",
@@ -1883,7 +1861,6 @@ dependencies = [
  "futures-util",
  "horsie-actor",
  "horsie-agentcore",
- "horsie-anthropic",
  "horsie-mcp-client",
  "horsie-models",
  "horsie-runtime-client",
@@ -2199,8 +2176,7 @@ dependencies = [
  "futures-util",
  "horsie-actor",
  "horsie-agentcore",
- "horsie-anthropic",
- "horsie-llm-adapters",
+ "horsie-llm-providers",
  "horsie-models",
  "horsie-runtime-client",
  "horsie-runtime-vendor",

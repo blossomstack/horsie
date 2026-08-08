@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use horsie_agentcore::{
     CompletionRequest, EventSink, EventSinkError, LlmProvider, StopReason, TextPart,
 };
-use horsie_llm_adapters::OpenAiProvider;
+use horsie_llm_providers::openai::OpenAiProvider;
 use horsie_models::{
     agent::{ContentPart, Message, Role},
     events::AgentEvent,
@@ -207,7 +207,7 @@ async fn streams_responses_text_into_horsie_parts_and_events() {
         .response("hello from Responses")
         .build()
         .await;
-    let provider = horsie_llm_adapters::ResponsesProvider::with_api_key("test-key")
+    let provider = horsie_llm_providers::responses::ResponsesProvider::with_api_key("test-key")
         .expect("constructs")
         .with_model("mock-model")
         .with_base_url(server.url());
@@ -243,7 +243,7 @@ async fn streams_responses_text_into_horsie_parts_and_events() {
 async fn preserves_responses_reasoning_encrypted_signature() {
     let server = async_llm::mock::MockLlmServer::builder().build().await;
     server.queue_reasoning("checking", "answer");
-    let provider = horsie_llm_adapters::ResponsesProvider::with_api_key("test-key")
+    let provider = horsie_llm_providers::responses::ResponsesProvider::with_api_key("test-key")
         .expect("constructs")
         .with_model("mock-model")
         .with_base_url(server.url());
@@ -281,7 +281,7 @@ async fn preserves_responses_reasoning_encrypted_signature() {
 async fn streams_responses_tool_calls_and_reports_tool_use() {
     let server = async_llm::mock::MockLlmServer::builder().build().await;
     server.queue_tool_call("echo", serde_json::json!({"value": 42}));
-    let provider = horsie_llm_adapters::ResponsesProvider::with_api_key("test-key")
+    let provider = horsie_llm_providers::responses::ResponsesProvider::with_api_key("test-key")
         .expect("constructs")
         .with_model("mock-model")
         .with_base_url(server.url());
@@ -332,7 +332,7 @@ async fn maps_responses_http_errors_to_horsie_errors() {
         .error(400, "invalid request")
         .build()
         .await;
-    let provider = horsie_llm_adapters::ResponsesProvider::with_api_key("test-key")
+    let provider = horsie_llm_providers::responses::ResponsesProvider::with_api_key("test-key")
         .expect("constructs")
         .with_model("mock-model")
         .with_base_url(server.url())

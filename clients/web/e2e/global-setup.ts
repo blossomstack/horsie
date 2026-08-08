@@ -27,24 +27,22 @@ export default async function globalSetup(): Promise<void> {
   const runtimeBin = path.join(binDir, "horsie-runtime");
   // The vendor agent: sessions reach this machine only through it now.
   const cliBin = path.join(binDir, "horsie");
-  const mockBin = path.join(binDir, "horsie-mock-llm");
+  const mockBin = path.join(binDir, "async-llm-mock");
   const distDir = path.join(WEB_DIR, "dist");
 
   if (!skipBuild) {
-    log("building rust binaries (horsie-server, horsie, horsie-runtime, horsie-mock-llm)…");
+    log("building rust binaries (horsie-server, horsie, horsie-runtime, async-llm-mock)…");
     execFileSync(
       "cargo",
-      [
-        "build",
-        "-p",
-        "horsie-server",
-        "-p",
-        "horsie",
-        "-p",
-        "horsie-runtime",
-        "-p",
-        "horsie-mock-llm",
-      ],
+      ["build", "-p", "horsie-server", "-p", "horsie", "-p", "horsie-runtime"],
+      { cwd: REPO_ROOT, stdio: "inherit" },
+    );
+    // The mock server is async-llm's own binary. It builds only because a
+    // workspace member takes async-llm as a normal dependency with `mock` on —
+    // a dev-dependency's features are not active for `cargo build`.
+    execFileSync(
+      "cargo",
+      ["build", "-p", "async-llm", "--bin", "async-llm-mock"],
       { cwd: REPO_ROOT, stdio: "inherit" },
     );
     log("building web assets (bun run build)…");

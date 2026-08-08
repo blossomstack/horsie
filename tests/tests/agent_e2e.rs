@@ -17,7 +17,7 @@ use horsie_agentcore::{
     Agent, AgentError, AgentEvent, AgentInput, AgentResult, CompletedOutput, ContentPart,
     EventSink, EventSinkError, HandoffOutput, ToolCallError, ToolSpec, Toolbox,
 };
-use horsie_anthropic::AnthropicProvider;
+use horsie_llm_providers::anthropic::AnthropicProvider;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
