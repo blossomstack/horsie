@@ -7,7 +7,8 @@ use horsie_models::routines::{RoutineRunResponse, RoutineView};
 use horsie_models::session::{SessionDetail, SessionSummary};
 use horsie_models::session_api::{ApiError, GetSessionResponse, ListSessionsResponse};
 use horsie_models::workflow::{
-    WorkflowRunGraph, WorkflowRunRequest, WorkflowRunResponse, WorkflowView,
+    WorkflowInput, WorkflowRetryRequest, WorkflowRunGraph, WorkflowRunRequest, WorkflowRunResponse,
+    WorkflowView,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -49,6 +50,30 @@ impl ServerClient {
         body: Option<&B>,
     ) -> Result<T, CliError> {
         let url = format!("{}{path}", self.base);
+        let bytes = self.request_bytes(method, path, body).await?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| CliError::Server(format!("bad response from {url}: {e}")))
+    }
+
+    /// As [`send`](Self::send), for the endpoints that answer `202`/`204` with no
+    /// body — a retry, a delete. Deserializing `()` from an empty body fails, so
+    /// these need the same error handling without the last step.
+    async fn send_no_body<B: Serialize + ?Sized>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<(), CliError> {
+        self.request_bytes(method, path, body).await.map(|_| ())
+    }
+
+    async fn request_bytes<B: Serialize + ?Sized>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<Vec<u8>, CliError> {
+        let url = format!("{}{path}", self.base);
         let mut req = self.http.request(method, &url);
         if let Some(t) = &self.token {
             req = req.bearer_auth(t);
@@ -79,8 +104,7 @@ impl ServerClient {
                 .unwrap_or_else(|_| format!("{status} {}", String::from_utf8_lossy(&bytes)));
             return Err(CliError::Server(message));
         }
-        serde_json::from_slice(&bytes)
-            .map_err(|e| CliError::Server(format!("bad response from {url}: {e}")))
+        Ok(bytes.to_vec())
     }
 
     pub async fn list_agents(&self) -> Result<Vec<AgentView>, CliError> {
@@ -137,6 +161,35 @@ impl ServerClient {
         .await
     }
 
+    pub async fn create_workflow(&self, input: &WorkflowInput) -> Result<WorkflowView, CliError> {
+        self.send(reqwest::Method::POST, "/api/workflows", Some(input))
+            .await
+    }
+
+    /// Full replace; the path name is the id of record, so the body's name has
+    /// to match it.
+    pub async fn replace_workflow(
+        &self,
+        name: &str,
+        input: &WorkflowInput,
+    ) -> Result<WorkflowView, CliError> {
+        self.send(
+            reqwest::Method::PUT,
+            &format!("/api/workflows/{name}"),
+            Some(input),
+        )
+        .await
+    }
+
+    pub async fn delete_workflow(&self, name: &str) -> Result<(), CliError> {
+        self.send_no_body(
+            reqwest::Method::DELETE,
+            &format!("/api/workflows/{name}"),
+            None::<&str>,
+        )
+        .await
+    }
+
     /// A run, projected onto its graph. Keyed by session id: a run is a
     /// session.
     pub async fn workflow_run(&self, session_id: &str) -> Result<WorkflowRunGraph, CliError> {
@@ -144,6 +197,20 @@ impl ServerClient {
             reqwest::Method::GET,
             &format!("/api/sessions/{session_id}/workflow"),
             None::<&str>,
+        )
+        .await
+    }
+
+    /// Re-run one step execution. Keyed by session id, like the graph read.
+    pub async fn retry_workflow_step(
+        &self,
+        session_id: &str,
+        step_index: u32,
+    ) -> Result<(), CliError> {
+        self.send_no_body(
+            reqwest::Method::POST,
+            &format!("/api/sessions/{session_id}/workflow/retry"),
+            Some(&WorkflowRetryRequest { step_index }),
         )
         .await
     }
