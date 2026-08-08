@@ -48,6 +48,9 @@ jsonschema        = "0.49"
 jsonwebtoken      = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 base64            = "0.23"
 sha2              = "0.11"
+# hmac 0.13 is the release that pairs with sha2 0.11 (both on digest 0.11), and
+# it moved `new_from_slice` onto `KeyInit`, so the call site is qualified.
+hmac              = "0.13"
 # sha2 0.11 returns `hybrid_array::Array` from `finalize()`, which has no
 # `LowerHex` impl — `format!("{:x}", …)` no longer compiles. These digests are
 # persisted (plugin artifact ids, source keys), so the encoding must stay

@@ -320,7 +320,6 @@ impl WebsocketRuntimeVendor {
         })
         .await
     }
-
 }
 
 #[async_trait::async_trait]

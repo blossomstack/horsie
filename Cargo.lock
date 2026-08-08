@@ -1808,6 +1808,7 @@ dependencies = [
  "async-trait",
  "axum",
  "hex",
+ "hmac",
  "horsie-models",
  "regex",
  "reqwest 0.12.28",

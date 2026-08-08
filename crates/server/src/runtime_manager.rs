@@ -18,9 +18,7 @@
 //! mid-create, which one held in a map beside this manager could not.
 
 use crate::runtime_vendor::RuntimeVendor;
-use crate::runtime_vendor::{
-    RuntimeSpec, RuntimeVendorError, WorkspaceSpec,
-};
+use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorError, WorkspaceSpec};
 use crate::sessions::spec::{RuntimeVendorMap, SessionSpec};
 use horsie_runtime_client::RuntimeClient;
 use std::sync::Arc;
