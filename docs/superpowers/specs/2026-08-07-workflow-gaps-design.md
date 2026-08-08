@@ -171,3 +171,36 @@ Five PRs, merged as a stack:
 5. The CLI's retry and definition management.
 
 The HTTP end-to-end test lands with (1), where the behaviour it guards is.
+
+## What building it turned up
+
+Three things this design did not anticipate, recorded because the reasoning
+matters more than the diffs.
+
+**The browser had no answer box for a parked step at all.** This design treated
+answering as one server-side defect plus a missing `aid` on the request, and
+scoped the run page's job to *getting you to* the step. But `ToolCallCard`
+dispatched to the answer card on `call.name === "ask_user"`, and a step never
+gets `ask_user` — it asks through `conclude`. The question rendered as a
+collapsed generic tool row with no input and no send button, so fixing the server
+would have left a parked run unblockable from the browser and pointed a new
+banner at a page that could not answer it. Matched by shape now, not by tool
+name. The lesson generalises: **anything keyed on the ask tool's name is wrong
+for a run**, because a run's terminal tool is a different one.
+
+**Nothing ever cleared `AwaitingInput`.** Found while writing the test for the
+answer fix: `apply_awaiting` set the status and no fold ever moved it off. So even
+a delivered answer would have resumed the step and then stalled the run at the
+step it had just finished — a third defect hiding behind the second, invisible
+because answering had never worked at all. `apply_concluded` now reasserts
+`Running`, which is what the run is between steps.
+
+**CI gave every stacked PR but the bottom one zero checks.** `ci.yml` gated
+`pull_request` on `branches: [main]`, and a stacked PR targets its parent — so
+four of these five were unverifiable, and the widened trigger immediately caught
+a real break (a `WorkflowView` field added in PR 4 whose fixtures were only fixed
+in PR 5, so PR 4 alone did not compile). Fixed in PR 1 as `branches: ["**"]`.
+
+The second one generalises: adding a field to a struct shared across crates
+breaks fixtures in crates the change never touches, and `cargo clippy -p
+horsie-server` cannot see them. The workspace-wide lint is the gate.
