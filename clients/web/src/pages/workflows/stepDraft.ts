@@ -24,6 +24,13 @@ export interface StepDraft {
   /** A schema the field editor could not represent, kept verbatim. */
   rawSchema: unknown;
   transitions: WorkflowTransition[];
+  /** Per-step budgets, carried through rather than edited.
+   *
+   * The form has no control for either, and a save is a full replace — so
+   * dropping them here destroyed whatever the API had set. Preserved the same
+   * way `rawSchema` is, for the same reason. */
+  maxIterations: number | undefined;
+  maxRetries: number | undefined;
 }
 
 let counter = 0;
@@ -73,6 +80,8 @@ export function toDraft(step: WorkflowStepDef): StepDraft {
     fields: fields ?? [],
     rawSchema: fields === null ? step.outputSchema : undefined,
     transitions: step.transitions ?? [],
+    maxIterations: step.maxIterations ?? undefined,
+    maxRetries: step.maxRetries ?? undefined,
   };
 }
 
@@ -83,8 +92,8 @@ export function fromDraft(d: StepDraft): WorkflowStepDef {
     prompt: d.prompt,
     outputSchema: d.rawSchema !== undefined ? d.rawSchema : fieldsToSchema(d.fields),
     transitions: d.transitions.length > 0 ? d.transitions : undefined,
-    maxIterations: undefined,
-    maxRetries: undefined,
+    maxIterations: d.maxIterations,
+    maxRetries: d.maxRetries,
   };
 }
 
@@ -96,4 +105,6 @@ export const emptyStep = (n: number): StepDraft => ({
   fields: [],
   rawSchema: undefined,
   transitions: [],
+  maxIterations: undefined,
+  maxRetries: undefined,
 });

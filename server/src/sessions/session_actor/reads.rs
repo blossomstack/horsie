@@ -115,6 +115,7 @@ impl SessionActor {
             .fold(UsageTotal::default(), |acc, u| acc.combine(u));
         SessionUsageStats {
             session_total,
+            agents: state.agent_usage.clone(),
             main_agent: AgentUsageEntry {
                 model: self.spec.agent.model.clone(),
                 snapshot: AgentUsageSnapshot {

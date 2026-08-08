@@ -2517,6 +2517,17 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
         "the edge the run took records which execution took it"
     );
 
+    // Per-step tokens. These were hardcoded to zero, so "which step is
+    // expensive?" — most of why the breakdown is on the page — was unanswerable.
+    let spent: u64 = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|n| n["runs"].as_array().unwrap())
+        .map(|r| r["inputTokens"].as_u64().unwrap() + r["outputTokens"].as_u64().unwrap())
+        .sum();
+    assert!(spent > 0, "every step reported zero tokens: {graph}");
+
     // A step is addressable as an agent, which is where its transcript is.
     let step_agent = graph["nodes"][0]["runs"][0]["agentId"].as_str().unwrap();
     let res = client
@@ -2528,6 +2539,14 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
         res.status().as_u16(),
         200,
         "a step's own page reads through the agent API"
+    );
+    let doc: serde_json::Value = res.json().await.unwrap();
+    // A step is in no subagent tree, so this used to fall through to a
+    // hardcoded "running" and report that for ever.
+    assert_eq!(
+        doc["agent"]["status"],
+        serde_json::json!("completed"),
+        "a concluded step must not report itself as still running: {doc}"
     );
     let page = messages_page(&client, &server.addr, &id, step_agent).await;
     assert!(

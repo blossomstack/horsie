@@ -52,18 +52,24 @@ impl Toolbox for StepConcludeToolbox {
         specs
     }
 
+    /// Forwards `tool_call_id` untouched. It used to pass a literal `"tc1"`,
+    /// which is not cosmetic: the id is the runtime's correlation key
+    /// (`ToolCallRequest.call_id`) and the key of the in-flight set a cancel
+    /// walks. The agent loop runs a turn's tool calls concurrently, so two
+    /// parallel calls from one step shared an id — their replies could correlate
+    /// to the wrong call, and a cancel reached only one of them.
     async fn execute(
         &self,
         name: &str,
         input: Value,
-        _tool_call_id: &str,
+        tool_call_id: &str,
     ) -> Result<Value, ToolCallError> {
         if name == CONCLUDE_TOOL && self.conclude.is_some() {
             return Err(ToolCallError::ExecutionFailed(
                 "the conclude tool is terminal and is not executed".to_string(),
             ));
         }
-        self.inner.execute(name, input, "tc1").await
+        self.inner.execute(name, input, tool_call_id).await
     }
 }
 
@@ -107,6 +113,56 @@ mod tests {
         let tb = StepConcludeToolbox::wrap(base(), None, false);
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(!names.contains(&CONCLUDE_TOOL.to_string()));
+    }
+
+    /// The wrapped toolbox must see the model's own call id. Passing a literal
+    /// gave every tool call in every step the same one, and that id is what the
+    /// runtime correlates a reply by and what a cancel names — so two concurrent
+    /// calls from one step collided.
+    #[tokio::test]
+    async fn the_wrapped_toolbox_sees_the_real_call_id() {
+        use std::sync::Mutex;
+
+        struct Recording(Mutex<Vec<String>>);
+
+        #[async_trait]
+        impl Toolbox for Recording {
+            fn specs(&self) -> Vec<ToolSpec> {
+                vec![ToolSpec {
+                    name: "noop".into(),
+                    description: String::new(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }]
+            }
+
+            async fn execute(
+                &self,
+                _name: &str,
+                _input: Value,
+                tool_call_id: &str,
+            ) -> Result<Value, ToolCallError> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(tool_call_id.to_string());
+                Ok(Value::Null)
+            }
+        }
+
+        let inner = Arc::new(Recording(Mutex::new(Vec::new())));
+        let schema = serde_json::json!({"type": "object"});
+        let tb = StepConcludeToolbox::wrap(inner.clone(), Some(&schema), false);
+        tb.execute("noop", serde_json::json!({}), "toolu_real")
+            .await
+            .unwrap();
+        assert_eq!(
+            inner
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            ["toolu_real"]
+        );
     }
 
     #[tokio::test]
