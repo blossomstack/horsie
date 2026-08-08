@@ -14,6 +14,10 @@
 
 **Protocol types are not storage types.** Wire formats and inter-module message types evolve at the speed of the interface contract. Persisted structures evolve at the speed of data migrations. Never conflate them.
 
+## Repository layout
+
+Every workspace crate lives under `crates/` (the workspace globs `crates/*`, so a new crate needs no `members` edit). Everything else at the root is repo-level: `clients/` (TypeScript + web UI), `docker/`, `docs/`, `scripts/`.
+
 ## Tests
 
 Unit tests live alongside source files under `#[cfg(test)] mod tests` in the same `.rs` file. E2e / integration tests that spin up the full stack go in `tests/` at the crate root.
@@ -31,10 +35,10 @@ my-crate/
 
 Use [fluorite](https://github.com/blossomstack/fluorite) to generate all protocol message types — any data transported between modules, or between server and clients (API request/response types, inter-crate message envelopes, wire formats).
 
-- Define schemas as `.fl` files under `models/fluorite/` (inside the models crate, so published packages are self-contained).
+- Define schemas as `.fl` files under `crates/models/fluorite/` (inside the models crate, so published packages are self-contained).
 - The `horsie-models` crate runs `fluorite_codegen` in `build.rs` and exposes generated types via `horsie_models::models::*`.
 - Generated types automatically derive `Debug`, `Clone`, `PartialEq`, `Serialize`, `Deserialize`, `JsonSchema`.
-- Add hand-written convenience methods in `models/src/lib.rs` (not in the schema).
+- Add hand-written convenience methods in `crates/models/src/lib.rs` (not in the schema).
 
 **Never use fluorite for persisted data structures** (database rows, migration types, on-disk formats). Those are owned by the storage layer and must evolve independently of the wire protocol.
 

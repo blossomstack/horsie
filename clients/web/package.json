@@ -13,7 +13,7 @@
     "contrast": "node scripts/contrast.mjs",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "generate-types": "fluorite clean -o src/generated && fluorite ts -i ../../models/fluorite/agent.fl ../../models/fluorite/hooks.fl ../../models/fluorite/runtime.fl ../../models/fluorite/capabilities.fl ../../models/fluorite/session.fl ../../models/fluorite/session_api.fl ../../models/fluorite/settings.fl ../../models/fluorite/github.fl ../../models/fluorite/mcp.fl ../../models/fluorite/plugins.fl ../../models/fluorite/model_cards.fl ../../models/fluorite/memory.fl ../../models/fluorite/auth.fl ../../models/fluorite/agents.fl ../../models/fluorite/routines.fl ../../models/fluorite/executor.fl ../../models/fluorite/environments.fl ../../models/fluorite/workflow.fl -o src/generated"
+    "generate-types": "fluorite clean -o src/generated && fluorite ts -i ../../crates/models/fluorite/agent.fl ../../crates/models/fluorite/hooks.fl ../../crates/models/fluorite/runtime.fl ../../crates/models/fluorite/capabilities.fl ../../crates/models/fluorite/session.fl ../../crates/models/fluorite/session_api.fl ../../crates/models/fluorite/settings.fl ../../crates/models/fluorite/github.fl ../../crates/models/fluorite/mcp.fl ../../crates/models/fluorite/plugins.fl ../../crates/models/fluorite/model_cards.fl ../../crates/models/fluorite/memory.fl ../../crates/models/fluorite/auth.fl ../../crates/models/fluorite/agents.fl ../../crates/models/fluorite/routines.fl ../../crates/models/fluorite/executor.fl ../../crates/models/fluorite/environments.fl ../../crates/models/fluorite/workflow.fl -o src/generated"
   },
   "dependencies": {
     "@fontsource-variable/archivo": "^5.3.0",
