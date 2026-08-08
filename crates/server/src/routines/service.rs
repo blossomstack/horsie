@@ -216,12 +216,10 @@ impl RoutineService {
         // Only what is stable at save. Whether the named vendor is connected,
         // or the named environment still exists, is a run-time fact — a routine
         // outlives both, and reports a broken one through `last_error`.
-        if let EnvironmentSpec::Runtime(r) = &input.environment {
-            if r.vendor.trim().is_empty() {
-                return Err(RoutineError::Invalid(
-                    "environment names no runtime vendor".to_string(),
-                ));
-            }
+        if matches!(&input.environment, EnvironmentSpec::Runtime(r) if r.vendor.trim().is_empty()) {
+            return Err(RoutineError::Invalid(
+                "environment names no runtime vendor".to_string(),
+            ));
         }
         let schedule = input
             .schedule

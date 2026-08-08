@@ -140,7 +140,6 @@ async fn agents_are_isolated() {
         name: "reviewer".into(),
         description: String::new(),
         model: model.into(),
-        repos: vec![],
         plugins: vec![],
         mcp_servers: vec![],
         memory_spaces: vec![],
@@ -460,6 +459,12 @@ fn plugin(name: &str, hash: &str) -> horsie_server::plugins::PluginRow {
 
 fn routine(name: &str) -> horsie_server::routines::RoutineRow {
     horsie_server::routines::RoutineRow {
+        environment: horsie_models::environments::EnvironmentSpec::Runtime(
+            horsie_models::environments::RuntimeEnvironment {
+                vendor: "mock".into(),
+                repos: None,
+            },
+        ),
         name: name.into(),
         description: String::new(),
         agent: "reviewer".into(),

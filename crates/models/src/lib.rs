@@ -1103,7 +1103,6 @@ mod agents_tests {
             name: "reviewer".into(),
             description: "reviews PRs".into(),
             model: "sonnet".into(),
-            repos: vec![],
             plugins: vec!["superpowers".into()],
             mcp_servers: vec![],
             memory_spaces: vec!["default".into()],
