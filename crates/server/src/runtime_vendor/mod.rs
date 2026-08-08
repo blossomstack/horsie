@@ -20,6 +20,7 @@
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
 pub mod fly;
+pub mod fly_api;
 mod registry;
 mod transport;
 mod websocket;
