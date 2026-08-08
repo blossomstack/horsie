@@ -110,7 +110,7 @@ impl RuntimeTransport for RuntimeVendorTransport {
         let event = link
             .request(self.addressed(message))
             .await
-            .map_err(TransportError::SendFailed)?;
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
         match event {
             RuntimeVendorEvent::Runtime(ev) => Ok(ev.message),
             RuntimeVendorEvent::Ready(_)
@@ -131,7 +131,7 @@ impl RuntimeTransport for RuntimeVendorTransport {
             .await?
             .send_oneway(self.addressed(message))
             .await
-            .map_err(TransportError::SendFailed)
+            .map_err(|e| TransportError::SendFailed(e.to_string()))
     }
 }
 

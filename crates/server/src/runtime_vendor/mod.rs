@@ -19,6 +19,7 @@
 /// external test crates that opt in via the `test-util` feature.
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
+pub mod fly;
 mod registry;
 mod transport;
 mod websocket;

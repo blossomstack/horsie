@@ -49,6 +49,38 @@ type BoxedSink = Box<
     dyn futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Send + Unpin,
 >;
 
+/// Why a request did not produce an answer.
+///
+/// The distinction is load-bearing and used to be lost: a vendor that
+/// *answered* "I have no such runtime" is terminal for the owning session,
+/// while a link that died before answering says nothing about the runtime at
+/// all. Collapsing them made a disconnect during a resume look like a destroyed
+/// workspace and marked perfectly recoverable sessions `Unrecoverable`.
+#[derive(Debug)]
+pub enum RequestError {
+    /// The vendor answered, and the answer was a failure.
+    Refused(String),
+    /// The link died, or never answered in time. Always retryable.
+    Link(String),
+}
+
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(m) | Self::Link(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl From<RequestError> for RuntimeVendorError {
+    fn from(e: RequestError) -> Self {
+        match e {
+            RequestError::Refused(m) => Self::Provision(m),
+            RequestError::Link(m) => Self::Unavailable(m),
+        }
+    }
+}
+
 pub struct WebsocketRuntimeVendor {
     vendor_name: String,
     /// The announcing *process*. Two links carrying the same id are the same
@@ -286,7 +318,7 @@ impl WebsocketRuntimeVendor {
     pub async fn request(
         &self,
         command: RuntimeVendorCommand,
-    ) -> Result<RuntimeVendorEvent, String> {
+    ) -> Result<RuntimeVendorEvent, RequestError> {
         let request_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.waiters.lock().await.insert(request_id.clone(), tx);
@@ -297,17 +329,21 @@ impl WebsocketRuntimeVendor {
         };
         if let Err(e) = self.write(&msg).await {
             self.waiters.lock().await.remove(&request_id);
-            return Err(e);
+            return Err(RequestError::Link(e));
         }
 
         match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(RuntimeVendorEvent::RequestFailed(ev))) => Err(ev.message),
+            Ok(Ok(RuntimeVendorEvent::RequestFailed(ev))) => Err(RequestError::Refused(ev.message)),
             Ok(Ok(event)) => Ok(event),
             // The sender was dropped: the read loop exited, i.e. the socket died.
-            Ok(Err(_)) => Err("vendor agent disconnected".to_string()),
+            Ok(Err(_)) => Err(RequestError::Link(
+                "the runtime vendor disconnected".to_string(),
+            )),
             Err(_) => {
                 self.waiters.lock().await.remove(&request_id);
-                Err("timed out waiting for the vendor agent".to_string())
+                Err(RequestError::Link(
+                    "the runtime vendor did not answer in time".to_string(),
+                ))
             }
         }
     }
@@ -358,8 +394,7 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
             runtime_id: runtime_id.to_string(),
             spec: spec.clone(),
         }))
-        .await
-        .map_err(RuntimeVendorError::Provision)?;
+        .await?;
         Ok(horsie_runtime_vendor::RuntimeProgress::Ready(
             self.handle(runtime_id),
         ))
@@ -392,7 +427,14 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
             runtime_id: runtime_id.to_string(),
         }))
         .await
-        .map_err(RuntimeVendorError::Gone)?;
+        .map_err(|e| match e {
+            // The vendor answered: it has nothing under this id, and rebuilding
+            // would destroy work the user believes is still there.
+            RequestError::Refused(m) => RuntimeVendorError::Gone(m),
+            // The vendor never answered. That says nothing about the runtime,
+            // so the session stays recoverable and simply retries.
+            RequestError::Link(m) => RuntimeVendorError::Unavailable(m),
+        })?;
         Ok(horsie_runtime_vendor::RuntimeProgress::Ready(
             self.handle(runtime_id),
         ))
@@ -691,7 +733,10 @@ mod tests {
             ))
             .await
             .expect_err("a hung-up agent must fail the request, not hang");
-        assert!(err.to_lowercase().contains("disconnect"), "{err}");
+        assert!(
+            matches!(err, RequestError::Link(_)),
+            "a dead socket is a link failure, not a refusal: {err}"
+        );
         for _ in 0..50 {
             if !link.is_reachable() {
                 return;
