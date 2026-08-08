@@ -185,6 +185,16 @@ pub fn app(state: AppState) -> Router {
             "/api/config",
             get(config::get_config).put(config::update_config),
         )
+        .route("/api/config/models", get(config::list_models))
+        .route(
+            "/api/config/models/{alias}",
+            put(config::put_model).delete(config::delete_model),
+        )
+        .route("/api/config/model-providers", get(config::list_providers))
+        .route(
+            "/api/config/model-providers/{name}",
+            put(config::put_provider).delete(config::delete_provider),
+        )
         .route("/api/admin/providers/{name}/chatgpt", get(chatgpt::status))
         .route(
             "/api/admin/providers/{name}/chatgpt/login",
@@ -2934,5 +2944,113 @@ mod tests {
             .unwrap();
         let listed: Vec<AgentTokenView> = read_json(res).await;
         assert!(listed.is_empty());
+    }
+
+    fn delete_req(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// The status codes that carry meaning for a Terraform-style client: each
+    /// resource is addressed on its own, and the failures are distinguishable.
+    #[tokio::test]
+    async fn per_resource_config_routes_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/config/model-providers/p",
+                &serde_json::json!({"name": "p", "kind": "anthropic", "apiKey": "sk-x"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // A second provider must not disturb the first — the clobbering this
+        // whole change exists to remove.
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/config/model-providers/q",
+                &serde_json::json!({"name": "q", "kind": "openai", "apiKey": "sk-y"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .clone()
+            .oneshot(get("/api/config/model-providers"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let providers: serde_json::Value = read_json(res).await;
+        assert_eq!(providers.as_array().unwrap().len(), 2);
+
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/config/models/m",
+                &serde_json::json!({"alias": "m", "provider": "p", "modelId": "claude-x"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // A model routed to a provider that does not exist is refused.
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/config/models/bad",
+                &serde_json::json!({"alias": "bad", "provider": "ghost", "modelId": "x"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // The path is the identity; a body that disagrees is not a rename.
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/config/models/m",
+                &serde_json::json!({"alias": "other", "provider": "p", "modelId": "x"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // A provider held open by a model is a conflict, not a cascade.
+        let res = app
+            .clone()
+            .oneshot(delete_req("/api/config/model-providers/p"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+
+        let res = app
+            .clone()
+            .oneshot(delete_req("/api/config/models/m"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let res = app
+            .clone()
+            .oneshot(delete_req("/api/config/model-providers/p"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let res = app
+            .clone()
+            .oneshot(delete_req("/api/config/models/ghost"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }
