@@ -61,7 +61,14 @@ jsonschema        = "0.49"
 # into these binaries by rustls, so this adds no new build dependency.
 # `use_pem` is in the crate's default set and is what provides
 # `EncodingKey::from_rsa_pem`, which the GitHub App JWT needs.
-jsonwebtoken      = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+# `rust_crypto`, not `aws_lc_rs`: jsonwebtoken 11 requires exactly one provider
+# and panics at first use if a build graph holds two — so this choice is not
+# private to us. Anything that embeds `horsie-server` as a library and also uses
+# jsonwebtoken inherits it, and would otherwise compile cleanly and fail at the
+# first token it verified. The pure-Rust one also keeps a C toolchain out of
+# every such build; the only algorithm here is HS256, where the difference is
+# not measurable.
+jsonwebtoken      = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 base64            = "0.23"
 sha2              = "0.11"
 # sha2 0.11 returns `hybrid_array::Array` from `finalize()`, which has no
