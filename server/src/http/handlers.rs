@@ -9,6 +9,7 @@ use crate::sessions::session_actor::AskAnswer;
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
+use crate::sessions::workflow::StepStatus;
 use axum::Json;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -277,6 +278,42 @@ fn to_wire_usage(u: horsie_workflow::UsageTotal) -> UsageView {
     }
 }
 
+/// The workflow step this agent is one execution of: its definition (for the
+/// preset it runs under) and its entry in the run log (for what became of it).
+///
+/// `None` for the main agent, for a subagent, and for every agent of a session
+/// that is not a run — all of which is what makes calling this unconditionally
+/// safe.
+async fn step_execution(
+    state: &crate::users::UserServices,
+    id: &str,
+    rec: &SessionRecord,
+    agent_id: &str,
+) -> Result<
+    Option<(
+        crate::sessions::workflow::WorkflowStepSpec,
+        crate::sessions::workflow::StepRun,
+    )>,
+    Api,
+> {
+    let Some(spec) = rec.spec.workflow.as_ref() else {
+        return Ok(None);
+    };
+    let Ok(uid) = Uuid::parse_str(agent_id) else {
+        return Ok(None);
+    };
+    let run = ask(state, |reply| SessionSupervisorCommand::RunState {
+        id: id.to_string(),
+        reply,
+    })
+    .await?
+    .unwrap_or_default();
+    let Some(execution) = run.index_of_agent(uid).and_then(|i| run.get(i).cloned()) else {
+        return Ok(None);
+    };
+    Ok(spec.step(&execution.step).cloned().map(|s| (s, execution)))
+}
+
 /// One agent's current values: its task list, its usage, and — for a subagent —
 /// its spawn metadata and terminal result. Everything here is a value the
 /// client re-reads rather than a log it accumulates; the log is `/history`.
@@ -301,10 +338,19 @@ pub async fn get_agent(
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
     let settings = state.config_store.view().await.map_err(Api::internal)?;
+    // A run's steps each carry their own preset, so the session's model — which
+    // is the *first* step's — is the wrong window for any other step. The run
+    // log names which execution this agent is, and the snapshot holds that
+    // step's resolved settings.
+    let step = step_execution(&state, &id, &rec, &agent_id).await?;
+    let model = match &step {
+        Some((step, _)) => step.settings.model.clone(),
+        None => rec.spec.agent.model.clone(),
+    };
     let context_window = settings
         .models
         .iter()
-        .find(|m| m.alias == rec.spec.agent.model)
+        .find(|m| m.alias == model)
         .and_then(|m| m.context_window);
 
     // Spawn metadata comes from the session's tree, which is where a subagent's
@@ -332,19 +378,40 @@ pub async fn get_agent(
         label: node.as_ref().map(|(_, rec)| rec.label.clone()),
         task: node.as_ref().map(|(_, rec)| rec.task.clone()),
         depth: node.as_ref().map_or(0, |(_, rec)| rec.depth),
-        status: node.as_ref().map_or_else(
-            || "running".to_string(),
-            |(_, rec)| {
-                match rec.status {
-                    SubAgentStatus::Running => "running",
-                    SubAgentStatus::Completed => "completed",
-                    SubAgentStatus::Failed => "failed",
-                }
-                .to_string()
-            },
-        ),
-        output: node.as_ref().and_then(|(_, rec)| rec.output.clone()),
-        error: node.as_ref().and_then(|(_, rec)| rec.error.clone()),
+        // A step is in no subagent tree, so it used to fall through to the
+        // `"running"` default and report that for ever — including long after it
+        // had concluded. Its execution in the run log is what became of it.
+        status: match (&node, &step) {
+            (Some((_, rec)), _) => match rec.status {
+                SubAgentStatus::Running => "running",
+                SubAgentStatus::Completed => "completed",
+                SubAgentStatus::Failed => "failed",
+            }
+            .to_string(),
+            (None, Some((_, execution))) => match execution.status {
+                StepStatus::Running => "running",
+                StepStatus::Concluded => "completed",
+                StepStatus::Failed => "failed",
+                StepStatus::Cancelled => "cancelled",
+            }
+            .to_string(),
+            (None, None) => "running".to_string(),
+        },
+        output: match (&node, &step) {
+            (Some((_, rec)), _) => rec.output.clone(),
+            // A step's output is structured; the transcript is the readable
+            // form, so this is the same summary a subagent gives.
+            (None, Some((_, execution))) => execution
+                .output
+                .as_ref()
+                .map(crate::sessions::workflow::output_as_input),
+            (None, None) => None,
+        },
+        error: match (&node, &step) {
+            (Some((_, rec)), _) => rec.error.clone(),
+            (None, Some((_, execution))) => execution.error.clone(),
+            (None, None) => None,
+        },
         tasks: view
             .tasks
             .iter()

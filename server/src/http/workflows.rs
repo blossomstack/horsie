@@ -26,6 +26,7 @@ use horsie_models::workflow::{
     StepRunning, SuspendedStatus, WorkflowInput, WorkflowRetryRequest, WorkflowRunGraph,
     WorkflowRunRequest, WorkflowRunResponse, WorkflowRunsResponse, WorkflowStatus, WorkflowView,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Seconds since the epoch, the stamp both `agents` and `routines` store.
@@ -297,10 +298,10 @@ pub async fn get_run_graph(
         id: id.clone(),
         reply,
     })
-    .await?
-    .map(|s| s.session_total)
-    .unwrap_or_default();
-    Ok(Json(project_run(&spec, &run, usage)))
+    .await?;
+    let per_agent = usage.as_ref().map(|s| s.agents.clone()).unwrap_or_default();
+    let total = usage.map(|s| s.session_total).unwrap_or_default();
+    Ok(Json(project_run(&spec, &run, total, &per_agent)))
 }
 
 /// POST /api/sessions/:id/workflow/retry — re-run one execution.
@@ -329,6 +330,7 @@ fn project_run(
     spec: &WorkflowRunSpec,
     run: &WorkflowRunState,
     usage: horsie_workflow::UsageTotal,
+    per_agent: &HashMap<String, horsie_workflow::UsageTotal>,
 ) -> WorkflowRunGraph {
     let nodes = spec
         .steps
@@ -340,7 +342,7 @@ fn project_run(
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| r.step == step.name)
-                .map(|(i, r)| step_run_view(i as u32, r))
+                .map(|(i, r)| step_run_view(i as u32, r, per_agent))
                 .collect(),
         })
         .collect();
@@ -382,7 +384,18 @@ fn project_run(
     }
 }
 
-fn step_run_view(index: u32, r: &StepRun) -> StepRunView {
+fn step_run_view(
+    index: u32,
+    r: &StepRun,
+    per_agent: &HashMap<String, horsie_workflow::UsageTotal>,
+) -> StepRunView {
+    // A step's agent id is exactly how its usage is banked, so the lookup needs
+    // nothing but the map. Zero until the execution's turn ends, which is when
+    // usage is recorded.
+    let usage = per_agent
+        .get(&r.agent.to_string())
+        .copied()
+        .unwrap_or_default();
     StepRunView {
         index,
         step: r.step.clone(),
@@ -398,10 +411,8 @@ fn step_run_view(index: u32, r: &StepRun) -> StepRunView {
         error: r.error.clone(),
         started_at_ms: r.started_at_ms,
         ended_at_ms: r.ended_at_ms,
-        // Per-step usage is recorded against the step's agent id; the run's
-        // total is on the graph itself.
-        input_tokens: 0,
-        output_tokens: 0,
+        input_tokens: usage.input_tokens.try_into().unwrap_or(u32::MAX),
+        output_tokens: usage.output_tokens.try_into().unwrap_or(u32::MAX),
     }
 }
 

@@ -519,6 +519,14 @@ pub struct SessionSnapshot {
 pub struct SessionUsageStats {
     pub session_total: UsageTotal,
     pub main_agent: AgentUsageEntry,
+    /// Every agent's banked total, keyed as `agent_usage` keys it: `"main"` for
+    /// the primary agent, the agent's uuid for a subagent or a workflow step.
+    ///
+    /// Here so a run can report per-step tokens: a step's key *is* its
+    /// `StepRun.agent`, so the run graph only needs the map, not a read per
+    /// step. Usage banks at turn end, so a step in flight reads zero — the same
+    /// as `session_total`.
+    pub agents: HashMap<String, UsageTotal>,
 }
 
 /// Which agent of a session a broadcast belongs to. `Main` is not a `Uuid`
