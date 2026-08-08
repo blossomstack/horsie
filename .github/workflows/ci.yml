@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Every base, not only `main`. A stacked PR targets its parent branch, so
+    # gating on `main` gave every PR in a stack but the bottom one *zero* checks
+    # — the ones most in need of review were the ones nobody could verify.
+    branches: ["**"]
     # Include `edited` so a PR auto-retargeted onto main (e.g. when its parent
     # in a stack merges) triggers CI — the default types omit base-branch changes.
     types: [opened, synchronize, reopened, edited]
