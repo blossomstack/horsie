@@ -133,6 +133,25 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
   await expect(page.getByTestId("workflow-node-start")).toBeVisible();
   await expect(page.getByTestId("run-status")).toBeVisible();
 
+  // It runs to completion by itself: creating it is what starts it, and each
+  // step's plain text is its output.
+  await expect(page.getByTestId("run-status")).toHaveAttribute(
+    "data-status",
+    "Finished",
+    { timeout: 30_000 },
+  );
+  // The result. It was on the wire from the first release and rendered nowhere,
+  // so the one thing a finished run produced was reachable only by opening its
+  // last step.
+  await expect(page.getByTestId("run-output")).toContainText("goodbye");
+
+  // A step's own page is reached from its node, and that is where its
+  // transcript is.
+  await page.getByTestId("workflow-node-start").click();
+  await page.getByTestId("open-step").first().click();
+  await page.waitForURL(/\/sessions\/[0-9a-f-]+\/agents\/[0-9a-f-]+$/);
+  await expect(page.getByTestId("step-stop")).toBeVisible();
+
   // It landed under the workflow it was started from.
   await page.goto(`${appBase}/workflows/${WORKFLOW}`);
   await expect(page.getByTestId("workflow-run-row")).toHaveCount(1);
