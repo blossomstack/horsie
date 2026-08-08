@@ -24,7 +24,7 @@ test.beforeAll(async () => {
         state_dir: path.join(root, "state"),
         data_dir: path.join(root, "data"),
       },
-      auth: { enabled: true },
+      auth: { mode: "password" },
     }),
   );
   const out = fs.openSync(path.join(root, "server.log"), "a");
@@ -62,7 +62,7 @@ test("approving a device code in the browser lets the waiting CLI collect tokens
 }) => {
   // What `horsie auth login` does first.
   const started = await (
-    await fetch(`${baseURL}/api/auth/device/code`, {
+    await fetch(`${baseURL}/api/device/auth/code`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
@@ -82,7 +82,7 @@ test("approving a device code in the browser lets the waiting CLI collect tokens
 
   // The CLI's next poll gets its tokens. An approved code skips the poll
   // floor, so there is nothing to wait for.
-  const res = await fetch(`${baseURL}/api/auth/device/token`, {
+  const res = await fetch(`${baseURL}/api/device/auth/token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ deviceCode: started.deviceCode }),
@@ -100,7 +100,7 @@ test("approving a device code in the browser lets the waiting CLI collect tokens
 
 test("denying a code refuses the waiting CLI", async ({ page }) => {
   const started = await (
-    await fetch(`${baseURL}/api/auth/device/code`, {
+    await fetch(`${baseURL}/api/device/auth/code`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
@@ -116,7 +116,7 @@ test("denying a code refuses the waiting CLI", async ({ page }) => {
   await page.getByTestId("device-deny").click();
   await expect(page.getByTestId("device-denied")).toBeVisible();
 
-  const res = await fetch(`${baseURL}/api/auth/device/token`, {
+  const res = await fetch(`${baseURL}/api/device/auth/token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ deviceCode: started.deviceCode }),

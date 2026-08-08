@@ -111,7 +111,7 @@ async fn start_server_on(
     let auth = Arc::new(horsie_server::auth::AuthService::new(
         horsie_server::auth::AuthStore::new(db.clone()),
         horsie_server::auth::AuthDeps {
-            enabled: false,
+            mode: horsie_server::auth::AuthMode::Off,
             state_dir: journal_dir.to_path_buf(),
         },
     ));

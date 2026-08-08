@@ -6,6 +6,7 @@
 //! reads (no providers/models/hackamore/velos/default_vendor — those stay
 //! CLI/job-daemon-only).
 
+use horsie_server::auth::AuthMode;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -31,34 +32,50 @@ pub struct BootConfig {
     pub auth: AuthConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct AuthConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
+    /// `password` (the default), `delegated`, or `off`.
+    #[serde(default)]
+    pub mode: AuthModeSetting,
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self { enabled: true }
+/// The config-file spelling of [`AuthMode`]. A separate type because this one
+/// is a wire format an operator types by hand, and an unknown value here has to
+/// fail the boot rather than silently pick a default.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthModeSetting {
+    #[default]
+    Password,
+    Delegated,
+    Off,
+}
+
+impl From<AuthModeSetting> for AuthMode {
+    fn from(v: AuthModeSetting) -> Self {
+        match v {
+            AuthModeSetting::Password => Self::Password,
+            AuthModeSetting::Delegated => Self::Delegated,
+            AuthModeSetting::Off => Self::Off,
+        }
     }
 }
 
-fn default_true() -> bool {
-    true
+/// `$HORSIE_AUTH_MODE` if set to a recognised value, else the config file.
+///
+/// An unrecognised value falls through to the file rather than picking a
+/// default: the two wrong guesses here are "open to everyone" and "trusts a
+/// header nobody is setting", and neither should happen over a typo.
+pub fn auth_mode(cfg: &BootConfig) -> AuthMode {
+    auth_mode_from(cfg, std::env::var("HORSIE_AUTH_MODE").ok())
 }
 
-/// `$HORSIE_AUTH_ENABLED` if set to a recognised value, else the config file.
-/// An unrecognised value falls through to the file rather than silently
-/// disabling authentication.
-pub fn auth_enabled(cfg: &BootConfig) -> bool {
-    auth_enabled_from(cfg, std::env::var("HORSIE_AUTH_ENABLED").ok())
-}
-
-fn auth_enabled_from(cfg: &BootConfig, env: Option<String>) -> bool {
-    match env.as_deref().map(str::trim) {
-        Some("1" | "true" | "TRUE" | "yes") => true,
-        Some("0" | "false" | "FALSE" | "no") => false,
-        _ => cfg.auth.enabled,
+fn auth_mode_from(cfg: &BootConfig, env: Option<String>) -> AuthMode {
+    match env.as_deref().map(str::trim).map(str::to_ascii_lowercase) {
+        Some(v) if v == "password" => AuthMode::Password,
+        Some(v) if v == "delegated" => AuthMode::Delegated,
+        Some(v) if v == "off" => AuthMode::Off,
+        _ => cfg.auth.mode.into(),
     }
 }
 
@@ -256,32 +273,51 @@ mod tests {
     }
 
     #[test]
-    fn auth_is_enabled_unless_the_config_turns_it_off() {
-        let cfg = BootConfig::default();
-        assert!(cfg.auth.enabled, "default is on");
+    fn the_mode_defaults_to_password_and_an_unknown_spelling_is_fatal() {
+        assert_eq!(BootConfig::default().auth.mode, AuthModeSetting::Password);
 
-        let cfg: BootConfig = serde_json::from_str(r#"{ "auth": { "enabled": false } }"#).unwrap();
-        assert!(!cfg.auth.enabled);
+        let cfg: BootConfig = serde_json::from_str(r#"{ "auth": { "mode": "off" } }"#).unwrap();
+        assert_eq!(cfg.auth.mode, AuthModeSetting::Off);
+        let cfg: BootConfig =
+            serde_json::from_str(r#"{ "auth": { "mode": "delegated" } }"#).unwrap();
+        assert_eq!(cfg.auth.mode, AuthModeSetting::Delegated);
 
         // An unrelated config still gets the default.
         let cfg: BootConfig =
             serde_json::from_str(r#"{ "database": { "url": "sqlite://x.db" } }"#).unwrap();
-        assert!(cfg.auth.enabled);
+        assert_eq!(cfg.auth.mode, AuthModeSetting::Password);
+
+        // A misspelling fails the boot rather than resolving to anything. The
+        // two wrong answers here are "open to everyone" and "trusting an
+        // identity nobody is supplying".
+        assert!(
+            serde_json::from_str::<BootConfig>(r#"{ "auth": { "mode": "delegted" } }"#).is_err()
+        );
     }
 
     #[test]
     fn the_env_override_beats_the_file_in_both_directions() {
-        let on = BootConfig::default();
-        let off: BootConfig = serde_json::from_str(r#"{ "auth": { "enabled": false } }"#).unwrap();
+        let password = BootConfig::default();
+        let off: BootConfig = serde_json::from_str(r#"{ "auth": { "mode": "off" } }"#).unwrap();
+
         // An explicit env value wins over whatever the file said.
-        assert!(auth_enabled_from(&off, Some("true".into())));
-        assert!(auth_enabled_from(&off, Some("1".into())));
-        assert!(!auth_enabled_from(&on, Some("false".into())));
-        assert!(!auth_enabled_from(&on, Some("0".into())));
+        assert_eq!(
+            auth_mode_from(&off, Some("password".into())),
+            AuthMode::Password
+        );
+        assert_eq!(auth_mode_from(&password, Some("off".into())), AuthMode::Off);
+        assert_eq!(
+            auth_mode_from(&password, Some("Delegated".into())),
+            AuthMode::Delegated
+        );
+
         // Unset, or a value we do not recognise, falls through to the file —
-        // a typo must not silently disable authentication.
-        assert!(auth_enabled_from(&on, None));
-        assert!(auth_enabled_from(&on, Some("maybe".into())));
-        assert!(!auth_enabled_from(&off, None));
+        // a typo must not silently change who may reach this server.
+        assert_eq!(auth_mode_from(&password, None), AuthMode::Password);
+        assert_eq!(
+            auth_mode_from(&password, Some("maybe".into())),
+            AuthMode::Password
+        );
+        assert_eq!(auth_mode_from(&off, None), AuthMode::Off);
     }
 }

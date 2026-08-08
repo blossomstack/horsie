@@ -41,7 +41,7 @@ pub enum LoginError {
     Internal(String),
 }
 
-/// What `POST /api/auth/device/code` hands the CLI.
+/// What `POST /api/device/auth/code` hands the CLI.
 pub struct DeviceAuthorization {
     pub device_code: String,
     pub user_code: String,
@@ -67,9 +67,29 @@ pub enum DeviceError {
     Internal(String),
 }
 
+/// Who decides whether a caller is who they say they are.
+///
+/// Three answers, not a boolean, because the third one is neither of the first
+/// two: a deployment that already authenticates its callers wants horsie to
+/// trust that answer rather than issue a credential on top of it or abandon the
+/// question entirely.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AuthMode {
+    /// horsie owns the credential: password login, the device grant, machine
+    /// tokens. The default, and what a self-hosted deployment gets.
+    #[default]
+    Password,
+    /// A layer in front owns identity and puts it on the request. horsie mounts
+    /// no credential routes and refuses anything that arrives without one.
+    Delegated,
+    /// Nobody authenticates. Every request is `Principal::Anonymous` and
+    /// resolves to one account.
+    Off,
+}
+
 /// Deployment inputs the host supplies.
 pub struct AuthDeps {
-    pub enabled: bool,
+    pub mode: AuthMode,
     /// Where the first-boot password file is written.
     pub state_dir: PathBuf,
 }
@@ -84,7 +104,7 @@ pub struct VerifiedToken {
 
 pub struct AuthService {
     store: AuthStore,
-    enabled: bool,
+    mode: AuthMode,
     state_dir: PathBuf,
     throttle: Throttle,
 }
@@ -93,7 +113,7 @@ impl AuthService {
     pub fn new(store: AuthStore, deps: AuthDeps) -> Self {
         Self {
             store,
-            enabled: deps.enabled,
+            mode: deps.mode,
             state_dir: deps.state_dir,
             throttle: Throttle::new(),
         }
@@ -107,8 +127,15 @@ impl AuthService {
         self.store.sole_user().await
     }
 
+    pub fn mode(&self) -> AuthMode {
+        self.mode
+    }
+
+    /// Whether horsie itself checks credentials. False in both of the modes
+    /// where it does not — but they are not interchangeable, so callers that
+    /// care about *which* ask [`Self::mode`].
     pub fn enabled(&self) -> bool {
-        self.enabled
+        self.mode == AuthMode::Password
     }
 
     /// Create the admin account if there is none, returning the generated
@@ -141,7 +168,7 @@ impl AuthService {
             )
             .await?;
         write_secret_file(&self.state_dir.join(INITIAL_PASSWORD_FILE), &plain)?;
-        Ok(self.enabled.then_some(plain))
+        Ok(self.enabled().then_some(plain))
     }
 
     pub async fn must_change_password(&self) -> Result<bool, String> {
@@ -577,7 +604,11 @@ mod tests {
         AuthService::new(
             AuthStore::new(pool),
             AuthDeps {
-                enabled,
+                mode: if enabled {
+                    AuthMode::Password
+                } else {
+                    AuthMode::Off
+                },
                 state_dir: tmp.path().to_path_buf(),
             },
         )
@@ -614,7 +645,7 @@ mod tests {
         let svc = AuthService::new(
             AuthStore::new(db.clone()),
             AuthDeps {
-                enabled: true,
+                mode: AuthMode::Password,
                 state_dir: tmp.path().to_path_buf(),
             },
         );

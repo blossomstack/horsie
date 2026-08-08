@@ -26,7 +26,7 @@ test.beforeAll(async () => {
         state_dir: path.join(root, "state"),
         data_dir: path.join(root, "data"),
       },
-      auth: { enabled: true },
+      auth: { mode: "password" },
     }),
   );
 

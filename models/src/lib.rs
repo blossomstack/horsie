@@ -1040,10 +1040,19 @@ mod auth_wire_tests {
             enabled: true,
             authenticated: false,
             must_change_password: false,
+            external: true,
+            login_url: Some("https://id.example/authorize".into()),
+            logout_url: Some("https://id.example/logout".into()),
         })
         .unwrap();
         assert!(json.contains("\"mustChangePassword\""), "{json}");
         assert!(!json.contains("must_change_password"), "{json}");
+        // A snake_case key here is not an error, it is silently ignored by
+        // every client — so the camelCase spelling is worth pinning for the
+        // fields the UI branches on.
+        assert!(json.contains("\"loginUrl\""), "{json}");
+        assert!(json.contains("\"logoutUrl\""), "{json}");
+        assert!(!json.contains("login_url"), "{json}");
     }
 
     #[test]

@@ -39,10 +39,11 @@ fn bearer_of(headers: &axum::http::HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-async fn authenticate(state: &AppState, bearer: Option<String>) -> Result<Principal, Response> {
-    if !state.auth.enabled() {
-        return Ok(Principal::Anonymous);
-    }
+async fn authenticate(
+    state: &AppState,
+    bearer: Option<String>,
+    delegated: Option<crate::http::auth::DelegatedIdentity>,
+) -> Result<Principal, Response> {
     let refused = || {
         (
             StatusCode::UNAUTHORIZED,
@@ -53,6 +54,17 @@ async fn authenticate(state: &AppState, bearer: Option<String>) -> Result<Princi
         )
             .into_response()
     };
+    match state.auth.mode() {
+        crate::auth::AuthMode::Off => return Ok(Principal::Anonymous),
+        // The kind rule below does not survive into this mode, and should not:
+        // only whoever issues credentials knows what kinds it has. A front
+        // layer that tells a browser session apart from a machine one refuses
+        // this dial itself, on the path, where it has that information.
+        crate::auth::AuthMode::Delegated => {
+            return delegated.map(|d| Principal::User(d.0)).ok_or_else(refused);
+        }
+        crate::auth::AuthMode::Password => {}
+    }
     let Some(secret) = bearer else {
         return Err(refused());
     };
@@ -78,7 +90,11 @@ pub async fn vendor_connect(
     // the upgrade and closing: an upgrade that opens and dies looks to the
     // agent like a transport fault worth retrying, whereas a 401 is a fact it
     // can report to whoever launched it.
-    let owner = match authenticate(&state, bearer_of(req.headers())).await {
+    let delegated = req
+        .extensions()
+        .get::<crate::http::auth::DelegatedIdentity>()
+        .cloned();
+    let owner = match authenticate(&state, bearer_of(req.headers()), delegated).await {
         Ok(p) => p,
         Err(response) => return response,
     };

@@ -12,7 +12,7 @@ mod token;
 mod user;
 
 pub use service::{
-    ACCESS_TOKEN_TTL_SECS, ADMIN_USERNAME, AuthDeps, AuthService, DEVICE_CODE_TTL_SECS,
+    ACCESS_TOKEN_TTL_SECS, ADMIN_USERNAME, AuthDeps, AuthMode, AuthService, DEVICE_CODE_TTL_SECS,
     DEVICE_POLL_INTERVAL_SECS, DeviceAuthorization, DeviceError, INITIAL_PASSWORD_FILE,
     IssuedTokens, LoginError, USER_CODE_ALPHABET, VerifiedToken,
 };

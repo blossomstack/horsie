@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEffect } from "react";
 import type { ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useAuthStatus } from "./hooks/useAuth";
@@ -40,13 +41,28 @@ const client = new QueryClient({
 });
 
 /** Renders the login page instead of the app when the server wants a
- *  credential this browser does not have. */
+ *  credential this browser does not have.
+ *
+ *  When identity is managed by a layer in front of the server there is no login
+ *  page to render — signing in happens somewhere else entirely — so this
+ *  navigates there instead. */
 function AuthGate({ children }: { children: ReactNode }) {
   const { data, isPending } = useAuthStatus();
+  const needsSignIn = !!data?.enabled && !data.authenticated;
+
+  useEffect(() => {
+    if (needsSignIn && data?.external && data.loginUrl) {
+      window.location.assign(data.loginUrl);
+    }
+  }, [needsSignIn, data?.external, data?.loginUrl]);
+
   // Render nothing until the first status lands: flashing a login form at
-  // someone who is already signed in is worse than a blank frame.
+  // someone who is already signed in is worse than a blank frame. Same while
+  // the redirect above is in flight.
   if (isPending) return null;
-  if (data?.enabled && !data.authenticated) return <LoginPage />;
+  if (needsSignIn) {
+    return data.external ? null : <LoginPage />;
+  }
   return <>{children}</>;
 }
 

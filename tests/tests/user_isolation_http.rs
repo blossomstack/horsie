@@ -135,7 +135,7 @@ async fn fixture() -> Fixture {
     let auth = Arc::new(horsie_server::auth::AuthService::new(
         horsie_server::auth::AuthStore::new(db.clone()),
         horsie_server::auth::AuthDeps {
-            enabled: true,
+            mode: horsie_server::auth::AuthMode::Password,
             state_dir: dir.clone(),
         },
     ));

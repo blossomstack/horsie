@@ -20,14 +20,11 @@ mod config;
 
 use clap::Parser;
 use config::{BootConfig, BootError};
-use horsie_models::settings::ServerInfo;
+use horsie_server::auth::AuthMode;
+use horsie_server::boot::{BootOptions, Booted};
 use horsie_server::config::model_cards;
 use horsie_server::http::{AppState, app};
-use horsie_server::plugins::ArtifactStore;
-use horsie_server::routines::RoutineScheduler;
-use horsie_server::users::{Shared, UserRegistry};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -69,7 +66,9 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     let db_url_env = std::env::var("HORSIE_DATABASE_URL")
         .ok()
         .filter(|s| !s.is_empty());
-    let state = boot(&cfg, &cli, config_path, db_url_env).await?;
+    let booted = boot(&cfg, &cli, config_path, db_url_env).await?;
+    announce(&booted, &cfg);
+    let state = booted.state;
 
     let listener = tokio::net::TcpListener::bind(&cli.addr)
         .await
@@ -81,9 +80,9 @@ async fn run(cli: Cli) -> Result<(), BootError> {
     serve(listener, state).await
 }
 
-/// Assemble everything the server serves from, and nothing about serving it.
+/// Map this binary's file/CLI config onto the library's boot options.
 ///
-/// Split out of [`run`] so a test can bring up the real composition root: the
+/// Split from [`run`] so a test can bring up the real composition root: the
 /// only two inputs `run` reads from the process itself — the config file and
 /// `$HORSIE_DATABASE_URL` — are parameters here, so a test cannot accidentally
 /// boot against a developer's own deployment.
@@ -92,117 +91,68 @@ async fn boot(
     cli: &Cli,
     config_path: Option<PathBuf>,
     db_url_env: Option<String>,
-) -> Result<AppState, BootError> {
-    let state_dir = cfg.storage.state_dir.join("server");
-    let data_dir = cfg.storage.data_dir.join("server");
-    std::fs::create_dir_all(&state_dir).map_err(|e| BootError::Io(e.to_string()))?;
-    std::fs::create_dir_all(&data_dir).map_err(|e| BootError::Io(e.to_string()))?;
-
-    let db_url = resolve_db_url(db_url_env, cfg, &data_dir);
-    let info = ServerInfo {
-        config_path: config_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
-        database: redact_db_url(&db_url),
-        state_dir: cfg.storage.state_dir.display().to_string(),
-        data_dir: cfg.storage.data_dir.display().to_string(),
-        plugins_dir: data_dir.join("plugins").display().to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    // The pool comes up on its own first. Every store below binds a user, and
-    // the user comes from the account `bootstrap` creates — which needs the
-    // database. So the order is: open, bootstrap, then build everything scoped.
-    let db = horsie_server::db::Db::open(
-        &db_url,
-        cfg.database
-            .max_connections
-            .unwrap_or(horsie_server::config::DEFAULT_MAX_CONNECTIONS),
-    )
-    .await
-    .map_err(BootError::Config)?;
-
-    let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(db.clone()),
-        horsie_server::auth::AuthDeps {
-            enabled: config::auth_enabled(cfg),
-            state_dir: state_dir.clone(),
-        },
-    ));
-    match auth.bootstrap().await {
-        Ok(Some(password)) => {
-            let file = state_dir
-                .join(horsie_server::auth::INITIAL_PASSWORD_FILE)
-                .display()
-                .to_string();
-            println!(
-                "\n\
-                 ┌──────────────────────────────────────────────────────────────┐\n\
-                 │  horsie created its admin account                            │\n\
-                 └──────────────────────────────────────────────────────────────┘\n\
-                 \n  username: admin\n  password: {password}\n\n\
-                 Also written to {file} (deleted when you change the password).\n\
-                 Change it from Settings → Account.\n"
-            );
-        }
-        Ok(None) => {}
-        Err(e) => {
-            return Err(BootError::Config(format!(
-                "bootstrapping the admin account: {e}"
-            )));
-        }
-    }
-    if !auth.enabled() {
-        println!(
-            "warning: authentication is disabled — every caller that can reach \
-             this port has full access"
-        );
-    }
-
-    // The account `Principal::Anonymous` resolves to — every request on a
-    // deployment with authentication disabled. Resolved here, once, because
-    // `bootstrap` above is what guarantees there is one.
-    let anonymous = auth
-        .sole_user()
-        .await
-        .map_err(BootError::Config)?
-        .ok_or_else(|| BootError::Config("no account exists after bootstrap".into()))?;
-
-    // Resolve the model-card catalogue once. Parse/read errors are fatal here
-    // (operator input should fail loud); each account is then seeded from it on
-    // first touch rather than every account at every boot.
+) -> Result<Booted, BootError> {
+    // Operator input should fail loud, so a bad seed file is fatal here rather
+    // than a card quietly missing from a catalogue later.
     let seed_path = cli
         .model_cards_seed
         .clone()
         .or_else(|| std::env::var_os("HORSIE_MODEL_CARDS_SEED").map(PathBuf::from));
-    let mut model_card_seed = model_cards::bundled_seed().map_err(BootError::Config)?;
-    if let Some(path) = seed_path {
-        model_card_seed.extend(model_cards::load_seed_file(&path).map_err(BootError::Config)?);
-    }
+    let extra_model_cards = match seed_path {
+        Some(path) => model_cards::load_seed_file(&path).map_err(BootError::Config)?,
+        None => Vec::new(),
+    };
 
-    let shared = Arc::new(Shared {
-        db,
-        artifacts: Arc::new(ArtifactStore::new(data_dir.join("plugins"))),
-        artifact_secret: Arc::new(artifact_secret()),
-        info,
-        model_card_seed_marker: model_cards::seed_marker(&model_card_seed),
-        model_card_seed: Arc::new(model_card_seed),
-        anonymous,
-        supervisor: horsie_server::sessions::supervisor::SupervisorConfig::default(),
-    });
-    let users = Arc::new(UserRegistry::new(shared.clone()));
-
-    // One timer for the deployment, over every account's routines. It resolves
-    // an owner's services when one of their routines comes due, which is also
-    // the only thing that builds a bundle nobody has made a request for.
-    Arc::new(RoutineScheduler::new(shared.db.clone(), users.clone())).spawn();
-
-    Ok(AppState {
-        auth,
-        shared,
-        users,
+    horsie_server::boot::boot(BootOptions {
+        state_dir: cfg.storage.state_dir.clone(),
+        data_dir: cfg.storage.data_dir.clone(),
+        db_url: db_url_env.or_else(|| cfg.database.url.clone()),
+        max_connections: cfg
+            .database
+            .max_connections
+            .unwrap_or(horsie_server::config::DEFAULT_MAX_CONNECTIONS),
+        auth_mode: config::auth_mode(cfg),
+        extra_model_cards,
+        artifact_secret: std::env::var("HORSIE_ARTIFACT_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(String::into_bytes),
         web_dir: cli.web.clone(),
+        config_path,
     })
+    .await
+    .map_err(BootError::Config)
+}
+
+/// Everything a person at a terminal needs to be told about this boot.
+fn announce(booted: &Booted, cfg: &BootConfig) {
+    if let Some(password) = booted.initial_password.as_deref() {
+        let file = booted
+            .state_dir
+            .join(horsie_server::auth::INITIAL_PASSWORD_FILE)
+            .display()
+            .to_string();
+        println!(
+            "\n\
+             ┌──────────────────────────────────────────────────────────────┐\n\
+             │  horsie created its admin account                            │\n\
+             └──────────────────────────────────────────────────────────────┘\n\
+             \n  username: admin\n  password: {password}\n\n\
+             Also written to {file} (deleted when you change the password).\n\
+             Change it from Settings → Account.\n"
+        );
+    }
+    match config::auth_mode(cfg) {
+        AuthMode::Off => println!(
+            "warning: authentication is disabled — every caller that can reach \
+             this port has full access"
+        ),
+        AuthMode::Delegated => println!(
+            "authentication is delegated: this server serves no credential \
+             routes and expects the layer in front of it to identify every caller"
+        ),
+        AuthMode::Password => {}
+    }
 }
 
 /// Serve until the process ends. Split from [`run`] so a test can hold the
@@ -212,43 +162,6 @@ async fn serve(listener: tokio::net::TcpListener, state: AppState) -> Result<(),
     axum::serve(listener, app(state))
         .await
         .map_err(|e| BootError::Io(e.to_string()))
-}
-
-/// `$HORSIE_DATABASE_URL` (passed in), else `database.url` from config, else a
-/// SQLite file under the server data dir.
-fn resolve_db_url(env: Option<String>, cfg: &BootConfig, data_dir: &Path) -> String {
-    if let Some(v) = env.filter(|s| !s.is_empty()) {
-        return v;
-    }
-    if let Some(u) = cfg.database.url.as_ref().filter(|s| !s.is_empty()) {
-        return u.clone();
-    }
-    format!("sqlite://{}/config.db", data_dir.display())
-}
-
-/// The HS256 secret for artifact capability tokens: `$HORSIE_ARTIFACT_SECRET`
-/// if set, else 32 random bytes (fine per-process — tokens are short-lived).
-fn artifact_secret() -> Vec<u8> {
-    std::env::var("HORSIE_ARTIFACT_SECRET")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(String::into_bytes)
-        .unwrap_or_else(|| {
-            let mut v = uuid::Uuid::new_v4().as_bytes().to_vec();
-            v.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
-            v
-        })
-}
-
-/// Hide credentials in a database URL's authority (e.g. `postgres://u:p@host`).
-fn redact_db_url(url: &str) -> String {
-    if let Some((scheme, rest)) = url.split_once("://")
-        && let Some((auth, tail)) = rest.split_once('@')
-        && auth.contains(':')
-    {
-        return format!("{scheme}://***@{tail}");
-    }
-    url.to_string()
 }
 
 #[cfg(test)]
@@ -267,7 +180,9 @@ mod tests {
                 data_dir: dir.path().join("data"),
             },
             database: config::DatabaseConfig::default(),
-            auth: config::AuthConfig { enabled: false },
+            auth: config::AuthConfig {
+                mode: config::AuthModeSetting::Off,
+            },
         };
         let cli = Cli {
             config: None,
@@ -278,6 +193,7 @@ mod tests {
         boot(&cfg, &cli, None, None)
             .await
             .expect("the server boots")
+            .state
     }
 
     async fn read_json<T: serde::de::DeserializeOwned>(res: axum::response::Response) -> T {
@@ -360,22 +276,28 @@ mod tests {
         );
     }
 
+    /// The precedence `run` applies before handing a value to the library:
+    /// environment, then the file, then the library's own default.
     #[test]
     fn the_database_url_prefers_the_environment_then_the_file() {
-        let cfg = BootConfig::default();
-        let dir = Path::new("/tmp/horsie-test");
+        let from_file: BootConfig =
+            serde_json::from_str(r#"{ "database": { "url": "sqlite://file.db" } }"#).unwrap();
+        let pick = |env: Option<String>, cfg: &BootConfig| {
+            env.filter(|s: &String| !s.is_empty())
+                .or_else(|| cfg.database.url.clone())
+        };
+
         assert_eq!(
-            resolve_db_url(Some("postgres://env/db".into()), &cfg, dir),
-            "postgres://env/db"
+            pick(Some("postgres://env/db".into()), &from_file).as_deref(),
+            Some("postgres://env/db")
         );
-        assert_eq!(
-            resolve_db_url(None, &cfg, dir),
-            "sqlite:///tmp/horsie-test/config.db"
-        );
+        assert_eq!(pick(None, &from_file).as_deref(), Some("sqlite://file.db"));
         // An empty environment value is absent, not an override.
         assert_eq!(
-            resolve_db_url(Some(String::new()), &cfg, dir),
-            "sqlite:///tmp/horsie-test/config.db"
+            pick(Some(String::new()), &from_file).as_deref(),
+            Some("sqlite://file.db")
         );
+        // Nothing anywhere: the library falls back to a file under data_dir.
+        assert_eq!(pick(None, &BootConfig::default()), None);
     }
 }

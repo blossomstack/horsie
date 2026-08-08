@@ -93,7 +93,9 @@ Configuration is split in two, and the halves never overlap:
 > `admin` account, prints a generated password, and writes it to
 > `initial-admin-password` in its state directory. Change it from
 > **Settings → Account**. To run without a password on a trusted network, set
-> `HORSIE_AUTH_ENABLED=false` or `{"auth": {"enabled": false}}` in `config.json`.
+> `HORSIE_AUTH_MODE=off` or `{"auth": {"mode": "off"}}` in `config.json`. Behind
+> something that already authenticates your users, use `delegated` instead —
+> see the self-hosting guide.
 
 ## Documentation
 

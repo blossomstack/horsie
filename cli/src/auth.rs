@@ -298,7 +298,7 @@ pub async fn login(server: &str, token: Option<&str>, default: bool) -> Result<(
 
     let start: DeviceCode = post_json(
         &client,
-        &api_url(server, "/api/auth/device/code"),
+        &api_url(server, "/api/device/auth/code"),
         &serde_json::json!({}),
     )
     .await?
@@ -325,7 +325,7 @@ pub async fn login(server: &str, token: Option<&str>, default: bool) -> Result<(
         }
         let polled: Result<TokenPair, ApiFailure> = post_json(
             &client,
-            &api_url(server, "/api/auth/device/token"),
+            &api_url(server, "/api/device/auth/token"),
             &serde_json::json!({ "deviceCode": start.device_code }),
         )
         .await?;
@@ -550,7 +550,7 @@ async fn resolve_token_outcome_with(
     let client = reqwest::Client::new();
     let refreshed: Result<TokenPair, ApiFailure> = match post_json(
         &client,
-        &api_url(server, "/api/auth/refresh"),
+        &api_url(server, "/api/device/auth/refresh"),
         &serde_json::json!({ "refreshToken": current.refresh_token }),
     )
     .await

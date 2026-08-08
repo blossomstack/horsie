@@ -78,7 +78,7 @@ plugin hooks, and is still honoured.
 | `HORSIE_DATABASE_URL` | Overrides `database.url`. Takes precedence over the config file. Accepts `sqlite://` or `postgres://`. |
 | `HORSIE_ARTIFACT_SECRET` | Signing secret for the short-lived tokens runtimes use to fetch skill bundles. Unset → a random per-process secret (fine for a single instance). Set a stable value if you run more than one server instance. |
 | `HORSIE_TOKEN` | Bearer token the CLI sends instead of reading `~/.config/horsie/credentials.json`. For scripts and CI. |
-| `HORSIE_AUTH_ENABLED` | Overrides `auth.enabled`. `false`/`0`/`no` turns authentication off; `true`/`1`/`yes` turns it on. An unrecognised value falls through to the config file rather than silently disabling it. |
+| `HORSIE_AUTH_MODE` | Overrides `auth.mode`. One of `password` (the default), `delegated`, or `off`. An unrecognised value falls through to the config file rather than silently changing who may reach the server. |
 
 ## Settings database (managed in the UI)
 
