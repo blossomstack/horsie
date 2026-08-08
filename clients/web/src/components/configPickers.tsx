@@ -2,7 +2,6 @@ import {
   Boxes,
   Brain,
   Cpu,
-  FolderGit2,
   Lightbulb,
   Plug,
   Server,
@@ -21,7 +20,7 @@ import { cn } from "../lib/cn";
 import { basename } from "../lib/format";
 import type {
   ConfigDraft,
-  RuntimeChannel,
+  EnvironmentChannel,
   WorkflowChannel,
 } from "../hooks/useSessionDraft";
 
@@ -107,16 +106,215 @@ function EmptyLink({ to, children }: { to: string; children: ReactNode }) {
   );
 }
 
-/** A session draft carries a runtime channel; an agent-preset draft does not.
- * The draft's own shape is the signal, so neither surface has to pass a flag
- * saying which one it is. */
-function hasRuntime(draft: ConfigDraft): draft is ConfigDraft & RuntimeChannel {
-  return "setVendor" in draft;
+/** A session draft carries an environment channel; an agent-preset draft does
+ * not. The draft's own shape is the signal, so neither surface has to pass a
+ * flag saying which one it is. */
+function hasEnvironment(
+  draft: ConfigDraft,
+): draft is ConfigDraft & EnvironmentChannel {
+  return "setEnvironment" in draft;
 }
 
 /** Likewise for the workflow channel: only the new-session draft starts one. */
 function hasWorkflow(draft: ConfigDraft): draft is ConfigDraft & WorkflowChannel {
   return "setWorkflow" in draft;
+}
+
+/** Stands in when a draft has no environment channel, so the picker hook can
+ * be called unconditionally. Its spec is built and discarded. */
+const INERT_ENVIRONMENT: EnvironmentChannel = {
+  environment: { kind: "runtime", vendor: "", repos: {} },
+  setEnvironment: () => {},
+  environments: [],
+  provisions: false,
+  githubConnected: false,
+};
+
+/**
+ * The one Environment picker, as its own hook.
+ *
+ * Standalone because four surfaces need it and only one of them — the session
+ * config bar — wants the rest of `useConfigPickers`. The routine form renders
+ * exactly this spec as a labelled field, which is what makes the two lists
+ * identical rather than merely similar.
+ */
+export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
+  const { data: settings } = useSettings();
+  const { data: repoList } = useGithubRepos(d.provisions && d.githubConnected);
+  const activeVendors = settings?.vendors ?? [];
+  const chosen =
+    d.environment.kind === "named"
+      ? d.environment.name
+      : d.environment.vendor;
+  // What a predefined selection resolves to, for the read-only summary the
+  // picker shows under it.
+  const namedName = d.environment.kind === "named" ? d.environment.name : undefined;
+  const named =
+    namedName === undefined
+      ? undefined
+      : d.environments.find((e) => e.name === namedName);
+  const repos =
+    d.environment.kind === "runtime"
+      ? new Map(Object.entries(d.environment.repos))
+      : new Map<string, string>();
+  return {
+    key: "environment",
+    legend: "Environment",
+    icon: <Server size={15} />,
+    label: chosen || "Select",
+    marked: !!chosen,
+    // The new-session page used to carry a whole roster panel answering "is
+    // my laptop connected?". The answer is one bit, and this is where it is
+    // actionable.
+    warn: activeVendors.length === 0 && d.environments.length === 0,
+    width: "w-80",
+    testId: "config-environment",
+    body: (close) => (
+      <div className="space-y-1">
+        {d.environments.length > 0 && (
+          <>
+            <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+              Predefined
+            </p>
+            {d.environments.map((e) => {
+              const selected =
+                d.environment.kind === "named" && d.environment.name === e.name;
+              return (
+                <button
+                  key={e.name}
+                  type="button"
+                  className={optionClass(selected)}
+                  data-testid="environment-option"
+                  data-value={e.name}
+                  data-kind="named"
+                  data-selected={selected}
+                  aria-pressed={selected}
+                  onClick={() => {
+                    d.setEnvironment({ kind: "named", name: e.name });
+                    close();
+                  }}
+                >
+                  <span className="min-w-0 flex-1 truncate font-mono">{e.name}</span>
+                  <span className="text-[0.6875rem] text-faint">
+                    {e.vendor}
+                    {e.repos.length > 0 &&
+                      ` · ${e.repos.length} repo${e.repos.length === 1 ? "" : "s"}`}
+                  </span>
+                  {selected && <SelectedMark />}
+                </button>
+              );
+            })}
+          </>
+        )}
+        <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+          Runtimes
+        </p>
+        {activeVendors.length === 0 ? (
+          <p className="px-2 py-1.5 text-sm leading-relaxed text-dim">
+            No runtime is connected, so a session can’t run a turn yet. Run{" "}
+            <code className="font-mono text-legend">horsie connect</code> on the
+            machine holding your code.
+          </p>
+        ) : (
+          activeVendors.map((v) => {
+            const selected =
+              d.environment.kind === "runtime" && d.environment.vendor === v.name;
+            return (
+              <button
+                key={v.name}
+                type="button"
+                className={optionClass(selected)}
+                data-testid="environment-option"
+                data-value={v.name}
+                data-kind="runtime"
+                data-selected={selected}
+                aria-pressed={selected}
+                onClick={() =>
+                  d.setEnvironment({
+                    kind: "runtime",
+                    vendor: v.name,
+                    // Keep the repos already ticked when swapping between
+                    // two provisioning vendors: the selection is about
+                    // where, not about what.
+                    repos:
+                      d.environment.kind === "runtime" ? d.environment.repos : {},
+                  })
+                }
+              >
+                <span className="min-w-0 flex-1 truncate font-mono">{v.name}</span>
+                {v.isDefault && (
+                  <span className="text-[0.6875rem] text-faint">default</span>
+                )}
+                {selected && <SelectedMark />}
+              </button>
+            );
+          })
+        )}
+
+        {/*
+          What follows the divider depends on the selection: a predefined
+          environment's repos are part of its definition and shown read-only,
+          an ad-hoc one's are picked here, and a runtime that cannot
+          provision has nowhere to check anything out.
+        */}
+        {named && (
+          <div className="border-t pt-1.5" data-testid="environment-summary">
+            <p className="px-2 pb-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+              Repos
+            </p>
+            {named.repos.length === 0 ? (
+              <p className="px-2 py-1 text-sm text-faint">None</p>
+            ) : (
+              <ul className="space-y-0.5 px-2 py-0.5">
+                {named.repos.map((r) => (
+                  <li
+                    key={r.url}
+                    className="truncate font-mono text-[0.8125rem] text-legend"
+                  >
+                    {basename(r.url)}
+                    {r.gitRef && <span className="text-faint"> @ {r.gitRef}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+        {d.environment.kind === "runtime" && d.provisions && (
+          <div className="border-t pt-1.5" data-testid="environment-repos">
+            <p className="px-2 pb-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+              Repos
+            </p>
+            {!d.githubConnected ? (
+              <EmptyLink to="/settings/integrations">
+                Connect GitHub in Settings to pick repos
+              </EmptyLink>
+            ) : (
+              checkList({
+                items: (repoList?.repos ?? []).map((r) => r.fullName),
+                selected: repos,
+                onToggle: (name, checked) => {
+                  const next = new Map(repos);
+                  if (checked) next.delete(name);
+                  else next.set(name, "");
+                  d.setEnvironment({
+                    kind: "runtime",
+                    vendor:
+                      d.environment.kind === "runtime" ? d.environment.vendor : "",
+                    repos: Object.fromEntries(next),
+                  });
+                },
+                empty: (
+                  <p className="px-2 py-1 text-sm text-dim">
+                    No repos visible to the app installation.
+                  </p>
+                ),
+              })
+            )}
+          </div>
+        )}
+      </div>
+    ),
+  };
 }
 
 /**
@@ -131,10 +329,12 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   const { data: bundles } = usePlugins();
   const { data: mcpServers } = useMcpServers();
   const { data: memorySpaces } = useMemorySpaces();
-  const { data: repoList } = useGithubRepos(draft.provisions && draft.githubConnected);
+  const env = hasEnvironment(draft) ? draft : undefined;
+  // Called unconditionally with an inert channel when the draft has none: a
+  // hook cannot be conditional, and an agent-preset form has no environment.
+  const environmentPicker = useEnvironmentPicker(env ?? INERT_ENVIRONMENT);
 
   const models = settings?.models ?? [];
-  const activeVendors = settings?.vendors ?? [];
   const enabledMcp = (mcpServers ?? []).filter((s) => s.enabled);
 
   const pickers: PickerSpec[] = [];
@@ -196,88 +396,8 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
     });
   }
 
-  if (hasRuntime(draft)) {
-    const d = draft;
-    pickers.push({
-      key: "runtime",
-      legend: "Runtime",
-      icon: <Server size={15} />,
-      label: d.vendor || "Select",
-      marked: !!d.vendor,
-      // The new-session page used to carry a whole roster panel answering "is my
-      // laptop connected?". The answer is one bit, and this is where it is
-      // actionable.
-      warn: activeVendors.length === 0,
-      width: "w-56",
-      testId: "config-runtime",
-      body: (close) =>
-        activeVendors.length === 0 ? (
-          <p className="px-2 py-1.5 text-sm leading-relaxed text-dim">
-            No runtime is connected, so a session can’t run a turn yet. Run{" "}
-            <code className="font-mono text-legend">horsie connect</code> on the
-            machine holding your code.
-          </p>
-        ) : (
-          activeVendors.map((v) => (
-            <button
-              key={v.name}
-              type="button"
-              className={optionClass(d.vendor === v.name)}
-              data-testid="runtime-option"
-              data-value={v.name}
-              data-selected={d.vendor === v.name}
-              aria-pressed={d.vendor === v.name}
-              onClick={() => {
-                d.setVendor(v.name);
-                close();
-              }}
-            >
-              <span className="font-mono">{v.name}</span>
-              {v.isDefault && <span className="text-[0.6875rem] text-faint">default</span>}
-              {d.vendor === v.name && <SelectedMark />}
-            </button>
-          ))
-        ),
-    });
-  }
-
-  // Repos are the one channel a non-provisioning vendor genuinely cannot
-  // honour: it runs over a fixed, user-owned directory, so there is nothing to
-  // check a repo out into. Skills and MCP are not workspace channels — MCP is
-  // composed server-side and never reaches the runtime at all — so they are
-  // offered unconditionally, below.
-  if (draft.provisions) {
-    pickers.push({
-      key: "repos",
-      legend: "Repos",
-      icon: <FolderGit2 size={15} />,
-      label: draft.repos.size ? `${draft.repos.size} selected` : "None",
-      marked: draft.repos.size > 0,
-      width: "w-80",
-      testId: "config-repos",
-      body: () =>
-        !draft.githubConnected ? (
-          <EmptyLink to="/settings/integrations">
-            Connect GitHub in Settings to pick repos
-          </EmptyLink>
-        ) : (
-          checkList({
-            items: (repoList?.repos ?? []).map((r) => r.fullName),
-            selected: draft.repos,
-            onToggle: (name, checked) => {
-              const next = new Map(draft.repos);
-              if (checked) next.delete(name);
-              else next.set(name, "");
-              draft.setRepos(next);
-            },
-            empty: (
-              <p className="px-2 py-1 text-sm text-dim">
-                No repos visible to the app installation.
-              </p>
-            ),
-          })
-        ),
-    });
+  if (env) {
+    pickers.push(environmentPicker);
   }
 
   // A run's model, thinking effort, skills, MCP and memory come from each
@@ -513,18 +633,26 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
           },
         ];
 
+  // One key, matching the draft row: the environment is where this session
+  // runs, and the vendor and repos are what it resolved to. A predefined one
+  // leads with its name, because that is what was chosen.
+  const environment: PickerSpec = {
+    key: "environment",
+    legend: "Environment",
+    icon: <Server size={15} />,
+    label: detail.environment ?? detail.vendor,
+    marked: true,
+    width: "w-80",
+    testId: "config-environment",
+    body: readout([
+      ...(detail.environment ? [detail.environment] : []),
+      detail.vendor,
+      ...detail.repos.map(basename),
+    ]),
+  };
+
   const channels: PickerSpec[] = [
-    {
-      key: "runtime",
-      legend: "Runtime",
-      icon: <Server size={15} />,
-      label: detail.vendor,
-      marked: true,
-      width: "w-56",
-      testId: "config-runtime",
-      body: readout([detail.vendor]),
-    },
-    ...optional("repos", "Repos", <FolderGit2 size={15} />, "w-80", detail.repos.map(basename)),
+    environment,
     ...optional("skills", "Skills", <Boxes size={15} />, "w-80", detail.plugins),
     ...optional("mcp", "MCP", <Plug size={15} />, "w-72", detail.mcpServers),
     ...optional("memory", "Memory", <Brain size={15} />, "w-72", detail.memorySpaces),

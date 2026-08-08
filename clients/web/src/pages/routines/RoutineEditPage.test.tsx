@@ -17,6 +17,7 @@ const storedRoutine: RoutineView = {
   name: "stored",
   description: "",
   agent: "reviewer",
+  environment: { type: "Runtime", value: { vendor: "local" } },
   prompt: "triage the queue",
   schedule: {
     type: "Daily",
@@ -40,7 +41,6 @@ vi.mock("../../api/client", () => ({
           name: "reviewer",
           description: "",
           model: "sonnet",
-          repos: [],
           plugins: [],
           mcpServers: [],
           memorySpaces: [],
@@ -53,6 +53,28 @@ vi.mock("../../api/client", () => ({
       get: async (name: string) => (name === storedRoutine.name ? storedRoutine : undefined),
       create: (body: RoutineInput) => create(body),
       update: (name: string, body: RoutineInput) => update(name, body),
+    },
+    // The form carries an environment field now, which reads all three.
+    environments: { list: async () => [] },
+    github: { status: async () => ({ connected: false, appConfigured: false, repoCount: 0 }) },
+    config: {
+      get: async () => ({
+        providers: [],
+        models: [],
+        vendors: [
+          { name: "local", isDefault: true, capabilities: { supportsProvisioning: false } },
+        ],
+        defaultVendor: "local",
+        info: {
+          configPath: "",
+          database: "",
+          stateDir: "",
+          dataDir: "",
+          pluginsDir: "",
+          version: "0",
+        },
+        restartRequired: false,
+      }),
     },
   },
   ApiRequestError: class extends Error {},
@@ -90,9 +112,42 @@ function renderStored() {
   return utils;
 }
 
+/** Pick the local runtime through the Environment field — a routine cannot be
+ * saved without one, which is the point. */
+async function chooseEnvironment(utils: ReturnType<typeof renderNew>) {
+  fireEvent.click(utils.getByTestId("config-environment"));
+  const option = await utils.findByTestId("environment-option");
+  fireEvent.click(option);
+}
+
 describe("RoutineEditPage", () => {
+  it("blocks saving until an environment is chosen", async () => {
+    const utils = renderNew();
+    fireEvent.change(await utils.findByTestId("routine-name-input"), {
+      target: { value: "morning" },
+    });
+    fireEvent.change(utils.getByTestId("routine-agent-select"), {
+      target: { value: "reviewer" },
+    });
+    fireEvent.change(utils.getByTestId("routine-prompt-input"), {
+      target: { value: "triage the queue" },
+    });
+    const save = utils.getByTestId("save-routine-button") as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    await chooseEnvironment(utils);
+    await waitFor(() => expect(save.disabled).toBe(false));
+
+    fireEvent.click(save);
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    expect(create.mock.calls[0]?.[0].environment).toEqual({
+      type: "Runtime",
+      value: { vendor: "local", repos: undefined },
+    });
+  });
+
   it("defaults the timezone to the browser's and saves a daily schedule", async () => {
-    const { findByTestId, getByTestId, queryByTestId } = renderNew();
+    const utils = renderNew();
+    const { findByTestId, getByTestId, queryByTestId } = utils;
     fireEvent.change(await findByTestId("routine-name-input"), {
       target: { value: "morning" },
     });
@@ -124,6 +179,7 @@ describe("RoutineEditPage", () => {
     fireEvent.change(getByTestId("routine-time-input"), {
       target: { value: "09:00" },
     });
+    await chooseEnvironment(utils);
     fireEvent.click(getByTestId("save-routine-button"));
 
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
@@ -134,7 +190,8 @@ describe("RoutineEditPage", () => {
   });
 
   it("weekly requires at least one weekday before saving", async () => {
-    const { findByTestId, getByTestId } = renderNew();
+    const utils = renderNew();
+    const { findByTestId, getByTestId } = utils;
     fireEvent.change(await findByTestId("routine-name-input"), {
       target: { value: "standup" },
     });
@@ -147,6 +204,7 @@ describe("RoutineEditPage", () => {
     fireEvent.change(getByTestId("routine-schedule-kind"), {
       target: { value: "Weekly" },
     });
+    await chooseEnvironment(utils);
 
     const save = getByTestId("save-routine-button") as HTMLButtonElement;
     expect(save.disabled).toBe(true);

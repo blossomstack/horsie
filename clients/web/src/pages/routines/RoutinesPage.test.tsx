@@ -27,6 +27,7 @@ function routine(name: string, over: Partial<RoutineView> = {}): RoutineView {
     name,
     description: `${name} description`,
     agent: "reviewer",
+    environment: { type: "Runtime", value: { vendor: "local" } },
     prompt: "triage the inbox",
     schedule: { type: "Manual", value: {} },
     enabled: true,
