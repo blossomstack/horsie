@@ -79,6 +79,13 @@ pub struct ProvisionStepSpec {
     pub with: Vec<(String, String)>,
 }
 
+/// One environment variable as persisted (storage twin of the wire `EnvVar`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvVarSpec {
+    pub name: String,
+    pub value: String,
+}
+
 /// What asked for a session to exist. More than a label: it decides whether
 /// the session appears in the session list, whose run list it appears in
 /// instead, and — because a routine's runs have nobody watching them — whether
@@ -122,6 +129,15 @@ pub struct SessionSpec {
     /// session, which is what makes the field additive.
     #[serde(default)]
     pub workflow: Option<Arc<crate::sessions::workflow::WorkflowRunSpec>>,
+    /// The predefined environment this session was created from. Provenance
+    /// only — everything it contributed is resolved into the fields above, so
+    /// nothing re-reads it. `None` for an ad-hoc environment.
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// Environment variables injected into the runtime child, from the
+    /// environment. Snapshotted with the rest.
+    #[serde(default)]
+    pub env_vars: Vec<EnvVarSpec>,
 }
 
 impl SessionSpec {
@@ -298,6 +314,8 @@ mod tests {
             plugins: vec![],
             origin: SessionOrigin::User,
             workflow: None,
+            environment: None,
+            env_vars: vec![],
         };
         let mut row = serde_json::to_value(&spec).unwrap();
         row["plugins_dir"] = serde_json::json!("/home/u/.local/share/horsie/plugins");
@@ -347,6 +365,8 @@ mod tests {
                 routine: "nightly".into(),
             },
             workflow: None,
+            environment: None,
+            env_vars: vec![],
         };
         let loaded: SessionSpec =
             serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();

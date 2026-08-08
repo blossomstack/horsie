@@ -60,6 +60,8 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
         plugins: vec![],
         origin: crate::sessions::spec::SessionOrigin::User,
         workflow: None,
+        environment: None,
+        env_vars: vec![],
     }
 }
 

@@ -91,10 +91,10 @@ pub async fn create_session(
     }
     let spec = build_session_spec(
         &state.config_store,
+        &state.environments,
         req.name,
         req.agent,
-        req.vendor,
-        req.repos.unwrap_or_default(),
+        req.environment,
         req.plugins,
         SessionOrigin::User,
     )
@@ -185,6 +185,7 @@ pub async fn get_session(
         last_error: status.as_ref().and_then(status_reason),
         annotations: wire_annotations(&rec.annotations),
         model: rec.spec.agent.model.clone(),
+        environment: rec.spec.environment.clone(),
         vendor: rec.spec.vendor.clone(),
         repos: rec
             .spec

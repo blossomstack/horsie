@@ -327,6 +327,8 @@ mod tests {
             plugins: vec![],
             origin: crate::sessions::spec::SessionOrigin::User,
             workflow: None,
+            environment: None,
+            env_vars: vec![],
         }
     }
 

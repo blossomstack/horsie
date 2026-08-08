@@ -7,6 +7,7 @@
 
 use crate::agents::AgentService;
 use crate::routines::store::{RoutineRow, RoutineStore, RunOutcome};
+use horsie_models::environments::EnvironmentSpec;
 use horsie_models::routines::{
     ManualSchedule, RoutineInput, RoutineSchedule, RoutineView, Weekday,
 };
@@ -212,6 +213,16 @@ impl RoutineService {
         self.agents.get(&input.agent).await.map_err(|_| {
             RoutineError::Invalid(format!("unknown agent preset '{}'", input.agent))
         })?;
+        // Only what is stable at save. Whether the named vendor is connected,
+        // or the named environment still exists, is a run-time fact — a routine
+        // outlives both, and reports a broken one through `last_error`.
+        if let EnvironmentSpec::Runtime(r) = &input.environment {
+            if r.vendor.trim().is_empty() {
+                return Err(RoutineError::Invalid(
+                    "environment names no runtime vendor".to_string(),
+                ));
+            }
+        }
         let schedule = input
             .schedule
             .clone()
@@ -317,6 +328,7 @@ fn row_from_input(
         name: input.name,
         description: input.description.unwrap_or_default(),
         agent: input.agent,
+        environment: input.environment,
         prompt: input.prompt,
         next_run_at_ms: next_run_at(&schedule, enabled, now_ms),
         schedule,
@@ -335,6 +347,7 @@ fn routine_view(row: &RoutineRow) -> RoutineView {
         name: row.name.clone(),
         description: row.description.clone(),
         agent: row.agent.clone(),
+        environment: row.environment.clone(),
         prompt: row.prompt.clone(),
         schedule: row.schedule.clone(),
         enabled: row.enabled,
@@ -362,6 +375,7 @@ pub(crate) mod tests {
     use crate::agents::AgentStore;
     use crate::config::ConfigStore;
     use horsie_models::agents::AgentPresetInput;
+    use horsie_models::environments::RuntimeEnvironment;
     use horsie_models::routines::{
         DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
         WeeklySchedule, YearlySchedule,
@@ -375,6 +389,7 @@ pub(crate) mod tests {
     pub(crate) struct Fixture {
         pub routines: Arc<RoutineService>,
         pub agents: Arc<AgentService>,
+        pub environments: Arc<crate::environments::EnvironmentService>,
         pub config: Arc<dyn ConfigStore>,
         pub provider_registry: crate::sessions::spec::SharedProviderRegistry,
         pub tmp: tempfile::TempDir,
@@ -435,7 +450,6 @@ pub(crate) mod tests {
                 name: "reviewer".into(),
                 description: None,
                 model: "sonnet".into(),
-                repos: None,
                 plugins: None,
                 mcp_servers: None,
                 memory_spaces: None,
@@ -449,6 +463,12 @@ pub(crate) mod tests {
                 agents.clone(),
             )),
             agents,
+            environments: Arc::new(crate::environments::EnvironmentService::new(
+                crate::environments::EnvironmentStore::new(
+                    opened.db.clone(),
+                    crate::auth::UserId::new("1"),
+                ),
+            )),
             config: opened.store.clone(),
             provider_registry: opened.registry.clone(),
             tmp,
@@ -466,6 +486,10 @@ pub(crate) mod tests {
             name: name.into(),
             description: Some("d".into()),
             agent: "reviewer".into(),
+            environment: EnvironmentSpec::Runtime(RuntimeEnvironment {
+                vendor: "mock".into(),
+                repos: None,
+            }),
             prompt: "triage the inbox".into(),
             schedule,
             enabled: None,

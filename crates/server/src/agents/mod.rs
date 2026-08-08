@@ -8,4 +8,4 @@ mod service;
 mod store;
 
 pub use service::{AgentError, AgentService};
-pub use store::{AgentRepo, AgentRow, AgentStore};
+pub use store::{AgentRow, AgentStore};

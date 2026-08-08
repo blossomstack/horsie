@@ -108,13 +108,6 @@ pub async fn invoke_agent(
     if req.message.trim().is_empty() {
         return Err(Api::unprocessable("message must not be empty"));
     }
-    // A preset names no vendor: where the work runs belongs to the invocation.
-    let vendor = state.config_store.default_vendor();
-    if !state.vendor_agents.connected_names().contains(&vendor) {
-        return Err(Api::unprocessable(format!(
-            "runtime vendor '{vendor}' is not connected"
-        )));
-    }
     // The preset validated its model at save, but models are editable
     // settings — re-check so a stale preset fails here, not as a turn error.
     let view = state.config_store.view().await.map_err(Api::internal)?;
@@ -137,14 +130,22 @@ pub async fn invoke_agent(
     };
     let spec = build_session_spec(
         &state.config_store,
+        &state.environments,
         req.name,
         wire,
-        Some(vendor),
-        agent.repos.clone(),
+        req.environment,
         Some(agent.plugins.clone()),
         SessionOrigin::User,
     )
     .await?;
+    // Checked on the *resolved* vendor, which only exists once the environment
+    // has been read: a named environment carries its own.
+    if !state.vendor_agents.connected_names().contains(&spec.vendor) {
+        return Err(Api::unprocessable(format!(
+            "runtime vendor '{}' is not connected",
+            spec.vendor
+        )));
+    }
     let created_at = now_ms();
     let id = handlers::ask(&state, |reply| SessionSupervisorCommand::Create {
         spec: spec.clone(),

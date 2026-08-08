@@ -192,6 +192,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     let routine_runner = Arc::new(crate::routines::RoutineRunner::new(
         routines.clone(),
         agents.clone(),
+        environments.clone(),
         opened.store.clone(),
         vendor_agents.clone(),
         supervisor.clone(),

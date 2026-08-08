@@ -325,7 +325,6 @@ mod tests {
                     name: name.into(),
                     description: None,
                     model: "sonnet".into(),
-                    repos: None,
                     plugins: None,
                     mcp_servers: None,
                     memory_spaces: None,

@@ -3,10 +3,9 @@
 //! alias, and the thinking effort the model offers. Plugins, MCP servers, and
 //! memory spaces are live/external rosters — validated at invoke.
 
-use crate::agents::store::{AgentRepo, AgentRow, AgentStore};
+use crate::agents::store::{AgentRow, AgentStore};
 use crate::config::ConfigStore;
 use horsie_models::agents::{AgentPresetInput, AgentView};
-use horsie_models::session_api::RepoConfig;
 use std::sync::Arc;
 
 /// Typed service errors so the HTTP layer can pick a status without string
@@ -152,16 +151,6 @@ fn row_from_input(input: AgentPresetInput, created_at: String, updated_at: Strin
         name: input.name,
         description: input.description.unwrap_or_default(),
         model: input.model,
-        repos: input
-            .repos
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| AgentRepo {
-                url: r.url,
-                git_ref: r.git_ref,
-                dir: r.dir,
-            })
-            .collect(),
         plugins: input.plugins.unwrap_or_default(),
         mcp_servers: input.mcp_servers.unwrap_or_default(),
         memory_spaces: input.memory_spaces.unwrap_or_default(),
@@ -176,15 +165,6 @@ fn agent_view(row: &AgentRow) -> AgentView {
         name: row.name.clone(),
         description: row.description.clone(),
         model: row.model.clone(),
-        repos: row
-            .repos
-            .iter()
-            .map(|r| RepoConfig {
-                url: r.url.clone(),
-                git_ref: r.git_ref.clone(),
-                dir: r.dir.clone(),
-            })
-            .collect(),
         plugins: row.plugins.clone(),
         mcp_servers: row.mcp_servers.clone(),
         memory_spaces: row.memory_spaces.clone(),
@@ -281,7 +261,6 @@ mod tests {
             name: name.into(),
             description: Some("d".into()),
             model: model.into(),
-            repos: None,
             plugins: None,
             mcp_servers: None,
             memory_spaces: None,
@@ -295,7 +274,7 @@ mod tests {
         let v = s.create(input("a", "sonnet")).await.unwrap();
         assert_eq!(v.name, "a");
         assert_eq!(v.description, "d");
-        assert!(v.repos.is_empty() && v.plugins.is_empty());
+        assert!(v.plugins.is_empty());
         assert!(!v.created_at.is_empty());
         assert_eq!(v.created_at, v.updated_at);
     }

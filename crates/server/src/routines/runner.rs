@@ -7,6 +7,7 @@
 
 use crate::agents::AgentService;
 use crate::config::ConfigStore;
+use crate::environments::EnvironmentService;
 use crate::routines::service::{RoutineError, RoutineService};
 use crate::routines::store::RunOutcome;
 use crate::runtime_vendor::RuntimeVendorRegistry;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 pub struct RoutineRunner {
     routines: Arc<RoutineService>,
     agents: Arc<AgentService>,
+    environments: Arc<EnvironmentService>,
     config: Arc<dyn ConfigStore>,
     vendors: Arc<RuntimeVendorRegistry>,
     supervisor: ActorRef<SessionSupervisorCommand>,
@@ -30,6 +32,7 @@ impl RoutineRunner {
     pub fn new(
         routines: Arc<RoutineService>,
         agents: Arc<AgentService>,
+        environments: Arc<EnvironmentService>,
         config: Arc<dyn ConfigStore>,
         vendors: Arc<RuntimeVendorRegistry>,
         supervisor: ActorRef<SessionSupervisorCommand>,
@@ -37,6 +40,7 @@ impl RoutineRunner {
         Self {
             routines,
             agents,
+            environments,
             config,
             vendors,
             supervisor,
@@ -85,16 +89,6 @@ impl RoutineRunner {
             RoutineError::Invalid(format!("unknown agent preset '{}'", routine.agent))
         })?;
 
-        // A preset names no vendor, so every run resolves the server default.
-        // Deliberately not a per-routine pin: a routine is unattended, so a pin
-        // that goes stale fails every interval with nobody watching, and
-        // `next_run` waits the interval out rather than disabling the routine.
-        let vendor = self.config.default_vendor();
-        if !self.vendors.connected_names().contains(&vendor) {
-            return Err(RoutineError::Invalid(format!(
-                "runtime vendor '{vendor}' is not connected"
-            )));
-        }
         let view = self.config.view().await.map_err(RoutineError::Internal)?;
         if !view.models.iter().any(|m| m.alias == agent.model) {
             return Err(RoutineError::Invalid(format!(
@@ -116,12 +110,12 @@ impl RoutineRunner {
         };
         let spec = build_session_spec(
             &self.config,
+            &self.environments,
             // Named for the routine so a run is recognisable before the agent
             // titles it; the agent may retitle it from what it actually did.
             Some(routine.name.clone()),
             wire,
-            Some(vendor),
-            agent.repos.clone(),
+            routine.environment.clone(),
             Some(agent.plugins.clone()),
             SessionOrigin::Routine {
                 routine: routine.name.clone(),
@@ -132,6 +126,16 @@ impl RoutineRunner {
             SpecError::Invalid(m) => RoutineError::Invalid(m),
             SpecError::Internal(m) => RoutineError::Internal(m),
         })?;
+        // The routine's environment is re-resolved every run — an environment
+        // deleted since it was saved, or a vendor now offline, fails here and
+        // is recorded in `last_error` rather than failing inside a session
+        // nobody is watching.
+        if !self.vendors.connected_names().contains(&spec.vendor) {
+            return Err(RoutineError::Invalid(format!(
+                "runtime vendor '{}' is not connected",
+                spec.vendor
+            )));
+        }
 
         let id = self
             .supervisor
@@ -238,6 +242,7 @@ pub(crate) mod tests {
         let runner = Arc::new(RoutineRunner::new(
             f.routines.clone(),
             f.agents.clone(),
+            f.environments.clone(),
             f.config.clone(),
             registry,
             supervisor.clone(),
