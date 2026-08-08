@@ -7,4 +7,4 @@ export * from './serverInfo';
 export * from './settingsView';
 export * from './providerInput';
 export * from './modelInput';
-export * from './settingsUpdate';
+export * from './defaultVendorInput';

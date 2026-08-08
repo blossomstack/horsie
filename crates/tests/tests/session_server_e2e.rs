@@ -1551,23 +1551,31 @@ async fn session_detail_echoes_thinking_effort() {
 
     // The mock model is not in the settings store by default, and the server
     // only accepts a session thinking effort that the model offers — so
-    // configure it through the same PUT /api/config path settings uses.
+    // configure it through the same per-resource routes settings uses. The
+    // provider goes first: a model is validated against what is stored.
     let res = client
-        .put(format!("http://{}/api/config", server.addr))
+        .put(format!(
+            "http://{}/api/config/model-providers/mock",
+            server.addr
+        ))
         .json(&serde_json::json!({
-            "providers": [{
-                "name": "mock",
-                "kind": "anthropic",
-                "baseUrl": mock.url(),
-                "apiKey": "test-key"
-            }],
-            "models": [{
-                "alias": "mock",
-                "provider": "mock",
-                "modelId": "mock-model",
-                "thinkingEfforts": ["low", "high"],
-                "thinkingEffort": "high"
-            }]
+            "name": "mock",
+            "kind": "anthropic",
+            "baseUrl": mock.url(),
+            "apiKey": "test-key"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    let res = client
+        .put(format!("http://{}/api/config/models/mock", server.addr))
+        .json(&serde_json::json!({
+            "alias": "mock",
+            "provider": "mock",
+            "modelId": "mock-model",
+            "thinkingEfforts": ["low", "high"],
+            "thinkingEffort": "high"
         }))
         .send()
         .await
@@ -2544,14 +2552,18 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
     // Pointing the provider at the mock is what `provider_at` already does, so
     // swapping the live registry changes nothing but the route.
     let res = client
-        .put(format!("{base}/api/config"))
+        .put(format!("{base}/api/config/model-providers/p"))
         .json(&serde_json::json!({
-            "providers": [{
-                "name": "p", "kind": "anthropic",
-                "baseUrl": mock.url(), "apiKey": "test-key"
-            }],
-            "models": [{"alias": "mock", "provider": "p", "modelId": "m"}],
+            "name": "p", "kind": "anthropic",
+            "baseUrl": mock.url(), "apiKey": "test-key"
         }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200, "configure the provider");
+    let res = client
+        .put(format!("{base}/api/config/models/mock"))
+        .json(&serde_json::json!({"alias": "mock", "provider": "p", "modelId": "m"}))
         .send()
         .await
         .unwrap();

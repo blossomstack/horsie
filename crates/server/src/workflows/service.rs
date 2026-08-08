@@ -264,7 +264,6 @@ pub fn step_named<'a>(steps: &'a [WorkflowStepDef], name: &str) -> Option<&'a Wo
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::ConfigStore;
     use horsie_models::agents::AgentPresetInput;
     use horsie_models::workflow::WorkflowTransition;
 
@@ -272,7 +271,7 @@ mod tests {
     /// reference already created. The agent service validates a preset's model
     /// against the config store, so that has to exist and know one model.
     async fn service() -> WorkflowService {
-        use horsie_models::settings::{ModelInput, ProviderInput, SettingsUpdate};
+        use horsie_models::settings::{ModelInput, ProviderInput};
         let db = crate::db::testing::db().await;
         let opened = crate::config::DbConfigStore::open_on(
             db.clone(),
@@ -292,15 +291,15 @@ mod tests {
         .unwrap();
         opened
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![ProviderInput {
+            .seed(
+                vec![ProviderInput {
                     name: "p".into(),
                     kind: "anthropic".into(),
                     base_url: Some("http://localhost:1".into()),
                     api_key: Some("sk-x".into()),
                     keep_thinking_signature: None,
-                }]),
-                models: Some(vec![ModelInput {
+                }],
+                vec![ModelInput {
                     alias: "sonnet".into(),
                     provider: "p".into(),
                     model_id: "claude-sonnet-4-6".into(),
@@ -310,9 +309,8 @@ mod tests {
                     thinking_effort: None,
                     thinking_dialect: None,
                     forced_tools_disable_thinking: None,
-                }]),
-                default_vendor: None,
-            })
+                }],
+            )
             .await
             .unwrap();
         let agents = Arc::new(AgentService::new(

@@ -186,7 +186,7 @@ fn now_secs() -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use horsie_models::settings::{ModelInput, ProviderInput, SettingsUpdate};
+    use horsie_models::settings::{ModelInput, ProviderInput};
 
     /// A service on a temp DB with one provider ("p") and two models:
     /// "sonnet" (offers thinking efforts) and "haiku" (none).
@@ -211,15 +211,15 @@ mod tests {
         .unwrap();
         opened
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![ProviderInput {
+            .seed(
+                vec![ProviderInput {
                     name: "p".into(),
                     kind: "anthropic".into(),
                     base_url: Some("http://localhost:1".into()),
                     api_key: Some("sk-x".into()),
                     keep_thinking_signature: None,
-                }]),
-                models: Some(vec![
+                }],
+                vec![
                     ModelInput {
                         alias: "sonnet".into(),
                         provider: "p".into(),
@@ -242,9 +242,8 @@ mod tests {
                         thinking_dialect: None,
                         forced_tools_disable_thinking: None,
                     },
-                ]),
-                default_vendor: None,
-            })
+                ],
+            )
             .await
             .unwrap();
         (

@@ -181,9 +181,10 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/sessions/{id}/stop", post(handlers::stop_session))
         .route("/api/events", get(sse::global_events))
+        .route("/api/config", get(config::get_config))
         .route(
-            "/api/config",
-            get(config::get_config).put(config::update_config),
+            "/api/config/default-vendor",
+            put(config::put_default_vendor).delete(config::delete_default_vendor),
         )
         .route("/api/config/models", get(config::list_models))
         .route(
@@ -195,13 +196,16 @@ pub fn app(state: AppState) -> Router {
             "/api/config/model-providers/{name}",
             put(config::put_provider).delete(config::delete_provider),
         )
-        .route("/api/admin/providers/{name}/chatgpt", get(chatgpt::status))
         .route(
-            "/api/admin/providers/{name}/chatgpt/login",
+            "/api/config/model-providers/{name}/chatgpt",
+            get(chatgpt::status),
+        )
+        .route(
+            "/api/config/model-providers/{name}/chatgpt/login",
             post(chatgpt::start).delete(chatgpt::sign_out),
         )
         .route(
-            "/api/admin/providers/{name}/chatgpt/poll",
+            "/api/config/model-providers/{name}/chatgpt/poll",
             post(chatgpt::poll),
         )
         .route("/api/model-cards", get(model_cards::list))
@@ -610,20 +614,19 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/admin/providers/ghost/chatgpt/login",
+                "/api/config/model-providers/ghost/chatgpt/login",
                 &serde_json::json!({}),
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-        let body = serde_json::json!({
-            "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
-            "models": [],
-        });
         let res = app
             .clone()
-            .oneshot(put_json("/api/config", &body))
+            .oneshot(put_json(
+                "/api/config/model-providers/p",
+                &serde_json::json!({"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}),
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -631,7 +634,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/admin/providers/p/chatgpt/login",
+                "/api/config/model-providers/p/chatgpt/login",
                 &serde_json::json!({}),
             ))
             .await
@@ -640,20 +643,19 @@ mod tests {
 
         // And a ChatGPT provider that nobody has signed into reports as much
         // rather than 404ing — the provider exists, the sign-in does not.
-        let body = serde_json::json!({
-            "providers": [{"name": "c", "kind": "chatgpt"}],
-            "models": [],
-        });
         let res = app
             .clone()
-            .oneshot(put_json("/api/config", &body))
+            .oneshot(put_json(
+                "/api/config/model-providers/c",
+                &serde_json::json!({"name": "c", "kind": "chatgpt"}),
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
         let res = app
             .clone()
-            .oneshot(get("/api/admin/providers/c/chatgpt"))
+            .oneshot(get("/api/config/model-providers/c/chatgpt"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -662,7 +664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_get_and_put_round_trip() {
+    async fn config_get_and_per_resource_writes_round_trip() {
         use horsie_models::settings::SettingsView;
         let tmp = tempfile::tempdir().unwrap();
         let app = app(test_state(&tmp).await);
@@ -679,24 +681,63 @@ mod tests {
             view.vendors.iter().map(|v| &v.name).collect::<Vec<_>>(),
             ["mock"]
         );
-        // PUT a provider + model persists and redacts the key.
-        let body = serde_json::json!({
-            "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
-            "models": [{"alias": "m", "provider": "p", "modelId": "id"}],
-        });
+        // Writing a provider then a model persists both and redacts the key.
         let res = app
             .clone()
-            .oneshot(put_json("/api/config", &body))
+            .oneshot(put_json(
+                "/api/config/model-providers/p",
+                &serde_json::json!({"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/config/models/m",
+                &serde_json::json!({"alias": "m", "provider": "p", "modelId": "id"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app.clone().oneshot(get("/api/config")).await.unwrap();
+        let view: SettingsView = read_json(res).await;
+        assert_eq!(view.models.len(), 1);
+        assert!(view.providers[0].has_credential);
+
+        // The default vendor has its own endpoint now, and clearing it is a
+        // DELETE rather than an omitted field — which is what the old
+        // whole-document save expressed, and why "clear" silently did nothing.
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/config/default-vendor",
+                &serde_json::json!({"vendor": "mock"}),
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
-        assert_eq!(view.models.len(), 1);
-        assert!(view.providers[0].has_credential);
+        assert_eq!(view.default_vendor, "mock");
+
+        let res = app
+            .clone()
+            .oneshot(delete_req("/api/config/default-vendor"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let view: SettingsView = read_json(res).await;
+        assert_eq!(view.default_vendor, "local");
+
         // A model referencing a missing provider is a 422.
-        let bad =
-            serde_json::json!({ "models": [{"alias": "x", "provider": "ghost", "modelId": "y"}] });
-        let res = app.oneshot(put_json("/api/config", &bad)).await.unwrap();
+        let res = app
+            .oneshot(put_json(
+                "/api/config/models/x",
+                &serde_json::json!({"alias": "x", "provider": "ghost", "modelId": "y"}),
+            ))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
@@ -1900,23 +1941,31 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
-    /// PUT a provider + model so agent save-time validation has a model to
-    /// reference; the alias is "mock".
     /// Seed a usable server: one provider, one model, and `mock` as the default
     /// vendor. The default vendor matters because a preset names none — every
     /// invocation resolves it.
+    ///
+    /// Three requests rather than one, because each resource is addressed on
+    /// its own now. Provider first: the model referencing it is validated
+    /// against what is stored.
     async fn put_mock_model(app: &axum::Router) {
-        let body = serde_json::json!({
-            "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
-            "models": [{"alias": "mock", "provider": "p", "modelId": "id"}],
-            "defaultVendor": "mock",
-        });
-        let res = app
-            .clone()
-            .oneshot(put_json("/api/config", &body))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        for (uri, body) in [
+            (
+                "/api/config/model-providers/p",
+                serde_json::json!({"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}),
+            ),
+            (
+                "/api/config/models/mock",
+                serde_json::json!({"alias": "mock", "provider": "p", "modelId": "id"}),
+            ),
+            (
+                "/api/config/default-vendor",
+                serde_json::json!({"vendor": "mock"}),
+            ),
+        ] {
+            let res = app.clone().oneshot(put_json(uri, &body)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "seeding {uri}");
+        }
     }
 
     #[tokio::test]
@@ -2536,19 +2585,25 @@ mod tests {
         // A preset names no vendor, so what makes it invocable is whether the
         // server default is connected. Point the default at a vendor that is
         // not, and the same preset stops being invocable.
-        let res = app
-            .clone()
-            .oneshot(put_json(
-                "/api/config",
-                &serde_json::json!({
-                    "providers": [{"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}],
-                    "models": [{"alias": "mock", "provider": "p", "modelId": "id"}],
-                    "defaultVendor": "ghost-vendor",
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        for (uri, body) in [
+            (
+                "/api/config/model-providers/p",
+                serde_json::json!({"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}),
+            ),
+            (
+                "/api/config/models/mock",
+                serde_json::json!({"alias": "mock", "provider": "p", "modelId": "id"}),
+            ),
+            // A vendor no agent answers to: still accepted, because the agent
+            // may dial in later.
+            (
+                "/api/config/default-vendor",
+                serde_json::json!({"vendor": "ghost-vendor"}),
+            ),
+        ] {
+            let res = app.clone().oneshot(put_json(uri, &body)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "seeding {uri}");
+        }
         let res = app
             .oneshot(post_json(
                 "/api/agents/reviewer/invoke",

@@ -11,9 +11,12 @@ import type {
 import { ChatGptSignIn } from "./ChatGptSignIn";
 import { useModelCardSearch } from "../../hooks/useModelCards";
 import {
+  useDeleteModel,
+  useDeleteProvider,
+  usePutModel,
+  usePutProvider,
   useRefreshSettings,
   useSettings,
-  useUpdateSettings,
 } from "../../hooks/useSettings";
 import {
   ListRow,
@@ -181,15 +184,25 @@ const toModelInput = (m: ModelDraft): ModelInput => ({
  * provider, and the flat version made you scroll past six fields to learn that
  * a second entry existed.
  *
- * Every action writes immediately. `SettingsUpdate` replaces whole
- * collections, so an edit sends the current providers *and* models arrays with
- * the one changed entry substituted — the same payload the batched Save used
- * to send, just at the moment you press the button. Sending only `models`
- * would replace `providers` with nothing, which is why both always go.
+ * Every action writes immediately, and each one addresses a single resource,
+ * so an edit no longer resends the whole configuration. The only multi-step
+ * action is a rename: the identity lives in the URL, so renaming means
+ * creating the new row, repointing anything that referenced the old name, and
+ * only then deleting it — in that order, because the server refuses to delete
+ * a provider a model still routes to.
  */
 export function ModelsSettings() {
   const { data: settings, isLoading, isError } = useSettings();
-  const update = useUpdateSettings();
+  const putProvider = usePutProvider();
+  const removeProvider = useDeleteProvider();
+  const putModel = usePutModel();
+  const removeModel = useDeleteModel();
+  // One header lamp still speaks for the page, but there are four ways to be
+  // busy now instead of one.
+  const writes = [putProvider, removeProvider, putModel, removeModel];
+  const busy = writes.some((w) => w.isPending);
+  const wroteOk = !busy && writes.some((w) => w.isSuccess);
+  const writeError = writes.find((w) => w.isError)?.error;
 
   const [selected, setSelected] = useState<string | null>(null);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
@@ -215,12 +228,6 @@ export function ModelsSettings() {
   const providerModels = models.filter((m) => m.provider === selected);
   const addModelBlocked = blockedReason(providers.find((p) => p.name === selected));
 
-  const commit = (next: { providers?: ProviderInput[]; models?: ModelInput[] }) =>
-    update.mutateAsync({
-      providers: next.providers ?? providers.map(providerToDraft).map(toProviderInput),
-      models: next.models ?? models.map(modelToDraft).map(toModelInput),
-    });
-
   const saveProvider = async (draft: ProviderDraft, original: string | null) => {
     setLocalError(null);
     const name = draft.name.trim();
@@ -228,26 +235,26 @@ export function ModelsSettings() {
     if (providers.some((p) => p.name === name && p.name !== original))
       return setLocalError(`A provider named “${name}” already exists.`);
 
-    const current = providers.map(providerToDraft);
-    const next =
-      original === null
-        ? [...current, draft]
-        : current.map((p) => (p.name === original ? draft : p));
-
     // A rename carries its models with it, or they point at a provider that no
     // longer exists and every session using them fails to start.
-    const renamed =
+    const moving =
       original !== null && original !== name
         ? models
+            .filter((m) => m.provider === original)
             .map(modelToDraft)
-            .map((m) => (m.provider === original ? { ...m, provider: name } : m))
-        : undefined;
+            .map((m) => ({ ...m, provider: name }))
+        : [];
 
     try {
-      await commit({
-        providers: next.map(toProviderInput),
-        models: renamed?.map(toModelInput),
-      });
+      await putProvider.mutateAsync({ name, body: toProviderInput(draft) });
+      // Order matters: the models move to the new name before the old provider
+      // goes, or the delete is refused for holding them.
+      for (const m of moving) {
+        await putModel.mutateAsync({ alias: m.alias, body: toModelInput(m) });
+      }
+      if (original !== null && original !== name) {
+        await removeProvider.mutateAsync(original);
+      }
       setSelected(name);
       setEditingProvider(null);
       setAddingProvider(false);
@@ -275,12 +282,7 @@ export function ModelsSettings() {
     }
     if (!confirm(`Delete provider “${name}”?`)) return;
     try {
-      await commit({
-        providers: providers
-          .filter((p) => p.name !== name)
-          .map(providerToDraft)
-          .map(toProviderInput),
-      });
+      await removeProvider.mutateAsync(name);
     } catch (e) {
       setLocalError(e instanceof ApiRequestError ? e.message : "Delete failed.");
     }
@@ -300,13 +302,12 @@ export function ModelsSettings() {
         return setLocalError(`${label} for “${alias}” must be a number.`);
     }
 
-    const current = models.map(modelToDraft);
-    const next =
-      original === null
-        ? [...current, draft]
-        : current.map((m) => (m.alias === original ? draft : m));
     try {
-      await commit({ models: next.map(toModelInput) });
+      await putModel.mutateAsync({ alias, body: toModelInput(draft) });
+      // The alias is the identity, so a rename is a new row plus a delete.
+      if (original !== null && original !== alias) {
+        await removeModel.mutateAsync(original);
+      }
       setEditingModel(null);
       setAddingModel(false);
     } catch (e) {
@@ -318,21 +319,16 @@ export function ModelsSettings() {
     setLocalError(null);
     if (!confirm(`Delete model “${alias}”?`)) return;
     try {
-      await commit({
-        models: models
-          .filter((m) => m.alias !== alias)
-          .map(modelToDraft)
-          .map(toModelInput),
-      });
+      await removeModel.mutateAsync(alias);
     } catch (e) {
       setLocalError(e instanceof ApiRequestError ? e.message : "Delete failed.");
     }
   };
 
   const saveError =
-    update.error instanceof ApiRequestError
-      ? update.error.message
-      : update.isError
+    writeError instanceof ApiRequestError
+      ? writeError.message
+      : writeError
         ? "Failed to save settings."
         : null;
 
@@ -341,8 +337,8 @@ export function ModelsSettings() {
       <SettingsHeader
         title="Models & providers"
         desc="API endpoints and the model aliases sessions pick from. Changes save as you make them."
-        saving={update.isPending}
-        saved={update.isSuccess && !update.isPending}
+        saving={busy}
+        saved={wroteOk}
       />
 
       <SettingsPane>
@@ -383,7 +379,7 @@ export function ModelsSettings() {
                   initial={newProvider()}
                   onSave={(d) => saveProvider(d, null)}
                   onCancel={() => setAddingProvider(false)}
-                  busy={update.isPending}
+                  busy={busy}
                 />
               )}
               {providers.map((p) => {
@@ -394,7 +390,7 @@ export function ModelsSettings() {
                     initial={providerToDraft(p)}
                     onSave={(d) => saveProvider(d, p.name)}
                     onCancel={() => setEditingProvider(null)}
-                    busy={update.isPending}
+                    busy={busy}
                   />
                 ) : (
                   <ListRow
@@ -478,7 +474,7 @@ export function ModelsSettings() {
                           // from this render's data. Two deletes issued before
                           // the refetch lands would have the second resurrect
                           // the first.
-                          disabled={update.isPending}
+                          disabled={busy}
                           onClick={() => deleteProvider(p.name)}
                           testId={`provider-delete-${p.name}`}
                         />
@@ -522,7 +518,7 @@ export function ModelsSettings() {
                     providerNames={providers.map((p) => p.name)}
                     onSave={(d) => saveModel(d, null)}
                     onCancel={() => setAddingModel(false)}
-                    busy={update.isPending}
+                    busy={busy}
                   />
                 )}
                 {providerModels.map((m) =>
@@ -533,7 +529,7 @@ export function ModelsSettings() {
                       providerNames={providers.map((p) => p.name)}
                       onSave={(d) => saveModel(d, m.alias)}
                       onCancel={() => setEditingModel(null)}
-                      busy={update.isPending}
+                      busy={busy}
                     />
                   ) : (
                     <ListRow
@@ -561,7 +557,7 @@ export function ModelsSettings() {
                             icon={<Trash2 size={14} />}
                             label={`Delete ${m.alias}`}
                             danger
-                            disabled={update.isPending}
+                            disabled={busy}
                             onClick={() => deleteModel(m.alias)}
                             testId={`model-delete-${m.alias}`}
                           />
