@@ -4,6 +4,8 @@ import { ApiRequestError } from "../../api/client";
 import type {
   FlyVendorSettings,
   RuntimeVendorConfigView,
+  RuntimeVendorSettings,
+  VelosVendorSettings,
 } from "../../api/types";
 import {
   useDeleteRuntimeVendor,
@@ -15,10 +17,15 @@ import { ListRow, RowAction, RowShell, Section, TextField } from "./fields";
 /**
  * Runtime vendors the server runs itself.
  *
- * The opposite pole from the connected-vendor roster above it: an agent that
+ * The opposite pole from the connected-vendor roster above it: a process that
  * dials in carries its own configuration, so there is nothing to edit here; a
  * cloud vendor has nowhere to dial in from, so this form is the only thing that
  * makes it exist.
+ *
+ * The kind is fixed once a vendor is saved. Changing it in place would leave
+ * every session pointing at a name whose substrate silently moved — and the
+ * runtimes on the old one unreachable and still billing. Deleting and re-adding
+ * makes that visible.
  */
 
 const EMPTY_FLY: FlyVendorSettings = {
@@ -34,22 +41,34 @@ const EMPTY_FLY: FlyVendorSettings = {
   volumeSizeGb: 10,
 };
 
+const EMPTY_VELOS: VelosVendorSettings = {
+  serverUrl: "",
+  image: "",
+  runtimeBin: "horsie-runtime",
+  workspaceRoot: "/workspaces",
+  callbackUrl: "",
+  cpu: 1,
+  memoryMb: 1024,
+};
+
 type Draft = {
   name: string;
-  fly: FlyVendorSettings;
+  settings: RuntimeVendorSettings;
   /** Empty means "keep the stored token" — one is never readable back. */
   credential: string;
-  /** Editing an existing vendor, so its name is fixed and a blank token is OK. */
+  /** Editing an existing vendor, so its kind is fixed and a blank token is OK. */
   existing: boolean;
 };
 
-function draftOf(v: RuntimeVendorConfigView): Draft {
-  return {
-    name: v.name,
-    fly: v.settings.value,
-    credential: "",
-    existing: true,
-  };
+/** The callback URL lives under a different key per kind, but means the same. */
+function callbackOf(settings: RuntimeVendorSettings): string {
+  return settings.value.callbackUrl;
+}
+
+function summarise(v: RuntimeVendorConfigView): string {
+  return v.settings.kind === "Fly"
+    ? `Fly · ${v.settings.value.region} · ${v.settings.value.image || "no image"}`
+    : `velos · ${v.settings.value.serverUrl || "no server"} · ${v.settings.value.image || "no image"}`;
 }
 
 export function CloudVendors() {
@@ -59,14 +78,27 @@ export function CloudVendors() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const setFly = (patch: Partial<FlyVendorSettings>) =>
-    setDraft((d) => (d ? { ...d, fly: { ...d.fly, ...patch } } : d));
+  /** Patch the settings of whichever kind the draft is, keeping the tag. */
+  const patch = (
+    values: Partial<FlyVendorSettings> & Partial<VelosVendorSettings>,
+  ) =>
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            settings: {
+              kind: d.settings.kind,
+              value: { ...d.settings.value, ...values },
+            } as RuntimeVendorSettings,
+          }
+        : d,
+    );
 
   // A number field that has been cleared is not a zero — treating it as one
   // would trip the "needs at least one cpu" check while the user is still
   // typing.
-  const setNumber = (key: keyof FlyVendorSettings, raw: string) =>
-    setFly({ [key]: raw === "" ? 0 : Number(raw) } as Partial<FlyVendorSettings>);
+  const setNumber = (key: string, raw: string) =>
+    patch({ [key]: raw === "" ? 0 : Number(raw) });
 
   const submit = async () => {
     if (!draft) return;
@@ -76,7 +108,7 @@ export function CloudVendors() {
         name: draft.name,
         body: {
           name: draft.name,
-          settings: { kind: "Fly", value: draft.fly },
+          settings: draft.settings,
           credential: draft.credential || undefined,
         },
       });
@@ -102,23 +134,21 @@ export function CloudVendors() {
     }
   };
 
+  const add = (kind: RuntimeVendorSettings["kind"]) =>
+    setDraft({
+      name: "",
+      settings:
+        kind === "Fly"
+          ? { kind: "Fly", value: { ...EMPTY_FLY } }
+          : { kind: "Velos", value: { ...EMPTY_VELOS } },
+      credential: "",
+      existing: false,
+    });
+
   return (
     <Section
       title="Cloud vendors"
-      desc="Vendors this server runs itself. A Fly vendor starts one machine per runtime, and each machine dials back to the callback URL — so that URL must be reachable from outside this server."
-      onAdd={
-        draft
-          ? undefined
-          : () =>
-              setDraft({
-                name: "",
-                fly: { ...EMPTY_FLY },
-                credential: "",
-                existing: false,
-              })
-      }
-      addLabel="Add"
-      addTestId="cloud-vendor-add"
+      desc="Vendors this server runs itself — no process of your own to deploy. Each sandbox dials back to the callback URL, so that URL must be reachable from outside this server."
       empty={
         !isLoading && !draft && (vendors?.length ?? 0) === 0
           ? "No cloud vendors are configured."
@@ -139,24 +169,33 @@ export function CloudVendors() {
           key={v.name}
           testId={`cloud-vendor-row-${v.name}`}
           title={v.name}
-          subtitle={`Fly · ${v.settings.value.region} · ${v.settings.value.image || "no image"}`}
+          subtitle={summarise(v)}
           meta={
             <span className="flex shrink-0 items-center gap-2">
-              <span className="chip">{v.hasCredential ? "Token set" : "No token"}</span>
+              <span className="chip">
+                {v.hasCredential ? "Token set" : "No token"}
+              </span>
             </span>
           }
           actions={
             <RowAction
               icon={<Pencil size={14} />}
               label={`Edit ${v.name}`}
-              onClick={() => setDraft(draftOf(v))}
+              onClick={() =>
+                setDraft({
+                  name: v.name,
+                  settings: v.settings,
+                  credential: "",
+                  existing: true,
+                })
+              }
               testId={`cloud-vendor-edit-${v.name}`}
             />
           }
         />
       ))}
 
-      {draft && (
+      {draft ? (
         <RowShell
           onRemove={() =>
             draft.existing ? void drop(draft.name) : setDraft(null)
@@ -168,14 +207,23 @@ export function CloudVendors() {
               label="Name"
               value={draft.name}
               onChange={(name) => setDraft((d) => (d ? { ...d, name } : d))}
-              placeholder="fly"
+              placeholder={draft.settings.kind === "Fly" ? "fly" : "velos"}
             />
-            <TextField
-              label="Fly app"
-              value={draft.fly.app}
-              onChange={(app) => setFly({ app })}
-              placeholder="horsie-runtimes"
-            />
+            {draft.settings.kind === "Fly" ? (
+              <TextField
+                label="Fly app"
+                value={draft.settings.value.app}
+                onChange={(app) => patch({ app })}
+                placeholder="horsie-runtimes"
+              />
+            ) : (
+              <TextField
+                label="velos server URL"
+                value={draft.settings.value.serverUrl}
+                onChange={(serverUrl) => patch({ serverUrl })}
+                placeholder="http://velos.example:8080"
+              />
+            )}
             <TextField
               label="API token"
               type="password"
@@ -183,56 +231,83 @@ export function CloudVendors() {
               onChange={(credential) =>
                 setDraft((d) => (d ? { ...d, credential } : d))
               }
-              placeholder={draft.existing ? "Leave blank to keep" : "fly api token"}
+              placeholder={
+                draft.existing
+                  ? "Leave blank to keep"
+                  : draft.settings.kind === "Fly"
+                    ? "fly api token"
+                    : "optional — velos may run without auth"
+              }
             />
-            <TextField
-              label="Region"
-              value={draft.fly.region}
-              onChange={(region) => setFly({ region })}
-              placeholder="iad"
-            />
+            {draft.settings.kind === "Fly" && (
+              <TextField
+                label="Region"
+                value={draft.settings.value.region}
+                onChange={(region) => patch({ region })}
+                placeholder="iad"
+              />
+            )}
             <TextField
               label="Runtime image"
-              value={draft.fly.image}
-              onChange={(image) => setFly({ image })}
+              value={draft.settings.value.image}
+              onChange={(image) => patch({ image })}
               placeholder="ghcr.io/you/horsie-runtime:latest"
             />
             <TextField
               label="Callback URL"
-              value={draft.fly.callbackUrl}
-              onChange={(callbackUrl) => setFly({ callbackUrl })}
-              placeholder="wss://horsie.example.com"
+              value={callbackOf(draft.settings)}
+              onChange={(callbackUrl) => patch({ callbackUrl })}
+              placeholder={
+                draft.settings.kind === "Fly"
+                  ? "wss://horsie.example.com"
+                  : "ws://horsie.internal:3789"
+              }
             />
             <TextField
               label="Workspace root"
-              value={draft.fly.workspaceRoot}
-              onChange={(workspaceRoot) => setFly({ workspaceRoot })}
+              value={draft.settings.value.workspaceRoot}
+              onChange={(workspaceRoot) => patch({ workspaceRoot })}
               placeholder="/workspaces"
             />
             <TextField
               label="Memory (MB)"
-              value={String(draft.fly.memoryMb)}
+              value={String(draft.settings.value.memoryMb)}
               onChange={(v) => setNumber("memoryMb", v)}
             />
             <TextField
               label="CPUs"
-              value={String(draft.fly.cpus)}
-              onChange={(v) => setNumber("cpus", v)}
+              value={String(
+                draft.settings.kind === "Fly"
+                  ? draft.settings.value.cpus
+                  : draft.settings.value.cpu,
+              )}
+              onChange={(v) =>
+                setNumber(draft.settings.kind === "Fly" ? "cpus" : "cpu", v)
+              }
             />
-            <TextField
-              label="Volume size (GB)"
-              value={String(draft.fly.volumeSizeGb)}
-              onChange={(v) => setNumber("volumeSizeGb", v)}
-            />
+            {draft.settings.kind === "Fly" && (
+              <TextField
+                label="Volume size (GB)"
+                value={String(draft.settings.value.volumeSizeGb)}
+                onChange={(v) => setNumber("volumeSizeGb", v)}
+              />
+            )}
           </div>
-          <label className="mt-3 flex items-center gap-2 text-xs text-faint">
-            <input
-              type="checkbox"
-              checked={draft.fly.volumes}
-              onChange={(e) => setFly({ volumes: e.target.checked })}
-            />
-            Give each runtime a volume, so a stopped one keeps its workspace
-          </label>
+          {draft.settings.kind === "Fly" ? (
+            <label className="mt-3 flex items-center gap-2 text-xs text-faint">
+              <input
+                type="checkbox"
+                checked={draft.settings.value.volumes}
+                onChange={(e) => patch({ volumes: e.target.checked })}
+              />
+              Give each runtime a volume, so a stopped one keeps its workspace
+            </label>
+          ) : (
+            <p className="mt-3 text-xs leading-relaxed text-faint">
+              velos has no volumes: stopping a session deletes its container, and
+              the next message schedules a fresh one that re-runs provisioning.
+            </p>
+          )}
           <div className="mt-3 flex gap-2">
             <button
               className="key"
@@ -247,6 +322,23 @@ export function CloudVendors() {
             </button>
           </div>
         </RowShell>
+      ) : (
+        <div className="flex gap-2">
+          <button
+            className="key"
+            onClick={() => add("Fly")}
+            data-testid="cloud-vendor-add-fly"
+          >
+            Add Fly
+          </button>
+          <button
+            className="key"
+            onClick={() => add("Velos")}
+            data-testid="cloud-vendor-add-velos"
+          >
+            Add velos
+          </button>
+        </div>
       )}
     </Section>
   );

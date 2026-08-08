@@ -3,11 +3,10 @@
 # Multi-target Dockerfile for all three published horsie images:
 #   - ghcr.io/<owner>/horsie                (session server: HTTP/SSE API + web UI) -> --target server
 #   - ghcr.io/<owner>/horsie-runtime        (sandbox scheduled onto velos)          -> --target runtime
-#   - ghcr.io/<owner>/horsie-velos-runtime  (the vendor process doing the scheduling) -> --target velos
 #
 # All binaries are compiled in ONE shared `build` stage so the dependency tree
 # is compiled once per architecture. CI (.github/workflows/docker.yml) runs one
-# job per arch that builds the `server`, `runtime`, and `velos` targets in
+# job per arch that builds the `server` and `runtime` targets in
 # sequence on the same buildx builder, so the later targets' build stage
 # resolves CACHED.
 #
@@ -22,7 +21,6 @@
 # Build from the horsie workspace ROOT (the whole workspace is the build context):
 #   docker build -f docker/horsie.Dockerfile --target server  -t ghcr.io/blossomstack/horsie:latest .
 #   docker build -f docker/horsie.Dockerfile --target runtime -t ghcr.io/blossomstack/horsie-runtime:latest .
-#   docker build -f docker/horsie.Dockerfile --target velos   -t ghcr.io/blossomstack/horsie-velos-runtime:latest .
 
 # ---- Stage: build the web UI (clients/web -> dist) ---------------------------
 # The generated fluorite types are committed under clients/web/src/generated, so
@@ -71,11 +69,11 @@ FROM chef AS build
 # any cache backend, so mounts are always empty on a fresh CI runner.
 COPY --from=planner /src/recipe.json recipe.json
 RUN cargo chef cook --release --locked --no-default-features --recipe-path recipe.json \
-    -p horsie-server -p horsie-runtime -p horsie-velos-runtime
+    -p horsie-server -p horsie-runtime
 # Only the workspace crates are left to compile.
 COPY . .
-RUN cargo build --release --locked -p horsie-server -p horsie-runtime -p horsie-velos-runtime --no-default-features \
-    && cp target/release/horsie-server target/release/horsie-runtime target/release/horsie-velos-runtime /usr/local/bin/
+RUN cargo build --release --locked -p horsie-server -p horsie-runtime --no-default-features \
+    && cp target/release/horsie-server target/release/horsie-runtime /usr/local/bin/
 
 # ---- Target: horsie (session server + web UI) --------------------------------
 FROM debian:bookworm-slim AS server
@@ -115,27 +113,7 @@ RUN apt-get update \
  && mkdir -p /workspace
 COPY --from=build /usr/local/bin/horsie-runtime /usr/local/bin/horsie-runtime
 WORKDIR /workspace
-# The runtime needs outbound reachability to the vendor process's advertised
-# address (velos gives containers outbound NAT). The vendor supplies
-# the command; this entrypoint is just a sane default for manual runs.
+# The runtime needs outbound reachability to the server's callback URL (velos
+# gives containers outbound NAT). The vendor supplies the command; this
+# entrypoint is just a sane default for manual runs.
 ENTRYPOINT ["horsie-runtime"]
-
-# ---- Target: horsie-velos-runtime (velos vendor process) ---------------------
-FROM debian:bookworm-slim AS velos
-# ca-certificates: outbound TLS to the session server (wss://) and to velos.
-# No curl: the agent serves no HTTP health route, so there is no HEALTHCHECK to
-# probe -- liveness is "the vendor is listed in the server's Settings".
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
- && rm -rf /var/lib/apt/lists/* \
- && useradd --system --create-home --home-dir /home/horsie --shell /usr/sbin/nologin horsie \
- && install -d -o horsie -g horsie /var/lib/horsie-velos-runtime
-COPY --from=build /usr/local/bin/horsie-velos-runtime /usr/local/bin/horsie-velos-runtime
-USER horsie
-WORKDIR /var/lib/horsie-velos-runtime
-# The runtime dial-back listener (--listen). It must be published on the host
-# and reachable at whatever --advertise names.
-EXPOSE 3790
-ENTRYPOINT ["horsie-velos-runtime"]
-# No default CMD: every required flag (--server, --velos-url, --advertise,
-# --image) is deployment-specific, and a partial default would only fail later.

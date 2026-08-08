@@ -198,12 +198,35 @@ struct FlyVendorSettings {
     volume_size_gb: u32,
 }
 
+/// How a velos vendor schedules containers.
+struct VelosVendorSettings {
+    /// The velos server root, e.g. `http://velos:8080`.
+    server_url: String,
+    /// OCI image bundling `horsie-runtime`, built without the sandbox feature —
+    /// the container is already the isolation boundary.
+    image: String,
+    /// Path to `horsie-runtime` inside the image.
+    runtime_bin: String,
+    /// Where in the container workspaces are allocated.
+    workspace_root: String,
+    /// The `ws://` URL a container reaches this server on, *from velos's
+    /// container network* — not necessarily the address a browser uses.
+    callback_url: String,
+    cpu: u32,
+    memory_mb: u32,
+}
+
 /// Per-kind settings. A union rather than a kind string plus optional structs,
 /// so a client cannot describe a vendor that has no settings — or two kinds'
 /// worth.
+///
+/// Adding a kind is a variant here plus a match arm on the server. What each
+/// substrate can do — Fly keeps a workspace across a hibernate, velos rebuilds
+/// it — stays inside its implementation and never reaches this type.
 #[type_tag = "kind"]
 union RuntimeVendorSettings {
     Fly(FlyVendorSettings),
+    Velos(VelosVendorSettings),
 }
 
 /// A configured runtime vendor as shown to clients.

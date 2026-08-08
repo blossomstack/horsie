@@ -2485,7 +2485,9 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let v: RuntimeVendorConfigView = read_json(res).await;
         assert!(v.has_credential, "the token was stored");
-        let RuntimeVendorSettings::Fly(fly) = v.settings;
+        let RuntimeVendorSettings::Fly(fly) = v.settings else {
+            panic!("a fly vendor must round-trip as one")
+        };
         assert_eq!(
             fly.callback_url, "wss://horsie.example.com/api/runtime/connect",
             "a bare origin gains the connect path"

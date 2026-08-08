@@ -23,6 +23,7 @@ export * from './runtimeStateChanged';
 export * from './runtimeVendorEvent';
 export * from './runtimeVendorOutboundMessage';
 export * from './flyVendorSettings';
+export * from './velosVendorSettings';
 export * from './runtimeVendorSettings';
 export * from './runtimeVendorConfigView';
 export * from './runtimeVendorConfigInput';

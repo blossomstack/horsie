@@ -23,7 +23,10 @@ pub mod fake;
 pub mod fly;
 pub mod fly_api;
 mod registry;
+pub mod runtime_command;
 mod transport;
+pub mod velos;
+pub mod velos_api;
 mod websocket;
 
 pub use config::{

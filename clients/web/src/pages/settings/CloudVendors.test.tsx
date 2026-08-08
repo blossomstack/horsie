@@ -48,13 +48,13 @@ describe("CloudVendors", () => {
     expect(container.querySelector("input[type=password]")).toBeNull();
   });
 
-  it("saves a new vendor as an adjacently tagged union", async () => {
+  it("saves a new fly vendor as an adjacently tagged union", async () => {
     // The wire shape is `{kind, value}`, not a flat object with a kind field:
     // a flat body deserialises to nothing and fails as a 422.
     vendors.current = [];
     saved.mockClear();
     render(<CloudVendors />);
-    fireEvent.click(screen.getByTestId("cloud-vendor-add"));
+    fireEvent.click(screen.getByTestId("cloud-vendor-add-fly"));
 
     const field = (label: string) =>
       screen.getByText(label).parentElement!.querySelector("input")!;
@@ -85,6 +85,36 @@ describe("CloudVendors", () => {
         credential: "tok",
       },
     });
+  });
+
+  it("saves a velos vendor with velos-shaped settings", async () => {
+    // The union is what stops a client describing a vendor with the wrong
+    // substrate's fields — velos has a server URL and no region.
+    vendors.current = [];
+    saved.mockClear();
+    render(<CloudVendors />);
+    fireEvent.click(screen.getByTestId("cloud-vendor-add-velos"));
+
+    const field = (label: string) =>
+      screen.getByText(label).parentElement!.querySelector("input")!;
+    expect(screen.queryByText("Region")).toBeNull();
+    fireEvent.change(field("Name"), { target: { value: "velos" } });
+    fireEvent.change(field("velos server URL"), {
+      target: { value: "http://velos:8080" },
+    });
+    fireEvent.change(field("Runtime image"), {
+      target: { value: "ghcr.io/o/runtime:1" },
+    });
+    fireEvent.change(field("Callback URL"), {
+      target: { value: "ws://horsie.internal:3789" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-vendor-save"));
+
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
+    const settings = saved.mock.calls[0][0].body.settings;
+    expect(settings.kind).toBe("Velos");
+    expect(settings.value.serverUrl).toBe("http://velos:8080");
+    expect(settings.value).not.toHaveProperty("region");
   });
 
   it("omits the credential when an edit leaves it blank", async () => {

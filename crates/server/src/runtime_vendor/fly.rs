@@ -15,6 +15,7 @@
 //! Only the dial-back means `Ready`, which is why `create` returns `Starting`
 //! and finishes on the progress sink.
 
+use crate::runtime_vendor::runtime_command::{build_runtime_command, workspace_paths};
 use crate::runtime_vendor::{RuntimeHandle, RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
@@ -226,19 +227,7 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
         spec: &RuntimeSpec,
         volume: Option<String>,
     ) -> MachineSpec {
-        let workspaces: Vec<(String, String)> = spec
-            .workspaces
-            .iter()
-            .map(|name| {
-                (
-                    name.clone(),
-                    format!(
-                        "{}/{name}",
-                        self.settings.workspace_root.trim_end_matches('/')
-                    ),
-                )
-            })
-            .collect();
+        let workspaces = workspace_paths(&self.settings.workspace_root, &spec.workspaces);
         let mut env: Vec<(String, String)> = spec
             .env
             .iter()
@@ -263,7 +252,7 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
             name: machine_name(runtime_id),
             image: self.settings.image.clone(),
             region: self.settings.region.clone(),
-            command: build_machine_command(
+            command: build_runtime_command(
                 "horsie-runtime",
                 &self.settings.callback_url,
                 runtime_id,
@@ -317,56 +306,6 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
             });
         });
     }
-}
-
-/// The machine's command line: make the workspace directories, then `exec` the
-/// runtime so it becomes PID 1 and its exit is the machine's exit.
-#[must_use]
-pub fn build_machine_command(
-    runtime_bin: &str,
-    endpoint: &str,
-    runtime_id: &str,
-    workspaces: &[(String, String)],
-) -> Vec<String> {
-    let mut exec_line = format!(
-        "exec {} --endpoint {} --runtime-id {}",
-        shell_quote(runtime_bin),
-        shell_quote(endpoint),
-        shell_quote(runtime_id),
-    );
-    for (name, path) in workspaces {
-        exec_line.push_str(&format!(
-            " --workspace {}",
-            shell_quote(&format!("{name}={path}"))
-        ));
-    }
-    let script = if workspaces.is_empty() {
-        exec_line
-    } else {
-        let dirs = workspaces
-            .iter()
-            .map(|(_, path)| shell_quote(path))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("mkdir -p {dirs} && {exec_line}")
-    };
-    vec!["/bin/sh".to_string(), "-c".to_string(), script]
-}
-
-/// POSIX single-quote a value so it survives `sh -c` verbatim. Workspace paths
-/// derive from user input, so quote defensively.
-fn shell_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 #[async_trait]
@@ -864,23 +803,6 @@ mod tests {
             .expect("the sink must stay open");
         assert_eq!(event.runtime_id, "s1");
         assert!(matches!(event.progress, RuntimeProgress::Gone { .. }));
-    }
-
-    #[test]
-    fn the_machine_command_quotes_every_path_it_interpolates() {
-        let command = build_machine_command(
-            "horsie-runtime",
-            "wss://h/api/runtime/connect",
-            "s1",
-            &[("main".to_string(), "/work/it's here".to_string())],
-        );
-        assert_eq!(command[0], "/bin/sh");
-        assert_eq!(command[1], "-c");
-        assert!(
-            command[2].contains(r"'/work/it'\''s here'"),
-            "an apostrophe must not end the quoted string: {}",
-            command[2]
-        );
     }
 
     #[test]

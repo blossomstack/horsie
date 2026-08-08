@@ -17,6 +17,7 @@ use crate::auth::UserId;
 use crate::db::Db;
 use crate::runtime_vendor::fly::{FlyRuntimeVendor, FlySettings};
 use crate::runtime_vendor::fly_api::{FlyHttpApi, FlyMachineSize};
+use crate::runtime_vendor::velos::{VelosRuntimeVendor, VelosSettings};
 use crate::runtime_vendor::{RuntimeVendor, WebsocketVendorTable};
 use crate::sessions::spec::RuntimeVendorMap;
 use horsie_runtime_vendor::ConnectedRuntimeRegistry;
@@ -74,6 +75,34 @@ impl Default for StoredFlySettings {
     }
 }
 
+/// How a velos vendor schedules containers: the *storage* shape. A twin of the
+/// wire `runtime_vendor::VelosVendorSettings`, for the reason on
+/// [`StoredFlySettings`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredVelosSettings {
+    pub server_url: String,
+    pub image: String,
+    pub runtime_bin: String,
+    pub workspace_root: String,
+    pub callback_url: String,
+    pub cpu: u32,
+    pub memory_mb: u32,
+}
+
+impl Default for StoredVelosSettings {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            image: String::new(),
+            runtime_bin: "horsie-runtime".to_string(),
+            workspace_root: "/workspaces".to_string(),
+            callback_url: String::new(),
+            cpu: 1,
+            memory_mb: 1024,
+        }
+    }
+}
+
 /// One row of `runtime_vendors`, with `settings` already parsed by `kind`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeVendorRow {
@@ -115,6 +144,7 @@ pub enum VendorConfigError {
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoredVendorSettings {
     Fly(StoredFlySettings),
+    Velos(StoredVelosSettings),
 }
 
 impl StoredVendorSettings {
@@ -124,12 +154,14 @@ impl StoredVendorSettings {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Fly(_) => "fly",
+            Self::Velos(_) => "velos",
         }
     }
 
     fn to_json(&self) -> Result<String, String> {
         match self {
             Self::Fly(s) => serde_json::to_string(s).map_err(|e| e.to_string()),
+            Self::Velos(s) => serde_json::to_string(s).map_err(|e| e.to_string()),
         }
     }
 
@@ -138,32 +170,46 @@ impl StoredVendorSettings {
             "fly" => serde_json::from_str(json)
                 .map(Self::Fly)
                 .map_err(|e| format!("runtime_vendors.settings: {e}")),
+            "velos" => serde_json::from_str(json)
+                .map(Self::Velos)
+                .map_err(|e| format!("runtime_vendors.settings: {e}")),
             other => Err(format!("unknown runtime vendor kind '{other}'")),
         }
     }
 
     #[must_use]
     pub fn from_wire(wire: horsie_models::runtime_vendor::RuntimeVendorSettings) -> Self {
-        let horsie_models::runtime_vendor::RuntimeVendorSettings::Fly(f) = wire;
-        Self::Fly(StoredFlySettings {
-            app: f.app,
-            image: f.image,
-            region: f.region,
-            workspace_root: f.workspace_root,
-            callback_url: f.callback_url,
-            volumes: f.volumes,
-            cpu_kind: f.cpu_kind,
-            cpus: f.cpus,
-            memory_mb: f.memory_mb,
-            volume_size_gb: f.volume_size_gb,
-        })
+        use horsie_models::runtime_vendor::RuntimeVendorSettings as Wire;
+        match wire {
+            Wire::Fly(f) => Self::Fly(StoredFlySettings {
+                app: f.app,
+                image: f.image,
+                region: f.region,
+                workspace_root: f.workspace_root,
+                callback_url: f.callback_url,
+                volumes: f.volumes,
+                cpu_kind: f.cpu_kind,
+                cpus: f.cpus,
+                memory_mb: f.memory_mb,
+                volume_size_gb: f.volume_size_gb,
+            }),
+            Wire::Velos(v) => Self::Velos(StoredVelosSettings {
+                server_url: v.server_url,
+                image: v.image,
+                runtime_bin: v.runtime_bin,
+                workspace_root: v.workspace_root,
+                callback_url: v.callback_url,
+                cpu: v.cpu,
+                memory_mb: v.memory_mb,
+            }),
+        }
     }
 
     #[must_use]
     pub fn to_wire(&self) -> horsie_models::runtime_vendor::RuntimeVendorSettings {
-        let Self::Fly(f) = self;
-        horsie_models::runtime_vendor::RuntimeVendorSettings::Fly(
-            horsie_models::runtime_vendor::FlyVendorSettings {
+        use horsie_models::runtime_vendor as wire;
+        match self {
+            Self::Fly(f) => wire::RuntimeVendorSettings::Fly(wire::FlyVendorSettings {
                 app: f.app.clone(),
                 image: f.image.clone(),
                 region: f.region.clone(),
@@ -174,8 +220,17 @@ impl StoredVendorSettings {
                 cpus: f.cpus,
                 memory_mb: f.memory_mb,
                 volume_size_gb: f.volume_size_gb,
-            },
-        )
+            }),
+            Self::Velos(v) => wire::RuntimeVendorSettings::Velos(wire::VelosVendorSettings {
+                server_url: v.server_url.clone(),
+                image: v.image.clone(),
+                runtime_bin: v.runtime_bin.clone(),
+                workspace_root: v.workspace_root.clone(),
+                callback_url: v.callback_url.clone(),
+                cpu: v.cpu,
+                memory_mb: v.memory_mb,
+            }),
+        }
     }
 }
 
@@ -188,22 +243,46 @@ impl StoredVendorSettings {
 ///
 /// Returns the normalised callback URL.
 pub fn validate(settings: &StoredVendorSettings, credential: &str) -> Result<String, String> {
-    let StoredVendorSettings::Fly(fly) = settings;
-    if credential.trim().is_empty() {
-        return Err("a fly vendor needs an API token".to_string());
-    }
-    for (field, value) in [("app", &fly.app), ("image", &fly.image)] {
-        if value.trim().is_empty() {
-            return Err(format!("a fly vendor needs {field}"));
+    match settings {
+        StoredVendorSettings::Fly(fly) => {
+            if credential.trim().is_empty() {
+                return Err("a fly vendor needs an API token".to_string());
+            }
+            for (field, value) in [("app", &fly.app), ("image", &fly.image)] {
+                if value.trim().is_empty() {
+                    return Err(format!("a fly vendor needs {field}"));
+                }
+            }
+            if fly.cpus == 0 || fly.memory_mb == 0 {
+                return Err("a machine needs at least one cpu and some memory".to_string());
+            }
+            if fly.volumes && fly.volume_size_gb == 0 {
+                return Err("a volume needs a size".to_string());
+            }
+            normalise_callback(&fly.callback_url)
+        }
+        StoredVendorSettings::Velos(velos) => {
+            // No credential check: a velos deployment may run without auth, and
+            // demanding a token for one would make it unconfigurable.
+            for (field, value) in [
+                ("a server url", &velos.server_url),
+                ("an image", &velos.image),
+                ("a runtime binary path", &velos.runtime_bin),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(format!("a velos vendor needs {field}"));
+                }
+            }
+            if !velos.server_url.starts_with("http://") && !velos.server_url.starts_with("https://")
+            {
+                return Err("the velos server url must start with http:// or https://".to_string());
+            }
+            if velos.cpu == 0 || velos.memory_mb == 0 {
+                return Err("a container needs at least one cpu and some memory".to_string());
+            }
+            normalise_callback(&velos.callback_url)
         }
     }
-    if fly.cpus == 0 || fly.memory_mb == 0 {
-        return Err("a machine needs at least one cpu and some memory".to_string());
-    }
-    if fly.volumes && fly.volume_size_gb == 0 {
-        return Err("a volume needs a size".to_string());
-    }
-    normalise_callback(&fly.callback_url)
 }
 
 /// Check a callback URL a machine has to reach from outside, and fill in the
@@ -502,7 +581,9 @@ impl RuntimeVendorConfigService {
             }
         };
         for row in rows {
-            self.publish(&row);
+            if let Err(e) = self.publish(&row) {
+                tracing::warn!(vendor = %row.name, error = %e, "a configured runtime vendor could not be built");
+            }
         }
     }
 
@@ -519,16 +600,21 @@ impl RuntimeVendorConfigService {
             ));
         }
         let callback = validate(&row.settings, &row.credential)?;
-        let StoredVendorSettings::Fly(fly) = row.settings;
-        let row = RuntimeVendorRow {
-            settings: StoredVendorSettings::Fly(StoredFlySettings {
+        let settings = match row.settings {
+            StoredVendorSettings::Fly(fly) => StoredVendorSettings::Fly(StoredFlySettings {
                 callback_url: callback,
                 ..fly
             }),
-            ..row
+            StoredVendorSettings::Velos(velos) => {
+                StoredVendorSettings::Velos(StoredVelosSettings {
+                    callback_url: callback,
+                    ..velos
+                })
+            }
         };
+        let row = RuntimeVendorRow { settings, ..row };
         self.store.upsert(&row).await?;
-        self.publish(&row);
+        self.publish(&row)?;
         Ok(row)
     }
 
@@ -555,40 +641,77 @@ impl RuntimeVendorConfigService {
             .contains_key(name)
     }
 
-    fn publish(&self, row: &RuntimeVendorRow) {
-        let vendor = self.build(row);
+    fn publish(&self, row: &RuntimeVendorRow) -> Result<(), String> {
+        let vendor = self.build(row)?;
         self.vendors
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(row.name.clone(), vendor);
+        Ok(())
     }
 
-    fn build(&self, row: &RuntimeVendorRow) -> Arc<dyn RuntimeVendor> {
-        let StoredVendorSettings::Fly(fly) = &row.settings;
-        let api = FlyHttpApi::new(
-            fly.app.clone(),
-            row.credential.clone(),
-            FlyMachineSize {
-                cpu_kind: fly.cpu_kind.clone(),
-                cpus: fly.cpus,
-                memory_mb: fly.memory_mb,
-                volume_size_gb: fly.volume_size_gb,
-            },
-        );
-        Arc::new(FlyRuntimeVendor::new(
-            row.name.clone(),
-            api,
-            FlySettings {
-                image: fly.image.clone(),
-                region: fly.region.clone(),
-                workspace_root: fly.workspace_root.clone(),
-                callback_url: fly.callback_url.clone(),
-                volumes: fly.volumes,
-            },
-            self.connected.clone(),
-            self.dial_secret.clone(),
-            self.account.clone(),
-        ))
+    /// Turn one stored row into a live vendor.
+    ///
+    /// Fallible because a velos client validates its URL up front. A Fly vendor
+    /// cannot fail to build at all — a bad token surfaces on the first API call
+    /// rather than here — which is the difference between a client that dials
+    /// and one that is only a `reqwest::Client` and a string.
+    fn build(&self, row: &RuntimeVendorRow) -> Result<Arc<dyn RuntimeVendor>, String> {
+        match &row.settings {
+            StoredVendorSettings::Fly(fly) => {
+                let api = FlyHttpApi::new(
+                    fly.app.clone(),
+                    row.credential.clone(),
+                    FlyMachineSize {
+                        cpu_kind: fly.cpu_kind.clone(),
+                        cpus: fly.cpus,
+                        memory_mb: fly.memory_mb,
+                        volume_size_gb: fly.volume_size_gb,
+                    },
+                );
+                Ok(Arc::new(FlyRuntimeVendor::new(
+                    row.name.clone(),
+                    api,
+                    FlySettings {
+                        image: fly.image.clone(),
+                        region: fly.region.clone(),
+                        workspace_root: fly.workspace_root.clone(),
+                        callback_url: fly.callback_url.clone(),
+                        volumes: fly.volumes,
+                    },
+                    self.connected.clone(),
+                    self.dial_secret.clone(),
+                    self.account.clone(),
+                )))
+            }
+            StoredVendorSettings::Velos(velos) => {
+                // An empty credential means a velos deployment without auth,
+                // which is a supported configuration — so it becomes no bearer
+                // rather than an empty one.
+                let token = (!row.credential.trim().is_empty())
+                    .then(|| horsie_agentcore::Secret::from(row.credential.clone()));
+                let api = crate::runtime_vendor::velos_api::VelosClient::new(
+                    velos.server_url.clone(),
+                    token,
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(Arc::new(VelosRuntimeVendor::new(
+                    row.name.clone(),
+                    Arc::new(api),
+                    VelosSettings {
+                        image: velos.image.clone(),
+                        runtime_bin: velos.runtime_bin.clone(),
+                        workspace_root: velos.workspace_root.clone(),
+                        callback_url: velos.callback_url.clone(),
+                        cpu: velos.cpu,
+                        memory_bytes: u64::from(velos.memory_mb) * 1024 * 1024,
+                    },
+                    self.connected.clone(),
+                    self.dial_secret.clone(),
+                    self.account.clone(),
+                )))
+            }
+        }
     }
 }
 
@@ -679,7 +802,9 @@ mod tests {
 
     #[test]
     fn an_incomplete_vendor_is_refused() {
-        let StoredVendorSettings::Fly(fly) = settings();
+        let StoredVendorSettings::Fly(fly) = settings() else {
+            panic!("the fixture is a fly vendor")
+        };
         assert!(validate(&settings(), "").is_err(), "no token");
         assert!(
             validate(
@@ -699,6 +824,60 @@ mod tests {
             )
             .is_err(),
             "no cpus"
+        );
+    }
+
+    fn velos_settings() -> StoredVendorSettings {
+        StoredVendorSettings::Velos(StoredVelosSettings {
+            server_url: "http://velos:8080".to_string(),
+            image: "ghcr.io/x/runtime:1".to_string(),
+            callback_url: "ws://horsie.internal:8080".to_string(),
+            ..StoredVelosSettings::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn a_velos_vendor_is_saved_and_published_like_any_other() {
+        // The point of the union: a second kind is a variant and a match arm,
+        // and every path above it — validate, store, publish — is unchanged.
+        let db = crate::db::testing::db().await;
+        let vendors = empty_map();
+        let service = service(vendors.clone(), db);
+        service
+            .save(RuntimeVendorRow {
+                name: "velos".to_string(),
+                settings: velos_settings(),
+                credential: String::new(),
+                ..row()
+            })
+            .await
+            .unwrap();
+        assert!(vendors.read().unwrap().contains_key("velos"));
+    }
+
+    #[tokio::test]
+    async fn a_velos_vendor_needs_no_credential() {
+        // A velos deployment may run without auth. Demanding a token would make
+        // one unconfigurable, so an empty credential becomes no bearer.
+        assert!(validate(&velos_settings(), "").is_ok());
+        // A fly vendor is the opposite: its API is never anonymous.
+        assert!(validate(&settings(), "").is_err());
+    }
+
+    #[test]
+    fn a_velos_server_url_must_be_http() {
+        let StoredVendorSettings::Velos(v) = velos_settings() else {
+            panic!("the fixture is a velos vendor")
+        };
+        assert!(
+            validate(
+                &StoredVendorSettings::Velos(StoredVelosSettings {
+                    server_url: "velos:8080".to_string(),
+                    ..v
+                }),
+                ""
+            )
+            .is_err()
         );
     }
 
@@ -748,7 +927,9 @@ mod tests {
         let db = crate::db::testing::db().await;
         let service = service(empty_map(), db);
         let saved = service.save(row()).await.unwrap();
-        let StoredVendorSettings::Fly(fly) = saved.settings;
+        let StoredVendorSettings::Fly(fly) = saved.settings else {
+            panic!("a fly vendor must round-trip as one")
+        };
         assert_eq!(
             fly.callback_url,
             "wss://horsie.example.com/api/runtime/connect"
