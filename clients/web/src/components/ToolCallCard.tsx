@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import type { RenderedToolCall } from "../hooks/useSessionStream";
-import { ASK_USER_TOOL } from "../lib/askUser";
+import { isAskCall } from "../lib/askUser";
 import { cn } from "../lib/cn";
 import { deniesCall, hookSummary, systemMessage } from "../lib/hookSummary";
 import { AskUserCard } from "./AskUserCard";
@@ -50,7 +50,10 @@ function inputPreview(input: unknown): string | null {
  * came to read exactly what the machine sent and got back. */
 export function ToolCallCard({ call }: { call: RenderedToolCall }) {
   const [open, setOpen] = useState(false);
-  if (call.name === ASK_USER_TOOL) return <AskUserCard call={call} />;
+  // A workflow step asks through `conclude`, not `ask_user`, so matching on one
+  // tool name left a parked step's question rendered as a collapsed tool row
+  // with nothing to answer it with.
+  if (isAskCall(call.name, call.input)) return <AskUserCard call={call} />;
   const preview = inputPreview(call.input);
   const hasOutput = call.output !== undefined && call.output.length > 0;
   // A denial the model saw as an error is the one hook outcome that changes what

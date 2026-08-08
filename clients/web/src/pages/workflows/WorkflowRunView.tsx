@@ -161,8 +161,11 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
             <strong className="font-medium">{parked.step}</strong> is waiting on
             a question.
           </span>
+          {/* The primary action on the page while a run is blocked: nothing else
+              here moves it, and the question itself lives in the step's own
+              transcript, where its choices and answer box are. */}
           <button
-            className="key ml-auto !px-2 !py-1 text-xs"
+            className="key key-go ml-auto !px-2 !py-1 text-xs"
             onClick={() =>
               navigate(`/sessions/${sessionId}/agents/${parked.agentId}`)
             }
