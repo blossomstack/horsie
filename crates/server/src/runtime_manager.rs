@@ -109,7 +109,18 @@ impl RuntimeManager {
                         .collect(),
                 })
                 .collect(),
-            env: vec![],
+            // The environment's variables first; the server pushes its own
+            // (the minted GitHub token, below) after. A name that would shadow
+            // one cannot reach here — the environment service refuses it at
+            // save.
+            env: spec
+                .env_vars
+                .iter()
+                .map(|v| horsie_models::executor::EnvVar {
+                    name: v.name.clone(),
+                    value: v.value.clone(),
+                })
+                .collect(),
         };
 
         // A fresh, scoped token authorizing this session's `git_checkout`
@@ -425,6 +436,29 @@ mod tests {
             .expect("create");
         let sent = agent.last_create_request().expect("create request");
         assert_eq!(sent.workspaces, vec!["main".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn the_environments_variables_reach_the_vendor() {
+        let agent = FakeRuntimeVendor::builder("v")
+            .serve_in_process()
+            .await
+            .unwrap();
+        let m = manager(published(&agent, "v"));
+        let mut spec = session_spec("v");
+        spec.env_vars.push(crate::sessions::spec::EnvVarSpec {
+            name: "RUST_LOG".into(),
+            value: "debug".into(),
+        });
+        m.create("s1", "v", &spec).await.expect("create");
+        let sent = agent.last_create_request().expect("create request");
+        assert_eq!(
+            sent.env
+                .iter()
+                .find(|e| e.name == "RUST_LOG")
+                .map(|e| e.value.as_str()),
+            Some("debug")
+        );
     }
 
     /// Resolves any name to a hash of itself, so a test can assert on the
