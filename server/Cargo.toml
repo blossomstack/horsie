@@ -19,7 +19,6 @@ horsie-llm-providers   = { path = "../llm-providers" }
 horsie-workflow        = { path = "../workflow" }
 horsie-runtime-vendor  = { path = "../runtime-vendor" }
 horsie-runtime-client  = { path = "../runtime-client" }
-horsie-mcp-client      = { path = "../mcp-client" }
 clap              = { version = "4", features = ["derive"] }
 sqlx              = { workspace = true }
 axum              = { workspace = true }

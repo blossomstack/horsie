@@ -11,10 +11,10 @@
 //! Connections live as long as the runtime connection and are started on first
 //! use. A stdio child respawned per tool call would cost more than the call.
 
-use horsie_mcp_client::{HttpTransport, McpClient, McpError, StdioTransport};
 use horsie_models::runtime::{
     McpServerFailure, McpServerNeedsAuth, McpServerUnreachable, PluginMcpTool,
 };
+use horsie_support::mcp::{HttpTransport, McpClient, McpError, StdioTransport};
 use horsie_support::plugin::mcp::{McpTransportSpec, PluginMcpServer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -291,7 +291,7 @@ fn resource_metadata_of(challenge: &str) -> Option<&str> {
 struct NoBearer;
 
 #[async_trait::async_trait]
-impl horsie_mcp_client::BearerProvider for NoBearer {
+impl horsie_support::mcp::BearerProvider for NoBearer {
     async fn bearer(&self, _force: bool) -> Result<Option<String>, McpError> {
         Ok(None)
     }

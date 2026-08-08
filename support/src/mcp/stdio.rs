@@ -1,8 +1,8 @@
 //! MCP stdio transport: a child process speaking newline-framed JSON-RPC on its
 //! stdin and stdout.
 //!
-//! The other half of [`McpTransport`](crate::McpTransport), so
-//! [`McpClient`](crate::McpClient)'s protocol logic is shared verbatim between a
+//! The other half of [`McpTransport`](crate::mcp::McpTransport), so
+//! [`McpClient`](crate::mcp::McpClient)'s protocol logic is shared verbatim between a
 //! remote endpoint and a local process. Only the framing differs.
 //!
 //! **This runs where the plugin files are**, which is the runtime — never the
@@ -10,8 +10,8 @@
 //! workspace, and running it anywhere else would be both wrong and a way for a
 //! plugin to execute commands on the server host.
 
-use crate::error::McpError;
-use crate::transport::McpTransport;
+use crate::mcp::error::McpError;
+use crate::mcp::transport::McpTransport;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashMap;
