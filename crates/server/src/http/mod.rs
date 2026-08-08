@@ -19,6 +19,7 @@ mod model_cards;
 mod plugins;
 mod routines;
 pub mod runtime_connect;
+mod runtime_vendors;
 mod sse;
 mod vendor_connect;
 mod workflows;
@@ -287,6 +288,14 @@ pub fn app(state: AppState) -> Router {
                 .delete(agents::delete_agent),
         )
         .route("/api/agents/{name}/invoke", post(agents::invoke_agent))
+        .route(
+            "/api/runtime-vendors",
+            get(runtime_vendors::list_runtime_vendors),
+        )
+        .route(
+            "/api/runtime-vendors/{name}",
+            put(runtime_vendors::put_runtime_vendor).delete(runtime_vendors::delete_runtime_vendor),
+        )
         .route(
             "/api/environments",
             get(environments::list_environments).post(environments::create_environment),
@@ -2434,6 +2443,114 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let res = app.oneshot(delete("/api/routines/nightly")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn runtime_vendors_crud_over_http() {
+        use horsie_models::runtime_vendor::{RuntimeVendorConfigView, RuntimeVendorSettings};
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        let settings = |callback: &str| {
+            // Unions are adjacently tagged across this protocol: a variant name
+            // in `kind`, its payload in `value`.
+            serde_json::json!({
+                "kind": "Fly",
+                "value": {
+                    "app": "horsie-runtimes",
+                    "image": "ghcr.io/o/runtime:1",
+                    "region": "iad",
+                    "workspaceRoot": "/workspaces",
+                    "callbackUrl": callback,
+                    "volumes": true,
+                    "cpuKind": "shared",
+                    "cpus": 1,
+                    "memoryMb": 1024,
+                    "volumeSizeGb": 10,
+                }
+            })
+        };
+        let body = serde_json::json!({
+            "name": "fly",
+            "settings": settings("wss://horsie.example.com"),
+            "credential": "fly-token",
+        });
+
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/runtime-vendors/fly", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: RuntimeVendorConfigView = read_json(res).await;
+        assert!(v.has_credential, "the token was stored");
+        let RuntimeVendorSettings::Fly(fly) = v.settings;
+        assert_eq!(
+            fly.callback_url, "wss://horsie.example.com/api/runtime/connect",
+            "a bare origin gains the connect path"
+        );
+
+        // The token is never readable back, however it is asked for.
+        let res = app
+            .clone()
+            .oneshot(get("/api/runtime-vendors"))
+            .await
+            .unwrap();
+        let list: Vec<RuntimeVendorConfigView> = read_json(res).await;
+        assert_eq!(list.len(), 1);
+        assert!(list[0].has_credential);
+        assert!(
+            !serde_json::to_string(&list[0])
+                .unwrap()
+                .contains("fly-token"),
+            "a stored credential must never be serialised back to a client"
+        );
+
+        // An edit may omit the credential, since the client cannot read it.
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/runtime-vendors/fly",
+                &serde_json::json!({
+                    "name": "fly",
+                    "settings": settings("wss://horsie.example.com/relay"),
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: RuntimeVendorConfigView = read_json(res).await;
+        assert!(
+            v.has_credential,
+            "an omitted credential keeps the stored one"
+        );
+
+        // A callback only the server itself can reach is refused at save time.
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/runtime-vendors/local-only",
+                &serde_json::json!({
+                    "name": "local-only",
+                    "settings": settings("ws://localhost:8080"),
+                    "credential": "t",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let res = app
+            .clone()
+            .oneshot(delete("/api/runtime-vendors/fly"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = app
+            .oneshot(delete("/api/runtime-vendors/fly"))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 

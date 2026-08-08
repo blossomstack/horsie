@@ -38,6 +38,8 @@ import type {
   MemoryUpdateInput,
   MemoryView,
   ModelCard,
+  RuntimeVendorConfigInput,
+  RuntimeVendorConfigView,
   ModelCardInput,
   ModelCardUpdate,
   PluginDefaultInput,
@@ -301,6 +303,30 @@ export const api = {
 
     remove: (name: string): Promise<void> =>
       request(`/agents/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  },
+
+  /**
+   * Runtime vendors the server builds itself. The ones that dial in announce
+   * themselves and appear in the settings view instead — there is nothing to
+   * create or delete about a process someone else is running.
+   */
+  runtimeVendors: {
+    list: (): Promise<RuntimeVendorConfigView[]> => request("/runtime-vendors"),
+
+    /** Create or fully replace. Omit `credential` to keep the stored token. */
+    save: (
+      name: string,
+      body: RuntimeVendorConfigInput,
+    ): Promise<RuntimeVendorConfigView> =>
+      request(`/runtime-vendors/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    remove: (name: string): Promise<void> =>
+      request(`/runtime-vendors/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      }),
   },
 
   environments: {

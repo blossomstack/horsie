@@ -27,8 +27,8 @@ mod transport;
 mod websocket;
 
 pub use config::{
-    FlyVendorSettings, RuntimeVendorConfigService, RuntimeVendorRow, RuntimeVendorSettings,
-    RuntimeVendorStore,
+    RuntimeVendorConfigService, RuntimeVendorRow, RuntimeVendorStore, StoredFlySettings,
+    StoredVendorSettings,
 };
 pub use horsie_models::runtime_vendor::RuntimeVendorCapabilities;
 pub use horsie_runtime_vendor::runtime_vendor::{RuntimeHandle, RuntimeVendor};

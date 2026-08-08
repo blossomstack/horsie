@@ -2,18 +2,18 @@ import { Star, X } from "lucide-react";
 import { useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import { useSettings, useSetDefaultVendor } from "../../hooks/useSettings";
+import { CloudVendors } from "./CloudVendors";
 import { ListRow, RowAction, Section, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
 /**
  * Where sessions execute.
  *
- * There is nothing to configure here any more: every vendor is an external
- * agent process that dials the server and announces itself, so this page is a
- * live roster plus the one thing the server does own — which vendor new
- * sessions default to. A vendor's own settings (a velos URL and token, the
- * directories a laptop agent serves) live in that agent's configuration,
- * because that is the process that holds them.
+ * Two kinds of vendor, and the difference is who holds the configuration. An
+ * agent process dials in and announces itself, so its settings (a velos URL and
+ * token, the directories a laptop agent serves) live where it runs and this
+ * page only lists it. A cloud vendor has nowhere to dial in from, so the server
+ * holds its configuration and the form below is what makes it exist.
  */
 export function RuntimesSettings() {
   const { data: settings, isLoading, error } = useSettings();
@@ -66,7 +66,7 @@ export function RuntimesSettings() {
     <div className="flex h-full flex-col overflow-hidden">
       <SettingsHeader
         title="Runtimes"
-        desc="Where sessions execute. Vendors are agent processes that connect to this server; each one is configured where it runs."
+        desc="Where sessions execute. Agent processes connect to this server and are configured where they run; cloud vendors are configured here."
         saving={update.isPending}
         saved={update.isSuccess && !update.isPending}
       />
@@ -142,6 +142,8 @@ export function RuntimesSettings() {
             />
           )}
         </Section>
+
+        <CloudVendors />
       </SettingsPane>
     </div>
   );

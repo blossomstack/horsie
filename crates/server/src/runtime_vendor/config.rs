@@ -30,10 +30,15 @@ const COLS: &str = "name, kind, settings, credential, created_at, updated_at";
 /// a bare origin, which is the shape they will reach for.
 const CONNECT_PATH: &str = "/api/runtime/connect";
 
-/// How a Fly vendor builds machines. The storage twin of [`FlySettings`], plus
-/// the account and sizing the API client needs.
+/// How a Fly vendor builds machines: the *storage* shape.
+///
+/// A twin of the wire `runtime_vendor::FlyVendorSettings` rather than the type
+/// itself, following the same rule the environments store follows. It is what
+/// makes a wire rename a compile error in [`from_wire`](StoredVendorSettings::from_wire)
+/// instead of a silent parse failure that makes every configured vendor
+/// disappear at the next boot.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FlyVendorSettings {
+pub struct StoredFlySettings {
     /// The Fly app machines are created in. Must already exist — this server
     /// creates machines, not apps.
     pub app: String,
@@ -52,7 +57,7 @@ pub struct FlyVendorSettings {
     pub volume_size_gb: u32,
 }
 
-impl Default for FlyVendorSettings {
+impl Default for StoredFlySettings {
     fn default() -> Self {
         Self {
             app: String::new(),
@@ -73,20 +78,46 @@ impl Default for FlyVendorSettings {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeVendorRow {
     pub name: String,
-    pub settings: RuntimeVendorSettings,
+    pub settings: StoredVendorSettings,
     /// The vendor API token.
     pub credential: String,
     pub created_at: String,
     pub updated_at: String,
 }
 
-/// Every vendor kind the server can build. One variant per `kind` value.
-#[derive(Clone, Debug, PartialEq)]
-pub enum RuntimeVendorSettings {
-    Fly(FlyVendorSettings),
+impl RuntimeVendorRow {
+    /// The client's view. The credential is reported as present or absent and
+    /// never returned: a settings page that could read a token back turns every
+    /// session cookie into a way to steal one.
+    #[must_use]
+    pub fn to_view(&self) -> horsie_models::runtime_vendor::RuntimeVendorConfigView {
+        horsie_models::runtime_vendor::RuntimeVendorConfigView {
+            name: self.name.clone(),
+            settings: self.settings.to_wire(),
+            has_credential: !self.credential.is_empty(),
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
 }
 
-impl RuntimeVendorSettings {
+/// Why a configured-vendor edit was refused.
+#[derive(Debug)]
+pub enum VendorConfigError {
+    NotFound(String),
+    /// The name belongs to a dialled-in agent.
+    Conflict(String),
+    Invalid(String),
+    Internal(String),
+}
+
+/// Every vendor kind the server can build. One variant per `kind` value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StoredVendorSettings {
+    Fly(StoredFlySettings),
+}
+
+impl StoredVendorSettings {
     /// The `kind` column value. The enum is the source of truth for the string,
     /// so a new variant cannot forget to name itself.
     #[must_use]
@@ -110,6 +141,42 @@ impl RuntimeVendorSettings {
             other => Err(format!("unknown runtime vendor kind '{other}'")),
         }
     }
+
+    #[must_use]
+    pub fn from_wire(wire: horsie_models::runtime_vendor::RuntimeVendorSettings) -> Self {
+        let horsie_models::runtime_vendor::RuntimeVendorSettings::Fly(f) = wire;
+        Self::Fly(StoredFlySettings {
+            app: f.app,
+            image: f.image,
+            region: f.region,
+            workspace_root: f.workspace_root,
+            callback_url: f.callback_url,
+            volumes: f.volumes,
+            cpu_kind: f.cpu_kind,
+            cpus: f.cpus,
+            memory_mb: f.memory_mb,
+            volume_size_gb: f.volume_size_gb,
+        })
+    }
+
+    #[must_use]
+    pub fn to_wire(&self) -> horsie_models::runtime_vendor::RuntimeVendorSettings {
+        let Self::Fly(f) = self;
+        horsie_models::runtime_vendor::RuntimeVendorSettings::Fly(
+            horsie_models::runtime_vendor::FlyVendorSettings {
+                app: f.app.clone(),
+                image: f.image.clone(),
+                region: f.region.clone(),
+                workspace_root: f.workspace_root.clone(),
+                callback_url: f.callback_url.clone(),
+                volumes: f.volumes,
+                cpu_kind: f.cpu_kind.clone(),
+                cpus: f.cpus,
+                memory_mb: f.memory_mb,
+                volume_size_gb: f.volume_size_gb,
+            },
+        )
+    }
 }
 
 /// Reject a configuration that cannot possibly work, at save time.
@@ -120,8 +187,8 @@ impl RuntimeVendorSettings {
 /// in a session, attributed to nothing.
 ///
 /// Returns the normalised callback URL.
-pub fn validate(settings: &RuntimeVendorSettings, credential: &str) -> Result<String, String> {
-    let RuntimeVendorSettings::Fly(fly) = settings;
+pub fn validate(settings: &StoredVendorSettings, credential: &str) -> Result<String, String> {
+    let StoredVendorSettings::Fly(fly) = settings;
     if credential.trim().is_empty() {
         return Err("a fly vendor needs an API token".to_string());
     }
@@ -254,11 +321,20 @@ impl RuntimeVendorStore {
     }
 }
 
+/// Unix epoch seconds as text, matching every other timestamp column.
+fn unix_seconds() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string()
+}
+
 fn row_to_vendor(row: &AnyRow) -> Result<RuntimeVendorRow, String> {
     let get = |c: &str| row.try_get::<String, _>(c).map_err(|e| e.to_string());
     Ok(RuntimeVendorRow {
         name: get("name")?,
-        settings: RuntimeVendorSettings::parse(&get("kind")?, &get("settings")?)?,
+        settings: StoredVendorSettings::parse(&get("kind")?, &get("settings")?)?,
         credential: get("credential")?,
         created_at: get("created_at")?,
         updated_at: get("updated_at")?,
@@ -307,6 +383,75 @@ impl RuntimeVendorConfigService {
         self.store.list().await
     }
 
+    /// The HTTP surface: list, save, delete in wire types.
+    pub async fn list_views(
+        &self,
+    ) -> Result<Vec<horsie_models::runtime_vendor::RuntimeVendorConfigView>, VendorConfigError>
+    {
+        self.store
+            .list()
+            .await
+            .map(|rows| rows.iter().map(RuntimeVendorRow::to_view).collect())
+            .map_err(VendorConfigError::Internal)
+    }
+
+    /// Save what a client sent.
+    ///
+    /// An omitted credential keeps the stored one, so editing a region does not
+    /// require re-typing a token the client was never allowed to read back.
+    pub async fn save_input(
+        &self,
+        name: &str,
+        input: horsie_models::runtime_vendor::RuntimeVendorConfigInput,
+    ) -> Result<horsie_models::runtime_vendor::RuntimeVendorConfigView, VendorConfigError> {
+        if input.name != name {
+            return Err(VendorConfigError::Invalid(
+                "the name in the body must match the one in the path".to_string(),
+            ));
+        }
+        let existing = self
+            .store
+            .get(name)
+            .await
+            .map_err(VendorConfigError::Internal)?;
+        let credential = match (input.credential, existing.as_ref()) {
+            (Some(c), _) => c,
+            (None, Some(row)) => row.credential.clone(),
+            (None, None) => {
+                return Err(VendorConfigError::Invalid(
+                    "a new runtime vendor needs a credential".to_string(),
+                ));
+            }
+        };
+        let now = unix_seconds();
+        let row = RuntimeVendorRow {
+            name: input.name,
+            settings: StoredVendorSettings::from_wire(input.settings),
+            credential,
+            created_at: existing.map_or_else(|| now.clone(), |r| r.created_at),
+            updated_at: now,
+        };
+        self.save(row).await.map(|r| r.to_view()).map_err(|e| {
+            // A name held by a live agent is the one refusal a client can act
+            // on by choosing another name, so it is not lumped in with the rest.
+            if e.contains("connected vendor agent") {
+                VendorConfigError::Conflict(e)
+            } else {
+                VendorConfigError::Invalid(e)
+            }
+        })
+    }
+
+    pub async fn delete_named(&self, name: &str) -> Result<(), VendorConfigError> {
+        match self.delete(name).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(VendorConfigError::NotFound(format!(
+                "no runtime vendor named '{name}'"
+            ))),
+            Err(e) => Err(VendorConfigError::Internal(e)),
+        }
+    }
+
     /// Build and publish every stored vendor. Called once at boot.
     ///
     /// A row that cannot be built is logged and skipped rather than failing the
@@ -338,9 +483,9 @@ impl RuntimeVendorConfigService {
             ));
         }
         let callback = validate(&row.settings, &row.credential)?;
-        let RuntimeVendorSettings::Fly(fly) = row.settings;
+        let StoredVendorSettings::Fly(fly) = row.settings;
         let row = RuntimeVendorRow {
-            settings: RuntimeVendorSettings::Fly(FlyVendorSettings {
+            settings: StoredVendorSettings::Fly(StoredFlySettings {
                 callback_url: callback,
                 ..fly
             }),
@@ -383,7 +528,7 @@ impl RuntimeVendorConfigService {
     }
 
     fn build(&self, row: &RuntimeVendorRow) -> Arc<dyn RuntimeVendor> {
-        let RuntimeVendorSettings::Fly(fly) = &row.settings;
+        let StoredVendorSettings::Fly(fly) = &row.settings;
         let api = FlyHttpApi::new(
             fly.app.clone(),
             row.credential.clone(),
@@ -421,12 +566,12 @@ impl RuntimeVendorConfigService {
 mod tests {
     use super::*;
 
-    fn settings() -> RuntimeVendorSettings {
-        RuntimeVendorSettings::Fly(FlyVendorSettings {
+    fn settings() -> StoredVendorSettings {
+        StoredVendorSettings::Fly(StoredFlySettings {
             app: "horsie-runtimes".to_string(),
             image: "ghcr.io/x/runtime:1".to_string(),
             callback_url: "wss://horsie.example.com".to_string(),
-            ..FlyVendorSettings::default()
+            ..StoredFlySettings::default()
         })
     }
 
@@ -498,11 +643,11 @@ mod tests {
 
     #[test]
     fn an_incomplete_vendor_is_refused() {
-        let RuntimeVendorSettings::Fly(fly) = settings();
+        let StoredVendorSettings::Fly(fly) = settings();
         assert!(validate(&settings(), "").is_err(), "no token");
         assert!(
             validate(
-                &RuntimeVendorSettings::Fly(FlyVendorSettings {
+                &StoredVendorSettings::Fly(StoredFlySettings {
                     app: String::new(),
                     ..fly.clone()
                 }),
@@ -513,7 +658,7 @@ mod tests {
         );
         assert!(
             validate(
-                &RuntimeVendorSettings::Fly(FlyVendorSettings { cpus: 0, ..fly }),
+                &StoredVendorSettings::Fly(StoredFlySettings { cpus: 0, ..fly }),
                 "t"
             )
             .is_err(),
@@ -525,10 +670,10 @@ mod tests {
     fn settings_round_trip_through_their_kind() {
         let json = settings().to_json().unwrap();
         assert_eq!(
-            RuntimeVendorSettings::parse("fly", &json).unwrap(),
+            StoredVendorSettings::parse("fly", &json).unwrap(),
             settings()
         );
-        assert!(RuntimeVendorSettings::parse("e2b", &json).is_err());
+        assert!(StoredVendorSettings::parse("e2b", &json).is_err());
     }
 
     #[tokio::test]
@@ -567,7 +712,7 @@ mod tests {
         let db = crate::db::testing::db().await;
         let service = service(empty_map(), db);
         let saved = service.save(row()).await.unwrap();
-        let RuntimeVendorSettings::Fly(fly) = saved.settings;
+        let StoredVendorSettings::Fly(fly) = saved.settings;
         assert_eq!(
             fly.callback_url,
             "wss://horsie.example.com/api/runtime/connect"
