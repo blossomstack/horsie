@@ -484,8 +484,8 @@ async fn hibernate_frees_the_process_and_a_get_brings_it_back() {
     assert!(agent.is_live("rt-1").await);
 }
 
-/// A deleted session must not leave the means to rebuild its runtime lying
-/// around: the directory is the record, so it goes with the session.
+/// A deleted session's per-runtime state goes with it, rather than accumulating
+/// on the agent's disk for the life of the process.
 #[tokio::test]
 async fn delete_removes_the_runtimes_state_directory() {
     let machine = Machine::new();
@@ -496,10 +496,38 @@ async fn delete_removes_the_runtimes_state_directory() {
         .await
         .expect("create");
     let dir = machine.state_dir().join("rt-1");
-    assert!(dir.join("spec.json").exists(), "create records the spec");
+    assert!(dir.exists(), "create makes the runtime a state directory");
 
     let _ = agent.link.delete("rt-1", sink()).await;
-    assert!(!dir.exists(), "delete takes the record with it");
+    assert!(!dir.exists(), "delete takes it with it");
+}
+
+/// The point of putting the spec on the get: no agent-side copy is consulted,
+/// so a runtime revives against what the server holds now rather than against
+/// whatever was recorded when it was created.
+#[tokio::test]
+async fn a_get_revives_from_the_spec_it_carries() {
+    let machine = Machine::new();
+    let agent = machine.start(None, true).await;
+    agent
+        .link
+        .create("rt-1", &agent.spec().to_wire(), sink())
+        .await
+        .expect("create");
+    let _ = agent.link.hibernate("rt-1", sink()).await;
+
+    // Nothing on this agent's disk describes rt-1 any more.
+    assert!(
+        !machine.state_dir().join("rt-1/spec.json").exists(),
+        "the agent must keep no copy of the spec"
+    );
+
+    agent
+        .link
+        .get("rt-1", &agent.spec().to_wire(), sink())
+        .await
+        .expect("the carried spec is enough to revive it");
+    assert!(agent.is_live("rt-1").await);
 }
 
 /// The promise `lifecycle_locks` exists to keep. The real agent dispatches every

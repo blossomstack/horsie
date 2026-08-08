@@ -261,7 +261,7 @@ git add -A && git commit -m "feat: runtimes dial the server, per account"
 
 ---
 
-### Task 6: Acquisition carries its spec; `spec.json` deleted
+### Task 6: Acquisition carries its spec; `spec.json` deleted — **done**
 
 - [ ] **Step 1: Change the schema**
 

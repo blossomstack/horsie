@@ -419,12 +419,12 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
                 "the runtime vendor is disconnected".to_string(),
             ));
         }
-        // The spec is not on the wire yet; that lands with the schema change
-        // that lets a vendor stop keeping its own copy on disk. Accepting it
-        // here first means the trait is already the shape that needs.
-        let _ = spec;
+        // The spec travels with the get, so the vendor keeps no copy of its
+        // own. It is how to rebuild a runtime the vendor knows it owns, never
+        // permission to build one it does not.
         me.request(RuntimeVendorCommand::GetRuntime(GetRuntimeRequest {
             runtime_id: runtime_id.to_string(),
+            spec: spec.clone(),
         }))
         .await
         .map_err(|e| match e {
