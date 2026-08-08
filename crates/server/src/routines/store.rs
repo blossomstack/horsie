@@ -367,6 +367,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_environment_shape_round_trips() {
+        let (s, _db) = store().await;
+        for (name, environment) in [
+            (
+                "adhoc",
+                EnvironmentSpec::Runtime(RuntimeEnvironment {
+                    vendor: "fly".into(),
+                    repos: Some(vec![RepoConfig {
+                        url: "https://github.com/o/api".into(),
+                        git_ref: Some("dev".into()),
+                        dir: None,
+                    }]),
+                }),
+            ),
+            (
+                "named",
+                EnvironmentSpec::Named(NamedEnvironment {
+                    name: "staging".into(),
+                }),
+            ),
+        ] {
+            let mut r = row(name, RoutineSchedule::Manual(ManualSchedule {}));
+            r.environment = environment.clone();
+            s.insert(&r).await.unwrap();
+            assert_eq!(s.get(name).await.unwrap().unwrap().environment, environment);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replace_swaps_the_environment() {
+        let (s, _db) = store().await;
+        let mut r = row("nightly", RoutineSchedule::Manual(ManualSchedule {}));
+        s.insert(&r).await.unwrap();
+        r.environment = EnvironmentSpec::Named(NamedEnvironment {
+            name: "staging".into(),
+        });
+        assert!(s.replace(&r).await.unwrap());
+        assert_eq!(
+            s.get("nightly").await.unwrap().unwrap().environment,
+            r.environment
+        );
+    }
+
+    #[tokio::test]
     async fn duplicate_insert_is_rejected() {
         let (s, _db) = store().await;
         s.insert(&row("a", RoutineSchedule::Manual(ManualSchedule {})))

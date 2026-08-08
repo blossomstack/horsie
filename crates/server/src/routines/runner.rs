@@ -344,6 +344,30 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_against_a_deleted_environment_fails_visibly() {
+        let f = runner_fixture(true).await;
+        let mut i = input("nightly", None);
+        i.environment = horsie_models::environments::EnvironmentSpec::Named(
+            horsie_models::environments::NamedEnvironment {
+                name: "staging".into(),
+            },
+        );
+        f.routines.create(i, 0).await.unwrap();
+
+        // Never created, so it is already the "deleted since it was saved"
+        // case: the routine is re-resolved every run, and reports through
+        // `last_error` rather than failing inside a session nobody watches.
+        let err = f.runner.run("nightly", 1).await.unwrap_err();
+        assert!(
+            matches!(err, RoutineError::Invalid(ref m) if m.contains("staging")),
+            "{err}"
+        );
+        assert!(sessions(&f.supervisor).await.is_empty());
+        let view = f.routines.get("nightly").await.unwrap();
+        assert!(view.last_error.unwrap().contains("staging"));
+    }
+
+    #[tokio::test]
     async fn a_run_against_a_deleted_agent_preset_fails_visibly() {
         let f = runner_fixture(true).await;
         f.routines.create(input("nightly", None), 0).await.unwrap();
