@@ -13,7 +13,7 @@
 use async_llm::mock::MockLlmServer;
 use horsie_actor::ActorRef;
 use horsie_agentcore::LlmProvider;
-use horsie_anthropic::AnthropicProvider;
+use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_server::db::Db;
 use horsie_server::http::{AppState, app};
 use horsie_server::runtime_vendor::RuntimeVendorLink;
@@ -2331,7 +2331,7 @@ async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
         .await
         .expect("fake agent");
     let provider: Arc<dyn LlmProvider> = Arc::new(
-        horsie_llm_adapters::ResponsesProvider::with_api_key("test-key")
+        horsie_llm_providers::responses::ResponsesProvider::with_api_key("test-key")
             .unwrap()
             .with_model("mock")
             .with_base_url(mock.url()),

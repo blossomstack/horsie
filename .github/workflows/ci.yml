@@ -192,8 +192,10 @@ jobs:
       # Build the three binaries the harness spawns (debug — the harness resolves
       # them from target/debug). HORSIE_E2E_SKIP_BUILD below makes global-setup
       # assert-and-use these rather than rebuild, so build failures surface here.
-      - name: Build server, runtime, mock-llm
-        run: cargo build --locked -p horsie-server -p horsie -p horsie-runtime -p horsie-mock-llm
+      - name: Build server, runtime, mock LLM
+        run: |
+          cargo build --locked -p horsie-server -p horsie -p horsie-runtime
+          cargo build --locked -p async-llm --bin async-llm-mock
 
       # Install Bun via its official script (no new pinned action) and add it to PATH.
       - name: Install Bun

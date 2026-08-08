@@ -11,7 +11,7 @@ use horsie_agentcore::{
     AgentEvent, CompletionRequest, ContentPart, EventSink, EventSinkError, LlmProvider, StopReason,
     ToolChoice, ToolSpec,
 };
-use horsie_anthropic::AnthropicProvider;
+use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_models::agent::{Message, Role, TextPart};
 use std::sync::{Arc, Mutex};
 

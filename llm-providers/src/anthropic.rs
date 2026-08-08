@@ -1,3 +1,6 @@
+//! Anthropic's Messages API, adapted to horsie's `LlmProvider`.
+
+use crate::{BACKOFF_BASE_SECS, DEFAULT_READ_TIMEOUT_SECS, MAX_STREAM_RETRIES};
 use async_llm::{
     Client,
     types::{
@@ -25,8 +28,6 @@ pub const DEFAULT_MAX_TOKENS: u32 = 16_384;
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// The `anthropic-version` header value sent on every request. Required by the API.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const MAX_STREAM_RETRIES: u32 = 6;
-const BACKOFF_BASE_SECS: u64 = 5;
 
 pub fn env_base_url() -> Option<String> {
     env::var("ANTHROPIC_BASE_URL")
@@ -149,12 +150,6 @@ fn io_err(msg: impl std::fmt::Display) -> LlmError {
 
 /// Bounds TCP + TLS setup. A peer that never completes a handshake is dead, not slow.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
-/// Bounds *idle* time between reads, not the total call.
-///
-/// A total `.timeout()` would kill legitimately long generations; this resets on
-/// every chunk, so a slow-but-alive stream runs indefinitely while a stalled one
-/// is bounded (#61 item 5).
-const DEFAULT_READ_TIMEOUT_SECS: u64 = 120;
 
 pub struct AnthropicProvider {
     client: Client,

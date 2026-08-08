@@ -15,8 +15,7 @@ horsie-models          = { path = "../models" }
 horsie-support         = { path = "../support", features = ["git"] }
 horsie-actor           = { path = "../actor" }
 horsie-agentcore       = { path = "../agentcore" }
-horsie-anthropic       = { path = "../providers/anthropic" }
-horsie-llm-adapters    = { path = "../providers/llm-adapters" }
+horsie-llm-providers   = { path = "../llm-providers" }
 horsie-workflow        = { path = "../workflow" }
 horsie-runtime-vendor  = { path = "../runtime-vendor" }
 horsie-runtime-client  = { path = "../runtime-client" }

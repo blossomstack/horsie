@@ -17,9 +17,12 @@ use crate::db::Db;
 use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret, ThinkingDialect, ThinkingEffort};
-use horsie_anthropic::AnthropicProvider;
-use horsie_llm_adapters::chatgpt::{ChatGptTokens, ResponsesError, StoredTokens, TokenStore};
-use horsie_llm_adapters::{OpenAiProvider, ResponsesProvider};
+use horsie_llm_providers::anthropic::AnthropicProvider;
+use horsie_llm_providers::openai::OpenAiProvider;
+use horsie_llm_providers::responses::ResponsesProvider;
+use horsie_llm_providers::responses::chatgpt::{
+    ChatGptTokens, ResponsesError, StoredTokens, TokenStore,
+};
 use horsie_models::settings::{
     ModelView, ProviderView, ServerInfo, SettingsUpdate, SettingsView, VendorCapabilities,
     VendorView,
@@ -551,7 +554,7 @@ fn build_anthropic(
         .with_thinking_dialect(thinking_dialect)
         // Always explicit. Left unset, `ANTHROPIC_BASE_URL` would redirect this
         // provider — and the key with it — to a host the settings never named.
-        .with_base_url(base_url.unwrap_or(horsie_anthropic::DEFAULT_BASE_URL));
+        .with_base_url(base_url.unwrap_or(horsie_llm_providers::anthropic::DEFAULT_BASE_URL));
     Ok(Arc::new(p))
 }
 
@@ -571,7 +574,7 @@ fn build_openai(
         .with_max_tokens(max_tokens)
         .with_thinking_dialect(thinking_dialect)
         .with_forced_tools_disable_thinking(forced_tools_disable_thinking)
-        .with_base_url(base_url.unwrap_or(horsie_llm_adapters::DEFAULT_BASE_URL));
+        .with_base_url(base_url.unwrap_or(horsie_llm_providers::openai::DEFAULT_BASE_URL));
     Ok(Arc::new(p))
 }
 
@@ -591,7 +594,7 @@ fn build_responses(
         .with_thinking_dialect(thinking_dialect)
         // Both OpenAI dialects now take a bare host: the client appends
         // `/v1/chat/completions` or `/v1/responses` itself.
-        .with_base_url(base_url.unwrap_or(horsie_llm_adapters::DEFAULT_BASE_URL));
+        .with_base_url(base_url.unwrap_or(horsie_llm_providers::openai::DEFAULT_BASE_URL));
     Ok(Arc::new(p))
 }
 
@@ -754,7 +757,7 @@ fn live_chatgpt_tokens(
                 Arc::new(ChatGptTokens::new(
                     tokens,
                     store,
-                    horsie_llm_adapters::chatgpt_auth(),
+                    horsie_llm_providers::responses::chatgpt_auth(),
                 )),
             )
         })

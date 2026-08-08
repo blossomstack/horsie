@@ -22,8 +22,9 @@ use horsie_agentcore::{
     LlmError, LlmProvider,
     testkit::{CollectingEventSink, MockToolbox},
 };
-use horsie_anthropic::AnthropicProvider;
-use horsie_llm_adapters::{OpenAiProvider, ResponsesProvider};
+use horsie_llm_providers::anthropic::AnthropicProvider;
+use horsie_llm_providers::openai::OpenAiProvider;
+use horsie_llm_providers::responses::ResponsesProvider;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 

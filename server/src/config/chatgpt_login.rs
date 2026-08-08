@@ -11,7 +11,7 @@
 use crate::auth::UserId;
 use crate::config::ConfigStore;
 use crate::db::Db;
-use horsie_llm_adapters::chatgpt::{
+use horsie_llm_providers::responses::chatgpt::{
     ChatGptAuth, DeviceLogin, DeviceLoginPoll, poll_device_login, start_device_login,
 };
 use horsie_models::settings::SettingsUpdate;
@@ -66,7 +66,7 @@ impl ChatGptLoginService {
             user,
             config,
             http: reqwest::Client::new(),
-            auth: horsie_llm_adapters::chatgpt_auth(),
+            auth: horsie_llm_providers::responses::chatgpt_auth(),
             pending: RwLock::new(HashMap::new()),
         }
     }

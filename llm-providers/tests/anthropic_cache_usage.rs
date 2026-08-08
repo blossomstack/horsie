@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use horsie_agentcore::{
     AgentEvent, CompletionRequest, ContentPart, EventSink, EventSinkError, LlmProvider, ToolChoice,
 };
-use horsie_anthropic::AnthropicProvider;
+use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_models::agent::{Message, Role, TextPart};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
