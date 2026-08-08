@@ -87,6 +87,10 @@ pub struct UserServices {
     /// everyone — and no session can select another account's runtime, because
     /// it is not in the map it reads.
     pub vendor_agents: Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
+    /// This account's runtime vendors that are *configured* rather than dialled
+    /// in. A cloud vendor has nothing to announce itself from, so its row is
+    /// the only record it exists; this service is what rebuilds it at boot.
+    pub runtime_vendors: Arc<crate::runtime_vendor::RuntimeVendorConfigService>,
     /// Where this account's runtimes land when they dial `/api/runtime/connect`.
     ///
     /// One per account rather than one per server: the dial token names the
@@ -171,6 +175,20 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
         opened.vendors.clone(),
     ));
+    let connected_runtimes = Arc::new(horsie_runtime_vendor::ConnectedRuntimeRegistry::new());
+    let runtime_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorConfigService::new(
+        crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), user.clone()),
+        user.as_str().to_string(),
+        opened.vendors.clone(),
+        // The registry's own table, so the two publishers of one map can see
+        // each other's names rather than silently overwriting them.
+        vendor_agents.links(),
+        connected_runtimes.clone(),
+        opened.dial_secret.clone(),
+    ));
+    // Before anything can select a vendor: a session started early would
+    // otherwise be told its configured vendor does not exist.
+    runtime_vendors.publish_all().await;
     let runtimes = Arc::new(crate::runtime_manager::RuntimeManager::new(
         crate::runtime_manager::RuntimeDeps {
             vendors: opened.vendors.clone(),
@@ -228,7 +246,8 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         environments,
         workflows,
         vendor_agents,
-        connected_runtimes: Arc::new(horsie_runtime_vendor::ConnectedRuntimeRegistry::new()),
+        runtime_vendors,
+        connected_runtimes,
         dial_secret: opened.dial_secret.clone(),
     }))
 }

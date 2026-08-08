@@ -14,6 +14,7 @@
 //! can have. An earlier revision deleted the trait as "pure indirection" when
 //! every vendor was a socket; it stops being indirection the moment one is not.
 
+pub mod config;
 /// A scriptable runtime vendor for tests only — never compiled into a
 /// production build. Available to this crate's own tests (`cfg(test)`) and to
 /// external test crates that opt in via the `test-util` feature.
@@ -25,6 +26,10 @@ mod registry;
 mod transport;
 mod websocket;
 
+pub use config::{
+    FlyVendorSettings, RuntimeVendorConfigService, RuntimeVendorRow, RuntimeVendorSettings,
+    RuntimeVendorStore,
+};
 pub use horsie_models::runtime_vendor::RuntimeVendorCapabilities;
 pub use horsie_runtime_vendor::runtime_vendor::{RuntimeHandle, RuntimeVendor};
 pub use horsie_runtime_vendor::{RuntimeProgress, RuntimeVendorError};

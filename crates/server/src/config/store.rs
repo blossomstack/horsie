@@ -1,15 +1,18 @@
 //! Database-backed [`ConfigStore`]. Owns the settings database, builds the live
-//! provider registry and the runtime vendors from it, and applies edits:
-//! provider/model/default-vendor changes swap the live registry (next turn
-//! sees them); vendor changes reconcile the live vendor map immediately — an
-//! active vendor is reconfigured in place, a new/previously-inactive one is
-//! built. No vendor edit needs a restart: velos vendors share the server-wide
-//! runtime-connection registry, so there is no per-vendor listener to rebind.
+//! provider registry from it, and applies edits: provider/model/default-vendor
+//! changes swap the live registry, so the next turn sees them.
 //!
-//! Vendors are generic — a `vendors(name, kind, config)` table plus a
-//! kind-tagged config union — so a new vendor kind is a new match arm, not a
-//! schema change. The database itself is SQLite or PostgreSQL, selected by
-//! `database.url`; see `crate::db`.
+//! It does **not** own runtime vendors. It holds the vendor map only to render
+//! the settings view; the two things that write it are
+//! [`RuntimeVendorRegistry`] (agents that dial in) and
+//! [`RuntimeVendorConfigService`] (vendors configured in settings). Neither
+//! needs a restart to take effect.
+//!
+//! The database itself is SQLite or PostgreSQL, selected by `database.url`; see
+//! `crate::db`.
+//!
+//! [`RuntimeVendorRegistry`]: crate::runtime_vendor::RuntimeVendorRegistry
+//! [`RuntimeVendorConfigService`]: crate::runtime_vendor::RuntimeVendorConfigService
 
 use crate::auth::UserId;
 use crate::config::ConfigStore;
@@ -135,9 +138,9 @@ impl DbConfigStore {
         let registry: SharedProviderRegistry =
             Arc::new(RwLock::new(build_registry(&provs, &mods, &chatgpt)?));
 
-        // The server builds no vendors: every vendor is an agent that dials in
-        // and publishes itself into this map. It starts empty at boot and is
-        // never repopulated from the database.
+        // Empty here, and filled by its two writers: agents that dial in, and
+        // `RuntimeVendorConfigService` replaying the `runtime_vendors` table.
+        // This store never builds a vendor of its own.
         let vendors: RuntimeVendorMap = Arc::new(RwLock::new(HashMap::new()));
 
         let dial_secret = load_or_create_dial_secret(&db, &user).await?;

@@ -25,6 +25,9 @@ pub enum RegisterError {
     /// A live link already answers to this name, and it belongs to another
     /// agent process.
     NameTaken { by: String },
+    /// The name belongs to a vendor configured in settings. No process owns it,
+    /// so no reconnect rule can win it.
+    NameConfigured,
 }
 
 impl std::fmt::Display for RegisterError {
@@ -32,6 +35,9 @@ impl std::fmt::Display for RegisterError {
         match self {
             Self::NameTaken { by } => {
                 write!(f, "that vendor name is already held by {by}")
+            }
+            Self::NameConfigured => {
+                write!(f, "that vendor name belongs to a configured runtime vendor")
             }
         }
     }
@@ -49,6 +55,9 @@ impl RegisterError {
         match self {
             Self::NameTaken { .. } => {
                 format!("vendor name \"{name}\" is already in use by another agent")
+            }
+            Self::NameConfigured => {
+                format!("vendor name \"{name}\" is configured on the server")
             }
         }
     }
@@ -79,6 +88,9 @@ impl RuntimeVendorRegistry {
     /// A name is held by the process that claimed it, for as long as that
     /// process is connected. The gates, in order:
     ///
+    /// 0. A vendor *configured in settings* holds the name — refuse. Every rule
+    ///    below turns on which process owns a name, and a configured vendor has
+    ///    no process, so none of them can adjudicate this.
     /// 1. Nobody holds the name — publish.
     /// 2. A *different principal* holds it — refuse. This outranks the instance
     ///    id on purpose: an instance id is announced by the client and is not a
@@ -104,6 +116,12 @@ impl RuntimeVendorRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let mut vendors = self.vendors.write().unwrap_or_else(PoisonError::into_inner);
+        // Gate 0: a name in the map that this registry did not publish belongs
+        // to a vendor configured in settings. None of the rules below apply —
+        // they all turn on owning process, and a configured vendor has none.
+        if vendors.contains_key(&name) && !published.contains_key(&name) {
+            return Err(RegisterError::NameConfigured);
+        }
         if let Some(existing) = published.get(&name) {
             let taken = || RegisterError::NameTaken {
                 by: existing.owner().to_db(),
@@ -222,6 +240,31 @@ mod tests {
         assert!(
             !vendor.capabilities().supports_provisioning,
             "the published vendor must carry what the agent announced"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_take_a_configured_vendors_name() {
+        // Sessions select a vendor by name and cannot tell the two kinds apart,
+        // so letting an agent shadow a configured vendor would silently move
+        // every session on that name onto someone's laptop.
+        let vendors = empty_vendors();
+        let configured = FakeRuntimeVendor::builder("fly")
+            .serve_in_process()
+            .await
+            .expect("configured stand-in");
+        vendors.write().unwrap().insert(
+            "fly".to_string(),
+            configured.link() as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+        );
+        let registry = RuntimeVendorRegistry::new(vendors);
+        let agent = FakeRuntimeVendor::builder("fly")
+            .serve_in_process()
+            .await
+            .expect("agent");
+        assert_eq!(
+            registry.register(agent.link()),
+            Err(RegisterError::NameConfigured)
         );
     }
 
