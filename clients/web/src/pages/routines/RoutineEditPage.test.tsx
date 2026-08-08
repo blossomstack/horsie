@@ -2,14 +2,35 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentView, RoutineInput } from "../../api/types";
+import type { AgentView, RoutineInput, RoutineView } from "../../api/types";
 import { RoutineEditPage } from "./RoutineEditPage";
 
 afterEach(cleanup);
 
 const create = vi.fn(async (body: RoutineInput) => body);
+const update = vi.fn(async (_name: string, body: RoutineInput) => body);
+const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+const storedTimezone =
+  browserZone === "America/New_York" ? "America/Los_Angeles" : "America/New_York";
+const changedTimezone = "Asia/Tokyo";
+const storedRoutine: RoutineView = {
+  name: "stored",
+  description: "",
+  agent: "reviewer",
+  prompt: "triage the queue",
+  schedule: {
+    type: "Daily",
+    value: { timezone: storedTimezone, hour: 8, minute: 30 },
+  },
+  enabled: true,
+  createdAt: "1",
+  updatedAt: "1",
+};
 
-beforeEach(() => create.mockReset());
+beforeEach(() => {
+  create.mockReset();
+  update.mockReset();
+});
 
 vi.mock("../../api/client", () => ({
   api: {
@@ -29,8 +50,9 @@ vi.mock("../../api/client", () => ({
       ],
     },
     routines: {
-      get: async () => undefined,
+      get: async (name: string) => (name === storedRoutine.name ? storedRoutine : undefined),
       create: (body: RoutineInput) => create(body),
+      update: (name: string, body: RoutineInput) => update(name, body),
     },
   },
   ApiRequestError: class extends Error {},
@@ -52,9 +74,25 @@ function renderNew() {
   return utils;
 }
 
+function renderStored() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const utils = render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/routines/stored/edit"]}>
+        <Routes>
+          <Route path="/routines/:name/edit" element={<RoutineEditPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  return utils;
+}
+
 describe("RoutineEditPage", () => {
   it("defaults the timezone to the browser's and saves a daily schedule", async () => {
-    const { findByTestId, getByTestId } = renderNew();
+    const { findByTestId, getByTestId, queryByTestId } = renderNew();
     fireEvent.change(await findByTestId("routine-name-input"), {
       target: { value: "morning" },
     });
@@ -68,9 +106,20 @@ describe("RoutineEditPage", () => {
       target: { value: "Daily" },
     });
 
+    expect(queryByTestId("routine-timezone-select")).toBeNull();
+    const timezoneToggle = getByTestId("routine-timezone-toggle");
+    expect(timezoneToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(timezoneToggle.textContent).toContain("Change");
+    fireEvent.click(timezoneToggle);
+    expect(timezoneToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(getByTestId("routine-timezone-select")).not.toBeNull();
+
     const expectedZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     const zone = getByTestId("routine-timezone-select") as HTMLSelectElement;
     expect(zone.value).toBe(expectedZone);
+    expect(zone.className).toContain("min-w-0");
+    expect(zone.className).toContain("w-full");
+    expect(zone.parentElement?.className).toContain("flex-col");
 
     fireEvent.change(getByTestId("routine-time-input"), {
       target: { value: "09:00" },
@@ -104,17 +153,24 @@ describe("RoutineEditPage", () => {
 
     const mon = getByTestId("weekday-mon") as HTMLButtonElement;
     const tue = getByTestId("weekday-tue") as HTMLButtonElement;
-    expect(mon.className).not.toContain("bg-orange");
-    expect(tue.className).not.toContain("bg-orange");
+    expect(getByTestId("routine-weekdays").getAttribute("aria-label")).toBe(
+      "Days of week",
+    );
+    expect(mon.getAttribute("aria-label")).toBe("Monday");
+    expect(mon.getAttribute("aria-pressed")).toBe("false");
+    expect(tue.getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(mon);
-    expect(mon.className).toContain("bg-orange");
-    expect(tue.className).not.toContain("bg-orange");
+    expect(mon.getAttribute("aria-pressed")).toBe("true");
+    expect(mon.className).toContain("border-amber");
+    expect(mon.className).toContain("bg-amber/15");
+    expect(tue.getAttribute("aria-pressed")).toBe("false");
     expect(save.disabled).toBe(false);
 
     // Toggling off returns the chip to the unselected look.
     fireEvent.click(mon);
-    expect(mon.className).not.toContain("bg-orange");
+    expect(mon.getAttribute("aria-pressed")).toBe("false");
+    expect(mon.className).not.toContain("border-amber");
     expect(save.disabled).toBe(true);
 
     // Re-select so the weekly schedule is valid again before saving.
@@ -129,5 +185,51 @@ describe("RoutineEditPage", () => {
     expect(payload.type).toBe("Weekly");
     expect(payload.value.weekdays).toEqual(["Mon"]);
     expect(payload.value.hour).toBe(9);
+  });
+
+  it("preserves a changed timezone when editing a stored custom timezone", async () => {
+    const { findByTestId, getByTestId, getByText, queryByTestId } = renderStored();
+    await findByTestId("routine-edit-page");
+
+    expect(queryByTestId("routine-timezone-select")).toBeNull();
+    expect(getByText("Custom timezone")).not.toBeNull();
+
+    fireEvent.click(getByTestId("routine-timezone-toggle"));
+    const timezone = getByTestId("routine-timezone-select") as HTMLSelectElement;
+    expect(timezone.value).toBe(storedTimezone);
+
+    fireEvent.change(timezone, { target: { value: changedTimezone } });
+    fireEvent.click(getByTestId("save-routine-button"));
+
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0]?.[0]).toBe("stored");
+    expect(update.mock.calls[0]?.[1].schedule).toEqual({
+      type: "Daily",
+      value: { timezone: changedTimezone, hour: 8, minute: 30 },
+    });
+  });
+
+  it("selects weekdays with the Weekdays preset", async () => {
+    const { findByTestId, getByTestId } = renderNew();
+    fireEvent.change(await findByTestId("routine-schedule-kind"), {
+      target: { value: "Weekly" },
+    });
+
+    fireEvent.click(getByTestId("routine-weekdays-weekdays"));
+
+    const weekdays = getByTestId("routine-weekdays");
+    const preset = getByTestId("routine-weekdays-weekdays");
+    expect(weekdays.contains(preset)).toBe(false);
+
+    for (const day of ["mon", "tue", "wed", "thu", "fri"]) {
+      expect(
+        getByTestId(`weekday-${day}`).getAttribute("aria-pressed"),
+      ).toBe("true");
+    }
+    for (const day of ["sat", "sun"]) {
+      expect(
+        getByTestId(`weekday-${day}`).getAttribute("aria-pressed"),
+      ).toBe("false");
+    }
   });
 });

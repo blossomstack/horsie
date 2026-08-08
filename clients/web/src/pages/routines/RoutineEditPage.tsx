@@ -51,6 +51,16 @@ const WEEKDAY_ORDER: Weekday[] = [
   Weekday.Sun,
 ];
 
+const FULL_WEEKDAY_NAMES: Record<Weekday, string> = {
+  [Weekday.Mon]: "Monday",
+  [Weekday.Tue]: "Tuesday",
+  [Weekday.Wed]: "Wednesday",
+  [Weekday.Thu]: "Thursday",
+  [Weekday.Fri]: "Friday",
+  [Weekday.Sat]: "Saturday",
+  [Weekday.Sun]: "Sunday",
+};
+
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
@@ -99,6 +109,8 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
   const [timezone, setTimezone] = useState(
     calendarInitial?.timezone ?? browserTimezone(),
   );
+  const localTimezone = browserTimezone();
+  const [timezoneEditorOpen, setTimezoneEditorOpen] = useState(false);
   const [timeOfDay, setTimeOfDay] = useState(
     calendarInitial
       ? `${String(calendarInitial.hour).padStart(2, "0")}:${String(calendarInitial.minute).padStart(2, "0")}`
@@ -335,47 +347,94 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                       onChange={(e) => setTimeOfDay(e.target.value)}
                       data-testid="routine-time-input"
                     />
-                    <select
-                      className="field"
-                      value={timezone}
-                      onChange={(e) => setTimezone(e.target.value)}
-                      data-testid="routine-timezone-select"
-                    >
-                      {timezoneOptions().map((z) => (
-                        <option key={z} value={z}>
-                          {z}
-                        </option>
-                      ))}
-                    </select>
                   </label>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-dim">
+                    <span>
+                      {timezone === localTimezone
+                        ? "Browser timezone"
+                        : "Custom timezone"}
+                      <span className="ml-1 font-mono text-faint">
+                        · {timezone}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      className="key-flat !px-1.5 !py-1 text-xs"
+                      aria-controls="routine-timezone-editor"
+                      aria-expanded={timezoneEditorOpen}
+                      data-testid="routine-timezone-toggle"
+                      onClick={() =>
+                        setTimezoneEditorOpen((open) => !open)
+                      }
+                    >
+                      {timezoneEditorOpen ? "Done" : "Change"}
+                    </button>
+                  </div>
+                  {timezoneEditorOpen && (
+                    <div
+                      id="routine-timezone-editor"
+                      className="mt-2 w-full min-w-0"
+                    >
+                      <label className="flex min-w-0 flex-col items-start gap-1 text-xs text-dim">
+                        <span>Timezone</span>
+                        <select
+                          className="field field-mono min-w-0 w-full"
+                          value={timezone}
+                          onChange={(e) => setTimezone(e.target.value)}
+                          data-testid="routine-timezone-select"
+                        >
+                          {timezoneOptions().map((z) => (
+                            <option key={z} value={z}>
+                              {z}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                  )}
 
                   {kind === "Weekly" && (
-                    <div className="flex flex-wrap items-center gap-1">
-                      {WEEKDAY_ORDER.map((d) => (
-                        <button
-                          key={d}
-                          type="button"
-                          className={`chip ${weekdays.has(d) ? "border-transparent bg-orange text-orange-ink" : ""}`}
-                          aria-pressed={weekdays.has(d)}
-                          onClick={() =>
-                            setWeekdays((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(d)) next.delete(d);
-                              else next.add(d);
-                              return next;
-                            })
-                          }
-                          data-testid={`weekday-${d.toLowerCase()}`}
-                        >
-                          {d}
-                        </button>
-                      ))}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <div
+                        className="flex flex-wrap items-center gap-1.5"
+                        role="group"
+                        aria-label="Days of week"
+                        data-testid="routine-weekdays"
+                      >
+                        {WEEKDAY_ORDER.map((d) => (
+                          <button
+                            key={d}
+                            type="button"
+                            className={`chip min-h-10 min-w-10 justify-center transition-colors ${
+                              weekdays.has(d)
+                                ? "border-amber bg-amber/15 text-amber-ink shadow-[inset_0_0_0_1px_var(--amber)]"
+                                : "hover:bg-raised hover:text-legend"
+                            }`}
+                            aria-label={FULL_WEEKDAY_NAMES[d]}
+                            aria-pressed={weekdays.has(d)}
+                            onClick={() =>
+                              setWeekdays((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(d)) next.delete(d);
+                                else next.add(d);
+                                return next;
+                              })
+                            }
+                            data-testid={`weekday-${d.toLowerCase()}`}
+                          >
+                            {d}
+                          </button>
+                        ))}
+                      </div>
                       <button
                         type="button"
-                        className="chip"
-                        onClick={() => setWeekdays(new Set(WEEKDAY_ORDER.slice(0, 5)))}
+                        className="key-flat !px-2 !py-1.5 text-xs"
+                        onClick={() =>
+                          setWeekdays(new Set(WEEKDAY_ORDER.slice(0, 5)))
+                        }
+                        data-testid="routine-weekdays-weekdays"
                       >
-                        Mon–Fri
+                        Weekdays
                       </button>
                     </div>
                   )}
