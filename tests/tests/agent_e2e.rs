@@ -11,13 +11,13 @@
     clippy::wildcard_enum_match_arm
 )]
 
+use async_llm::mock::MockLlmServer;
 use async_trait::async_trait;
 use horsie_agentcore::{
     Agent, AgentError, AgentEvent, AgentInput, AgentResult, CompletedOutput, ContentPart,
     EventSink, EventSinkError, HandoffOutput, ToolCallError, ToolSpec, Toolbox,
 };
 use horsie_anthropic::AnthropicProvider;
-use horsie_mock_llm::MockLlmServer;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 

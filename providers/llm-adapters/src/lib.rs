@@ -596,7 +596,25 @@ mod tests {
 /// client. They are re-exported here so server consumers can move adapters
 /// without reaching into `async-llm`.
 pub mod chatgpt {
+    /// What a [`TokenStore`] implementation has to return, re-exported so a
+    /// caller needs one import rather than two.
+    pub use async_llm::responses::ResponsesError;
     pub use async_llm::responses::chatgpt::*;
+}
+
+/// OpenAI's own Codex OAuth client. Third parties cannot register one — there
+/// is no allocation mechanism — so this constant is the only usable client id.
+pub const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+/// How we identify ourselves. opencode sends its own name and is not blocked;
+/// impersonating `codex_cli_rs` would be a lie we do not need to tell.
+pub const CHATGPT_ORIGINATOR: &str = "horsie";
+
+/// How horsie identifies itself to OpenAI's ChatGPT auth and Codex endpoints.
+/// Every caller that logs in, refreshes, or spends a subscription must use the
+/// same one, so it is built here rather than assembled at each call site.
+#[must_use]
+pub fn chatgpt_auth() -> chatgpt::ChatGptAuth {
+    chatgpt::ChatGptAuth::new(CHATGPT_CLIENT_ID).with_originator(CHATGPT_ORIGINATOR)
 }
 
 pub const DEFAULT_RESPONSES_MODEL: &str = "gpt-5";
@@ -615,6 +633,7 @@ pub struct ResponsesProvider {
     base_url: String,
     max_tokens: Option<u32>,
     retry_delay: Duration,
+    read_timeout: Duration,
     thinking_dialect: ThinkingDialect,
 }
 
@@ -626,6 +645,7 @@ impl ResponsesProvider {
             base_url: DEFAULT_BASE_URL.to_string(),
             max_tokens: None,
             retry_delay: Duration::from_secs(BACKOFF_BASE_SECS),
+            read_timeout: Duration::from_secs(DEFAULT_READ_TIMEOUT_SECS),
             thinking_dialect: ThinkingDialect::NoControl,
         })
     }
@@ -676,16 +696,18 @@ impl ResponsesProvider {
     }
 
     #[must_use]
+    pub fn with_read_timeout_secs(mut self, seconds: u64) -> Self {
+        self.read_timeout = Duration::from_secs(seconds);
+        self
+    }
+
+    #[must_use]
     pub fn with_thinking_dialect(mut self, thinking_dialect: ThinkingDialect) -> Self {
         self.thinking_dialect = thinking_dialect;
         self
     }
 
     fn client(&self) -> ResponsesClient {
-        // `async-llm` owns retries for the native Responses stream. Its public
-        // client currently has a fixed retry delay, while keeping this field
-        // preserves the adapter's existing configuration surface.
-        let _ = self.retry_delay;
         match &self.credential {
             ResponsesCredential::ApiKey(api_key) => {
                 ResponsesClient::with_api_key(api_key.expose().to_owned())
@@ -694,6 +716,8 @@ impl ResponsesProvider {
         }
         .with_base_url(self.base_url.clone())
         .max_retries(MAX_STREAM_RETRIES)
+        .retry_delay(self.retry_delay)
+        .read_timeout(self.read_timeout)
     }
 
     fn build_body(&self, request: &CompletionRequest<'_>) -> ResponsesRequest {
