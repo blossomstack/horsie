@@ -91,6 +91,26 @@ fix-bug  running  1,204 tokens
 Not reached: file
 ```
 
+Once it finishes, the same command prints what the run produced — the last
+step's output, which is the run's:
+
+```console
+$ horsie workflow status 3f1a2b4c-…
+fix-bug  finished  4,102 tokens
+
+#    STEP                 TRY  STATUS      AGENT
+0    triage               1    concluded   6e3c20c8-…
+1    fix                  1    concluded   8a91f0d2-…
+
+Not reached: file
+
+Output:
+  {
+    "patched": true,
+    "files": 3
+  }
+```
+
 Opening the run in the browser shows its graph. Clicking a step opens that
 step's own page — the transcript, tool calls and all — which is the same
 session view scoped to one agent. To follow one from the terminal, take its
@@ -106,8 +126,9 @@ $ horsie session tail 3f1a2b4c-… --output ./run.jsonl --agent 8a91f0d2-…
 press **Retry** on that node.
 
 **A step asked a question.** A run started from the UI or the API is attended,
-so a step may ask. The question appears on the run's page; answering it resumes
-the step.
+so a step may ask. The run's page says which step is waiting; **Answer it**
+opens that step, where the question and the answer box are. Answering resumes
+the step and the run carries on from there.
 
 **The server restarted mid-run.** The step that was running is marked
 interrupted and the run is suspended rather than resumed. A retry is a

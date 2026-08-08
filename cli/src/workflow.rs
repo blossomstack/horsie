@@ -170,10 +170,32 @@ fn render_run(graph: &WorkflowRunGraph) -> String {
     if !untouched.is_empty() {
         out.push_str(&format!("\nNot reached: {}\n", untouched.join(", ")));
     }
+    // What the run produced. It was on the wire from the start and printed
+    // nowhere, so the one thing a finished run is *for* could only be read by
+    // tailing its last step.
+    if let Some(output) = &graph.output {
+        out.push_str(&format!("\nOutput:\n{}\n", indent(&render_output(output))));
+    }
     if let Some(error) = &graph.error {
         out.push_str(&format!("\nError: {error}\n"));
     }
     out
+}
+
+/// A run's output as text: a string is its own answer, anything else is pretty
+/// JSON. The same rule that hands one step's output to the next, so what is
+/// printed is what a following step would have been given.
+fn render_output(output: &serde_json::Value) -> String {
+    output.as_str().map(str::to_string).unwrap_or_else(|| {
+        serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
+    })
+}
+
+fn indent(body: &str) -> String {
+    body.lines()
+        .map(|l| format!("  {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn status_word(graph: &WorkflowRunGraph) -> &'static str {
@@ -257,8 +279,8 @@ mod tests {
         assert!(out.contains("→ ends the run"), "{out}");
     }
 
-    #[test]
-    fn a_run_lists_its_executions_in_order_and_names_what_it_missed() {
+    /// A finished two-step run that never reached `file`.
+    fn finished_graph() -> WorkflowRunGraph {
         let concluded = |index: u32, step: &str| StepRunView {
             index,
             step: step.into(),
@@ -272,7 +294,7 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
         };
-        let graph = WorkflowRunGraph {
+        WorkflowRunGraph {
             workflow: "fix-bug".into(),
             status: WorkflowStatus::Finished(FinishedStatus {}),
             current: None,
@@ -296,7 +318,12 @@ mod tests {
             error: None,
             input_tokens: 120,
             output_tokens: 30,
-        };
+        }
+    }
+
+    #[test]
+    fn a_run_lists_its_executions_in_order_and_names_what_it_missed() {
+        let graph = finished_graph();
         let out = render_run(&graph);
         assert!(out.contains("finished"), "{out}");
         assert!(out.contains("150 tokens"), "{out}");
@@ -304,6 +331,28 @@ mod tests {
         // "Not reached" distinguishes a branch not taken from a step still to
         // come.
         assert!(out.contains("Not reached: file"), "{out}");
+    }
+
+    /// A finished run's whole point is its output, and it used to be printed
+    /// nowhere — readable only by tailing the last step's transcript.
+    #[test]
+    fn a_finished_run_prints_what_it_produced() {
+        let mut graph = finished_graph();
+        graph.output = Some(serde_json::json!({"filed": 12}));
+        let out = render_run(&graph);
+        assert!(out.contains("Output:"), "{out}");
+        assert!(out.contains("\"filed\": 12"), "{out}");
+    }
+
+    /// A string output is its own answer; quoting and escaping it would be
+    /// noise, and it is what a following step would have been handed.
+    #[test]
+    fn a_string_output_is_printed_unquoted() {
+        let mut graph = finished_graph();
+        graph.output = Some(serde_json::json!("all clear"));
+        let out = render_run(&graph);
+        assert!(out.contains("all clear"), "{out}");
+        assert!(!out.contains("\"all clear\""), "{out}");
     }
 
     #[test]
