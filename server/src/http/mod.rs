@@ -3,7 +3,7 @@
 
 mod admin;
 mod agents;
-mod auth;
+pub mod auth;
 mod chatgpt;
 mod config;
 mod environments;
@@ -111,6 +111,39 @@ impl axum::extract::FromRequestParts<AppState> for Scope {
             }
         }
     }
+}
+
+/// The credential surface, split by *whose* credential it is: `/api/auth/` is
+/// the person in the browser, `/api/device/` is every credential a machine
+/// holds — obtaining one, rotating it, approving one, and listing or revoking
+/// the ones that exist.
+///
+/// Empty in [`AuthMode::Delegated`], where a layer in front owns identity and
+/// serves both prefixes itself. Unmounted rather than answering 404: axum
+/// panics when two merged routers claim one path, so leaving these out is
+/// precisely what lets that layer claim them.
+fn credentials(mode: crate::auth::AuthMode) -> Router<AppState> {
+    if mode == crate::auth::AuthMode::Delegated {
+        return Router::new();
+    }
+    Router::new()
+        .route("/api/auth/status", get(auth::status))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/password", post(auth::change_password))
+        .route("/api/device/auth/code", post(auth::device_code))
+        .route("/api/device/auth/token", post(auth::device_token))
+        .route("/api/device/auth/refresh", post(auth::refresh))
+        .route("/api/device/approve", post(auth::device_approve))
+        .route("/api/device/deny", post(auth::device_deny))
+        .route(
+            "/api/device/tokens",
+            get(auth::list_agent_tokens).post(auth::create_agent_token),
+        )
+        .route(
+            "/api/device/tokens/{id}",
+            axum::routing::delete(auth::delete_agent_token),
+        )
 }
 
 pub fn app(state: AppState) -> Router {
@@ -284,23 +317,7 @@ pub fn app(state: AppState) -> Router {
             post(workflows::retry_step),
         )
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
-        .route("/api/auth/status", get(auth::status))
-        .route("/api/auth/login", post(auth::login))
-        .route("/api/auth/logout", post(auth::logout))
-        .route("/api/auth/password", post(auth::change_password))
-        .route("/api/auth/device/code", post(auth::device_code))
-        .route("/api/auth/device/token", post(auth::device_token))
-        .route("/api/auth/device/approve", post(auth::device_approve))
-        .route("/api/auth/device/deny", post(auth::device_deny))
-        .route("/api/auth/refresh", post(auth::refresh))
-        .route(
-            "/api/auth/tokens",
-            get(auth::list_agent_tokens).post(auth::create_agent_token),
-        )
-        .route(
-            "/api/auth/tokens/{id}",
-            axum::routing::delete(auth::delete_agent_token),
-        )
+        .merge(credentials(state.auth.mode()))
         // Guards every route above. The SPA shell and its assets, added below,
         // are deliberately outside it: the app has to load in order to render a
         // login page, and the bundle holds no secrets.
@@ -363,7 +380,7 @@ mod tests {
         let auth = Arc::new(crate::auth::AuthService::new(
             crate::auth::AuthStore::new(db.clone()),
             crate::auth::AuthDeps {
-                enabled: false,
+                mode: crate::auth::AuthMode::Off,
                 state_dir: tmp.path().to_path_buf(),
             },
         ));
@@ -425,7 +442,7 @@ mod tests {
         let svc = Arc::new(crate::auth::AuthService::new(
             crate::auth::AuthStore::new(crate::db::testing::db().await),
             crate::auth::AuthDeps {
-                enabled: true,
+                mode: crate::auth::AuthMode::Password,
                 state_dir: tmp.path().to_path_buf(),
             },
         ));
@@ -1531,6 +1548,130 @@ mod tests {
         assert!(!status.authenticated);
     }
 
+    /// A deployment whose identity comes from the layer in front of it.
+    ///
+    /// Built by hand rather than through `auth_state`: what makes this mode
+    /// what it is, is that no credential of horsie's own exists.
+    async fn delegated_state(tmp: &tempfile::TempDir) -> AppState {
+        let mut state = test_state(tmp).await;
+        state.auth = Arc::new(crate::auth::AuthService::new(
+            crate::auth::AuthStore::new(crate::db::testing::db().await),
+            crate::auth::AuthDeps {
+                mode: crate::auth::AuthMode::Delegated,
+                state_dir: tmp.path().to_path_buf(),
+            },
+        ));
+        state
+    }
+
+    /// The failure that would not announce itself.
+    ///
+    /// If an unidentified request fell back to the anonymous account instead of
+    /// being refused, a deployment with one missing or mis-ordered middleware
+    /// would serve every caller the *same* account's data while every request
+    /// succeeded and every page rendered. So: `401`, and never `200`.
+    #[tokio::test]
+    async fn a_delegated_request_with_no_identity_is_refused_rather_than_anonymous() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(delegated_state(&tmp).await);
+
+        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "an unidentified request must never resolve to the anonymous account"
+        );
+
+        // A bearer token is not an identity here: nothing in this deployment
+        // issued one, so presenting anything must not change the answer.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions")
+                    .header("authorization", "Bearer anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        // The liveness probe still answers: it resolves no account.
+        let res = app.oneshot(get("/api/health")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// What the front layer's middleware does, and the whole point of the mode:
+    /// the account it names is the account the request gets.
+    #[tokio::test]
+    async fn a_delegated_identity_resolves_to_that_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = delegated_state(&tmp).await;
+        let anonymous = state.shared.anonymous.clone();
+        let app = app(state);
+
+        let mut req = get("/api/sessions");
+        req.extensions_mut()
+            .insert(crate::http::auth::DelegatedIdentity(anonymous));
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// Unmounted, not stubbed — and the reason it has to be unmounted rather
+    /// than answering 404 is that axum *panics* when two merged routers claim
+    /// one path. So the property worth asserting is not horsie's status code:
+    /// it is that a layer in front can take those paths over and be the one
+    /// that answers.
+    #[tokio::test]
+    async fn a_front_layer_can_claim_every_credential_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = [
+            "/api/auth/status",
+            "/api/auth/login",
+            "/api/auth/logout",
+            "/api/auth/password",
+            "/api/auth/session",
+            "/api/device/auth/code",
+            "/api/device/auth/token",
+            "/api/device/auth/refresh",
+            "/api/device/approve",
+            "/api/device/deny",
+            "/api/device/tokens",
+        ];
+
+        // Merging these onto a delegated deployment must not panic, and each
+        // one must reach the front layer's handler rather than horsie's.
+        let mut front = Router::new();
+        for path in paths {
+            front = front.route(path, post(|| async { "front layer" }));
+        }
+        let app = app(delegated_state(&tmp).await).merge(front);
+
+        for path in paths {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+            let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            assert_eq!(
+                &body[..],
+                b"front layer",
+                "{path} must be answered by the layer in front, not by horsie"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn with_auth_enabled_the_api_is_closed_but_health_and_status_are_not() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2399,7 +2540,7 @@ mod tests {
         // The CLI starts a device authorization without any credential.
         let res = app
             .clone()
-            .oneshot(post_json("/api/auth/device/code", &serde_json::json!({})))
+            .oneshot(post_json("/api/device/auth/code", &serde_json::json!({})))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -2411,7 +2552,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/auth/device/token",
+                "/api/device/auth/token",
                 &serde_json::json!({"deviceCode": device.device_code}),
             ))
             .await
@@ -2424,7 +2565,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/auth/device/approve",
+                "/api/device/approve",
                 &serde_json::json!({"userCode": device.user_code}),
             ))
             .await
@@ -2443,7 +2584,7 @@ mod tests {
 
         let approve = Request::builder()
             .method("POST")
-            .uri("/api/auth/device/approve")
+            .uri("/api/device/approve")
             .header("content-type", "application/json")
             .header("cookie", format!("horsie_session={cookie}"))
             .body(Body::from(
@@ -2460,7 +2601,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/auth/device/token",
+                "/api/device/auth/token",
                 &serde_json::json!({"deviceCode": device.device_code}),
             ))
             .await
@@ -2483,7 +2624,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/auth/refresh",
+                "/api/device/auth/refresh",
                 &serde_json::json!({"refreshToken": pair.refresh_token}),
             ))
             .await
@@ -2495,7 +2636,7 @@ mod tests {
         // Replaying the old refresh token is refused.
         let res = app
             .oneshot(post_json(
-                "/api/auth/refresh",
+                "/api/device/auth/refresh",
                 &serde_json::json!({"refreshToken": pair.refresh_token}),
             ))
             .await
@@ -2512,7 +2653,7 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(post_json("/api/auth/device/code", &serde_json::json!({})))
+            .oneshot(post_json("/api/device/auth/code", &serde_json::json!({})))
             .await
             .unwrap();
         let device: DeviceCodeResponse = read_json(res).await;
@@ -2529,7 +2670,7 @@ mod tests {
 
         let deny = Request::builder()
             .method("POST")
-            .uri("/api/auth/device/deny")
+            .uri("/api/device/deny")
             .header("content-type", "application/json")
             .header("cookie", format!("horsie_session={cookie}"))
             .body(Body::from(
@@ -2543,7 +2684,7 @@ mod tests {
 
         let res = app
             .oneshot(post_json(
-                "/api/auth/device/token",
+                "/api/device/auth/token",
                 &serde_json::json!({"deviceCode": device.device_code}),
             ))
             .await
@@ -2568,7 +2709,7 @@ mod tests {
         let cookie = session_cookie(&res);
         let req = Request::builder()
             .method("POST")
-            .uri("/api/auth/device/approve")
+            .uri("/api/device/approve")
             .header("content-type", "application/json")
             .header("cookie", format!("horsie_session={cookie}"))
             .body(Body::from(
@@ -2678,7 +2819,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/auth/tokens",
+                "/api/device/tokens",
                 &serde_json::json!({"label": "laptop"}),
             ))
             .await
@@ -2698,7 +2839,7 @@ mod tests {
         let create = |body: serde_json::Value, cookie: String| {
             Request::builder()
                 .method("POST")
-                .uri("/api/auth/tokens")
+                .uri("/api/device/tokens")
                 .header("content-type", "application/json")
                 .header("cookie", format!("horsie_session={cookie}"))
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -2729,7 +2870,7 @@ mod tests {
         // Listed, without the secret.
         let res = app
             .clone()
-            .oneshot(get_with_cookie("/api/auth/tokens", &cookie))
+            .oneshot(get_with_cookie("/api/device/tokens", &cookie))
             .await
             .unwrap();
         let listed: Vec<AgentTokenView> = read_json(res).await;
@@ -2750,7 +2891,7 @@ mod tests {
         // Revoke, and it stops working.
         let req = Request::builder()
             .method("DELETE")
-            .uri(format!("/api/auth/tokens/{}", created.view.id))
+            .uri(format!("/api/device/tokens/{}", created.view.id))
             .header("cookie", format!("horsie_session={cookie}"))
             .body(Body::empty())
             .unwrap();
@@ -2769,7 +2910,7 @@ mod tests {
         );
 
         let res = app
-            .oneshot(get_with_cookie("/api/auth/tokens", &cookie))
+            .oneshot(get_with_cookie("/api/device/tokens", &cookie))
             .await
             .unwrap();
         let listed: Vec<AgentTokenView> = read_json(res).await;

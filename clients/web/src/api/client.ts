@@ -162,27 +162,27 @@ export const api = {
       request("/auth/password", { method: "POST", body: JSON.stringify(body) }),
 
     approveDevice: (userCode: string): Promise<void> =>
-      request("/auth/device/approve", {
+      request("/device/approve", {
         method: "POST",
         body: JSON.stringify({ userCode } satisfies DeviceApprovalRequest),
       }),
 
     denyDevice: (userCode: string): Promise<void> =>
-      request("/auth/device/deny", {
+      request("/device/deny", {
         method: "POST",
         body: JSON.stringify({ userCode } satisfies DeviceApprovalRequest),
       }),
 
-    listTokens: (): Promise<AgentTokenView[]> => request("/auth/tokens"),
+    listTokens: (): Promise<AgentTokenView[]> => request("/device/tokens"),
 
     createToken: (label: string): Promise<AgentTokenCreated> =>
-      request("/auth/tokens", {
+      request("/device/tokens", {
         method: "POST",
         body: JSON.stringify({ label } satisfies AgentTokenCreateInput),
       }),
 
     deleteToken: (id: string): Promise<void> =>
-      request(`/auth/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
+      request(`/device/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
   },
 
   sessions: {

@@ -184,7 +184,7 @@ export default async function globalSetup(): Promise<void> {
       },
       // The suite drives the API and the UI without signing in. Authentication
       // has its own spec, which brings up its own server with it enabled.
-      auth: { enabled: false },
+      auth: { mode: "off" },
     }),
   );
 

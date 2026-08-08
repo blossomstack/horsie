@@ -108,7 +108,30 @@ The same password is written to `initial-admin-password` in the server's state
 directory, so a rotated log is not a lockout. Change it from
 **Settings → Account**, which deletes that file.
 
-**Turning it off.** On a trusted network — or behind an auth proxy that already
-identifies callers — set `HORSIE_AUTH_ENABLED=false`, or `"auth": {"enabled":
-false}` in `config.json`. The server then behaves exactly as it did before
-authentication existed: anything that can reach the port has full access.
+**Turning it off.** On a trusted network, set `HORSIE_AUTH_MODE=off`, or
+`"auth": {"mode": "off"}` in `config.json`. The server then behaves exactly as
+it did before authentication existed: anything that can reach the port has full
+access, and every caller shares one account.
+
+**Letting something else authenticate.** If you already run SSO, an
+identity-aware proxy, or your own service in front of horsie, use
+`HORSIE_AUTH_MODE=delegated` (or `"auth": {"mode": "delegated"}`) instead. Then:
+
+- horsie serves **no credential routes at all** — nothing under `/api/auth/` or
+  `/api/device/` exists, so your layer is free to serve those paths itself. A
+  browser and the CLI both keep working against whatever it puts there.
+- Every request must arrive with an identity attached, as a
+  `horsie_server::http::auth::DelegatedIdentity` extension set by your own axum
+  middleware wrapping `app(state)`. A request without one is answered `401` —
+  never the shared account, which would silently serve every caller the same
+  data.
+- The account id is yours to choose and horsie stores it as given. It must be
+  stable for the life of the account and **never reused**: recycling one hands
+  a person somebody else's workspace, and nothing here can detect that.
+- No account rows are created. `auth_users` stays empty in this mode; horsie
+  resolves an account from the id alone.
+
+This is a mode for a deployment that embeds the server as a library
+(`horsie_server::boot::boot` builds everything; `http::app` gives you the router
+to wrap). It is not something the stock binary can be pointed at a proxy and
+told to trust.

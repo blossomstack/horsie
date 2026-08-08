@@ -141,6 +141,10 @@ export function AccountSettings() {
     onSuccess: (s) => {
       qc.setQueryData(AUTH_STATUS_KEY, s);
       void qc.invalidateQueries();
+      // Clearing this server's session is only half of it when identity lives
+      // elsewhere: the provider holds one too, and leaving it alive means
+      // "sign out" did not sign anyone out of a shared machine.
+      if (s.external && s.logoutUrl) window.location.assign(s.logoutUrl);
     },
   });
 
@@ -178,51 +182,61 @@ export function AccountSettings() {
             <code>initial-admin-password</code> file from the state directory.
           </p>
         )}
-        <form
-          data-testid="password-form"
-          className="panel max-w-sm space-y-3 p-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            change.mutate();
-          }}
-        >
-          <input
-            className="field"
-            type="password"
-            autoComplete="current-password"
-            data-testid="current-password"
-            placeholder="Current password"
-            value={current}
-            onChange={(e) => setCurrent(e.target.value)}
-          />
-          <input
-            className="field"
-            type="password"
-            autoComplete="new-password"
-            data-testid="new-password"
-            placeholder="New password (8 characters or more)"
-            value={next}
-            onChange={(e) => setNext(e.target.value)}
-          />
-          {error && (
-            <p data-testid="password-error" className="text-xs text-red-ink">
-              {error}
-            </p>
-          )}
-          {change.isSuccess && (
-            <p data-testid="password-saved" className="text-xs text-lamp-ok">
-              Password changed. Other browsers have been signed out.
-            </p>
-          )}
-          <button
-            type="submit"
-            data-testid="password-submit"
-            className="key key-go"
-            disabled={change.isPending || !current || !next}
+        {status.external ? (
+          <p
+            data-testid="account-external"
+            className="panel p-4 text-sm text-dim"
           >
-            Change password
-          </button>
-        </form>
+            Sign-in for this server is managed elsewhere, so there is no
+            password to change here.
+          </p>
+        ) : (
+          <form
+            data-testid="password-form"
+            className="panel max-w-sm space-y-3 p-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              change.mutate();
+            }}
+          >
+            <input
+              className="field"
+              type="password"
+              autoComplete="current-password"
+              data-testid="current-password"
+              placeholder="Current password"
+              value={current}
+              onChange={(e) => setCurrent(e.target.value)}
+            />
+            <input
+              className="field"
+              type="password"
+              autoComplete="new-password"
+              data-testid="new-password"
+              placeholder="New password (8 characters or more)"
+              value={next}
+              onChange={(e) => setNext(e.target.value)}
+            />
+            {error && (
+              <p data-testid="password-error" className="text-xs text-red-ink">
+                {error}
+              </p>
+            )}
+            {change.isSuccess && (
+              <p data-testid="password-saved" className="text-xs text-lamp-ok">
+                Password changed. Other browsers have been signed out.
+              </p>
+            )}
+            <button
+              type="submit"
+              data-testid="password-submit"
+              className="key key-go"
+              disabled={change.isPending || !current || !next}
+            >
+              Change password
+            </button>
+          </form>
+        )}
         <button
           type="button"
           data-testid="logout"

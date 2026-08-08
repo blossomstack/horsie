@@ -89,4 +89,4 @@ cannot run a turn yet. Do these in order:
 > `admin` account, prints a generated password, and writes it to
 > `initial-admin-password` in its state directory. Change it from
 > **Settings → Account**. To run without a password on a trusted network, set
-> `HORSIE_AUTH_ENABLED=false` or `{"auth": {"enabled": false}}` in `config.json`.
+> `HORSIE_AUTH_MODE=off` or `{"auth": {"mode": "off"}}` in `config.json`.

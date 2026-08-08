@@ -35,19 +35,50 @@ fn is_public(path: &str) -> bool {
         || path == "/api/auth/login"
         // How a CLI becomes authenticated in the first place. Approval, which
         // is the actual authorization step, requires the browser cookie.
-        || path == "/api/auth/device/code"
-        || path == "/api/auth/device/token"
-        || path == "/api/auth/refresh"
+        || path == "/api/device/auth/code"
+        || path == "/api/device/auth/token"
+        || path == "/api/device/auth/refresh"
         || path.starts_with("/api/plugin-artifacts/")
 }
 
-/// Resolve a credential into a [`Principal`] and put it in the request
-/// extensions, or answer `401`. With auth disabled every request is
-/// `Principal::Anonymous`, which is today's behaviour exactly.
+/// The account a delegating front layer has already authenticated.
+///
+/// A request extension rather than a header: an extension can only have been
+/// set by code running in this process, whereas a header is whatever the
+/// caller sent unless every deployment remembers to strip it at every edge.
+#[derive(Clone, Debug)]
+pub struct DelegatedIdentity(pub crate::auth::UserId);
+
+/// Resolve a caller into a [`Principal`] and put it in the request extensions,
+/// or answer `401`.
+///
+/// One branch per [`AuthMode`]. The delegated branch is the one to read
+/// carefully: an absent identity is `401`, deliberately, and never a fall back
+/// to the anonymous account. Falling back would mean a single missing or
+/// mis-ordered layer silently serves every caller the *same* account's data,
+/// while every request succeeds and every page renders — the failure would not
+/// announce itself, so it is a test rather than a comment.
 pub async fn require_auth(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
-    if !state.auth.enabled() {
-        req.extensions_mut().insert(Principal::Anonymous);
-        return next.run(req).await;
+    match state.auth.mode() {
+        crate::auth::AuthMode::Off => {
+            req.extensions_mut().insert(Principal::Anonymous);
+            return next.run(req).await;
+        }
+        crate::auth::AuthMode::Delegated => {
+            if is_public(req.uri().path()) {
+                return next.run(req).await;
+            }
+            let Some(id) = req.extensions().get::<DelegatedIdentity>().cloned() else {
+                tracing::warn!(
+                    path = %req.uri().path(),
+                    "a request reached a delegated deployment with no identity attached"
+                );
+                return unauthorized();
+            };
+            req.extensions_mut().insert(Principal::User(id.0));
+            return next.run(req).await;
+        }
+        crate::auth::AuthMode::Password => {}
     }
     if is_public(req.uri().path()) {
         return next.run(req).await;
@@ -129,15 +160,26 @@ fn set_cookie(res: &mut Response, value: &str) {
     }
 }
 
+/// horsie's own answer about itself: it owns the credential in every mode that
+/// serves this route, so nothing is external and there is nowhere else to send
+/// anyone. The three delegated fields exist for a front layer to fill when it
+/// answers this endpoint instead.
+fn local_status(enabled: bool, authenticated: bool, must_change_password: bool) -> AuthStatus {
+    AuthStatus {
+        enabled,
+        authenticated,
+        must_change_password,
+        external: false,
+        login_url: None,
+        logout_url: None,
+    }
+}
+
 /// `GET /api/auth/status` — reachable unauthenticated, since it is what tells
 /// the UI to render a login page.
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Json<AuthStatus> {
     if !state.auth.enabled() {
-        return Json(AuthStatus {
-            enabled: false,
-            authenticated: false,
-            must_change_password: false,
-        });
+        return Json(local_status(false, false, false));
     }
     let authenticated = match credential(&headers) {
         Some(secret) => matches!(state.auth.verify(&secret).await, Ok(Some(_))),
@@ -146,11 +188,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Json<A
     // Only ever disclosed to someone already inside.
     let must_change_password =
         authenticated && state.auth.must_change_password().await.unwrap_or(false);
-    Json(AuthStatus {
-        enabled: true,
-        authenticated,
-        must_change_password,
-    })
+    Json(local_status(true, authenticated, must_change_password))
 }
 
 /// `POST /api/auth/login`
@@ -164,12 +202,7 @@ pub async fn login(
 ) -> Result<Response, Api> {
     let secret = state.auth.login(&body.password).await.map_err(to_api)?;
     let must_change_password = state.auth.must_change_password().await.unwrap_or(false);
-    let mut res = Json(AuthStatus {
-        enabled: true,
-        authenticated: true,
-        must_change_password,
-    })
-    .into_response();
+    let mut res = Json(local_status(true, true, must_change_password)).into_response();
     let secure = if arrived_over_tls(&headers) {
         "; Secure"
     } else {
@@ -189,12 +222,7 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result
     if let Some(secret) = credential(&headers) {
         state.auth.logout(&secret).await.map_err(Api::internal)?;
     }
-    let mut res = Json(AuthStatus {
-        enabled: state.auth.enabled(),
-        authenticated: false,
-        must_change_password: false,
-    })
-    .into_response();
+    let mut res = Json(local_status(state.auth.enabled(), false, false)).into_response();
     set_cookie(
         &mut res,
         &format!("{COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"),
@@ -214,14 +242,10 @@ pub async fn change_password(
         .change_password(&body.current_password, &body.new_password, &active)
         .await
         .map_err(to_api)?;
-    Ok(Json(AuthStatus {
-        enabled: true,
-        authenticated: true,
-        must_change_password: false,
-    }))
+    Ok(Json(local_status(true, true, false)))
 }
 
-/// `POST /api/auth/device/code` — start a device authorization.
+/// `POST /api/device/auth/code` — start a device authorization.
 pub async fn device_code(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -244,7 +268,7 @@ pub async fn device_code(
     }))
 }
 
-/// `POST /api/auth/device/token` — one poll.
+/// `POST /api/device/auth/token` — one poll.
 pub async fn device_token(
     State(state): State<AppState>,
     Json(body): Json<DeviceTokenRequest>,
@@ -255,7 +279,7 @@ pub async fn device_token(
     }
 }
 
-/// `POST /api/auth/refresh` — rotate a refresh token.
+/// `POST /api/device/auth/refresh` — rotate a refresh token.
 pub async fn refresh(
     State(state): State<AppState>,
     Json(body): Json<RefreshRequest>,
@@ -274,7 +298,7 @@ fn pair(t: crate::auth::IssuedTokens) -> TokenPair {
     }
 }
 
-/// `POST /api/auth/device/approve` — cookie-authenticated. The principal comes
+/// `POST /api/device/approve` — cookie-authenticated. The principal comes
 /// from the middleware, so a code is always approved *as* whoever is logged in.
 pub async fn device_approve(
     State(state): State<AppState>,
@@ -289,7 +313,7 @@ pub async fn device_approve(
     answered(approved)
 }
 
-/// `POST /api/auth/device/deny` — cookie-authenticated.
+/// `POST /api/device/deny` — cookie-authenticated.
 pub async fn device_deny(
     State(state): State<AppState>,
     Json(body): Json<DeviceApprovalRequest>,
@@ -337,7 +361,7 @@ fn device_error(e: DeviceError) -> Api {
     )
 }
 
-/// `GET /api/auth/tokens` — the machine tokens this deployment has minted.
+/// `GET /api/device/tokens` — the machine tokens this deployment has minted.
 pub async fn list_agent_tokens(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AgentTokenView>>, Api> {
@@ -349,7 +373,7 @@ pub async fn list_agent_tokens(
     Ok(Json(tokens.into_iter().map(token_view).collect()))
 }
 
-/// `POST /api/auth/tokens` — mint one. The secret comes back exactly once.
+/// `POST /api/device/tokens` — mint one. The secret comes back exactly once.
 pub async fn create_agent_token(
     State(state): State<AppState>,
     axum::Extension(principal): axum::Extension<Principal>,
@@ -369,7 +393,7 @@ pub async fn create_agent_token(
     ))
 }
 
-/// `DELETE /api/auth/tokens/:id` — revoke. Idempotent: revoking an already-dead
+/// `DELETE /api/device/tokens/:id` — revoke. Idempotent: revoking an already-dead
 /// token is the state the caller asked for.
 pub async fn delete_agent_token(
     State(state): State<AppState>,

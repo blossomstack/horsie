@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod auth;
+pub mod boot;
 pub mod config;
 pub mod db;
 pub mod environments;
