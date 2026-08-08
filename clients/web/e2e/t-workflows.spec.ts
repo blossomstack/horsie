@@ -120,7 +120,7 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
     "aria-label",
     new RegExp(`Workflow.*${WORKFLOW}`),
   );
-  await expect(page.getByTestId("config-runtime")).toBeVisible();
+  await expect(page.getByTestId("config-environment")).toBeVisible();
   await expect(page.getByTestId("config-model")).toHaveCount(0);
 
   const input = page.getByTestId("composer-input");

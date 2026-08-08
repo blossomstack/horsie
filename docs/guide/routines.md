@@ -11,27 +11,36 @@ Sweep a repo for stale dependencies once a week.
 ## What a routine is made of
 
 ```
-routine = an agent preset  (model, repos, skills, MCP, memory)
+routine = an agent preset  (model, skills, MCP, memory)
+        + an environment   (a runtime and its repos, or a saved environment)
         + a prompt         (the whole instruction each run gets)
         + a trigger        (manually · repeatedly · once · daily · weekly · monthly · yearly)
 ```
 
-The configuration lives in the **agent preset**, not in the routine. That is
-deliberate: a preset already answers "how does this agent run?", and a routine
-only has to answer "what should it do, and when?". Several routines can share
-one preset, and editing the preset changes all of them at once.
+The agent configuration lives in the **agent preset**, not in the routine. That
+is deliberate: a preset already answers "how does this agent think?", and a
+routine only has to answer "what should it do, where, and when?". Several
+routines can share one preset, and editing the preset changes all of them at
+once.
+
+The environment lives on the routine, because where work happens is a property
+of the run rather than of the agent. It is required — a routine that cannot say
+where it runs has nowhere to run.
 
 ## Creating one
 
 1. **Agents → New agent** — if you don't already have a preset, make one. It
-   holds the model, repositories, skills, MCP servers, memory spaces and
-   thinking effort every run will use. It does not name a runtime: every run
-   uses the server's default vendor, so a routine cannot be stranded on a
-   machine you forgot it was pinned to.
+   holds the model, skills, MCP servers, memory spaces and thinking effort every
+   run will use. It names no runtime and no repos: those come from the routine's
+   environment.
 2. **Routines → New routine.**
    - **Name** — a slug (`nightly-triage`). It is the id: routines are addressed
      by name in the API, and the name cannot be changed later.
    - **Agent** — the preset above.
+   - **Environment** — where every run happens: a connected runtime (with repos,
+     if it provisions its own workspace) or an environment you saved. A run
+     whose environment has gone — an offline runtime, a deleted environment —
+     fails and says so on the routine's page.
    - **Prompt** — everything the run is told. Write it as a complete brief; see
      [Writing the prompt](#writing-the-prompt).
    - **Trigger** — one of:

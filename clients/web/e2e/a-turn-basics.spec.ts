@@ -40,9 +40,9 @@ test("A1: draft creates a session on the local runtime vendor via first message"
     "data-mode",
     "locked",
   );
-  await expect(page.getByTestId("config-runtime")).toHaveAttribute(
+  await expect(page.getByTestId("config-environment")).toHaveAttribute(
     "aria-label",
-    /Runtime — e2e/,
+    /Environment — e2e/,
   );
   expect(id).toMatch(/[0-9a-f-]{8,}/);
 });

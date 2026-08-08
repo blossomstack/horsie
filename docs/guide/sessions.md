@@ -28,11 +28,15 @@ created when you send your first message.
 
 - **Model** *(required)* — one of the models you added in Settings. If you have
   none, the control links you to Settings to add one.
-- **Runtime vendor** — shown only when more than one runtime is active. Otherwise
-  the session uses the default vendor. See [Runtime vendors](runtime-vendors.md).
-- **Repositories** — shown only when the chosen vendor supports provisioning
-  (velos) **and** GitHub is connected. Pick 0..N repos, each with an optional
-  ref. See [GitHub](github.md).
+- **Environment** *(required)* — where the session runs and what it runs against.
+  One list with two sections: the environments you have saved under
+  **Environments**, and the runtimes currently connected. Picking a runtime that
+  provisions its own workspace (velos) reveals a repo checklist in the same
+  popover — 0..N repos, each with an optional ref — provided GitHub is
+  connected. Picking a saved environment shows its runtime and repos read-only:
+  they are part of its definition, so you change them by editing it. See
+  [Environments](environments.md), [Runtime vendors](runtime-vendors.md) and
+  [GitHub](github.md).
 - **Skills** — pick which skill bundles to load. Shown only for provisioning
   vendors; bundles marked as defaults are pre-checked. See
   [Skills & plugins](skills-and-plugins.md).
@@ -55,7 +59,7 @@ Send your first message to create the session and open it.
 - **Tokens** — a running total of tokens used across the session. Note this is
   cumulative usage, not a measure of how full the context window is; open it for
   the context-window meter and the per-turn breakdown.
-- **Header readouts** — the model, runtime, repositories, skills, MCP servers,
+- **Header readouts** — the model, environment, skills, MCP servers,
   and memory spaces this session was launched with. These are fixed for the
   session's lifetime.
 - **Delete** — remove the session.

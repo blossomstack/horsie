@@ -30,6 +30,8 @@ client: `horsie connect` runs this machine as a runtime vendor and
 - **Choose where tools run** — on your own machine (the `local` runtime), or on
   managed containers the server provisions for you (`velos`).
   → [Runtime vendors](runtime-vendors.md)
+- **Save a place to run** — a runtime plus its repos, variables and setup steps,
+  under a name you can pick from anywhere. → [Environments](environments.md)
 
 ## How the pieces fit
 
@@ -78,6 +80,7 @@ cannot run a turn yet. Do these in order:
 | [Self-hosting the server](self-hosting.md) | Stand up the server with Docker; manual/advanced setup |
 | [Runtime vendors](runtime-vendors.md) | Local daemon vs. velos; enabling each; picking one per session |
 | [Sessions](sessions.md) | Creating sessions, the chat view, per-session options |
+| [Environments](environments.md) | Save a runtime + repos + setup under a name; use it anywhere |
 | [GitHub integration](github.md) | Connect a GitHub App; run sessions against repos |
 | [MCP servers](mcp-servers.md) | Connect remote MCP servers; enable them per session |
 | [Skills & plugins](skills-and-plugins.md) | Install skill bundles; select them per session |

@@ -67,8 +67,9 @@ test("N3: the agent form offers skills and MCP, and no runtime", async ({
   await expect(page.getByTestId("agent-edit-page")).toBeVisible();
   await expect(page.getByTestId("config-skills")).toBeVisible();
   await expect(page.getByTestId("config-mcp")).toBeVisible();
-  // A preset names no runtime: where the work runs belongs to the invocation.
-  await expect(page.getByTestId("config-runtime")).toHaveCount(0);
+  // A preset names no environment: where the work runs, and what it runs
+  // against, belong to the invocation.
+  await expect(page.getByTestId("config-environment")).toHaveCount(0);
 
   await page.request.delete(`${appBase}/api/agents/e2e-channels`);
 });
