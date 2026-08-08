@@ -29,6 +29,19 @@ const READER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// error, so it is normalized to success.
 const SIGPIPE_EXIT: i32 = 141;
 
+/// Said whenever [`SIGPIPE_EXIT`] is normalized away.
+///
+/// The normalization is right for `ls | head`, where the producer's status was
+/// never the answer, and silently wrong for `cargo fmt --check | head`, where it
+/// was the whole answer. Without this the two are indistinguishable: a check
+/// that found a diff and a check that found nothing both arrive as exit 0, so
+/// the agent reports clean, pushes, and learns otherwise from CI. Saying that a
+/// status was discarded costs one line and keeps `head` ergonomic.
+const SIGPIPE_NOTE: &str = "[note: a pipeline stage exited on SIGPIPE (an early-closing \
+                            consumer such as `head`), so the upstream command's exit status \
+                            was discarded — this is not a verified success. Re-run without \
+                            the pipe if the status is what you needed.]";
+
 pub async fn exec(working_dir: &Path, env: &EnvOverlay, input: BashInput) -> ToolResult {
     let timeout = Duration::from_secs(input.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     // pipefail: a failing stage anywhere in a pipeline fails the command, so
@@ -91,9 +104,19 @@ pub async fn exec(working_dir: &Path, env: &EnvOverlay, input: BashInput) -> Too
     match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => {
             finish_readers(readers).await;
+            let sigpipe = status.code() == Some(SIGPIPE_EXIT);
+            let mut stderr = snapshot(&stderr_buf);
+            // On stderr rather than stdout: a caller parsing the command's
+            // output should not have to strip our commentary out of it.
+            if sigpipe {
+                if !stderr.is_empty() && !stderr.ends_with('\n') {
+                    stderr.push('\n');
+                }
+                stderr.push_str(SIGPIPE_NOTE);
+            }
             ToolResult::Ok(ToolOutput {
                 stdout: snapshot(&stdout_buf),
-                stderr: snapshot(&stderr_buf),
+                stderr,
                 exit_code: match status.code() {
                     Some(SIGPIPE_EXIT) => 0,
                     Some(code) => code,
@@ -310,7 +333,50 @@ mod tests {
             ToolResult::Ok(o) => {
                 assert_eq!(o.exit_code, 0, "SIGPIPE treated as failure: {}", o.stderr);
                 assert_eq!(o.stdout, "1\n2\n3\n");
+                assert!(o.stderr.contains("SIGPIPE"), "unannotated: {:?}", o.stderr);
             }
+            ToolResult::Err(e) => panic!("{}", e.reason),
+        }
+    }
+
+    /// The reason the note exists: a failing `--check` piped into `head` exits
+    /// 141, normalizes to 0, and is otherwise indistinguishable from a clean
+    /// one. `grep -q` stands in for any command whose status is the answer.
+    #[tokio::test]
+    async fn a_masked_failure_says_its_status_was_discarded() {
+        let dir = TempDir::new().unwrap();
+        let masked = exec(
+            dir.path(),
+            &EnvOverlay::default(),
+            BashInput {
+                // The producer means to exit 1, exactly as a `--check` that
+                // found a diff does — but `head` closes the pipe long before it
+                // gets there, so 141 is what the pipeline reports.
+                command: "bash -c 'for i in $(seq 1 200000); do echo $i; done; exit 1' | head -3"
+                    .to_string(),
+                timeout_secs: Some(30),
+            },
+        )
+        .await;
+        let ToolResult::Ok(masked) = masked else {
+            panic!("expected the normalized success");
+        };
+        assert_eq!(masked.exit_code, 0);
+        assert!(masked.stderr.contains(SIGPIPE_NOTE), "{:?}", masked.stderr);
+
+        // A genuinely clean run must stay silent, or the note is noise on every
+        // pipeline and stops meaning anything.
+        let clean = exec(
+            dir.path(),
+            &EnvOverlay::default(),
+            BashInput {
+                command: "echo needle | grep needle".to_string(),
+                timeout_secs: Some(30),
+            },
+        )
+        .await;
+        match clean {
+            ToolResult::Ok(o) => assert_eq!(o.stderr, "", "note on a clean run"),
             ToolResult::Err(e) => panic!("{}", e.reason),
         }
     }
