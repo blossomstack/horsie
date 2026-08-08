@@ -203,6 +203,61 @@ export function StepForm({
           </button>
         </div>
       </section>
+
+      {/* Limits, last: they are the only fields on this panel a step usually
+          leaves alone, and they were previously carried through the editor
+          without being shown at all — so a budget set through the API was
+          invisible here while quietly surviving a save. */}
+      <section className="panel space-y-3 p-4">
+        <h3 className="legend">Limits</h3>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className="section-title">Max iterations</span>
+            <input
+              className="field mt-1 w-full"
+              type="number"
+              min={1}
+              value={step.maxIterations ?? ""}
+              placeholder="unlimited"
+              onChange={(e) =>
+                onChange({ maxIterations: numberOrUndefined(e.target.value) })
+              }
+              data-testid="step-max-iterations"
+            />
+          </label>
+          <label className="block">
+            <span className="section-title">Retries</span>
+            <input
+              className="field mt-1 w-full"
+              type="number"
+              min={0}
+              value={step.maxRetries ?? ""}
+              placeholder="0"
+              onChange={(e) =>
+                onChange({ maxRetries: numberOrUndefined(e.target.value) })
+              }
+              data-testid="step-max-retries"
+            />
+          </label>
+        </div>
+        <p className="text-xs text-faint">
+          How many turns this step may take before it fails, and how many times a
+          transient provider error is retried within it. Leave both blank for the
+          defaults.
+        </p>
+      </section>
     </div>
   );
+}
+
+/** An empty field means "unset", which is not the same as zero — so it has to
+ * become `undefined` rather than `Number("")`, which is `0`.
+ *
+ * Exported for its own test: `0` is a *meaningful* value for retries, so the
+ * empty case cannot be folded into a falsy check. */
+export function numberOrUndefined(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : undefined;
 }

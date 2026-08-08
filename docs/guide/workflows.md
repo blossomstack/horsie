@@ -24,6 +24,10 @@ per step — and shows whichever you select on the right. Each step needs:
   fields you declare here.
 - **Goes to** — where to hand off, and on what condition.
 
+**Limits** are optional, at the bottom of the step: how many turns the step may
+take before it fails, and how many times a transient provider error is retried
+within it. Leave them blank unless a step has earned an opinion.
+
 Press **Visualize** to swap the panel for the graph, which redraws as you
 type; choosing a node there opens that step. Steps can be dragged into another
 order, which changes how the list reads and nothing about how the run
