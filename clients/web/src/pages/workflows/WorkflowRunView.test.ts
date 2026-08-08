@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowRunGraph } from "../../api/types";
-import { formatOutput, parkedStep } from "./WorkflowRunView";
+import { formatOutput, parkedStep, resumePoint } from "./WorkflowRunView";
 
 /** A two-node run whose second node holds the execution at log index 1. */
 function graph(over: Partial<WorkflowRunGraph> = {}): WorkflowRunGraph {
@@ -55,6 +55,32 @@ describe("parkedStep", () => {
    * reads raced; the banner must not claim a step then. */
   it("is silent when nothing is in flight", () => {
     expect(parkedStep(graph({ current: undefined }))).toBeUndefined();
+  });
+});
+
+describe("resumePoint", () => {
+  /** A suspended run moves only by a retry, so the page has to name the step to
+   * retry. This state became reachable at all once interruption stopped leaving
+   * runs wedged as `Running`. */
+  it("names the interrupted step of a suspended run", () => {
+    const g = graph({ status: { type: "Suspended", value: {} } });
+    g.nodes[1]!.runs[0]!.status = { type: "Cancelled", value: {} };
+    expect(resumePoint(g)).toEqual({ step: "fix", index: 1 });
+  });
+
+  /** A run can hold several cancelled attempts — a retry cancels the one it
+   * supersedes — and only the newest is where it stopped. */
+  it("takes the newest cancelled execution", () => {
+    const g = graph({ status: { type: "Suspended", value: {} } });
+    g.nodes[0]!.runs[0]!.status = { type: "Cancelled", value: {} };
+    g.nodes[1]!.runs[0]!.status = { type: "Cancelled", value: {} };
+    expect(resumePoint(g)?.index).toBe(1);
+  });
+
+  it("is silent for every other status", () => {
+    for (const type of ["Running", "AwaitingInput", "Finished", "Failed"] as const) {
+      expect(resumePoint(graph({ status: { type, value: {} } }))).toBeUndefined();
+    }
   });
 });
 

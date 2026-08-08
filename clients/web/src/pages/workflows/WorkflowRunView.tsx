@@ -1,4 +1,10 @@
-import { MessageCircleQuestion, RotateCcw, Square, Trash2 } from "lucide-react";
+import {
+  MessageCircleQuestion,
+  PauseCircle,
+  RotateCcw,
+  Square,
+  Trash2,
+} from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { StepRunView, WorkflowRunGraph } from "../../api/types";
@@ -39,6 +45,35 @@ export function parkedStep(
     if (run) return { step: node.step, agentId: run.agentId };
   }
   return undefined;
+}
+
+/**
+ * Where a suspended run stopped, so the page can offer to resume it.
+ *
+ * A run is suspended when a step was interrupted — by Interrupt, or by the server
+ * restarting under it — and it is deliberately not resumed on its own, because
+ * how far that step got is unknowable. A retry is the only thing that moves it,
+ * so the page has to say so: this state became reachable at all only once
+ * interruption stopped leaving runs wedged as `Running`, and "Suspended" with no
+ * explanation is a dead end.
+ *
+ * The cancelled execution is the last one in the log, and the retry names it by
+ * index.
+ */
+export function resumePoint(
+  graph: WorkflowRunGraph,
+): { step: string; index: number } | undefined {
+  if (graph.status.type !== "Suspended") return undefined;
+  let best: { step: string; index: number } | undefined;
+  for (const node of graph.nodes) {
+    for (const run of node.runs) {
+      if (run.status.type !== "Cancelled") continue;
+      if (best === undefined || run.index > best.index) {
+        best = { step: node.step, index: run.index };
+      }
+    }
+  }
+  return best;
 }
 
 /** The step's lamp: the latest execution decides how the node reads. */
@@ -109,6 +144,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
   const selectedNode = graph.nodes.find((n) => n.step === selected);
   const live = !isTerminal(graph);
   const parked = parkedStep(graph);
+  const resume = resumePoint(graph);
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-run-view">
@@ -172,6 +208,29 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
             data-testid="open-parked-step"
           >
             Answer it
+          </button>
+        </div>
+      )}
+
+      {resume && (
+        <div
+          className="flex items-center gap-3 border-b border-orange bg-orange-quiet px-6 py-2 text-sm text-orange-ink"
+          data-testid="run-suspended"
+        >
+          <PauseCircle size={15} className="shrink-0" />
+          <span>
+            <strong className="font-medium">{resume.step}</strong> was
+            interrupted. Nothing runs until you retry it — the workspace is not
+            rolled back, so it starts from whatever the last attempt left.
+          </span>
+          <button
+            className="key key-go ml-auto !px-2 !py-1 text-xs"
+            onClick={() => retry.mutate(resume.index)}
+            disabled={retry.isPending}
+            data-testid="resume-run"
+          >
+            <RotateCcw size={12} />
+            Retry {resume.step}
           </button>
         </div>
       )}

@@ -130,9 +130,11 @@ so a step may ask. The run's page says which step is waiting; **Answer it**
 opens that step, where the question and the answer box are. Answering resumes
 the step and the run carries on from there.
 
-**The server restarted mid-run.** The step that was running is marked
-interrupted and the run is suspended rather than resumed. A retry is a
-decision for you, because nobody knows how far the interrupted step got.
+**You interrupted it, or the server restarted mid-run.** The step that was
+running is marked cancelled and the run goes **suspended** rather than resuming
+by itself — nobody knows how far that step got, so continuing is your decision.
+The run's page says which step stopped and offers to retry it; nothing else moves
+a suspended run.
 
 ### Retrying is not a rollback
 
