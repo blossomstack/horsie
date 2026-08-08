@@ -127,6 +127,22 @@ today a single invalid row rejects the entire save including the valid rows.
 - **A concurrency test** is the point of the whole change: two concurrent upserts of
   *different* providers must both survive. Under `PUT /api/config` one would lose.
 
+## Delivery
+
+Two PRs, because the web Settings page is 952 lines and rewiring it is the bulk of the
+work:
+
+1. **This one** adds the per-resource routes and store operations. No schema change and
+   no codegen, because `ProviderInput`, `ModelInput`, `ProviderView` and `ModelView`
+   already exist. `PUT /api/config` survives here only because the web UI still calls
+   it.
+2. **The follow-up** rewires `ModelsSettings.tsx`, `RuntimesSettings.tsx` and
+   `useSettings.ts` onto the new routes, moves the ChatGPT sign-in routes, adds
+   `PUT /api/config/default-vendor`, and deletes `PUT /api/config` and `SettingsUpdate`.
+
+The end state is the one described above; the split is delivery order, not a compat
+shim.
+
 ## Out of Scope
 
 - Renaming a provider or model. Delete and recreate; the models that reference the old
