@@ -1,7 +1,8 @@
 
 import { AskLifecycle } from './askLifecycle';
-import { ProvisioningLifecycle } from './provisioningLifecycle';
+import { PreparingLifecycle } from './preparingLifecycle';
 import { QueuedLifecycle } from './queuedLifecycle';
+import { RuntimeLifecycle } from './runtimeLifecycle';
 import { SessionFailedLifecycle } from './sessionFailedLifecycle';
 import { StepLifecycle } from './stepLifecycle';
 import { SubAgentLifecycle } from './subAgentLifecycle';
@@ -17,7 +18,8 @@ import { TurnEndedLifecycle } from './turnEndedLifecycle';
  * against this one. Flow is one-directional: session to agent, never back.
  */
 export type LifecycleEvent =
-  | { kind: "Provisioning"; value: ProvisioningLifecycle }
+  | { kind: "Runtime"; value: RuntimeLifecycle }
+  | { kind: "Preparing"; value: PreparingLifecycle }
   | { kind: "MessageQueued"; value: QueuedLifecycle }
   | { kind: "TurnBegan"; value: TurnBeganLifecycle }
   | { kind: "TurnEnded"; value: TurnEndedLifecycle }

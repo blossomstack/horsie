@@ -145,6 +145,7 @@ impl RoutineRunner {
 
         self.supervisor
             .ask(|reply| SessionSupervisorCommand::UserMessage {
+                agent_id: None,
                 id: id.clone(),
                 text: routine.prompt.clone(),
                 reply,

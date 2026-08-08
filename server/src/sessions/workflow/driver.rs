@@ -284,7 +284,7 @@ mod tests {
             }
             AgentAction::Finish { output } => run.apply_finished(output.clone()),
             AgentAction::Fail { error } => run.apply_failed(error.clone()),
-            AgentAction::StartTurn(_) => panic!("a run never starts a plain turn"),
+            AgentAction::Deliver(_) => panic!("a run's step decisions never deliver a result"),
         }
         action
     }

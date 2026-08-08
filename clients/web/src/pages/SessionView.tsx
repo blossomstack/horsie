@@ -138,11 +138,10 @@ export function SessionView() {
   const tasks = stream.tasks;
   const tasksDone = tasks.filter((t) => t.status === TaskStatus.Completed).length;
 
-  // The server names what is answerable: live from the status frame, and from
-  // the session detail for a page opened on an already-parked session. Nothing
-  // is inferred from the transcript, so a question stays answerable whether or
-  // not the session happens to be loaded.
-  const pendingAsks = stream.livePendingAsks ?? detail?.pendingAsks ?? [];
+  // Folded from the agent's own log, which is where the agent that asked
+  // records its questions — the same connection the transcript arrives on, so
+  // there is no second source that could disagree about what is answerable.
+  const pendingAsks = stream.livePendingAsks ?? [];
   const answerableIds = useMemo(
     () => pendingAsks.map((a) => a.toolCallId).filter((x): x is string => !!x),
     [pendingAsks],

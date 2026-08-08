@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentLogBody, AgentLogEntry,
-    AgentResult, ContentPart, EventSink, EventSinkError, HandoffCall, LifecycleEvent, LlmProvider,
-    Message, Role, Toolbox, Usage,
+    AgentResult, AskLifecycle, ContentPart, EventSink, EventSinkError, HandoffCall, LifecycleEvent,
+    LlmProvider, Message, QueuedLifecycle, Role, Toolbox, TurnBeganLifecycle, Usage,
 };
 use horsie_models::now_ms;
 use serde::{Deserialize, Serialize};
@@ -86,22 +86,30 @@ impl AgentParams {
 
 /// Commands accepted by an [`AgentActor`].
 pub enum AgentCommand {
-    /// Start a turn. `results` are tool results to record first — the answers to
-    /// a park, or the results an abandoned park still owes the wire — and
-    /// `message` is the user message that starts it.
+    /// Something addressed to this agent: a person's message, a subagent's
+    /// report, a timer firing, a `Stop` hook's continuation.
     ///
-    /// With no `message`, the results themselves are the turn's input, which is
-    /// how an answered park resumes. With no `results`, it is an ordinary turn.
-    /// At least one of the three must be present.
-    ///
-    /// `subagent_results` ride the user message alongside `message` as parts of
-    /// their own, so a reader can tell a subagent's report from what the person
-    /// typed. A turn carrying only these has no `message` at all.
-    Resume {
-        results: Vec<horsie_models::agent::ToolResultInput>,
-        message: Option<String>,
-        subagent_results: Vec<horsie_models::agent::SubAgentResultPart>,
+    /// Durable *before* anything is done with it, and `ack` reports the write —
+    /// so a caller that must know an accepted message will survive a crash
+    /// (`POST /sessions/:id/messages`) can wait for that rather than trust a
+    /// mailbox. Whether it becomes a turn is this agent's own decision, taken
+    /// immediately afterwards; see [`crate::queued_turn`].
+    Enqueue {
+        item: crate::Incoming,
+        ack: Option<tokio::sync::oneshot::Sender<Result<(), horsie_actor::JournalError>>>,
     },
+    /// Answer every question this agent is parked on, at once.
+    ///
+    /// All or nothing: a set that does not cover them exactly is refused and
+    /// nothing is journaled. A half-answered park could not resume anyway — the
+    /// next provider call would carry a `tool_use` with no result.
+    Answer {
+        answers: Vec<crate::AskAnswer>,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::AnswerError>>,
+    },
+    /// Internal: reconsider whether the queue may start a turn now. Sent after
+    /// anything that could have changed the answer.
+    Drain,
     /// Cancel an in-flight run. `ack`, if given, fires once the run has actually
     /// terminated — immediately when none is in flight — so a caller that must
     /// know this incarnation will write nothing more (e.g. a session about to
@@ -209,12 +217,11 @@ pub enum AgentCommand {
 
 /// A turn whose pre-start hooks have run, on its way back to the actor.
 ///
-/// Carries the original `Resume` payload untouched: the prepare step decides
-/// nothing about the turn itself, it only learns what the hooks said.
+/// Carries the drained turn untouched apart from a rewritten prompt: the prepare
+/// step decides nothing about what the turn consumes, it only learns what the
+/// hooks said.
 pub struct PreparedStart {
-    pub results: Vec<horsie_models::agent::ToolResultInput>,
-    pub message: Option<String>,
-    pub subagent_results: Vec<horsie_models::agent::SubAgentResultPart>,
+    pub turn: crate::Turn,
     /// Records to journal before the turn snapshots its history — which is the
     /// whole reason this round-trip exists. Empty when no hook fired.
     pub records: Vec<horsie_models::hooks::HookRecord>,
@@ -369,6 +376,32 @@ pub enum AgentDomainEvent {
         event: LifecycleEvent,
         at_ms: u64,
     },
+    /// Something was accepted into this agent's queue.
+    ///
+    /// Journaled before anything is done with it, which is what makes an
+    /// accepted message a promise: it survives a crash and is still owed an
+    /// answer.
+    Received {
+        item: crate::Incoming,
+        at_ms: u64,
+    },
+    /// A turn began, consuming these queue items — and, if the agent was parked,
+    /// answering these questions. One event so a crash anywhere in the window
+    /// replays to the same place.
+    TurnBegan {
+        consumed: Vec<String>,
+        /// Every question this turn *answered*. Empty when the turn abandoned
+        /// them instead, which is what a plain message does.
+        answered: Vec<String>,
+        at_ms: u64,
+    },
+    /// The agent parked on these questions. One event for the whole park rather
+    /// than one per question: they are asked together and answered together, so
+    /// there is never a moment when only some of them are pending.
+    AskRecorded {
+        asks: Vec<crate::AskedQuestion>,
+        at_ms: u64,
+    },
 }
 
 /// The conversation history reconstructed by folding [`AgentDomainEvent`]s, plus
@@ -402,6 +435,20 @@ pub struct AgentState {
     /// log for context management stays possible without renumbering.
     #[serde(default)]
     pub next_seq: u64,
+    /// Accepted-but-undelivered things addressed to this agent, oldest first.
+    ///
+    /// The queue lives here rather than on the session because a message is
+    /// addressed to an *agent*: once one can name a subagent or a workflow step,
+    /// a session-level queue has nowhere to put it. Durable for the same reason
+    /// timers are — an accepted message is a promise, and a crash must not
+    /// forget it.
+    #[serde(default)]
+    pub inbox: Vec<crate::Incoming>,
+    /// Every question this agent is parked on, oldest first. A turn may ask
+    /// several at once, and the run cannot resume until all of them have a
+    /// result.
+    #[serde(default)]
+    pub asks: Vec<crate::AskedQuestion>,
     /// Active timers — durable so they re-arm on recovery and back `list`/`cancel`.
     #[serde(default)]
     pub timers: Vec<crate::timers::TimerRecord>,
@@ -570,6 +617,19 @@ impl AgentState {
             body,
         });
         self.next_seq += 1;
+    }
+
+    /// Whether this agent has ever spoken to a provider.
+    ///
+    /// Not `log.is_empty()`: a queued message and a provisioning stage both
+    /// append entries before any run, so an agent with a full log can still be
+    /// starting up for the first time — which is what `SessionStart` reports as
+    /// `startup` rather than `resume`.
+    #[must_use]
+    pub fn has_run(&self) -> bool {
+        self.log
+            .iter()
+            .any(|e| matches!(e.body, AgentLogBody::Llm(_)))
     }
 
     /// The seq of the newest entry, or `None` for an empty log. The tail a
@@ -789,8 +849,14 @@ pub struct AgentActor {
     /// Id of the next run to start. Monotonic for this actor's loaded lifetime,
     /// which is all the fence needs — a report can only be stale within it.
     next_run_id: u64,
-    /// A timer fired while a run was in flight; consume it when the run parks.
-    pending_wake: bool,
+    /// Whether this agent's session has a runtime to run on.
+    ///
+    /// Seeded at spawn and moved by the `Runtime` lifecycle records the owner
+    /// already sends — so nothing carries this fact but the log entry a reader
+    /// sees anyway. In-memory on purpose: an agent that does not exist cannot
+    /// be holding a turn, and one that is respawned is built with the answer
+    /// that was true at the time.
+    ready: bool,
     /// A prepare step is in flight. Gates a second `Resume` exactly as `running`
     /// does: between `Resume` and `StartPrepared` no run exists yet, so
     /// `running` alone would let two turns through and land two runs on one
@@ -828,6 +894,7 @@ pub struct AgentActor {
 impl AgentActor {
     pub fn new(ctx: AgentRuntimeContext, params: AgentParams) -> Self {
         let position = ctx.position.clone();
+        let ready = ctx.ready;
         Self {
             ctx,
             params,
@@ -835,7 +902,7 @@ impl AgentActor {
             observer: None,
             events_since_snapshot: 0,
             next_run_id: 0,
-            pending_wake: false,
+            ready,
             preparing: false,
             start_hook_fired: false,
             cancel_acks: Vec::new(),
@@ -873,12 +940,28 @@ impl AgentActor {
     /// Without this an agent that only ever converses — no ask, no park, no
     /// cancel — would never snapshot, and every recovery would stay a full
     /// replay of the whole transcript.
-    fn snapshot_if_due(&mut self) -> CommandEffect<AgentDomainEvent> {
+    /// Counting requests rather than confirmed writes means a failed snapshot
+    /// simply waits another interval, which is the right instinct for an
+    /// optimization: retrying hard against a failing journal helps nobody.
+    fn snapshot_due(&mut self) -> bool {
         if self.events_since_snapshot < SNAPSHOT_EVERY_EVENTS {
-            return CommandEffect::none();
+            return false;
         }
         self.events_since_snapshot = 0;
-        CommandEffect::snapshot()
+        true
+    }
+
+    /// Persist `events`, taking a snapshot too if enough have accrued. The
+    /// shape of every turn boundary that also ends a run.
+    fn persist_maybe_snapshot(
+        &mut self,
+        events: Vec<AgentDomainEvent>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let effect = CommandEffect::persist(events);
+        match self.snapshot_due() {
+            true => effect.and_snapshot(),
+            false => effect,
+        }
     }
 
     /// The journal identity of an agent session: kind `"agent"`, id = the session
@@ -897,19 +980,123 @@ impl AgentActor {
     /// every later turn (#61 item 3). Callers gate on session status, but that is a
     /// different actor's state; this is the invariant enforced where it lives.
     ///
-    /// `preparing` is part of it because a turn between `Resume` and
+    /// `preparing` is part of it because a turn between the drain decision and
     /// `StartPrepared` has no run yet: gating on `running` alone would let a
-    /// second `Resume` straight through into the same collision.
-    fn reject_if_busy(&self, command: &str) -> Option<CommandEffect<AgentDomainEvent>> {
-        if self.running.is_none() && !self.preparing {
-            return None;
+    /// second drain straight through into the same collision.
+    fn busy(&self) -> bool {
+        self.running.is_some() || self.preparing
+    }
+
+    /// Reconsider whether the queue may start a turn, and start it if so.
+    ///
+    /// Called after everything that could have changed the answer: something
+    /// arriving, a turn ending, a park, a readiness flip. Deliberately silent
+    /// when it decides against — finding a run already in flight is the normal
+    /// case, not a fault, and the queue simply waits for the next boundary.
+    ///
+    /// `state` must be the state as the caller's own events leave it, not the
+    /// pre-command snapshot: an agent that has just journaled `AskRecorded` is
+    /// parked as far as this decision is concerned, and asking against the
+    /// snapshot would drain a report the park is supposed to hold.
+    async fn try_drain(
+        &mut self,
+        state: &AgentState,
+        ctx: &ActorContext<Self>,
+    ) -> Vec<AgentDomainEvent> {
+        if self.busy() || !self.ready {
+            return Vec::new();
         }
-        tracing::warn!(
-            command,
-            preparing = self.preparing,
-            "refusing to start a turn while one is already in flight"
-        );
-        Some(CommandEffect::none())
+        match crate::queued_turn(&state.inbox, &state.asks) {
+            Some(turn) => self.begin_turn(turn, state, ctx).await,
+            None => Vec::new(),
+        }
+    }
+
+    /// Perform one turn decision: record what it consumes and answers, tell the
+    /// owner the turn began, then run its pre-start hooks before the run itself.
+    ///
+    /// `TurnBegan` is journaled here, at the decision, rather than after the
+    /// hooks: a crash in the hook window replays with the queue still owed,
+    /// which redelivers the message — the same at-least-once the session's
+    /// tell-then-persist has always had, and the direction to err in.
+    async fn begin_turn(
+        &mut self,
+        turn: crate::Turn,
+        state: &AgentState,
+        ctx: &ActorContext<Self>,
+    ) -> Vec<AgentDomainEvent> {
+        let mut events = vec![AgentDomainEvent::TurnBegan {
+            consumed: turn.consumed.clone(),
+            answered: turn.answered.clone(),
+            at_ms: now_ms(),
+        }];
+        // The owner no longer learns a turn began by being the thing that began
+        // it, so it is told. Before the work, not after: this is what moves a
+        // session to `Running`.
+        self.ctx
+            .parent
+            .deliver(AgentOutcome::Started {
+                session_id: self.ctx.session_id,
+            })
+            .await;
+
+        let start = crate::StartTurn {
+            // An agent that has never spoken to a provider is starting up;
+            // anything else was folded from a journal. Read off the *LLM*
+            // entries rather than the log, which a queued message alone already
+            // appends to.
+            start_source: (!self.start_hook_fired).then_some(match state.has_run() {
+                false => horsie_models::runtime::SessionStartSource::Startup,
+                true => horsie_models::runtime::SessionStartSource::Resume,
+            }),
+            prompt: turn.message.clone(),
+        };
+        let nothing_due = start.start_source.is_none() && start.prompt.is_none();
+        if nothing_due || !self.ctx.context_provider.has_start_hooks() {
+            events.extend(
+                self.start_prepared(
+                    PreparedStart {
+                        turn,
+                        records: Vec::new(),
+                        abandon: None,
+                    },
+                    state,
+                    ctx,
+                )
+                .await,
+            );
+            return events;
+        }
+        self.preparing = true;
+        // Set when the prepare task is *spawned*, not when it returns: a
+        // failed prepare must not re-fire the start hook on the next turn,
+        // which would inject its context a second time.
+        self.start_hook_fired = true;
+        let provider = self.ctx.context_provider.clone();
+        let self_ref = ctx.self_ref();
+        tokio::spawn(async move {
+            let prepared = match provider.start_hooks(start).await {
+                Ok(prep) => PreparedStart {
+                    abandon: crate::start_blocked(&prep.records).map(AbandonedStart::Blocked),
+                    records: prep.records,
+                    // A rewritten prompt replaces the turn's input; an absent
+                    // one leaves what the user actually sent.
+                    turn: crate::Turn {
+                        message: prep.message.or(turn.message),
+                        ..turn
+                    },
+                },
+                Err(error) => PreparedStart {
+                    turn,
+                    records: Vec::new(),
+                    abandon: Some(AbandonedStart::Failed(error)),
+                },
+            };
+            let _ = self_ref
+                .tell(AgentCommand::StartPrepared(Box::new(prepared)))
+                .await;
+        });
+        events
     }
 
     /// Journal a prepared turn's hook records, then start it — or abandon it.
@@ -923,14 +1110,18 @@ impl AgentActor {
         prepared: PreparedStart,
         state: &AgentState,
         ctx: &ActorContext<Self>,
-    ) -> CommandEffect<AgentDomainEvent> {
+    ) -> Vec<AgentDomainEvent> {
         let PreparedStart {
-            results,
-            message,
-            subagent_results,
+            turn,
             records,
             abandon,
         } = prepared;
+        let crate::Turn {
+            message,
+            subagent_results,
+            results,
+            ..
+        } = turn;
 
         let at_ms = now_ms();
         let mut events = Vec::new();
@@ -962,7 +1153,7 @@ impl AgentActor {
                 .await;
             // The records are still journaled: a user whose prompt was refused
             // must be able to see which plugin refused it and why.
-            return CommandEffect::persist(events);
+            return events;
         }
 
         // The ids answered here are not dangling, whatever the recovered
@@ -1000,7 +1191,7 @@ impl AgentActor {
             message: agent_input.to_message(now_ms()),
         });
         self.start_run(agent_input, ctx, history);
-        CommandEffect::persist(events)
+        events
     }
 
     fn start_run(&mut self, input: AgentInput, ctx: &ActorContext<Self>, history: Vec<Message>) {
@@ -1188,7 +1379,11 @@ impl AgentActor {
                 // Resident: the agent goes idle, it does not die. Its whole
                 // transcript stays in memory for the next turn and for history
                 // reads, and nothing has to replay a journal to answer either.
-                self.snapshot_if_due()
+                //
+                // A turn ending is a boundary, so whatever queued while it ran
+                // starts the next one.
+                let drained = self.try_drain(state, ctx).await;
+                self.persist_maybe_snapshot(drained)
             }
             RunOutcome::Concluded { calls } => {
                 match self.interpret(calls) {
@@ -1202,7 +1397,8 @@ impl AgentActor {
                         parent
                             .deliver(AgentOutcome::Concluded { session_id, output })
                             .await;
-                        self.snapshot_if_due()
+                        let drained = self.try_drain(state, ctx).await;
+                        self.persist_maybe_snapshot(drained)
                     }
                     Conclusion::Ask(asks) => {
                         parent
@@ -1212,14 +1408,28 @@ impl AgentActor {
                             })
                             .await;
                         parent
-                            .deliver(AgentOutcome::Asked { session_id, asks })
+                            .deliver(AgentOutcome::Asked {
+                                session_id,
+                                asks: asks.clone(),
+                            })
                             .await;
-                        // Stay alive — InjectToolResult resumes this same session.
+                        // Recorded before the drain is decided, and the drain is
+                        // asked against the folded result: an ask is a turn
+                        // boundary, but a parked agent only drains for a person
+                        // changing their mind — a report queued behind the
+                        // question waits for it to be answered.
+                        let recorded = AgentDomainEvent::AskRecorded {
+                            asks,
+                            at_ms: now_ms(),
+                        };
+                        let folded = Self::apply_event(state.clone(), recorded.clone());
+                        let mut events = vec![recorded];
+                        events.extend(self.try_drain(&folded, ctx).await);
                         // Snapshot to compact the incrementally-persisted log.
                         // Unconditional now that no cursor is a journal position:
                         // history and streams read state, so compaction is invisible.
                         self.events_since_snapshot = 0;
-                        CommandEffect::snapshot()
+                        CommandEffect::persist(events).and_snapshot()
                     }
                     Conclusion::Park => self.park_or_resume(state, ctx, session_id, parent).await,
                 }
@@ -1239,6 +1449,13 @@ impl AgentActor {
                 events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
                 // Snapshot to compact the incrementally-persisted log on cancel.
                 self.events_since_snapshot = 0;
+                // A stop cancels the turn, not the promise: anything queued
+                // while the cancelled turn ran starts the next one.
+                let folded = events
+                    .iter()
+                    .cloned()
+                    .fold(state.clone(), Self::apply_event);
+                events.extend(self.try_drain(&folded, ctx).await);
                 CommandEffect::persist(events).and_snapshot()
             }
             RunOutcome::Failed { error, recoverable } => {
@@ -1303,9 +1520,14 @@ impl AgentActor {
         )
     }
 
-    /// Decide what a `park` conclusion means: an illegal park (no timers fails the
-    /// run), an immediate resume (a timer fired during the run), or a real park
-    /// (stay alive, status → Parked).
+    /// Decide what a `park` conclusion means: an illegal park (no timers fails
+    /// the run), an immediate resume (something is already queued), or a real
+    /// park (stay alive, status → Parked).
+    ///
+    /// The immediate-resume case used to need a `pending_wake` flag, because a
+    /// timer that fired mid-run had nowhere to wait. It has a queue now, so this
+    /// is the ordinary drain and the wake carries the timer's own message rather
+    /// than a synthetic "re-check now".
     async fn park_or_resume(
         &mut self,
         state: &AgentState,
@@ -1325,27 +1547,28 @@ impl AgentActor {
                 .await;
             return CommandEffect::stop();
         }
-        if self.pending_wake {
-            // A timer fired mid-run; go straight back to work instead of parking.
-            self.pending_wake = false;
-            let wake = AgentInput::user_message(
-                new_message_id(),
-                "A timer fired while you were busy — re-check now.".to_string(),
-            );
-            let input_event = AgentDomainEvent::InputMessage {
-                message: wake.to_message(now_ms()),
-            };
-            self.start_run(wake, ctx, state.prompt_messages());
-            return CommandEffect::persist(vec![input_event]);
+        let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
+        let folded = Self::apply_event(state.clone(), parked.clone());
+        let mut events = vec![parked];
+        let drained = self.try_drain(&folded, ctx).await;
+        if !drained.is_empty() {
+            // Something was already waiting — a timer that fired while the run
+            // was busy, most likely. Go straight back to work instead of
+            // parking on a wake that has already happened.
+            events.extend(drained);
+            return CommandEffect::persist(events);
         }
         parent.deliver(AgentOutcome::Parked { session_id }).await;
         self.events_since_snapshot = 0;
-        CommandEffect::persist(vec![AgentDomainEvent::Parked { at_ms: now_ms() }]).and_snapshot()
+        CommandEffect::persist(events).and_snapshot()
     }
 
-    /// A timer's sleep elapsed. Re-arm a recurring timer, then resume the agent with
-    /// a wake message — unless a run is already in flight, in which case coalesce the
-    /// wake and let the run consume it when it parks.
+    /// A timer's sleep elapsed. Re-arm a recurring timer, then queue the wake.
+    ///
+    /// Queued rather than run: a wake is one more thing addressed to this agent,
+    /// and it waits in the same place everything else does. That is what makes a
+    /// timer firing mid-run harmless — the run finishes, the boundary drains,
+    /// and no flag has to remember anything.
     async fn handle_timer_fired(
         &mut self,
         id: crate::timers::TimerId,
@@ -1371,26 +1594,52 @@ impl AgentActor {
             }
             crate::timers::TimerKind::OneShot => None,
         };
+        // Derived from the timer and its fire count, never generated: the fold
+        // must reproduce the same id on replay, which a uuid could not.
+        let received = AgentDomainEvent::Received {
+            item: crate::Incoming::Timer {
+                id: format!("{id}:{display_count}"),
+                message: record.wake_message(display_count),
+            },
+            at_ms: now,
+        };
         let fired = AgentDomainEvent::TimerFired {
             id,
             next_fire_at_unix_ms,
             at_ms: now,
         };
+        let mut events = vec![fired, received];
+        let folded = events
+            .iter()
+            .cloned()
+            .fold(state.clone(), Self::apply_event);
+        events.extend(self.try_drain(&folded, ctx).await);
+        CommandEffect::persist(events)
+    }
+}
 
-        if self.running.is_some() {
-            // A run is in flight: record the fire (re-arm) and remember to wake when
-            // the run parks. Multiple fires coalesce into one wake.
-            self.pending_wake = true;
-            return CommandEffect::persist(vec![fired]);
-        }
-
-        // Idle/parked: start a fresh run with the wake message.
-        let wake = AgentInput::user_message(new_message_id(), record.wake_message(display_count));
-        let input_event = AgentDomainEvent::InputMessage {
-            message: wake.to_message(now_ms()),
-        };
-        self.start_run(wake, ctx, state.prompt_messages());
-        CommandEffect::persist(vec![fired, input_event])
+/// What a lifecycle record says about this agent's runtime, if anything.
+///
+/// Exhaustive on purpose: a variant added later has to state whether it bears
+/// on whether this agent may run, rather than silently answering "no".
+fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
+    match event {
+        LifecycleEvent::Runtime(runtime) => Some(match runtime.status {
+            horsie_agentcore::RuntimeStatus::Ready(_) => true,
+            horsie_agentcore::RuntimeStatus::Acquiring(_)
+            | horsie_agentcore::RuntimeStatus::Failed(_) => false,
+        }),
+        // Terminal: the runtime is gone for good and no later message brings it
+        // back, so this agent must not start another turn.
+        LifecycleEvent::SessionFailed(_) => Some(false),
+        LifecycleEvent::Preparing(_)
+        | LifecycleEvent::MessageQueued(_)
+        | LifecycleEvent::TurnBegan(_)
+        | LifecycleEvent::TurnEnded(_)
+        | LifecycleEvent::AskRecorded(_)
+        | LifecycleEvent::SubAgent(_)
+        | LifecycleEvent::Step(_)
+        | LifecycleEvent::TaskList(_) => None,
     }
 }
 
@@ -1495,6 +1744,65 @@ impl EventSourcedActor for AgentActor {
             AgentDomainEvent::LifecycleRecorded { event, at_ms } => {
                 state.push(at_ms, AgentLogBody::Lifecycle(event));
             }
+            AgentDomainEvent::Received { item, at_ms } => {
+                // Only a person's message becomes a visible queue entry. A
+                // report and a timer are already narrated elsewhere — the
+                // session records a subagent's news on this very log, and a
+                // wake becomes the turn's own input message — so surfacing
+                // them here would render the same fact twice.
+                if let crate::Incoming::User { id, text } = &item {
+                    state.push(
+                        at_ms,
+                        AgentLogBody::Lifecycle(LifecycleEvent::MessageQueued(QueuedLifecycle {
+                            id: id.clone(),
+                            text: text.clone(),
+                        })),
+                    );
+                }
+                state.inbox.push(item);
+            }
+            AgentDomainEvent::TurnBegan {
+                consumed,
+                answered,
+                at_ms,
+            } => {
+                // The entry names only what a client is tracking — the queued
+                // messages it is showing as unread. Reports and wakes were never
+                // shown as queued, so crossing them off would name ids nothing
+                // holds.
+                let visible = state
+                    .inbox
+                    .iter()
+                    .filter(|i| i.is_user() && consumed.iter().any(|id| id == i.id()))
+                    .map(|i| i.id().to_string())
+                    .collect();
+                state.push(
+                    at_ms,
+                    AgentLogBody::Lifecycle(LifecycleEvent::TurnBegan(TurnBeganLifecycle {
+                        consumed: visible,
+                        answered: answered.clone(),
+                    })),
+                );
+                state
+                    .inbox
+                    .retain(|i| !consumed.iter().any(|id| id == i.id()));
+                // A turn beginning ends the park either way: the questions were
+                // answered, or the user moved on and they were abandoned. Both
+                // record a result for every call before the turn starts.
+                state.asks.clear();
+            }
+            AgentDomainEvent::AskRecorded { asks, at_ms } => {
+                for ask in &asks {
+                    state.push(
+                        at_ms,
+                        AgentLogBody::Lifecycle(LifecycleEvent::AskRecorded(AskLifecycle {
+                            tool_call_id: ask.tool_call_id.clone(),
+                            question: ask.question.clone(),
+                        })),
+                    );
+                }
+                state.asks = asks;
+            }
             AgentDomainEvent::TimerArmed { record, .. } => state.timers.push(record),
             AgentDomainEvent::TimerCancelled { ids, .. } => {
                 state.timers.retain(|t| !ids.contains(&t.id));
@@ -1535,81 +1843,42 @@ impl EventSourcedActor for AgentActor {
         ctx: &mut ActorContext<Self>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            AgentCommand::Resume {
-                results,
-                message,
-                subagent_results,
-            } => {
-                if let Some(reason) = self.reject_if_busy("Resume") {
-                    return reason;
+            AgentCommand::Enqueue { item, ack } => {
+                // Decided after the write, never before it: the queue a turn
+                // drains has to be the durable one, so the drain arrives as its
+                // own command and finds this event already folded in.
+                let _ = ctx.self_ref().tell(AgentCommand::Drain).await;
+                let effect = CommandEffect::persist(vec![AgentDomainEvent::Received {
+                    item,
+                    at_ms: now_ms(),
+                }]);
+                match ack {
+                    Some(ack) => effect.and_ack(ack),
+                    None => effect,
                 }
-                if results.is_empty() && message.is_none() && subagent_results.is_empty() {
-                    tracing::warn!("Resume with nothing to resume on; ignoring");
+            }
+            AgentCommand::Drain => CommandEffect::persist(self.try_drain(state, ctx).await),
+            AgentCommand::Answer { answers, reply } => {
+                // A run in flight means the questions are already gone — a turn
+                // beginning is what clears them — so there is nothing to answer.
+                if self.busy() {
+                    let _ = reply.send(Err(crate::AnswerError::NothingPending));
                     return CommandEffect::none();
                 }
-                let turn = crate::StartTurn {
-                    // A fresh agent has nothing in its transcript; anything else
-                    // was folded from a journal. No framework flag needed to
-                    // tell a cold start from a rehydration.
-                    start_source: (!self.start_hook_fired).then_some(if state.log.is_empty() {
-                        horsie_models::runtime::SessionStartSource::Startup
-                    } else {
-                        horsie_models::runtime::SessionStartSource::Resume
-                    }),
-                    prompt: message.clone(),
-                };
-                let nothing_due = turn.start_source.is_none() && turn.prompt.is_none();
-                if nothing_due || !self.ctx.context_provider.has_start_hooks() {
-                    return self
-                        .start_prepared(
-                            PreparedStart {
-                                results,
-                                message,
-                                subagent_results,
-                                records: Vec::new(),
-                                abandon: None,
-                            },
-                            state,
-                            ctx,
-                        )
-                        .await;
+                match crate::answered_turn(&state.inbox, &state.asks, answers) {
+                    Ok(turn) => {
+                        let _ = reply.send(Ok(()));
+                        CommandEffect::persist(self.begin_turn(turn, state, ctx).await)
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        CommandEffect::none()
+                    }
                 }
-                self.preparing = true;
-                // Set when the prepare task is *spawned*, not when it returns: a
-                // failed prepare must not re-fire the start hook on the next
-                // turn, which would inject its context a second time.
-                self.start_hook_fired = true;
-                let provider = self.ctx.context_provider.clone();
-                let self_ref = ctx.self_ref();
-                tokio::spawn(async move {
-                    let prepared = match provider.start_hooks(turn).await {
-                        Ok(prep) => PreparedStart {
-                            abandon: crate::start_blocked(&prep.records)
-                                .map(AbandonedStart::Blocked),
-                            records: prep.records,
-                            results,
-                            // A rewritten prompt replaces the turn's input; an
-                            // absent one leaves what the user actually sent.
-                            message: prep.message.or(message),
-                            subagent_results,
-                        },
-                        Err(error) => PreparedStart {
-                            results,
-                            message,
-                            subagent_results,
-                            records: Vec::new(),
-                            abandon: Some(AbandonedStart::Failed(error)),
-                        },
-                    };
-                    let _ = self_ref
-                        .tell(AgentCommand::StartPrepared(Box::new(prepared)))
-                        .await;
-                });
-                CommandEffect::none()
             }
             AgentCommand::StartPrepared(prepared) => {
                 self.preparing = false;
-                self.start_prepared(*prepared, state, ctx).await
+                CommandEffect::persist(self.start_prepared(*prepared, state, ctx).await)
             }
             AgentCommand::HooksRan { records } => {
                 let at_ms = now_ms();
@@ -1724,7 +1993,25 @@ impl EventSourcedActor for AgentActor {
                 }
             }
             AgentCommand::RecordLifecycle { event, at_ms } => {
-                CommandEffect::persist(vec![AgentDomainEvent::LifecycleRecorded { event, at_ms }])
+                // Almost every one of these is something a reader sees and this
+                // agent does nothing about. The runtime arriving is the one
+                // that changes what it may *do* — so it is read off the record
+                // rather than announced separately, and a record that says
+                // nothing about the runtime cannot start a turn. That is what
+                // keeps recovery quiet: it journals a `TurnEnded(Interrupted)`,
+                // which is not a runtime fact and drains nothing.
+                let moved = runtime_readiness(&event).filter(|next| *next != self.ready);
+                if let Some(next) = moved {
+                    self.ready = next;
+                }
+                let recorded = AgentDomainEvent::LifecycleRecorded { event, at_ms };
+                if moved != Some(true) {
+                    return CommandEffect::persist(vec![recorded]);
+                }
+                let folded = Self::apply_event(state.clone(), recorded.clone());
+                let mut events = vec![recorded];
+                events.extend(self.try_drain(&folded, ctx).await);
+                CommandEffect::persist(events)
             }
             AgentCommand::RecordDelta { text } => {
                 self.deltas.push(text);
@@ -2485,23 +2772,24 @@ mod tests {
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(StubParent),
             session_id,
+            ready: true,
         };
         let mut agent = AgentActor::new(ctx, AgentParams::from_def(&def_fixture()));
 
         assert!(
-            !agent.snapshot_if_due().snapshots(),
+            !agent.snapshot_due(),
             "a fresh agent has nothing worth snapshotting"
         );
 
         agent.events_since_snapshot = SNAPSHOT_EVERY_EVENTS - 1;
         assert!(
-            !agent.snapshot_if_due().snapshots(),
+            !agent.snapshot_due(),
             "one event short of the interval must not snapshot"
         );
 
         agent.events_since_snapshot = SNAPSHOT_EVERY_EVENTS;
         assert!(
-            agent.snapshot_if_due().snapshots(),
+            agent.snapshot_due(),
             "reaching the interval snapshots at the turn boundary"
         );
         assert_eq!(
@@ -2509,7 +2797,7 @@ mod tests {
             "the counter resets on request, so a failed write waits one interval"
         );
         assert!(
-            !agent.snapshot_if_due().snapshots(),
+            !agent.snapshot_due(),
             "and the very next turn does not snapshot again"
         );
     }
@@ -2566,6 +2854,7 @@ mod tests {
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(DeafParent),
             session_id,
+            ready: true,
         };
         let agent = spawn_root(
             AgentActor::with_observer(ctx, AgentParams::from_def(&def_fixture()), recorder.clone()),
@@ -2645,6 +2934,7 @@ mod tests {
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(ReportingParent(tx)),
             session_id,
+            ready: true,
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let agent = spawn_root(
@@ -2653,19 +2943,21 @@ mod tests {
         );
 
         agent
-            .tell(AgentCommand::Resume {
-                results: vec![],
-                message: Some("hi".into()),
-                subagent_results: vec![],
+            .tell(AgentCommand::Enqueue {
+                item: crate::Incoming::User {
+                    id: "m1".into(),
+                    text: "hi".into(),
+                },
+                ack: None,
             })
             .await
             .unwrap();
 
-        // `UsageRecorded` rides alongside the terminal outcome, so read until
-        // the run itself reports.
+        // `Started` precedes the work and `UsageRecorded` rides alongside the
+        // terminal outcome, so read past both until the run itself reports.
         loop {
             match rx.recv().await.expect("the run must report an outcome") {
-                AgentOutcome::UsageRecorded { .. } => continue,
+                AgentOutcome::Started { .. } | AgentOutcome::UsageRecorded { .. } => continue,
                 AgentOutcome::Concluded { .. } => break,
                 other => panic!("expected the turn to conclude, got {other:?}"),
             }
@@ -2792,6 +3084,7 @@ mod tests {
                 position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
                 parent: Arc::new(ReportingParent(tx)),
                 session_id: uuid::Uuid::new_v4(),
+                ready: true,
             };
             let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
             let agent = spawn_root(
@@ -2803,18 +3096,28 @@ mod tests {
 
         async fn prompt(agent: &ActorRef<AgentCommand>, text: &str, rx: &mut Outcomes) {
             agent
-                .tell(AgentCommand::Resume {
-                    results: vec![],
-                    message: Some(text.into()),
-                    subagent_results: vec![],
+                .tell(AgentCommand::Enqueue {
+                    item: crate::Incoming::User {
+                        id: "m2".into(),
+                        text: text.into(),
+                    },
+                    ack: None,
                 })
                 .await
                 .unwrap();
-            // `UsageRecorded` rides alongside the terminal outcome, so read
-            // past it until the turn itself reports.
-            while let AgentOutcome::UsageRecorded { .. } =
-                rx.recv().await.expect("the turn must report an outcome")
-            {}
+            terminal_outcome(rx).await;
+        }
+
+        /// Read past the outcomes that are not how a turn *ended*: `Started`
+        /// precedes the work, and `UsageRecorded` rides alongside the terminal
+        /// one.
+        async fn terminal_outcome(rx: &mut Outcomes) -> AgentOutcome {
+            loop {
+                match rx.recv().await.expect("the turn must report an outcome") {
+                    AgentOutcome::Started { .. } | AgentOutcome::UsageRecorded { .. } => continue,
+                    outcome => return outcome,
+                }
+            }
         }
 
         fn session_start(context: &str) -> HookRecord {
@@ -2930,15 +3233,17 @@ mod tests {
             let (agent, mut rx) = spawn(provider);
 
             agent
-                .tell(AgentCommand::Resume {
-                    results: vec![],
-                    message: Some("my password is hunter2".into()),
-                    subagent_results: vec![],
+                .tell(AgentCommand::Enqueue {
+                    item: crate::Incoming::User {
+                        id: "m3".into(),
+                        text: "my password is hunter2".into(),
+                    },
+                    ack: None,
                 })
                 .await
                 .unwrap();
 
-            match rx.recv().await.expect("the turn must report an outcome") {
+            match terminal_outcome(&mut rx).await {
                 AgentOutcome::Failed { error, .. } => {
                     assert_eq!(error, "secrets in the prompt");
                 }
@@ -2954,8 +3259,23 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            assert_eq!(page.entries.len(), 1, "the record, and nothing else");
-            assert!(matches!(page.entries[0].body, AgentLogBody::Hook(_)));
+            // The queued message, the turn that took it, and the record that
+            // refused it — but no input message, because no run began.
+            assert!(
+                !page
+                    .entries
+                    .iter()
+                    .any(|e| matches!(e.body, AgentLogBody::Llm(_))),
+                "a refused prompt must never reach the transcript: {:?}",
+                page.entries
+            );
+            assert!(
+                page.entries
+                    .iter()
+                    .any(|e| matches!(e.body, AgentLogBody::Hook(_))),
+                "the refusal is auditable: {:?}",
+                page.entries
+            );
         }
 
         /// A preparation failure must classify itself exactly as the same
@@ -2988,6 +3308,7 @@ mod tests {
                 position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
                 parent: Arc::new(ReportingParent(tx)),
                 session_id: uuid::Uuid::new_v4(),
+                ready: true,
             };
             let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
             let agent = spawn_root(
@@ -2995,15 +3316,17 @@ mod tests {
                 journal,
             );
             agent
-                .tell(AgentCommand::Resume {
-                    results: vec![],
-                    message: Some("hi".into()),
-                    subagent_results: vec![],
+                .tell(AgentCommand::Enqueue {
+                    item: crate::Incoming::User {
+                        id: "m4".into(),
+                        text: "hi".into(),
+                    },
+                    ack: None,
                 })
                 .await
                 .unwrap();
 
-            match rx.recv().await.expect("the turn must report an outcome") {
+            match terminal_outcome(&mut rx).await {
                 AgentOutcome::Failed { terminal, .. } => {
                     assert!(terminal, "a gone sandbox is terminal wherever it surfaces");
                 }
@@ -4470,6 +4793,7 @@ mod fence_tests {
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(OutcomeChannel(tx)),
             session_id: uuid::Uuid::new_v4(),
+            ready: true,
         };
         let mut params = AgentParams::from_def(&AgentRunDef {
             system_prompt: None,
@@ -4486,10 +4810,12 @@ mod fence_tests {
 
         // Run 0 starts and hangs in `provide`, so it is genuinely in flight.
         agent
-            .tell(AgentCommand::Resume {
-                results: Vec::new(),
-                message: Some("first".into()),
-                subagent_results: Vec::new(),
+            .tell(AgentCommand::Enqueue {
+                item: crate::Incoming::User {
+                    id: "m5".into(),
+                    text: "first".into(),
+                },
+                ack: None,
             })
             .await
             .unwrap();
@@ -4510,10 +4836,12 @@ mod fence_tests {
         // held. Without it, `running` would have been cleared and this would
         // start a second background loop against the same journal.
         agent
-            .tell(AgentCommand::Resume {
-                results: Vec::new(),
-                message: Some("second".into()),
-                subagent_results: Vec::new(),
+            .tell(AgentCommand::Enqueue {
+                item: crate::Incoming::User {
+                    id: "m6".into(),
+                    text: "second".into(),
+                },
+                ack: None,
             })
             .await
             .unwrap();
@@ -4528,15 +4856,289 @@ mod fence_tests {
             .await
             .unwrap();
         let page = rx.await.unwrap();
+        // The second message is *queued* — that much is its whole point — but
+        // no second turn took it: one `TurnBegan`, one input message. Without
+        // the fence, the stale report would have cleared `running` and the
+        // second message would have started a run against the same journal.
+        let began = page
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.body,
+                    AgentLogBody::Lifecycle(LifecycleEvent::TurnBegan(_))
+                )
+            })
+            .count();
         assert_eq!(
-            page.entries.len(),
-            1,
-            "the refused turn must journal nothing: {:?}",
+            began, 1,
+            "the refused turn must not begin: {:?}",
             page.entries
+        );
+        assert!(
+            outcomes
+                .try_recv()
+                .is_ok_and(|o| matches!(o, AgentOutcome::Started { .. })),
+            "the first turn's own start, and nothing from the superseded run"
         );
         assert!(
             outcomes.try_recv().is_err(),
             "a superseded run's outcome must not reach the parent"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod queue_tests {
+    //! The queue as the agent actually runs it: what a not-ready agent does
+    //! with a message, what a boundary drains, and what an answer resumes.
+    //!
+    //! The *rule* is pure and tested in [`crate::inbox`]. These are about the
+    //! actor around it — the gates it holds, and the events it journals.
+    use super::*;
+    use crate::context::{ContextError, ContextProvider, Contexts};
+    use horsie_actor::{InMemoryJournal, Journal, spawn_root};
+    use horsie_agentcore::testkit::MockProvider;
+
+    struct OutcomeChannel(tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
+    #[async_trait]
+    impl AgentOutcomeSink for OutcomeChannel {
+        async fn deliver(&self, outcome: AgentOutcome) {
+            let _ = self.0.send(outcome);
+        }
+    }
+
+    /// Hands the agent a provider that always ends the turn with plain text.
+    struct TextContext(Arc<dyn LlmProvider>);
+    #[async_trait]
+    impl ContextProvider for TextContext {
+        async fn provide(&self) -> Result<Contexts, ContextError> {
+            Ok(Contexts {
+                provider: self.0.clone(),
+                toolbox: Arc::new(horsie_agentcore::ToolboxImpl::new()),
+                system_prompt: None,
+            })
+        }
+    }
+
+    /// A context that never returns, so a run stays genuinely in flight.
+    struct HangingContext;
+    #[async_trait]
+    impl ContextProvider for HangingContext {
+        async fn provide(&self) -> Result<Contexts, ContextError> {
+            std::future::pending().await
+        }
+    }
+
+    type Outcomes = tokio::sync::mpsc::UnboundedReceiver<AgentOutcome>;
+
+    fn spawn_with(
+        provider: Arc<dyn ContextProvider>,
+        ready: bool,
+    ) -> (ActorRef<AgentCommand>, Outcomes) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = AgentRuntimeContext {
+            context_provider: provider,
+            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            parent: Arc::new(OutcomeChannel(tx)),
+            session_id: uuid::Uuid::new_v4(),
+            ready,
+        };
+        let mut params = AgentParams::from_def(&AgentRunDef::default());
+        params.interactive = true;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let agent = spawn_root(AgentActor::new(ctx, params), journal);
+        (agent, rx)
+    }
+
+    fn text_agent(ready: bool) -> (ActorRef<AgentCommand>, Outcomes) {
+        spawn_with(Arc::new(TextContext(MockProvider::text("done"))), ready)
+    }
+
+    /// Exactly what a session sends when its sandbox lands or goes away: the
+    /// same `Runtime` record a reader sees in the log, and nothing else.
+    async fn set_ready(agent: &ActorRef<AgentCommand>, ready: bool) {
+        let status = match ready {
+            true => horsie_agentcore::RuntimeStatus::Ready(horsie_agentcore::EmptyOutcome {}),
+            false => horsie_agentcore::RuntimeStatus::Acquiring(horsie_agentcore::EmptyOutcome {}),
+        };
+        agent
+            .tell(AgentCommand::RecordLifecycle {
+                event: LifecycleEvent::Runtime(horsie_agentcore::RuntimeLifecycle {
+                    status,
+                    detail: None,
+                }),
+                at_ms: 0,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn send(agent: &ActorRef<AgentCommand>, id: &str, text: &str) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Enqueue {
+                item: crate::Incoming::User {
+                    id: id.into(),
+                    text: text.into(),
+                },
+                ack: Some(tx),
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().expect("the message must be durable");
+    }
+
+    /// Every lifecycle entry kind in the agent's log, in order.
+    async fn lifecycle(agent: &ActorRef<AgentCommand>) -> Vec<String> {
+        let page = agent
+            .ask(|reply| AgentCommand::PageLog {
+                before: None,
+                max: 100,
+                reply,
+            })
+            .await
+            .unwrap();
+        page.entries
+            .iter()
+            .filter_map(|e| match &e.body {
+                AgentLogBody::Lifecycle(LifecycleEvent::MessageQueued(_)) => {
+                    Some("MessageQueued".to_string())
+                }
+                AgentLogBody::Lifecycle(LifecycleEvent::TurnBegan(_)) => {
+                    Some("TurnBegan".to_string())
+                }
+                AgentLogBody::Lifecycle(LifecycleEvent::AskRecorded(_)) => {
+                    Some("AskRecorded".to_string())
+                }
+                AgentLogBody::Llm(_) | AgentLogBody::Hook(_) | AgentLogBody::Lifecycle(_) => None,
+            })
+            .collect()
+    }
+
+    /// Wait for `pred` to hold of the agent's lifecycle entries.
+    async fn wait_lifecycle(
+        agent: &ActorRef<AgentCommand>,
+        what: &str,
+        pred: impl Fn(&[String]) -> bool,
+    ) {
+        for _ in 0..200 {
+            let kinds = lifecycle(agent).await;
+            if pred(&kinds) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "{what} not reached within 2s; entries: {:?}",
+            lifecycle(agent).await
+        );
+    }
+
+    /// The ack is the promise. It resolves only once the message is written, so
+    /// a caller holding it holds something that survives a crash.
+    #[tokio::test]
+    async fn a_message_is_acked_only_once_it_is_durable() {
+        let (agent, _rx) = text_agent(true);
+        // `send` awaits the ack, so by the time it returns the write has
+        // happened — and the entry is already there to read.
+        send(&agent, "m1", "hello").await;
+        assert_eq!(
+            lifecycle(&agent).await.first().map(String::as_str),
+            Some("MessageQueued"),
+            "the ack lands after the write, not before it"
+        );
+    }
+
+    /// The one gate an agent cannot answer for itself. A message under a
+    /// session still building its runtime waits — the whole of the fix for a
+    /// first turn outrunning its own create — and the readiness that arrives
+    /// when the create lands is what releases it.
+    #[tokio::test]
+    async fn a_message_waits_for_readiness_and_the_flip_releases_it() {
+        let (agent, _rx) = text_agent(false);
+        send(&agent, "m1", "hello").await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            lifecycle(&agent).await,
+            vec!["MessageQueued".to_string()],
+            "a message with nowhere to run must not begin a turn"
+        );
+
+        set_ready(&agent, true).await;
+        wait_lifecycle(&agent, "the released turn", |k| {
+            k.contains(&"TurnBegan".to_string())
+        })
+        .await;
+    }
+
+    /// Losing readiness starts nothing; it only stops the next drain.
+    #[tokio::test]
+    async fn losing_readiness_starts_nothing() {
+        let (agent, _rx) = text_agent(true);
+        set_ready(&agent, false).await;
+        send(&agent, "m1", "hello").await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(lifecycle(&agent).await, vec!["MessageQueued".to_string()]);
+    }
+
+    /// A run in flight is not a reason to refuse a message — it is a reason to
+    /// hold it. Two arrive under one hanging run and neither starts a second.
+    #[tokio::test]
+    async fn messages_arriving_mid_run_queue_rather_than_starting_a_second_turn() {
+        let (agent, _rx) = spawn_with(Arc::new(HangingContext), true);
+        send(&agent, "m1", "one").await;
+        // The first drains immediately and hangs inside `provide`.
+        wait_lifecycle(&agent, "the first turn", |k| {
+            k.contains(&"TurnBegan".to_string())
+        })
+        .await;
+        send(&agent, "m2", "two").await;
+        send(&agent, "m3", "three").await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let kinds = lifecycle(&agent).await;
+        assert_eq!(
+            kinds.iter().filter(|k| *k == "TurnBegan").count(),
+            1,
+            "a run in flight must never be drained into a second one: {kinds:?}"
+        );
+        assert_eq!(kinds.iter().filter(|k| *k == "MessageQueued").count(), 3);
+    }
+
+    /// `Started` precedes the work and is how the owner learns a turn began at
+    /// all — it is no longer the thing that began it.
+    #[tokio::test]
+    async fn the_owner_is_told_the_turn_began_before_it_runs() {
+        let (agent, mut rx) = spawn_with(Arc::new(HangingContext), true);
+        send(&agent, "m1", "one").await;
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the owner must be told")
+            .expect("an outcome");
+        assert!(
+            matches!(first, AgentOutcome::Started { .. }),
+            "the first report of a turn is that it started, got {first:?}"
+        );
+    }
+
+    /// Answering is refused unless it covers the park exactly, and the refusal
+    /// journals nothing — which is what makes retrying it free.
+    #[tokio::test]
+    async fn a_partial_answer_is_refused_and_journals_nothing() {
+        let (agent, _rx) = text_agent(true);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Answer {
+                answers: vec![crate::AskAnswer {
+                    tool_call_id: "call-1".into(),
+                    text: "main".into(),
+                }],
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        assert_eq!(rx.await.unwrap(), Err(crate::AnswerError::NothingPending));
+        assert!(lifecycle(&agent).await.is_empty());
     }
 }

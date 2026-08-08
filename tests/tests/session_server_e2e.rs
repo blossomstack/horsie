@@ -286,25 +286,75 @@ async fn get_detail(client: &reqwest::Client, addr: &SocketAddr, id: &str) -> se
         .unwrap()
 }
 
-/// Poll the detail endpoint until the inbox holds exactly `want` texts.
+/// An agent's queue, folded from its log exactly as a client folds it:
+/// every `MessageQueued` entry, minus the ones a later `TurnBegan` consumed.
+///
+/// There is no second source to read it from. The queue belongs to the agent
+/// the message is addressed to, and its log is where that agent says so —
+/// which is what makes the queue and the transcript around it one ordered
+/// thing rather than two that have to be reconciled.
+fn queued_texts(page: &serde_json::Value) -> Vec<String> {
+    let entries = page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a messages page must carry entries: {page}"));
+    let mut queue: Vec<(String, String)> = Vec::new();
+    for entry in entries {
+        let body = &entry["body"];
+        if body["type"] != serde_json::json!("Lifecycle") {
+            continue;
+        }
+        let value = &body["value"];
+        match value["kind"].as_str() {
+            Some("MessageQueued") => {
+                let m = &value["value"];
+                queue.push((
+                    m["id"].as_str().unwrap_or_default().to_string(),
+                    m["text"].as_str().unwrap_or_default().to_string(),
+                ));
+            }
+            Some("TurnBegan") => {
+                let consumed: Vec<&str> = value["value"]["consumed"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                queue.retain(|(id, _)| !consumed.contains(&id.as_str()));
+            }
+            _ => {}
+        }
+    }
+    queue.into_iter().map(|(_, text)| text).collect()
+}
+
+/// One agent's whole log, newest window, as a page.
+async fn messages_page(
+    client: &reqwest::Client,
+    addr: &SocketAddr,
+    id: &str,
+    aid: &str,
+) -> serde_json::Value {
+    client
+        .get(format!(
+            "http://{addr}/api/sessions/{id}/messages?aid={aid}&max=200"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// Poll the main agent's log until its queue holds exactly `want` texts.
 async fn wait_inbox(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &[&str]) {
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
     loop {
-        let detail = get_detail(client, addr, id).await;
-        let got: Vec<String> = detail["session"]["inbox"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|m| m["text"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let got = queued_texts(&messages_page(client, addr, id, "main").await);
         if got == want {
             return;
         }
         if start.elapsed() > deadline {
-            panic!("timed out waiting for inbox {want:?}; last = {got:?}");
+            panic!("timed out waiting for queue {want:?}; last = {got:?}");
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
@@ -660,7 +710,7 @@ async fn create_message_sse_roundtrip() {
 }
 
 #[tokio::test]
-async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
+async fn a_queued_message_is_visible_on_the_agents_log_and_its_stream() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
     let agent = FakeRuntimeVendor::builder("mock")
@@ -678,8 +728,8 @@ async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
     block.wait_until_received().await;
 
     // Subscribe while the turn is in flight — this stands in for a second tab,
-    // which must learn about the queue without reloading the page. The inbox is
-    // session-scoped, so it rides the session stream, not an agent's.
+    // which must learn about the queue without reloading the page. The queue is
+    // the agent's, so it rides that agent's log like everything else.
     let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
     let sse = tokio::spawn(async move {
@@ -704,18 +754,25 @@ async fn a_queued_message_is_visible_on_the_detail_endpoint_and_the_stream() {
         "a message sent during a run is accepted, not refused"
     );
 
-    // The detail endpoint is the durable source of the queue.
-    let detail = get_detail(&client, &server.addr, &id).await;
-    let inbox = detail["session"]["inbox"].as_array().unwrap();
-    assert_eq!(inbox.len(), 1, "{detail}");
-    assert_eq!(inbox[0]["text"], "two");
+    // The agent's own log is the durable source of the queue. The message that
+    // created the session has already been taken into the turn in flight, so
+    // only the one just sent is still owed.
+    wait_inbox(&client, &server.addr, &id, &["two"]).await;
+    let page = messages_page(&client, &server.addr, &id, "main").await;
+    let ids: Vec<&str> = page["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter(|e| e["body"]["value"]["kind"] == serde_json::json!("MessageQueued"))
+        .filter_map(|e| e["body"]["value"]["value"]["id"].as_str())
+        .collect();
     assert!(
-        inbox[0]["id"].as_str().is_some_and(|s| !s.is_empty()),
-        "a queued message carries the id the send acknowledged: {detail}"
+        ids.iter().all(|id| !id.is_empty()),
+        "a queued entry carries the id the send acknowledged: {ids:?}"
     );
 
-    // ... and the live stream says the same thing, as an entry in the log
-    // rather than a frame on a second stream with no order against this one.
+    // ... and the live stream says the same thing, on the same connection as
+    // the transcript rather than a second one with no order against it.
     let events = sse.await.unwrap();
     // The replay carries the create's own message too, so the one under test is
     // the last — and the log is what makes "last" meaningful without a second
@@ -769,10 +826,12 @@ async fn prep_progressions_stream_during_a_turn() {
     send_message(&client, &server.addr, &id, "hi").await;
 
     let events = sse.await.unwrap();
-    // Preparation stages are `Provisioning` entries in the log, before the
-    // reply. Journaled rather than live-only, so a client that connects
-    // mid-preparation still learns what happened.
-    let stages: Vec<String> = stream_lifecycle_values(&events, "Provisioning")
+    // Preparation stages are `Preparing` entries in the log, before the reply.
+    // Journaled rather than live-only, so a client that connects
+    // mid-preparation still learns what happened. Distinct from `Runtime`,
+    // which is the session's sandbox rather than this turn's setup — the two
+    // used to share one variant and both used the stage "ready".
+    let stages: Vec<String> = stream_lifecycle_values(&events, "Preparing")
         .iter()
         .filter_map(|v| v["stage"].as_str().map(str::to_string))
         .collect();
@@ -783,6 +842,16 @@ async fn prep_progressions_stream_during_a_turn() {
     assert!(
         stages.iter().any(|s| s == "ready"),
         "missing ready progression: {stages:?}"
+    );
+    // The session's own runtime is its own variant, so a consumer acting on
+    // "the sandbox is up" cannot be fooled by a turn finishing its setup.
+    let runtime: Vec<String> = stream_lifecycle_values(&events, "Runtime")
+        .iter()
+        .filter_map(|v| v["status"]["kind"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        runtime.iter().any(|s| s == "Ready"),
+        "the sandbox landing is its own fact: {runtime:?}"
     );
 
     server.shutdown().await;

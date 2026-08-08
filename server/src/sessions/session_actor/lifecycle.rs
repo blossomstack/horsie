@@ -242,23 +242,25 @@ mod tests {
         assert_eq!(ready.status, SessionStatus::Idle);
     }
 
-    /// The message the session was created with waits in the inbox rather than
-    /// racing the vendor, and is still owed an answer once the runtime lands.
+    /// The message the session was created with waits in its agent's queue
+    /// rather than racing the vendor. What the session contributes is the gate:
+    /// `ready` is false while provisioning and true once the runtime lands, and
+    /// that answer is pushed to every agent.
     #[test]
-    fn a_message_sent_while_provisioning_waits_for_the_runtime() {
-        let waiting = fold(vec![
-            SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
-            queued("m1", "hello"),
-        ]);
+    fn a_session_is_not_runnable_until_its_runtime_lands() {
+        let waiting = fold(vec![SessionDomainEvent::ProvisioningStarted { at_ms: 0 }]);
         assert_eq!(waiting.status, SessionStatus::Provisioning);
-        assert_eq!(waiting.inbox.len(), 1, "the message is owed an answer");
+        assert!(
+            !RuntimeLifecycle::ready(&waiting),
+            "nothing may run before the runtime exists"
+        );
 
         let ready = SessionActor::apply_event(
             waiting,
             SessionDomainEvent::ProvisioningSucceeded { at_ms: 2 },
         );
         assert_eq!(ready.status, SessionStatus::Idle);
-        assert_eq!(ready.inbox.len(), 1, "still owed, now startable");
+        assert!(RuntimeLifecycle::ready(&ready));
     }
 
     /// A create that failed on something retryable — an offline vendor, a
@@ -300,13 +302,11 @@ mod tests {
                 error: "runtime vendor unavailable".into(),
                 terminal: false,
             },
-            queued("m1", "try again"),
         ]);
         assert!(
             !RuntimeLifecycle::ready(&s),
             "a session with no runtime must build one before it runs anything"
         );
-        assert_eq!(s.inbox.len(), 1, "and the message is still owed an answer");
     }
 
     /// A live vendor refusing to build the runtime is the terminal case, and
@@ -348,29 +348,34 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         session
             .tell(SessionCommand::Turn(TurnCommand::UserMessage {
+                agent_id: None,
                 text: "hello".into(),
                 reply: tx,
             }))
             .await
             .unwrap();
 
-        let waiting = wait_for_state(&journal, id, "a queued message under a live create", |s| {
-            s.status == SessionStatus::Provisioning && !s.inbox.is_empty()
+        // The message is owed an answer, not spent on a runtime that does not
+        // exist: it waits in the agent's queue, and the agent has been told it
+        // is not ready.
+        wait_for_state(&journal, id, "a live create", |s| {
+            s.status == SessionStatus::Provisioning
         })
         .await;
-        assert_eq!(
-            waiting.inbox.len(),
-            1,
-            "the message is owed an answer, not spent on a runtime that does not exist"
-        );
         assert!(
             !f.agent.signals().iter().any(|s| s.starts_with("get:")),
             "nothing may ask the vendor for a runtime it has not been told to build"
         );
 
         f.agent.release_creates();
-        wait_for_state(&journal, id, "the queued message running", |s| {
-            s.inbox.is_empty() && s.status != SessionStatus::Provisioning
+        // The create's completion is what releases the queue: the session
+        // announces readiness and the agent drains straight into a turn.
+        // Asserted on the journal, not the status — a fast turn ends before a
+        // poll could catch it `Running`, and only the event says it happened.
+        wait_for_events(&journal, id, "the queued message running", |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, SessionDomainEvent::TurnBegan { .. }))
         })
         .await;
     }
@@ -396,7 +401,6 @@ mod tests {
                 &[
                     serde_json::to_vec(&SessionDomainEvent::ProvisioningStarted { at_ms: 0 })
                         .unwrap(),
-                    serde_json::to_vec(&queued("m1", "hello")).unwrap(),
                 ],
             )
             .await
@@ -477,6 +481,7 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         session
             .tell(SessionCommand::Turn(TurnCommand::UserMessage {
+                agent_id: None,
                 text: "try again".into(),
                 reply: tx,
             }))
@@ -495,10 +500,13 @@ mod tests {
             "the retry has to build the runtime, not ask for one: {:?}",
             f.agent.signals()
         );
-        let ran = wait_for_state(&journal, id, "the queued message running", |s| {
-            s.inbox.is_empty()
+        wait_for_events(&journal, id, "the queued message running", |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, SessionDomainEvent::TurnBegan { .. }))
         })
         .await;
+        let ran = crate::sessions::events::fold_session_state(&journal, id).await;
         assert!(
             !matches!(ran.status, SessionStatus::Unrecoverable { .. }),
             "retrying must never be what kills the session: {:?}",
@@ -590,6 +598,7 @@ mod tests {
         session
             .ask(|reply| {
                 SessionCommand::Turn(TurnCommand::UserMessage {
+                    agent_id: None,
                     text: "go".into(),
                     reply,
                 })

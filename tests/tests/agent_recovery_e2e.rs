@@ -221,6 +221,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
         }),
         parent: Arc::new(OutcomeChannel(tx)),
         session_id,
+        ready: true,
     };
     let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
         system_prompt: None,
@@ -237,10 +238,12 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
 
     let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
     agent
-        .tell(AgentCommand::Resume {
-            results: Vec::new(),
-            message: Some("carry on".into()),
-            subagent_results: Vec::new(),
+        .tell(AgentCommand::Enqueue {
+            item: horsie_workflow::Incoming::User {
+                id: "m1".into(),
+                text: "carry on".into(),
+            },
+            ack: None,
         })
         .await
         .unwrap();
@@ -313,10 +316,21 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
             AgentDomainEvent::MessageComplete {
                 message: assistant_ask("a1", "ask-1"),
             },
+            // What the agent journals when it parks. Recovered, it is what
+            // makes the answer below answerable — a park is durable agent
+            // state now, not something the session holds on the agent's behalf.
+            AgentDomainEvent::AskRecorded {
+                asks: vec![horsie_workflow::AskedQuestion {
+                    tool_call_id: Some("ask-1".into()),
+                    question: "which commands?".into(),
+                }],
+                at_ms: 0,
+            },
         ],
     )
     .await;
 
+    let (answered, _answered_rx) = tokio::sync::oneshot::channel();
     let (tx, mut outcomes) = tokio::sync::mpsc::channel(8);
     let ctx = AgentRuntimeContext {
         position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
@@ -326,6 +340,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
         }),
         parent: Arc::new(OutcomeChannel(tx)),
         session_id,
+        ready: true,
     };
     let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
         system_prompt: None,
@@ -343,14 +358,12 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
 
     let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
     agent
-        .tell(AgentCommand::Resume {
-            results: vec![horsie_models::agent::ToolResultInput {
+        .tell(AgentCommand::Answer {
+            answers: vec![horsie_workflow::AskAnswer {
                 tool_call_id: "ask-1".into(),
-                output: "validate, daemon, job".into(),
-                is_error: false,
+                text: "validate, daemon, job".into(),
             }],
-            message: None,
-            subagent_results: Vec::new(),
+            reply: answered,
         })
         .await
         .unwrap();
@@ -367,10 +380,12 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
     // Take another turn: any synthetic result recovery journaled is in the
     // history by now, so this is what every later turn would carry forever.
     agent
-        .tell(AgentCommand::Resume {
-            results: Vec::new(),
-            message: Some("carry on".into()),
-            subagent_results: Vec::new(),
+        .tell(AgentCommand::Enqueue {
+            item: horsie_workflow::Incoming::User {
+                id: "m2".into(),
+                text: "carry on".into(),
+            },
+            ack: None,
         })
         .await
         .unwrap();
@@ -427,6 +442,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
             context_provider: Arc::new(HangingContextProvider),
             parent: Arc::new(OutcomeChannel(tx)),
             session_id,
+            ready: true,
         };
         let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
             system_prompt: None,
@@ -441,10 +457,12 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
 
         let agent = spawn_root(AgentActor::new(ctx, params), journal);
         agent
-            .tell(AgentCommand::Resume {
-                results: Vec::new(),
-                message: Some("start something that wedges".into()),
-                subagent_results: Vec::new(),
+            .tell(AgentCommand::Enqueue {
+                item: horsie_workflow::Incoming::User {
+                    id: "m3".into(),
+                    text: "start something that wedges".into(),
+                },
+                ack: None,
             })
             .await
             .unwrap();
@@ -501,6 +519,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         }),
         parent: Arc::new(OutcomeChannel(tx)),
         session_id,
+        ready: true,
     };
     let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
         system_prompt: None,
@@ -557,6 +576,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         }),
         parent: Arc::new(OutcomeChannel(tx2)),
         session_id,
+        ready: true,
     };
     let mut params2 = AgentParams::from_def(&horsie_workflow::AgentRunDef {
         system_prompt: None,

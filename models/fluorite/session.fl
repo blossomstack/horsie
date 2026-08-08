@@ -69,24 +69,7 @@ struct SessionSummary {
     annotations: Vec<AnnotationEntry>,
 }
 
-/// A user message the server has accepted but not yet answered. It rides on
-/// the detail endpoint and on `InboxChanged` so a client can render it as
-/// still-unanswered rather than as part of the transcript.
-struct QueuedMessage {
-    id: String,
-    text: String,
-    at_ms: u64,
-}
-
-/// One question the agent is parked on. `tool_call_id` is what an answer is
-/// addressed to; it is absent only for a question journaled before call ids
-/// were recorded, which can be read but not answered
-struct PendingAskView {
-    tool_call_id: Option<String>,
-    question: String,
-}
-
-/// Answers to every pending ask of a session, delivered together
+/// Answers to every question one agent is parked on, delivered together
 struct AnswerAsksRequest {
     answers: Vec<AskAnswerInput>,
 }
@@ -104,9 +87,6 @@ struct SessionDetail {
     last_error: Option<String>,
     /// User-set key-value metadata (e.g. `group=<name>`). Empty when none.
     annotations: Vec<AnnotationEntry>,
-    /// Every question the agent is awaiting an answer to, oldest first. All of
-    /// them must be answered in one request before the turn can resume.
-    pending_asks: Vec<PendingAskView>,
     model: String,
     vendor: String,
     /// Clone URLs of the session's provisioned repos (empty when none).
@@ -123,9 +103,6 @@ struct SessionDetail {
     /// from the model's default. Absent → the model exposes no thinking
     /// control.
     thinking_effort: Option<String>,
-    /// Messages accepted but not yet carried into a turn, oldest first (empty
-    /// when nothing is owed).
-    inbox: Vec<QueuedMessage>,
     /// Token usage summed across every agent this session hosts. Per-agent
     /// numbers (and context size, which is never summed) are on the agent
     /// document instead.

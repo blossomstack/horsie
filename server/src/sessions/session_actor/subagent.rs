@@ -22,7 +22,7 @@ use crate::sessions::subagents::{
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_models::now_ms;
-use horsie_workflow::AgentCommand;
+use horsie_workflow::{AgentCommand, Incoming};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -112,12 +112,18 @@ impl SubAgents {
                     let _ = reply.send(Err(format!("persist subagent: {e}")));
                     return CommandEffect::none();
                 }
-                let agent = actor.spawn_sub_agent_actor(ctx, id, agent_type);
+                let agent = actor.spawn_sub_agent_actor(ctx, state, id, agent_type);
+                // The task is the first thing in this agent's queue, which it
+                // drains at once — there is nothing else in it and nothing in
+                // flight. Queued rather than run directly so a subagent has one
+                // way in, whatever is addressed to it.
                 let _ = agent
-                    .tell(AgentCommand::Resume {
-                        results: Vec::new(),
-                        message: Some(task),
-                        subagent_results: Vec::new(),
+                    .tell(AgentCommand::Enqueue {
+                        item: Incoming::User {
+                            id: format!("task:{id}"),
+                            text: task,
+                        },
+                        ack: None,
                     })
                     .await;
                 let _ = reply.send(Ok(id));
@@ -211,7 +217,7 @@ impl SessionActor {
             },
             // Defensive: a subagent has no ask or timer tools, so neither
             // outcome should ever occur.
-            TurnEnd::Asked { .. } => SessionDomainEvent::SubAgentFailed {
+            TurnEnd::Asked => SessionDomainEvent::SubAgentFailed {
                 at_ms: now_ms(),
                 id,
                 error: "subagent asked the user; not supported".to_string(),
@@ -234,11 +240,13 @@ impl SessionActor {
     pub(super) fn spawn_sub_agent_actor(
         &mut self,
         ctx: &ActorContext<Self>,
+        state: &SessionState,
         id: Uuid,
         agent_type: Option<String>,
     ) -> ActorRef<AgentCommand> {
         self.spawn_agent(
             ctx,
+            state,
             AgentPlan {
                 kind: SessionAgentKind::Sub(id),
                 settings: self.spec.agent.clone(),
@@ -254,11 +262,11 @@ impl SessionActor {
 }
 
 impl Component for SubAgents {
-    /// Wake every idle parent its children owe results to. Reads the forest, so
-    /// it works in a run exactly as in a conversation — and it never asks which
-    /// it is in.
+    /// Deliver every result a child owes its parent. Reads the forest, so it
+    /// works in a run exactly as in a conversation — and it never asks which it
+    /// is in.
     fn actions(_cx: &ActionCx<'_>, state: &SessionState) -> Vec<AgentAction> {
-        crate::sessions::orchestrator::wake_owed_parents(state)
+        crate::sessions::orchestrator::owed_deliveries(state)
     }
 
     /// Nodes left `Running` by a dead process. Their runs are over; the parents
@@ -634,6 +642,7 @@ mod tests {
         session2
             .ask(|reply| {
                 SessionCommand::Turn(TurnCommand::UserMessage {
+                    agent_id: None,
                     text: "hi".into(),
                     reply,
                 })

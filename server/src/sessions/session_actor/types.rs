@@ -12,12 +12,16 @@
 
 use crate::sessions::{
     UserMessageError,
-    spec::{PendingAsk, SessionStatus},
+    spec::SessionStatus,
     subagents::{SubAgentForest, SubAgentParent, TreeOwner},
     workflow::WorkflowRunState,
 };
 use horsie_models::hooks::HookRecord;
-use horsie_workflow::{AgentOutcome, AgentUsageSnapshot, AskedQuestion, UsageTotal};
+use horsie_workflow::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
+/// Answering belongs to the agent that asked, so its vocabulary lives with the
+/// agent. Re-exported because the session routes both and every caller reaches
+/// them through it.
+pub use horsie_workflow::{AnswerError, AskAnswer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -73,17 +77,26 @@ pub enum LifecycleCommand {
 
 /// The conversation.
 pub enum TurnCommand {
-    /// A user message. Always accepted: it is queued durably and answered by
-    /// the next turn, so there is no rejection path and no `409`.
+    /// A message for one of this session's agents. Always accepted: the agent
+    /// queues it durably and answers it at its next turn, so there is no
+    /// rejection path and no `409`.
+    ///
+    /// The session's part is only to resolve `agent_id` — spawning a cold agent
+    /// if need be — and to title an unnamed session from its first message. The
+    /// message itself never touches session state: it is addressed to an agent,
+    /// and that is where it is stored.
     UserMessage {
+        agent_id: Option<String>,
         text: String,
         reply: oneshot::Sender<Result<String, UserMessageError>>,
     },
     /// Cancel the turn in flight. Queued messages are *not* discarded — stop
     /// means "not this turn", not "throw away what I asked for".
     Stop { reply: oneshot::Sender<()> },
-    /// Answer every pending ask at once, resuming the turn.
+    /// Answer every question one agent is parked on, at once. Routed, not
+    /// decided: the agent owns what it asked and validates the set.
     Answer {
+        agent_id: Option<String>,
         answers: Vec<AskAnswer>,
         reply: oneshot::Sender<Result<(), AnswerError>>,
     },
@@ -253,32 +266,23 @@ pub enum SessionDomainEvent {
         error: String,
         terminal: bool,
     },
-    /// A user message was accepted. Durable *before* anything is done with it,
-    /// so an accepted message survives a crash and is still owed an answer.
-    MessageQueued {
-        id: String,
-        text: String,
-        at_ms: u64,
-    },
-    /// A turn started, consuming these queued messages — and, if the session
-    /// was parked on an ask, answering it. One event so a crash anywhere in
-    /// the window replays to the same place.
+    /// The main agent started a turn.
+    ///
+    /// Recorded, not decided: the agent owns its own queue and chooses when
+    /// that queue becomes a turn, so this is the session learning what
+    /// happened. What the turn consumed and answered is the agent's own fact
+    /// and lives in the agent's journal — this carries only the fact that the
+    /// session is now `Running`.
     TurnBegan {
         at_ms: u64,
-        consumed: Vec<String>,
-        /// The single ask this turn answered. Kept for journals written before
-        /// a turn could answer several; new turns write `answered`.
-        answering: Option<String>,
-        /// Every ask this turn answered. Empty when the turn abandoned them or
-        /// there were none.
-        #[serde(default)]
-        answered: Vec<String>,
     },
-    /// The agent asked the user something and is parked on it.
+    /// The main agent parked on questions for the user.
+    ///
+    /// Also recorded rather than decided, and carries no payload for the same
+    /// reason: the questions belong to the agent that asked them, which is what
+    /// answers them. All this drives is the session's status.
     AskRecorded {
         at_ms: u64,
-        tool_call_id: Option<String>,
-        question: String,
     },
     TurnEnded {
         at_ms: u64,
@@ -287,8 +291,7 @@ pub enum SessionDomainEvent {
         at_ms: u64,
         error: String,
     },
-    /// The user cancelled the turn. Distinct from `TurnEnded` only in intent;
-    /// both are turn boundaries, and both let the inbox drain.
+    /// The user cancelled the turn. Distinct from `TurnEnded` only in intent.
     TurnStopped {
         at_ms: u64,
     },
@@ -390,12 +393,13 @@ pub enum SessionDomainEvent {
 
 /// How a turn ended.
 ///
-/// [`AgentOutcome`] minus `UsageRecorded`, which is not a way a turn ends at
-/// all — it is banked identically for every agent a session hosts, so
-/// `on_agent_outcome` answers it once before routing. Narrowing it away here is
-/// what lets the three components that handle an outcome match exhaustively on
-/// the four real cases, instead of each carrying an `unreachable!` for a variant
-/// it can never be handed.
+/// [`AgentOutcome`] minus the two variants that are not a way a turn ends at
+/// all: `UsageRecorded`, banked identically for every agent a session hosts,
+/// and `Started`, which reports a turn *beginning*. `on_agent_outcome` answers
+/// both once before routing. Narrowing them away here is what lets the three
+/// components that handle an outcome match exhaustively on the four real cases,
+/// instead of each carrying an `unreachable!` for a variant it can never be
+/// handed.
 ///
 /// It is a second vocabulary for something `horsie_workflow` already names, and
 /// that is the deliberate cost. `AgentOutcome` is the *protocol* between an
@@ -408,7 +412,11 @@ pub(super) enum TurnEnd {
     /// The agent produced its output — structured, or its final text.
     Concluded { output: Value },
     /// The agent parked on one or more questions for the user.
-    Asked { asks: Vec<AskedQuestion> },
+    ///
+    /// Carries none of them: the questions belong to the agent that asked and
+    /// are answered through it, so all this tells the session is that it is now
+    /// `AwaitingInput`.
+    Asked,
     /// `terminal` means the agent's sandbox is gone and no later message can
     /// bring it back; anything else is a turn the user can retry.
     Failed { error: String, terminal: bool },
@@ -421,14 +429,14 @@ impl TurnEnd {
     /// bank. Both carry the agent that reported them.
     ///
     /// A `Result` rather than an `Option` so the caller cannot reach the routing
-    /// path with usage still in hand — the narrowing is total, and nothing below
-    /// it needs a case for a variant that never arrives.
-    pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), (Uuid, UsageTotal)> {
+    /// path with a non-ending outcome still in hand — the narrowing is total,
+    /// and nothing below it needs a case for a variant that never arrives.
+    pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), (Uuid, NotAnEnd)> {
         match outcome {
             AgentOutcome::Concluded { session_id, output } => {
                 Ok((session_id, Self::Concluded { output }))
             }
-            AgentOutcome::Asked { session_id, asks } => Ok((session_id, Self::Asked { asks })),
+            AgentOutcome::Asked { session_id, .. } => Ok((session_id, Self::Asked)),
             AgentOutcome::Parked { session_id } => Ok((session_id, Self::Parked)),
             AgentOutcome::Failed {
                 session_id,
@@ -439,53 +447,18 @@ impl TurnEnd {
             AgentOutcome::UsageRecorded {
                 session_id,
                 usage_total,
-            } => Err((session_id, usage_total)),
+            } => Err((session_id, NotAnEnd::Usage(usage_total))),
+            AgentOutcome::Started { session_id } => Err((session_id, NotAnEnd::Started)),
         }
     }
 }
 
-/// One answer to one pending ask.
-#[derive(Debug, Clone)]
-pub struct AskAnswer {
-    pub tool_call_id: String,
-    pub text: String,
-}
-
-/// Why a set of answers was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AnswerError {
-    /// The session is not parked on anything answerable.
-    NothingPending,
-    /// The answers did not cover the pending asks exactly.
-    Incomplete {
-        missing: Vec<String>,
-        unexpected: Vec<String>,
-    },
-}
-
-impl std::fmt::Display for AnswerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NothingPending => write!(f, "this session is not waiting on an answer"),
-            Self::Incomplete {
-                missing,
-                unexpected,
-            } => write!(
-                f,
-                "every pending question must be answered together (missing: [{}]; not pending: [{}])",
-                missing.join(", "),
-                unexpected.join(", ")
-            ),
-        }
-    }
-}
-
-/// One accepted-but-undelivered user message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct InboxMessage {
-    pub id: String,
-    pub text: String,
-    pub at_ms: u64,
+/// An outcome that is not a way a turn ended.
+pub(super) enum NotAnEnd {
+    /// A turn began. The agent decided it, so the session is being told.
+    Started,
+    /// Tokens to bank. The turn they were spent on is a separate report.
+    Usage(UsageTotal),
 }
 
 /// Persisted session state — purely a function of the event log.
@@ -497,15 +470,6 @@ pub struct InboxMessage {
 #[serde(default)]
 pub struct SessionState {
     pub status: SessionStatus,
-    /// Every ask awaiting an answer (status `AwaitingInput`), oldest first. A
-    /// turn may ask several questions at once, and the run cannot resume until
-    /// all of them have a result.
-    #[serde(default)]
-    pub pending_asks: Vec<PendingAsk>,
-    /// Accepted user messages not yet delivered to a turn. The client shows
-    /// these as unread; they go in with whatever turn starts next.
-    #[serde(default)]
-    pub inbox: Vec<InboxMessage>,
     pub last_error: Option<String>,
     #[serde(default)]
     pub agent_usage: HashMap<String, UsageTotal>,
@@ -544,9 +508,7 @@ pub struct AgentUsageEntry {
 /// the same answers as a loaded one — it just has to be loaded to give them.
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
-    /// Carries the pending asks when the session is parked on questions.
     pub status: SessionStatus,
-    pub inbox: Vec<InboxMessage>,
 }
 
 /// A session's aggregated usage.

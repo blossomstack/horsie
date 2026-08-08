@@ -25,7 +25,7 @@ use horsie_models::{
     runtime::{ServerHookEvent, StopInput, SubagentStopInput},
 };
 use horsie_workflow::AgentCommand;
-use horsie_workflow::{AgentOutcome, AgentOutcomeSink};
+use horsie_workflow::{AgentOutcome, AgentOutcomeSink, Incoming};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -466,15 +466,18 @@ impl HookRouting {
                     .await
             }
             HookCommand::ContinueAfterStop { key, reason } => {
-                // The same path recovery uses to continue an interrupted task:
-                // a plain user-message turn whose input is the hook's reason.
+                // One more thing addressed to the agent, queued like the rest:
+                // the turn it continues is over by the time this lands, so the
+                // agent's own boundary drain is what starts the next one.
                 if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
                     let _ = agent
                         .actor
-                        .tell(AgentCommand::Resume {
-                            results: Vec::new(),
-                            message: Some(reason),
-                            subagent_results: Vec::new(),
+                        .tell(AgentCommand::Enqueue {
+                            item: Incoming::Continue {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                reason,
+                            },
+                            ack: None,
                         })
                         .await;
                 }

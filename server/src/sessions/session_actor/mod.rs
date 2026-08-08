@@ -46,7 +46,7 @@ use turns::Turns;
 
 use crate::sessions::{
     ask_tool::ASK_USER_TOOL,
-    orchestrator::{AgentAction, TurnStart},
+    orchestrator::{AgentAction, Delivery},
     spec::{ServerDeps, SessionSpec, SessionStatus},
     supervisor::SessionSupervisorCommand,
 };
@@ -55,7 +55,7 @@ use context::{SessionAgentKind, SessionContextProvider};
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_models::now_ms;
 use horsie_workflow::{
-    AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext,
+    AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
 };
 use serde_json::Value;
 use std::{
@@ -241,7 +241,12 @@ impl SessionActor {
     ///
     /// Main is registered as the session's primary; a subagent and a step both
     /// register under their own id, which is also the id they journal under.
-    fn spawn_agent(&mut self, ctx: &ActorContext<Self>, plan: AgentPlan) -> ResidentAgent {
+    fn spawn_agent(
+        &mut self,
+        ctx: &ActorContext<Self>,
+        state: &SessionState,
+        plan: AgentPlan,
+    ) -> ResidentAgent {
         // A subagent and a step journal under their own id; the main agent
         // journals under the session's, because its transcript *is* the
         // session's. The position channel follows the same split.
@@ -303,6 +308,11 @@ impl SessionActor {
             position,
             parent: StopHookParent::wrap(ctx.self_ref(), key, provider.clone()),
             session_id: journal_id,
+            // Computed from the state this spawn was decided against, never
+            // remembered: an agent built after the runtime landed starts ready,
+            // and one built before it starts waiting. Changes reach it as the
+            // `Runtime` records it is sent anyway.
+            ready: Self::runnable(state),
         };
         let resident = ResidentAgent {
             actor: ctx.spawn(AgentActor::new(agent_ctx, params)),
@@ -322,9 +332,10 @@ impl SessionActor {
     }
 
     /// The session's primary agent, spawned once at load.
-    fn spawn_main_agent(&mut self, ctx: &ActorContext<Self>) {
+    fn spawn_main_agent(&mut self, ctx: &ActorContext<Self>, state: &SessionState) {
         self.spawn_agent(
             ctx,
+            state,
             AgentPlan {
                 kind: SessionAgentKind::Main,
                 settings: self.spec.agent.clone(),
@@ -359,7 +370,7 @@ impl SessionActor {
                 let agent_type = state.subagents.node(id)?.agent_type.clone();
                 Some((
                     AgentKey::Sub(id),
-                    self.spawn_sub_agent_actor(ctx, id, agent_type),
+                    self.spawn_sub_agent_actor(ctx, state, id, agent_type),
                 ))
             }
         }
@@ -417,12 +428,11 @@ impl SessionActor {
         }
     }
 
-    /// Carry out one orchestrator decision: resume the agent it names, report
-    /// the status it implies, and return the events that record it.
+    /// Carry out one orchestrator decision and return the events that record it.
     ///
-    /// The single place a turn ever begins. Reached only at turn boundaries (a
-    /// message arriving while idle, a turn ending, a stop) — never on load,
-    /// which is what keeps opening a session free of side effects.
+    /// No turn ever begins here any more: an agent owns its queue and decides
+    /// when that queue becomes a turn. What is left is delivery — putting a
+    /// finished child's result where the agent that asked for it will find it.
     async fn perform(
         &mut self,
         action: AgentAction,
@@ -430,108 +440,75 @@ impl SessionActor {
         ctx: &ActorContext<Self>,
     ) -> Vec<SessionDomainEvent> {
         match action {
-            AgentAction::StartTurn(turn) => self.start_turn(turn, state, ctx).await,
-            AgentAction::StartStep(step) => self.start_step(step, ctx).await,
+            AgentAction::Deliver(delivery) => self.deliver(delivery, state, ctx).await,
+            AgentAction::StartStep(step) => self.start_step(step, state, ctx).await,
             AgentAction::Finish { output } => self.finish_run(output).await,
             AgentAction::Fail { error } => self.fail_run(error).await,
         }
     }
 
-    /// Resume the agent a `StartTurn` names, and return the events that record
-    /// it. Split from [`Self::perform`] so neither half needs an `unreachable!`
-    /// for the variants the other owns.
-    async fn start_turn(
+    /// Put a finished subagent's result in the queue of the agent that is owed
+    /// it, and record that it has been sent.
+    ///
+    /// Tell-then-persist: a crash between the enqueue and this write leaves the
+    /// result still owed, so the next boundary re-delivers it. Delivery is
+    /// at-least-once in that window (the parent may see a result twice), never
+    /// lost — `spawn_agent`'s stricter persist-then-spawn is the deliberate
+    /// exception, because an untracked agent is worse than a duplicate.
+    ///
+    /// Skipped, not failed, when the agent cannot be reached: the result stays
+    /// owed and the next boundary tries again.
+    async fn deliver(
         &mut self,
-        turn: TurnStart,
+        delivery: Delivery,
         state: &SessionState,
         ctx: &ActorContext<Self>,
     ) -> Vec<SessionDomainEvent> {
-        let TurnStart {
-            who,
-            input,
-            consumed,
-            answered,
-            notified,
-            mark_running,
-        } = turn;
-        match who {
-            // A subagent parent waking to consume its children's results. It
-            // is skipped, not failed, when its actor cannot be reached: the
-            // results stay owed and the next boundary retries.
-            // A step is resumed only by `start_step`; the turn path never names
-            // one.
-            AgentKey::Step(_) => Vec::new(),
+        let Delivery { to, child, part } = delivery;
+        let Some(agent) = self.reach(to, state, ctx) else {
+            return Vec::new();
+        };
+        if agent
+            .tell(AgentCommand::Enqueue {
+                item: Incoming::SubAgent {
+                    id: child.to_string(),
+                    part: Box::new(part),
+                },
+                ack: None,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        vec![SessionDomainEvent::SubAgentNotified {
+            at_ms: now_ms(),
+            id: child,
+        }]
+    }
+
+    /// The mailbox of one of this session's agents, spawning a cold subagent's
+    /// actor on demand. `None` when nothing under that key exists.
+    fn reach(
+        &mut self,
+        key: AgentKey,
+        state: &SessionState,
+        ctx: &ActorContext<Self>,
+    ) -> Option<ActorRef<AgentCommand>> {
+        if let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)) {
+            return Some(agent.actor.clone());
+        }
+        match key {
+            // A cold node reached for the first time since load. The type comes
+            // off the record, not from the caller: a node woken to receive a
+            // result must run as what it was spawned as.
             AgentKey::Sub(id) => {
-                let agent = match self.agents.as_ref().and_then(|a| a.sub(id)) {
-                    Some(agent) => agent.actor.clone(),
-                    // A cold node woken for the first time since load: spawn
-                    // its resident actor on demand (see `on_recovery_complete`).
-                    None => match state.subagents.node(id) {
-                        Some(rec) => {
-                            let agent_type = rec.agent_type.clone();
-                            self.spawn_sub_agent_actor(ctx, id, agent_type)
-                        }
-                        None => return Vec::new(),
-                    },
-                };
-                if agent
-                    .tell(AgentCommand::Resume {
-                        results: input.results,
-                        message: input.message,
-                        subagent_results: input.subagent_results,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return Vec::new();
-                }
-                let mut events = Vec::new();
-                if let Some(parent) = mark_running {
-                    events.push(SessionDomainEvent::SubAgentRunning {
-                        at_ms: now_ms(),
-                        id: parent,
-                    });
-                }
-                events.extend(notified.into_iter().map(|id| {
-                    SessionDomainEvent::SubAgentNotified {
-                        at_ms: now_ms(),
-                        id,
-                    }
-                }));
-                events
+                let agent_type = state.subagents.node(id)?.agent_type.clone();
+                Some(self.spawn_sub_agent_actor(ctx, state, id, agent_type))
             }
-            AgentKey::Main => {
-                if let Some(agent) = self.agent() {
-                    let _ = agent
-                        .tell(AgentCommand::Resume {
-                            results: input.results,
-                            message: input.message,
-                            subagent_results: input.subagent_results,
-                        })
-                        .await;
-                }
-                self.report(SessionStatus::Running).await;
-                // Tell-then-persist, like the user messages this turn also
-                // carries: a crash between the agent's `Run` and this write
-                // leaves the result owed, so the next turn re-delivers it.
-                // Delivery is at-least-once in that window (the parent may see
-                // a result twice), never lost — `spawn_agent`'s stricter
-                // persist-then-spawn is the deliberate exception, because an
-                // untracked agent is worse than a duplicate.
-                let mut events = vec![SessionDomainEvent::TurnBegan {
-                    at_ms: now_ms(),
-                    consumed,
-                    answering: None,
-                    answered,
-                }];
-                events.extend(notified.into_iter().map(|id| {
-                    SessionDomainEvent::SubAgentNotified {
-                        at_ms: now_ms(),
-                        id,
-                    }
-                }));
-                events
-            }
+            // A step's actor is spawned by the step itself, and the main agent
+            // is spawned at load — neither is created on demand here.
+            AgentKey::Step(_) | AgentKey::Main => None,
         }
     }
 
@@ -620,22 +597,22 @@ impl SessionActor {
     /// The one command routed by *identity* rather than by variant: the same
     /// `Concluded` means "the turn is over", "this step's output picks the next
     /// step", or "tell the parent its child is done", depending only on which
-    /// agent sent it. Banking usage first is what lets each of those three read
-    /// the outcome as a turn that ended, rather than re-answering a variant that
-    /// means the same thing to all of them.
+    /// agent sent it. Answering the two non-ending reports first is what lets
+    /// each of those three read the outcome as a turn that ended, rather than
+    /// re-answering variants that mean the same thing to all of them.
     async fn on_agent_outcome(
         &mut self,
         state: &SessionState,
         outcome: AgentOutcome,
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<SessionDomainEvent> {
-        // Usage is banked for every agent alike, and always: the tokens were
-        // spent whatever became of the turn that spent them. The main agent
-        // banks under a fixed name because its journal is keyed by the session
-        // id; every other agent banks under its own.
         let (who, end) = match TurnEnd::split(outcome) {
             Ok(pair) => pair,
-            Err((session_id, usage_total)) => {
+            // Usage is banked for every agent alike, and always: the tokens
+            // were spent whatever became of the turn that spent them. The main
+            // agent banks under a fixed name because its journal is keyed by
+            // the session id; every other agent banks under its own.
+            Err((session_id, NotAnEnd::Usage(usage_total))) => {
                 let agent_id = match session_id == self.id {
                     true => MAIN_AGENT_ID.to_string(),
                     false => session_id.to_string(),
@@ -645,6 +622,9 @@ impl SessionActor {
                     agent_id,
                     usage_total,
                 }]);
+            }
+            Err((session_id, NotAnEnd::Started)) => {
+                return self.on_agent_started(state, session_id).await;
             }
         };
         // In a run, an outcome is a step's or one of a step's subagents'.
@@ -658,6 +638,39 @@ impl SessionActor {
             true => self.on_main_outcome(state, end, ctx).await,
             false => self.on_sub_agent_outcome(state, who, end, ctx).await,
         }
+    }
+
+    /// One of this session's agents drained its queue into a turn.
+    ///
+    /// The session used to know this because it was the thing that started the
+    /// turn. It is told now, and what it records depends only on which agent it
+    /// was: the session's own status for the main agent, a tree node going back
+    /// to work for a subagent. A step announces itself through `StepStarted`
+    /// when the run picks it, so there is nothing to add here.
+    async fn on_agent_started(
+        &mut self,
+        state: &SessionState,
+        who: Uuid,
+    ) -> CommandEffect<SessionDomainEvent> {
+        if who == self.id {
+            self.report(SessionStatus::Running).await;
+            return CommandEffect::persist(vec![SessionDomainEvent::TurnBegan { at_ms: now_ms() }]);
+        }
+        if state.subagents.node(who).is_some() {
+            return CommandEffect::persist(vec![SessionDomainEvent::SubAgentRunning {
+                at_ms: now_ms(),
+                id: who,
+            }]);
+        }
+        CommandEffect::none()
+    }
+
+    /// Whether this session's agents may start a turn at all: it has a runtime,
+    /// and it is not terminal. The whole of what an agent's own drain gate
+    /// cannot answer for itself.
+    fn runnable(state: &SessionState) -> bool {
+        RuntimeLifecycle::ready(state)
+            && !matches!(state.status, SessionStatus::Unrecoverable { .. })
     }
 
     /// Stop every agent this session hosts. Used when the session unloads.
@@ -695,8 +708,7 @@ impl EventSourcedActor for SessionActor {
             | SessionDomainEvent::ProvisioningFailed { .. } => {
                 RuntimeLifecycle::apply(&mut state, &event)
             }
-            SessionDomainEvent::MessageQueued { .. }
-            | SessionDomainEvent::TurnBegan { .. }
+            SessionDomainEvent::TurnBegan { .. }
             | SessionDomainEvent::AskRecorded { .. }
             | SessionDomainEvent::TurnEnded { .. }
             | SessionDomainEvent::TurnFailed { .. }
@@ -759,7 +771,7 @@ impl EventSourcedActor for SessionActor {
             // next step a boundary picks.
             self.agents = Some(SessionAgents::workflow());
         } else {
-            self.spawn_main_agent(ctx);
+            self.spawn_main_agent(ctx, state);
         }
         // Each component repairs itself. A self-send rather than direct work,
         // because recovery must not persist and this runs before the first live

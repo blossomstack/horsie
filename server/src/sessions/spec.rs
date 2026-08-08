@@ -148,18 +148,8 @@ impl SessionSpec {
     }
 }
 
-/// One question the agent is parked on, and the tool call that asked it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingAsk {
-    /// `None` only in a pre-#62 journal, where the call id was not recorded;
-    /// such an ask can be read but not answered on its own.
-    pub tool_call_id: Option<String>,
-    pub question: String,
-}
-
-/// User-visible lifecycle state. Failure reasons and pending questions ride
-/// inside the variants; [`status_kind`]/[`status_reason`] project them onto the
-/// wire shape.
+/// User-visible lifecycle state. Failure reasons ride inside the variants;
+/// [`status_kind`]/[`status_reason`] project them onto the wire shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum SessionStatus {
     /// The runtime is being built and nothing may run yet. Where a session
@@ -175,12 +165,12 @@ pub enum SessionStatus {
     #[default]
     Idle,
     Running,
-    /// Parked on one or more questions. Every one of them must be answered
-    /// before the turn can resume, so the status carries them all: a caller that
-    /// can see the status can see exactly what it has to answer.
-    AwaitingInput {
-        asks: Vec<PendingAsk>,
-    },
+    /// Parked on one or more questions.
+    ///
+    /// Carries none of them: the questions belong to the agent that asked, are
+    /// entries in that agent's log, and are answered through it. A status is
+    /// what badges a session in a list, and a list does not render questions.
+    AwaitingInput,
     /// The last turn failed. Sticky so the UI can badge it, but fully
     /// recoverable: the next turn moves it back to `Running`.
     Failed {
@@ -211,7 +201,7 @@ pub fn status_kind(s: &SessionStatus) -> SessionStatusKind {
         SessionStatus::Provisioning => SessionStatusKind::Provisioning,
         SessionStatus::Idle => SessionStatusKind::Idle,
         SessionStatus::Running => SessionStatusKind::Running,
-        SessionStatus::AwaitingInput { .. } => SessionStatusKind::AwaitingInput,
+        SessionStatus::AwaitingInput => SessionStatusKind::AwaitingInput,
         // Deliberately the same wire discriminant as a failed turn: to a
         // reader both are "it did not work, the reason is in `last_error`, send
         // again". What differs is what *sending again* does, and that is the
@@ -232,7 +222,7 @@ pub fn status_reason(s: &SessionStatus) -> Option<String> {
         SessionStatus::Provisioning
         | SessionStatus::Idle
         | SessionStatus::Running
-        | SessionStatus::AwaitingInput { .. } => None,
+        | SessionStatus::AwaitingInput => None,
     }
 }
 

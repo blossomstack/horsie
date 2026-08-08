@@ -78,7 +78,6 @@ impl Reads {
             ReadCommand::Snapshot { reply } => {
                 let _ = reply.send(SessionSnapshot {
                     status: state.status.clone(),
-                    inbox: state.inbox.clone(),
                 });
                 CommandEffect::none()
             }
@@ -174,6 +173,7 @@ mod tests {
         session
             .ask(|reply| {
                 SessionCommand::Turn(TurnCommand::UserMessage {
+                    agent_id: None,
                     text: "go".into(),
                     reply,
                 })
@@ -246,6 +246,7 @@ mod tests {
         session
             .ask(|reply| {
                 SessionCommand::Turn(TurnCommand::UserMessage {
+                    agent_id: None,
                     text: "go".into(),
                     reply,
                 })

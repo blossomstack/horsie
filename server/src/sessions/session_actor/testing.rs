@@ -24,14 +24,6 @@ use horsie_models::hooks::{HookAction, HookRecord, StopOutcome};
 use horsie_workflow::{ContextProvider, StartTurn};
 use std::sync::PoisonError;
 
-pub(super) fn queued(id: &str, text: &str) -> SessionDomainEvent {
-    SessionDomainEvent::MessageQueued {
-        id: id.to_string(),
-        text: text.to_string(),
-        at_ms: 0,
-    }
-}
-
 pub(super) fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
     events
         .into_iter()
@@ -153,32 +145,6 @@ pub(super) fn spawn_deaf_supervisor() -> ActorRef<SessionSupervisorCommand> {
         DeafSupervisor,
         Arc::new(horsie_actor::InMemoryJournal::new()),
     )
-}
-
-/// A session parked on two questions, with an actor to answer them on.
-pub(super) async fn parked_on_two_asks() -> (SessionActor, SessionState) {
-    let f = actor_fixture().await;
-    let parent = spawn_deaf_supervisor();
-    let actor = SessionActor::new(
-        Uuid::new_v4(),
-        actor_spec_fixture(),
-        f.deps,
-        parent,
-        crate::sessions::Positions::default(),
-    );
-    let state = fold(vec![
-        SessionDomainEvent::AskRecorded {
-            at_ms: 0,
-            tool_call_id: Some("call-1".into()),
-            question: "which branch?".into(),
-        },
-        SessionDomainEvent::AskRecorded {
-            at_ms: 0,
-            tool_call_id: Some("call-2".into()),
-            question: "which model?".into(),
-        },
-    ]);
-    (actor, state)
 }
 
 pub(super) fn answer(id: &str, text: &str) -> AskAnswer {
@@ -474,6 +440,28 @@ pub(super) fn spawn_unprovisioned(
     (session, journal)
 }
 
+/// Poll a session's own journal until its decoded events satisfy `pred`.
+///
+/// Asserting on the *events* rather than the fold is what makes a transition
+/// observable: a turn that begins and ends between two polls leaves the status
+/// exactly where it started, and only the journal remembers it happened.
+pub(super) async fn wait_for_events(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    session_id: Uuid,
+    what: &str,
+    pred: impl Fn(&[SessionDomainEvent]) -> bool,
+) -> Vec<SessionDomainEvent> {
+    for _ in 0..200 {
+        let events = crate::sessions::events::session_events(journal, session_id).await;
+        if pred(&events) {
+            return events;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let events = crate::sessions::events::session_events(journal, session_id).await;
+    panic!("{what} not reached within 2s; journal: {events:?}");
+}
+
 /// Poll the folded session state until it satisfies `pred`.
 pub(super) async fn wait_for_state(
     journal: &Arc<dyn horsie_actor::Journal>,
@@ -488,7 +476,8 @@ pub(super) async fn wait_for_state(
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("{what} not reached within 2s");
+    let events = crate::sessions::events::session_events(journal, session_id).await;
+    panic!("{what} not reached within 2s; journal: {events:?}");
 }
 
 /// Entry count of the session's own journal (`session/<id>`), not the
@@ -924,6 +913,7 @@ pub(super) async fn send(session: &ActorRef<SessionCommand>, text: &str) {
     session
         .ask(|reply| {
             SessionCommand::Turn(TurnCommand::UserMessage {
+                agent_id: None,
                 text: text.into(),
                 reply,
             })
