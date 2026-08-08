@@ -87,6 +87,17 @@ pub struct UserServices {
     /// everyone — and no session can select another account's runtime, because
     /// it is not in the map it reads.
     pub vendor_agents: Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
+    /// Where this account's runtimes land when they dial `/api/runtime/connect`.
+    ///
+    /// One per account rather than one per server: the dial token names the
+    /// account, so there is no lookup to get wrong, and a transport can never
+    /// be resolved across accounts even if two of them somehow shared a
+    /// runtime id.
+    pub connected_runtimes: Arc<horsie_runtime_vendor::ConnectedRuntimeRegistry>,
+    /// Signs this account's dial-back tokens. See [`OpenedConfig::dial_secret`].
+    ///
+    /// [`OpenedConfig::dial_secret`]: crate::config::store::OpenedConfig::dial_secret
+    pub dial_secret: Arc<Vec<u8>>,
 }
 
 /// Build one account's services on the shared deployment tier.
@@ -217,6 +228,8 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         environments,
         workflows,
         vendor_agents,
+        connected_runtimes: Arc::new(horsie_runtime_vendor::ConnectedRuntimeRegistry::new()),
+        dial_secret: opened.dial_secret.clone(),
     }))
 }
 

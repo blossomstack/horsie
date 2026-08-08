@@ -45,6 +45,12 @@ pub struct OpenedConfig {
     pub store: Arc<DbConfigStore>,
     pub registry: SharedProviderRegistry,
     pub vendors: RuntimeVendorMap,
+    /// Signs the dial-back token every runtime this account owns presents.
+    ///
+    /// Generated once and kept, rather than derived per runtime: rotating this
+    /// one value invalidates every outstanding token at once, and there is no
+    /// per-runtime row to migrate or expire.
+    pub dial_secret: Arc<Vec<u8>>,
     /// The migrated connection pool, shared with feature stores (e.g. GitHub)
     /// that persist into the same settings DB.
     pub db: Db,
@@ -134,6 +140,8 @@ impl DbConfigStore {
         // never repopulated from the database.
         let vendors: RuntimeVendorMap = Arc::new(RwLock::new(HashMap::new()));
 
+        let dial_secret = load_or_create_dial_secret(&db, &user).await?;
+
         // Kept as a preference even when no agent has connected yet — an agent
         // announcing this name later makes it take effect, so validating it
         // against the (empty) live map at boot would be wrong.
@@ -154,6 +162,7 @@ impl DbConfigStore {
             store,
             registry,
             vendors,
+            dial_secret,
             db,
         })
     }
@@ -1087,6 +1096,42 @@ where
     }
     Ok(out)
 }
+
+/// This account's dial secret, creating it on first use.
+///
+/// `begin_write`, not `begin`: this reads the setting and then writes it when
+/// absent, and a deferred transaction that upgrades to a write that late loses
+/// to any writer that committed in between — SQLite answers `database is
+/// locked` and no busy timeout retries it.
+async fn load_or_create_dial_secret(db: &Db, user: &UserId) -> Result<Arc<Vec<u8>>, String> {
+    let mut tx = db.begin_write().await.map_err(|e| e.to_string())?;
+    if let Some(existing) = read_setting(db, &mut *tx, user, RUNTIME_DIAL_SECRET_KEY)
+        .await
+        .map_err(|e| e.to_string())?
+        && let Ok(bytes) = hex::decode(&existing)
+        && !bytes.is_empty()
+    {
+        return Ok(Arc::new(bytes));
+    }
+    let mut secret = vec![0u8; 32];
+    rand::fill(&mut secret[..]);
+    let sql = db.q(
+        "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) \
+         ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+    );
+    sqlx::query(&sql)
+        .bind(user.as_str())
+        .bind(RUNTIME_DIAL_SECRET_KEY)
+        .bind(hex::encode(&secret))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(Arc::new(secret))
+}
+
+/// Settings key holding this account's hex-encoded dial secret.
+const RUNTIME_DIAL_SECRET_KEY: &str = "runtime_dial_secret";
 
 async fn read_setting<'e, E>(
     db: &Db,

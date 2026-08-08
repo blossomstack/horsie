@@ -18,8 +18,9 @@ mod messages;
 mod model_cards;
 mod plugins;
 mod routines;
+pub mod runtime_connect;
 mod sse;
-pub mod vendor_connect;
+mod vendor_connect;
 mod workflows;
 
 use crate::auth::{AuthService, Principal};
@@ -331,6 +332,10 @@ pub fn app(state: AppState) -> Router {
             post(workflows::retry_step),
         )
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
+        .route(
+            "/api/runtime/connect",
+            get(runtime_connect::runtime_connect),
+        )
         .merge(credentials(state.auth.mode()))
         // Guards every route above. The SPA shell and its assets, added below,
         // are deliberately outside it: the app has to load in order to render a
@@ -1560,6 +1565,122 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Dial `/api/runtime/connect` with `token`, announce `announced`, and
+    /// return the socket so the caller controls when it closes.
+    async fn dial_runtime(
+        addr: std::net::SocketAddr,
+        token: &str,
+        announced: &str,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::Error,
+    > {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{addr}/api/runtime/connect")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
+        let ready = serde_json::to_string(&horsie_models::runtime::RuntimeOutboundMessage::Ready(
+            horsie_models::runtime::RuntimeReady {
+                runtime_id: announced.to_string(),
+            },
+        ))
+        .unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(ready.into()))
+            .await
+            .unwrap();
+        Ok(ws)
+    }
+
+    /// Bind and serve, returning the address. Named apart from the existing
+    /// `serve` helper below, which answers with a URL string instead.
+    async fn serve_state(state: AppState) -> std::net::SocketAddr {
+        let router = app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_dials_in_is_registered_for_its_own_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let services = services(&state).await;
+        let token = horsie_support::dial_token::mint(
+            &services.dial_secret,
+            &horsie_support::dial_token::DialClaims {
+                user_id: services.user.as_str().to_string(),
+                runtime_id: "s1".to_string(),
+            },
+        );
+        let addr = serve_state(state).await;
+
+        let _ws = dial_runtime(addr, &token, "s1").await.expect("dial");
+        for _ in 0..100 {
+            if services
+                .connected_runtimes
+                .runtime_transport("s1")
+                .await
+                .is_some()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the runtime never registered");
+    }
+
+    #[tokio::test]
+    async fn a_runtime_with_no_token_is_refused_before_the_upgrade() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addr = serve_state(test_state(&tmp).await).await;
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{addr}/api/runtime/connect"))
+                .await
+                .is_err(),
+            "an unauthenticated runtime must never reach a websocket"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_cannot_register_a_runtime_it_does_not_name() {
+        // The property the token buys. Before it, whoever announced an id first
+        // received that runtime's relayed tool calls.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let services = services(&state).await;
+        let token = horsie_support::dial_token::mint(
+            &services.dial_secret,
+            &horsie_support::dial_token::DialClaims {
+                user_id: services.user.as_str().to_string(),
+                runtime_id: "mine".to_string(),
+            },
+        );
+        let addr = serve_state(state).await;
+
+        let _ws = dial_runtime(addr, &token, "someone-elses")
+            .await
+            .expect("dial");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            services
+                .connected_runtimes
+                .runtime_transport("someone-elses")
+                .await
+                .is_none(),
+            "a token for 'mine' must not register 'someone-elses'"
+        );
     }
 
     #[tokio::test]
