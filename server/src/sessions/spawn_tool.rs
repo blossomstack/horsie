@@ -25,10 +25,10 @@ pub const SUBAGENT_STATUS_TOOL: &str = "subagent_status";
 
 fn spawn_agent_spec(catalog: &AgentCatalog) -> ToolSpec {
     let mut description = "Spawn a subagent to work on a task independently and in parallel. \
-        Returns immediately with the subagent's id; when it finishes, its result is \
-        delivered back to you as a message. Use subagent_status to check progress. \
-        Spawning fails when the session's subagent limits (depth or concurrency) are \
-        reached."
+        Returns immediately with the subagent's id; its result or failure is automatically \
+        delivered back to you as a message. Continue with independent work, or wait if none \
+        remains; do not poll subagent_status or call it repeatedly. Spawning fails when the \
+        session's subagent limits (depth or concurrency) are reached."
         .to_string();
     let mut properties = serde_json::Map::new();
     properties.insert(
@@ -87,9 +87,12 @@ fn spawn_agent_spec(catalog: &AgentCatalog) -> ToolSpec {
 fn subagent_status_spec() -> ToolSpec {
     ToolSpec {
         name: SUBAGENT_STATUS_TOOL.to_string(),
-        description: "Check on subagents. With `id`, returns that subagent's status, and \
-            its output or error once finished. Without `id`, lists your whole subagent \
-            subtree with statuses."
+        description: "Inspect subagent status only for a user-requested progress update or \
+            to diagnose a suspected runtime or result-delivery problem. Do not poll or call \
+            this tool repeatedly: terminal results and failures are automatically delivered \
+            to you as messages. With `id`, returns that subagent's status and its output or \
+            error once finished. Without `id`, lists your whole subagent subtree with \
+            statuses."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -329,6 +332,40 @@ mod tests {
             .collect();
         assert!(names.contains(&SPAWN_AGENT_TOOL.to_string()));
         assert!(names.contains(&SUBAGENT_STATUS_TOOL.to_string()));
+    }
+
+    #[test]
+    fn tool_descriptions_prohibit_status_polling() {
+        let spawn = spawn_agent_spec(&AgentCatalog::default());
+        assert!(
+            spawn.description.contains("automatically delivered"),
+            "{}",
+            spawn.description
+        );
+        assert!(
+            spawn.description.contains("do not poll"),
+            "{}",
+            spawn.description
+        );
+
+        let status = subagent_status_spec();
+        assert!(
+            status
+                .description
+                .contains("user-requested progress update"),
+            "{}",
+            status.description
+        );
+        assert!(
+            status.description.contains("diagnos"),
+            "{}",
+            status.description
+        );
+        assert!(
+            status.description.contains("Do not poll"),
+            "{}",
+            status.description
+        );
     }
 
     /// A session with no plugin agents sees exactly the tool it saw before

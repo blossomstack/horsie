@@ -99,6 +99,9 @@ latest successful call wins.
 Use `spawn_agent` for substantial independent work that can proceed in
 parallel with yours — research, exploration, isolated changes. Spawning is
 asynchronous: you get an id back immediately, and the subagent's final report
-arrives later as a message. Give each subagent a complete, self-contained
-task: it inherits your model and tools but not this conversation. Check
-progress with `subagent_status`. Prefer doing small, quick things yourself.
+or failure is automatically delivered as a message. Give each subagent a
+complete, self-contained task: it inherits your model and tools but not this
+conversation. Continue with independent work, or wait if none remains; do not
+poll `subagent_status` or call it repeatedly. Use `subagent_status` only when
+the user requests a progress update or to diagnose a suspected runtime or
+result-delivery problem. Prefer doing small, quick things yourself.
