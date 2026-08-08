@@ -31,7 +31,8 @@ and stay.
 
 | Now | After |
 | --- | --- |
-| `RuntimeVendorLink` | `RemoteRuntimeVendor` |
+| `RuntimeVendorLink` (server) | `RemoteRuntimeVendor` |
+| `RuntimeVendor` (runtime-vendor crate — the process that dials a server) | `RuntimeVendorClient`, freeing the name for the server trait |
 | `SharedVendors` | `RuntimeVendorMap` |
 | `VendorError` | `RuntimeVendorError` |
 | `VendorCapabilities` (server) | deleted — use the wire `RuntimeVendorCapabilities` |
@@ -41,6 +42,17 @@ and stay.
 
 `RuntimeProvider` keeps its name: it provisions *runtimes*, not vendors, and is
 the thing a vendor drives. `RuntimeManager` keeps its name and its job.
+
+The two are not the same layer, and the boundary is load-bearing. A
+`RuntimeVendor` is the server's noun: it has a *name* a session selects, it is
+addressed per call by `runtime_id`, and it owns relay routing and the live
+runtime map. A `RuntimeProvider` is the substrate's: `create(id, config)` →
+a handle that can `stop` and `health_check`, and nothing else. The split earns
+itself because `ProcessRuntimeProvider` is used by `horsie connect`, which the
+server only ever sees as a `RemoteRuntimeVendor` — the provider trait spans two
+host processes while `RuntimeVendor` exists only in the server. Collapsing them
+would duplicate wait-for-dial-back, the handle map and relay routing in every
+provider, which is exactly what `InProcessRuntimeVendor<P>` exists to avoid.
 
 "Shared" is dropped from the map alias deliberately — since #233 there is one
 per account, so a name saying "Shared" reads as "the deployment-wide one",
