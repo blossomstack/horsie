@@ -190,6 +190,73 @@ pub trait RuntimeHandle: Send + Sync + std::fmt::Debug {
     async fn closed(&self);
 }
 
+/// The only [`RuntimeHandle`] implementation there needs to be.
+///
+/// Every difference between vendors lives in the transport, which is a seam
+/// that already existed: a websocket vendor supplies one that relays through
+/// its vendor link, and an in-server vendor supplies the socket its runtime
+/// registered when it dialled back. Two handle types would have re-derived a
+/// split [`RuntimeTransport`] already makes.
+pub struct RuntimeHandleImpl {
+    runtime_id: String,
+    transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
+    /// Flipped by whoever owns the connection when it can no longer be reached.
+    closed: tokio::sync::watch::Receiver<bool>,
+}
+
+impl RuntimeHandleImpl {
+    #[must_use]
+    pub fn new(
+        runtime_id: String,
+        transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
+        closed: tokio::sync::watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            runtime_id,
+            transport,
+            closed,
+        }
+    }
+}
+
+impl std::fmt::Debug for RuntimeHandleImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeHandleImpl")
+            .field("runtime_id", &self.runtime_id)
+            .field("closed", &*self.closed.borrow())
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl RuntimeHandle for RuntimeHandleImpl {
+    fn id(&self) -> &str {
+        &self.runtime_id
+    }
+
+    async fn relay(
+        &self,
+        message: RuntimeInboundMessage,
+    ) -> Result<RuntimeOutboundMessage, TransportError> {
+        self.transport.relay(message).await
+    }
+
+    async fn relay_oneway(&self, message: RuntimeInboundMessage) -> Result<(), TransportError> {
+        self.transport.send_oneway(message).await
+    }
+
+    async fn closed(&self) {
+        let mut rx = self.closed.clone();
+        // Checked before waiting, not after: a handle whose runtime died before
+        // anyone asked must still answer immediately, and `wait_for` alone
+        // would miss a flip that happened before this clone.
+        if *rx.borrow() {
+            return;
+        }
+        let _ = rx.wait_for(|closed| *closed).await;
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -408,6 +475,82 @@ mod tests {
             }
         }
         assert_eq!(ids.len(), 2, "both runtimes reported on the one channel");
+    }
+
+    #[derive(Default)]
+    struct RecordingTransport {
+        relays: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl horsie_runtime_client::RuntimeTransport for RecordingTransport {
+        async fn relay(
+            &self,
+            _: RuntimeInboundMessage,
+        ) -> Result<RuntimeOutboundMessage, TransportError> {
+            self.relays
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(TransportError::SendFailed("recorded".to_string()))
+        }
+        async fn send_oneway(&self, _: RuntimeInboundMessage) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    fn ping() -> RuntimeInboundMessage {
+        RuntimeInboundMessage::CancelCall(horsie_models::runtime::CancelCallRequest {
+            call_id: "c1".to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_handle_delegates_every_message_to_its_transport() {
+        let transport = Arc::new(RecordingTransport::default());
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let handle = RuntimeHandleImpl::new("s1".to_string(), transport.clone(), rx);
+
+        assert_eq!(handle.id(), "s1");
+        let _ = handle.relay(ping()).await;
+        handle.relay_oneway(ping()).await.unwrap();
+        assert_eq!(
+            transport.relays.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_resolves_when_the_connection_goes_away() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = RuntimeHandleImpl::new(
+            "s1".to_string(),
+            Arc::new(RecordingTransport::default()),
+            rx,
+        );
+
+        let waiting = tokio::spawn(async move { handle.closed().await });
+        tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("closed() should resolve once the connection is marked dead")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_resolves_immediately_for_a_runtime_that_already_died() {
+        // A handle asked after the fact must still answer: checking the value
+        // only after subscribing would hang forever on a flip that already
+        // happened.
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tx.send(true).unwrap();
+        let handle = RuntimeHandleImpl::new(
+            "s1".to_string(),
+            Arc::new(RecordingTransport::default()),
+            rx,
+        );
+
+        tokio::time::timeout(Duration::from_millis(200), handle.closed())
+            .await
+            .expect("closed() must not wait for a flip that already happened");
     }
 
     #[tokio::test]
