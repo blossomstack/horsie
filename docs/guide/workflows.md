@@ -181,9 +181,31 @@ This is tracked as a known limitation.
 
 ```console
 horsie workflow list
-horsie workflow get <name>
+horsie workflow get <name> [--json]
+horsie workflow apply -f <file>
+horsie workflow delete <name>
 horsie workflow run <name> --input <text> [--vendor <v>] [--repo <url>]
 horsie workflow status <session-id>
+horsie workflow retry <session-id> <step-index>
 horsie session status <session-id>
 horsie session tail <session-id> --output <file> [--agent <agent-id>]
 ```
+
+### Definitions as files
+
+`get --json` prints the definition, and `apply` takes that same document back —
+so a workflow can be kept in a repository, reviewed as a diff, and applied to
+another server:
+
+```console
+$ horsie workflow get fix-bug --json > fix-bug.json
+$ horsie workflow apply -f fix-bug.json --server https://other.example
+Created workflow fix-bug (3 steps)
+```
+
+`apply` creates the workflow or fully replaces it; the name comes from the file.
+There is deliberately no separate definition format — the JSON the API takes is
+the only one, so there is nothing to keep in step.
+
+Deleting a workflow leaves its runs alone. Each run holds its own snapshot of the
+graph, so finished runs stay readable afterwards.

@@ -10,7 +10,9 @@ use crate::agent::truncate;
 use crate::error::CliError;
 use crate::server_client::ServerClient;
 use horsie_models::session_api::RepoConfig;
-use horsie_models::workflow::{StepRunView, WorkflowRunGraph, WorkflowRunRequest, WorkflowView};
+use horsie_models::workflow::{
+    StepRunView, WorkflowInput, WorkflowRunGraph, WorkflowRunRequest, WorkflowView,
+};
 
 pub async fn list(server: &str) -> Result<(), CliError> {
     let workflows = ServerClient::new(server).await?.list_workflows().await?;
@@ -18,10 +20,89 @@ pub async fn list(server: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-pub async fn get(server: &str, name: &str) -> Result<(), CliError> {
+/// Show one workflow. `--json` prints the definition itself, which is what
+/// `apply` takes back — so the pair is a round-trip and there is no second
+/// format to keep in step.
+pub async fn get(server: &str, name: &str, json: bool) -> Result<(), CliError> {
     let workflow = ServerClient::new(server).await?.get_workflow(name).await?;
-    print!("{}", render_detail(&workflow));
+    match json {
+        true => println!("{}", to_json(&to_input(&workflow))?),
+        false => print!("{}", render_detail(&workflow)),
+    }
     Ok(())
+}
+
+/// Create or fully replace a definition from a JSON file.
+///
+/// One command rather than `create` and `replace`: from a file, "make the server
+/// match this" is the only intent, and having to know whether the name is taken
+/// first is friction with no purpose. The name comes from the file, because the
+/// file is the definition.
+pub async fn apply(server: &str, path: &str) -> Result<(), CliError> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| CliError::Config(format!("cannot read {path}: {e}")))?;
+    let input: WorkflowInput = serde_json::from_str(&body)
+        .map_err(|e| CliError::Config(format!("{path} is not a workflow definition: {e}")))?;
+    let name = input.name.clone();
+    let client = ServerClient::new(server).await?;
+    // Which verb this is depends on whether it exists, and only the server
+    // knows. A missing one is the ordinary case for a first apply, not an error
+    // worth relaying.
+    let exists = client.get_workflow(&name).await.is_ok();
+    let view = match exists {
+        true => client.replace_workflow(&name, &input).await?,
+        false => client.create_workflow(&input).await?,
+    };
+    let verb = match exists {
+        true => "Updated",
+        false => "Created",
+    };
+    println!("{verb} workflow {} ({} steps)", view.name, view.steps.len());
+    Ok(())
+}
+
+pub async fn delete(server: &str, name: &str) -> Result<(), CliError> {
+    ServerClient::new(server)
+        .await?
+        .delete_workflow(name)
+        .await?;
+    // Runs are not deleted with it: each carries its own snapshot of the graph,
+    // so they stay readable. Worth saying, because deleting a routine does take
+    // its runs.
+    println!("Deleted workflow {name}. Its runs are sessions and are untouched.");
+    Ok(())
+}
+
+/// Re-run one step execution of a run.
+pub async fn retry(server: &str, session_id: &str, step_index: u32) -> Result<(), CliError> {
+    ServerClient::new(server)
+        .await?
+        .retry_workflow_step(session_id, step_index)
+        .await?;
+    println!(
+        "Retrying step {step_index} of {session_id}.\n  \
+         The workspace is not rolled back — the new attempt runs against whatever \
+         the last one left.\n\n\
+         Follow it with:\n  horsie workflow status {session_id}"
+    );
+    Ok(())
+}
+
+/// The definition as an input document: what `get --json` prints and `apply`
+/// takes. Deliberately not the view — `created_at` and `updated_at` are the
+/// server's, and echoing them back would invite editing them.
+fn to_input(w: &WorkflowView) -> WorkflowInput {
+    WorkflowInput {
+        name: w.name.clone(),
+        description: (!w.description.is_empty()).then(|| w.description.clone()),
+        start: w.start.clone(),
+        steps: w.steps.clone(),
+        max_steps: w.max_steps,
+    }
+}
+
+fn to_json<T: serde::Serialize>(v: &T) -> Result<String, CliError> {
+    serde_json::to_string_pretty(v).map_err(|e| CliError::Config(format!("render json: {e}")))
 }
 
 /// Start a run. The server creates the session and the first step is already
@@ -354,6 +435,59 @@ mod tests {
         let out = render_run(&graph);
         assert!(out.contains("all clear"), "{out}");
         assert!(!out.contains("\"all clear\""), "{out}");
+    }
+
+    /// `get --json` prints what `apply` takes: the definition, and nothing the
+    /// server owns. If these two drift, a round-trip silently loses part of a
+    /// graph — and a save is a full replace.
+    #[test]
+    fn the_json_form_round_trips_through_a_definition_document() {
+        let w = WorkflowView {
+            name: "fix-bug".into(),
+            description: "triage then fix".into(),
+            start: "triage".into(),
+            steps: vec![
+                step("triage", Some(("fix", Some("output.severity == \"p0\"")))),
+                step("fix", None),
+            ],
+            max_steps: Some(40),
+            created_at: "1".into(),
+            updated_at: "2".into(),
+        };
+        let json = to_json(&to_input(&w)).unwrap();
+        let back: WorkflowInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "fix-bug");
+        assert_eq!(back.description.as_deref(), Some("triage then fix"));
+        assert_eq!(back.start, "triage");
+        assert_eq!(back.steps, w.steps, "every step survives the round-trip");
+        assert_eq!(back.max_steps, Some(40), "the budget is part of the graph");
+        // The server's own stamps are deliberately absent: echoing them back
+        // would invite editing them.
+        assert!(!json.contains("createdAt"), "{json}");
+        assert!(!json.contains("updatedAt"), "{json}");
+        // Keys are camelCase, because that is what the API reads. A snake_case
+        // key in a body is not an error — it is silently ignored — so a printed
+        // document that a user edits and applies has to be in the wire's casing
+        // or the edit vanishes.
+        assert!(json.contains("\"maxSteps\""), "{json}");
+        assert!(json.contains("\"outputSchema\""), "{json}");
+        assert!(!json.contains("max_steps"), "{json}");
+    }
+
+    /// An empty description is absent rather than `""`, so a round-tripped
+    /// document does not gain a field the user never set.
+    #[test]
+    fn an_empty_description_round_trips_as_absent() {
+        let w = WorkflowView {
+            name: "w".into(),
+            description: String::new(),
+            start: "a".into(),
+            steps: vec![step("a", None)],
+            max_steps: None,
+            created_at: "1".into(),
+            updated_at: "1".into(),
+        };
+        assert_eq!(to_input(&w).description, None);
     }
 
     #[test]

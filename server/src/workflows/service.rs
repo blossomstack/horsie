@@ -138,9 +138,14 @@ impl WorkflowService {
         Ok(to_view(row))
     }
 
-    /// Delete a definition. In-flight runs are the caller's concern: it holds
-    /// the session list and refuses while any run is active. A finished run
-    /// survives, because it carries its own snapshot of the graph.
+    /// Delete a definition.
+    ///
+    /// Runs are deliberately untouched, in flight or not — including the one
+    /// this deletes out from under. A run snapshots the whole graph at creation,
+    /// with every step's preset already resolved, so it neither reads this row
+    /// again nor needs it to stay readable afterwards. (An earlier comment here
+    /// claimed the caller refuses while a run is active. It does not, and it
+    /// should not: there is nothing for the run to lose.)
     pub async fn delete(&self, name: &str) -> Result<(), WorkflowError> {
         if !self
             .store

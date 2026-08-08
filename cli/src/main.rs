@@ -207,6 +207,26 @@ enum WorkflowAction {
     Get {
         /// Workflow name.
         name: String,
+        /// Print the definition as JSON — the document `apply` takes back.
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Create or fully replace a workflow from a JSON definition. The name comes
+    /// from the file. Round-trips with `get --json`.
+    Apply {
+        /// Path to the definition.
+        #[arg(short = 'f', long = "file")]
+        file: String,
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Delete a workflow. Its runs are sessions and are left alone — each holds
+    /// its own snapshot of the graph.
+    Delete {
+        /// Workflow name.
+        name: String,
         #[arg(long)]
         server: Option<String>,
     },
@@ -235,6 +255,16 @@ enum WorkflowAction {
     Status {
         /// Session UUID of the run.
         session_id: String,
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Re-run one step execution. Appends an attempt; the workspace is not
+    /// rolled back.
+    Retry {
+        /// Session UUID of the run.
+        session_id: String,
+        /// Index of the execution to re-run, from `workflow status`.
+        step_index: u32,
         #[arg(long)]
         server: Option<String>,
     },
@@ -359,9 +389,19 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 workflow::list(&server).await?;
                 Ok(0)
             }
-            WorkflowAction::Get { name, server } => {
+            WorkflowAction::Get { name, json, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                workflow::get(&server, &name).await?;
+                workflow::get(&server, &name, json).await?;
+                Ok(0)
+            }
+            WorkflowAction::Apply { file, server } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                workflow::apply(&server, &file).await?;
+                Ok(0)
+            }
+            WorkflowAction::Delete { name, server } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                workflow::delete(&server, &name).await?;
                 Ok(0)
             }
             WorkflowAction::Run {
@@ -379,6 +419,15 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             WorkflowAction::Status { session_id, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
                 workflow::status(&server, &session_id).await?;
+                Ok(0)
+            }
+            WorkflowAction::Retry {
+                session_id,
+                step_index,
+                server,
+            } => {
+                let server = horsie::config::resolve_server(server, None)?;
+                workflow::retry(&server, &session_id, step_index).await?;
                 Ok(0)
             }
         },
