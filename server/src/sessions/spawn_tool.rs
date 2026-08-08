@@ -342,16 +342,30 @@ mod tests {
             "{}",
             spawn.description
         );
-        assert!(spawn.description.contains("do not poll"), "{}", spawn.description);
+        assert!(
+            spawn.description.contains("do not poll"),
+            "{}",
+            spawn.description
+        );
 
         let status = subagent_status_spec();
         assert!(
-            status.description.contains("user-requested progress update"),
+            status
+                .description
+                .contains("user-requested progress update"),
             "{}",
             status.description
         );
-        assert!(status.description.contains("diagnos"), "{}", status.description);
-        assert!(status.description.contains("Do not poll"), "{}", status.description);
+        assert!(
+            status.description.contains("diagnos"),
+            "{}",
+            status.description
+        );
+        assert!(
+            status.description.contains("Do not poll"),
+            "{}",
+            status.description
+        );
     }
 
     /// A session with no plugin agents sees exactly the tool it saw before
