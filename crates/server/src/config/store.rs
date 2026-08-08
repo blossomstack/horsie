@@ -24,8 +24,8 @@ use horsie_llm_providers::responses::chatgpt::{
     ChatGptTokens, ResponsesError, StoredTokens, TokenStore,
 };
 use horsie_models::settings::{
-    ModelView, ProviderView, ServerInfo, SettingsUpdate, SettingsView, VendorCapabilities,
-    VendorView,
+    ModelInput, ModelView, ProviderInput, ProviderView, ServerInfo, SettingsUpdate, SettingsView,
+    VendorCapabilities, VendorView,
 };
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
@@ -175,6 +175,39 @@ impl DbConfigStore {
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+}
+
+impl DbConfigStore {
+    /// Rebuild the registry from the transaction's pending state, commit, and
+    /// swap the live registry in.
+    ///
+    /// This is the whole cross-resource validation story: building the registry
+    /// is what rejects a model routed to a provider that does not exist, so
+    /// every per-resource mutation gets that check by running this, and a bad
+    /// edit rolls back untouched because the rebuild happens before the commit.
+    async fn validate_and_commit(
+        &self,
+        mut tx: sqlx::Transaction<'_, sqlx::Any>,
+    ) -> Result<(), String> {
+        let provs = read_providers(&self.db, &mut *tx, &self.user)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mods = read_models(&self.db, &mut *tx, &self.user)
+            .await
+            .map_err(|e| e.to_string())?;
+        let chatgpt = live_chatgpt_tokens(
+            &self.db,
+            &self.user,
+            read_provider_oauth(&self.db, &mut *tx, &self.user)
+                .await
+                .map_err(|e| e.to_string())?,
+        );
+        let new_registry = build_registry(&provs, &mods, &chatgpt)?;
+
+        tx.commit().await.map_err(|e| e.to_string())?;
+        *self.registry.write().unwrap_or_else(|e| e.into_inner()) = new_registry;
+        Ok(())
     }
 }
 
@@ -389,6 +422,186 @@ impl ConfigStore for DbConfigStore {
                 .unwrap_or_else(|e| e.into_inner()) = dv.clone();
         }
         self.build_view().await
+    }
+
+    async fn upsert_provider(&self, input: ProviderInput) -> Result<ProviderView, String> {
+        let name = validate_provider(&input)?;
+
+        // `begin_write` for the same reason `update` uses it: this reads the
+        // stored key before rewriting the row, and a deferred transaction that
+        // upgrades to a write that late loses to any writer that committed in
+        // between.
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
+
+        let existing = read_providers(&self.db, &mut *tx, &self.user)
+            .await
+            .map_err(|e| e.to_string())?;
+        let stored_key = existing
+            .iter()
+            .find(|r| r.name == name)
+            .and_then(|r| r.api_key.clone());
+
+        let is_chatgpt = input.kind == "chatgpt";
+        // A ChatGPT plan authorizes with an OAuth token and has no key field at
+        // all, so any key on that row is a leftover from the kind it used to be.
+        let api_key = if is_chatgpt {
+            None
+        } else {
+            resolve_secret(&input.api_key, stored_key.as_deref())
+        };
+
+        sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM providers WHERE user_id = ? AND name = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(&name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        sqlx::query(&self.db.q(
+            "INSERT INTO providers (user_id, name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?, ?)",
+        ))
+        .bind(self.user.as_str())
+        .bind(&name)
+        .bind(&input.kind)
+        .bind(trimmed(&input.base_url))
+        .bind(api_key)
+        .bind(i64::from(input.keep_thinking_signature.unwrap_or(false)))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // A sign-in outlives the kind that created it. Wholesale rewrite got
+        // this by deleting every row and keeping only the names that are
+        // ChatGPT plans now; per-resource it has to be said out loud, or the
+        // next provider of this name silently inherits a live refresh token.
+        if !is_chatgpt {
+            delete_provider_oauth(&self.db, &mut tx, &self.user, &name).await?;
+        }
+
+        self.validate_and_commit(tx).await?;
+
+        self.build_view()
+            .await?
+            .providers
+            .into_iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| format!("provider '{name}' vanished after write"))
+    }
+
+    async fn delete_provider(&self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
+
+        // Checked explicitly rather than left to the registry rebuild, so the
+        // error names the models holding the provider open instead of saying
+        // only that some model references something missing.
+        let referencing: Vec<String> = read_models(&self.db, &mut *tx, &self.user)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|m| m.provider == name)
+            .map(|m| m.alias)
+            .collect();
+        if !referencing.is_empty() {
+            return Err(format!(
+                "provider '{name}' is still used by model(s): {}",
+                referencing.join(", ")
+            ));
+        }
+
+        let affected = sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM providers WHERE user_id = ? AND name = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+        if affected == 0 {
+            return Err(format!("no such provider '{name}'"));
+        }
+
+        delete_provider_oauth(&self.db, &mut tx, &self.user, name).await?;
+
+        self.validate_and_commit(tx).await
+    }
+
+    async fn upsert_model(&self, input: ModelInput) -> Result<ModelView, String> {
+        let alias = validate_model(&input)?;
+        let context_window = input
+            .context_window
+            .or_else(|| default_context_window(input.model_id.trim()));
+
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM models WHERE user_id = ? AND alias = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(&alias)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        sqlx::query(&self.db.q(
+            "INSERT INTO models (user_id, alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ))
+        .bind(self.user.as_str())
+        .bind(&alias)
+        .bind(&input.provider)
+        .bind(input.model_id.trim())
+        .bind(input.max_tokens.map(i64::from))
+        .bind(context_window.map(i64::from))
+        .bind(encode_efforts(input.thinking_efforts.as_ref()))
+        .bind(input.thinking_effort.clone())
+        .bind(input.thinking_dialect.clone())
+        .bind(i64::from(input.forced_tools_disable_thinking.unwrap_or(false)))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // The registry rebuild below is what rejects an unknown provider, and
+        // it checks against the table rather than an incoming list — strictly
+        // stronger than what the whole-document update could do.
+        self.validate_and_commit(tx).await?;
+
+        self.build_view()
+            .await?
+            .models
+            .into_iter()
+            .find(|m| m.alias == alias)
+            .ok_or_else(|| format!("model '{alias}' vanished after write"))
+    }
+
+    async fn delete_model(&self, alias: &str) -> Result<(), String> {
+        let alias = alias.trim();
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
+
+        let affected = sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM models WHERE user_id = ? AND alias = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(alias)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+        if affected == 0 {
+            return Err(format!("no such model '{alias}'"));
+        }
+
+        self.validate_and_commit(tx).await
     }
 
     fn default_vendor(&self) -> String {
@@ -768,6 +981,81 @@ fn live_chatgpt_tokens(
 
 /// Write-only secret input: `None` keeps the stored value, `Some("")` clears,
 /// `Some(v)` sets.
+/// Field validation for one provider, returning its trimmed name.
+///
+/// Every rule the whole-document update applied per entry, minus duplicate
+/// detection: one request now carries one provider, so a repeated name is just
+/// an upsert.
+fn validate_provider(input: &ProviderInput) -> Result<String, String> {
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err("provider name cannot be empty".into());
+    }
+    if !matches!(
+        input.kind.as_str(),
+        "anthropic" | "openai" | "openai-responses" | "chatgpt"
+    ) {
+        return Err(format!(
+            "unsupported provider kind '{}' (expected 'anthropic', 'openai', \
+             'openai-responses' or 'chatgpt')",
+            input.kind
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Field validation for one model, returning its trimmed alias. The provider it
+/// names is checked by the registry rebuild, not here.
+fn validate_model(input: &ModelInput) -> Result<String, String> {
+    let alias = input.alias.trim();
+    if alias.is_empty() {
+        return Err("model alias cannot be empty".into());
+    }
+    if input.model_id.trim().is_empty() {
+        return Err(format!("model '{alias}' needs a model id"));
+    }
+    if let Some(d) = input.thinking_dialect.as_deref()
+        && ThinkingDialect::parse(d).is_none()
+    {
+        return Err(format!(
+            "model '{alias}' has unknown thinking dialect '{d}'"
+        ));
+    }
+    let offered: Vec<String> = input.thinking_efforts.clone().unwrap_or_default();
+    for e in &offered {
+        if ThinkingEffort::parse(e).is_none() {
+            return Err(format!(
+                "model '{alias}' offers unknown thinking effort '{e}'"
+            ));
+        }
+    }
+    if let Some(def) = input.thinking_effort.as_deref()
+        && !offered.iter().any(|e| e == def)
+    {
+        return Err(format!(
+            "model '{alias}' default thinking effort '{def}' is not among its offered efforts"
+        ));
+    }
+    Ok(alias.to_string())
+}
+
+/// Drop a provider's stored ChatGPT sign-in, so the next provider to take that
+/// name cannot inherit a live refresh token.
+async fn delete_provider_oauth(
+    db: &Db,
+    tx: &mut sqlx::AnyConnection,
+    user: &UserId,
+    name: &str,
+) -> Result<(), String> {
+    sqlx::query(&db.q("DELETE FROM provider_oauth WHERE user_id = ? AND provider = ?"))
+        .bind(user.as_str())
+        .bind(name)
+        .execute(tx)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn resolve_secret(input: &Option<String>, existing: Option<&str>) -> Option<String> {
     match input {
         None => existing.filter(|s| !s.is_empty()).map(str::to_string),
@@ -1615,4 +1903,175 @@ mod tests {
 
     // The WAL/synchronous pragmas moved to `Db::open`'s `after_connect` hook,
     // and so did the test that guards them: `crate::db::tests`.
+
+    // --- per-resource operations ---
+
+    #[tokio::test]
+    async fn upsert_provider_creates_then_updates_one_row() {
+        let o = open().await;
+        o.store
+            .upsert_provider(provider("a", Some("sk-a")))
+            .await
+            .expect("create a");
+        o.store
+            .upsert_provider(provider("b", Some("sk-b")))
+            .await
+            .expect("create b");
+
+        // The point of the whole change: touching one provider leaves the other
+        // alone. Under `PUT /api/config` the second write would drop `a`.
+        let view = o.store.view().await.unwrap();
+        assert_eq!(view.providers.len(), 2);
+
+        let updated = o
+            .store
+            .upsert_provider(provider("a", Some("sk-a2")))
+            .await
+            .expect("update a");
+        assert!(updated.has_credential);
+        assert_eq!(o.store.view().await.unwrap().providers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn upsert_provider_keeps_stored_key_when_omitted_and_clears_on_empty() {
+        let o = open().await;
+        o.store
+            .upsert_provider(provider("p", Some("sk-keep")))
+            .await
+            .unwrap();
+
+        let mut omitted = provider("p", None);
+        omitted.api_key = None;
+        assert!(
+            o.store
+                .upsert_provider(omitted)
+                .await
+                .unwrap()
+                .has_credential,
+            "omitted api_key must keep the stored key"
+        );
+
+        let mut cleared = provider("p", None);
+        cleared.api_key = Some(String::new());
+        assert!(
+            !o.store
+                .upsert_provider(cleared)
+                .await
+                .unwrap()
+                .has_credential,
+            "empty api_key must clear the stored key"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_provider_rejects_unknown_kind() {
+        let o = open().await;
+        let err = o
+            .store
+            .upsert_provider(provider_of_kind("p", "gemini", Some("k")))
+            .await
+            .expect_err("unknown kind rejected");
+        assert!(err.contains("unsupported provider kind"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn upsert_model_rejects_unknown_provider_and_rolls_back() {
+        let o = open().await;
+        let err = o
+            .store
+            .upsert_model(model("m", "nope"))
+            .await
+            .expect_err("unknown provider rejected");
+        assert!(!err.is_empty());
+        assert!(
+            o.store.view().await.unwrap().models.is_empty(),
+            "a rejected model must not persist"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_provider_is_blocked_while_a_model_references_it() {
+        let o = open().await;
+        o.store
+            .upsert_provider(provider("p", Some("sk")))
+            .await
+            .unwrap();
+        o.store.upsert_model(model("m", "p")).await.unwrap();
+
+        let err = o
+            .store
+            .delete_provider("p")
+            .await
+            .expect_err("referenced provider is held open");
+        assert!(err.contains("still used by model"), "{err}");
+        assert!(err.contains('m'), "the error names the model: {err}");
+
+        o.store.delete_model("m").await.expect("model deleted");
+        o.store.delete_provider("p").await.expect("now deletable");
+        assert!(o.store.view().await.unwrap().providers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_missing_row_is_an_error() {
+        let o = open().await;
+        assert!(o.store.delete_provider("ghost").await.is_err());
+        assert!(o.store.delete_model("ghost").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_model_swaps_it_out_of_the_registry() {
+        let o = open().await;
+        o.store
+            .upsert_provider(provider("p", Some("sk")))
+            .await
+            .unwrap();
+        o.store.upsert_model(model("m", "p")).await.unwrap();
+        assert!(o.registry.read().unwrap().contains_key("m"));
+
+        o.store.delete_model("m").await.unwrap();
+        assert!(
+            !o.registry.read().unwrap().contains_key("m"),
+            "a deleted model must leave the live registry too"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_and_delete_drop_a_stale_chatgpt_sign_in() {
+        // The rule wholesale rewrite got for free: a sign-in must not outlive
+        // the kind that created it, or the next provider of that name silently
+        // inherits a live refresh token.
+        let o = open().await;
+        o.store
+            .upsert_provider(provider_of_kind("p", "chatgpt", None))
+            .await
+            .unwrap();
+        write_provider_oauth(
+            &o.db,
+            &UserId::new("1"),
+            "p",
+            &StoredTokens {
+                access_token: "a".into(),
+                refresh_token: "r".into(),
+                id_token: None,
+                account_id: Some("acct_1".into()),
+                expires_at: Some(9_999_999_999),
+            },
+        )
+        .await
+        .expect("sign-in written");
+        assert!(
+            o.store.view().await.unwrap().providers[0].has_credential,
+            "chatgpt provider is signed in"
+        );
+
+        // Switching it to a key-based kind must drop the sign-in.
+        o.store
+            .upsert_provider(provider_of_kind("p", "openai", None))
+            .await
+            .unwrap();
+        assert!(
+            !o.store.view().await.unwrap().providers[0].has_credential,
+            "changing kind away from chatgpt must clear the sign-in"
+        );
+    }
 }
