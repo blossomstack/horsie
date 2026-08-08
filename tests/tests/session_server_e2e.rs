@@ -344,6 +344,29 @@ async fn messages_page(
         .unwrap()
 }
 
+/// Poll the main agent's transcript until it carries `want` (10s cap).
+///
+/// The honest wait for "the turn produced this": a session's status is not it,
+/// because `Idle` is reported both when provisioning finishes and when the turn
+/// that followed it ends.
+async fn wait_for_reply(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &str) {
+    let deadline = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    let mut last = String::new();
+    loop {
+        let page = messages_page(client, addr, id, "main").await;
+        last = serde_json::to_string(&page_messages(&page)).unwrap_or(last);
+        if last.contains(want) {
+            return;
+        }
+        assert!(
+            start.elapsed() < deadline,
+            "the message the session was created with is still owed an answer: {last}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Poll the main agent's log until its queue holds exactly `want` texts.
 async fn wait_inbox(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &[&str]) {
     let deadline = Duration::from_secs(10);
@@ -574,23 +597,17 @@ async fn a_first_turn_waits_for_the_create_it_rides_on() {
     );
 
     agent.release_creates();
-    wait_status(&client, &server.addr, &id, "Idle").await;
-    let page: serde_json::Value = client
-        .get(format!(
-            "http://{}/api/sessions/{id}/messages?aid=main&max=50",
-            server.addr
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let text = serde_json::to_string(&page_messages(&page)).unwrap();
-    assert!(
-        text.contains("answered once the runtime was up"),
-        "the message the session was created with is still owed an answer: {text}"
-    );
+    // Not `wait_status(Idle)`: a session reports `Idle` *twice* — once when
+    // provisioning finishes and again when the queued turn ends — so waiting on
+    // the status can return between the two and read the transcript before the
+    // turn has run. Wait for the reply itself, which is what this asserts.
+    wait_for_reply(
+        &client,
+        &server.addr,
+        &id,
+        "answered once the runtime was up",
+    )
+    .await;
 
     server.shutdown().await;
 }
