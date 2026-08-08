@@ -184,6 +184,17 @@ enum AgentAction {
         /// First user message (required).
         #[arg(short = 'm', long)]
         message: String,
+        /// Predefined environment to run in. Alternative to --vendor; one of
+        /// the two is required.
+        #[arg(long)]
+        environment: Option<String>,
+        /// Runtime vendor to run on. Alternative to --environment.
+        #[arg(long)]
+        vendor: Option<String>,
+        /// Repeatable clone URL, cloned into the workspace. Goes with
+        /// --vendor: a named environment carries its own repos.
+        #[arg(long = "repo")]
+        repo: Vec<String>,
         /// Optional session title.
         #[arg(long)]
         session_name: Option<String>,
@@ -238,11 +249,16 @@ enum WorkflowAction {
         /// What the first step is handed (required).
         #[arg(short = 'i', long)]
         input: String,
-        /// Runtime vendor to host the run's shared runtime. Omitted → the
-        /// server's default.
+        /// Predefined environment to run in. Alternative to --vendor; one of
+        /// the two is required.
+        #[arg(long)]
+        environment: Option<String>,
+        /// Runtime vendor to host the run's shared runtime. Alternative to
+        /// --environment.
         #[arg(long)]
         vendor: Option<String>,
-        /// Repeatable clone URL, cloned into the run's shared workspace.
+        /// Repeatable clone URL, cloned into the run's shared workspace. Goes
+        /// with --vendor: a named environment carries its own repos.
         #[arg(long = "repo")]
         repo: Vec<String>,
         /// Optional run title.
@@ -407,13 +423,16 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             WorkflowAction::Run {
                 name,
                 input,
+                environment,
                 vendor,
                 repo,
                 session_name,
                 server,
             } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                workflow::run(&server, &name, input, vendor, repo, session_name).await?;
+                let environment =
+                    horsie::environment::environment_from_flags(environment, vendor, repo)?;
+                workflow::run(&server, &name, input, environment, session_name).await?;
                 Ok(0)
             }
             WorkflowAction::Status { session_id, server } => {
@@ -445,11 +464,16 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             AgentAction::Invoke {
                 name,
                 message,
+                environment,
+                vendor,
+                repo,
                 session_name,
                 server,
             } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                agent::invoke(&server, &name, message, session_name).await?;
+                let environment =
+                    horsie::environment::environment_from_flags(environment, vendor, repo)?;
+                agent::invoke(&server, &name, message, environment, session_name).await?;
                 Ok(0)
             }
         },

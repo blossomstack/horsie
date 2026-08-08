@@ -9,7 +9,7 @@
 use crate::agent::truncate;
 use crate::error::CliError;
 use crate::server_client::ServerClient;
-use horsie_models::session_api::RepoConfig;
+use horsie_models::environments::EnvironmentSpec;
 use horsie_models::workflow::{
     StepRunView, WorkflowInput, WorkflowRunGraph, WorkflowRunRequest, WorkflowView,
 };
@@ -111,8 +111,7 @@ pub async fn run(
     server: &str,
     name: &str,
     input: String,
-    vendor: Option<String>,
-    repos: Vec<String>,
+    environment: EnvironmentSpec,
     session_name: Option<String>,
 ) -> Result<(), CliError> {
     let client = ServerClient::new(server).await?;
@@ -121,21 +120,7 @@ pub async fn run(
             name,
             &WorkflowRunRequest {
                 input,
-                vendor,
-                repos: if repos.is_empty() {
-                    None
-                } else {
-                    Some(
-                        repos
-                            .into_iter()
-                            .map(|url| RepoConfig {
-                                url,
-                                git_ref: None,
-                                dir: None,
-                            })
-                            .collect(),
-                    )
-                },
+                environment,
                 name: session_name,
             },
         )
