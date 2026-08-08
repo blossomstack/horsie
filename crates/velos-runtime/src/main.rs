@@ -119,7 +119,13 @@ async fn run(cli: Cli) -> Result<(), String> {
         .await
         .map_err(|e| format!("bind runtime listener on {}: {e}", cli.listen))?;
     let cancel = CancellationToken::new();
-    serve_runtime_connections(listener, connected.clone(), cancel.clone());
+    let dial_secret = horsie_runtime_vendor::new_dial_secret();
+    serve_runtime_connections(
+        listener,
+        connected.clone(),
+        dial_secret.clone(),
+        cancel.clone(),
+    );
 
     let api = Arc::new(
         velos::VelosClient::new(
@@ -165,6 +171,9 @@ async fn run(cli: Cli) -> Result<(), String> {
         Arc::new(ManagedWorkspaces::new(cli.workspace_root.clone())),
         cli.state_dir.clone(),
     )
+    // The same secret the listener above verifies against: this vendor mints
+    // the tokens its own runtimes present, and nothing else needs to know it.
+    .with_dial_secret(dial_secret)
     .with_bundles(horsie_runtime_vendor::BundleDelivery {
         // Containers reach the server the same way they reach us: over the
         // advertise address, which is routable from velos's container network.

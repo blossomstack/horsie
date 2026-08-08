@@ -227,6 +227,13 @@ pub struct RuntimeVendorClient {
     /// Whether a get for a runtime that is not live may rebuild it from its
     /// persisted spec. See [`RuntimeVendorClient::with_respawnable_runtimes`].
     respawnable: bool,
+    /// Signs the bearer each spawned runtime presents on its dial-back.
+    ///
+    /// Minted per process and never persisted or configured: this vendor is the
+    /// only party that needs to mint or verify, so a random secret held in
+    /// memory is both sufficient and self-rotating — a restart invalidates
+    /// every outstanding token, and the runtimes it spawned died with it.
+    dial_secret: Arc<Vec<u8>>,
     runtimes: Arc<Mutex<HashMap<String, LiveRuntime>>>,
     /// One lock per runtime id, held for the whole of a lifecycle command.
     ///
@@ -282,6 +289,7 @@ impl RuntimeVendorClient {
             bundles: None,
             backoff: Backoff::default(),
             respawnable: false,
+            dial_secret: crate::runtime_vendor::new_dial_secret(),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             lifecycle_locks: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -798,6 +806,19 @@ impl RuntimeVendorClient {
 
         let mut env = request.env.clone();
         env.extend(self.bundle_env(runtime_id));
+        // The runtime proves it is *this* runtime when it dials back. The
+        // account id is empty here: a vendor process serves one account by
+        // construction, so the token only has to bind the runtime id.
+        env.push(EnvVar {
+            name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
+            value: horsie_support::dial_token::mint(
+                &self.dial_secret,
+                &horsie_support::dial_token::DialClaims {
+                    user_id: self.vendor_name.clone(),
+                    runtime_id: runtime_id.to_string(),
+                },
+            ),
+        });
 
         let config = RuntimeConfig {
             workspaces,
@@ -828,6 +849,16 @@ impl RuntimeVendorClient {
             .await
             .insert(runtime_id.to_string(), LiveRuntime { handle, transport });
         Ok(())
+    }
+
+    /// Sign dial-back tokens with this secret.
+    ///
+    /// Must be the same value the runtime listener verifies against; pair them
+    /// from one [`new_dial_secret`](crate::new_dial_secret) call.
+    #[must_use]
+    pub fn with_dial_secret(mut self, secret: Arc<Vec<u8>>) -> Self {
+        self.dial_secret = secret;
+        self
     }
 
     /// Stop every runtime this agent owns. Used on shutdown.

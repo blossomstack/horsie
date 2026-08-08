@@ -1748,6 +1748,7 @@ dependencies = [
  "horsie-runtime-client",
  "horsie-server",
  "horsie-support",
+ "rand 0.10.2",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",

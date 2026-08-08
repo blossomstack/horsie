@@ -25,7 +25,7 @@ pub use reconnect::Backoff;
 pub use runtime_listener::{AcceptedStream, RuntimeEndpoint, RuntimeListenerServer};
 pub use runtime_vendor::{
     RuntimeEvent, RuntimeHandleImpl, RuntimeHandleTransport, RuntimeProgress, RuntimeProgressSink,
-    RuntimeVendorError,
+    RuntimeVendorError, new_dial_secret,
 };
 pub use socket_transport::{SocketRuntimeTransport, UnixSocketRuntimeTransport};
 pub use vendor::{

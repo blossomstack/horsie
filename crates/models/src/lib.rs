@@ -210,6 +210,14 @@ pub mod routines {
 /// providers from `RuntimeConfig.provision`.
 pub const ENV_PROVISION: &str = "HORSIE_PROVISION";
 
+/// The bearer a runtime presents on its dial-back, minted by whoever spawned it
+/// for that runtime's id alone.
+///
+/// Carried in the environment rather than argv deliberately: argv is readable
+/// by any process on the host through `ps`, while a process environment is
+/// owner-only. It is a credential, so it travels the private channel.
+pub const ENV_CONNECT_TOKEN: &str = "HORSIE_CONNECT_TOKEN";
+
 /// Env var carrying a GitHub token used by `git_checkout` provision steps for
 /// github.com URLs.
 pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";

@@ -306,7 +306,13 @@ pub async fn run(
         .await
         .map_err(|e| CliError::Executor(format!("bind runtime socket: {e}")))?;
     let cancel = CancellationToken::new();
-    serve_runtime_connections(listener, connected.clone(), cancel.clone());
+    let dial_secret = horsie_runtime_vendor::new_dial_secret();
+    serve_runtime_connections(
+        listener,
+        connected.clone(),
+        dial_secret.clone(),
+        cancel.clone(),
+    );
 
     let bin = runtime_bin.to_path_buf();
     let sock_for_provider = socket.clone();
@@ -333,6 +339,7 @@ pub async fn run(
         Arc::new(FixedWorkspaces::new(table.clone())),
         state_dir.join("runtimes"),
     )
+    .with_dial_secret(dial_secret)
     .with_sandbox(sandbox)
     // The workspaces this agent serves are the user's own directories, which
     // exist whether or not a runtime does. So a runtime here is just a process:

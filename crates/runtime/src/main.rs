@@ -90,6 +90,28 @@ enum Endpoint {
     Unix(PathBuf),
 }
 
+/// The dial-back request, carrying the bearer when one was supplied.
+///
+/// Built in one place so the fail-fast validation and the retry loop cannot
+/// diverge on what is actually sent — the retry closure clones this rather than
+/// rebuilding it.
+fn dial_request(
+    url: &str,
+    token: Option<&str>,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| format!("not a dialable endpoint: {e}"))?;
+    if let Some(token) = token {
+        let value = format!("Bearer {token}")
+            .parse()
+            .map_err(|_| "the connect token is not a valid header value".to_string())?;
+        request.headers_mut().insert("authorization", value);
+    }
+    Ok(request)
+}
+
 fn parse_endpoint(s: &str) -> Result<Endpoint, String> {
     if let Some(rest) = s.strip_prefix("unix:") {
         Ok(Endpoint::Unix(PathBuf::from(rest)))
@@ -231,9 +253,19 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
 
     match endpoint {
         Endpoint::Ws(url) => {
+            // From the environment, never argv: a bearer in argv is readable
+            // by any process on the host through `ps`.
+            let token = std::env::var(horsie_models::ENV_CONNECT_TOKEN).ok();
+            let request = match dial_request(&url, token.as_deref()) {
+                Ok(request) => request,
+                Err(e) => {
+                    eprintln!("cannot dial {url}: {e}");
+                    std::process::exit(1);
+                }
+            };
             let ws = match retry(
                 &format!("connect to {url}"),
-                || connect_async(url.clone()),
+                || connect_async(request.clone()),
                 CONNECT_RETRIES,
                 CONNECT_BASE_DELAY,
                 CONNECT_MAX_DELAY,
@@ -249,13 +281,24 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
             run_loop(ws, registry, runtime_id, steps, state_file).await;
         }
         Endpoint::Unix(path) => {
+            // The bearer rides the unix path too. A vendor verifies every dial
+            // the same way whatever the socket family, so skipping it here
+            // would make a local runtime unable to register at all.
+            let token = std::env::var(horsie_models::ENV_CONNECT_TOKEN).ok();
+            let request = match dial_request("ws://localhost/", token.as_deref()) {
+                Ok(request) => request,
+                Err(e) => {
+                    eprintln!("cannot dial {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            };
             let ws = match retry(
                 &format!("connect to unix socket {}", path.display()),
                 || async {
                     let stream = tokio::net::UnixStream::connect(&path)
                         .await
                         .map_err(|e| format!("connect failed: {e}"))?;
-                    client_async("ws://localhost/", stream)
+                    client_async(request.clone(), stream)
                         .await
                         .map_err(|e| format!("handshake failed: {e}"))
                 },
@@ -279,6 +322,16 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
 /// Retry an async operation with capped exponential backoff. Logs each failed
 /// attempt to stderr so a foreground `horsie connect` is not silent while the
 /// server is unreachable.
+/// Whether an error is worth another attempt.
+///
+/// A refused dial is terminal: the vendor rejected this runtime's credential,
+/// and the identical handshake will earn the identical answer. Retrying one
+/// burns the whole connect budget — thirty attempts backing off to 30s is over
+/// ten minutes of waiting to learn something the first response already said.
+fn is_retryable(error: &str) -> bool {
+    !error.contains("HTTP error: 4")
+}
+
 async fn retry<F, Fut, T, E>(
     label: &str,
     operation: F,
@@ -296,6 +349,10 @@ where
         match operation().await {
             Ok(t) => return Ok(t),
             Err(e) if attempt == max_attempts => return Err(e),
+            Err(e) if !is_retryable(&e.to_string()) => {
+                eprintln!("{label} was refused, which no retry can change: {e}");
+                return Err(e);
+            }
             Err(e) => {
                 eprintln!(
                     "{label} attempt {attempt}/{max_attempts} failed: {e}; retrying in {delay:?}"
