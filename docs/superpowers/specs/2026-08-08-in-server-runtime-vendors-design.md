@@ -3,10 +3,9 @@
 Closes the implementation half of #191. Folds in #234 (naming) and #243
 (orphaned runtime state).
 
-Diagrams — **both predate the naming and ownership decisions below and are kept
-only for the shape of the flow**:
-[components](https://excalidraw.com/#json=7KcJeXYoO05ZGIh-_veHq,8b__XasgnlnEJeMTKtWNfA),
-[sequence](https://excalidraw.com/#json=sm6DoGp01tCrbIX7W0OXD,V-t0R_UqVEWhqT_JHeAxSw).
+Diagrams:
+[components](https://excalidraw.com/#json=S2_1fgFxP6pcm1U46qdAv,CgiZki3IyWApAFD1aiqrhw),
+[create / relay / hibernate / resume](https://excalidraw.com/#json=LNJF4g1GQEMuqZu4meioe,cm13NsRuFID-MCFF3v4N-A).
 
 ## The problem
 
