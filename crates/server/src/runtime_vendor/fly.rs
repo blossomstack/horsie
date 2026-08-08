@@ -415,23 +415,25 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         };
 
         let waiter = self.connected.notify_when_ready(runtime_id).await;
-        // Started but not connected means the server restarted: the runtime's
-        // socket died with it, and since the runtime has no reconnect loop its
-        // process is gone. Bounce the machine so a fresh one dials in.
-        match machine.state {
-            MachineState::Started => {
-                self.api.stop(&machine.id).await?;
-                self.api.start(&machine.id).await?;
-            }
+        // A started machine is a *live* runtime, always. The runtime is PID 1
+        // under `restart: no`, so a machine outlives its runtime process by
+        // nothing — and the runtime now re-dials rather than exiting when its
+        // link drops. So "started but not connected" means it is mid-retry
+        // (this server restarted, or the network blinked), and the only correct
+        // thing to do is wait. Bouncing it here would kill a runtime that was
+        // seconds from reconnecting, and take its in-flight work with it.
+        let detail = match machine.state {
+            MachineState::Started => "the machine is up; waiting for it to dial back",
             MachineState::Stopped | MachineState::Suspended | MachineState::Other => {
                 self.api.start(&machine.id).await?;
+                "the machine is resuming"
             }
-        }
+        };
         let _ = spec;
 
         self.finish_in_background(runtime_id, waiter, progress);
         Ok(RuntimeProgress::Starting {
-            detail: "the machine is resuming".to_string(),
+            detail: detail.to_string(),
         })
     }
 
@@ -694,10 +696,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_get_for_a_started_but_unconnected_machine_bounces_it() {
-        // Started with no transport means the server restarted: the runtime's
-        // socket died with it and, having no reconnect loop, so did its
-        // process. Only a fresh boot produces a runtime that dials in.
+    async fn a_get_for_a_started_but_unconnected_machine_waits_rather_than_bouncing() {
+        // The runtime is PID 1 under `restart: no` and re-dials when its link
+        // drops, so a started machine is a live runtime mid-retry — this server
+        // restarted, or the network blinked. Bouncing it would kill a runtime
+        // seconds from reconnecting and take its in-flight work with it.
         let (v, _reg) = vendor(
             FakeFly::default().with_machine("s1", MachineState::Started),
             false,
@@ -705,9 +708,10 @@ mod tests {
         let (tx, _rx) = sink();
         let progress = v.get("s1", &spec(), tx).await.unwrap();
         assert!(matches!(progress, RuntimeProgress::Starting { .. }));
-        assert_eq!(
-            v.api.calls(),
-            vec!["stop:m-s1".to_string(), "start:m-s1".to_string()]
+        assert!(
+            v.api.calls().is_empty(),
+            "a live machine must be left alone, got {:?}",
+            v.api.calls()
         );
     }
 

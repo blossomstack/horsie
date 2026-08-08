@@ -310,7 +310,7 @@ git add -A && git commit -m "feat: runtime vendors configured per account"
 
 Spec steps 6–9. `FlyRuntimeVendor` with volumes landed early (`3b8a19c`, `eceb84e`) because Task 7's settings UI has nothing to configure without it. Still open:
 
-- **The runtime reconnect loop.** Until a runtime can re-dial, `FlyRuntimeVendor::get` has to bounce a started-but-unconnected machine, and Fly `suspend`/`resume` cannot be used at all — status: todo.
+- **The runtime reconnect loop** — status: done. A ws-endpoint runtime re-dials for as long as it lives; a unix-endpoint one still exits on the first dropped frame, because there the link *is* its parent process. `FlyRuntimeVendor::get` no longer bounces a started machine: under `restart: no` the runtime is PID 1, so a started machine is a live runtime mid-retry. Fly `suspend`/`resume` is now unblocked but not wired — stop plus a volume is already a correct hibernate, and suspend is only a speed-up.
 - **The velos port and `crates/velos-runtime` deletion** — status: todo.
 - **The orphan sweep** (closes #243) — status: todo.
 - **An identity-class edit warning.** Saving a changed credential or Fly app over a vendor that sessions already reference should report how many. Deliberately not built into Task 7: with one vendor kind there is no kind edit, and a credential naming a different Fly account is indistinguishable from a rotated one without calling Fly — status: todo.

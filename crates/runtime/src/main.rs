@@ -251,71 +251,162 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
             .with_plugins(plugins_dir, cli.hook_path),
     );
 
+    // Per-agent cwd/env state, keyed by the agent id stamped on each tool call.
+    // Built once, above the reconnect loop: a dropped socket is not a reason to
+    // forget where each agent was working. File-backed when the vendor can
+    // respawn this runtime, so a hibernate does not reset it either.
+    let state = Arc::new(match state_file {
+        Some(path) => horsie_runtime::state::RuntimeState::with_file(path),
+        None => horsie_runtime::state::RuntimeState::new(),
+    });
+
+    // From the environment, never argv: a bearer in argv is readable by any
+    // process on the host through `ps`.
+    let token = std::env::var(horsie_models::ENV_CONNECT_TOKEN).ok();
+    // The bearer rides the unix path too. A vendor verifies every dial the same
+    // way whatever the socket family, so skipping it there would make a local
+    // runtime unable to register at all.
+    let dial_url = match &endpoint {
+        Endpoint::Ws(url) => url.clone(),
+        Endpoint::Unix(_) => "ws://localhost/".to_string(),
+    };
+    let request = match dial_request(&dial_url, token.as_deref()) {
+        Ok(request) => request,
+        Err(e) => {
+            eprintln!("cannot dial {dial_url}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // One loop per socket family rather than one shared: the two produce
+    // different stream types, and `serve_until_disconnected` is generic
+    // precisely so that is the only thing that differs.
+    //
+    // `reconnect` differs too, and that is not an accident. A unix endpoint is
+    // a socket belonging to the vendor process that spawned this runtime as its
+    // child: if that link drops, the parent is gone, nothing will ever answer
+    // that path again, and retrying leaves an orphan burning a machine for the
+    // whole connect budget. A ws endpoint is a server across a network, where a
+    // restart or a blink is ordinary and coming back is the whole point.
     match endpoint {
         Endpoint::Ws(url) => {
-            // From the environment, never argv: a bearer in argv is readable
-            // by any process on the host through `ps`.
-            let token = std::env::var(horsie_models::ENV_CONNECT_TOKEN).ok();
-            let request = match dial_request(&url, token.as_deref()) {
-                Ok(request) => request,
-                Err(e) => {
-                    eprintln!("cannot dial {url}: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let ws = match retry(
+            serve_until_disconnected(
                 &format!("connect to {url}"),
-                || connect_async(request.clone()),
-                CONNECT_RETRIES,
-                CONNECT_BASE_DELAY,
-                CONNECT_MAX_DELAY,
+                true,
+                || {
+                    let request = request.clone();
+                    // Normalised to a string so both socket families report a
+                    // failure the same way, and `is_retryable` reads one shape.
+                    async move { connect_async(request).await.map_err(|e| e.to_string()) }
+                },
+                registry,
+                runtime_id,
+                steps,
+                state,
             )
-            .await
-            {
-                Ok((ws, _)) => ws,
-                Err(e) => {
-                    eprintln!("failed to connect to {url}: {e}");
-                    std::process::exit(1);
-                }
-            };
-            run_loop(ws, registry, runtime_id, steps, state_file).await;
+            .await;
         }
         Endpoint::Unix(path) => {
-            // The bearer rides the unix path too. A vendor verifies every dial
-            // the same way whatever the socket family, so skipping it here
-            // would make a local runtime unable to register at all.
-            let token = std::env::var(horsie_models::ENV_CONNECT_TOKEN).ok();
-            let request = match dial_request("ws://localhost/", token.as_deref()) {
-                Ok(request) => request,
-                Err(e) => {
-                    eprintln!("cannot dial {}: {e}", path.display());
-                    std::process::exit(1);
-                }
-            };
-            let ws = match retry(
+            serve_until_disconnected(
                 &format!("connect to unix socket {}", path.display()),
-                || async {
-                    let stream = tokio::net::UnixStream::connect(&path)
-                        .await
-                        .map_err(|e| format!("connect failed: {e}"))?;
-                    client_async(request.clone(), stream)
-                        .await
-                        .map_err(|e| format!("handshake failed: {e}"))
+                false,
+                || {
+                    let request = request.clone();
+                    let path = path.clone();
+                    async move {
+                        let stream = tokio::net::UnixStream::connect(&path)
+                            .await
+                            .map_err(|e| format!("connect failed: {e}"))?;
+                        client_async(request, stream)
+                            .await
+                            .map_err(|e| format!("handshake failed: {e}"))
+                    }
                 },
-                CONNECT_RETRIES,
-                CONNECT_BASE_DELAY,
-                CONNECT_MAX_DELAY,
+                registry,
+                runtime_id,
+                steps,
+                state,
             )
-            .await
-            {
-                Ok((ws, _)) => ws,
-                Err(e) => {
-                    eprintln!("failed to connect to unix socket {}: {e}", path.display());
-                    std::process::exit(1);
-                }
-            };
-            run_loop(ws, registry, runtime_id, steps, state_file).await;
+            .await;
         }
+    }
+}
+
+/// Dial, serve, and — when `reconnect` — dial again for as long as the process
+/// lives.
+///
+/// A runtime across a network outlives its link. The server it dials restarts,
+/// a resumed machine lands on a new socket, a laptop's network blinks — and
+/// exiting on the first dropped frame takes the workspace with it. For a vendor
+/// that hibernates by stopping a machine, it would mean a runtime could never
+/// be resumed at all, only rebuilt from scratch.
+///
+/// A runtime on a local socket is the opposite case: see the call site. There
+/// the first dropped frame is its parent's death, and returning is correct.
+///
+/// Otherwise only two things end this: a dial refused with a 4xx, which no
+/// retry can change, and a connect budget exhausted. Both are reported and exit
+/// non-zero, so a supervisor sees a failure rather than a silent stop.
+///
+/// `steps` is drained by the first connection. Provisioning built the workspace
+/// once; re-running a `git_checkout` over it would fail or clone a second copy.
+async fn serve_until_disconnected<S, C, Fut>(
+    label: &str,
+    reconnect: bool,
+    connect: C,
+    registry: Arc<horsie_runtime::workspace::WorkspaceRegistry>,
+    runtime_id: String,
+    steps: Vec<horsie_models::executor::ProvisionStep>,
+    state: Arc<horsie_runtime::state::RuntimeState>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: Fn() -> Fut,
+    Fut: Future<
+        Output = Result<
+            (
+                WebSocketStream<S>,
+                tokio_tungstenite::tungstenite::handshake::client::Response,
+            ),
+            String,
+        >,
+    >,
+{
+    let mut steps = steps;
+    let mut first = true;
+    loop {
+        let connected = retry(
+            label,
+            &connect,
+            CONNECT_RETRIES,
+            CONNECT_BASE_DELAY,
+            CONNECT_MAX_DELAY,
+        )
+        .await;
+        let ws = match connected {
+            Ok((ws, _)) => ws,
+            Err(e) => {
+                eprintln!("failed to {label}: {e}");
+                std::process::exit(1);
+            }
+        };
+        if !first {
+            eprintln!("reconnected: {label}");
+        }
+        first = false;
+
+        run_loop(
+            ws,
+            registry.clone(),
+            runtime_id.clone(),
+            std::mem::take(&mut steps),
+            state.clone(),
+        )
+        .await;
+        if !reconnect {
+            eprintln!("link closed; the vendor that owns this runtime is gone");
+            return;
+        }
+        eprintln!("link closed; reconnecting");
     }
 }
 
@@ -367,12 +458,18 @@ where
 
 /// The runtime message loop, generic over the underlying socket so TCP and unix
 /// share one implementation. Announces `RuntimeReady`, then services tool calls.
+///
+/// `steps` is empty on every connection after the first: provisioning built the
+/// workspace once, and re-running a `git_checkout` over it would fail or clone
+/// a second copy. `state` outlives the connection for the same reason — it is
+/// the per-agent working directory and environment, which a dropped socket has
+/// no business resetting.
 async fn run_loop<S>(
     ws: WebSocketStream<S>,
     registry: Arc<horsie_runtime::workspace::WorkspaceRegistry>,
     runtime_id: String,
     steps: Vec<horsie_models::executor::ProvisionStep>,
-    state_file: Option<PathBuf>,
+    state: Arc<horsie_runtime::state::RuntimeState>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -433,15 +530,6 @@ async fn run_loop<S>(
     let mcp = Arc::new(horsie_runtime::mcp::McpRegistry::default());
     let in_flight: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>> =
         Arc::new(Mutex::new(HashMap::new()));
-
-    // Per-agent cwd/env state, keyed by the agent id stamped on each tool call;
-    // shared by every task this connection spawns. File-backed when the vendor
-    // can respawn this runtime, so a hibernate or an agent restart does not
-    // silently reset the agent's working directory and environment.
-    let state = Arc::new(match state_file {
-        Some(path) => horsie_runtime::state::RuntimeState::with_file(path),
-        None => horsie_runtime::state::RuntimeState::new(),
-    });
 
     while let Some(msg) = stream.next().await {
         match msg {
