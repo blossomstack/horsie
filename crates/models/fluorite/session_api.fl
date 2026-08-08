@@ -1,6 +1,7 @@
 /// HTTP request/response contracts for the session server.
 package session_api;
 
+use environments.EnvironmentSpec;
 use session.AgentSettings;
 use session.AnnotationEntry;
 use session.SessionSummary;
@@ -31,12 +32,9 @@ struct CreateSessionRequest {
     /// The first user message, queued as part of the create. Required and
     /// non-empty.
     message: String,
-    /// Runtime vendor name; defaults to "local".
-    vendor: Option<String>,
-    /// Repositories cloned into a vendor-managed workspace at provision time.
-    /// Only honored by a vendor that supports provisioning; the UI sends these
-    /// only for such a vendor.
-    repos: Option<Vec<RepoConfig>>,
+    /// Where this session runs and what it runs against. Required — a session
+    /// that did not say has not chosen, it has been chosen for.
+    environment: EnvironmentSpec,
     /// Selected plugin-bundle names to provision for this session; absent →
     /// the server's default-enabled bundles. Non-empty implies plugins are on.
     plugins: Option<Vec<String>>,

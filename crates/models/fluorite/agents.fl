@@ -1,15 +1,16 @@
-/// Named agent presets: a saved session configuration (model, repos, skills,
-/// MCP servers, memory spaces, thinking effort) that is invoked with a message
-/// to create a session.
+/// Named agent presets: a saved agent configuration (model, skills, MCP
+/// servers, memory spaces, thinking effort) that is invoked with a message to
+/// create a session.
 ///
-/// A preset deliberately does not name a runtime vendor. Which machine runs the
-/// work is a property of the invocation, not of the saved configuration, and a
-/// pinned vendor is invisible once it disconnects but fatal at invoke — which
-/// surfaces as a routine that silently stopped working.
+/// A preset says nothing about where the work happens. Which machine runs it,
+/// and what it runs against, are properties of the invocation, not of the saved
+/// configuration: a pinned runtime is invisible once it disconnects but fatal
+/// at invoke, and a hardcoded checkout can only ever be run one way. The
+/// invocation supplies both, as one `EnvironmentSpec`.
 package agents;
 
+use environments.EnvironmentSpec;
 use session.SessionSummary;
-use session_api.RepoConfig;
 
 /// An agent preset as shown to clients.
 struct AgentView {
@@ -18,8 +19,6 @@ struct AgentView {
     description: String,
     /// Configured model alias.
     model: String,
-    /// Repositories cloned into the session workspace at provision time.
-    repos: Vec<RepoConfig>,
     /// Selected plugin-bundle (skill) names.
     plugins: Vec<String>,
     /// Enabled MCP server names.
@@ -43,7 +42,6 @@ struct AgentPresetInput {
     name: String,
     description: Option<String>,
     model: String,
-    repos: Option<Vec<RepoConfig>>,
     plugins: Option<Vec<String>>,
     mcp_servers: Option<Vec<String>>,
     memory_spaces: Option<Vec<String>>,
@@ -54,6 +52,8 @@ struct AgentPresetInput {
 struct AgentInvokeRequest {
     /// First user message; queued immediately after the session is created.
     message: String,
+    /// Where this invocation runs and what it runs against. Required.
+    environment: EnvironmentSpec,
     /// Optional session title.
     name: Option<String>,
 }

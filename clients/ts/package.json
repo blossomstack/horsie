@@ -4,7 +4,7 @@
   "private": true,
   "description": "TypeScript types generated from horsie's fluorite protocol schemas. Requires the `fluorite` CLI on PATH (cargo install fluorite_codegen).",
   "scripts": {
-    "generate-types": "fluorite clean -o src/generated && fluorite ts -i ../../crates/models/fluorite/agent.fl ../../crates/models/fluorite/hooks.fl ../../crates/models/fluorite/runtime.fl ../../crates/models/fluorite/capabilities.fl ../../crates/models/fluorite/session.fl ../../crates/models/fluorite/session_api.fl ../../crates/models/fluorite/settings.fl ../../crates/models/fluorite/auth.fl ../../crates/models/fluorite/agents.fl ../../crates/models/fluorite/routines.fl ../../crates/models/fluorite/workflow.fl -o src/generated",
+    "generate-types": "fluorite clean -o src/generated && fluorite ts -i ../../crates/models/fluorite/agent.fl ../../crates/models/fluorite/hooks.fl ../../crates/models/fluorite/runtime.fl ../../crates/models/fluorite/capabilities.fl ../../crates/models/fluorite/session.fl ../../crates/models/fluorite/session_api.fl ../../crates/models/fluorite/settings.fl ../../crates/models/fluorite/auth.fl ../../crates/models/fluorite/agents.fl ../../crates/models/fluorite/routines.fl ../../crates/models/fluorite/executor.fl ../../crates/models/fluorite/environments.fl ../../crates/models/fluorite/workflow.fl -o src/generated",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
 
-import { RepoConfig } from '../session_api';
+import { EnvironmentSpec } from '../environments';
 /**
  * Start a run: the configuration creating a session takes, plus the input the
  * start step is handed.
@@ -7,14 +7,10 @@ import { RepoConfig } from '../session_api';
 export interface WorkflowRunRequest {
   input: string;
   /**
-   * Runtime vendor for the run's single shared runtime; absent → the
-   * server's default vendor at invoke.
+   * Where the run's single shared runtime is built, and what it runs
+   * against. Required.
    */
-  vendor?: string;
-  /**
-   * Repositories cloned into the run's shared workspace.
-   */
-  repos?: RepoConfig[];
+  environment: EnvironmentSpec;
   /**
    * Optional run title.
    */

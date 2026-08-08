@@ -1,5 +1,4 @@
 
-import { RepoConfig } from '../session_api';
 /**
  * Create or fully replace an agent preset. Omitted list fields default to
  * empty; `description` defaults to "".
@@ -12,7 +11,6 @@ export interface AgentPresetInput {
   name: string;
   description?: string;
   model: string;
-  repos?: RepoConfig[];
   plugins?: string[];
   mcpServers?: string[];
   memorySpaces?: string[];

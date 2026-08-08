@@ -1,6 +1,6 @@
 
+import { EnvironmentSpec } from '../environments';
 import { AgentSettings } from '../session';
-import { RepoConfig } from './repoConfig';
 /**
  * A session is created *with* the first thing to say to it. There is no
  * create-then-message shape: a session with no message is a provisioned
@@ -15,15 +15,10 @@ export interface CreateSessionRequest {
    */
   message: string;
   /**
-   * Runtime vendor name; defaults to "local".
+   * Where this session runs and what it runs against. Required — a session
+   * that did not say has not chosen, it has been chosen for.
    */
-  vendor?: string;
-  /**
-   * Repositories cloned into a vendor-managed workspace at provision time.
-   * Only honored by a vendor that supports provisioning; the UI sends these
-   * only for such a vendor.
-   */
-  repos?: RepoConfig[];
+  environment: EnvironmentSpec;
   /**
    * Selected plugin-bundle names to provision for this session; absent →
    * the server's default-enabled bundles. Non-empty implies plugins are on.
